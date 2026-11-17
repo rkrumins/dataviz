@@ -5,13 +5,18 @@
  *
  * Colour is the change (emerald added, amber edited, rose removed, as on the canvas); a dashed
  * line is not saved yet, a solid one is saved on the draft. Loaded only when the Map is opened
- * (React.lazy), so Review & Save opens as fast as before. Capped at {@link MAX_NODES} entities.
+ * (React.lazy), so Review & Save opens as fast as before.
+ *
+ * Up to {@link MAX_NODES} entities are drawn one by one. Past that, the changes are drawn as
+ * clusters — one per type and kind of change, with how many, and the relationships between them
+ * summed — plus the selected change and what it links to; a cluster opens the List on just those.
+ * The layout is worked out once per set of changes: selecting is styling, not a new layout.
  */
 import { memo, useMemo, useState } from 'react'
 import dagre from 'dagre'
 import { ReactFlow, ReactFlowProvider, Handle, Position, MarkerType, type Node, type Edge, type NodeProps } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { ArrowUpRight, ListTree } from 'lucide-react'
+import { ArrowUpRight, ListFilter, ListTree } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import type { ChangeSet, ChangeStatus } from '../model/changeModel'
@@ -33,6 +38,8 @@ interface MapNodeData extends Record<string, unknown> {
   context: boolean
   saved: boolean
   selected: boolean
+  /** A cluster: how many changes it stands for. */
+  count?: number
 }
 
 interface MapModel {
@@ -45,7 +52,47 @@ interface MapModel {
 
 const text = (s: Sentence) => s.map((p) => (typeof p === 'string' ? p : p.name)).join('')
 
-function build(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameOf: (id: string) => string, selected: string | null): MapModel {
+/** An edge change's ends, as Review & Save staged it (a reversal drawn the way it will run). */
+function edgeEnds(g: ReviewGroup): { source: string; target: string; type?: string } | null {
+  const c = g.changes[g.changes.length - 1]
+  const a = (c.after ?? {}) as Record<string, unknown>
+  const b = (c.before ?? {}) as Record<string, unknown>
+  const e = (c.type === 'create_edge' ? a : (b.edge ?? b)) as Record<string, unknown>
+  const source = typeof e.source === 'string' ? e.source : undefined
+  const target = typeof e.target === 'string' ? e.target : undefined
+  if (!source || !target) return null
+  const [s, t] = c.type === 'reverse_edge' ? [target, source] : [source, target]
+  return { source: s, target: t, type: typeof a.edgeType === 'string' ? a.edgeType : undefined }
+}
+
+const edgeStyle = (status: ChangeStatus, isSaved: boolean, width = 2) => ({
+  style: { stroke: STROKE[status], strokeWidth: width, strokeDasharray: isSaved ? undefined : '6 4' },
+  labelStyle: { fontSize: 10, fontWeight: 600, fill: STROKE[status] },
+  labelBgStyle: { fill: 'var(--nx-bg-elevated)' },
+  labelBgPadding: [4, 2] as [number, number],
+  labelBgBorderRadius: 4,
+  markerEnd: { type: MarkerType.ArrowClosed, color: STROKE[status], width: 16, height: 16 },
+})
+
+function layout(ids: Iterable<string>, edges: readonly Edge[]): Map<string, { x: number; y: number }> {
+  const g = new dagre.graphlib.Graph()
+  g.setGraph({ rankdir: 'LR', nodesep: 18, ranksep: 70, marginx: 10, marginy: 10 })
+  g.setDefaultEdgeLabel(() => ({}))
+  for (const id of ids) g.setNode(id, { width: NODE_W, height: NODE_H })
+  for (const e of edges) g.setEdge(e.source, e.target)
+  dagre.layout(g)
+  const out = new Map<string, { x: number; y: number }>()
+  for (const id of g.nodes()) {
+    const p = g.node(id)
+    out.set(id, { x: p.x - NODE_W / 2, y: p.y - NODE_H / 2 })
+  }
+  return out
+}
+
+const toFlow = (data: Map<string, MapNodeData>, pos: Map<string, { x: number; y: number }>): Node<MapNodeData>[] =>
+  [...data].map(([id, d]) => ({ id, type: 'change', position: pos.get(id) ?? { x: 0, y: 0 }, data: d, draggable: false, connectable: false }))
+
+function build(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameOf: (id: string) => string): MapModel {
   const nodes = new Map<string, MapNodeData>()
   const edges: Edge[] = []
   const byKey = new Map<string, ReviewGroup>()
@@ -58,15 +105,7 @@ function build(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameOf: 
   const link = (id: string, source: string, target: string, status: ChangeStatus, isSaved: boolean, label?: string) => {
     put(source, { context: true })
     put(target, { context: true })
-    edges.push({
-      id, source, target, label,
-      style: { stroke: STROKE[status], strokeWidth: 2, strokeDasharray: isSaved ? undefined : '6 4' },
-      labelStyle: { fontSize: 10, fontWeight: 600, fill: STROKE[status] },
-      labelBgStyle: { fill: 'var(--nx-bg-elevated)' },
-      labelBgPadding: [4, 2] as [number, number],
-      labelBgBorderRadius: 4,
-      markerEnd: { type: MarkerType.ArrowClosed, color: STROKE[status], width: 16, height: 16 },
-    })
+    edges.push({ id, source, target, label, ...edgeStyle(status, isSaved) })
   }
 
   for (const g of groups) {
@@ -83,15 +122,8 @@ function build(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameOf: 
         }
       }
     } else {
-      const c = g.changes[g.changes.length - 1]
-      const a = (c.after ?? {}) as Record<string, unknown>
-      const b = (c.before ?? {}) as Record<string, unknown>
-      const e = (c.type === 'create_edge' ? a : (b.edge ?? b)) as Record<string, unknown>
-      const source = typeof e.source === 'string' ? e.source : undefined
-      const target = typeof e.target === 'string' ? e.target : undefined
-      if (!source || !target) continue
-      const [s, t] = c.type === 'reverse_edge' ? [target, source] : [source, target]
-      link(`edge:${g.key}`, s, t, g.status, false, typeof a.edgeType === 'string' ? a.edgeType : undefined)
+      const ends = edgeEnds(g)
+      if (ends) link(`edge:${g.key}`, ends.source, ends.target, g.status, false, ends.type)
     }
   }
 
@@ -106,30 +138,82 @@ function build(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameOf: 
     }
   }
 
-  const total = nodes.size
-  const kept = new Set([...nodes.keys()].slice(0, MAX_NODES))
-  const shownEdges = edges.filter((e) => kept.has(e.source) && kept.has(e.target))
+  // Too many to draw one by one: the caller clusters them instead.
+  if (nodes.size > MAX_NODES) return { nodes: [], edges: [], total: nodes.size, byKey }
+  return { nodes: toFlow(nodes, layout(nodes.keys(), edges)), edges, total: nodes.size, byKey }
+}
 
-  const g = new dagre.graphlib.Graph()
-  g.setGraph({ rankdir: 'LR', nodesep: 18, ranksep: 70, marginx: 10, marginy: 10 })
-  g.setDefaultEdgeLabel(() => ({}))
-  for (const id of kept) g.setNode(id, { width: NODE_W, height: NODE_H })
-  for (const e of shownEdges) g.setEdge(e.source, e.target)
-  dagre.layout(g)
+const STATUS_WORD: Record<ChangeStatus, string> = { added: 'added', modified: 'edited', removed: 'removed' }
 
-  return {
-    nodes: [...kept].map((id) => {
-      const p = g.node(id)
-      return {
-        id, type: 'change', position: { x: p.x - NODE_W / 2, y: p.y - NODE_H / 2 },
-        data: { ...nodes.get(id)!, selected: id === selected },
-        draggable: false, connectable: false,
-      }
-    }),
-    edges: shownEdges,
-    total,
-    byKey,
+/**
+ * Past {@link MAX_NODES}: one node per type × kind of change (saved changes on their own), the
+ * relationships between them summed, and — drawn one by one — the selected entity and the
+ * entities its staged relationships reach.
+ */
+function clusters(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameOf: (id: string) => string, selected: ReviewGroup | undefined): MapModel {
+  const data = new Map<string, MapNodeData>()
+  const clusterOf = new Map<string, string>()
+  const byKey = new Map<string, ReviewGroup>()
+  const add = (entity: string, cid: string, d: () => MapNodeData) => {
+    clusterOf.set(entity, cid)
+    const was = data.get(cid)
+    if (was) was.count = (was.count ?? 0) + 1
+    else data.set(cid, { ...d(), count: 1 })
   }
+  for (const g of groups) {
+    if (g.kind !== 'node') continue
+    byKey.set(g.key, g)
+    const t = g.typeId ?? ''
+    add(g.key, `cluster:${t}|${g.status}`, () => ({ label: t || 'Untyped', typeId: g.typeId, status: g.status, context: false, saved: false, selected: false }))
+  }
+  for (const ch of saved?.changes ?? []) {
+    const id = ch.urn ?? ch.entityId
+    if (ch.kind !== 'node' || clusterOf.has(id)) continue
+    add(id, `cluster:saved|${ch.status}`, () => ({ label: 'Saved on the draft', status: ch.status, context: false, saved: true, selected: false }))
+  }
+  const sums = new Map<string, { source: string; target: string; status: ChangeStatus; saved: boolean; n: number }>()
+  const sum = (s: string | undefined, t: string | undefined, status: ChangeStatus, isSaved: boolean) => {
+    const cs = s && clusterOf.get(s)
+    const ct = t && clusterOf.get(t)
+    if (!cs || !ct || cs === ct) return
+    const k = `${cs}>${ct}`
+    const was = sums.get(k)
+    if (was) was.n++
+    else sums.set(k, { source: cs, target: ct, status, saved: isSaved, n: 1 })
+  }
+  for (const g of groups) {
+    if (g.kind !== 'edge') continue
+    byKey.set(g.key, g)
+    const ends = edgeEnds(g)
+    if (ends) sum(ends.source, ends.target, g.status, false)
+  }
+  for (const ch of saved?.changes ?? []) if (ch.kind === 'edge') sum(ch.sourceUrn, ch.targetUrn, ch.status, true)
+  const edges: Edge[] = [...sums.values()].map((e) => ({
+    id: `sum:${e.source}>${e.target}`, source: e.source, target: e.target, label: e.n.toLocaleString(),
+    ...edgeStyle(e.status, e.saved, Math.min(6, 1.5 + Math.log10(e.n + 1) * 1.5)),
+  }))
+
+  // The selected change, and what its staged relationships reach, one by one.
+  if (selected && selected.kind !== 'layout') {
+    const focus = selected.kind === 'node' ? selected.key : null
+    const draw = (id: string, d: Partial<MapNodeData>) => {
+      if (!data.has(id)) data.set(id, { label: nameOf(id), context: true, saved: false, selected: false, ...d })
+    }
+    if (focus) draw(focus, { label: selected.name, typeId: selected.typeId, status: selected.status, context: false, selected: true })
+    let reached = 0
+    for (const g of groups) {
+      if (g.kind !== 'edge' || reached >= 24) continue
+      const ends = edgeEnds(g)
+      if (!ends || (g !== selected && ends.source !== focus && ends.target !== focus)) continue
+      draw(ends.source, {})
+      draw(ends.target, {})
+      if (g === selected) { data.get(ends.source)!.selected = true; data.get(ends.target)!.selected = true }
+      edges.push({ id: `near:${g.key}`, source: ends.source, target: ends.target, label: ends.type, ...edgeStyle(g.status, false) })
+      reached++
+    }
+  }
+  const ids = [...data.keys()]
+  return { nodes: toFlow(data, layout(ids, edges)), edges, total: clusterOf.size, byKey }
 }
 
 const ChangeNode = memo(function ChangeNode({ data }: NodeProps<Node<MapNodeData>>) {
@@ -149,9 +233,12 @@ const ChangeNode = memo(function ChangeNode({ data }: NodeProps<Node<MapNodeData
       <span className="min-w-0 flex-1">
         <span className="block text-[11.5px] font-semibold text-ink truncate">{data.label}</span>
         <span className={cn('block text-[10px] font-medium truncate', meta ? meta.text : 'text-ink-muted')}>
-          {meta ? `${meta.label}${data.saved ? ' · saved' : ''}` : 'Unchanged'}
+          {data.count !== undefined && data.status
+            ? `${data.count.toLocaleString()} ${STATUS_WORD[data.status]}`
+            : meta ? `${meta.label}${data.saved ? ' · saved' : ''}` : 'Unchanged'}
         </span>
       </span>
+      {data.count !== undefined && <ListFilter className="w-3.5 h-3.5 text-ink-muted shrink-0" aria-hidden />}
       <Handle type="source" position={Position.Right} className="!opacity-0 !w-1 !h-1" />
     </div>
   )
@@ -159,30 +246,48 @@ const ChangeNode = memo(function ChangeNode({ data }: NodeProps<Node<MapNodeData
 
 const nodeTypes = { change: ChangeNode }
 
-export default function ChangeMap({ groups, saved = null, nameOf, onShowInList, onReveal }: {
-  /** The staged changes, as Review & Save groups them. */
+export default function ChangeMap({ groups, saved = null, nameOf, selectedKey, onSelect, onShowInList, onReveal, onShowCluster }: {
+  /** The staged changes, as Review & Save groups them (and as its filter keeps them). */
   groups: readonly ReviewGroup[]
   /** What the draft already has saved (drawn solid). */
   saved?: ChangeSet | null
   nameOf: (id: string) => string
+  /** The selected group's key — given, the Map follows the List's selection. */
+  selectedKey?: string | null
+  onSelect?: (key: string | null) => void
   /** Open this group in the List. */
   onShowInList?: (key: string) => void
   /** Show this entity on the canvas. */
   onReveal?: (id: string) => void
+  /** List the changes a cluster stands for. */
+  onShowCluster?: (typeId: string, status: ChangeStatus) => void
 }) {
-  const [selected, setSelected] = useState<string | null>(null)
-  const model = useMemo(() => build(groups, saved, nameOf, selected), [groups, saved, nameOf, selected])
-  const group = selected ? model.byKey.get(selected) : undefined
+  const [own, setOwn] = useState<string | null>(null)
+  const selected = selectedKey !== undefined ? selectedKey : own
+  const select = (key: string | null) => (onSelect ? onSelect(key) : setOwn(key))
+  // Laid out once per set of changes; selecting below only restyles.
+  const base = useMemo(() => build(groups, saved, nameOf), [groups, saved, nameOf])
+  const clustered = base.total > MAX_NODES
+  const selectedGroup = selected ? base.byKey.get(selected) : undefined
+  const model = useMemo(
+    () => (clustered ? clusters(groups, saved, nameOf, selectedGroup) : base),
+    [clustered, groups, saved, nameOf, selectedGroup, base],
+  )
+  const nodes = useMemo(
+    () => (clustered ? model.nodes : model.nodes.map((n) => (n.id === selected ? { ...n, data: { ...n.data, selected: true } } : n))),
+    [clustered, model, selected],
+  )
+  const group = selectedGroup
 
-  if (model.nodes.length === 0) {
+  if (!clustered && model.nodes.length === 0) {
     return <p className="py-16 text-center text-sm text-ink-muted">Nothing to draw — these changes are to the view’s layout only.</p>
   }
 
   return (
-    <div className="relative h-[min(52vh,460px)] rounded-2xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02] overflow-hidden">
+    <div className="relative h-[min(58vh,600px)] rounded-2xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02] overflow-hidden">
       <ReactFlowProvider>
         <ReactFlow
-          nodes={model.nodes}
+          nodes={nodes}
           edges={model.edges}
           nodeTypes={nodeTypes}
           fitView
@@ -190,8 +295,16 @@ export default function ChangeMap({ groups, saved = null, nameOf, onShowInList, 
           minZoom={0.2}
           nodesDraggable={false}
           nodesConnectable={false}
-          onNodeClick={(_, n) => setSelected((s) => (s === n.id ? null : n.id))}
-          onPaneClick={() => setSelected(null)}
+          onNodeClick={(_, n) => {
+            const d = n.data as MapNodeData
+            if (d.count !== undefined && d.status) {
+              if (d.saved) return
+              onShowCluster?.(d.typeId ?? '', d.status)
+              return
+            }
+            select(selected === n.id ? null : n.id)
+          }}
+          onPaneClick={() => select(null)}
           proOptions={{ hideAttribution: true }}
           style={{ background: 'transparent' }}
         />
@@ -205,9 +318,9 @@ export default function ChangeMap({ groups, saved = null, nameOf, onShowInList, 
         <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-dashed border-ink-muted" />not saved</span>
         {saved && saved.changes.length > 0 && <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-ink-muted" />saved on draft</span>}
       </div>
-      {model.total > MAX_NODES && (
-        <p className="absolute top-2.5 right-2.5 px-2 py-1 rounded-lg bg-canvas-elevated/90 border border-glass-border text-[10.5px] text-ink-muted">
-          Showing {MAX_NODES} of {model.total.toLocaleString()} — the List has them all
+      {clustered && (
+        <p className="absolute top-2.5 right-2.5 max-w-[46%] px-2 py-1 rounded-lg bg-canvas-elevated/90 border border-glass-border text-[10.5px] text-ink-muted">
+          {base.total.toLocaleString()} entities, grouped by type — click a group to list it
         </p>
       )}
 

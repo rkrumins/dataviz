@@ -157,26 +157,62 @@ export function sentenceFor(change: StagedChange, { nameOf }: NameLookup): Sente
   return [change.summary]
 }
 
+/** A group whose sentence is worded when first read — a 50,000-change review words only the rows
+ *  drawn, not every change up front (a field edit's sentence diffs the node). */
+class Group implements ReviewGroup {
+  #lead: StagedChange
+  #sentence: Sentence | null = null
+  readonly #lookup: NameLookup
+  key: string
+  kind: ReviewKind
+  name: string
+  typeId?: string
+  status: ChangeStatus
+  changes: StagedChange[]
+  revealId?: string
+
+  constructor(init: Omit<ReviewGroup, 'sentence'>, lookup: NameLookup) {
+    this.key = init.key
+    this.kind = init.kind
+    this.name = init.name
+    this.typeId = init.typeId
+    this.status = init.status
+    this.changes = init.changes
+    this.revealId = init.revealId
+    this.#lead = init.changes[0]
+    this.#lookup = lookup
+  }
+
+  /** A create or delete says more about the thing than an edit made to it as well. */
+  lead(change: StagedChange) {
+    this.status = statusOf(change.type)
+    this.#lead = change
+    this.#sentence = null
+  }
+
+  get sentence(): Sentence {
+    return (this.#sentence ??= sentenceFor(this.#lead, this.#lookup))
+  }
+}
+
 /** Every staged change, grouped by what it changes, in the order they were first made. */
 export function buildReviewGroups(changes: readonly StagedChange[], lookup: NameLookup): ReviewGroup[] {
-  const groups = new Map<string, ReviewGroup>()
+  const groups = new Map<string, Group>()
   for (const c of changes) {
     const layout = LAYOUT_TYPES.has(c.type)
     const kind: ReviewKind = layout ? 'layout' : c.type.includes('edge') ? 'edge' : 'node'
     const key = layout ? c.id : kind === 'node' && c.type === 'move_entity'
       ? (str(asObj(c.after).childId) ?? c.targetUrn ?? c.targetId)
       : (c.targetUrn ?? c.targetId)
-    const sentence = sentenceFor(c, lookup)
     const existing = groups.get(`${kind}:${key}`)
     if (existing) {
       existing.changes.push(c)
-      // A create or delete says more about the thing than an edit made to it as well.
-      if (statusOf(c.type) !== 'modified') { existing.status = statusOf(c.type); existing.sentence = sentence }
+      if (statusOf(c.type) !== 'modified') existing.lead(c)
       continue
     }
     const afterName = str(asObj(c.after).displayName)
     const ends = kind === 'edge' ? edgeOf(c) : null
-    groups.set(`${kind}:${key}`, {
+    groups.set(`${kind}:${key}`, new Group({
       key,
       kind,
       name: kind === 'node' ? (afterName ?? lookup.nameOf(key))
@@ -184,9 +220,8 @@ export function buildReviewGroups(changes: readonly StagedChange[], lookup: Name
       typeId: kind === 'node' ? (str(asObj(c.after).entityType) ?? lookup.typeOf?.(key)) : undefined,
       status: statusOf(c.type),
       changes: [c],
-      sentence,
       revealId: kind === 'node' && c.type !== 'delete_entity' ? key : undefined,
-    })
+    }, lookup))
   }
   return [...groups.values()]
 }

@@ -2,8 +2,8 @@
  * The Map draws what a review changes: each changed entity, the relationships added or removed,
  * the entities they hang off (as context) — and says when it shows only part of a large review.
  */
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 import type { StagedChange } from '@/store/stagedChangesStore'
 import { buildReviewGroups } from '../../model/reviewModel'
 import ChangeMap, { MAX_NODES } from '../ChangeMap'
@@ -28,11 +28,27 @@ describe('ChangeMap', () => {
     expect(screen.getByText('not saved')).toBeInTheDocument()
   })
 
-  it('says when a large review is drawn only in part', () => {
+  it('draws a large review as clusters by type, and a cluster lists its changes', () => {
+    const n = MAX_NODES + 5
+    const groups = buildReviewGroups(Array.from({ length: n }, (_, i) =>
+      change({ targetId: `urn:n${i}`, targetUrn: `urn:n${i}`, before: { label: `n${i}`, properties: { a: 1 } }, after: { label: `n${i}`, properties: { a: 2 } } })),
+    { nameOf, typeOf: () => 'Table' })
+    const onShowCluster = vi.fn()
+    render(<ChangeMap groups={groups} nameOf={nameOf} onShowCluster={onShowCluster} />)
+    expect(screen.getByText(`${n} entities, grouped by type — click a group to list it`)).toBeInTheDocument()
+    expect(screen.getByText('Table')).toBeInTheDocument()
+    expect(screen.getByText(`${n} edited`)).toBeInTheDocument()
+    expect(screen.queryByText('n7')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('Table'))
+    expect(onShowCluster).toHaveBeenCalledWith('Table', 'modified')
+  })
+
+  it('draws the selected change on its own beside the clusters', () => {
     const groups = buildReviewGroups(Array.from({ length: MAX_NODES + 5 }, (_, i) =>
-      change({ targetId: `urn:n${i}`, targetUrn: `urn:n${i}`, before: { label: `n${i}`, properties: { a: 1 } }, after: { label: `n${i}`, properties: { a: 2 } } })), { nameOf })
-    render(<ChangeMap groups={groups} nameOf={nameOf} />)
-    expect(screen.getByText(`Showing ${MAX_NODES} of ${MAX_NODES + 5} — the List has them all`)).toBeInTheDocument()
+      change({ targetId: `urn:n${i}`, targetUrn: `urn:n${i}`, before: { label: `n${i}`, properties: { a: 1 } }, after: { label: `n${i}`, properties: { a: 2 } } })),
+    { nameOf, typeOf: () => 'Table' })
+    render(<ChangeMap groups={groups} nameOf={nameOf} selectedKey="urn:n7" onSelect={() => {}} />)
+    expect(screen.getAllByText('urn:n7').length).toBeGreaterThan(0)
   })
 
   it('has nothing to draw for layout-only changes, and says so', () => {

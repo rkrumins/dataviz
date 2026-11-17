@@ -8,6 +8,17 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+// jsdom has no layout: lay every row of the virtualized list out.
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: (opts: { count: number; getItemKey?: (i: number) => string | number }) => ({
+    getVirtualItems: () => Array.from({ length: opts.count }, (_, index) => ({
+      index, key: opts.getItemKey ? opts.getItemKey(index) : index, start: index * 52, size: 52,
+    })),
+    getTotalSize: () => opts.count * 52,
+    scrollToIndex: () => undefined,
+  }),
+}))
+
 const publishMutate = vi.fn()
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
   useChangeSummary: () => ({ data: { counts: { added: 1, modified: 2, removed: 0 } }, isLoading: false, isFetching: false }),
@@ -21,6 +32,9 @@ vi.mock('@/features/versioning/hooks/useActiveDraftAccess', () => ({
   useActiveDraftAccess: () => ({ draft: null, canWrite: true, canManage: true }),
 }))
 vi.mock('@/store/auth', () => ({ usePermission: () => true }))
+vi.mock('@/features/versioning/components/ChangeList', () => ({
+  ChangeList: ({ origin }: { origin: { branchId: string } }) => <div>saved list of {origin.branchId}</div>,
+}))
 
 import { StagedChangesPanel } from '../StagedChangesPanel'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
@@ -122,7 +136,7 @@ describe('Review & Save — the guided flow', () => {
     expect(screen.getByRole('radio', { name: /Save to draft/ })).toHaveAttribute('aria-checked', 'true')
   })
 
-  it('opened after an import, it shows the map of what the draft holds — not Publish', async () => {
+  it('opened after an import, it lists what the draft holds, a page at a time — not Publish', async () => {
     useStagedChangesStore.setState({ changes: [] })
     useBranchStore.setState({
       activeChangeSet: buildChangeSet([{ entityId: 'urn:orders', urn: 'urn:orders', kind: 'node', status: 'added', label: 'urn:orders', origin: { source: 'branch', branchId: 'br1' } }]),
@@ -130,7 +144,7 @@ describe('Review & Save — the guided flow', () => {
     renderPanel()
     act(() => state().openReviewPanel('saved'))
     expect(screen.queryByRole('button', { name: /Publish now/ })).not.toBeInTheDocument()
-    expect(await screen.findByText('Orders')).toBeInTheDocument()
-    expect(screen.getByText('Added · saved')).toBeInTheDocument()
+    expect(screen.getByText('saved list of br1')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Already saved on this draft/ })).toHaveAttribute('aria-expanded', 'true')
   })
 })

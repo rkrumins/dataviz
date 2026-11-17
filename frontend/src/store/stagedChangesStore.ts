@@ -161,6 +161,9 @@ interface StagedChangesState {
    */
   patchAfter: (changeId: string, patch: Record<string, unknown>, summary?: string) => void
   discard: (changeId: string) => void
+  /** Discard these changes (and what each takes with it, as `discard` does) in one write — one
+   *  Redo step brings back those that can come back. For "Discard the N shown". */
+  discardMany: (changeIds: Iterable<string>) => void
   discardAll: () => void
   /** Drop the changes a save carried, by id, without running their discard hooks (the canvas keeps
    *  them as saved). A change staged while the save ran stays. `applyStatus` is left to the save. */
@@ -255,35 +258,45 @@ function showOnCanvas(from: StagedChange | null, to: StagedChange | null, what: 
 }
 
 /**
- * The `root` change plus every staged `create_entity` descendant of it, found by
- * walking the temp-urn → `after.parentUrn` linkage, plus any staged `create_edge`
- * changes anchored to one of those entities' temp urns. Returned LEAF-FIRST
- * (deepest descendants and edges before their ancestors) so discard hooks restore
- * children before parents, regardless of staging order or same-millisecond
- * timestamps. Used so discarding a staged parent also discards the children
- * created under it (no orphans) and any edges staged against them (no phantoms).
+ * The `roots` plus every staged `create_entity` descendant of them, found by walking the temp-urn →
+ * `after.parentUrn` linkage, plus any staged `create_edge` changes anchored to one of those
+ * entities' temp urns. Returned LEAF-FIRST (deepest descendants and edges before their ancestors)
+ * so discard hooks restore children before parents, regardless of staging order or same-millisecond
+ * timestamps; siblings keep their staging order. Used so discarding a staged parent also discards
+ * the children created under it (no orphans) and any edges staged against them (no phantoms).
+ * One pass to index, one to walk: a 50,000-change discard is linear.
  */
-function collectStagedSubtree(all: StagedChange[], root: StagedChange): StagedChange[] {
-  const victims: StagedChange[] = [root]
-  const victimIds = new Set<string>([root.id])
-  const depthById = new Map<string, number>([[root.id, 0]])
+function collectStagedSubtree(all: readonly StagedChange[], roots: readonly StagedChange[]): StagedChange[] {
+  const order = new Map<string, number>()
+  all.forEach((c, i) => order.set(c.id, i))
+  const childrenOf = new Map<string, StagedChange[]>()
+  for (const c of all) {
+    if (c.type !== 'create_entity') continue
+    const pu = (c.after as { parentUrn?: string } | undefined)?.parentUrn
+    if (!pu) continue
+    const list = childrenOf.get(pu)
+    if (list) list.push(c)
+    else childrenOf.set(pu, [c])
+  }
+  const victims: StagedChange[] = []
+  const depthById = new Map<string, number>()
   // temp urn → depth, so a child can resolve its depth from its parentUrn.
   const urnDepth = new Map<string, number>()
-  if (root.type === 'create_entity' && root.targetUrn) urnDepth.set(root.targetUrn, 0)
-  let grew = urnDepth.size > 0
-  while (grew) {
-    grew = false
-    for (const c of all) {
-      if (c.type !== 'create_entity' || victimIds.has(c.id)) continue
-      const pu = (c.after as { parentUrn?: string } | undefined)?.parentUrn
-      if (pu && urnDepth.has(pu)) {
-        const d = (urnDepth.get(pu) ?? 0) + 1
-        depthById.set(c.id, d)
-        victims.push(c)
-        victimIds.add(c.id)
-        if (c.targetUrn) urnDepth.set(c.targetUrn, d)
-        grew = true
-      }
+  const queue: StagedChange[] = []
+  for (const r of roots) {
+    if (depthById.has(r.id)) continue
+    victims.push(r)
+    depthById.set(r.id, 0)
+    if (r.type === 'create_entity' && r.targetUrn) { urnDepth.set(r.targetUrn, 0); queue.push(r) }
+  }
+  for (let i = 0; i < queue.length; i++) {
+    const parent = queue[i]
+    const d = (depthById.get(parent.id) ?? 0) + 1
+    for (const c of childrenOf.get(parent.targetUrn!) ?? []) {
+      if (depthById.has(c.id)) continue
+      depthById.set(c.id, d)
+      victims.push(c)
+      if (c.targetUrn) { urnDepth.set(c.targetUrn, d); queue.push(c) }
     }
   }
   // Any staged `create_edge` whose endpoint is one of the victim entities' temp
@@ -291,18 +304,31 @@ function collectStagedSubtree(all: StagedChange[], root: StagedChange): StagedCh
   // leaves the canvas but the staged change survives, later shipping an
   // unresolvable urn:staged: endpoint on save). Cascade those too — deepest, so
   // their discard hooks run before the entities they reference.
-  const maxDepth = Math.max(0, ...depthById.values())
-  for (const c of all) {
-    if (c.type !== 'create_edge' || victimIds.has(c.id)) continue
-    const after = c.after as { source?: string; target?: string } | undefined
-    if (after && (urnDepth.has(after.source ?? '') || urnDepth.has(after.target ?? ''))) {
-      depthById.set(c.id, maxDepth + 1)
-      victims.push(c)
-      victimIds.add(c.id)
+  if (urnDepth.size > 0) {
+    let maxDepth = 0
+    for (const d of depthById.values()) if (d > maxDepth) maxDepth = d
+    for (const c of all) {
+      if (c.type !== 'create_edge' || depthById.has(c.id)) continue
+      const after = c.after as { source?: string; target?: string } | undefined
+      if (after && (urnDepth.has(after.source ?? '') || urnDepth.has(after.target ?? ''))) {
+        depthById.set(c.id, maxDepth + 1)
+        victims.push(c)
+      }
     }
   }
-  // Deepest first; stable sort keeps siblings in their original (creation) order.
-  return [...victims].sort((a, b) => (depthById.get(b.id) ?? 0) - (depthById.get(a.id) ?? 0))
+  // Deepest first; siblings in their original (creation) order.
+  return victims.sort((a, b) => (depthById.get(b.id)! - depthById.get(a.id)!) || (order.get(a.id)! - order.get(b.id)!))
+}
+
+/** Run each change's discard hook, in order, a failing one not stopping the rest. */
+function runDiscardHooks(changes: readonly StagedChange[]) {
+  for (const v of changes) {
+    try {
+      v.discard?.()
+    } catch (err) {
+      console.error('[StagedChanges] discard hook failed', err)
+    }
+  }
 }
 
 export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
@@ -402,14 +428,8 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     // exist on save and it would surface orphaned at the top level. Match by the
     // temp-urn → after.parentUrn linkage of staged create_entity changes; the
     // result is leaf-first so each discard hook restores children before parents.
-    const ordered = collectStagedSubtree(all, root)
-    for (const v of ordered) {
-      try {
-        v.discard?.()
-      } catch (err) {
-        console.error('[StagedChanges] discard hook failed', err)
-      }
-    }
+    const ordered = collectStagedSubtree(all, [root])
+    runDiscardHooks(ordered)
     const victimIds = new Set(ordered.map((v) => v.id))
     set((s) => ({
       changes: s.changes.filter((c) => !victimIds.has(c.id)),
@@ -422,6 +442,27 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       redoStack: root.type === 'create_entity'
         ? pruneSteps(s.redoStack, victimIds)
         : [...s.redoStack, stepOf([...ordered].reverse().map((c) => ({ before: null, after: c })))],
+    }))
+  },
+
+  discardMany: (changeIds) => {
+    const all = get().changes
+    const wanted = new Set(changeIds)
+    const roots = all.filter((c) => wanted.has(c.id))
+    if (roots.length === 0) return
+    const ordered = collectStagedSubtree(all, roots)
+    runDiscardHooks(ordered)
+    const victimIds = new Set(ordered.map((v) => v.id))
+    // As `discard`: an entity create, and everything it took with it, is not redoable; every other
+    // change discarded comes back with one Redo.
+    const created = new Set(collectStagedSubtree(all, roots.filter((c) => c.type === 'create_entity')).map((c) => c.id))
+    const back = ordered.filter((c) => !created.has(c.id))
+    set((s) => ({
+      changes: s.changes.filter((c) => !victimIds.has(c.id)),
+      past: pruneSteps(s.past, victimIds),
+      redoStack: back.length
+        ? [...pruneSteps(s.redoStack, created), stepOf([...back].reverse().map((c) => ({ before: null, after: c })))]
+        : pruneSteps(s.redoStack, created),
     }))
   },
 

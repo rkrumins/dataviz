@@ -2,10 +2,12 @@
  * Review & Save — one guided place to take staged edits from the canvas to the draft, and on to
  * the Published version.
  *
- *   1. **Review** what will be saved, in words (List) or drawn (Map): one card per entity or
- *      relationship changed, each saying what it does ("Renamed orders to Orders v2") with only the
- *      fields the save sends, shown as the values they are. Undo / Redo, discard one, or all.
- *      What the draft already holds from earlier saves and imports is listed beneath.
+ *   1. **Review** what will be saved, in words (List) or drawn (Map) — built for tens of thousands
+ *      of changes: a filter bar (what, how, which type, a search, what needs attention), a
+ *      virtualized list moved through with the keyboard, and the selected change beside it, saying
+ *      what it does ("Renamed orders to Orders v2") with only the fields the save sends, shown as
+ *      the values they are. Undo / Redo, discard one, the N shown, or all. What the draft already
+ *      holds from earlier saves and imports is listed beneath, a page at a time.
  *   2. **Save** — to the draft (and keep editing; save as often as you like), or save and go
  *      straight on to publishing or to a review.
  *   3. **Publish** — the shared publish flow (`PublishForm`), its title taken from what was saved,
@@ -15,49 +17,45 @@
  * Theme-aware (light and dark). A save or publish in flight holds the dialog: nothing in it is
  * closed, discarded or undone until it settles.
  */
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  AlertTriangle, ArrowUpRight, Check, CheckCircle2, ChevronRight, CircleAlert, Code2, FileStack, GitPullRequest,
-  Layers, ListTree, Loader2, Map as MapIcon, OctagonAlert, Rocket, Save, Search, Undo2, Redo2, X,
+  AlertTriangle, Check, CheckCircle2, ChevronRight, FileStack, GitPullRequest,
+  Layers, ListTree, Loader2, Map as MapIcon, OctagonAlert, Rocket, Save, Undo2, Redo2, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatShortcut } from '@/lib/platform'
 import { useCanvasStore } from '@/store/canvas'
 import { useBranchStore } from '@/store/branchStore'
-import { usePersonaMode } from '@/store/persona'
 import { usePermission } from '@/store/auth'
 import { liveProblems, useSaveProblemsStore } from '@/store/saveProblemsStore'
 import type { SaveProblem } from '@/features/versioning/model/saveProblems'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { Segmented } from '@/components/ui/Segmented'
-import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
-import { nodeUpdatePatch } from '@/features/versioning/model/stagedChangesToOps'
+import { describeScope, suggestTitle } from '@/features/versioning/model/reviewModel'
 import {
-  buildReviewGroups, describeScope, fieldChanges, suggestTitle, type ReviewGroup, type Sentence,
-} from '@/features/versioning/model/reviewModel'
+  buildReviewIndex, filterRows, isNarrowed, needsAttention, NO_FILTER, rowKey, type ReviewFilter, type ReviewIndex,
+} from '@/features/versioning/model/reviewIndex'
 import { fromChangeCounts } from '@/features/versioning/model/changeAdapters'
 import { EMPTY_CHANGE_SET, type ChangeSet, type ChangeStatus } from '@/features/versioning/model/changeModel'
 import { useChangeSummary, useDataSourceDraftsPolicy } from '@/features/versioning/hooks/useVersioning'
 import { useActiveDraftAccess } from '@/features/versioning/hooks/useActiveDraftAccess'
-import { CascadeImpactList } from '@/features/versioning/components/CascadeImpactList'
-import { ConflictChoices } from '@/features/versioning/components/ConflictChoices'
 import { ChangesPanel, ChangeCountChips } from '@/features/versioning/components/ChangesPanel'
+import { ChangeList } from '@/features/versioning/components/ChangeList'
 import { STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
-import { ReviewValue } from '@/features/versioning/components/ReviewValue'
 import { PublishActions, PublishBody, usePublishFlow } from '@/features/versioning/components/PublishForm'
-import { JsonView } from '@/components/panels/shell/JsonView'
+import { ReviewExplorer, ReviewFilterBar } from './review/ReviewExplorer'
 
 // Drawn only when the Map is opened: React Flow and the layout engine stay out of the first paint.
 const ChangeMap = lazy(() => import('@/features/versioning/components/ChangeMap'))
 
-/** Cards drawn before "Show more": a 5,000-change review opens as fast as a 5-change one. */
-const GROUPS_SHOWN = 100
-/** Up to this many cards open with their fields showing. */
-const OPEN_FIRST = 20
+const EMPTY_INDEX: ReviewIndex = {
+  groups: [], groupOf: new Map(),
+  facets: { status: { added: 0, modified: 0, removed: 0 }, kind: { node: 0, edge: 0, layout: 0 }, types: [] },
+}
 
 /** A save (or a publish from here) is in flight: until it settles the review stays open and nothing
  *  in it is discarded or undone. */
@@ -80,18 +78,6 @@ export interface SaveConfirmationModalProps {
   viewId?: string | null
   /** Show an entity on the canvas (the dialog closes first). */
   onReveal?: (nodeId: string) => void
-}
-
-const sentenceText = (s: Sentence) => s.map((p) => (typeof p === 'string' ? p : p.name)).join('')
-
-function SentenceView({ sentence }: { sentence: Sentence }) {
-  return (
-    <>
-      {sentence.map((p, i) => (typeof p === 'string'
-        ? <span key={i}>{p}</span>
-        : <span key={i} className="font-semibold text-ink">{p.name}</span>))}
-    </>
-  )
 }
 
 /** Names for ids and urns, as the canvas holds them — read once per review, never subscribed to. */
@@ -119,10 +105,10 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   const close = useStagedChangesStore(s => s.closeReviewPanel)
   const intent = useStagedChangesStore(s => s.reviewIntent)
   const stagedChanges = useStagedChangesStore(s => s.changes)
-  const changes = useMemo(() => (describe
+  // Nothing per change is worked out while the dialog is closed.
+  const changes = useMemo(() => (describe && isOpen
     ? stagedChanges.map(c => { const now = describe(c); return now && now !== c.summary ? { ...c, summary: now } : c })
-    : stagedChanges), [stagedChanges, describe])
-  const discard = useStagedChangesStore(s => s.discard)
+    : stagedChanges), [stagedChanges, describe, isOpen])
   const discardAll = useStagedChangesStore(s => s.discardAll)
   const applyStatus = useStagedChangesStore(s => s.applyStatus)
   const lastApplyResult = useStagedChangesStore(s => s.lastApplyResult)
@@ -133,7 +119,12 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   const branchId = useBranchStore(s => s.currentBranchId)
   const draftChanges = useBranchStore(s => s.activeChangeSet)
   const closeUnlessSaving = useCallback(() => { if (!saving()) close() }, [close])
-  const discardUnlessSaving = (id: string) => { if (!saving()) discard(id) }
+  const discardUnlessSaving = (ids: string[]) => {
+    if (saving() || ids.length === 0) return
+    const s = useStagedChangesStore.getState()
+    if (ids.length === 1) s.discard(ids[0])
+    else s.discardMany(ids)
+  }
 
   const draftCount = draftChanges ? draftChanges.counts.added + draftChanges.counts.modified + draftChanges.counts.removed : 0
   // Publishing needs the draft's graph; a host that gives none (or Published) only saves here.
@@ -142,10 +133,11 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   const [step, setStep] = useState<'review' | 'publish'>('review')
   const [destination, setDestination] = useState<ReviewDestination>('draft')
   const [view, setView] = useState<'list' | 'map'>('list')
-  const [filter, setFilter] = useState('')
-  const [shown, setShown] = useState(GROUPS_SHOWN)
-  const [open, setOpen] = useState<Set<string> | null>(null)
-  const [focusKey, setFocusKey] = useState<string | null>(null)
+  const [filter, setFilter] = useState<ReviewFilter>(NO_FILTER)
+  /** The selected row (`rowKey`): the List's detail and the Map's highlight. */
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  /** Opened to look at what the draft holds (after an import): that list, open. */
+  const [lookAtSaved, setLookAtSaved] = useState(false)
   /** What the last save carried, for the Publish step's title. */
   const [savedTitle, setSavedTitle] = useState('')
   const filterInputRef = useRef<HTMLInputElement>(null)
@@ -156,14 +148,15 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   useEffect(() => {
     if (isOpen && !wasOpen.current) {
       const s = useStagedChangesStore.getState()
-      // Opened to look at what the draft holds (an import just landed): its map, not Publish.
+      // Opened to look at what the draft holds (an import just landed): that list, not Publish —
+      // a page at a time, never 100,000 entities drawn.
       const toLook = s.reviewIntent === 'saved' && draftCount > 0
       setStep(s.changes.length === 0 && draftCount > 0 && canPublishHere && !toLook ? 'publish' : 'review')
       setDestination(s.reviewIntent === 'publish' && canPublishHere ? 'publish' : 'draft')
-      setView(toLook ? 'map' : 'list')
-      setFilter('')
-      setShown(GROUPS_SHOWN)
-      setOpen(null)
+      setView('list')
+      setFilter(NO_FILTER)
+      setSelectedKey(null)
+      setLookAtSaved(toLook)
       setSavedTitle('')
     }
     wasOpen.current = isOpen
@@ -176,6 +169,9 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
       if (e.key === 'Escape') {
         e.stopPropagation()
         closeUnlessSaving()
+      } else if (e.key === '/' && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) {
+        e.preventDefault()
+        filterInputRef.current?.focus()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -183,37 +179,30 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   }, [isOpen, closeUnlessSaving])
 
   const lookup = useMemo(() => canvasLookup(), [isOpen, changes]) // eslint-disable-line react-hooks/exhaustive-deps
-  const groups = useMemo(() => (isOpen ? buildReviewGroups(changes, lookup) : []), [isOpen, changes, lookup])
-  const filtered = useMemo(() => {
-    const q = filter.trim().toLowerCase()
-    if (!q) return groups
-    return groups.filter(g => g.name.toLowerCase().includes(q) || g.key.toLowerCase().includes(q)
-      || g.changes.some(c => c.summary.toLowerCase().includes(q) || (c.targetUrn ?? '').toLowerCase().includes(q)))
-  }, [groups, filter])
-  const dataGroups = useMemo(() => filtered.filter(g => g.kind !== 'layout'), [filtered])
-  const layoutGroups = useMemo(() => filtered.filter(g => g.kind === 'layout'), [filtered])
-  const layoutCount = useMemo(() => groups.filter(g => g.kind === 'layout').length, [groups])
-  const openKeys = useMemo(() => open ?? new Set(groups.slice(0, OPEN_FIRST).map(g => g.key)), [open, groups])
-  const toggle = (key: string) => setOpen(() => {
-    const next = new Set(openKeys)
-    if (next.has(key)) next.delete(key)
-    else next.add(key)
-    return next
-  })
+  const index = useMemo(() => (isOpen ? buildReviewIndex(changes, lookup) : EMPTY_INDEX), [isOpen, changes, lookup])
+  const groups = index.groups
+  const layoutCount = index.facets.kind.layout
 
   const total = changes.length
-  const failedCount = changes.filter(c => c.error).length
+  const failedCount = useMemo(() => (isOpen ? changes.filter(c => c.error).length : 0), [isOpen, changes])
   // Why the last save was refused (nothing was written) — the problems still tied to staged changes.
   const allProblems = useSaveProblemsStore(s => s.problems)
   const problems = useMemo(
-    () => liveProblems(allProblems, new Set(changes.map(c => c.id))),
-    [allProblems, changes],
+    () => (isOpen && allProblems.length ? liveProblems(allProblems, new Set(changes.map(c => c.id))) : []),
+    [isOpen, allProblems, changes],
   )
-  const counts = useMemo(() => {
-    const out: Record<ChangeStatus, number> = { added: 0, modified: 0, removed: 0 }
-    for (const g of groups) if (g.kind !== 'layout') out[g.status]++
-    return out
-  }, [groups])
+  const problemIds = useMemo(() => new Set(problems.flatMap(p => p.changeIds)), [problems])
+  const rows = useMemo(() => filterRows(index, filter, problemIds), [index, filter, problemIds])
+  const attention = useMemo(() => groups.reduce((n, g) => n + (needsAttention(g, problemIds) ? 1 : 0), 0), [groups, problemIds])
+  const shownGroups = useMemo(() => rows.map(i => groups[i]), [rows, groups])
+  const counts = index.facets.status
+  const discardShown = () => {
+    const ids = shownGroups.flatMap(g => g.changes.map(c => c.id))
+    const n = shownGroups.length
+    if (confirm(`Discard the ${n.toLocaleString()} change${n === 1 ? '' : 's'} shown? Redo brings back all but new entities.`)) {
+      discardUnlessSaving(ids)
+    }
+  }
 
   const handleConfirm = async () => {
     // One save at a time: a second press while one runs would send the same batch again.
@@ -236,11 +225,15 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   }
 
   const reveal = onReveal ? (id: string) => { if (!saving()) { close(); onReveal(id) } } : undefined
+  /** A group's row key from the key the Map knows it by. */
+  const rowOf = (key: string) => {
+    const g = groups.find(x => x.key === key && x.kind !== 'layout')
+    return g ? rowKey(g) : null
+  }
   const showInList = (key: string) => {
     setView('list')
-    setFilter('')
-    setOpen(new Set([...openKeys, key]))
-    setFocusKey(key)
+    setFilter(NO_FILTER)
+    setSelectedKey(rowOf(key))
   }
   const undoLabel = formatShortcut('mod+z')
   const redoLabel = formatShortcut('mod+shift+z')
@@ -270,7 +263,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
               role="dialog"
               aria-modal="true"
               aria-labelledby="staged-modal-title"
-              className="pointer-events-auto relative w-full max-w-[880px] max-h-[min(860px,100%)] flex flex-col rounded-3xl overflow-hidden bg-canvas-elevated border border-glass-border shadow-glass-lg"
+              className="pointer-events-auto relative w-full max-w-[1120px] max-h-[min(900px,100%)] flex flex-col rounded-3xl overflow-hidden bg-canvas-elevated border border-glass-border shadow-glass-lg"
               data-canvas-interactive
             >
             {/* Header */}
@@ -317,7 +310,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
               <StepTrail step={step} destination={destination} canPublish={canPublishHere} />
 
               {step === 'review' && problems.length > 0 && (
-                <SaveProblemsBanner problems={problems} onDiscard={(ids) => ids.forEach(discardUnlessSaving)} />
+                <SaveProblemsBanner problems={problems} onDiscard={discardUnlessSaving} />
               )}
 
               {step === 'review' && (total > 0 || draftCount > 0) && (
@@ -349,26 +342,18 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                 </div>
               )}
 
-              {step === 'review' && view === 'list' && total > 4 && (
-                <div className="relative mt-3">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted" />
-                  <input
-                    ref={filterInputRef}
-                    type="text"
-                    value={filter}
-                    onChange={e => { setFilter(e.target.value); setShown(GROUPS_SHOWN) }}
-                    placeholder="Filter changes by name or URN…"
-                    className="w-full pl-9 pr-8 py-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-[12px] text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent-lineage/50 transition-colors"
+              {step === 'review' && groups.length > 1 && (
+                <div className="mt-3">
+                  <ReviewFilterBar
+                    index={index}
+                    filter={filter}
+                    onChange={setFilter}
+                    shown={rows.length}
+                    attention={attention}
+                    onDiscardShown={discardShown}
+                    disabled={applyStatus === 'applying'}
+                    searchRef={filterInputRef}
                   />
-                  {filter && (
-                    <button
-                      onClick={() => setFilter('')}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                      aria-label="Clear filter"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  )}
                 </div>
               )}
             </div>
@@ -390,66 +375,42 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                 {/* Body */}
                 <div className="relative flex-1 overflow-y-auto px-5 py-4 space-y-5 custom-scrollbar">
                   {view === 'map' && (groups.length > 0 || draftCount > 0) ? (
-                    <Suspense fallback={<div className="h-[min(52vh,460px)] rounded-2xl border border-glass-border flex items-center justify-center text-xs text-ink-muted gap-2"><Loader2 className="w-4 h-4 animate-spin" />Drawing the map…</div>}>
-                      <ChangeMap groups={groups} saved={draftChanges} nameOf={lookup.nameOf} onShowInList={showInList} onReveal={reveal} />
+                    <Suspense fallback={<div className="h-[min(58vh,600px)] rounded-2xl border border-glass-border flex items-center justify-center text-xs text-ink-muted gap-2"><Loader2 className="w-4 h-4 animate-spin" />Drawing the map…</div>}>
+                      <ChangeMap
+                        groups={shownGroups}
+                        saved={isNarrowed(filter) ? null : draftChanges}
+                        nameOf={lookup.nameOf}
+                        selectedKey={selectedKey ? selectedKey.slice(selectedKey.indexOf(':') + 1) : null}
+                        onSelect={(key) => setSelectedKey(key ? rowOf(key) : null)}
+                        onShowInList={showInList}
+                        onReveal={reveal}
+                        onShowCluster={(type, status) => {
+                          setFilter({ ...NO_FILTER, kind: 'node', type, statuses: [status] })
+                          setView('list')
+                        }}
+                      />
                     </Suspense>
-                  ) : groups.length === 0 ? (
-                    draftCount > 0 ? null : <EmptyState hasFilter={false} onClearFilter={() => setFilter('')} />
-                  ) : filtered.length === 0 ? (
-                    <EmptyState hasFilter onClearFilter={() => setFilter('')} />
-                  ) : (
-                    <>
-                      {/* Data-source changes — everything that commits to the graph. */}
-                      {dataGroups.length > 0 && (
-                        <section className="space-y-2">
-                          {dataGroups.slice(0, shown).map(g => (
-                            <GroupCard
-                              key={`${g.kind}:${g.key}`}
-                              group={g}
-                              open={openKeys.has(g.key)}
-                              focus={focusKey === g.key}
-                              onToggle={() => toggle(g.key)}
-                              onDiscard={(ids) => ids.forEach(discardUnlessSaving)}
-                              onReveal={reveal}
-                            />
-                          ))}
-                          {dataGroups.length > shown && (
-                            <button onClick={() => setShown(n => n + GROUPS_SHOWN)}
-                              className="w-full py-2 rounded-xl border border-dashed border-glass-border text-xs font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
-                              Show {Math.min(GROUPS_SHOWN, dataGroups.length - shown)} more of {dataGroups.length - shown}
-                            </button>
-                          )}
-                        </section>
-                      )}
-
-                      {/* View layout — presentation only, DECOUPLED from the data source. Own banner so it's
-                          unmistakably not a data change; on Save it persists to the view, never the graph. */}
-                      {layoutGroups.length > 0 && (
-                        <section>
-                          <div className={cn(
-                            'flex items-center gap-2 px-1 mb-2',
-                            dataGroups.length > 0 && 'pt-4 border-t border-glass-border',
-                          )}>
-                            <div className="w-6 h-6 rounded-md flex items-center justify-center border bg-indigo-500/[0.08] border-indigo-500/25">
-                              <Layers className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-300" strokeWidth={2.2} />
-                            </div>
-                            <h4 className="text-[11px] font-bold uppercase tracking-[0.08em] text-indigo-700 dark:text-indigo-200">View layout</h4>
-                            <span className="text-[10.5px] text-ink-muted font-medium hidden sm:inline">this view only · not the data source</span>
-                            <span className="text-[10px] tabular-nums text-ink-muted font-semibold ml-auto">{layoutCount}</span>
-                          </div>
-                          <div className="space-y-1.5">
-                            {layoutGroups.map(g => (
-                              <GroupCard key={g.key} group={g} open={false} focus={false} onToggle={() => {}}
-                                onDiscard={(ids) => ids.forEach(discardUnlessSaving)} />
-                            ))}
-                          </div>
-                        </section>
-                      )}
-                    </>
+                  ) : groups.length === 0 && draftCount > 0 ? null : (
+                    <ReviewExplorer
+                      index={index}
+                      rows={rows}
+                      selected={selectedKey}
+                      onSelect={setSelectedKey}
+                      problemIds={problemIds}
+                      onDiscard={discardUnlessSaving}
+                      onReveal={reveal}
+                      onClearFilter={() => setFilter(NO_FILTER)}
+                      searchRef={filterInputRef}
+                      disabled={applyStatus === 'applying'}
+                    />
                   )}
 
                   {draftChanges && draftCount > 0 && view === 'list' && (
-                    <DraftSavedSection changeSet={draftChanges} defaultOpen={total === 0} />
+                    <DraftSavedSection
+                      changeSet={draftChanges}
+                      list={wsId && graphId && branchId ? { wsId, graphId, branchId } : null}
+                      defaultOpen={total === 0 || lookAtSaved}
+                    />
                   )}
                 </div>
 
@@ -635,217 +596,15 @@ function UndoRedoCluster({ canUndo, canRedo, onUndo, onRedo, undoShortcut, redoS
   )
 }
 
-function EmptyState({ hasFilter, onClearFilter }: { hasFilter: boolean; onClearFilter: () => void }) {
-  return (
-    <div className="px-4 py-14 text-center flex flex-col items-center gap-3">
-      <div className="w-14 h-14 rounded-2xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border flex items-center justify-center">
-        <CheckCircle2 className="w-7 h-7 text-ink-muted" strokeWidth={1.6} />
-      </div>
-      <div>
-        <p className="text-sm text-ink font-semibold">
-          {hasFilter ? 'No changes match your filter' : 'No staged changes'}
-        </p>
-        <p className="text-[12px] text-ink-muted mt-1 max-w-[420px] leading-relaxed">
-          {hasFilter
-            ? 'Try a different search, or clear the filter to see everything pending.'
-            : 'Edit a value on the canvas or in an entity’s details — it shows up here, ready to save.'}
-        </p>
-      </div>
-      {hasFilter && (
-        <button
-          onClick={onClearFilter}
-          className="mt-1 px-3 py-1.5 text-[11px] font-medium rounded-lg border border-glass-border text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-        >
-          Clear filter
-        </button>
-      )}
-    </div>
-  )
-}
-
-/** One thing changed — an entity, a relationship, a layout item — and what each change does to it. */
-function GroupCard({ group, open, focus, onToggle, onDiscard, onReveal }: {
-  group: ReviewGroup
-  open: boolean
-  focus: boolean
-  onToggle: () => void
-  onDiscard: (ids: string[]) => void
-  onReveal?: (nodeId: string) => void
+/** What the draft already holds from earlier saves and imports — what publishing takes along too:
+ *  read from the server a page at a time (an import of 100,000 entities opens as fast as one). */
+function DraftSavedSection({ changeSet, list, defaultOpen = false }: {
+  changeSet: ChangeSet
+  list: { wsId: string; graphId: string; branchId: string } | null
+  defaultOpen?: boolean
 }) {
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => { if (focus) ref.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }) }, [focus])
-  const meta = STATUS_META[group.status]
-  const colors = useEntityColorSet(group.typeId ?? '')
-  const sentence = sentenceText(group.sentence)
-  const layout = group.kind === 'layout'
-  const error = group.changes.find(c => c.error)?.error
-  const n = group.changes.length
-  return (
-    <div
-      ref={ref}
-      className={cn(
-        'group rounded-2xl border bg-canvas-elevated transition-shadow border-l-[3px]',
-        error ? 'border-rose-500/50 bg-rose-500/[0.04]' : 'border-glass-border hover:shadow-sm',
-        layout ? 'border-l-indigo-500' : meta.accent,
-        focus && 'ring-2 ring-accent-lineage/40',
-      )}
-    >
-      <div className="flex items-start gap-2.5 px-3 py-2.5">
-        {!layout ? (
-          <button
-            onClick={onToggle}
-            className="mt-0.5 p-0.5 rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] flex-shrink-0"
-            aria-label={open ? 'Collapse' : 'Expand'}
-            aria-expanded={open}
-          >
-            <ChevronRight className={cn('w-3.5 h-3.5 transition-transform duration-150', open && 'rotate-90')} />
-          </button>
-        ) : <span className="w-[18px]" />}
-        <div className="flex-1 min-w-0">
-          {layout ? (
-            <p className="text-[13px] font-medium text-ink leading-snug">{sentence}</p>
-          ) : (
-            <>
-              <div className="flex items-center gap-2 min-w-0">
-                {group.kind === 'node' && (
-                  <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: group.typeId ? colors.hex : undefined }} aria-hidden />
-                )}
-                <span className="text-[13px] font-semibold text-ink truncate">{group.name}</span>
-                <span className={cn('px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide flex-shrink-0', meta.bg, meta.text)}>
-                  {group.kind === 'edge' ? `${meta.label} link` : meta.label}
-                </span>
-                {n > 1 && <span className="text-[10.5px] text-ink-muted flex-shrink-0">{n} changes</span>}
-              </div>
-              {sentence !== group.name && (
-                <p className="text-[12px] text-ink-secondary mt-0.5 leading-snug"><SentenceView sentence={group.sentence} /></p>
-              )}
-            </>
-          )}
-          {group.changes.some(c => c.targetUrn && c.targetUrn !== c.targetId) && !layout && (
-            <p className="text-[10.5px] text-ink-muted mt-0.5 font-mono truncate">{group.changes[0].targetUrn}</p>
-          )}
-          {error && (
-            <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] leading-snug text-rose-700 dark:text-rose-300">
-              <CircleAlert className="w-3.5 h-3.5 mt-px flex-shrink-0" aria-hidden />
-              <span><span className="font-semibold">Not saved — </span>{error}</span>
-            </p>
-          )}
-          {group.changes.map(c => c.conflict && <ConflictChoices key={c.id} change={c} />)}
-
-          <AnimatePresence initial={false}>
-            {open && !layout && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: 'auto', opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                transition={{ duration: 0.16, ease: 'easeOut' }}
-                className="overflow-hidden"
-              >
-                <div className="mt-2 space-y-2">
-                  {group.changes.map(c => <ChangeDetail key={c.id} change={c} several={n > 1} />)}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-        <div className="flex items-center gap-0.5 flex-shrink-0">
-          {onReveal && group.revealId && (
-            <HoverTip label="Show on the canvas" className="inline-flex">
-              <button
-                onClick={() => onReveal(group.revealId!)}
-                className="p-1.5 rounded-md text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
-                aria-label="Show on canvas"
-              >
-                <ArrowUpRight className="w-3.5 h-3.5" />
-              </button>
-            </HoverTip>
-          )}
-          <HoverTip label={n === 1 ? 'Discard this change' : `Discard these ${n} changes`} detail="Redo brings it back" className="inline-flex">
-            <button
-              onClick={() => onDiscard(group.changes.map(c => c.id))}
-              className="p-1.5 rounded-md text-ink-muted hover:text-rose-600 dark:hover:text-rose-300 hover:bg-rose-500/10 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
-              aria-label={n === 1 ? 'Discard change' : `Discard ${n} changes`}
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </HoverTip>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/** One change's detail: its fields as values, a move's from/to, a delete's cascade. */
-function ChangeDetail({ change, several }: { change: StagedChange; several: boolean }) {
-  const technical = usePersonaMode() === 'technical'
-  const [json, setJson] = useState(false)
-  const fields = useMemo(() => fieldChanges(change), [change])
-  const cascade = change.type === 'delete_entity' ? (change.before as { cascade?: Parameters<typeof CascadeImpactList>[0]['impact'] } | undefined)?.cascade : undefined
-  // What the save sends — the patch, never the whole node twice.
-  const patch = useMemo(() => {
-    if (!json) return null
-    if (change.type === 'update_entity' || change.type === 'rename_entity') {
-      const { payload, unset } = nodeUpdatePatch(change.before, change.after)
-      return unset.length ? { ...payload, unsetProperties: unset } : payload
-    }
-    return { before: change.before ?? null, after: change.after ?? null }
-  }, [json, change])
-
-  let body: ReactNode = null
-  if (change.type === 'move_entity') body = <MoveDetail change={change} />
-  else if (cascade) body = <CascadeImpactList impact={cascade} rootUrn={change.targetUrn} />
-  else if (fields.length > 0) {
-    body = (
-      <div className="rounded-xl border border-glass-border overflow-hidden bg-black/[0.015] dark:bg-white/[0.02]">
-        {fields.map((f, i) => <ReviewValue key={`${f.folder ?? ''}/${f.label}/${i}`} field={f} />)}
-      </div>
-    )
-  }
-  if (!body && !several && !technical) return null
-  return (
-    <div className="space-y-1.5">
-      {several && <p className="text-[11px] text-ink-muted">{change.summary}</p>}
-      {body}
-      {technical && (
-        <div>
-          <button type="button" onClick={() => setJson(v => !v)}
-            className="inline-flex items-center gap-1 text-[10.5px] font-medium text-ink-muted hover:text-ink">
-            <Code2 className="w-3 h-3" aria-hidden />{json ? 'Hide technical details' : 'Technical details'}
-          </button>
-          {json && patch && <div className="mt-1"><JsonView data={patch} label="What the save sends" /></div>}
-        </div>
-      )}
-    </div>
-  )
-}
-
-/** A move, in words: where the entity sits now and where the save puts it. (Its raw `before` holds
- *  the undo state — the whole view layout — which is no reading matter.) */
-function MoveDetail({ change }: { change: StagedChange }) {
-  const nodes = useCanvasStore(s => s.nodes)
-  const label = (id: string | null | undefined) =>
-    id ? ((nodes.find(n => n.id === id)?.data?.label as string | undefined) ?? id) : null
-  const after = change.after as { parentId?: string | null; edgeType?: string | null }
-  const removed = ((change.before as { removedLinks?: Array<{ source: string }> } | undefined)?.removedLinks ?? [])
-  const from = [...new Set(removed.map(e => label(e.source)))].filter(Boolean).join(', ')
-  const cell = (title: string, value: string, hint?: string) => (
-    <div className="rounded-lg border border-glass-border bg-black/[0.015] dark:bg-white/[0.02] p-2 min-w-0">
-      <p className="text-[9px] uppercase tracking-[0.08em] text-ink-muted mb-1 font-bold">{title}</p>
-      <p className="text-[12px] text-ink break-words">{value}</p>
-      {hint && <p className="text-[10.5px] text-ink-muted mt-0.5">{hint}</p>}
-    </div>
-  )
-  return (
-    <div className="grid grid-cols-2 gap-2">
-      {cell('From', from || 'Its current parent', from ? undefined : 'Replaced on save, wherever it is')}
-      {cell('To', label(after.parentId) ?? 'Top level', after.edgeType ? `as ${after.edgeType}` : undefined)}
-    </div>
-  )
-}
-
-/** What the draft already holds from earlier saves and imports — what publishing takes along too. */
-function DraftSavedSection({ changeSet, defaultOpen = false }: { changeSet: ChangeSet; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen)
+  const origin = useMemo(() => (list ? { branchId: list.branchId } : null), [list?.branchId]) // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <section className="rounded-2xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02]">
       <button
@@ -862,7 +621,9 @@ function DraftSavedSection({ changeSet, defaultOpen = false }: { changeSet: Chan
       </button>
       {open && (
         <div className="px-4 pb-4">
-          <ChangesPanel changeSet={changeSet} emptyHint="Nothing saved on this draft yet." />
+          {list && origin
+            ? <ChangeList wsId={list.wsId} graphId={list.graphId} origin={origin} emptyHint="Nothing saved on this draft yet." />
+            : <ChangesPanel changeSet={changeSet} emptyHint="Nothing saved on this draft yet." />}
         </div>
       )}
     </section>

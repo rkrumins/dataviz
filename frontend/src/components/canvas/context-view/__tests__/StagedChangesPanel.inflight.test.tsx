@@ -6,6 +6,17 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { StagedChangesPanel } from '../StagedChangesPanel'
+
+// jsdom has no layout: lay every row of the virtualized list out.
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: (opts: { count: number; getItemKey?: (i: number) => string | number }) => ({
+    getVirtualItems: () => Array.from({ length: opts.count }, (_, index) => ({
+      index, key: opts.getItemKey ? opts.getItemKey(index) : index, start: index * 52, size: 52,
+    })),
+    getTotalSize: () => opts.count * 52,
+    scrollToIndex: () => undefined,
+  }),
+}))
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 
 const change = (id: string): StagedChange => ({
