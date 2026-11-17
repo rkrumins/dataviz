@@ -154,7 +154,17 @@ Builder's "Start building" (`ContextViewCanvas.tsx:2439`), and the builder store
 ## 5. Staged changes → ops → the three-phase save
 
 Canvas edits accumulate optimistically in `stagedChangesStore` (dashed-halo feedback, unsaved).
-"Review & Save" runs `saveStagedChangesToDraft` (`ContextViewCanvas.tsx:2370-2399` `StagedChangesPanel
+The entity drawer stages each edit as it is committed — a property edited in place on the View tab
+(`PropertyEditor inline`), an Edit-tab field on Enter or blur — through `useEntityEditSession.commit`
+→ `stageNodeEdit`; there is no separate Stage step. Every staged action is one step in the store's
+undo history (`past` / `redoStack` hold `UndoStep`s), so Undo steps back one edit — a node edited
+twice keeps one staged change but undoes one edit at a time — and Redo re-applies it (`reapply`).
+"Review & Save" (`StagedChangesPanel`) is a guided stepper: Review (List of `reviewModel` groups —
+one per entity/relationship, a sentence, only the fields `nodeUpdatePatch` sends — or a lazy
+`ChangeMap`), a destination (Save to draft / Save & publish / Save & send for review), and Publish
+(the shared `usePublishFlow` / `PublishForm` that `CommitDialog` also renders, over the whole
+draft's counts). Its `onConfirm` resolves `true` once written; the panel then closes or goes on to
+Publish. It runs `saveStagedChangesToDraft` (`ContextViewCanvas.tsx` `StagedChangesPanel
 onConfirm` → `saveStagedChangesToDraft.ts`). The header docstring says "two phases" but the code
 implements **three**, and the separation is the whole point:
 
@@ -221,6 +231,13 @@ one language. It merges two layers (`useDiffDecoration.ts:30-61`):
 > unmistakable at a glance. `activeChangeSet` is populated by the bar's effect from
 > `useDiffVsMain` → `fromDiffVsMain` (`CanvasVersioningBar.tsx:59-66`).
 
+Relationships speak the same language on the Context View: `LineageFlowOverlay` draws a dashed halo
+on a staged edge change and a solid one on a committed edge change (`committedEdgeLookup`, matched
+by edge id or by its two ends — an imported edge's id is not the canvas's), and a closed
+`FlatTreeItem` row carries a stripe when something saved inside it changed, including children a
+containment link added that are not loaded. After an import, `refreshAfterImport` un-hides the
+committed overlay and says what the import did.
+
 ---
 
 ## 7. The versioning chrome — the bar, the bridge, the panel
@@ -233,7 +250,8 @@ non-blank graph — managers only; a `kind === 'blank'` model is excluded becaus
 design) (`CanvasVersioningBar.tsx:98-132`). On a draft it shows an amber strip: `BranchSwitcher`,
 `RefreshingBadge`, `ReadRouteChip` (the watermark's `readRoute`: "Serving from FalkorDB · provider" or "Serving from Postgres (catching up)", plus "· draft overlay"; on main it shows only while Postgres serves), `AggregationSyncChip`, the committed `ChangeCountChips` + an *"N unsaved"* staged
 hint (`:162-185`), `ViewPrIndicator`, a **Reviews** button, the committed-diff `ChangeHighlightControl`
-(toggles `committedDiffHidden`), **Publish** (`CommitDialog`), and **Discard** (`useAbandonDraft`). A
+(toggles `committedDiffHidden`), **Publish** (`CommitDialog`; shown once the draft has changes, view
+changes or staged edits), and **Discard** (`useAbandonDraft`). A
 `PullBeforeMergeBanner` appears when the draft is `behindMain` (`:84-87, 228-236`).
 
 ### `versioningPanelStore` — a one-shot bridge
