@@ -60,8 +60,8 @@ describe('EntityDrawer — editing is kept only in a draft', () => {
         await user.click(screen.getByRole('tab', { name: 'Edit' }))
         const name = screen.getByPlaceholderText('Entity name…')
         await user.clear(name)
-        await user.type(name, 'Orders v2')
-        await user.click(screen.getByRole('button', { name: /Stage changes/ }))
+        // Enter stages it — there is no separate Stage step.
+        await user.type(name, 'Orders v2{Enter}')
 
         expect(useStagedChangesStore.getState().changes).toHaveLength(1)
         expect(screen.getByText(/Review & Save to keep it/)).toBeInTheDocument()

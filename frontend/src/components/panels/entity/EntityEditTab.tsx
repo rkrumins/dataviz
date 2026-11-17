@@ -1,10 +1,11 @@
 /**
  * The entity drawer's Edit tab: name, business label, description, the entity type's schema
- * fields, placement in the hierarchy, and the property bag. Every input edits the session's
- * working copy through `onEdit`; where a field is stored — top-level or among the properties — is
- * decided by `lib/nodeFields`.
+ * fields, placement in the hierarchy, and the property bag. Typing edits the session's working
+ * copy through `onEdit`; leaving a field or pressing Enter stages it (`onCommit`), and Esc puts it
+ * back (`onCancel`). A property change is staged as it is made. Where a field is stored —
+ * top-level or among the properties — is decided by `lib/nodeFields`.
  */
-import { useId, useMemo, type ComponentType, type ReactNode } from 'react'
+import { useId, useMemo, type ComponentType, type KeyboardEvent, type ReactNode } from 'react'
 import { ArrowRight, AtSign, Briefcase, Check, Copy, Database, FileText, Layers, Link, Sparkles, Type, Unlink } from 'lucide-react'
 import { useActiveView } from '@/store/schema'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
@@ -51,6 +52,16 @@ function Field({ label, icon: Icon, hint, children }: {
 
 interface SchemaField { id: string; name: string; type?: string }
 
+/** The node with `bag` as its user properties — reserved names kept, and the business label,
+ *  which the header also shows, kept as one with its property. */
+export function withPropertyBag(d: Data, bag: Data): Data {
+  return {
+    ...d,
+    properties: withReserved(d.properties, bag),
+    businessLabel: typeof bag.businessLabel === 'string' ? bag.businessLabel : undefined,
+  }
+}
+
 /** What saving does to the data source's own name property, said under the Name input before it
  *  happens — the server's rule, predicted by `nameOnSave`. */
 function nameHint(original: Data | null, form: Data, mapping: DataSourceResponse | null): ReactNode {
@@ -80,7 +91,7 @@ function nameHint(original: Data | null, form: Data, mapping: DataSourceResponse
   }
 }
 
-export function EntityEditTab({ nodeId, form, original, entityType, urn, userProps, onEdit, onCopyUrn }: {
+export function EntityEditTab({ nodeId, form, original, entityType, urn, userProps, onEdit, onCommit, onCancel, onCopyUrn }: {
   nodeId: string
   form: Data
   /** The entity as first read — what a save is judged against — or null for one not saved yet. */
@@ -90,9 +101,21 @@ export function EntityEditTab({ nodeId, form, original, entityType, urn, userPro
   /** The node's own properties (reserved names the reader mirrors in are left out). */
   userProps: Data
   onEdit: (update: (data: Data) => Data) => void
+  /** Stage the copy — after `update`, when given. */
+  onCommit: (update?: (data: Data) => Data) => void
+  /** Put back what is being typed. */
+  onCancel: () => void
   onCopyUrn: () => void
 }) {
   const set = (key: string, value: unknown) => onEdit((d) => ({ ...d, [key]: value }))
+  // Every text field: leaving it or Enter stages it (⌘Enter in a multi-line one), Esc puts it back.
+  const commitOn = {
+    onBlur: () => onCommit(),
+    onKeyDown: (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (e.key === 'Escape') onCancel()
+      else if (e.key === 'Enter' && e.currentTarget.tagName === 'INPUT') { e.preventDefault(); onCommit() }
+    },
+  }
   // The Name input is also the source's own name property, and the platform assigns its identity
   // property: neither is offered as a schema field of its own.
   const identity = useCanvasNodeIdentity()
@@ -115,15 +138,15 @@ export function EntityEditTab({ nodeId, form, original, entityType, urn, userPro
       <div className="space-y-4">
         <Field label="Name" icon={Type} hint={nameHint(original, form, identity)}>
           {(id) => <input id={id} type="text" className={INPUT} placeholder="Entity name…"
-            value={text(form.label ?? form.name)} onChange={(e) => set('label', e.target.value)} />}
+            value={text(form.label ?? form.name)} onChange={(e) => set('label', e.target.value)} {...commitOn} />}
         </Field>
         <Field label="Business label" icon={Briefcase} hint="The name people in the business know it by — shown in Business mode.">
           {(id) => <input id={id} type="text" className={INPUT} placeholder="Business-friendly name…"
-            value={text(form.businessLabel)} onChange={(e) => { const v = e.target.value; onEdit((d) => writeBusinessLabel(d, v)) }} />}
+            value={text(form.businessLabel)} onChange={(e) => { const v = e.target.value; onEdit((d) => writeBusinessLabel(d, v)) }} {...commitOn} />}
         </Field>
         <Field label="Description" icon={FileText}>
           {(id) => <textarea id={id} rows={3} className={cn(INPUT, 'resize-none')} placeholder="What is this, and what is it for?"
-            value={text(form.description)} onChange={(e) => set('description', e.target.value)} />}
+            value={text(form.description)} onChange={(e) => set('description', e.target.value)} {...commitOn} />}
         </Field>
         <Field label="URN" icon={Link}>
           {(id) => (
@@ -145,11 +168,11 @@ export function EntityEditTab({ nodeId, form, original, entityType, urn, userPro
         <div className="space-y-4">
           <Field label="Qualified name" icon={AtSign}>
             {(id) => <input id={id} type="text" className={INPUT} placeholder="Fully qualified name…"
-              value={text(form.qualifiedName)} onChange={(e) => set('qualifiedName', e.target.value)} />}
+              value={text(form.qualifiedName)} onChange={(e) => set('qualifiedName', e.target.value)} {...commitOn} />}
           </Field>
           <Field label="Source system" icon={Database}>
             {(id) => <input id={id} type="text" className={INPUT} placeholder="Where it comes from…"
-              value={text(form.sourceSystem)} onChange={(e) => set('sourceSystem', e.target.value)} />}
+              value={text(form.sourceSystem)} onChange={(e) => set('sourceSystem', e.target.value)} {...commitOn} />}
           </Field>
           <div className="space-y-1.5">
             <span className="text-xs font-semibold text-ink-muted flex items-center gap-2">
@@ -172,11 +195,11 @@ export function EntityEditTab({ nodeId, form, original, entityType, urn, userPro
                 {(id) => field.type === 'textarea' || field.type === 'markdown' ? (
                   <textarea id={id} rows={2} className={cn(INPUT, 'resize-none')}
                     value={text(readSchemaField(form, field.id))}
-                    onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }} />
+                    onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }} {...commitOn} />
                 ) : (
                   <input id={id} type="text" className={INPUT}
                     value={text(readSchemaField(form, field.id))}
-                    onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }} />
+                    onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }} {...commitOn} />
                 )}
               </Field>
             ))}
@@ -190,15 +213,7 @@ export function EntityEditTab({ nodeId, form, original, entityType, urn, userPro
           <PanelErrorBoundary resetKeys={[urn]}>
             <PropertyEditor
               value={userProps}
-              onChange={(next) => onEdit((d) => {
-                const bag = next as Data
-                // The business label is a property the header also shows — keep the two as one.
-                return {
-                  ...d,
-                  properties: withReserved(d.properties, bag),
-                  businessLabel: typeof bag.businessLabel === 'string' ? bag.businessLabel : undefined,
-                }
-              })}
+              onChange={(next) => onCommit((d) => withPropertyBag(d, next as Data))}
               searchable
               groupByPath
               bare

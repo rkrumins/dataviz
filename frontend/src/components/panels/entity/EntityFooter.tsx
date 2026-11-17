@@ -1,21 +1,21 @@
 /**
  * The entity drawer's footer. Reading: when it was created and last changed, and by whom, on the
- * line being read, and when the live graph last caught up (DrawerActivity). Editing — or holding
- * an edit not staged yet — the stage bar.
+ * line being read, and when the live graph last caught up (DrawerActivity). Editing — typing in a
+ * field, or holding changes staged on this entity — where the edit stands (EntityChangeStrip).
  */
 import { ArrowUpRight } from 'lucide-react'
 import type { EntitySummary } from '@/services/versioningApiService'
 import { DrawerFooter } from '../shell/DrawerShell'
 import { DrawerActivity } from '../shell/DrawerActivity'
-import { StageBar } from '../shell/StageBar'
+import { EntityChangeStrip, useStagedNodeEdit } from './EntityChangeStrip'
 
-export function EntityFooter({ editing, dirty, justStaged, onCancel, onStage, summary, summaryLoading, wsId, graphId, inDraft, externalUrl }: {
+export function EntityFooter({ nodeId, editing, dirty, justStaged, onCancel, summary, summaryLoading, wsId, graphId, inDraft, externalUrl }: {
+  nodeId: string
   /** The Edit tab is open, or an edit waits to be staged. */
   editing: boolean
   dirty: boolean
   justStaged: boolean
   onCancel: () => void
-  onStage: () => void
   summary?: EntitySummary
   summaryLoading: boolean
   wsId?: string
@@ -23,10 +23,11 @@ export function EntityFooter({ editing, dirty, justStaged, onCancel, onStage, su
   inDraft: boolean
   externalUrl: string | null
 }) {
-  if (editing) {
+  const staged = useStagedNodeEdit(nodeId)
+  if (editing || staged) {
     return (
       <DrawerFooter>
-        <StageBar dirty={dirty} justStaged={justStaged} onCancel={onCancel} onStage={onStage} />
+        <EntityChangeStrip nodeId={nodeId} dirty={dirty} justStaged={justStaged} onCancel={onCancel} />
       </DrawerFooter>
     )
   }

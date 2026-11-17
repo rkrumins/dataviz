@@ -16,6 +16,7 @@
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { formatShortcut } from '@/lib/platform'
 import { BRANCH_VOCAB } from '@/features/versioning/model/branchVocab'
 import { ComprehensionTools, type ComprehensionToolsProps } from './ViewerActions'
 import { useFolded } from './toolbarFold'
@@ -94,7 +95,7 @@ export function EditorActions({
       {/* Undo / Redo — labelled segmented pair (icon + word, mirrored like
           bookends) so both actions read at a glance, not only on hover. */}
       <div className="flex items-stretch rounded-xl overflow-hidden bg-black/[0.03] dark:bg-gradient-to-b dark:from-white/[0.06] dark:to-white/[0.02] border border-black/[0.10] dark:border-white/[0.08]">
-        <HoverTip className="flex" label="Undo the last change on the canvas" shortcut="⌘Z">
+        <HoverTip className="flex" label="Undo the last change on the canvas" shortcut={formatShortcut('mod+z')}>
         <button
           onClick={onUndo}
           disabled={!canUndo}
@@ -113,7 +114,7 @@ export function EditorActions({
         </button>
         </HoverTip>
         <div className="w-px bg-black/[0.10] dark:bg-white/[0.08]" />
-        <HoverTip className="flex" label="Put back the change you just undid" shortcut="⌘⇧Z">
+        <HoverTip className="flex" label="Put back the change you just undid" shortcut={formatShortcut('mod+shift+z')}>
         <button
           onClick={onRedo}
           disabled={!canRedo}

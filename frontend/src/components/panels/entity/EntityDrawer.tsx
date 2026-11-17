@@ -6,11 +6,13 @@
  *   business label, description, schema fields, placement and properties. **JSON**: read-only.
  * - Property values are plain JSON; friendly field types are inferred from the value on read
  *   (property/fieldTypes.ts), so nothing extra is persisted.
- * - An edit stages ONE change per node (`stageNodeEdit`), saved with the draft as a patch against
- *   the node as first read: changed fields, set properties, and each removed property named in
- *   `unsetProperties`. Where a field lives is decided by `lib/nodeFields`.
- * - Built on `DrawerShell`: while an edit is unstaged, every move of the drawer — a canvas click,
- *   the trail, Esc, a trace — asks first.
+ * - Every edit is staged as it is committed — Enter, leaving a field, a toggle, a property added or
+ *   removed — in place on the View tab's properties or on the Edit tab. It stages ONE change per
+ *   node (`stageNodeEdit`), saved with the draft as a patch against the node as first read: changed
+ *   fields, set properties, and each removed property named in `unsetProperties`. Where a field
+ *   lives is decided by `lib/nodeFields`.
+ * - Built on `DrawerShell`: while a field holds typing not staged yet, every move of the drawer — a
+ *   canvas click, the trail, Esc, a trace — asks first.
  *
  * The drawer shows whichever entity it was last opened on (`drawerNodeId`), independent of the
  * canvas highlight; it stays open until closed.
@@ -37,7 +39,7 @@ import { useDrawerHistoryScope } from '../useDrawerHistoryScope'
 import { useEntityEditSession } from './useEntityEditSession'
 import { EntityHeader, type EntityTab } from './EntityHeader'
 import { EntityViewTab } from './EntityViewTab'
-import { EntityEditTab } from './EntityEditTab'
+import { EntityEditTab, withPropertyBag } from './EntityEditTab'
 import { EntityFooter } from './EntityFooter'
 
 export interface EntityDrawerProps {
@@ -112,7 +114,7 @@ function OpenEntityDrawer({
   const stagedBefore = useStagedChangesStore((s) => s.changes.find(
     (c) => (c.type === 'update_entity' || c.type === 'rename_entity') && c.targetId === node.id)?.before)
   const original = unsavedCreate ? null : ((stagedBefore as Record<string, unknown> | undefined) ?? data)
-  const { form, dirty, justStaged, edit, stage, discard } = session
+  const { form, dirty, justStaged, edit, commit, stage, discard } = session
   const isGhost = data.isGhost === true
   // An edit is kept only as a change in a draft (useEntityEditing). Where editing isn't offered at
   // all — switched off, a read-only view, a ghost, a locked surface — nothing is offered; where it
@@ -140,6 +142,15 @@ function OpenEntityDrawer({
 
   const urn = (form.urn as string | undefined) || node.id
   const userProps = useMemo(() => userProperties(form.properties), [form.properties])
+  // The properties as first read, for what each row says changed; none for an entity not saved yet.
+  const originalProps = useMemo(
+    () => (original ? userProperties((original as Record<string, unknown>).properties) : undefined),
+    [original],
+  )
+  const commitProperties = useCallback(
+    (bag: Record<string, unknown>) => commit((d) => withPropertyBag(d, bag)),
+    [commit],
+  )
   const title = useMemo(() => resolveEntityName(node.data, personaMode, node.id), [node.data, personaMode, node.id])
   const identityProperty = useCanvasIdentityProperty()
   const technicalLine = useMemo(
@@ -166,11 +177,6 @@ function OpenEntityDrawer({
     s.closeNodeDrawer()
     s.clearSelection()
   }), [])
-  const cancelEdit = useCallback(() => {
-    discard()
-    setTab('view')
-  }, [discard])
-  const startEdit = useCallback(() => setTab('edit'), [])
 
   const titleId = useId()
   return (
@@ -226,7 +232,8 @@ function OpenEntityDrawer({
                 copiedUrn={copiedUrn}
                 onCopyUrn={copyUrn}
                 canEdit={editable}
-                onStartEdit={startEdit}
+                originalProps={originalProps}
+                onCommitProperties={commitProperties}
                 onFocusNode={onFocusNode}
                 onLocateMany={onLocateMany}
                 onRevealPath={onRevealPath}
@@ -249,6 +256,8 @@ function OpenEntityDrawer({
                   urn={urn}
                   userProps={userProps}
                   onEdit={edit}
+                  onCommit={commit}
+                  onCancel={discard}
                   onCopyUrn={copyUrn}
                 />
               </TabsContent>
@@ -261,11 +270,11 @@ function OpenEntityDrawer({
           </DrawerBody>
 
           <EntityFooter
-            editing={shownTab === 'edit' || dirty || justStaged}
+            nodeId={node.id}
+            editing={(editable && shownTab === 'edit') || dirty || justStaged}
             dirty={dirty}
             justStaged={justStaged}
-            onCancel={cancelEdit}
-            onStage={stage}
+            onCancel={discard}
             summary={summaryQ.data}
             summaryLoading={summaryQ.isLoading}
             wsId={scope.wsId}

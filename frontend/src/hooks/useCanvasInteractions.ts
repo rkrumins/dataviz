@@ -379,6 +379,11 @@ export function useCanvasInteractions(
                     useCanvasStore.getState().updateNode(nodeId, { isPending: undefined })
                     cascade?.descUrns.forEach(id => useCanvasStore.getState().updateNode(id, { isPending: undefined }))
                 },
+                // Redo marks it (and what it takes with it) for deletion again.
+                reapply: () => {
+                    useCanvasStore.getState().updateNode(nodeId, { isPending: 'delete' })
+                    cascade?.descUrns.forEach(id => useCanvasStore.getState().updateNode(id, { isPending: 'delete' }))
+                },
             })
             onNodeDeleted?.(nodeId)
         }
@@ -458,6 +463,9 @@ export function useCanvasInteractions(
             discard: () => {
                 useCanvasStore.getState().addEdges([snapshot])
             },
+            reapply: () => {
+                useCanvasStore.getState().removeEdge(edgeId)
+            },
         })
         onEdgeDeleted?.(edgeId)
     }, [onEdgeDeleted])
@@ -498,6 +506,10 @@ export function useCanvasInteractions(
             discard: () => {
                 useCanvasStore.getState().removeEdge(reversedId)
                 useCanvasStore.getState().addEdges([{ ...edge }])
+            },
+            reapply: () => {
+                useCanvasStore.getState().removeEdge(edgeId)
+                useCanvasStore.getState().addEdges([reversed])
             },
         })
     }, [notify])

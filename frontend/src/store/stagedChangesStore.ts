@@ -95,6 +95,17 @@ export interface StagedConflict {
   current: EntityView
 }
 
+/**
+ * One user action in the undo history, as the staged changes it touched: each entry is one change
+ * as it was before the action and after it (null: not staged). Undo puts every `before` back and
+ * redo every `after`, so a node edited three times steps back one edit at a time, in the order the
+ * edits were made — not in the order the changes happen to sit in `changes`.
+ */
+export interface UndoStep {
+  id: string
+  entries: { before: StagedChange | null; after: StagedChange | null }[]
+}
+
 export interface ApplyContext {
   provider: GraphDataProvider
   wsId: string
@@ -112,15 +123,18 @@ interface StagedChangesState {
   applyStatus: 'idle' | 'applying' | 'partial-error'
   lastApplyResult: { ok: number; failed: number } | null
 
-  /** Most-recently-discarded changes (for Undo). Multiple-step undo via stack. */
-  redoStack: StagedChange[]
+  /** The actions Undo steps back through, oldest first (in memory only: a restored draft has none,
+   *  and Undo then takes back its newest change). */
+  past: UndoStep[]
+  /** The actions undone (or changes discarded), newest last — what Redo puts back. */
+  redoStack: UndoStep[]
 
   /** Active scope key = `${wsId}::${dsId}::${branchId|main}`. Staged edits belong to ONE
    *  branch; switching branches must NOT show another branch's edits (a draft is isolated
    *  until merged). `changes`/`redoStack` always hold the ACTIVE scope's slice. */
   _scopeKey: string | null
   /** Parked per-scope slices, so switching away and back preserves each branch's own edits. */
-  _byScope: Record<string, { changes: StagedChange[]; redoStack: StagedChange[] }>
+  _byScope: Record<string, { changes: StagedChange[]; redoStack: UndoStep[]; past?: UndoStep[] }>
   /** Make `key` the active scope: park the current slice and load `key`'s (empty if none).
    *  Called whenever the active (workspace, data source, branch) changes. */
   setScope: (key: string | null) => void
@@ -135,6 +149,10 @@ interface StagedChangesState {
     matcher: (c: StagedChange) => boolean,
     input: Omit<StagedChange, 'id' | 'timestamp'>,
   ) => string
+  /** Put `next` in place of the staged change with its id (or add it), or drop `prev` when `next` is
+   *  null — recorded as one undoable step. For a surface that keeps one change per target and
+   *  rewrites it with each edit (`stageNodeEdit`). */
+  replace: (prev: StagedChange | null, next: StagedChange | null) => void
   /**
    * Patch a staged change's `after` object in place, keeping its reference — so
    * hooks that closed over `after` (e.g. a `create_entity`'s `apply`) observe the
@@ -154,13 +172,17 @@ interface StagedChangesState {
     wsId: string,
     opts?: { graphWrites?: boolean },
   ) => Promise<{ ok: number; failed: number }>
-  openReviewPanel: () => void
+  /** Open Review & Save — on `'publish'`, with Save & publish chosen (only that exact string: a
+   *  button handing over its click event opens it plainly). */
+  openReviewPanel: (intent?: unknown) => void
   closeReviewPanel: () => void
+  /** What Review & Save was opened for: `'publish'` preselects Save & publish. */
+  reviewIntent: 'publish' | null
 
-  /** Undo the most recent staged change — pops it from changes, runs its
-   *  discard hook (which restores the canvas), and pushes onto redoStack. */
+  /** Step back the most recent action: every change it touched goes back to how it was (the canvas
+   *  with it — a `before` re-applies itself, a change that was not staged runs its discard hook). */
   undo: () => boolean
-  /** Re-stage the most recently undone change. */
+  /** Put back the most recently undone action (or discarded change). */
   redo: () => boolean
   canUndo: () => boolean
   canRedo: () => boolean
@@ -196,6 +218,40 @@ export const GRAPH_DATA_CHANGE_TYPES: ReadonlySet<StagedChangeType> = new Set<St
 export const PUBLISHED_READ_ONLY = 'The published graph is read-only — open a draft to save this change.'
 
 const _SCOPE_NULL = '__none__'   // sentinel for the null/unscoped slice in _byScope
+
+const stepOf = (entries: UndoStep['entries']): UndoStep => ({ id: generateId('step'), entries })
+const entryId = (e: UndoStep['entries'][number]) => (e.after ?? e.before)!.id
+
+/** The steps without any entry about these changes (they are gone — saved, or discarded for good),
+ *  dropping steps left empty. */
+function pruneSteps(steps: UndoStep[], gone: ReadonlySet<string>): UndoStep[] {
+  if (gone.size === 0 || steps.length === 0) return steps
+  const out: UndoStep[] = []
+  for (const st of steps) {
+    const entries = st.entries.filter((e) => !gone.has(entryId(e)))
+    if (entries.length === st.entries.length) out.push(st)
+    else if (entries.length > 0) out.push({ ...st, entries })
+  }
+  return out
+}
+
+/** `changes` with `next` in place of the change of its id (appended if absent), or that change
+ *  removed when `next` is null. */
+function putChange(changes: StagedChange[], id: string, next: StagedChange | null): StagedChange[] {
+  if (!next) return changes.filter((c) => c.id !== id)
+  return changes.some((c) => c.id === id) ? changes.map((c) => (c.id === id ? next : c)) : [...changes, next]
+}
+
+/** Bring the canvas to `to`: a staged change re-applies itself; a change no longer staged undoes
+ *  itself (its discard hook restores what it changed). */
+function showOnCanvas(from: StagedChange | null, to: StagedChange | null, what: string) {
+  try {
+    if (to) to.reapply?.()
+    else from?.discard?.()
+  } catch (err) {
+    console.error(`[StagedChanges] ${what} hook failed`, err)
+  }
+}
 
 /**
  * The `root` change plus every staged `create_entity` descendant of it, found by
@@ -253,6 +309,8 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
   isReviewPanelOpen: false,
   applyStatus: 'idle',
   lastApplyResult: null,
+  reviewIntent: null,
+  past: [],
   redoStack: [],
   _scopeKey: null,
   _byScope: {},
@@ -262,7 +320,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     if (s._scopeKey === key) return                       // already active — no-op
     const byScope = { ...s._byScope }
     // Park the current active slice under its key (so returning to this branch restores it).
-    byScope[s._scopeKey ?? _SCOPE_NULL] = { changes: s.changes, redoStack: s.redoStack }
+    byScope[s._scopeKey ?? _SCOPE_NULL] = { changes: s.changes, redoStack: s.redoStack, past: s.past }
     const next = byScope[key ?? _SCOPE_NULL] ?? { changes: [], redoStack: [] }
     delete byScope[key ?? _SCOPE_NULL]                    // active slice lives in `changes`, not parked
     set({
@@ -270,6 +328,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       _byScope: byScope,
       changes: next.changes,
       redoStack: next.redoStack,
+      past: next.past ?? [],
       // Transient apply/UI state never carries across a branch switch.
       applyStatus: 'idle',
       lastApplyResult: null,
@@ -281,6 +340,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     const change: StagedChange = { ...input, id, timestamp: Date.now() }
     set((s) => ({
       changes: [...s.changes, change],
+      past: [...s.past, stepOf([{ before: null, after: change }])],
       // A new edit invalidates the redo stack — once you make a fresh change,
       // we can't redo a previously-discarded one cleanly anymore.
       redoStack: [],
@@ -292,7 +352,12 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     // Same invariant as stage(): a fresh batch of changes invalidates the redo
     // stack — a previously-discarded change can't be cleanly redone once the
     // canvas has moved on (e.g. a bulk create-at-scale apply).
-    set((s) => ({ changes: [...s.changes, ...batch], redoStack: [] }))
+    // One action: one Undo takes the whole batch back.
+    set((s) => ({
+      changes: [...s.changes, ...batch],
+      past: batch.length ? [...s.past, stepOf(batch.map((c) => ({ before: null, after: c })))] : s.past,
+      redoStack: [],
+    }))
   },
 
   stageOrReplace: (matcher, input) => {
@@ -300,16 +365,20 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     if (existing) {
       // Preserve the original `before` (the very first state before any edits)
       // but update `after` and `summary` to reflect the latest intent.
-      set((s) => ({
-        changes: s.changes.map((c) =>
-          c.id === existing.id
-            ? { ...c, ...input, before: existing.before, id: existing.id, timestamp: Date.now() }
-            : c,
-        ),
-      }))
+      get().replace(existing, { ...existing, ...input, before: existing.before, id: existing.id, timestamp: Date.now() })
       return existing.id
     }
     return get().stage(input)
+  },
+
+  replace: (prev, next) => {
+    const id = (next ?? prev)?.id
+    if (!id) return
+    set((s) => ({
+      changes: putChange(s.changes, id, next),
+      past: [...s.past, stepOf([{ before: prev, after: next }])],
+      redoStack: [],
+    }))
   },
 
   patchAfter: (changeId, patch, summary) => {
@@ -343,11 +412,15 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     const victimIds = new Set(ordered.map((v) => v.id))
     set((s) => ({
       changes: s.changes.filter((c) => !victimIds.has(c.id)),
+      // A discard is an undo of those changes: their history leaves Undo, and Redo puts them back.
+      past: pruneSteps(s.past, victimIds),
       // A discarded entity create is not redoable, and neither is anything its discard took with
       // it: its staged children, and the links staged to it — redoing one of those would draw a
       // line to a node that no longer exists. Everything else goes on the stack (a link discarded
       // on its own is redrawn by its `reapply`).
-      redoStack: root.type === 'create_entity' ? s.redoStack : [...s.redoStack, ...ordered],
+      redoStack: root.type === 'create_entity'
+        ? pruneSteps(s.redoStack, victimIds)
+        : [...s.redoStack, stepOf([...ordered].reverse().map((c) => ({ before: null, after: c })))],
     }))
   },
 
@@ -362,50 +435,56 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
         console.error('[StagedChanges] discard hook failed', err)
       }
     }
-    set({ changes: [], redoStack: [], applyStatus: 'idle', lastApplyResult: null })
+    set({ changes: [], past: [], redoStack: [], applyStatus: 'idle', lastApplyResult: null })
   },
 
   clearSaved: (ids) => {
     const done = new Set(ids)
-    set((s) => ({ changes: s.changes.filter((c) => !done.has(c.id)), redoStack: [], lastApplyResult: null }))
+    // Saved is not undoable here; edits staged since the save still are.
+    set((s) => ({
+      changes: s.changes.filter((c) => !done.has(c.id)), past: pruneSteps(s.past, done), redoStack: [], lastApplyResult: null,
+    }))
   },
 
   undo: () => {
-    const { changes } = get()
-    if (changes.length === 0) return false
-    const last = changes[changes.length - 1]
-    try {
-      last.discard?.()
-    } catch (err) {
-      console.error('[StagedChanges] undo discard hook failed', err)
+    const { changes, past } = get()
+    const step = past[past.length - 1]
+    if (!step) {
+      // No history (the work was restored after a reload): take back the newest change.
+      if (changes.length === 0) return false
+      const last = changes.reduce((a, b) => (b.timestamp >= a.timestamp ? b : a))
+      showOnCanvas(last, null, 'undo discard')
+      set((s) => ({
+        changes: s.changes.filter((c) => c.id !== last.id),
+        redoStack: [...s.redoStack, stepOf([{ before: null, after: last }])],
+      }))
+      return true
     }
+    for (const e of [...step.entries].reverse()) showOnCanvas(e.after, e.before, 'undo')
     set((s) => ({
-      changes: s.changes.slice(0, -1),
-      redoStack: [...s.redoStack, last],
+      changes: [...step.entries].reverse().reduce((cs, e) => putChange(cs, entryId(e), e.before), s.changes),
+      past: s.past.slice(0, -1),
+      redoStack: [...s.redoStack, step],
     }))
     return true
   },
 
   redo: () => {
     const { redoStack } = get()
-    if (redoStack.length === 0) return false
-    const change = redoStack[redoStack.length - 1]
-    // If the change carries a `reapply` hook (e.g. layer_config re-applies its `after` layers), run it
-    // so redo restores the visual mutation, not just the panel row. Types without one are re-added
-    // record-only (legacy — the user re-applies via the UI); this stays backward-compatible.
-    try {
-      change.reapply?.()
-    } catch (err) {
-      console.error('[StagedChanges] redo reapply hook failed', err)
-    }
+    const step = redoStack[redoStack.length - 1]
+    if (!step) return false
+    // A change carrying a `reapply` hook (a drawn link, a create, a node edit, a layer edit) redraws
+    // what it changed, so redo restores the canvas, not just the panel row.
+    for (const e of step.entries) showOnCanvas(e.before, e.after, 'redo reapply')
     set((s) => ({
-      changes: [...s.changes, change],
+      changes: step.entries.reduce((cs, e) => putChange(cs, entryId(e), e.after), s.changes),
+      past: [...s.past, step],
       redoStack: s.redoStack.slice(0, -1),
     }))
     return true
   },
 
-  canUndo: () => get().changes.length > 0,
+  canUndo: () => get().changes.length > 0 || get().past.length > 0,
   canRedo: () => get().redoStack.length > 0,
 
   applyAll: async (provider, wsId, opts) => {
@@ -459,8 +538,10 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
 
     // A change staged while this ran was not sent: keep it.
     const sent = new Set(sorted.map((c) => c.id))
+    const kept = new Set(remaining.map((c) => c.id))
     set((s) => ({
       changes: [...remaining, ...s.changes.filter((c) => !sent.has(c.id))],
+      past: pruneSteps(s.past, new Set([...sent].filter((id) => !kept.has(id)))),
       applyStatus: failed > 0 ? 'partial-error' : 'idle',
       lastApplyResult: { ok, failed },
     }))
@@ -468,8 +549,8 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     return { ok, failed }
   },
 
-  openReviewPanel: () => set({ isReviewPanelOpen: true }),
-  closeReviewPanel: () => set({ isReviewPanelOpen: false }),
+  openReviewPanel: (intent) => set({ isReviewPanelOpen: true, reviewIntent: intent === 'publish' ? 'publish' : null }),
+  closeReviewPanel: () => set({ isReviewPanelOpen: false, reviewIntent: null }),
 
   hasChange: (targetId) => get().changes.some((c) => c.targetId === targetId),
   getChangesForTarget: (targetId) =>

@@ -1711,6 +1711,9 @@ export function ContextViewCanvas({
   // Staged changes — review-before-save layer for all canvas edits
   const stagedChangeList = useStagedChangesStore(s => s.changes)
   const stagedRedoStack = useStagedChangesStore(s => s.redoStack)
+  const stagedPast = useStagedChangesStore(s => s.past)
+  // Nothing is undone under a save in flight (the ⌘Z handler below holds the same rule).
+  const stagedSaving = useStagedChangesStore(s => s.applyStatus === 'applying')
   const isStagedPanelOpen = useStagedChangesStore(s => s.isReviewPanelOpen)
   const openStagedChangesPanel = useStagedChangesStore(s => s.openReviewPanel)
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
@@ -6763,8 +6766,8 @@ export function ContextViewCanvas({
         onImport={() => { void flushLayoutSave().then(() => setShowImportDialog(true)) }}
         onExport={() => setShowExportDialog(true)}
         thisView={thisView}
-        canUndo={stagedChangeList.length > 0}
-        canRedo={stagedRedoStack.length > 0}
+        canUndo={!stagedSaving && (stagedChangeList.length > 0 || stagedPast.length > 0)}
+        canRedo={!stagedSaving && stagedRedoStack.length > 0}
         onUndo={undoStagedChange}
         onRedo={redoStagedChange}
         connectToolOn={edgeConnect.state.tool}

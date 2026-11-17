@@ -10,6 +10,9 @@
  * diff base the save sends a patch against and the state a discard restores) and the latest
  * state (`after`). An edit that nets out to nothing — the user put everything back — drops the
  * staged change instead of saving a no-op.
+ *
+ * Each call is one step in the undo history (`replace`): Undo puts the node back as the previous
+ * edit left it — not all the way to the original — and Redo draws the edit again (`reapply`).
  */
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
@@ -42,8 +45,9 @@ export function stageNodeEdit(nodeId: string, current: NodeData, after: NodeData
   const changed = [...Object.keys(payload).filter((k) => k !== 'properties'),
     ...Object.keys((payload.properties as Record<string, unknown> | undefined) ?? {}), ...unset]
   if (changed.length === 0) {
-    // Back where it started: nothing to save, and nothing for a discard to restore.
-    if (existing) useStagedChangesStore.setState((s) => ({ changes: s.changes.filter((c) => c.id !== existing.id) }))
+    // Back where it started: nothing to save, and nothing for a discard to restore — but the step
+    // that put it back can be undone.
+    if (existing) store.replace(existing, null)
     return
   }
 
@@ -59,13 +63,12 @@ export function stageNodeEdit(nodeId: string, current: NodeData, after: NodeData
       ? `Rename '${name}' → '${labelOf(after)}'`
       : `Edit ${changed.length} field${changed.length === 1 ? '' : 's'} on '${name}'`,
     discard: () => useCanvasStore.getState().updateNode(nodeId, original),
+    reapply: () => useCanvasStore.getState().updateNode(nodeId, after),
   }
   if (!existing) {
     store.stage(input)
     return
   }
   // Replaced in place (not `stageOrReplace`, which keeps the old `before`): the completed original.
-  useStagedChangesStore.setState((s) => ({
-    changes: s.changes.map((c) => (c.id === existing.id ? { ...c, ...input, timestamp: Date.now() } : c)),
-  }))
+  store.replace(existing, { ...existing, ...input, timestamp: Date.now() })
 }
