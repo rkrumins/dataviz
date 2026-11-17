@@ -12,13 +12,14 @@
  */
 import { useState, type ReactNode } from 'react'
 import { useReducedMotion } from 'framer-motion'
-import { ArrowRight, Info, RotateCw } from 'lucide-react'
+import { ArrowRight, RotateCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatCount } from '@/lib/units'
+import { MetricInfo } from '@/components/analytics/MetricInfo'
+import type { MetricDefinition } from '@/components/analytics/metricDefinitions'
 import { Button } from '@/components/ui/Button'
 import { Card } from '@/components/ui/Card'
 import { DateTime } from '@/components/ui/DateTime'
-import { HoverTip } from '@/components/ui/HoverTip'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { SymptomFinder, type ResolvedValues, type SettingValue } from '@/components/settings'
 import type { GraphProvider, VersionedGraphRow } from '@/services/systemStatusService'
@@ -54,36 +55,63 @@ function postureSentence(summary: GraphsSummary | undefined, readsPosture: strin
     return parts.join(' ')
 }
 
+/** A figure's definition, titled by its tile: what it counts, how, and why it matters. */
+type Explained = Omit<MetricDefinition, 'title'>
+
 interface Figure {
     id: string
     label: string
     value: (s: GraphsSummary) => number
-    definition: string
+    definition: Explained
     filter?: GraphInventoryFilter
     /** Worth a look when above zero. */
     alarm?: boolean
 }
 
 const FIGURES: Figure[] = [
-    { id: 'graphs', label: 'Versioned graphs', value: (s) => s.graphs, definition: 'Live versioned graphs on the platform. A fork isn’t counted: it follows the graph it was forked from.', filter: {} },
-    { id: 'building', label: 'Building a new version', value: (s) => s.building, definition: 'Graphs whose next version is being built in a second copy while readers keep the current one.', filter: { status: 'building' } },
-    { id: 'failing', label: 'Failing', value: (s) => s.failing, definition: 'Graphs whose last update failed. The list below says why for each.', filter: { status: 'failed' }, alarm: true },
-    { id: 'own', label: 'With settings of their own', value: (s) => s.withOwnSettings, definition: 'Graphs that chose at least one setting for themselves instead of following their workspace and the platform.', filter: { ownSettings: true } },
+    {
+        id: 'graphs', label: 'Versioned graphs', value: (s) => s.graphs, filter: {},
+        definition: {
+            what: 'Live versioned graphs on the platform. A fork isn’t counted: it follows the graph it was forked from.',
+            how: 'Every graph under version control that isn’t in the trash, counted in the database when the figures were read. Forks are left out.',
+            why: 'It is how far a platform change reaches: each of these graphs follows the platform’s values unless it or its workspace chose its own.',
+        },
+    },
+    {
+        id: 'building', label: 'Building a new version', value: (s) => s.building, filter: { status: 'building' },
+        definition: {
+            what: 'Graphs whose next version is being built in a second copy while readers keep the current one.',
+            how: 'Graphs with a new-version build under way, at any step: waiting to start, copying, building from the database, catching up or switching.',
+            why: 'Each build holds a second copy of its graph while it runs, so it needs that much free memory on its node. Readers move to the new version only once it is built and checked.',
+        },
+    },
+    {
+        id: 'failing', label: 'Failing', value: (s) => s.failing, filter: { status: 'failed' }, alarm: true,
+        definition: {
+            what: 'Graphs whose last update failed. The list below says why for each.',
+            how: 'Graphs with an error recorded against their copy: their last update failed, or they are rebuilding on their own after a failure. Each drops out once it updates again.',
+            why: 'A failing graph’s copy stops taking new versions, so its readers fall behind or are read from the database, as its read mode says.',
+        },
+    },
+    {
+        id: 'own', label: 'With settings of their own', value: (s) => s.withOwnSettings, filter: { ownSettings: true },
+        definition: {
+            what: 'Graphs that chose at least one setting for themselves instead of following their workspace and the platform.',
+            how: 'Graphs with at least one setting saved for the graph itself. Forks are left out: a fork has no settings of its own.',
+            why: 'A platform or workspace change doesn’t reach a value a graph set for itself, unless the platform locks it, so these are the graphs to look at after one.',
+        },
+    },
 ]
 
-function Definition({ label, text }: { label: string; text: string }) {
-    return (
-        <HoverTip label={text} width="data" className="inline-flex">
-            <button type="button" aria-label={`What “${label}” counts`} className="grid place-items-center w-5 h-5 rounded text-ink-secondary outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
-                <Info aria-hidden className="w-3.5 h-3.5" />
-            </button>
-        </HoverTip>
-    )
+const IN_MEMORY: Explained = {
+    what: 'Graphs loaded in the graph store, of those that aren’t forks. The rest are unloaded (their next read comes from the database and loads them), being loaded, waiting for room on their node, or have no copy in the graph store yet: together, every graph.',
+    how: 'Each graph counts once, by the state of its copy now: in memory, loading (its copy is being written from the database), unloaded, waiting for room on its node, or no copy yet. So the five add up to the versioned graphs.',
+    why: 'A graph in memory is read from the graph store, fast. An unloaded one is read from the database, more slowly, until it is loaded again; graphs waiting for room mean a node’s memory is full.',
 }
 
 function Tile({ label, definition, children, onClick, action, className }: {
     label: string
-    definition: string
+    definition: Explained
     children: ReactNode
     onClick?: () => void
     action?: string
@@ -93,7 +121,7 @@ function Tile({ label, definition, children, onClick, action, className }: {
         <Card padding="md" className={cn('flex min-w-0 flex-col gap-1', className)}>
             <div className="flex items-start gap-1">
                 <p className="min-w-0 text-[12.5px] font-medium text-ink-secondary">{label}</p>
-                <Definition label={label} text={definition} />
+                <MetricInfo definition={{ title: label, ...definition }} className="mt-px" />
             </div>
             {children}
             {onClick && action && (
@@ -140,7 +168,7 @@ function Figures({ onFilter }: { onFilter: (f: GraphInventoryFilter) => void }) 
                     {FIGURES.slice(0, 1).map((f) => (
                         <Tile key={f.id} label={f.label} definition={f.definition}>{value(s && f.value(s))}</Tile>
                     ))}
-                    <Tile label="In memory" definition="Graphs loaded in the graph store, of those that aren’t forks. The rest are unloaded (their next read comes from the database and loads them), being loaded, waiting for room on their node, or have no copy in the graph store yet: together, every graph.">
+                    <Tile label="In memory" definition={IN_MEMORY}>
                         {value(s?.inMemory)}
                         {s && total > 0 && (
                             <>
@@ -157,9 +185,9 @@ function Figures({ onFilter }: { onFilter: (f: GraphInventoryFilter) => void }) 
                                         return (
                                             <li key={m.id}>
                                                 {m.filter && (s[m.id] as number) > 0 ? (
-                                                    <button type="button" onClick={() => onFilter(m.filter!)} title={`Show the graphs ${m.words}`}
+                                                    <button type="button" onClick={() => onFilter(m.filter!)}
                                                         className="inline-flex items-start gap-1.5 rounded text-left underline-offset-2 outline-none hover:text-ink hover:underline focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
-                                                        {words}
+                                                        {words}<span className="sr-only">: show them</span>
                                                     </button>
                                                 ) : <span className="inline-flex items-start gap-1.5">{words}</span>}
                                             </li>

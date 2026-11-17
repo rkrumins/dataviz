@@ -43,11 +43,28 @@ describe('Overview', () => {
         expect(SUMMARY.inMemory + SUMMARY.unloaded + SUMMARY.loading + SUMMARY.waitingForRoom + SUMMARY.noCopy).toBe(SUMMARY.graphs)
         expect((await tile('Failing')).getByText('1')).toBeInTheDocument()
         // Each definition is named for its figure.
-        const definitions = screen.getAllByRole('button', { name: /^What “.+” counts$/ }).map((b) => b.getAttribute('aria-label'))
+        const definitions = screen.getAllByRole('button', { name: /^What does ".+" mean\?$/ }).map((b) => b.getAttribute('aria-label'))
         expect(definitions).toHaveLength(5)
         expect(new Set(definitions).size).toBe(5)
         // Read when it was read, and not announced again each time the clock moves.
         expect(screen.getByText(/^As of /).closest('[aria-live]')).toBeNull()
+    })
+
+    it('opens a figure’s definition on a tap: what it counts, how, and why it matters', async () => {
+        const user = userEvent.setup()
+        mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: OVERVIEW })
+        await screen.findByText('The fleet now')
+        const trigger = (await tile('Failing')).getByRole('button', { name: 'What does "Failing" mean?' })
+        await user.click(trigger)
+        const definition = screen.getByRole('dialog', { name: 'Failing' })
+        expect(within(definition).getByText("How it's calculated")).toBeInTheDocument()
+        expect(within(definition).getByText('Why it matters')).toBeInTheDocument()
+        expect(trigger).toHaveAttribute('aria-expanded', 'true')
+
+        await user.keyboard('{Escape}')
+        expect(screen.queryByRole('dialog', { name: 'Failing' })).not.toBeInTheDocument()
+        expect(trigger).toHaveFocus()
     })
 
     it('shows "—" and why when the figures couldn’t be read, never 0', async () => {

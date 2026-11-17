@@ -174,6 +174,32 @@ describe('GraphSettingsDrawer', () => {
         expect(within(elsewhere).queryByText(/In force here/)).not.toBeInTheDocument()
     })
 
+    it('explains a status on a tap inside the drawer: in the drawer, and Esc closes only the explanation', async () => {
+        const user = userEvent.setup()
+        mockApi('workspace-admin')
+        const onOpenChange = vi.fn()
+        renderWithApi(<GraphSettingsDrawer workspaceId={WS} graphId={GRAPH} open onOpenChange={onOpenChange} label="Sales lineage" />)
+        const drawer = await screen.findByRole('dialog', { name: 'Sales lineage' })
+        const summary = await screen.findByText(/^Set for every graph/)
+        await user.click(summary)
+        const served = (await import('../__fixtures__/api')).graphValues('workspace_admin').values
+        const inactive = served.find((r) => !CATALOGUE.settings.find((x) => x.key === r.key)?.scopes.graph && r.status !== 'in_effect')!
+        const { label, hint } = STATUS_META[inactive.status]
+        const item = within(within(summary.closest('details')!).getByText(S[inactive.key].label).closest('li')!)
+
+        await user.click(item.getByRole('button', { name: label }))
+        // Portaled into the drawer, not the page it makes inert, so it can be read and pressed.
+        const explanation = within(drawer).getByRole('dialog', { name: label })
+        expect(explanation).toHaveTextContent(hint)
+        await user.click(explanation)
+        expect(within(drawer).getByRole('dialog', { name: label })).toBeInTheDocument()
+
+        await user.keyboard('{Escape}')
+        expect(within(drawer).queryByRole('dialog', { name: label })).not.toBeInTheDocument()
+        expect(screen.getByRole('dialog', { name: 'Sales lineage' })).toBeInTheDocument()
+        expect(onOpenChange).not.toHaveBeenCalled()
+    })
+
     it('stages a graph’s own value, saves it with a reason after Review, and undoes it', async () => {
         const sent = mockApi('workspace-admin')
         renderDrawer()

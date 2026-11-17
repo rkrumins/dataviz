@@ -6,8 +6,8 @@
  * server's answer under its control; going back to the default is one action, said to be the
  * recommended one, and what this platform's facts suggest is said in the open; the footer's actions
  * stage and never save; a why's fix calls back; a row the viewer may not change says who can; the
- * link copies; guidance opens on demand; and a change of status is announced. Words come from the
- * registry's catalogue.
+ * link copies; guidance opens on demand; a status and a defined word open what they mean on a tap;
+ * and a change of status is announced. Words come from the registry's catalogue.
  */
 import { render, screen, within } from '@testing-library/react'
 import type { ResolvedSetting, ResolvedValues, Scope, SettingValue } from '../types'
@@ -16,6 +16,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { SCHEMA, SETTINGS_BY_KEY as S } from '../__fixtures__/schema'
 import { GRAPH_VALUES, PLATFORM_VALUES, WORKSPACE_VALUES } from '../__fixtures__/resolved'
 import { formatValue } from '../format'
+import { STATUS_META } from '../meta'
 import { SettingRow, type SettingRowProps } from '../SettingRow'
 
 const choice = (key: string, id: string) => S[key].choices.find((c) => c.id === id)!.title
@@ -262,14 +263,25 @@ describe('SettingRow', () => {
         expect(onStage).not.toHaveBeenCalled()
     })
 
-    it('underlines a defined term in the guidance, with its definition from the glossary on focus', async () => {
+    it('underlines a defined term in the guidance, with its definition from the glossary on a tap', async () => {
         const user = userEvent.setup()
         row({ setting: S['reads.mode'], resolved: GRAPH_VALUES['reads.mode'], scope: 'graph' })
         await user.click(screen.getByRole('button', { name: 'How it works' }))
-        const term = screen.getAllByText('graph store').find((el) => el.getAttribute('tabindex') === '0') as HTMLElement
-        term.focus()
-        const definition = SCHEMA.glossary.find((t) => t.term === 'Graph store')!.definition
-        expect(await screen.findByRole('tooltip')).toHaveTextContent(definition)
+        const store = SCHEMA.glossary.find((t) => t.term === 'Graph store')!
+        await user.click(screen.getAllByRole('button', { name: /^graph store$/i })[0])
+        expect(screen.getByRole('dialog', { name: store.term })).toHaveTextContent(store.definition)
+    })
+
+    it('opens what a status means on a tap, and Esc hands focus back to the badge', async () => {
+        const user = userEvent.setup()
+        row({ setting: S['reads.mode'], resolved: GRAPH_VALUES['reads.mode'], scope: 'graph', lens: 'business' })
+        const { label, hint } = STATUS_META[GRAPH_VALUES['reads.mode'].status]
+        const badge = screen.getByRole('button', { name: label })
+        await user.click(badge)
+        expect(screen.getByRole('dialog', { name: label })).toHaveTextContent(hint)
+        await user.keyboard('{Escape}')
+        expect(screen.queryByRole('dialog', { name: label })).not.toBeInTheDocument()
+        expect(badge).toHaveFocus()
     })
 
     it('announces a change of status, not the status it opens with', () => {

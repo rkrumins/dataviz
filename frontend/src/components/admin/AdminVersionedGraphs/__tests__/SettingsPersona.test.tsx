@@ -102,19 +102,22 @@ describe('Settings in the Business view', () => {
         await user.click(row.getByRole('button', { name: 'How it works' }))
         const store = CATALOGUE.glossary.find((t) => t.term === 'Graph store')!
         expect(store.technical).not.toBe('')
+        // A tap, so it reads on a phone: the term is a button that opens its definition.
         const term = () => within(document.getElementById('reads-mode-guidance')!)
-            .getAllByText(new RegExp(`^${store.term}$`, 'i')).find((el) => el.tabIndex === 0)!
+            .getAllByRole('button', { name: new RegExp(`^${store.term}$`, 'i') })[0]
 
-        act(() => term().focus())
-        const tip = await screen.findByRole('tooltip')
+        await user.click(term())
+        const tip = screen.getByRole('dialog', { name: store.term })
         expect(tip).toHaveTextContent(store.definition)
-        expect(tip).not.toHaveTextContent('Technical:')
+        expect(within(tip).queryByText('Technical')).not.toBeInTheDocument()
         expect(tip).not.toHaveTextContent(store.technical)
-        act(() => term().blur())
+        await user.keyboard('{Escape}')
 
         act(() => usePersonaStore.getState().setMode('technical'))
-        act(() => term().focus())
-        expect(await screen.findByRole('tooltip')).toHaveTextContent(`Technical: ${store.technical}`)
+        await user.click(term())
+        const technical = screen.getByRole('dialog', { name: store.term })
+        expect(within(technical).getByText('Technical')).toBeInTheDocument()
+        expect(technical).toHaveTextContent(store.technical)
     })
 
     it('reviews a change with names and sentences: no workspace or graph id, no node by name', async () => {

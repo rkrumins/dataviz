@@ -265,6 +265,27 @@ describe('Workspace → Versioned graphs: its graphs and its history', () => {
         expect(await within(drawer).findByRole('article', { name: S['reads.mode'].label })).toBeInTheDocument()
     })
 
+    it('shows the rest of what a graph sets itself from "+N more", in its row, and fewer again', async () => {
+        const user = userEvent.setup()
+        mockApi('workspace-admin')
+        renderTab(`${PATH}&vg=graphs`)
+        const table = await screen.findByRole('table', { name: 'This workspace’s graphs' })
+        const own = WORKSPACE_GRAPHS.find((g) => g.label === 'Sales lineage')!.ownSettings
+        const list = within(within(table).getByRole('list', { name: 'Set for Sales lineage' }))
+        const last = S[own.at(-1)!].label
+        expect(list.queryByText(last)).not.toBeInTheDocument()
+
+        const more = list.getByRole('button', { name: `+${own.length - 3} more settings` })
+        expect(more).toHaveAttribute('aria-expanded', 'false')
+        await user.click(more)
+        for (const key of own) expect(list.getByText(S[key].label)).toBeInTheDocument()
+        expect(more).toHaveAttribute('aria-expanded', 'true')
+        expect(more).toHaveTextContent('Show fewer')
+
+        await user.click(more)
+        expect(list.queryByText(last)).not.toBeInTheDocument()
+    })
+
     it('says so when the workspace has no versioned graph yet', async () => {
         mockApi('empty')
         renderTab(`${PATH}&vg=graphs`)

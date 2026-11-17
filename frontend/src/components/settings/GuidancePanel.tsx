@@ -6,15 +6,15 @@
  *
  * Plain words first. The engineering facts (key, env var, timing, caps, the measured evidence,
  * where it was stored) sit under "Technical details", collapsed except in the Technical view. Defined
- * terms ("graph store", "copy") carry their glossary definition on hover and focus, and in the
- * Technical view the term's technical note too.
+ * terms ("graph store", "copy") open their glossary definition on a tap, a click or Enter, and in
+ * the Technical view the term's technical note too.
  */
 import { Fragment, type ReactNode } from 'react'
 import { BookOpen, CircleDashed, Sparkles } from 'lucide-react'
+import { MetricInfo } from '@/components/analytics/MetricInfo'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
-import { HoverTip } from '@/components/ui/HoverTip'
 import { formatValue, sameValue } from './format'
 import type { Lens } from './lens'
 import { RISK_META, VERDICT_META } from './meta'
@@ -62,11 +62,10 @@ function Prose({ text, glossary, technical }: { text: string; glossary: Term[]; 
     return (
         <>
             {parts.map((p, i) => typeof p === 'string' ? <Fragment key={i}>{p}</Fragment> : (
-                <HoverTip key={i} label={p.term.definition} detail={technical && p.term.technical ? `Technical: ${p.term.technical}` : undefined} className="inline">
-                    <span tabIndex={0} className="cursor-help underline decoration-dotted decoration-ink-muted/60 underline-offset-[3px] outline-none focus-visible:rounded focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
-                        {p.text}
-                    </span>
-                </HoverTip>
+                <MetricInfo key={i} className="inline"
+                    definition={{ title: p.term.term, what: p.term.definition, technical: technical ? p.term.technical : undefined }}>
+                    <span className="underline decoration-dotted decoration-ink-muted/60 underline-offset-[3px]">{p.text}</span>
+                </MetricInfo>
             ))}
         </>
     )
@@ -116,6 +115,7 @@ function EffectsTable({ setting, dimensions }: { setting: Setting; dimensions: D
 function VerdictMatrix({ setting, dimensions }: { setting: Setting; dimensions: DimensionInfo[] }) {
     const named = dimensions.filter((d) => setting.choices.some((c) => c.effects[d.id]))
     if (!named.length) return null
+    const unstated = named.some((d) => setting.choices.some((c) => !c.effects[d.id]))
     return (
         <div className="overflow-x-auto">
             <table className="w-full min-w-[22rem] border-separate border-spacing-0 text-left text-[12.5px]">
@@ -143,7 +143,7 @@ function VerdictMatrix({ setting, dimensions }: { setting: Setting; dimensions: 
                                                 <span className="sr-only">{meta.label}: {effect?.[1]}</span>
                                             </span>
                                         ) : (
-                                            <span className="inline-flex items-center text-ink-muted" title="Not stated">
+                                            <span className="inline-flex items-center text-ink-muted">
                                                 <CircleDashed aria-hidden className="w-3 h-3" /><span className="sr-only">not stated</span>
                                             </span>
                                         )}
@@ -154,6 +154,12 @@ function VerdictMatrix({ setting, dimensions }: { setting: Setting; dimensions: 
                     ))}
                 </tbody>
             </table>
+            {/* Its key, in the open: a hover tip on the glyph is never seen on a phone. */}
+            {unstated && (
+                <p aria-hidden className="mt-1.5 flex items-center gap-1 text-[11px] text-ink-secondary">
+                    <CircleDashed className="w-3 h-3" /> Not stated
+                </p>
+            )}
         </div>
     )
 }

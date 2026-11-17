@@ -3,18 +3,18 @@
  *
  * Each level shows what it chose (or that it chose nothing). The level whose value won is drawn
  * solid with a check; a value a later level overrides is struck through; one the platform's lock
- * ignores says so. The platform carries badges for its lock and its limits (hover for what they
+ * ignores says so. The platform carries badges for its lock and its limits (tap for what they
  * allow), a lower level for a system admin's exception, the default for the deployment's env var.
  * When the value in force differs from the one chosen, a last step says what is in force and why.
  *
  * A change being staged shows at the level being edited, in the accent: "→ 7 days". The
  * accent means "your change" across the kit, so the winning level is emphasised without it.
  *
- * The badges' explanations show on hover and are read with the badge; they are not tab stops.
+ * Each badge opens its explanation on a tap, a click or Enter (`MetricInfo`).
  */
 import { ArrowRight, Check, ChevronRight, Lock, Ruler, ShieldAlert } from 'lucide-react'
+import { MetricInfo } from '@/components/analytics/MetricInfo'
 import { cn } from '@/lib/utils'
-import { HoverTip } from '@/components/ui/HoverTip'
 import { formatValue, hasLimits, limitsWords, SCOPE_HERE, SCOPE_LABEL, sameValue, stepAt } from './format'
 import { SCOPE_ICON } from './meta'
 import type { ResolvedSetting, Scope, Setting, SettingValue, TrailStep } from './types'
@@ -28,16 +28,15 @@ function TrailBadge({ icon: Icon, label, tip, tone = 'neutral' }: {
     tone?: 'neutral' | 'info'
 }) {
     return (
-        <HoverTip label={tip} className="inline-flex">
+        <MetricInfo definition={{ title: label, what: tip }}>
             <span className={cn(
                 'inline-flex items-center gap-0.5 rounded px-1 text-[11px] font-semibold leading-4',
                 tone === 'info' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-black/[0.06] text-ink-secondary dark:bg-white/[0.08]',
             )}>
                 <Icon className="w-2.5 h-2.5" aria-hidden />
                 <span>{label}</span>
-                <span className="sr-only">: {tip}</span>
             </span>
-        </HoverTip>
+        </MetricInfo>
     )
 }
 
