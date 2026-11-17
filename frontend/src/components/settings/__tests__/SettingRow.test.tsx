@@ -31,6 +31,15 @@ describe('SettingRow', () => {
         expect(within(article).getByRole('radiogroup', { name: s.question })).toBeInTheDocument()
     })
 
+    it('business lens: a setting for the platform team is titled by its question too', () => {
+        const s = S['updates.pacingRatio']
+        expect(s.audience).toBe('operator')
+        row({ setting: s, resolved: PLATFORM_VALUES['updates.pacingRatio'], scope: 'platform', lens: 'business' })
+        const article = screen.getByRole('article', { name: s.question })
+        expect(within(article).getByRole('heading', { level: 3 })).toHaveTextContent(s.question)
+        expect(article).toHaveTextContent(s.label)
+    })
+
     it('operator lens: titled by the label, with the env var, when a change takes effect, its cap, and the evidence on demand', async () => {
         const s = S['builds.perWorker']
         row({ setting: s, resolved: PLATFORM_VALUES['builds.perWorker'], scope: 'platform', lens: 'operator' })

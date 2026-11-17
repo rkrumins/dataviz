@@ -2,7 +2,8 @@
  * The profile picker: the profiles offered at this level as one radio group, each told as an
  * outcome; a preview of what the chosen one would change here; Apply stages only what this person
  * may set, one value at a time, and never saves; then a summary of what was staged and what was
- * left out, and why. Words come from the catalogue and `skipWords`, not copied here.
+ * left out, and why. The Business view lists the business profiles first. Words come from the
+ * catalogue and `skipWords`, not copied here.
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -34,10 +35,30 @@ describe('ProfilePicker', () => {
         const fastest = within(group).getByRole('radio', { name: P['fastest-reads'].title })
         expect(fastest).toHaveAccessibleDescription(`${P['fastest-reads'].promise} What you give up: ${P['fastest-reads'].caution}`)
         for (const w of P['fastest-reads'].when) expect(fastest).toHaveTextContent(w)
+        // Whom each is for, in the app's own views' words.
         expect(fastest).toHaveTextContent('Business')
-        expect(within(group).getByRole('radio', { name: P['least-memory'].title })).toHaveTextContent('Operator')
+        expect(within(group).getByRole('radio', { name: P['least-memory'].title })).toHaveTextContent('Technical')
+        expect(group).not.toHaveTextContent('Operator')
         // Not offered here, and said so: Big import tonight is the platform's.
         expect(screen.getByText(new RegExp(`Not offered for this graph: ${P['big-import-tonight'].title}`))).toBeInTheDocument()
+    })
+
+    it('lists the business profiles first in the Business view, and keeps the order it is given in the Technical one', () => {
+        // Given the technical profiles first, so the Business view has something to reorder.
+        const given = [...CATALOGUE.profiles].sort((a, b) => Number(a.audience === 'business') - Number(b.audience === 'business'))
+        const shown = () => within(screen.getByRole('radiogroup', { name: 'Profiles' })).getAllByRole('radio').map((r) => r.getAttribute('aria-label'))
+        const { unmount } = render(<ProfilePicker profiles={given} scope="platform" editor="system_admin" resolved={PLATFORM_VALUES}
+            onStage={() => {}} onClose={() => {}} lens="business" />)
+        const business = given.filter((p) => p.audience === 'business')
+        expect(business.length).toBeGreaterThan(0)
+        expect(shown()).toEqual([...business, ...given.filter((p) => p.audience !== 'business')].map((p) => p.title))
+        // The first offered is the one chosen: a business profile.
+        expect(screen.getByRole('radio', { name: business[0].title })).toHaveAttribute('aria-checked', 'true')
+        unmount()
+
+        render(<ProfilePicker profiles={given} scope="platform" editor="system_admin" resolved={PLATFORM_VALUES}
+            onStage={() => {}} onClose={() => {}} lens="operator" />)
+        expect(shown()).toEqual(given.map((p) => p.title))
     })
 
     it('previews what the chosen profile would change here, and what it leaves out and why', async () => {

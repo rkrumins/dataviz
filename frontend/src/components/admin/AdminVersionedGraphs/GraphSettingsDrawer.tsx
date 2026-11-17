@@ -93,7 +93,7 @@ function GraphSettingsBody({ workspaceId, graphId, open, label, viewingRootOf, c
     const schemaQ = useSettingsSchema()
     const valuesQ = useSettingsValues(place, { staged: () => dirty.current, enabled: open })
     const versioningOn = useFeaturesStore((s) => isFeatureOn(s.values, 'versioningEnabled'))
-    const [lens, setLens] = useLens()
+    const [lens] = useLens()
     const [asked, setAsked] = useState<Leaving | null>(null)
     const schema = schemaQ.data
     const byKey = useMemo(() => Object.fromEntries((schema?.settings ?? []).map((s) => [s.key, s])), [schema])
@@ -210,7 +210,7 @@ function GraphSettingsBody({ workspaceId, graphId, open, label, viewingRootOf, c
                     <Notice icon={Eye}>You can read this graph’s settings and why each is what it is. A workspace admin can change them.</Notice>
                 )}
 
-                <LensSwitch value={lens} onChange={setLens} />
+                <LensSwitch />
 
                 {categories.map((c) => {
                     const rows = own.filter((s) => s.category === c.id)

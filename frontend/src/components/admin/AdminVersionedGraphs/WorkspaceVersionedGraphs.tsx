@@ -22,7 +22,7 @@ import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { BookOpen, History, Info, Network, ShieldCheck, SlidersHorizontal } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import { settingAnchor, type ResolvedValues, type Scope, type SettingsFacts } from '@/components/settings'
+import { LensSwitch, settingAnchor, type ResolvedValues, type Scope, type SettingsFacts } from '@/components/settings'
 import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import {
@@ -160,10 +160,13 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
                         chosen here.
                     </p>
                 </div>
-                <Link to="/guide/versioned-graph-settings"
-                    className="inline-flex items-center gap-1.5 rounded text-[13px] font-medium text-indigo-700 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:text-indigo-300">
-                    <BookOpen aria-hidden className="w-4 h-4" /> The settings guide
-                </Link>
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                    <LensSwitch />
+                    <Link to="/guide/versioned-graph-settings"
+                        className="inline-flex items-center gap-1.5 rounded text-[13px] font-medium text-indigo-700 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:text-indigo-300">
+                        <BookOpen aria-hidden className="w-4 h-4" /> The settings guide
+                    </Link>
+                </div>
             </div>
 
             <Tabs value={tab} onValueChange={setTab}>

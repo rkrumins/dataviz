@@ -6,12 +6,16 @@
  *
  * Every part is the server's, and best effort: a part it couldn't work out is named as such, never
  * drawn as zero. A part the change can't affect isn't drawn at all.
+ *
+ * The Business view names no id and no node: a graph by its name (else "a graph"), a value left
+ * outside the limits by where it was chosen ("a workspace"), and the nodes in one sentence ("fits
+ * on 2 of 3 nodes"). The Technical view lists each node and id.
  */
 import type { ReactNode } from 'react'
 import { ArrowRight, Check, Database, GitBranch, Layers, MemoryStick, Network, Ruler, TriangleAlert, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatBytes, formatCount } from '@/lib/units'
-import { formatValue, type Setting, type SettingValue } from '@/components/settings'
+import { formatValue, type Lens, type Setting, type SettingValue } from '@/components/settings'
 import type { Impact } from '@/services/settingsService'
 
 const PART_NAME: Record<string, string> = {
@@ -57,7 +61,8 @@ function Moved({ s, from, to }: { s?: Setting; from: SettingValue; to: SettingVa
     )
 }
 
-export function ImpactReport({ impact, settings }: { impact: Impact; settings: Record<string, Setting> }) {
+export function ImpactReport({ impact, settings, lens }: { impact: Impact; settings: Record<string, Setting>; lens: Lens }) {
+    const business = lens === 'business'
     const tiles: ReactNode[] = []
     const { graphs, alwaysLatest, memory, residency, database, drafts, outsideLimits } = impact
 
@@ -70,7 +75,7 @@ export function ImpactReport({ impact, settings }: { impact: Impact; settings: R
                     <ul className="space-y-1">
                         {graphs.samples.map((g) => (
                             <li key={g.graphId}>
-                                <span className="font-medium text-ink">{g.label ?? g.graphId}</span>
+                                <span className="font-medium text-ink">{g.label ?? (business ? 'A graph' : g.graphId)}</span>
                                 {g.changes.map((c) => (
                                     <span key={c.key} className="block">
                                         {settings[c.key]?.label ?? c.key}: <Moved s={settings[c.key]} from={c.from} to={c.to} />
@@ -104,7 +109,7 @@ export function ImpactReport({ impact, settings }: { impact: Impact; settings: R
             <Tile key="memory" icon={MemoryStick} tone={memory.copied && memory.nodes.length > 0 && fits === 0 ? 'warning' : 'neutral'}
                 figure={same ? formatBytes(memory.neededBytes.to) : <Moved from={formatBytes(memory.neededBytes.from)} to={formatBytes(memory.neededBytes.to)} />}
                 title={`needed free on one node to copy your largest graph (${formatBytes(memory.largestGraphBytes)})${memory.copied ? '' : ': it is built from the database instead, as it isn’t copied'}.`}>
-                {memory.nodes.length > 0 && (
+                {memory.nodes.length > 0 && (business ? <p>Fits on {formatCount(fits)} of {plural(memory.nodes.length, 'node')}.</p> : (
                     <ul className="space-y-0.5">
                         {memory.nodes.map((n, i) => (
                             <li key={n.name ?? i} className="flex items-start gap-1.5">
@@ -122,16 +127,18 @@ export function ImpactReport({ impact, settings }: { impact: Impact; settings: R
                             </li>
                         ))}
                     </ul>
-                )}
+                ))}
             </Tile>,
         )
     }
     if (residency) {
+        const touched = residency.nodes.filter((n) => n.unloads.length || n.loads.length || n.waits.length).length
+        const unloaded = residency.nodes.flatMap((n) => n.unloads.map((u) => u.label ?? 'a graph'))
         tiles.push(
             <Tile key="residency" icon={Layers} tone={residency.unloads > 0 && residency.switchOn ? 'warning' : 'neutral'}
                 figure={residency.unloads ? `${plural(residency.unloads, 'graph')} unloaded` : 'Nothing unloaded'}
                 title={`at the next memory check${residency.unloads ? ` (${formatBytes(residency.unloadedBytes)})` : ''}; ${plural(residency.loads, 'graph')} loaded, ${plural(residency.waits, 'graph')} waiting for room.${residency.switchOn ? '' : ' Graph residency is off, so nothing acts on this until it is on.'}`}>
-                {residency.nodes.some((n) => n.unloads.length || n.loads.length || n.waits.length) && (
+                {touched > 0 && (business ? <p>On {plural(touched, 'node')}{unloaded.length ? `, unloading ${unloaded.join(', ')}` : ''}.</p> : (
                     <ul className="space-y-0.5">
                         {residency.nodes.map((n) => (
                             <li key={n.name}>
@@ -140,7 +147,7 @@ export function ImpactReport({ impact, settings }: { impact: Impact; settings: R
                             </li>
                         ))}
                     </ul>
-                )}
+                ))}
             </Tile>,
         )
     }
@@ -169,7 +176,9 @@ export function ImpactReport({ impact, settings }: { impact: Impact; settings: R
         )
     }
     if (outsideLimits && outsideLimits.count > 0) {
-        const where = (scope: string, id: string) => `${scope === 'workspace' ? 'Workspace' : scope === 'graph' ? 'Graph' : scope} ${id}`
+        const where = (scope: string, id: string) => (business
+            ? (scope === 'workspace' ? 'A workspace' : 'A graph')
+            : `${scope === 'workspace' ? 'Workspace' : scope === 'graph' ? 'Graph' : scope} ${id}`)
         tiles.push(
             <Tile key="limits" icon={Ruler} tone="warning"
                 figure={plural(outsideLimits.count, 'value')}

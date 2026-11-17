@@ -263,6 +263,8 @@ export const GRAPHS: VersionedGraphRow[] = [
 
 export const SUMMARY: GraphsSummary = {
     graphs: 42, inMemory: 34, unloaded: 4, loading: 1, waitingForRoom: 2, noCopy: 1, building: 2, failing: 1, withOwnSettings: 7,
+    // The inventory's largest platform copy.
+    largestGraph: { graphId: GRAPH, dataSourceId: 'ds_sales', workspaceId: WS, label: 'Sales lineage', bytes: 9.4 * 1024 ** 3 },
 }
 
 export const PROVIDERS = [

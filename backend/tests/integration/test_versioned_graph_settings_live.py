@@ -14,7 +14,7 @@ for a workspace's graphs, the drafts a shorter window removes and the inventory.
 * The full preview finds the graphs a change reaches and counts the closed drafts a shorter
   window removes, in the graph store.
 * The inventory filters by the read mode in force, the class and whether a graph chose settings
-  of its own, and its summary counts the fleet.
+  of its own, and its summary counts the fleet and names its largest graph.
 
 Its database is its own, built with the upgrade CLI, as ``test_settings_store_live.py`` builds
 one. Needs ``GRAPHVER_E2E=1``, ``MANAGEMENT_DB_URL`` (a role that may create databases) and the
@@ -464,4 +464,7 @@ async def test_the_inventory_filters_by_what_is_in_force_and_counts_the_fleet(cl
     summary = await probes.versioned_graphs_summary()
     assert summary == {"graphs": 2, "inMemory": 1, "unloaded": 1, "loading": 0,
                        "waitingForRoom": 0, "noCopy": 0, "building": 0, "failing": 0,
-                       "withOwnSettings": 1}
+                       "withOwnSettings": 1,
+                       "largestGraph": {"graphId": "graph_1", "dataSourceId": "ds_1",
+                                        "workspaceId": "ws_1", "label": "Ledger",
+                                        "bytes": 4 * _GB}}

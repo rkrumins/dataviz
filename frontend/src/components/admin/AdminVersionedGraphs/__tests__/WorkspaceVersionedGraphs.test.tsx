@@ -5,8 +5,8 @@
  * workspace scope — stage, the server's quick answer, Review with a reason, Save, Undo. Then the
  * workspace's graphs, each with what it sets itself, its read mode and class (a fork follows its
  * root), opening its settings in the drawer; and its history, with a change put back through the
- * workspace. Leaving for another page with changes staged asks first. Labels come from the
- * registry's generated catalogue.
+ * workspace. Leaving for another page with changes staged asks first. The app's Business /
+ * Technical switch sits above the tabs. Labels come from the registry's generated catalogue.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -19,6 +19,7 @@ import { formatValue } from '@/components/settings/format'
 import { REASON_HEADER } from '@/services/activityReason'
 import { useAuthStore } from '@/store/auth'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
+import { usePersonaStore } from '@/store/persona'
 import { WorkspaceVersionedGraphs } from '../WorkspaceVersionedGraphs'
 import { WORKSPACE_GRAPHS, WS, workspaceValues } from '../__fixtures__/api'
 import { allowMenus, calls, json, mockApi, renderWithApi } from './helpers'
@@ -141,6 +142,18 @@ describe('Workspace → Versioned graphs: what a person meets', () => {
         await rowOnceDrawn('reads.mode')
         expect(screen.getByText('Start from a profile.')).toBeInTheDocument()
         expect(screen.getByText('What your settings trade')).toBeInTheDocument()
+    })
+
+    it('asks each setting’s question in the Business view, with the app’s switch above the tabs', async () => {
+        usePersonaStore.setState({ mode: 'business' })
+        mockApi('workspace-admin')
+        renderTab()
+        expect(await screen.findByRole('article', { name: S['reads.mode'].question })).toBeInTheDocument()
+        const view = screen.getByRole('radiogroup', { name: 'Business or Technical view' })
+        expect(view.closest('[role="tabpanel"]')).toBeNull()
+        await userEvent.click(within(view).getByRole('radio', { name: 'Technical' }))
+        expect(usePersonaStore.getState().mode).toBe('technical')
+        expect(await screen.findByRole('article', { name: S['reads.mode'].label })).toBeInTheDocument()
     })
 })
 

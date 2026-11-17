@@ -194,6 +194,8 @@ How new data is written into the graph store without slowing reads.
 
 **Write target.** How long each write to the graph store aims to take, so reads on the same node keep their turn.
 
+*Asked as:* How long should each write to the graph store take?
+
 | Fact | Value |
 |---|---|
 | Key | `updates.statementTargetMs` |
@@ -231,6 +233,8 @@ While the worker writes new data into a graph's copy, every read of that graph o
 ### `updates-writeCeilingSecs`
 
 **Longest write.** The longest one write to the graph store may run before it is stopped and split.
+
+*Asked as:* How long may one write to the graph store run before it's stopped?
 
 | Fact | Value |
 |---|---|
@@ -270,6 +274,8 @@ A write still running after this long is stopped and sent again in halves, so no
 
 **Pause after a write.** The pause after each write to the graph store, as a share of the time it took.
 
+*Asked as:* How long should updates pause after each write to let reads go first?
+
 | Fact | Value |
 |---|---|
 | Key | `updates.pacingRatio` |
@@ -307,6 +313,8 @@ After each write the worker pauses, so reads waiting on that node go first. At 2
 ### `updates-readPressureRatio`
 
 **Pause while reads wait.** The longer pause after each write while reads on the node are waiting.
+
+*Asked as:* How long should updates pause while reads are waiting?
 
 | Fact | Value |
 |---|---|
@@ -346,6 +354,8 @@ When reads on a node are queueing, the worker pauses this share of each write's 
 ### `updates-retireGraceSecs`
 
 **Keep the previous copy for.** How long a graph's previous copy is kept after a switch or a move, so reads under way finish on it.
+
+*Asked as:* How long should a graph's previous copy be kept after a switch or a move?
 
 | Fact | Value |
 |---|---|
@@ -406,6 +416,8 @@ These settings act only while the **New-version builds** switch is on (Admin →
 
 **Build above.** How large a publish must be to be built in a second copy rather than written in place.
 
+*Asked as:* How large must a publish be to be built in a second copy?
+
 | Fact | Value |
 |---|---|
 | Key | `builds.aboveRows` |
@@ -446,6 +458,8 @@ For a graph set to Keep serving, switch when ready, a publish that changes more 
 
 **Rebuilds and moves too.** Whether rebuilds and moves of a graph set to switch when ready are built in a second copy too.
 
+*Asked as:* Should rebuilds and moves be built in a second copy too?
+
 | Fact | Value |
 |---|---|
 | Key | `builds.forRebuilds` |
@@ -485,6 +499,8 @@ On, a rebuild or a move of a graph set to Keep serving, switch when ready builds
 ### `builds-method`
 
 **How a build makes its copy.** Whether a build copies the current copy or builds the new one from the database.
+
+*Asked as:* Should a build make its copy from the graph store or from the database?
 
 | Fact | Value |
 |---|---|
@@ -532,6 +548,8 @@ A copy is fast, but needs about twice the graph's size free on the node the curr
 
 **Free memory a copy needs.** The free memory a copy needs on its node, as a share of the graph's size.
 
+*Asked as:* How much free memory should a copy wait for, as a share of the graph's size?
+
 | Fact | Value |
 |---|---|
 | Key | `builds.copyRoomPct` |
@@ -572,6 +590,8 @@ While a copy is made, its node holds the new copy and the copy's own working buf
 
 **Largest graph copied.** The largest graph a build may copy; a larger one is built from the database.
 
+*Asked as:* Up to what size may a build copy a graph?
+
 | Fact | Value |
 |---|---|
 | Key | `builds.copyMaxBytes` |
@@ -611,6 +631,8 @@ A graph over this size is never copied: with Auto its builds come from the datab
 ### `builds-noRoom`
 
 **With no room.** What a build does when no node has room for it.
+
+*Asked as:* What should a build do when no node has room for it?
 
 | Fact | Value |
 |---|---|
@@ -656,6 +678,8 @@ Wait keeps readers on the current, whole version and asks again every minute, so
 
 **Alert after waiting.** How long a build may wait for room before it raises an alert.
 
+*Asked as:* How long may a build wait for room before it raises an alert?
+
 | Fact | Value |
 |---|---|
 | Key | `builds.noRoomAlertSecs` |
@@ -693,6 +717,8 @@ A build still waiting for room this long after it was asked for raises an alert:
 ### `builds-perWorker`
 
 **Builds per worker.** How many builds each worker runs at once.
+
+*Asked as:* How many builds may each worker run at once?
 
 | Fact | Value |
 |---|---|
@@ -735,6 +761,8 @@ Each worker updates a number of graphs at once, set by your deployment; up to th
 
 **Attempts before giving up.** How many times a build is tried before it is given up and the change is written in place.
 
+*Asked as:* How many times should a failing build be tried before it's given up?
+
 | Fact | Value |
 |---|---|
 | Key | `builds.maxAttempts` |
@@ -773,6 +801,8 @@ A build step that fails is tried again from a fresh start after a pause. After t
 ### `builds-switchMaxLagRows`
 
 **Changes left at the switch.** How far behind a build may still be when it switches; the changes left are written in place right after.
+
+*Asked as:* How many changes behind may a build be when it switches?
 
 | Fact | Value |
 |---|---|
@@ -884,6 +914,8 @@ With Graph residency on, the graph store keeps each graph by its class and each 
 
 **Unload graphs automatically.** Whether the graph store unloads graphs on its own.
 
+*Asked as:* Should the graph store unload graphs on its own to free memory?
+
 | Fact | Value |
 |---|---|
 | Key | `residency.autoUnload` |
@@ -924,6 +956,8 @@ On, each memory check unloads graphs left unread past their class's idle time, a
 
 **Unload a Standard graph after.** How long a Standard graph may go unread before it is unloaded.
 
+*Asked as:* How long may a Standard graph go unread before it's unloaded?
+
 | Fact | Value |
 |---|---|
 | Key | `residency.standardIdleSecs` |
@@ -963,6 +997,8 @@ A Standard graph nobody has read for this long is unloaded at the next memory ch
 ### `residency-coldlineIdleSecs`
 
 **Unload a Coldline graph after.** How long a Coldline graph may go unread before it is unloaded.
+
+*Asked as:* How long may a Coldline graph go unread before it's unloaded?
 
 | Fact | Value |
 |---|---|
@@ -1005,6 +1041,8 @@ A Coldline graph nobody has read for this long is unloaded at the next memory ch
 
 **Start unloading at.** The share of a node's memory at which graphs start to be unloaded; loads and copies must fit under it.
 
+*Asked as:* At what share of a node's memory should unloading start?
+
 | Fact | Value |
 |---|---|
 | Key | `residency.unloadStartPct` |
@@ -1046,6 +1084,8 @@ When a node uses this share of its memory or more, the next memory check unloads
 
 **Stop unloading at.** The share of a node's memory down to which graphs are unloaded once the start mark is passed.
 
+*Asked as:* At what share of a node's memory should unloading stop?
+
 | Fact | Value |
 |---|---|
 | Key | `residency.unloadStopPct` |
@@ -1086,6 +1126,8 @@ Once a node passes its start mark, graphs are unloaded until it is at or under t
 
 **Headroom a load needs.** The headroom a load asks for over the graph's size.
 
+*Asked as:* How much free memory should a load ask for, as a share of the graph's size?
+
 | Fact | Value |
 |---|---|
 | Key | `residency.loadMarginPct` |
@@ -1124,6 +1166,8 @@ A graph is loaded only when its node has the graph's size times this share free 
 ### `residency-bytesPerEntity`
 
 **Memory per item, estimated.** The memory one item is estimated to take, for a graph not measured yet.
+
+*Asked as:* How much memory should one item be estimated to take, until a graph is measured?
 
 | Fact | Value |
 |---|---|
@@ -1164,6 +1208,8 @@ A graph is measured once it is in memory. Until then its size is estimated as it
 
 **Load a Coldline graph on opening above.** How large a Coldline graph must be for opening it on a canvas to load it.
 
+*Asked as:* How large must a Coldline graph be to load when someone opens it?
+
 | Fact | Value |
 |---|---|
 | Key | `residency.coldlineLoadAbove` |
@@ -1203,6 +1249,8 @@ Opening a Coldline graph that isn't in memory loads it only when the graph has m
 ### `residency-capacityIntervalSecs`
 
 **Check memory every.** How often each node's memory is checked, to unload and load graphs.
+
+*Asked as:* How often should each node's memory be checked?
 
 | Fact | Value |
 |---|---|
@@ -1256,6 +1304,8 @@ Limits on reads from the database while the graph store has no version of a grap
 
 **Longest read.** The longest one read of a graph from the database may run.
 
+*Asked as:* How long may one read from the database run before it's stopped?
+
 | Fact | Value |
 |---|---|
 | Key | `database.readTimeoutMs` |
@@ -1293,6 +1343,8 @@ When the graph store holds no version of a graph, or Always the latest is catchi
 ### `database-readsPerGraph`
 
 **Reads at once per graph.** How many reads of one graph from the database each process runs at once.
+
+*Asked as:* How many reads of one graph may each process run on the database at once?
 
 | Fact | Value |
 |---|---|
@@ -1334,6 +1386,8 @@ Each read of a graph from the database takes a place; past this many, more wait 
 ### `database-readsPerProcess`
 
 **Reads at once per process.** How many reads from the database each process runs at once, across all graphs.
+
+*Asked as:* How many reads may each process run on the database at once, across all graphs?
 
 | Fact | Value |
 |---|---|
@@ -2074,13 +2128,13 @@ Matching by a property keeps an index of its values in the database: built by th
 
 Starting points: each profile sets the settings it covers for one outcome. Applying one in the app stages its values at the level you are editing, only for the settings you may set there, and says which it left out and why. Nothing is saved until you review the changes and save them.
 
-| Profile | What it gives you | Lens | Applies at |
+| Profile | What it gives you | View | Applies at |
 |---|---|---|---|
 | [Balanced](#balanced) | The built-in values: readers see the newest version as soon as it is published, and writes to the graph store leave reads their turn. | Business | Platform, Workspace, Graph |
 | [Fastest reads](#fastest-reads) | Reads stay on the graph store at full speed while new data loads, and writes give way to them. | Business | Platform, Workspace, Graph |
 | [Always exact](#always-exact) | Readers always see the newest published version, whole, read from the database until the graph store has it. | Business | Platform, Workspace, Graph |
-| [Least memory](#least-memory) | Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it. | Operator | Platform, Workspace, Graph |
-| [Big import tonight](#big-import-tonight) | Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait. | Operator | Platform |
+| [Least memory](#least-memory) | Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it. | Technical | Platform, Workspace, Graph |
+| [Big import tonight](#big-import-tonight) | Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait. | Technical | Platform |
 
 ### Balanced
 
@@ -2108,7 +2162,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 **What you give up:** The settings it covers go back to their built-in values here, including any you tuned for your platform.
 
-**Applies at:** Platform, Workspace, Graph. Shown first in the Business lens.
+**Applies at:** Platform, Workspace, Graph. Shown first in the Business view.
 
 ### Fastest reads
 
@@ -2128,7 +2182,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 **What you give up:** While a large change is written, readers can see part of it before the rest, and large updates take longer to land.
 
-**Applies at:** Platform, Workspace, Graph. Shown first in the Business lens.
+**Applies at:** Platform, Workspace, Graph. Shown first in the Business view.
 
 ### Always exact
 
@@ -2145,7 +2199,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 **What you give up:** While a graph updates, its reads come from the database: slower on a large graph, without lineage summaries meanwhile, and asked to retry under heavy load.
 
-**Applies at:** Platform, Workspace, Graph. Shown first in the Business lens.
+**Applies at:** Platform, Workspace, Graph. Shown first in the Business view.
 
 ### Least memory
 
@@ -2168,7 +2222,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 **What you give up:** Graphs nobody read in the last half hour are read from the database, which is slower, and builds take much longer; the memory values need Graph residency on, and the build values New-version builds.
 
-**Applies at:** Platform, Workspace, Graph. Shown first in the Operator lens.
+**Applies at:** Platform, Workspace, Graph.
 
 ### Big import tonight
 
@@ -2187,7 +2241,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 **What you give up:** Reads wait longer behind writes, and a change whose build finds no room can be seen part-way, until you apply Balanced again; the build value needs New-version builds.
 
-**Applies at:** Platform. Shown first in the Operator lens.
+**Applies at:** Platform.
 
 ## Signals
 

@@ -11,7 +11,7 @@ import { ArrowRight, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Drawer } from '@/components/ui/Drawer'
 import { SkeletonText } from '@/components/ui/Skeleton'
-import type { Editor, ResolvedValues, Scope, SettingValue } from '@/components/settings'
+import type { Editor, Lens, ResolvedValues, Scope, SettingValue } from '@/components/settings'
 import type { SettingsProfile } from '@/services/settingsService'
 
 /** What the page hands the picker. */
@@ -23,6 +23,8 @@ export interface ProfilePickerProps {
     /** Stages one key; called once per key the profile sets here. */
     onStage: (key: string, value: SettingValue | null) => void
     onClose: () => void
+    /** The app's view, passed through: Business lists the business profiles first. */
+    lens?: Lens
 }
 
 const found = import.meta.glob<{ ProfilePicker: ComponentType<ProfilePickerProps> }>('/src/components/settings/ProfilePicker.tsx')

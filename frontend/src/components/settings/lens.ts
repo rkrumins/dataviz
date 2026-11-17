@@ -1,28 +1,27 @@
 /**
- * The two lenses on the same settings.
+ * The settings in the app's own Business or Technical view: one switch, the app's.
  *
  * - BUSINESS asks each setting's question in plain words, with outcome cards, and leads with the
  *   settings a workspace admin or a data owner decides.
- * - OPERATOR shows the full detail: env var, when a change takes effect, caps and evidence, in
- *   category order.
+ * - TECHNICAL (the `operator` lens here) shows the full detail: env var, when a change takes
+ *   effect, caps, evidence and ids, in category order.
  *
- * Both show every setting the viewer may change; the lens only orders and frames them. It opens on
- * the app's own business/technical view (the persona switch), and changing it here changes only
- * this page.
+ * Both show every setting the viewer may change; the view only orders and frames them. The lens
+ * is the persona (`store/persona.ts`), nothing of its own: the top bar's switch, ⌘/ and the
+ * settings' own `LensSwitch` all change it, and every settings surface follows at once.
  */
-import { useState } from 'react'
-import { usePersonaStore, type PersonaMode } from '@/store/persona'
+import { usePersonaMode, usePersonaStore, type PersonaMode } from '@/store/persona'
 import type { Category, Setting } from './types'
 
 export type Lens = 'business' | 'operator'
 
 export const lensFor = (persona: PersonaMode): Lens => (persona === 'technical' ? 'operator' : 'business')
 
-/** The lens, opening on the persona's. */
+const setLens = (l: Lens) => usePersonaStore.getState().setMode(l === 'operator' ? 'technical' : 'business')
+
+/** The app's view as a lens, and a setter that changes the app's view. */
 export function useLens(): [Lens, (lens: Lens) => void] {
-    const persona = usePersonaStore((s) => s.mode)
-    const [lens, setLens] = useState<Lens>(() => lensFor(persona))
-    return [lens, setLens]
+    return [lensFor(usePersonaMode()), setLens]
 }
 
 /** Every setting, ordered for the lens: business first under Business, category order under Operator. */

@@ -1635,8 +1635,12 @@ async def versioned_graphs_summary() -> dict:
     are; how many are in memory, unloaded, loading, waiting for room to load, and have no copy in
     the graph store yet (``residency_state_of``: the five add up to the graphs, and the inventory's
     filters list the same graphs); how many have a new version being built, how many failed their
-    last update, and how many chose a versioned-graph setting of their own. Raises rather than
-    degrading, as the inventory does."""
+    last update, and how many chose a versioned-graph setting of their own. And the largest graph
+    (``largestGraph``, which the copy-room explainer draws): the platform copy with the largest
+    measured size, as ``{graphId, dataSourceId, workspaceId, label, bytes}`` with its data
+    source's ``label`` (null when the directory can't name it), or null while no copy is
+    measured; a connected graph is never copied, so it never counts. Raises rather than
+    degrading, as the inventory does, except for that label."""
     from sqlalchemy import select
 
     from backend.app.services.versioning import candidates
@@ -1644,9 +1648,11 @@ async def versioned_graphs_summary() -> dict:
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
     from backend.app.services.versioning.service import residency_state_of
 
-    stmt = (select(GraphORM.id, GraphORM.data_source_id, ProjectionStateORM.status,
-                   ProjectionStateORM.projected_commit_seq, ProjectionStateORM.falkor_graph_name,
-                   ProjectionStateORM.last_error, ProjectionStateORM.candidate_state)
+    stmt = (select(GraphORM.id, GraphORM.data_source_id, GraphORM.workspace_id,
+                   ProjectionStateORM.status, ProjectionStateORM.projected_commit_seq,
+                   ProjectionStateORM.falkor_graph_name, ProjectionStateORM.last_error,
+                   ProjectionStateORM.candidate_state, ProjectionStateORM.owns_falkor_graph,
+                   ProjectionStateORM.size_bytes)
             .select_from(GraphORM)
             .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
             .where(GraphORM.deleted_at.is_(None), GraphORM.fork_parent_graph_id.is_(None)))
@@ -1655,6 +1661,15 @@ async def versioned_graphs_summary() -> dict:
     own = await _sources_with_own_settings()
     states = [residency_state_of(r.status or "idle", r.projected_commit_seq or 0,
                                  r.falkor_graph_name, r.id) for r in rows]
+    # By graph id between equals, so the figures read the same graph every time.
+    largest = max((r for r in rows if r.owns_falkor_graph and r.size_bytes is not None),
+                  key=lambda r: (r.size_bytes, r.id), default=None)
+    largest_graph = None
+    if largest is not None:
+        named = (await _resolve_data_sources([largest.data_source_id])).get(largest.data_source_id)
+        largest_graph = {"graphId": largest.id, "dataSourceId": largest.data_source_id,
+                         "workspaceId": largest.workspace_id, "label": (named or {}).get("label"),
+                         "bytes": largest.size_bytes}
     return {
         "graphs": len(rows),
         "inMemory": states.count("resident"),
@@ -1665,6 +1680,7 @@ async def versioned_graphs_summary() -> dict:
         "building": sum(candidates.block(r) is not None for r in rows),
         "failing": sum(r.last_error is not None for r in rows),
         "withOwnSettings": sum(r.data_source_id in own for r in rows),
+        "largestGraph": largest_graph,
     }
 
 

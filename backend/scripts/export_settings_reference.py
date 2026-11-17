@@ -200,8 +200,7 @@ def _setting(s, example: str) -> list:
     ``#reads-maxversionsbehind``)."""
     g = s.guidance
     out = [f"### `{s.key.replace('.', '-')}`", "", f"**{_esc(s.label)}.** {_esc(g.summary)}", ""]
-    if s.audience == "business":
-        out += [f"*Asked as:* {_esc(s.question)}", ""]
+    out += [f"*Asked as:* {_esc(s.question)}", ""]
     out += [*_table(["Fact", "Value"], _facts_rows(s)), "", _esc(g.means), ""]
     if s.choices:
         out += _choices(s)
@@ -222,8 +221,9 @@ def _link(key: str, anchors: dict) -> str:
 
 def _profiles(anchors: dict) -> list:
     """The profiles: a summary table, then each one's promise, when to choose it, the values it sets
-    and what it costs. Each heading is its title, whose id is the profile's id (``#fastest-reads``)."""
-    lens = {"business": "Business", "operator": "Operator"}
+    and what it costs. Each heading is its title, whose id is the profile's id (``#fastest-reads``).
+    The app's Business view lists the business profiles first; the Technical view keeps this order."""
+    view = {"business": "Business", "operator": "Technical"}
     out = [
         "## Profiles",
         "",
@@ -232,8 +232,8 @@ def _profiles(anchors: dict) -> list:
          "there, and says which it left out and why. Nothing is saved until you review the changes "
          "and save them."),
         "",
-        *_table(["Profile", "What it gives you", "Lens", "Applies at"], [
-            [f"[{_esc(p.title)}](#{p.id})", _esc(p.promise), lens[p.audience],
+        *_table(["Profile", "What it gives you", "View", "Applies at"], [
+            [f"[{_esc(p.title)}](#{p.id})", _esc(p.promise), view[p.audience],
              ", ".join(scope.title() for scope in p.scopes)] for p in registry.PROFILES]),
         "",
     ]
@@ -246,8 +246,8 @@ def _profiles(anchors: dict) -> list:
                 "**Choose it when**", "", *(f"- {_esc(w)}" for w in p.when), "",
                 *_table(["Setting", "It sets", "Default", "Set at"], rows), "",
                 f"**What you give up:** {_esc(p.caution)}", "",
-                f"**Applies at:** {', '.join(scope.title() for scope in p.scopes)}. Shown first in "
-                f"the {lens[p.audience]} lens.", ""]
+                f"**Applies at:** {', '.join(scope.title() for scope in p.scopes)}."
+                + (" Shown first in the Business view." if p.audience == "business" else ""), ""]
     return out
 
 

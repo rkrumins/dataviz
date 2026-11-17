@@ -1244,7 +1244,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How long should each write to the graph store take?",
       "range": [
         100,
         10000
@@ -1338,7 +1338,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How long may one write to the graph store run before it's stopped?",
       "range": [
         1,
         60
@@ -1431,7 +1431,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How long should updates pause after each write to let reads go first?",
       "range": [
         0,
         5
@@ -1532,7 +1532,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How long should updates pause while reads are waiting?",
       "range": [
         0,
         10
@@ -1627,7 +1627,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How long should a graph's previous copy be kept after a switch or a move?",
       "range": [
         660,
         86400
@@ -1725,7 +1725,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How large must a publish be to be built in a second copy?",
       "range": [
         1000,
         100000000
@@ -1833,7 +1833,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "Should rebuilds and moves be built in a second copy too?",
       "range": null,
       "requires": [
         {
@@ -2018,7 +2018,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "Should a build make its copy from the graph store or from the database?",
       "range": null,
       "requires": [
         {
@@ -2125,7 +2125,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How much free memory should a copy wait for, as a share of the graph's size?",
       "range": [
         100,
         400
@@ -2234,7 +2234,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "Up to what size may a build copy a graph?",
       "range": [
         1,
         17592186044416
@@ -2386,7 +2386,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "What should a build do when no node has room for it?",
       "range": null,
       "requires": [
         {
@@ -2477,7 +2477,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How long may a build wait for room before it raises an alert?",
       "range": [
         300,
         86400
@@ -2592,7 +2592,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How many builds may each worker run at once?",
       "range": [
         1,
         8
@@ -2691,7 +2691,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How many times should a failing build be tried before it's given up?",
       "range": [
         1,
         10
@@ -2791,7 +2791,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How many changes behind may a build be when it switches?",
       "range": [
         0,
         1000000
@@ -3107,7 +3107,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "Should the graph store unload graphs on its own to free memory?",
       "range": null,
       "requires": [
         {
@@ -3216,7 +3216,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How long may a Standard graph go unread before it's unloaded?",
       "range": [
         3600,
         31536000
@@ -3323,7 +3323,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How long may a Coldline graph go unread before it's unloaded?",
       "range": [
         300,
         604800
@@ -3447,7 +3447,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "At what share of a node's memory should unloading start?",
       "range": [
         50,
         95
@@ -3546,7 +3546,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "At what share of a node's memory should unloading stop?",
       "range": [
         30,
         90
@@ -3654,7 +3654,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How much free memory should a load ask for, as a share of the graph's size?",
       "range": [
         100,
         300
@@ -3756,7 +3756,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How much memory should one item be estimated to take, until a graph is measured?",
       "range": [
         100,
         10000
@@ -3862,7 +3862,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How large must a Coldline graph be to load when someone opens it?",
       "range": [
         0,
         100000000
@@ -3971,7 +3971,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How often should each node's memory be checked?",
       "range": [
         15,
         600
@@ -4070,7 +4070,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How long may one read from the database run before it's stopped?",
       "range": [
         1000,
         120000
@@ -4175,7 +4175,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How many reads of one graph may each process run on the database at once?",
       "range": [
         1,
         64
@@ -4280,7 +4280,7 @@
       },
       "limitable": [],
       "materialized": null,
-      "question": "",
+      "question": "How many reads may each process run on the database at once, across all graphs?",
       "range": [
         1,
         64

@@ -8,16 +8,27 @@
  * - THE EARLY STOP ends a replace whose first rows match fewer existing items than the match
  *   share, whether or not the guard is on (0 turns it off).
  *
- * The sample is the page's example import; drag its sliders to try another. Staged limits are
- * marked in the accent, with their own verdict.
+ * The sample is an import's dry run where the page has one, else an example replace, labelled as
+ * one; drag its sliders to try another. Staged limits are marked in the accent, with their own
+ * verdict.
  */
 import { useState } from 'react'
 import { ShieldCheck, ShieldOff, ShieldX } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatCount, formatRatio } from '@/lib/units'
+import { Badge } from '@/components/ui/Badge'
 import { Slider } from '@/components/ui/Slider'
 import type { SampleImport } from '../types'
 import { LegendKey, VisualFrame } from './VisualFrame'
+
+/**
+ * The replace drawn when no import's dry run is at hand: a file keyed by the wrong identifier, the
+ * mistake the guard is for. Its 8,000 rows match 2,000 (25%) of the graph's 10,000 items, so it
+ * would delete the other 8,000 (80%) and make 6,000 (60%) again: stopped at the registry's default
+ * limits. Dragging shows the rest: fewer deleted or fewer made again goes through, and fewer
+ * matching rows stops early. Every figure is round and on its slider's step.
+ */
+const EXAMPLE_REPLACE: SampleImport = { liveItems: 10_000, importRows: 8_000, matched: 2_000, deletes: 8_000, creates: 6_000 }
 
 export interface GuardLimits {
     enabled: boolean
@@ -99,13 +110,16 @@ function Meter({ label, share, limit, nextLimit, floor = false, hit }: {
     )
 }
 
-export function GuardMeter({ limits, next, sample, className }: {
+export function GuardMeter({ limits, next, sample: dryRun, className }: {
     limits: GuardLimits
     /** The limits with staged changes applied. */
     next?: GuardLimits
-    sample: SampleImport
+    /** An import's dry run to try; without one, an example replace, labelled as one. */
+    sample?: SampleImport
     className?: string
 }) {
+    const example = dryRun === undefined
+    const sample = dryRun ?? EXAMPLE_REPLACE
     const [deletes, setDeletes] = useState(sample.deletes)
     const [creates, setCreates] = useState(sample.creates)
     const [matched, setMatched] = useState(sample.matched)
@@ -120,6 +134,7 @@ export function GuardMeter({ limits, next, sample, className }: {
         <VisualFrame
             title="What stops a mistaken replace"
             className={className}
+            badge={example ? <Badge tone="info" size="md">Example</Badge> : undefined}
             legend={(
                 <>
                     <LegendKey kind="line" className="border-ink">Limit</LegendKey>
@@ -128,7 +143,7 @@ export function GuardMeter({ limits, next, sample, className }: {
             )}
             caption={(
                 <>
-                    A replace of {formatCount(sample.importRows, 'rows')} into a graph of {formatCount(sample.liveItems, 'items')}. {now.why}
+                    {example ? 'An example replace' : 'A replace'} of {formatCount(sample.importRows, 'rows')} into a graph of {formatCount(sample.liveItems, 'items')}. {now.why}
                     {then && <>{' '}<span className="font-medium text-indigo-700 dark:text-indigo-300">With your changes: {then.why}</span></>}
                 </>
             )}
@@ -140,7 +155,7 @@ export function GuardMeter({ limits, next, sample, className }: {
                 <Banner.icon aria-hidden className="w-4 h-4 shrink-0" />
                 {Banner.words}
             </div>
-            <p className="-mt-2 mb-4 text-[11px] text-ink-secondary">Drag the handles to try another replace.</p>
+            <p className="-mt-2 mb-4 text-[11px] text-ink-secondary">{example ? 'An example replace: drag to try another.' : 'Drag the handles to try another replace.'}</p>
             <div className="space-y-4">
                 <div className="space-y-1.5">
                     <Meter label="Deletes" share={deletes / s.live} limit={limits.deleteShare} nextLimit={changed ? next?.deleteShare : undefined}

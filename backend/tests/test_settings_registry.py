@@ -266,11 +266,11 @@ def test_effects_name_real_dimensions_once_each(key: str):
         assert e.up_verdict in ("better", "worse"), f"{key}: {e.dimension} has no up_verdict"
 
 
-def test_business_settings_ask_their_question():
-    """The business lens asks each of its settings as an outcome question."""
+def test_every_setting_asks_its_question():
+    """The business lens asks every setting as a plain question, the platform team's tuning
+    among them; the business settings, which it shows first, are the contract's."""
     for s in SETTINGS:
-        if s.audience == "business":
-            assert s.question.strip().endswith("?"), s.key
+        assert s.question.strip().endswith("?"), s.key
     business = {s.key for s in SETTINGS if s.audience == "business"}
     expected = {k for k in _KEYS if k.split(".")[0] in ("reads", "drafts", "forks", "trash",
                                                          "imports")} | {"residency.class"}

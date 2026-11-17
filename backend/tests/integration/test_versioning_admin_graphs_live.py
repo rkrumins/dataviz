@@ -8,6 +8,8 @@
   a graph id, data source id, key or data-source label.
 * Loading means one thing for a row, the Loading filter and the fleet's figure; each memory
   figure counts what its filter lists, and with the graphs that have no copy they add up.
+* The figures name the largest graph: the platform copy with the largest measured size, by its
+  data source. A fork's copy and a connected graph never count, however large.
 
 Needs ``GRAPHVER_E2E=1`` and Postgres.
 """
@@ -42,7 +44,8 @@ async def _seed_data_source(ds: str, ws: str, label: str) -> None:
 
 
 async def _seed_graph(gid, *, ws, ds, provider, head=3, projected=3, status="idle", error=None,
-                      owned=False, fork_of=None, deleted=False, retired=None, key="", build=None):
+                      owned=False, fork_of=None, deleted=False, retired=None, key="", build=None,
+                      size=None):
     async with db.graphver_session() as s:
         s.add(GraphORM(id=gid, data_source_id=ds, workspace_id=ws, kind="manual",
                        main_head_commit_seq=head, fork_parent_graph_id=fork_of,
@@ -52,7 +55,7 @@ async def _seed_graph(gid, *, ws, ds, provider, head=3, projected=3, status="idl
                                  falkor_provider=provider,
                                  falkor_graph_name=f"gvt_{gid}" if key == "" else key,
                                  owns_falkor_graph=owned, last_error=error,
-                                 retired_keys=retired, candidate_state=build))
+                                 retired_keys=retired, candidate_state=build, size_bytes=size))
 
 
 async def _list(**kw):
@@ -218,6 +221,27 @@ async def _run() -> None:
     for bucket, figure in (("rehydrating", "loading"), ("evicted", "unloaded"),
                            ("waiting_capacity", "waitingForRoom"), ("building", "building")):
         assert len(await everyone(bucket)) == figures[figure], bucket
+
+    # The largest graph, which the copy-room explainer draws: the platform copy with the largest
+    # measured size, named by its data source. Larger than anything the shared store holds, with a
+    # fork's copy and a connected graph larger still, which never count; measured no more after.
+    before = figures["largestGraph"]
+    outsized = (before["bytes"] if before else 0) + (1 << 40)
+    big_ds = f"ds_big_{tag}"
+    big, big_fork, connected = (f"graph_{tag}_{n}" for n in ("m_big", "n_big_fork", "o_connected"))
+    await _seed_data_source(big_ds, ws, f"Warehouse {tag}")
+    await _seed_graph(big, ws=ws, ds=big_ds, provider=prov, owned=True, size=outsized)
+    await _seed_graph(big_fork, ws=ws, ds=f"dsfork_big_{tag}", provider=prov, owned=True,
+                      fork_of=big, size=2 * outsized)
+    await _seed_graph(connected, ws=ws, ds=f"ds_connected_{tag}", provider=prov, size=3 * outsized)
+    try:
+        assert (await probes.versioned_graphs_summary())["largestGraph"] == {
+            "graphId": big, "dataSourceId": big_ds, "workspaceId": ws,
+            "label": f"Warehouse {tag}", "bytes": outsized}
+    finally:
+        async with db.graphver_session() as s:
+            await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id.in_(
+                (big, big_fork, connected))).values(size_bytes=None))
 
     async with db.graphver_session() as s:          # leave no graph waiting on the shared store
         await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == waiting)

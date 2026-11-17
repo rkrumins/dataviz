@@ -13,6 +13,9 @@
  *             profiles-applied | primitives
  *   theme     `dark` for the dark palette
  *
+ * The page opens in the app's Business view for `business` and `graph`, else the Technical one;
+ * its switch is the app's own (`LensSwitch`), so flipping it changes the persona, as in the app.
+ *
  * `visuals-signals` gives the symptom finder a day's signal counts; `profiles` opens the profile
  * picker on the platform with Fastest reads chosen, and `profiles-applied` applies Balanced to a
  * graph as a workspace admin, to show what was staged and what was left out.
@@ -33,12 +36,13 @@ import { Switch } from '../components/ui/Switch'
 import {
     ChangeReviewDialog, CopyRoomBar, GuardMeter, IdleTimeline, LensSwitch, MemoryMarks, ProfilePicker, ReadTimeline, RetentionTimeline,
     SettingRow, SettingsSearch, SettingVisual, StickySaveBar, SymptomFinder, TradeoffCompass, WriteRhythm,
-    describeFix, orderForLens, reviewItems, settingAnchor, useStagedChanges, validateStaged, boundsAt,
-    type Lens, type ResolvedValues, type Scope, type SettingValue,
+    describeFix, orderForLens, reviewItems, settingAnchor, useLens, useStagedChanges, validateStaged, boundsAt,
+    type ResolvedValues, type Scope, type SettingValue,
 } from '../components/settings'
 import { SCHEMA, SETTINGS_BY_KEY } from '../components/settings/__fixtures__/schema'
 import { FACTS, GRAPH_VALUES, PLATFORM_VALUES, SIGNAL_COUNTS } from '../components/settings/__fixtures__/resolved'
 import { BYTE_UNITS, DURATION_UNITS } from '../lib/units'
+import { usePersonaStore } from '../store/persona'
 import { usePreferencesStore } from '../store/preferences'
 
 const params = new URLSearchParams(window.location.search)
@@ -46,6 +50,7 @@ const fixture = params.get('fixture') ?? 'platform'
 const dark = params.get('theme') === 'dark'
 
 MotionGlobalConfig.skipAnimations = true
+usePersonaStore.setState({ mode: fixture === 'business' || fixture === 'graph' ? 'business' : 'technical' })
 
 /** Changes a fixture stages once the page has drawn, the way a person would. */
 const STAGED: Record<string, Array<[string, SettingValue | null]>> = {
@@ -61,13 +66,12 @@ const CATEGORIES: Record<string, string[]> = {
     review: ['reads', 'residency', 'drafts'],
 }
 
-function SettingsPage({ scope, values, lens, onLens, inDrawer = false }: {
+function SettingsPage({ scope, values, inDrawer = false }: {
     scope: Scope
     values: ResolvedValues
-    lens: Lens
-    onLens: (l: Lens) => void
     inDrawer?: boolean
 }) {
+    const [lens] = useLens()
     const staged = useStagedChanges(values, scope)
     const [reviewing, setReviewing] = useState(fixture === 'review')
     const [openKey, setOpenKey] = useState<string | null>(fixture === 'platform' ? 'residency.unloadStartPct' : null)
@@ -103,9 +107,9 @@ function SettingsPage({ scope, values, lens, onLens, inDrawer = false }: {
                             <h1 className="mt-1 text-2xl font-bold tracking-tight text-ink">Settings</h1>
                             <p className="mt-1 max-w-2xl text-sm text-ink-muted">{SCHEMA.categories[0].posture}</p>
                         </div>
-                        <LensSwitch value={lens} onChange={onLens} />
+                        <LensSwitch />
                     </div>
-                    <SettingsSearch className="max-w-xl" settings={SCHEMA.settings} categories={SCHEMA.categories} onSelect={show} />
+                    <SettingsSearch className="max-w-xl" settings={SCHEMA.settings} categories={SCHEMA.categories} onSelect={show} lens={lens} />
                     <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
                         <TradeoffCompass dimensions={SCHEMA.dimensions} settings={SCHEMA.settings} current={staged.current} next={staged.next} inactive={inactive} />
                         <SymptomFinder settings={SCHEMA.settings} values={values} staged={stagedMap} onStage={staged.stage} onShow={show} />
@@ -197,6 +201,7 @@ function Visuals({ signals = false }: { signals?: boolean }) {
  * reads chosen, or (`applied`) on a graph as a workspace admin with Balanced applied.
  */
 function Profiles({ applied }: { applied: boolean }) {
+    const [lens] = useLens()
     const scope: Scope = applied ? 'graph' : 'platform'
     const values = applied ? GRAPH_VALUES : PLATFORM_VALUES
     const staged = useStagedChanges(values, scope)
@@ -208,7 +213,7 @@ function Profiles({ applied }: { applied: boolean }) {
         <Drawer open={open} onOpenChange={setOpen} size="xl" title="Start from a profile"
             eyebrow={applied ? 'Graph · Sales lineage' : 'Administration · Versioned graphs'}>
             <ProfilePicker profiles={SCHEMA.profiles} scope={scope} editor={applied ? 'workspace_admin' : 'system_admin'}
-                resolved={values} onStage={staged.stage} onClose={() => setOpen(false)} />
+                resolved={values} onStage={staged.stage} onClose={() => setOpen(false)} lens={lens} />
         </Drawer>
     )
 }
@@ -249,7 +254,6 @@ function Primitives() {
 
 export function SettingsKitHarness() {
     const setTheme = usePreferencesStore((s) => s.setTheme)
-    const [lens, setLens] = useState<Lens>(fixture === 'business' ? 'business' : 'operator')
     const [drawer, setDrawer] = useState(fixture === 'graph')
     useEffect(() => {
         setTheme(dark ? 'dark' : 'light')
@@ -266,12 +270,12 @@ export function SettingsKitHarness() {
             <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
                 {fixture === 'visuals' || fixture === 'visuals-signals' ? <Visuals signals={fixture === 'visuals-signals'} />
                     : fixture === 'primitives' ? <Primitives />
-                        : fixture !== 'graph' && <SettingsPage scope="platform" values={PLATFORM_VALUES} lens={lens} onLens={setLens} />}
+                        : fixture !== 'graph' && <SettingsPage scope="platform" values={PLATFORM_VALUES} />}
             </main>
             {fixture.startsWith('profiles') && <Profiles applied={fixture === 'profiles-applied'} />}
             <Drawer open={drawer} onOpenChange={setDrawer} eyebrow="Graph · Finance" title="Sales lineage" size="xl"
                 description="Settings for this graph. Values it doesn’t set come from the workspace, then the platform.">
-                <SettingsPage scope="graph" values={GRAPH_VALUES} lens="business" onLens={() => {}} inDrawer />
+                <SettingsPage scope="graph" values={GRAPH_VALUES} inDrawer />
             </Drawer>
         </div>
     )
