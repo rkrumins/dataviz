@@ -19,6 +19,7 @@ vi.mock('@tanstack/react-virtual', () => ({
 
 import { StagedChangesPanel } from '../StagedChangesPanel'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
+import { useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 
 const rename = (id: string, from: string, to: string): StagedChange => ({
   id, type: 'rename_entity', targetId: `urn:${id}`, targetUrn: `urn:${id}`, timestamp: 0,
@@ -79,5 +80,18 @@ describe('Review & Save — the change explorer', () => {
     fireEvent.keyDown(screen.getByRole('listbox', { name: 'Staged changes' }), { key: 'Delete' })
     expect(state().changes.map((c) => c.id)).toEqual(['b', 'c'])
     expect(within(detail()).getByText((_, el) => el?.tagName === 'P' && el.textContent === 'Renamed sales to Sales')).toBeInTheDocument()
+  })
+
+  it('steps through the changes shown on the canvas, from the selected one', () => {
+    useChangeNavigatorStore.setState({ canReveal: true, active: false })
+    render(<StagedChangesPanel onConfirm={() => {}} />)
+    fireEvent.keyDown(screen.getByRole('listbox', { name: 'Staged changes' }), { key: 'j' })
+    fireEvent.click(within(detail()).getByRole('button', { name: /Step through/ }))
+    const nav = useChangeNavigatorStore.getState()
+    expect(state().isReviewPanelOpen).toBe(false)
+    expect(nav.active).toBe(true)
+    expect(nav.stops.map((s) => s.id)).toEqual(['urn:a', 'urn:b', 'urn:c'])
+    expect(nav.index).toBe(1)
+    useChangeNavigatorStore.setState({ canReveal: false, active: false })
   })
 })

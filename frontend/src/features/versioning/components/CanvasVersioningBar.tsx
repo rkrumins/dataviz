@@ -56,6 +56,7 @@ import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
 import { ReadRouteChip } from './ReadRouteChip'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
+import { savedStops, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 import { ContributorsStack } from './ContributorsStack'
 import { OthersSavedChip } from './OthersSavedChip'
 import { CommitDialog } from './CommitDialog'
@@ -166,6 +167,8 @@ export function CanvasVersioningBar({
     return diffQ.data ? fromDiffVsMain(diffQ.data, branchId) : EMPTY_CHANGE_SET
   }, [branchId, large, indexQ.data, countsQ.data, diffQ.data])
   const changeCount = changeSet.counts.added + changeSet.counts.modified + changeSet.counts.removed
+  // On the canvas, the counts step through what they count.
+  const canStep = useChangeNavigatorStore((s) => s.canReveal)
   // New entities a curated view could not draw: it draws a page of what the draft created.
   const createdNotLoaded = useCanvasStore((s) => s.createdRootsNotLoaded)
   const loadingChanges = diffQ.isLoading || (large && (indexQ.isLoading || countsQ.isLoading))
@@ -425,12 +428,23 @@ export function CanvasVersioningBar({
                   <HoverTip
                     className="inline-flex"
                     label={`Saved to this ${BRANCH_VOCAB.draft.toLowerCase()}, not published yet`}
-                    detail={`${BRANCH_VOCAB.publish} sends them to the version everyone sees`}
+                    detail={canStep
+                      ? `${BRANCH_VOCAB.publish} sends them to the version everyone sees. Click to step through them on the canvas.`
+                      : `${BRANCH_VOCAB.publish} sends them to the version everyone sees`}
                   >
-                    <span className="flex items-center gap-1.5">
-                      <ChangeCountChips changeSet={changeSet} />
-                      <span className="text-[11px] text-ink-muted/80">in branch</span>
-                    </span>
+                    {canStep && savedStops(changeSet).length > 0 ? (
+                      <button type="button" onClick={() => useChangeNavigatorStore.getState().start(savedStops(changeSet), { scope: 'saved' })}
+                        aria-label="Step through the saved changes on the canvas"
+                        className="flex items-center gap-1.5 rounded-lg px-1 -mx-1 hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+                        <ChangeCountChips changeSet={changeSet} />
+                        <span className="text-[11px] text-ink-muted/80">in branch</span>
+                      </button>
+                    ) : (
+                      <span className="flex items-center gap-1.5">
+                        <ChangeCountChips changeSet={changeSet} />
+                        <span className="text-[11px] text-ink-muted/80">in branch</span>
+                      </span>
+                    )}
                   </HoverTip>
                 ) : changesFailed ? (
                   <button type="button" onClick={retryChanges}

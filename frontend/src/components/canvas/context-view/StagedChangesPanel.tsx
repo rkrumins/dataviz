@@ -26,7 +26,6 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatShortcut } from '@/lib/platform'
-import { useCanvasStore } from '@/store/canvas'
 import { useBranchStore } from '@/store/branchStore'
 import { usePermission } from '@/store/auth'
 import { liveProblems, useSaveProblemsStore } from '@/store/saveProblemsStore'
@@ -48,6 +47,8 @@ import { ChangeList } from '@/features/versioning/components/ChangeList'
 import { STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { PublishActions, PublishBody, usePublishFlow } from '@/features/versioning/components/PublishForm'
 import { ReviewExplorer, ReviewFilterBar } from './review/ReviewExplorer'
+import { canvasLookup } from './review/canvasLookup'
+import { stopsFromGroups, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 
 // Drawn only when the Map is opened: React Flow and the layout engine stay out of the first paint.
 const ChangeMap = lazy(() => import('@/features/versioning/components/ChangeMap'))
@@ -78,26 +79,6 @@ export interface SaveConfirmationModalProps {
   viewId?: string | null
   /** Show an entity on the canvas (the dialog closes first). */
   onReveal?: (nodeId: string) => void
-}
-
-/** Names for ids and urns, as the canvas holds them — read once per review, never subscribed to. */
-function canvasLookup() {
-  let names: Map<string, { label: string; type?: string }> | null = null
-  const index = () => {
-    if (names) return names
-    names = new Map()
-    for (const n of useCanvasStore.getState().nodes) {
-      const d = n.data as Record<string, unknown>
-      const entry = { label: String(d.label ?? d.displayName ?? n.id), type: typeof d.type === 'string' ? d.type : undefined }
-      names.set(n.id, entry)
-      if (typeof d.urn === 'string') names.set(d.urn, entry)
-    }
-    return names
-  }
-  return {
-    nameOf: (id: string) => index().get(id)?.label ?? id,
-    typeOf: (id: string) => index().get(id)?.type,
-  }
 }
 
 export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSourceId, viewId, onReveal }: SaveConfirmationModalProps) {
@@ -225,6 +206,16 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   }
 
   const reveal = onReveal ? (id: string) => { if (!saving()) { close(); onReveal(id) } } : undefined
+  // Walk what is shown, on the canvas, from the selected one (the dialog closes for it).
+  const canStep = useChangeNavigatorStore(s => s.canReveal)
+  const stepThrough = canStep ? (key: string) => {
+    if (saving()) return
+    const stops = stopsFromGroups(shownGroups)
+    const at = groups.find(g => rowKey(g) === key)?.revealId
+    if (stops.length === 0) return
+    close()
+    useChangeNavigatorStore.getState().start(stops, { scope: 'unsaved', at, narrowed: isNarrowed(filter) })
+  } : undefined
   /** A group's row key from the key the Map knows it by. */
   const rowOf = (key: string) => {
     const g = groups.find(x => x.key === key && x.kind !== 'layout')
@@ -399,6 +390,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                       problemIds={problemIds}
                       onDiscard={discardUnlessSaving}
                       onReveal={reveal}
+                      onStepThrough={stepThrough}
                       onClearFilter={() => setFilter(NO_FILTER)}
                       searchRef={filterInputRef}
                       disabled={applyStatus === 'applying'}

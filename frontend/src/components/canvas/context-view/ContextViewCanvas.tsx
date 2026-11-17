@@ -80,6 +80,7 @@ import { SelectionBar } from './SelectionBar'
 import { BulkEditPanel } from './BulkEditPanel'
 import { LayerSettingsPanel } from './LayerSettingsPanel'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
+import { ChangeNavigator } from './ChangeNavigator'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
 import { primeLineageFor } from '@/lib/primeLineageFor'
@@ -7155,6 +7156,8 @@ export function ContextViewCanvas({
         {/* Save Confirmation Modal — opens when the user clicks Save Blueprint
              or the pending-changes badge. Single source of truth for reviewing
              and confirming a batch of staged edits before they hit the backend. */}
+        {/* Steps through changed entities on the canvas, when something starts it. */}
+        <ChangeNavigator reveal={revealOnCanvas} />
         <StagedChangesPanel describe={describeStagedChange}
           wsId={scopeWsId} graphId={graphId} dataSourceId={dataSourceId} viewId={activeView?.id ?? null}
           onReveal={(id) => {
