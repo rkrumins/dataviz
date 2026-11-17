@@ -909,7 +909,8 @@ export function ContextViewCanvas({
       return false
     },
     onCloseEntityDrawer: () => {
-      if (isStagedPanelOpen) { closeStagedChangesPanel(); return true }
+      // Held while a save or a publish from it runs.
+      if (isStagedPanelOpen) { if (useStagedChangesStore.getState().applyStatus !== 'applying') closeStagedChangesPanel(); return true }
       if (drawerNodeId || drawerEdge) {
         // One move: with unsaved edits in the drawer, neither happens until the reader decides.
         useCanvasStore.getState().requestDrawerMove(() => { closeNodeDrawer(); clearSelection() })
@@ -1712,6 +1713,9 @@ export function ContextViewCanvas({
   const stagedChangeList = useStagedChangesStore(s => s.changes)
   const stagedRedoStack = useStagedChangesStore(s => s.redoStack)
   const stagedPast = useStagedChangesStore(s => s.past)
+  // What the draft already holds (saved edits, imports): Review & Save can publish it.
+  const draftChangeCount = useBranchStore(s => s.activeChangeSet
+    ? s.activeChangeSet.counts.added + s.activeChangeSet.counts.modified + s.activeChangeSet.counts.removed : 0)
   // Nothing is undone under a save in flight (the ⌘Z handler below holds the same rule).
   const stagedSaving = useStagedChangesStore(s => s.applyStatus === 'applying')
   const isStagedPanelOpen = useStagedChangesStore(s => s.isReviewPanelOpen)
@@ -6760,6 +6764,7 @@ export function ContextViewCanvas({
         onEnterEdit={handleEnterEdit}
         onExitEdit={handleExitEdit}
         pendingChangeCount={stagedChangeList.length}
+        draftChangeCount={draftChangeCount}
         onOpenStagedChanges={openStagedChangesPanel}
         // A pending layout edit is saved first: the import writes its placements into the same
         // overlay, and the debounced save landing after it would put the old layout back over them.
@@ -7130,8 +7135,16 @@ export function ContextViewCanvas({
         {/* Save Confirmation Modal — opens when the user clicks Save Blueprint
              or the pending-changes badge. Single source of truth for reviewing
              and confirming a batch of staged edits before they hit the backend. */}
-        <StagedChangesPanel describe={describeStagedChange} onConfirm={async () => {
-          if (!scopeWsId) return
+        <StagedChangesPanel describe={describeStagedChange}
+          wsId={scopeWsId} graphId={graphId} dataSourceId={dataSourceId} viewId={activeView?.id ?? null}
+          onReveal={(id) => {
+            useCanvasStore.getState().openNodeDrawer(id)
+            void revealOnCanvas(id)
+          }}
+          // True once the changes are written: the panel then closes (Save to draft) or goes on to
+          // Publish. Every other way out leaves it open.
+          onConfirm={async () => {
+          if (!scopeWsId) return false
           // Draft mode: persist EVERY change type — creates, edges, updates/deletes, and layer
           // moves — to the draft branch as ONE atomic, server-merged /graph/changes commit. One
           // Review & Save is exactly one commit (the backend mints urns + resolves temp refs).
@@ -7177,7 +7190,6 @@ export function ContextViewCanvas({
               // (a save is user-initiated and infrequent, so the broad refetch is fine).
               queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
               await flushLayoutSave()   // durably persist the view's referenceLayout (layers + assignments)
-              closeStagedChangesPanel()
               // Only claim what was written. `unsaved` names node fields the op mapper cannot carry
               // (the entity drawer's schema-property inputs, a raw-JSON edit) — an edit made only of
               // those sends no ops at all, and a zero-op save resolves exactly like a commit. A green
@@ -7195,6 +7207,8 @@ export function ContextViewCanvas({
                 notify('success', 'Saved to draft.')
               }
               useSaveProblemsStore.getState().clear()
+              // Nothing written at all: say so (above) and stay on the review.
+              return carriedSomething || unsaved.length === 0
             } catch (e) {
               if (e instanceof OntologyViolationError) {
                 // Refused as a whole — nothing was written. Say exactly what and why, on the changes
@@ -7244,8 +7258,8 @@ export function ContextViewCanvas({
               } else {
                 notify('error', (e as Error).message)
               }
+              return false
             }
-            return
           }
           // Main mode: the view's layout changes persist with the view; graph edits never write to
           // the published graph — they stay staged, marked, for the user to take to a draft.
@@ -7254,12 +7268,13 @@ export function ContextViewCanvas({
             : { ok: 0, failed: 0 }
           if (result.failed === 0) {
             await flushLayoutSave()
-            closeStagedChangesPanel()
+            return true
           } else {
             if (result.ok > 0) await flushLayoutSave()
             notify('warning', `${result.failed} ${result.failed === 1 ? 'change edits' : 'changes edit'} the published graph — open a draft to save ${result.failed === 1 ? 'it' : 'them'}.`,
               canManage && versioningEnabled && canEnterEdit && editModeEnabled
                 ? { label: 'Open a draft', onClick: handleEnterEdit } : undefined)
+            return false
           }
         }} />
 

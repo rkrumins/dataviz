@@ -220,8 +220,10 @@ describe('a draft edited end to end in the Business view', () => {
     const drawer = document.querySelector<HTMLElement>('[data-panel="entity-drawer"]')!
     await act(async () => { fireEvent.mouseDown(within(drawer).getByRole('tab', { name: /^Edit/ })) })
     await h.settle()
-    fireEvent.change(within(drawer).getByLabelText('Business label'), { target: { value: 'Dashboards' } })
-    await act(async () => { fireEvent.click(within(drawer).getByRole('button', { name: /Stage changes/ })) })
+    // Leaving the field stages it — there is no separate Stage step.
+    const label = within(drawer).getByLabelText('Business label')
+    fireEvent.change(label, { target: { value: 'Dashboards' } })
+    await act(async () => { fireEvent.blur(label) })
     await h.settle()
     expect(staged()).toHaveLength(1)
     expect(staged()[0].after).toMatchObject({ label: 'tableau', businessLabel: 'Dashboards', properties: { businessLabel: 'Dashboards' } })

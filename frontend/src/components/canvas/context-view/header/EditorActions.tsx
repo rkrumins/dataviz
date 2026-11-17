@@ -28,6 +28,8 @@ export interface EditorActionsProps extends ComprehensionToolsProps {
   onRedo?: () => void
   /** Number of staged changes pending review/save — drives the count chip + disabled state. */
   pendingChangeCount?: number
+  /** Changes already saved on the draft — with nothing staged, Review & Save goes on to Publish. */
+  draftChangeCount?: number
   /** Opens the staged-changes review panel (the only save path). */
   onOpenStagedChanges?: () => void
   /** The Connect tool is on: a click on an entity starts a link, the next one ends it. */
@@ -45,6 +47,7 @@ export function EditorActions({
   onUndo,
   onRedo,
   pendingChangeCount = 0,
+  draftChangeCount = 0,
   onOpenStagedChanges,
   onExitEdit,
   connectToolOn = false,
@@ -142,19 +145,25 @@ export function EditorActions({
         className="inline-flex"
         label={pendingChangeCount > 0
           ? `Review and save ${pendingChangeCount} pending change${pendingChangeCount === 1 ? '' : 's'}`
+          : draftChangeCount > 0
+          ? 'Nothing new to save — publish what’s on this draft'
           : 'No changes yet — edits you make collect here for review'}
         detail={pendingChangeCount > 0
-          ? 'Saves to your draft, not to the published version'
+          ? 'Saves to your draft — then publish, or keep editing'
+          : draftChangeCount > 0
+          ? 'Or send it for review'
           : undefined}
       >
       <button
         onClick={onOpenStagedChanges}
-        disabled={pendingChangeCount === 0}
+        disabled={pendingChangeCount === 0 && draftChangeCount === 0}
         data-toolbar-item="review"
         className={cn(
           "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition duration-300 border",
           pendingChangeCount > 0
             ? "bg-accent-lineage border-transparent text-white shadow-lg shadow-accent-lineage/30 hover:bg-accent-lineage/90 hover:shadow-accent-lineage/40 active:scale-[0.98]"
+            : draftChangeCount > 0
+            ? "bg-accent-lineage/10 border-accent-lineage/30 text-accent-lineage hover:bg-accent-lineage/15 active:scale-[0.98]"
             : "bg-black/[0.03] border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/50 cursor-not-allowed",
           reviewFolded && "px-2.5",
         )}
