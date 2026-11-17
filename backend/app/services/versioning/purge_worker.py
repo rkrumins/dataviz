@@ -468,6 +468,7 @@ class PurgeRunner:
                 f'  (SELECT id FROM "{sch}"."jobs" WHERE graph_id = :g)',
                 f'DELETE FROM "{sch}"."import_mentions" WHERE job_id IN '
                 f'  (SELECT id FROM "{sch}"."jobs" WHERE graph_id = :g)',
+                f'DELETE FROM "{sch}"."review_comments" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."merge_requests" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."branches" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."projection_state" WHERE graph_id = :g',

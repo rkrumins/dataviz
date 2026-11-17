@@ -5538,8 +5538,12 @@ async def _viewer_can(svc: GraphVersioningService, session: AsyncSession, pr: di
         (not manages, "manage_required"),
         (not publishes, "publish_required"),
         (opened and not policy.self_merge, "self_merge"))
+    # Anyone who sees a review may discuss it — a person, not a key; someone who manages the data
+    # source may also remove what others wrote.
+    comment = _first_refusal((is_service_account(viewer), "person_required"))
     return {"approve": approve is None, "merge": merge is None,
-            "approveReason": approve, "mergeReason": merge}
+            "approveReason": approve, "mergeReason": merge,
+            "comment": comment is None, "commentReason": comment, "moderate": manages}
 
 
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
@@ -6073,3 +6077,185 @@ async def merge_merge_request(
                                  branch_id=str(_src_branch), actor=user.id)
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
     return await _publish_answer(svc, target, commit_id)
+
+
+# --------------------------------------------------------------------------- #
+# A review's discussion: threads on a change (or one field of it), or on the  #
+# review as a whole — replies, resolve, people mentioned                       #
+# --------------------------------------------------------------------------- #
+class PostCommentRequest(_ApiModel):
+    body: str = Field(max_length=10_000)
+    entity_id: Optional[str] = Field(default=None, alias="entityId", max_length=512)
+    path: Optional[str] = Field(default=None, max_length=512)
+    thread_id: Optional[str] = Field(default=None, alias="threadId", max_length=64)
+    mentions: List[str] = Field(default_factory=list, max_length=20)
+
+
+class EditCommentRequest(_ApiModel):
+    body: str = Field(max_length=10_000)
+
+
+def get_review_comments():
+    from backend.app.services.versioning.review_comments import ReviewComments
+    return ReviewComments()
+
+
+@contextmanager
+def _comment_errors():
+    from backend.app.services.versioning.review_comments import CommentRefused, NotYours
+    try:
+        yield
+    except NotYours as exc:
+        raise HTTPException(status_code=403, detail={"type": "not_yours", "message": str(exc)})
+    except CommentRefused as exc:
+        raise HTTPException(status_code=422, detail={"type": "comment_refused", "message": str(exc)})
+
+
+async def _named(session: AsyncSession, items: List[dict]) -> Dict[str, str]:
+    """Authors and mentioned people by name, for a page of threads."""
+    ids = {i["author"] for i in items} | {m for i in items for m in i.get("mentions") or ()}
+    ids |= {r["author"] for i in items for r in i.get("replies") or ()}
+    ids |= {i["resolvedBy"] for i in items if i.get("resolvedBy")}
+    resolved = await resolve_user_ids(session, ids) if ids else {}
+    return {uid: disp for uid, (disp, _email) in resolved.items() if disp}
+
+
+async def _workspace_people(session: AsyncSession, ws_id: str) -> List[dict]:
+    """Who can be mentioned: the workspace's active people, bound directly or through a group."""
+    from backend.app.db.repositories import binding_repo, group_repo, user_repo
+    ids: set = set()
+    for b in await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id):
+        if b.subject_type == "user":
+            ids.add(b.subject_id)
+        elif b.subject_type == "group":
+            ids.update(m.user_id for m in await group_repo.list_group_members(session, b.subject_id))
+    idents = await user_repo.get_identities_by_ids(session, sorted(ids))
+    people = [{"user_id": uid, "display_name": i["name"] or None, "email": i["email"]}
+              for uid, i in idents.items()
+              if i["status"] == "active" and not i["deleted"] and not is_service_account(uid)]
+    return sorted(people, key=lambda p: (p["display_name"] or p["user_id"]).lower())
+
+
+@router.get("/merge-requests/{pr_id}/comments")
+async def list_review_comments(
+    ws_id: str, pr_id: str,
+    entity_id: Optional[str] = Query(None, alias="entityId", max_length=512),
+    general: bool = Query(False, description="Only threads on the review as a whole"),
+    thread_id: Optional[str] = Query(None, alias="threadId", max_length=64),
+    state: Literal["open", "resolved", "all"] = Query("all"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    comments=Depends(get_review_comments),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A review's threads, newest first, each with its replies in order — on one change, on the
+    review as a whole, or all; ``outdated`` where the change was edited since."""
+    with _comment_errors():
+        page = await comments.threads(pr_id=pr_id, entity_id=entity_id, general=general, thread_id=thread_id,
+                                      state=state, offset=offset, limit=limit)
+    return {**page, "userNames": await _named(session, page["threads"])}
+
+
+@router.get("/merge-requests/{pr_id}/comments/counts")
+async def count_review_comments(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    comments=Depends(get_review_comments),
+):
+    """Threads per change (open and in all) and on the review — what a change list badges."""
+    return await comments.counts(pr_id=pr_id)
+
+
+@router.get("/merge-requests/{pr_id}/comments/people", response_model=List[ReviewerCandidate])
+async def review_comment_people(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Who can be mentioned in this review's discussion."""
+    return await _workspace_people(session, ws_id)
+
+
+@router.post("/merge-requests/{pr_id}/comments", status_code=201)
+async def post_review_comment(
+    ws_id: str, pr_id: str, body: PostCommentRequest,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    comments=Depends(get_review_comments),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A new thread — on a change (``entityId``), one field or property of it (``path``), or the
+    review — or a reply (``threadId``). People mentioned are told, and so are the thread's people
+    and whoever opened the review."""
+    from backend.app.db.repositories import notification_repo
+    from backend.app.services.versioning.review_comments import mention_candidates_filter
+    if is_service_account(user.id):
+        raise HTTPException(status_code=403, detail={"type": "person_required",
+                                                     "message": "A key does not take part in a review's discussion."})
+    allowed = [p["user_id"] for p in await _workspace_people(session, ws_id)] if body.mentions else []
+    with _comment_errors():
+        posted = await comments.post(pr_id=pr_id, actor=user.id, body=body.body, entity_id=body.entity_id,
+                                     path=body.path, thread_id=body.thread_id,
+                                     mentions=mention_candidates_filter(body.mentions, allowed))
+    title = pr.get("title") or "a review"
+    link = f"/workspaces/{ws_id}/reviews?pr={pr_id}&thread={posted.comment['threadId']}"
+    excerpt = posted.comment["body"][:240]
+    try:
+        if posted.mentioned:
+            await notification_repo.notify(session, user_ids=posted.mentioned, kind="review.mention",
+                                           title=f"You were mentioned on “{title}”", body=excerpt, link=link,
+                                           actor_id=user.id, resource_type="review", resource_id=pr_id)
+        if posted.told:
+            await notification_repo.notify(
+                session, user_ids=posted.told, kind="review.reply" if body.thread_id else "review.comment",
+                title=(f"A reply on “{title}”" if body.thread_id else f"A comment on “{title}”"),
+                body=excerpt, link=link, actor_id=user.id, resource_type="review", resource_id=pr_id)
+    except Exception:  # noqa: BLE001 — telling people never fails the comment it tells of
+        logger.warning("could not tell the people of review %s about a comment", pr_id, exc_info=True)
+    return {**posted.comment, "userNames": await _named(session, [posted.comment])}
+
+
+@router.patch("/merge-requests/{pr_id}/comments/{comment_id}")
+async def edit_review_comment(
+    ws_id: str, pr_id: str, comment_id: str, body: EditCommentRequest,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    comments=Depends(get_review_comments),
+):
+    """Edit one's own comment."""
+    with _comment_errors():
+        return await comments.edit(pr_id=pr_id, comment_id=comment_id, actor=user.id, body=body.body)
+
+
+@router.delete("/merge-requests/{pr_id}/comments/{comment_id}", status_code=204)
+async def delete_review_comment(
+    ws_id: str, pr_id: str, comment_id: str,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    comments=Depends(get_review_comments),
+):
+    """Delete a comment — one's own, or anyone's for someone who manages the data source. Its
+    place in the thread stays, marked deleted."""
+    with _comment_errors():
+        await comments.delete(pr_id=pr_id, comment_id=comment_id, actor=user.id,
+                              may_moderate=has_permission(claims, _MANAGE, workspace_id=ws_id))
+    return Response(status_code=204)
+
+
+@router.post("/merge-requests/{pr_id}/comments/{thread_id}/{action}")
+async def resolve_review_thread(
+    ws_id: str, pr_id: str, thread_id: str, action: Literal["resolve", "reopen"],
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    comments=Depends(get_review_comments),
+):
+    """Resolve a thread, or reopen it."""
+    if is_service_account(user.id):
+        raise HTTPException(status_code=403, detail={"type": "person_required", "message": "A person resolves a thread."})
+    with _comment_errors():
+        return await comments.resolve(pr_id=pr_id, thread_id=thread_id, actor=user.id, resolved=action == "resolve")

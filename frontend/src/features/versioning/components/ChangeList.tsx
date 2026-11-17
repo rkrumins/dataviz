@@ -10,10 +10,13 @@
  *
  * Narrow it by kind (entities, relationships, structure), status, type and text — the counts on
  * each come from the same index the rows do, so they always agree.
+ *
+ * In a review (`review`), each change also carries its discussion: a count on rows with threads,
+ * and, opened, its threads under what changed — with Comment on any one field of it.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ArrowRight, ArrowUpRight, ChevronRight, Loader2, Search, SearchX } from 'lucide-react'
+import { ArrowRight, ArrowUpRight, ChevronRight, Loader2, MessageSquare, MessageSquarePlus, Search, SearchX } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
@@ -30,6 +33,10 @@ import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/use
 import type { GraphChange } from '../model/changeModel'
 import { changeListSource, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 import { EntityDiff } from './EntityDiff'
+import { fieldPath } from '../model/fieldDiff'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { useReviewCommentCounts, useReviewThreads } from '@/features/reviews/comments/useReviewComments'
+import { ReviewThreads, type DiscussionAccess } from '@/features/reviews/comments/ReviewThreads'
 import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
 const STATUSES: ChangeListStatus[] = ['added', 'modified', 'removed']
@@ -81,12 +88,15 @@ export interface ChangeListProps {
   emptyHint?: string
   /** Height the list may grow to before it scrolls. */
   maxHeight?: number | string
+  /** The review these changes are of: each change carries its discussion. */
+  review?: { prId: string } & DiscussionAccess
   className?: string
 }
 
 export function ChangeList({
-  wsId, graphId, origin, summary, emptyHint = 'No changes.', maxHeight = '60vh', className,
+  wsId, graphId, origin, summary, emptyHint = 'No changes.', maxHeight = '60vh', review, className,
 }: ChangeListProps) {
+  const commentCounts = useReviewCommentCounts(wsId, review?.prId).data?.entities
   const summaryQ = useChangeSummary(wsId, graphId, summary ? null : origin)
   const s = summary ?? summaryQ.data ?? null
 
@@ -288,7 +298,8 @@ export function ChangeList({
                   ) : (
                     <Row wsId={wsId} graphId={graphId} origin={origin} row={item.row}
                       open={open.has(item.row.entityId)} onToggle={() => toggle(item.row.entityId)}
-                      onShow={() => showOnCanvas(item.row)} />
+                      onShow={() => showOnCanvas(item.row)}
+                      review={review} comments={commentCounts?.[item.row.entityId]} />
                   )}
                 </div>
               )
@@ -300,7 +311,7 @@ export function ChangeList({
   )
 }
 
-function Row({ wsId, graphId, origin, row, open, onToggle, onShow }: {
+function Row({ wsId, graphId, origin, row, open, onToggle, onShow, review, comments }: {
   wsId: string
   graphId: string
   origin: ChangeListOrigin
@@ -309,6 +320,9 @@ function Row({ wsId, graphId, origin, row, open, onToggle, onShow }: {
   onToggle: () => void
   /** Step through these on the canvas, from this one. */
   onShow: () => void
+  review?: ChangeListProps['review']
+  /** Its threads, open and in all. */
+  comments?: { open: number; total: number }
 }) {
   const meta = STATUS_META[row.status]
   const label = rowLabel(row)
@@ -337,6 +351,14 @@ function Row({ wsId, graphId, origin, row, open, onToggle, onShow }: {
           {row.kind === 'node' && row.qualifiedName && row.qualifiedName !== label && (
             <span className="text-[11px] text-ink-muted/70 truncate min-w-0 hidden sm:inline">{row.qualifiedName}</span>
           )}
+          {comments && comments.total > 0 && (
+            <span
+              aria-label={comments.open ? `${comments.open} open thread${comments.open === 1 ? '' : 's'}` : `${comments.total} resolved thread${comments.total === 1 ? '' : 's'}`}
+              className={cn('ml-auto shrink-0 inline-flex items-center gap-1 px-1.5 h-5 rounded-md text-[10.5px] font-semibold tabular-nums',
+                comments.open ? 'bg-accent-lineage/10 text-accent-lineage' : 'text-ink-muted')}>
+              <MessageSquare className="w-3 h-3" aria-hidden />{comments.open || comments.total}
+            </span>
+          )}
         </button>
         {canReveal && (
           <button type="button" onClick={onShow} aria-label={`Show ${label} on canvas`}
@@ -347,21 +369,32 @@ function Row({ wsId, graphId, origin, row, open, onToggle, onShow }: {
       </div>
       {open && (
         <div className="px-2.5 pb-2 pl-7">
-          <RowDetail wsId={wsId} graphId={graphId} origin={origin} row={row} />
+          <RowDetail wsId={wsId} graphId={graphId} origin={origin} row={row} review={review} />
         </div>
       )}
     </div>
   )
 }
 
-/** One entity before and after, fetched when its row is opened. */
-function RowDetail({ wsId, graphId, origin, row }: {
+/** One entity before and after, fetched when its row is opened — in a review, with its threads. */
+function RowDetail({ wsId, graphId, origin, row, review }: {
   wsId: string
   graphId: string
   origin: ChangeListOrigin
   row: ChangeListRow
+  review?: ChangeListProps['review']
 }) {
   const q = useChangeEntry(wsId, graphId, origin, row.entityId)
+  const [path, setPath] = useState<string | null>(null)
+  // Threads on each field, from the change's own threads (the list below reads the same page).
+  const threadsQ = useReviewThreads(wsId, review?.prId ?? '', { entityId: row.entityId }, !!review)
+  const onField = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const t of threadsQ.data?.pages.flatMap((p) => p.threads) ?? []) {
+      if (t.path && !t.resolvedAt) m.set(t.path, (m.get(t.path) ?? 0) + 1)
+    }
+    return m
+  }, [threadsQ.data])
   if (q.isLoading) return <SkeletonText lines={2} className="py-1" />
   if (q.isError || !q.data) {
     return <p className="text-[11px] text-ink-muted px-2 py-1.5">Couldn't load this change.</p>
@@ -378,7 +411,31 @@ function RowDetail({ wsId, graphId, origin, row }: {
       ? { source: 'branch', branchId: origin.branchId }
       : { source: 'compare', fromSeq: origin.fromSeq, toSeq: origin.toSeq },
   }
-  return <EntityDiff change={change} />
+  if (!review) return <EntityDiff change={change} />
+  return (
+    <div className="space-y-2.5">
+      <EntityDiff change={change} fieldAction={(f) => {
+        const p = fieldPath(f)
+        const n = onField.get(p) ?? 0
+        if (!n && !review.canComment) return null
+        return (
+          <HoverTip label={n ? `${n} open thread${n === 1 ? '' : 's'} on ${f.label}` : `Comment on ${f.label}`} className="inline-flex">
+            <button type="button" onClick={() => setPath(p)} aria-label={`Comment on ${f.label}`}
+              className={cn('inline-flex items-center gap-0.5 h-6 px-1 rounded-md text-[10.5px] font-semibold tabular-nums transition-opacity',
+                n ? 'text-accent-lineage' : 'text-ink-muted opacity-0 group-hover/value:opacity-100 focus-visible:opacity-100 hover:text-ink',
+                path === p && 'opacity-100 bg-accent-lineage/10 text-accent-lineage')}>
+              {n ? <><MessageSquare className="w-3 h-3" aria-hidden />{n}</> : <MessageSquarePlus className="w-3.5 h-3.5" aria-hidden />}
+            </button>
+          </HoverTip>
+        )
+      }} />
+      <ReviewThreads
+        wsId={wsId} prId={review.prId} filter={{ entityId: row.entityId }} access={review}
+        compose={{ entityId: row.entityId, path, placeholder: path ? `Comment on ${path.split('/').pop()}…` : 'Comment on this change…' }}
+        onClearPath={() => setPath(null)}
+      />
+    </div>
+  )
 }
 
 /** An origin past what a list holds: what changed, counted, and why it isn't listed. */

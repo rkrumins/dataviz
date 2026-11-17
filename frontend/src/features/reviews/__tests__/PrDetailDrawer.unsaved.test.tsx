@@ -15,6 +15,8 @@ vi.mock('@tanstack/react-query', async (orig) => ({
   ...(await orig<typeof import('@tanstack/react-query')>()),
   useQueryClient: () => ({ invalidateQueries }),
 }))
+vi.mock('../comments/ReviewDiscussion', () => ({ ReviewDiscussion: () => null }))
+vi.mock('../comments/useReviewComments', () => ({ useReviewCommentCounts: () => ({ data: undefined }) }))
 vi.mock('../../versioning/components/ChangeList', () => ({ ChangeList: () => null }))
 vi.mock('../../versioning/components/ChangeTreePanel', () => ({ ChangeTreePanel: () => null }))
 vi.mock('../../versioning/hooks/useVersioning', () => ({

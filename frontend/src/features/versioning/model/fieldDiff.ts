@@ -21,6 +21,9 @@ export interface FieldChange {
   kind: 'added' | 'changed' | 'removed'
 }
 
+/** A field's place on its entity — `Description`, `Technical/Owner` — what a comment on it names. */
+export const fieldPath = (f: FieldChange) => (f.folder ? `${f.folder}/${f.label}` : f.label)
+
 type Bag = Record<string, unknown>
 const asBag = (v: unknown): Bag => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Bag) : {})
 

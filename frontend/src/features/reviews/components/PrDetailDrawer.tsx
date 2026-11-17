@@ -18,7 +18,7 @@ import { motion } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
   GitPullRequestArrow, Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
-  Undo2, ShieldAlert, LayoutTemplate,
+  Undo2, ShieldAlert, LayoutTemplate, MessageSquare,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -59,6 +59,9 @@ import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } fro
 import { ConflictResolver } from './ConflictResolver'
 import { MOTION } from '@/lib/motion'
 import { refusalCopy } from '@/features/versioning/model/provenance'
+import { ReviewDiscussion } from '../comments/ReviewDiscussion'
+import { useReviewCommentCounts } from '../comments/useReviewComments'
+import type { DiscussionAccess } from '../comments/ReviewThreads'
 
 /** " by 3 changes people made" — what holds a draft's review back from main; people's changes
  *  are what make it pull, so they are what it counts when the server says. */
@@ -92,7 +95,16 @@ const MERGE_REFUSALS: Record<string, string> = {
   self_merge: 'This data source has someone other than whoever opened a review merge it',
 }
 
-export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: string; onClose: () => void }) {
+/** Why the reader may not take part in the discussion (`viewerCan.commentReason`). */
+const COMMENT_REFUSALS: Record<string, string> = {
+  person_required: 'A key can’t take part in a review’s discussion — sign in as a person to comment.',
+}
+
+export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
+  wsId: string; prId: string; onClose: () => void
+  /** A thread to open on (a notification's link). */
+  focusThreadId?: string | null
+}) {
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const { notify } = useAppNotifications()
@@ -246,6 +258,13 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
     && (viewerCan ? viewerCan.approve : !isAuthor && !isOwner)
   const canMerge = viewerCan ? viewerCan.merge : canPublish
   const mergeBlockedWhy = MERGE_REFUSALS[viewerCan?.mergeReason ?? (canPublish ? '' : 'publish_required')]
+  // Whoever sees a review discusses it (a person, not a key); a manager may remove what others wrote.
+  const discussion: DiscussionAccess = {
+    canComment: viewerCan?.comment ?? true,
+    commentReason: viewerCan?.commentReason ? (COMMENT_REFUSALS[viewerCan.commentReason] ?? null) : null,
+    canModerate: viewerCan?.moderate ?? canManage,
+  }
+  const openThreads = useReviewCommentCounts(wsId, prId).data?.open ?? 0
   const busy = approve.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
 
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
@@ -575,7 +594,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                       </p>
                     )}
                     <ChangeList wsId={wsId} graphId={pr.graphId} origin={listOrigin} summary={draftSummaryQ.data}
-                      emptyHint="No changes in this PR." />
+                      emptyHint="No changes in this PR." review={{ prId, ...discussion }} />
                   </>
                 ) : (
                   // A fork's review: laid out as a tree within the cap; past it, counted and listed from
@@ -595,6 +614,12 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                     } : undefined}
                   />
                 )}
+              </Section>
+
+              <Section icon={MessageSquare} title="Discussion"
+                right={openThreads > 0 ? <span className="text-[10.5px] font-semibold text-accent-lineage tabular-nums">{openThreads.toLocaleString()} open</span> : undefined}>
+                <ReviewDiscussion wsId={wsId} prId={prId} graphId={pr.graphId} origin={listOrigin}
+                  access={discussion} focusThreadId={focusThreadId} />
               </Section>
 
               <Section icon={Clock} title="Activity">

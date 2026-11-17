@@ -598,6 +598,11 @@ export interface ReviewViewerCan {
   merge: boolean
   approveReason: string | null
   mergeReason: string | null
+  /** Whether the reader may take part in its discussion (a person may; a key may not). */
+  comment?: boolean
+  commentReason?: string | null
+  /** Whether the reader may remove what others wrote (they manage the data source). */
+  moderate?: boolean
 }
 
 /** Map of entityId → resolved payload (or `null` to delete) for conflict resolution. */
@@ -2393,6 +2398,102 @@ export interface ReviewerCandidate {
 export function listReviewerCandidates(wsId: string, dataSourceId?: string | null): Promise<ReviewerCandidate[]> {
   const q = dataSourceId ? `?dataSourceId=${encodeURIComponent(dataSourceId)}` : ''
   return vfetch<ReviewerCandidate[]>(`${base(wsId)}/reviewers${q}`)
+}
+
+// ============================================
+// A review's discussion
+// ============================================
+
+/** One comment of a review's discussion. A deleted one keeps its place, with no body. */
+export interface ReviewComment {
+  id: string
+  /** The thread's first comment — itself, for a first comment. */
+  threadId: string
+  /** The change it is on; none for a comment on the review as a whole. */
+  entityId: string | null
+  /** The field or property of that change ("Description", "Technical/Owner"). */
+  path: string | null
+  body: string
+  /** People mentioned (ids), each told. */
+  mentions: string[]
+  author: string
+  createdAt: string
+  editedAt: string | null
+  deleted: boolean
+  resolvedAt: string | null
+  resolvedBy: string | null
+}
+
+/** A thread: its first comment, its replies in order, and whether its change was edited since. */
+export interface ReviewThread extends ReviewComment {
+  replies: ReviewComment[]
+  outdated: boolean
+}
+
+export interface ReviewThreadPage {
+  threads: ReviewThread[]
+  total: number
+  offset: number
+  limit: number
+  hasMore: boolean
+  /** Authors and people mentioned, by name. */
+  userNames: Record<string, string>
+}
+
+export interface ReviewCommentCounts {
+  /** Threads per change with any: open, and in all. */
+  entities: Record<string, { open: number; total: number }>
+  general: { open: number; total: number }
+  open: number
+}
+
+export interface ReviewThreadFilter {
+  entityId?: string
+  general?: boolean
+  threadId?: string
+  state?: 'open' | 'resolved' | 'all'
+}
+
+const commentsBase = (wsId: string, prId: string) => `${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/comments`
+
+/** A page of a review's threads, newest first. */
+export function listReviewThreads(
+  wsId: string, prId: string, filter: ReviewThreadFilter, offset = 0, limit = 20,
+): Promise<ReviewThreadPage> {
+  const sp = new URLSearchParams({ offset: String(offset), limit: String(limit), state: filter.state ?? 'all' })
+  if (filter.threadId) sp.set('threadId', filter.threadId)
+  else if (filter.entityId) sp.set('entityId', filter.entityId)
+  else if (filter.general) sp.set('general', 'true')
+  return vfetch<ReviewThreadPage>(`${commentsBase(wsId, prId)}?${sp}`)
+}
+
+/** Threads per change, and on the review — what a change list badges. */
+export function getReviewCommentCounts(wsId: string, prId: string): Promise<ReviewCommentCounts> {
+  return vfetch<ReviewCommentCounts>(`${commentsBase(wsId, prId)}/counts`)
+}
+
+/** Who can be mentioned in a review's discussion. */
+export function listReviewCommentPeople(wsId: string, prId: string): Promise<ReviewerCandidate[]> {
+  return vfetch<ReviewerCandidate[]>(`${commentsBase(wsId, prId)}/people`)
+}
+
+/** A new thread (on a change, a field of it, or the review) or, with `threadId`, a reply. */
+export function postReviewComment(wsId: string, prId: string, data: {
+  body: string; entityId?: string | null; path?: string | null; threadId?: string | null; mentions?: string[]
+}): Promise<ReviewThread & { userNames: Record<string, string> }> {
+  return vfetch(commentsBase(wsId, prId), jsonBody(data))
+}
+
+export function editReviewComment(wsId: string, prId: string, commentId: string, body: string): Promise<ReviewComment> {
+  return vfetch(`${commentsBase(wsId, prId)}/${encodeURIComponent(commentId)}`, { method: 'PATCH', body: JSON.stringify({ body }) })
+}
+
+export function deleteReviewComment(wsId: string, prId: string, commentId: string): Promise<void> {
+  return vfetch(`${commentsBase(wsId, prId)}/${encodeURIComponent(commentId)}`, { method: 'DELETE' })
+}
+
+export function setReviewThreadResolved(wsId: string, prId: string, threadId: string, resolved: boolean): Promise<ReviewComment> {
+  return vfetch(`${commentsBase(wsId, prId)}/${encodeURIComponent(threadId)}/${resolved ? 'resolve' : 'reopen'}`, jsonBody({}))
 }
 
 export function listMergeRequests(wsId: string, graphId: string): Promise<PullRequest[]> {

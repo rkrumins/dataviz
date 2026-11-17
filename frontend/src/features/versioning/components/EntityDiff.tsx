@@ -6,7 +6,7 @@
  *
  * Built only for the row someone opens — never up front for every change of a list.
  */
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { Code2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePersonaMode } from '@/store/persona'
@@ -33,10 +33,12 @@ function rowsOf(change: GraphChange): FieldChange[] {
     change.status === 'removed' ? undefined : change.after, change.kind)
 }
 
-export function EntityDiff({ change, fields }: {
+export function EntityDiff({ change, fields, fieldAction }: {
   change: GraphChange
   /** Rows already worked out (a revision's, from the history endpoint). */
   fields?: FieldChange[]
+  /** Something to do with each field (a review: comment on it). */
+  fieldAction?: (field: FieldChange) => ReactNode
 }) {
   const technical = usePersonaMode() === 'technical'
   const [all, setAll] = useState(false)
@@ -90,7 +92,7 @@ export function EntityDiff({ change, fields }: {
         )}
       </p>
       <div className="rounded-xl border border-glass-border overflow-hidden bg-black/[0.015] dark:bg-white/[0.02]">
-        {shown.map((f, i) => <ReviewValue key={`${f.folder ?? ''}/${f.label}/${i}`} field={f} plain={whole} />)}
+        {shown.map((f, i) => <ReviewValue key={`${f.folder ?? ''}/${f.label}/${i}`} field={f} plain={whole} action={fieldAction?.(f)} />)}
       </div>
       {rows.length > FIRST_ROWS && (
         <button type="button" onClick={() => setAll((v) => !v)}

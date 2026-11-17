@@ -297,6 +297,39 @@ class MergeRequestORM(VersioningBase):
     )
 
 
+class ReviewCommentORM(VersioningBase):
+    """A comment on a review: on one change (``entity_id``), on one field or property of it
+    (``path``), or on the review as a whole (neither). A thread is its first comment and the replies
+    that name it (``thread_id`` — a first comment names itself); resolving is the first comment's.
+    ``entity_hash`` is the draft's content hash of the entity when it was written: a later edit to
+    it marks the thread outdated. Deleting keeps the row (``deleted_at``), so a thread's replies
+    still read in order (20261117_1200_gv_review_comments)."""
+
+    __tablename__ = "review_comments"
+
+    id = Column(Text, primary_key=True, default=lambda: prefixed_id("rc"))
+    pr_id = Column(Text, nullable=False)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    thread_id = Column(Text, nullable=False)
+    entity_id = Column(Text, nullable=True)
+    path = Column(Text, nullable=True)
+    body = Column(Text, nullable=False)
+    mentions = Column(JSONB, nullable=True)
+    author = Column(Text, nullable=False)
+    entity_hash = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    edited_at = Column(Text, nullable=True)
+    deleted_at = Column(Text, nullable=True)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+
+    __table_args__ = _plain(
+        Index("ix_rc_pr_entity", "pr_id", "entity_id"),
+        Index("ix_rc_thread", "thread_id"),
+        Index("ix_rc_graph", "graph_id"),
+    )
+
+
 class ProjectionStateORM(VersioningBase):
     """FalkorDB projection watermark + placement/eviction state per graph
     (plan §5, §16.5 #9). Drives the read watermark and bounded-staleness."""

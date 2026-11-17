@@ -3,7 +3,7 @@
  * was added, what was taken away), dates and links formatted, Yes/No as pills, long text clamped.
  * The plain-language counterpart of a JSON diff.
  */
-import { memo, useState } from 'react'
+import { memo, useState, type ReactNode } from 'react'
 import { ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { inferFieldType } from '@/components/panels/property/fieldTypes'
@@ -80,16 +80,19 @@ function TagDiff({ before, after }: { before: string[]; after: string[] }) {
 
 const isTags = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string')
 
-export const ReviewValue = memo(function ReviewValue({ field, plain = false }: {
+export const ReviewValue = memo(function ReviewValue({ field, plain = false, action }: {
   field: FieldChange
   /** Every row is the same kind (an entity added or removed whole): the badge would only repeat it. */
   plain?: boolean
+  /** Something to do with this field (comment on it), at the row's end. */
+  action?: ReactNode
 }) {
   const style = KIND_STYLE[field.kind]
   const tags = (field.kind === 'changed' && isTags(field.before) && isTags(field.after))
     || (field.kind === 'added' && isTags(field.after)) || (field.kind === 'removed' && isTags(field.before))
   return (
-    <div className="grid grid-cols-[minmax(0,9rem)_1fr] gap-3 px-3 py-2 border-b border-glass-border/50 last:border-b-0">
+    <div className={cn('group/value grid gap-3 px-3 py-2 border-b border-glass-border/50 last:border-b-0',
+      action ? 'grid-cols-[minmax(0,9rem)_1fr_auto]' : 'grid-cols-[minmax(0,9rem)_1fr]')}>
       <div className="min-w-0">
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="text-xs font-semibold text-ink truncate">{field.label}</span>
@@ -116,6 +119,7 @@ export const ReviewValue = memo(function ReviewValue({ field, plain = false }: {
           <Value value={field.before} gone />
         )}
       </div>
+      {action && <div className="shrink-0 self-start -my-0.5">{action}</div>}
     </div>
   )
 })
