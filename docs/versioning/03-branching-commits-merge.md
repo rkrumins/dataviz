@@ -399,10 +399,13 @@ settings, and each of its commits reads its parent at a recorded base (`fork_bas
 until the fork takes a newer one): see [17 · Forks & Residency](17-forks-and-residency.md).
 
 Forking needs `workspace:datasource:manage`. It runs under the parent's `_lock_graph`, refuses a
-parent with `GRAPHVER_MAX_FORKS_PER_GRAPH` (default 10) live forks with **409** `fork_limit {limit}`
-(trashed forks do not count), and refuses a frozen parent with **409** `graph_not_writable`. A fork is
+parent with as many live forks as [Forks per graph](/guide/versioned-graph-settings#forks-maxpergraph)
+allows it (its root's value, else its workspace's, else the platform's) with **409**
+`fork_limit {limit}` (trashed forks do not count), and refuses a frozen parent with **409**
+`graph_not_writable`. A fork is
 deleted into the trash (`DELETE …/graphs/{forkId}`) and brought back (`POST …/graphs/{forkId}/restore`);
-the reaper purges it once `GRAPHVER_PURGE_GRACE_DAYS` have passed, dropping a FalkorDB copy an earlier
+the reaper purges it once its workspace's [Restore deleted data sources
+for](/guide/versioned-graph-settings#trash-restoredays) has passed, dropping a FalkorDB copy an earlier
 release made of it if that copy is its own, never its parent's key. See
 [06 · API Reference](06-api-reference.md) for the refusals.
 
@@ -637,7 +640,9 @@ is the fuller design; this section is what ships.
 ### Draft visibility and write rules
 
 A draft is **public** or **private** (`branches.visibility`); it opens at the level asked for, else
-where its data source's drafts and reviews policy says (`drafts_policy`, public out of the box; a level
+where its data source's drafts and reviews policy says ([New drafts
+start](/guide/versioned-graph-settings#drafts-defaultvisibility) and [Draft levels allowed](/guide/versioned-graph-settings#drafts-levels), as
+they resolve for its graph, `drafts_policy`; a level
 the policy rules out is 409 `private_drafts_disabled` / `public_drafts_disabled`). Its owner is an
 implicit maintainer; its members hold `viewer`, `editor` or `maintainer`, directly or through a group
 (`_branch_role`), at either level. `is_shared` means "has members".
@@ -673,12 +678,12 @@ implicit maintainer; its members hold `viewer`, `editor` or `maintainer`, direct
 - Merging a review does not check the merger's role on the draft: the merger needs
   `workspace:datasource:manage` and `workspace:datasource:publish` at the route, not ownership of or
   membership in the draft — and, where the policy has someone else merge, not to have opened it.
-- The idle-draft sweep (`sweep_idle_drafts`) abandons an open draft idle past `GRAPHVER_DRAFT_TTL_DAYS`,
-  but not one with a live PR or staged edits, nor one on a graph that is deleted, not live, or was
-  unfrozen within the TTL.
-- Draft retention (`prune_closed_drafts`, the same sweep): a draft merged or abandoned more than
-  `GRAPHVER_DRAFT_RETENTION_DAYS` ago (30; a system administrator sets it live, Admin → Infrastructure
-  → Versioned graphs → Draft retention; `0` keeps them for good) has its changes removed: its heads,
+- The idle-draft sweep (`sweep_idle_drafts`) abandons an open draft idle past its workspace's
+  [Close idle drafts after](/guide/versioned-graph-settings#drafts-idleclosedays), but not one with a live PR or
+  staged edits, nor one on a graph that is deleted, not live, or was unfrozen within the TTL.
+- Draft retention (`prune_closed_drafts`, the same sweep): a draft merged or abandoned longer ago than
+  its workspace's [Keep closed drafts' changes for](/guide/versioned-graph-settings#drafts-keepcloseddays) has its
+  changes removed: its heads,
   staged edits, integrity tree and versions. As with a squash-merged Git branch, the merge commit on
   `main` holds what it changed (the publish copied its rows there), and the draft's own commits remain
   as records. The draft's record stays: the branch (`prunedAt`), its members, its commits and its
@@ -691,8 +696,11 @@ implicit maintainer; its members hold `viewer`, `editor` or `maintainer`, direct
     was unfrozen within the window.
   - Removed in windows, each its own transaction, for at most 5 minutes a sweep; a removal cut off
     is finished first by the next sweep.
-  - An idle draft is abandoned after `GRAPHVER_DRAFT_TTL_DAYS`, and its changes go
-    `GRAPHVER_DRAFT_RETENTION_DAYS` after that.
+  - So an idle draft is abandoned once the first window has passed, and its changes go once the
+    second has passed after that.
+  - Each sweep reads every workspace's two windows once (`settings.effective.by_workspace`) and
+    sweeps each workspace's graphs by its own. While the settings can't be read, it closes and
+    removes nothing.
 
 ### Publish permission
 
@@ -718,9 +726,11 @@ not.
 {headCommitId, headSeq, at}}`: the source draft's head at that moment, and that commit's own seq. It
 takes an optional `expectedHeadCommitId` (the head the reviewer loaded) and answers **409**
 `head_moved {prId, headCommitId}` when the draft has moved on. Whoever opened the PR gets **403**
-`self_review` only where its data source's policy has someone else approve (`selfApproval` off); the
+`self_review` only where its data source's policy has someone else approve ([People may approve
+their own reviews](/guide/versioned-graph-settings#drafts-selfapproval) off); the
 draft's owner, when someone else opened it, approves either way. Where the policy has someone else
-merge (`selfMerge` off), whoever opened it gets **403** `self_merge` on merge, and a direct publish is
+merge ([People may merge their own reviews](/guide/versioned-graph-settings#drafts-selfmerge) off), whoever
+opened it gets **403** `self_merge` on merge, and a direct publish is
 **409** `review_required`. A merged or closed PR is 404. The PR row is locked for the
 transaction (bounded), so two reviewers approving at once both land.
 

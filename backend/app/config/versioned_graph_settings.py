@@ -774,9 +774,11 @@ _READS = (
                 "in 29 s, reads p99 66 ms, 5% of them from Postgres; update in place 30 s, p99 9 ms, "
                 "no extra memory; switch when ready by a copy 56 s, p99 9.6 ms, FalkorDB at 2.0x the "
                 "graph's memory at the peak; by a seed from Postgres 522 s, at 1.1x. No read failed "
-                "in any mode. With 200 readers at 1M nodes and 2M edges, GRAPH.COPY took 76 to 88 s, "
-                "past the projector's 75 s socket, three times: the build was dropped and the change "
-                "written in place. One rule applies the mode to every read: service.serving_seq with "
+                "in any mode. With 200 readers at 1M nodes and 2M edges, no read failed either: in run "
+                "43728972056 GRAPH.COPY took 76 to 88 s, past the projector's 75 s socket, and after 3 "
+                "attempts the build was dropped and the change written in place; in run 43967953534 "
+                "the copy took about 32 s and switch when ready landed by a switch, one whole version "
+                "at a time. One rule applies the mode to every read: service.serving_seq with "
                 "the lag build_policy.read_mode_for resolves for the graph (0 for latest). "
                 "candidates.wanted builds beside only above "
                 "buildAboveRows, on a platform-owned key, with candidateKeysEnabled on; a graph whose "
@@ -1394,10 +1396,11 @@ _BUILDS = (
             evidence=(
                 "residency.copy_room refuses a graph larger than copyMaxBytes (too_large), and auto "
                 "then seeds it (projection._build_queued). Measured (docs/versioning/09 §10, item "
-                "6): under 200 readers, GRAPH.COPY of 1M nodes and 2M edges took 76 to 88 s, past "
-                "the projector's 75 s socket (PROJECTION_FALKOR_WRITE_TIMEOUT_S 60 + "
+                "6): under 200 readers, GRAPH.COPY of 1M nodes and 2M edges took 76 to 88 s in run "
+                "43728972056, past the projector's 75 s socket (PROJECTION_FALKOR_WRITE_TIMEOUT_S 60 + "
                 "PROJECTION_SOCKET_TIMEOUT_MARGIN_S 15); after 3 attempts the build was dropped and "
-                "the change written in place. With 4 readers the same copy took about 19 s."),
+                "the change written in place. In run 43967953534 the same copy took about 32 s and "
+                "landed. With 4 readers a copy of 1M nodes and 1M edges took about 19 s."),
             aliases=("copy limit", "copy max bytes", "GRAPHVER_PROJECTION_COPY_MAX_BYTES"),
         ),
     ),
@@ -1546,8 +1549,8 @@ _BUILDS = (
             example=_ex_per_worker,
             evidence=(
                 "projection._advance_candidate: a build takes a step only while fewer than "
-                "buildConcurrency are running in that projector; build_policy.effective clamps it to "
-                "max(1, GRAPHVER_PROJECTION_CONCURRENCY), 8 by default."),
+                "buildConcurrency are running in that projector; the settings resolver caps it at "
+                "GRAPHVER_PROJECTION_CONCURRENCY (8 by default), never under 1 (its deployment cap)."),
             aliases=("build concurrency", "builds at once", "GRAPHVER_PROJECTION_CANDIDATE_CONCURRENCY"),
         ),
     ),
@@ -1596,8 +1599,9 @@ _BUILDS = (
             evidence=(
                 "projection._advance_candidate: attempts >= buildMaxAttempts drops the build "
                 "(drop_candidate); each failure backs off and starts again from a fresh copy, or "
-                "seeds again. Measured (docs/versioning/09 §10, item 6): under 200 readers, three "
-                "copies of 1M + 2M timed out at 75 s, and the build was dropped and the change "
+                "seeds again. Measured (docs/versioning/09 §10, item 6): under 200 readers, in run "
+                "43728972056, two of the three attempts to copy 1M + 2M timed out at 75 s and the "
+                "other found the first's copy already there; the build was dropped and the change "
                 "written in place."),
             aliases=("build attempts", "retries", "GRAPHVER_PROJECTION_CANDIDATE_MAX_ATTEMPTS"),
         ),
@@ -1801,8 +1805,9 @@ _RESIDENCY = (
             evidence=(
                 "residency_plan._plan_master: idle and pressure eviction only with eviction_enabled, "
                 "and _make_room returns False without it. The capacity pass evicts nothing in the 90 "
-                "s grace after Graph residency is turned on (residency_policy.GRACE_SECS). With no "
-                "policy read yet, an unreadable policy turns eviction off (residency_policy.resolve)."),
+                "s grace after Graph residency is turned on (residency_policy.GRACE_SECS). While the "
+                "settings can't be read, before the first read or since one failed, eviction is off "
+                "and loads go on (residency_policy.resolve)."),
             aliases=("eviction", "auto unload", "unload", "GRAPHVER_EVICTION_ENABLED"),
         ),
     ),
@@ -2287,9 +2292,10 @@ _DATABASE = (
             evidence=(
                 "ProviderManager.pg_read_slot: a place among the process's reads (pgReadsPerProcess) "
                 "and the graph's (pgReadsPerGraph); past them ProviderBusy, 429 with Retry-After, "
-                "counted in graphver_pg_read_slots_shed_total. build_policy.effective clamps it to "
+                "counted in graphver_pg_read_slots_shed_total. The settings resolver caps it at "
                 "pgReadsPerProcess. Measured (docs/versioning/09 §2): with 200 readers, Always the "
-                "latest shed 171 reads, each read on a retry."),
+                "latest shed 171 reads in run 43728972056 and 34 in run 43967953534, each read on a "
+                "retry."),
             aliases=("reads per graph", "read slots", "GRAPHVER_PG_READS_PER_GRAPH"),
         ),
     ),
@@ -2399,11 +2405,12 @@ _DRAFTS = (
                 f"next hourly sweep; its record stays."),
             evidence=(
                 "service.prune_closed_drafts, in the worker's sweep (GRAPHVER_DRAFT_SWEEP_SECS, "
-                "hourly): drafts closed longer ago than the window, kept while a live review, a "
+                "hourly): drafts closed longer ago than their workspace's window, read once a sweep "
+                "(settings.effective.by_workspace(draft_retention.KEY)), kept while a live review, a "
                 "pending or running job, or a deleted or frozen graph may still need them; removed in "
                 "windows for at most 5 minutes a sweep (DRAFT_PRUNE_PASS_SECS). A read of a pruned "
-                "draft's changes is 410 draft_pruned. When the value can't be read, the sweep removes "
-                "nothing (draft_retention.retention_days)."),
+                "draft's changes is 410 draft_pruned. Forever skips the window, and while the "
+                "settings can't be read the sweep removes nothing (unreadable skip)."),
             aliases=("draft retention", "prune drafts", "GRAPHVER_DRAFT_RETENTION_DAYS"),
         ),
     ),
@@ -2450,10 +2457,13 @@ _DRAFTS = (
                 f"A draft nobody saves to for {_days(_v(values, 'drafts.idleCloseDays'))} is closed, "
                 f"unless it has an open review or edits not yet saved."),
             evidence=(
-                "service.sweep_idle_drafts, in the worker's hourly sweep: open drafts whose "
-                "updated_at is older than the TTL, with no live PR, no staged changes, on a live "
-                "graph not unfrozen within the TTL, become abandoned. 0 today would close every idle "
-                "draft at the next sweep, so the app offers forever instead."),
+                "service.sweep_idle_drafts, in the worker's hourly sweep, once for each workspace's "
+                "window (settings.effective.by_workspace, worker.py): open drafts whose updated_at is "
+                "older than the TTL, with no live PR, no staged changes, on a live graph not "
+                "unfrozen within the TTL, become abandoned; forever skips the sweep. Before the "
+                "settings store, GRAPHVER_DRAFT_TTL_DAYS=0 closed every idle draft at the next "
+                "sweep; now 0 is outside the range and held to 1 day (env_out_of_range), and the "
+                "app offers forever instead."),
             aliases=("draft ttl", "idle drafts", "auto abandon", "GRAPHVER_DRAFT_TTL_DAYS"),
         ),
     ),
@@ -2508,9 +2518,10 @@ _DRAFTS = (
                 if _v(values, "drafts.defaultVisibility") == "private" else
                 "A new draft starts public: everyone who can read the data source sees it."),
             evidence=(
-                "drafts_policy.resolve: the data source's value, else the workspace's, else public; "
-                "a levels value other than any forces it (derived). Read when a draft is created, "
-                "never cached (docs/versioning/03 §3.15)."),
+                "drafts_policy.effective: the graph's value (a fork's, its root's), else its "
+                "workspace's, else the platform's, else public; a levels value other than any forces "
+                "it (derived_from_levels). Read fresh (strict) when a draft is created "
+                "(docs/versioning/03 §3.15)."),
             aliases=("draft visibility", "private drafts", "public drafts"),
         ),
     ),
@@ -2700,7 +2711,8 @@ _DRAFTS = (
                 f"Each graph may have {_v(values, 'forks.maxPerGraph')} live forks; one more is "
                 f"refused. Forks in the trash don't count."),
             evidence=(
-                "service._fork_slot and fork_preflight: live_forks >= MAX_FORKS_PER_GRAPH raises "
+                "service._fork_slot and fork_preflight: as many live forks as service._forks_allowed "
+                "(this setting for the root graph, else its workspace's, else the platform's) raises "
                 "ForkLimit (409 fork_limit). A fork has no FalkorDB key of its own, so this bounds "
                 "the readers' patch sets and the forks' rows (docs/versioning/17 §6)."),
             aliases=("fork limit", "forks per graph", "GRAPHVER_MAX_FORKS_PER_GRAPH"),
@@ -2746,9 +2758,11 @@ _DRAFTS = (
                 f"A deleted data source can be restored for {_days(_v(values, 'trash.restoreDays'))}; "
                 f"then it and its history are removed for good."),
             evidence=(
-                "purge_worker.Reaper.run_once, every GRAPHVER_REAP_POLL_SECS (900 s): tombstones older "
-                "than PURGE_GRACE_DAYS have their purge queued; the tombstone's age is the schedule. "
-                "A fork list's purge_after uses the same window."),
+                "purge_worker.Reaper.run_once, every GRAPHVER_REAP_POLL_SECS (900 s): data sources "
+                "deleted longer ago than their workspace's window (settings.effective.by_workspace) "
+                "have their purge queued; the tombstone's age is the schedule, and while the "
+                "settings can't be read nothing expires that pass. A fork list's purge_after uses "
+                "its workspace's window (service.list_forks)."),
             aliases=("trash", "undo window", "purge grace", "restore", "GRAPHVER_PURGE_GRACE_DAYS"),
         ),
     ),
@@ -2809,9 +2823,10 @@ _IMPORTS = (
             example=_ex_identifier,
             evidence=(
                 "import_export/identifier.py: entity_id, urn, prop.<name> or prop.<name>,urn; "
-                "import_settings.resolve: the data source's, else the platform's "
-                "(GRAPHVER_IMPORT_IDENTIFIER), kept on the job. A fork can't match by a property "
-                "yet, so its default property is entity_id there (docs/versioning/08 §3b)."),
+                "import_settings.for_import: the request's, else the graph's, else its workspace's, "
+                "else the platform's (GRAPHVER_IMPORT_IDENTIFIER until one is set), kept on the job. "
+                "A fork follows its root, but can't match by a property yet, so its default "
+                "property is entity_id there (docs/versioning/08 §3b)."),
             aliases=("identifier", "match by", "alternate key", "external id",
                      "GRAPHVER_IMPORT_IDENTIFIER"),
         ),
@@ -2857,8 +2872,10 @@ _IMPORTS = (
             symptoms=("Imports deleted too much", "A replace import is refused"),
             example=_ex_guard,
             evidence=(
-                "import_worker.replace_verdict: state off when IMPORT_REPLACE_GUARD is off; else "
-                "blocked past the limits unless the import is sent with allowMassDelete "
+                "import_worker.replace_verdict: state off when the job's replaceGuard is off (this "
+                "setting as it resolved for the graph when the import was made, "
+                "import_settings.for_import; a job without one, the platform's); else blocked past "
+                "the limits unless the import is sent with allowMassDelete "
                 "(mass_delete_blocked). Measured against the main the draft reads "
                 "(docs/versioning/08 §6)."),
             aliases=("replace guard", "mass delete", "allowMassDelete", "IMPORT_REPLACE_GUARD"),
@@ -2905,7 +2922,9 @@ _IMPORTS = (
                 f"or more; smaller ones go straight through."),
             evidence=(
                 "import_worker.replace_verdict (live >= minLive) and _fail_fast (main's live count >= "
-                "minLive), each from the job's limits: the data source's, else the platform's."),
+                "minLive), each from the job's limits, kept from when the import was made "
+                "(import_settings.for_import): the graph's, else its workspace's, else the "
+                "platform's."),
             aliases=("min live", "guard minimum", "IMPORT_REPLACE_GUARD_MIN_LIVE"),
         ),
     ),
@@ -3057,7 +3076,8 @@ _IMPORTS = (
                 "import_worker._fail_fast: after a replace's first node window, matched < "
                 "minMatchFraction x decided, in a graph of at least minLive live entities, raises "
                 "IdentifierMatchedNothing; not for a view's scope or with allowMassDelete, and not "
-                "gated on IMPORT_REPLACE_GUARD (import_worker.py, docs/versioning/08 §6)."),
+                "gated on the replace guard (imports.replaceGuard; import_worker.py, "
+                "docs/versioning/08 §6)."),
             aliases=("min match fraction", "early stop", "identifier matched nothing",
                      "IMPORT_REPLACE_MIN_MATCH_FRACTION"),
         ),
@@ -3100,7 +3120,9 @@ _IMPORTS = (
             example=_ex_refused,
             evidence=(
                 "import_worker.refused_budget and within_budget: 0, a count, a share ('0.5%') or -1; "
-                "an invalid platform value holds on any refused row. Kept on jobs.import_settings "
+                "an invalid platform value holds on any refused row. The request's, else this "
+                "setting as it resolves for the graph when the import is made "
+                "(import_settings.for_import), kept on jobs.import_settings "
                 "(docs/versioning/08 §3b)."),
             aliases=("refused rows", "bad rows", "maxRefusedRows", "IMPORT_MAX_REFUSED_ROWS"),
         ),
@@ -3146,8 +3168,10 @@ _IMPORTS = (
                 f"{_v(values, 'imports.maxMatchingProperties')} properties, each kept in an index."),
             evidence=(
                 "import_export/keys.ensure: a property not indexed yet is refused "
-                "(too_many_matching_properties) when the graph already has MAX_MATCHING_PROPERTIES "
-                "others; the index is built from main's live nodes a page at a time, minutes at a "
+                "(too_many_matching_properties) when the graph already has as many others as its "
+                "limit: the import's job keeps it (import_settings.for_import), else the platform's "
+                "value of this setting; the index is built from main's live nodes a page at a time, "
+                "minutes at a "
                 "million nodes (docs/versioning/08 §3b)."),
             aliases=("matching properties", "alternate keys", "external ids",
                      "GRAPHVER_MAX_MATCHING_PROPERTIES"),

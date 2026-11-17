@@ -9,6 +9,8 @@ facts are claims about the code. These tests hold both:
   * every default is the one ``versioning/config.py`` reads, from the env var the setting names;
   * every value the build and residency policies, the drafts policy and the import settings store
     today belongs to exactly one setting, with that code's range and choices;
+  * every setting is read by the code, outside the registry and the settings framework, unless it
+    is exempted with why;
   * memory-heavy settings are system administrators' at every scope;
   * every name a setting points at (rules, caps, requirements, uses, why codes) exists;
   * examples, postures and recommendations render, with and without live facts;
@@ -455,6 +457,79 @@ def test_drafts_and_import_columns_each_belong_to_one_setting():
         column = entry.elts[0].value
         owners = [s for s in SETTINGS if s.legacy and s.legacy.data_source_column == column]
         assert len(owners) == 1, column
+
+
+# ── Every setting is read by the code ─────────────────────────────────────────
+
+#: Settings nothing reads on purpose, each with why: a setting retired, or one only the deployment
+#: sets, goes here with its reason. None today.
+_UNREAD: dict = {}
+#: What reads every setting by the registry, and so says nothing about whether the code acts on one:
+#: the registry itself and the settings framework.
+_REGISTRY_FILES = (_APP / "config" / "versioned_graph_settings.py", _APP / "config" / "settings_types.py")
+_FRAMEWORK = _APP / "services" / "settings"
+
+
+def _read_as(s) -> list:
+    """How code that reads ``s`` names it: its key, as a string (``effective.value("forks.maxPerGraph")``,
+    or a facade's table of keys); the New-version builds wire name the registry gives it, as a
+    subscript of ``build_policy``'s policy (``policy["pacingRatio"]``); and the residency policy's
+    attribute for it, its old column without ``gv_`` (``policy.eviction_enabled``)."""
+    out = [("string", s.key)]
+    if s.legacy and s.legacy.build_policy:
+        out.append(("subscript", s.legacy.build_policy))
+    if s.legacy and s.legacy.residency_policy:
+        out.append(("attribute", s.legacy.platform_column.removeprefix("gv_")))
+    return out
+
+
+def _names_in(source: str) -> dict:
+    """A module's string constants (a bare string, a docstring among them, reads nothing), the
+    constants it subscripts with, and the attributes it reads."""
+    tree = ast.parse(source)
+    bare = {id(node.value) for node in ast.walk(tree)
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
+    out = {"string": set(), "subscript": set(), "attribute": set()}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in bare:
+            out["string"].add(node.value)
+        elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+            out["subscript"].add(node.slice.value)
+        elif isinstance(node, ast.Attribute):
+            out["attribute"].add(node.attr)
+    return out
+
+
+def _readers() -> dict:
+    """Each way of naming a setting (:func:`_read_as`) that the app's code uses, outside the registry
+    and the settings framework."""
+    wanted = {name for s in SETTINGS for _how, name in _read_as(s)}
+    found = {"string": set(), "subscript": set(), "attribute": set()}
+    for path in sorted(_APP.rglob("*.py")):
+        if path in _REGISTRY_FILES or _FRAMEWORK in path.parents:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if any(name in source for name in wanted):
+            for how, names in _names_in(source).items():
+                found[how] |= names & wanted
+    return found
+
+
+def test_every_setting_is_read_by_the_code():
+    """A setting the code never reads would be saved, shown and explained while nothing acts on it.
+    Each must be named by a reader somewhere in ``backend/app`` beyond the registry and the
+    settings framework, or be exempted in :data:`_UNREAD` with why."""
+    found = _readers()
+    unread = [s.key for s in SETTINGS if s.key not in _UNREAD
+              and not any(name in found[how] for how, name in _read_as(s))]
+    assert not unread, (
+        "nothing in backend/app reads these settings, outside the registry and "
+        f"services/settings/ (by key, build-policy wire name or residency attribute): {unread}. "
+        "Read each where the code acts on it, or retire it")
+    for key, why in _UNREAD.items():
+        assert key in BY_KEY and isinstance(why, str) and why.strip(), f"_UNREAD[{key!r}]"
+        assert not any(name in found[how] for how, name in _read_as(BY_KEY[key])), (
+            f"{key} is read now: take it out of _UNREAD")
 
 
 # ── Who may set what ──────────────────────────────────────────────────────────
