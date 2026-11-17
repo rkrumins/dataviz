@@ -456,9 +456,13 @@ def test_each_pass_names_its_phase(from_seq, status, served, published, phase):
 
 def _run(proj, redis):
     async def go():
-        result = await proj.project_graph("g1")
-        await settled()
-        return result
+        # The writes run in the background: let them land whether the pass returns or raises, as
+        # they do in the worker's loop. Without it a failed pass's last write is cancelled with
+        # the loop (on 3.11, whose wait_for adds a task, it hasn't run yet).
+        try:
+            return await proj.project_graph("g1")
+        finally:
+            await settled()
     return asyncio.run(go())
 
 
