@@ -164,8 +164,9 @@ export async function saveStagedChangesToDraft(
     const key = prior?.body === body ? prior.key : newRequestId()
     const save: PendingSave = { body, key, sent: Object.fromEntries(rest.map((c) => [c.id, JSON.stringify(c.after ?? null)])) }
     pendingSaves.set(scope, save)
-    // The key rides in the crash snapshot before the request leaves, so a reload mid-save keeps it.
-    if (scope) markSnapshotCommitting(scope, save)
+    // The key rides in the crash snapshot before the request leaves, so a reload mid-save keeps it
+    // (a large snapshot's is written to IndexedDB: the request waits until it is durable).
+    if (scope) await markSnapshotCommitting(scope, save)
     let next: GraphChangesResult
     try {
       next = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message, key)
