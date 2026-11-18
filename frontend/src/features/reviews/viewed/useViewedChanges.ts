@@ -49,5 +49,8 @@ export function useViewedChanges(prId: string | undefined) {
     else delete next[row.entityId]
     write(next)
   }, [seen, write])
-  return { isViewed, changedSince, toggle, enabled: !!prId }
+  /** How many ticks still hold: every one kept, but those `rows` show moved on since. */
+  const count = useCallback((rows: readonly ChangeListRow[] = []) =>
+    Object.keys(seen).length - rows.filter((r) => !!seen[r.entityId] && seen[r.entityId] !== fingerprint(r)).length, [seen])
+  return { isViewed, changedSince, toggle, count, enabled: !!prId }
 }

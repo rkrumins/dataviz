@@ -78,6 +78,8 @@ export interface TreeViewProps {
   onLanded?: () => void
   /** Told the current row as it moves (a surface sharing it with another view). */
   onCurrent?: (key: string) => void
+  /** The row to make current when it changes (picked elsewhere), without moving focus. */
+  follow?: string | null
   /** Said above the rows (a reveal that failed). */
   notice?: ReactNode
   maxHeight?: number | string
@@ -99,7 +101,7 @@ function Inside({ item }: { item: ChangeTreeItem }) {
 }
 
 export function TreeView({
-  model, label, isChange, nameOf, renderChange, itemKeys, showFrom, land, onLanded, onCurrent, notice,
+  model, label, isChange, nameOf, renderChange, itemKeys, showFrom, land, onLanded, onCurrent, follow, notice,
   maxHeight = '60vh', className,
 }: TreeViewProps) {
   const { rows, open, setOpen } = model
@@ -178,6 +180,14 @@ export function TreeView({
   useEffect(() => {
     if (land && byKey.has(land)) landRef.current(land)
   }, [land, byKey])
+  // Following a row picked elsewhere: current, and in view once it is drawn.
+  const followDrawn = !!follow && byKey.has(follow)
+  useEffect(() => {
+    if (!follow || !followDrawn) return
+    expand.setCurrent(follow)
+    const at = rowAt.get(follow)
+    if (at !== undefined) virtualizer.scrollToIndex(at, { align: 'auto' })
+  }, [follow, followDrawn]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (rows.length === 1 && rows[0].kind === 'loading') {
     return (

@@ -26,6 +26,9 @@
  *
  * In a review, each change can be ticked Viewed (or `v`, which moves on to the next) — kept in this
  * browser, and unticked when the change moves on ("changed since you viewed it").
+ *
+ * Picking (`pick`), a change opens beside the list instead of in it — clicked, Enter or → — in
+ * either layout, and the list's current row follows the one picked.
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -128,6 +131,8 @@ export interface ChangeListProps {
   review?: { prId: string } & DiscussionAccess & { decisions?: ReviewDecisions }
   /** A draft's own saved changes, which its editor can discard (each put back where it began). */
   restore?: { branchId: string }
+  /** Changes open beside the list (a review page's), not in it: the one open, and opening one. */
+  pick?: { selected: string | null; onPick: (row: ChangeListRow) => void }
   className?: string
 }
 
@@ -142,7 +147,7 @@ export interface ReviewDecisions {
 }
 
 export function ChangeList({
-  wsId, graphId, origin, summary, emptyHint = 'No changes.', maxHeight = '60vh', review, restore, className,
+  wsId, graphId, origin, summary, emptyHint = 'No changes.', maxHeight = '60vh', review, restore, pick, className,
 }: ChangeListProps) {
   const commentCounts = useReviewCommentCounts(wsId, review?.prId).data?.entities
   const summaryQ = useChangeSummary(wsId, graphId, summary ? null : origin)
@@ -259,13 +264,15 @@ export function ChangeList({
   const [asking, setAsking] = useState<string | null>(null)
   // A change's own keys, in either layout: a accept, r reject (asks why), c its discussion, o show on canvas.
   const changeKeys = (e: KeyboardEvent, row: ChangeListRow, setLevel: (l: RowLevel) => void, show: () => void, next?: () => void) => {
+    // Picking, a change opens beside the list: never in it, one or all.
+    if (pick && (e.key === 'Enter' || e.key === 'ArrowRight')) { if (!e.shiftKey) pick.onPick(row); return true }
     if (e.shiftKey) return false
     if (e.key === '?') { document.getElementById(`${keysId}`)?.focus(); return true }
     if (viewed.enabled && e.key === 'v') { viewed.toggle(row); if (!viewed.isViewed(row)) next?.(); return true }
     if (e.key === 'o' && canRevealRows && row.kind === 'node' && row.status !== 'removed') { show(); return true }
     if (decisions?.canDecide && e.key === 'a') { void flow.run('accepted', { entityIds: [row.entityId] }); return true }
     if (decisions?.canDecide && e.key === 'r') { setAsking(row.entityId); return true }
-    if (review && e.key === 'c') { setLevel(2); return true }
+    if (review && e.key === 'c') { if (pick) pick.onPick(row); else setLevel(2); return true }
     if (restore && (e.key === 'Delete' || e.key === 'Backspace')) { void discardSaved({ ids: [row.entityId], label: rowLabel(row) }); return true }
     return false
   }
@@ -279,8 +286,8 @@ export function ChangeList({
     onDecide: (verdict: DecisionVerdict | null, reason?: string | null) => void flow.run(verdict, { entityIds: [row.entityId] }, reason),
   } : undefined)
   const renderTreeChange = (row: ChangeListRow, f: TreeRowFrame) => (
-    <Row wsId={wsId} graphId={graphId} origin={origin} row={row} domId={f.domId}
-      level={f.level} current={f.current} onToggle={f.onToggle} onLevel={f.onLevel} onFocus={f.onFocus}
+    <Row wsId={wsId} graphId={graphId} origin={origin} row={row} domId={f.domId} picked={pick?.selected === row.entityId}
+      level={pick ? 0 : f.level} current={f.current} onToggle={pick ? () => pick.onPick(row) : f.onToggle} onLevel={f.onLevel} onFocus={f.onFocus}
       setsize={f.setsize} posinset={f.posinset} depth={f.depth} lead={f.lead} inside={f.inside}
       asking={asking === row.entityId} onAsk={(on) => setAsking(on ? row.entityId : null)} onShow={f.onShow}
       onDiscard={restore ? () => void discardSaved({ ids: [row.entityId], label: rowLabel(row) }) : undefined}
@@ -311,8 +318,9 @@ export function ChangeList({
   const keysId = `change-keys-${graphId}`
   const shortcuts: Array<readonly [string, string]> = [
     ['j k', 'Next / previous change'],
-    tree ? ['→ ←', 'Open / close — step in and out'] as const : ['→ ←', 'Open / close a change'] as const,
-    ['shift+→', 'Open every change shown'],
+    ...(pick ? [['→', 'Open it beside the list'] as const]
+      : [tree ? ['→ ←', 'Open / close — step in and out'] as const : ['→ ←', 'Open / close a change'] as const,
+        ['shift+→', 'Open every change shown'] as const]),
     ...(canRevealRows ? [['o', 'Show it on the canvas'] as const] : []),
     ...(decisions?.canDecide ? [['a', 'Accept it'] as const, ['r', 'Reject it (asks why)'] as const] : []),
     ...(review ? [['c', 'Its discussion'] as const] : []),
@@ -333,6 +341,15 @@ export function ChangeList({
   useEffect(() => {
     if (hasMore && !isFetchingNextPage && lastShown >= items.length - PREFETCH_ROWS) void fetchNextPage()
   }, [hasMore, isFetchingNextPage, lastShown, items.length, fetchNextPage])
+  // The change picked elsewhere (a key on the page, a link) is the current row here too, in view.
+  const picked = pick?.selected ?? null
+  const pickedListed = !!picked && rowIndex.has(picked)
+  useEffect(() => {
+    if (!picked || !pickedListed) return
+    expand.setCurrent(picked)
+    const at = itemAt.get(picked)
+    if (at !== undefined) virtualizer.scrollToIndex(at, { align: 'auto' })
+  }, [picked, pickedListed]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!s) {
     return summaryQ.isError
@@ -421,7 +438,7 @@ export function ChangeList({
           {!showTree && rows.length < matching && !entriesQ.isLoading && ` · ${rows.length.toLocaleString()} loaded`}
           {viewed.enabled && !showTree && rows.length > 0 && ` · ${rows.filter(viewed.isViewed).length.toLocaleString()} viewed`}
         </p>
-        {!showTree && rows.length > 1 && (
+        {!showTree && !pick && rows.length > 1 && (
           <HoverTip label={expand.allOpen ? 'Collapse every change' : 'Open every change to its key differences'}
             shortcut={expand.allOpen ? '⇧←' : '⇧→'} className="inline-flex">
             <button type="button" onClick={expand.allOpen ? expand.collapseAll : expand.expandAll}
@@ -458,7 +475,7 @@ export function ChangeList({
       {tree && (
         <div hidden={!showTree} className="min-h-0">
           <ChangeTree source={{ wsId, graphId, origin, prId: decisions ? review?.prId : null }}
-            renderChange={renderTreeChange} changeKeys={changeKeys} reveal={reveal} maxHeight={maxHeight} />
+            renderChange={renderTreeChange} changeKeys={changeKeys} reveal={reveal} maxHeight={maxHeight} follow={picked} />
         </div>
       )}
       {showTree ? null : entriesQ.isError ? (
@@ -498,9 +515,9 @@ export function ChangeList({
                       )}
                     </div>
                   ) : (
-                    <Row wsId={wsId} graphId={graphId} origin={origin} row={item.row}
-                      level={expand.levelOf(item.row.entityId)} current={expand.current === item.row.entityId}
-                      onToggle={() => expand.toggle(item.row.entityId)}
+                    <Row wsId={wsId} graphId={graphId} origin={origin} row={item.row} picked={picked === item.row.entityId}
+                      level={pick ? 0 : expand.levelOf(item.row.entityId)} current={expand.current === item.row.entityId}
+                      onToggle={pick ? () => pick.onPick(item.row) : () => expand.toggle(item.row.entityId)}
                       onLevel={(l) => expand.setLevel(item.row.entityId, l)}
                       onFocus={() => expand.setCurrent(item.row.entityId)}
                       setsize={matching} posinset={(rowIndex.get(item.row.entityId) ?? 0) + 1}
@@ -526,7 +543,7 @@ export function ChangeList({
 const rowDomId = (entityId: string) => `change-row-${entityId}`
 
 function Row({
-  wsId, graphId, origin, row, domId, level, current, onToggle, onLevel, onFocus, setsize, posinset, asking, onAsk,
+  wsId, graphId, origin, row, domId, picked, level, current, onToggle, onLevel, onFocus, setsize, posinset, asking, onAsk,
   onShow, onShowInTree, onDiscard, viewed, review, comments, decide, depth, lead, inside,
 }: {
   wsId: string
@@ -535,6 +552,8 @@ function Row({
   row: ChangeListRow
   /** Its button's id, when the list focusing it names it otherwise (the tree). */
   domId?: string
+  /** The change open beside the list. */
+  picked?: boolean
   level: RowLevel
   current: boolean
   onToggle: () => void
@@ -580,6 +599,7 @@ function Row({
       id={domId ?? rowDomId(row.entityId)} status={row.status} level={level} current={current}
       onToggle={onToggle} onFocus={onFocus} setsize={setsize} posinset={posinset}
       depth={depth} lead={lead} chevron={lead === undefined}
+      className={picked ? 'bg-accent-lineage/[0.06] border-accent-lineage/25' : undefined}
       title={edge ? (
         <span className="inline-flex items-center gap-1 min-w-0 max-w-full">
           <span className="truncate">{row.sourceName || row.sourceEntityId}</span>
@@ -700,7 +720,7 @@ function stubChange(row: ChangeListRow, origin: ChangeListOrigin): GraphChange {
 }
 
 /** One entity before and after, fetched when its row is opened — in a review, with its threads. */
-function RowDetail({ wsId, graphId, origin, row, review, depth = 'all', onShowAll }: {
+export function RowDetail({ wsId, graphId, origin, row, review, depth = 'all', onShowAll, focusThreadId }: {
   wsId: string
   graphId: string
   origin: ChangeListOrigin
@@ -708,6 +728,8 @@ function RowDetail({ wsId, graphId, origin, row, review, depth = 'all', onShowAl
   review?: ChangeListProps['review']
   depth?: 'key' | 'all'
   onShowAll?: () => void
+  /** One of its threads a link opened: drawn out and scrolled to. */
+  focusThreadId?: string | null
 }) {
   const q = useChangeEntry(wsId, graphId, origin, row.entityId)
   const [path, setPath] = useState<string | null>(null)
@@ -760,7 +782,7 @@ function RowDetail({ wsId, graphId, origin, row, review, depth = 'all', onShowAl
         )
       }} />
       <ReviewThreads
-        wsId={wsId} prId={review.prId} filter={{ entityId: row.entityId }} access={review}
+        wsId={wsId} prId={review.prId} filter={{ entityId: row.entityId }} access={review} focusThreadId={focusThreadId}
         compose={{ entityId: row.entityId, path, placeholder: path ? `Comment on ${path.split('/').pop()}…` : 'Comment on this change…' }}
         onClearPath={() => setPath(null)}
       />
