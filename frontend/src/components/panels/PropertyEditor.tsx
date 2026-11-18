@@ -67,6 +67,8 @@ import {
 import { MarkdownValueModal } from './property/MarkdownValueEditor'
 import { InlineValue } from './property/InlineValue'
 import { propertyMarks, shortValue, type ChangeMark, type PropertyMarks } from './property/changeMarks'
+import { detectValue, parsePastedLines, rankSuggestions, type PastedProperty, type PropertySuggestion } from './property/composerModel'
+import { useRecentPropertyKeys } from '@/store/recentPropertyKeys'
 
 // ============================================
 // Types
@@ -112,8 +114,9 @@ export interface PropertyEditorProps {
   published?: Record<string, unknown>
   /** Open the add-property form straight away (an empty entity's "Add properties"). */
   startAdding?: boolean
-  /** Property names worth adding, offered as one-click starts next to "Add property". */
-  suggestions?: string[]
+  /** Property names worth adding — offered as one-click starts next to "Add property", and as the
+   *  name is typed (with how many others of the type carry each, and an example value). */
+  suggestions?: ReadonlyArray<string | PropertySuggestion>
 }
 
 const MAX_DEPTH = 6
@@ -1121,6 +1124,9 @@ function PropertyComposer({
   variant,
   prefixLabel,
   initialKey = '',
+  suggestions = [],
+  onAddMany,
+  onUpdateExisting,
 }: {
   /** key is '' for array items; value is the fully-formed value to insert. */
   onAdd: (key: string, value: unknown) => void
@@ -1131,28 +1137,128 @@ function PropertyComposer({
   prefixLabel?: string
   /** The name to start with (a suggestion). */
   initialKey?: string
+  /** Names others of this type carry, offered as the name is typed. */
+  suggestions?: readonly PropertySuggestion[]
+  /** Several properties pasted at once, added as one change (one Undo). */
+  onAddMany?: (entries: Array<[string, unknown]>) => void
+  /** A name already there: set its value instead. */
+  onUpdateExisting?: (key: string, value: unknown) => void
 }) {
+  const smartish = variant === 'object'
   const [key, setKey] = useState(initialKey)
   const [type, setType] = useState<FieldType>('text')
   const [draft, setDraft] = useState<unknown>('')
+  // Until a type is picked, the value is typed as text and what it is is detected (a number, yes/no,
+  // a date, a link) — stored as that.
+  const [typeChosen, setTypeChosen] = useState(!smartish)
+  const [text, setText] = useState('')
+  const detected = useMemo(() => detectValue(text), [text])
   const [modalOpen, setModalOpen] = useState(false)
+  const [pasted, setPasted] = useState<PastedProperty[] | null>(null)
+  const [highlight, setHighlight] = useState(-1)
+  const [nameFocused, setNameFocused] = useState(false)
+  const nameRef = useRef<HTMLInputElement>(null)
+  const recent = useRecentPropertyKeys((st) => st.keys)
+  const remember = useRecentPropertyKeys((st) => st.remember)
 
   const candidateKey = prefixLabel ? `${prefixLabel}/${key.trim()}` : key.trim()
   const isDup = variant === 'object' && key.trim() !== '' && existingKeys.includes(candidateKey)
   const canSubmit = variant === 'array' || (key.trim() !== '' && !isDup)
+  const value = typeChosen ? draft : detected.value
+  const shownType: FieldType = typeChosen ? type : detected.type
+  const offered = useMemo(
+    () => (smartish ? rankSuggestions(key, suggestions, recent, existingKeys.map((k) => (prefixLabel && k.startsWith(`${prefixLabel}/`) ? k.slice(prefixLabel.length + 1) : k))) : []),
+    [smartish, key, suggestions, recent, existingKeys, prefixLabel])
+  const listOpen = nameFocused && offered.length > 0 && !(offered.length === 1 && offered[0].key === key.trim())
+  const picked = suggestions.find((p) => p.key === key.trim())
 
   const changeType = (t: FieldType) => {
     setType(t)
-    setDraft(valueForType(t))
+    setTypeChosen(true)
+    setDraft(text.trim() ? coerceToType(detected.value, t) : valueForType(t))
+  }
+  const pick = (k: string) => {
+    setKey(k)
+    setHighlight(-1)
+    setNameFocused(false)
   }
 
-  const submit = () => {
+  /** Add it; `next`: and start another (⌘↵), else close. */
+  const submit = (next = false) => {
     if (!canSubmit) return
-    onAdd(variant === 'array' ? '' : key.trim(), draft)
+    const k = variant === 'array' ? '' : key.trim()
+    onAdd(k, value)
+    if (k) remember([candidateKey])
+    if (next && smartish) {
+      setKey(''); setText(''); setDraft(''); setTypeChosen(false); setType('text')
+      requestAnimationFrame(() => nameRef.current?.focus())
+    } else {
+      onCancel()
+    }
+  }
+  const updateInstead = () => {
+    onUpdateExisting?.(candidateKey, value)
+    onCancel()
+  }
+  const addPasted = () => {
+    if (!pasted?.length) return
+    const entries = pasted.filter((p) => !existingKeys.includes(prefixLabel ? `${prefixLabel}/${p.key}` : p.key))
+      .map((p): [string, unknown] => [prefixLabel ? `${prefixLabel}/${p.key}` : p.key, p.value])
+    if (entries.length) {
+      onAddMany?.(entries)
+      remember(entries.map(([k]) => k))
+    }
+    onCancel()
+  }
+  // Several lines pasted read as several properties: say so, and add them in one go.
+  const onPaste = (e: React.ClipboardEvent) => {
+    if (!smartish || !onAddMany) return
+    const many = parsePastedLines(e.clipboardData.getData('text'))
+    if (many.length) { e.preventDefault(); setPasted(many) }
   }
 
   const onFormKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') { e.preventDefault(); onCancel() }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (pasted) setPasted(null); else onCancel() }
+    // ⌘↵ adds it and starts the next — not the drawer's own ⌘↵.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); submit(true) }
+  }
+
+  if (pasted) {
+    const dupes = pasted.filter((p) => existingKeys.includes(prefixLabel ? `${prefixLabel}/${p.key}` : p.key)).length
+    const adding = pasted.length - dupes
+    return (
+      <div onKeyDown={onFormKeyDown}
+        className="mt-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-accent-lineage/30 p-3 space-y-2.5 shadow-sm">
+        <p className="text-xs font-semibold text-ink">
+          {pasted.length.toLocaleString()} properties pasted
+          {dupes > 0 && <span className="font-normal text-ink-muted"> · {dupes} already there, left as they are</span>}
+        </p>
+        <div className="max-h-56 overflow-y-auto custom-scrollbar rounded-lg border border-glass-border divide-y divide-glass-border">
+          {pasted.map((p) => {
+            const there = existingKeys.includes(prefixLabel ? `${prefixLabel}/${p.key}` : p.key)
+            return (
+              <div key={p.key} className={cn('flex items-center gap-2 px-2.5 py-1.5 text-xs', there && 'opacity-50')}>
+                <span className="basis-[40%] min-w-0 font-mono text-ink truncate">{p.key}</span>
+                <span className="flex-1 min-w-0 text-ink-secondary truncate">{shortValue(p.value)}</span>
+                <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
+                  {there ? 'There' : FIELD_TYPE_META[p.type].label}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+        <div className="flex items-center justify-end gap-2">
+          <button type="button" onClick={() => setPasted(null)}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5 transition-colors">
+            Back
+          </button>
+          <button type="button" onClick={addPasted} disabled={adding === 0} autoFocus
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-accent-lineage text-white hover:brightness-110 shadow-sm disabled:opacity-50">
+            <Plus className="w-3.5 h-3.5" aria-hidden />Add {adding.toLocaleString()}
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -1160,74 +1266,142 @@ function PropertyComposer({
       onKeyDown={onFormKeyDown}
       className="mt-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-accent-lineage/30 p-3 space-y-2.5 shadow-sm"
     >
-      {/* Row 1: name + type */}
+      {/* Row 1: name (with what others of this type carry) + type */}
       <div className="flex items-center gap-2">
         {prefixLabel && (
-          <span
-            className="text-2xs font-mono text-ink-muted bg-black/[0.03] dark:bg-white/5 rounded px-1.5 py-0.5 max-w-[140px] truncate flex-shrink-0"
-            title={prefixLabel}
-          >
-            {prefixLabel}/
-          </span>
+          <HoverTip label={prefixLabel} className="inline-flex flex-shrink-0">
+            <span className="text-2xs font-mono text-ink-muted bg-black/[0.03] dark:bg-white/5 rounded px-1.5 py-0.5 max-w-[140px] truncate">
+              {prefixLabel}/
+            </span>
+          </HoverTip>
         )}
         {variant === 'object' ? (
-          <input
-            autoFocus
-            value={key}
-            placeholder="Property name"
-            onChange={(e) => setKey(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') submit() }}
-            className={cn(
-              "flex-1 min-w-0 text-sm px-2.5 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border outline-none",
-              isDup ? "border-red-500/40" : "border-black/10 dark:border-white/10 focus:border-accent-lineage/50",
+          <div className="relative flex-1 min-w-0">
+            <input
+              ref={nameRef}
+              autoFocus
+              value={key}
+              placeholder="Property name"
+              aria-label="Property name"
+              role="combobox"
+              aria-expanded={listOpen}
+              aria-autocomplete="list"
+              onChange={(e) => { setKey(e.target.value); setHighlight(-1); setNameFocused(true) }}
+              onFocus={() => setNameFocused(true)}
+              onBlur={() => window.setTimeout(() => setNameFocused(false), 120)}
+              onPaste={onPaste}
+              onKeyDown={(e) => {
+                if (listOpen && e.key === 'ArrowDown') { e.preventDefault(); setHighlight((h) => Math.min(offered.length - 1, h + 1)); return }
+                if (listOpen && e.key === 'ArrowUp') { e.preventDefault(); setHighlight((h) => Math.max(-1, h - 1)); return }
+                if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+                  if (listOpen && highlight >= 0) { e.preventDefault(); pick(offered[highlight].key); return }
+                  submit()
+                }
+              }}
+              className={cn(
+                "w-full text-sm px-2.5 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border outline-none",
+                isDup ? "border-red-500/40" : "border-black/10 dark:border-white/10 focus:border-accent-lineage/50",
+              )}
+            />
+            {listOpen && (
+              <ul role="listbox" aria-label="Suggested names"
+                className="absolute left-0 right-0 top-full mt-1 z-20 rounded-lg border border-glass-border bg-canvas-elevated shadow-lg py-1 max-h-56 overflow-y-auto">
+                {offered.map((o, i) => (
+                  <li key={o.key} role="option" aria-selected={i === highlight}
+                    onMouseDown={(e) => { e.preventDefault(); pick(o.key) }}
+                    className={cn('flex items-center gap-2 px-2.5 py-1.5 cursor-pointer text-xs',
+                      i === highlight ? 'bg-accent-lineage/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]')}>
+                    <span className="font-mono text-ink truncate">{o.key}</span>
+                    <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted truncate max-w-[55%]">
+                      {o.recent ? 'You used it recently'
+                        : `${o.count.toLocaleString()} other${o.count === 1 ? '' : 's'}${o.examples[0] ? ` · e.g. ${o.examples[0]}` : ''}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             )}
-          />
+          </div>
         ) : (
           <span className="flex-1 text-xs text-ink-muted">New {FIELD_TYPE_META[type].label} item</span>
         )}
-        <FieldTypeChip fieldType={type} onChange={changeType} />
+        <FieldTypeChip fieldType={shownType} onChange={changeType} />
       </div>
 
       {isDup && (
-        <p className="text-2xs text-red-500 pl-1">“{candidateKey}” already exists.</p>
+        <p className="flex items-center gap-2 text-2xs text-red-500 pl-1">
+          “{candidateKey}” already exists.
+          {onUpdateExisting && (
+            <button type="button" onClick={updateInstead} className="font-semibold text-accent-lineage hover:underline">
+              Update it instead
+            </button>
+          )}
+        </p>
       )}
 
-      {/* Row 2: value (adapts to the chosen type) */}
+      {/* Row 2: value — typed as text and detected, until a type is picked */}
       <div className="flex items-center gap-2">
         <span className="text-2xs uppercase tracking-wider text-ink-muted w-10 flex-shrink-0">Value</span>
         <div className="flex-1 min-w-0">
-          <ComposerValueField
-            type={type}
-            value={draft}
-            onChange={setDraft}
-            onExpand={() => setModalOpen(true)}
-            onEnter={submit}
-          />
+          {typeChosen ? (
+            <ComposerValueField
+              type={type}
+              value={draft}
+              onChange={setDraft}
+              onExpand={() => setModalOpen(true)}
+              onEnter={() => submit()}
+            />
+          ) : (
+            <input
+              value={text}
+              aria-label="Value"
+              placeholder={picked?.examples[0] ? `e.g. ${picked.examples[0]}` : 'Enter a value…'}
+              onChange={(e) => setText(e.target.value)}
+              onPaste={onPaste}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) submit() }}
+              className="w-full text-sm px-2.5 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 focus:border-accent-lineage/50 outline-none"
+            />
+          )}
         </div>
       </div>
 
+      {/* What it will read as, before it is added. */}
+      {smartish && key.trim() && !isDup && (
+        <div className="flex items-center gap-2 pl-1 text-xs min-w-0" aria-live="polite">
+          <span className={cn('px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide shrink-0', fieldTone('added').chip)}>New</span>
+          <span className="font-mono text-ink truncate">{candidateKey}</span>
+          <span className="text-ink-secondary truncate">{shortValue(value)}</span>
+          {!typeChosen && text.trim() && detected.type !== 'text' && (
+            <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted">read as {FIELD_TYPE_META[detected.type].label.toLowerCase()}</span>
+          )}
+        </div>
+      )}
+
       {/* Row 3: actions */}
       <div className="flex items-center justify-end gap-2 pt-0.5">
+        {smartish && onAddMany && (
+          <span className="mr-auto text-[10.5px] text-ink-muted hidden sm:inline">Paste several “name: value” lines to add them all</span>
+        )}
         <button
           onClick={onCancel}
           className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5 transition-colors"
         >
           Cancel
         </button>
-        <button
-          onClick={submit}
-          disabled={!canSubmit}
-          className={cn(
-            "flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
-            canSubmit
-              ? "bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/25"
-              : "bg-black/[0.03] dark:bg-white/5 text-ink-muted/50 cursor-not-allowed",
-          )}
-          title="Add property"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          Add
-        </button>
+        <HoverTip label="Add property" detail={smartish ? 'Enter adds it · ⌘↵ adds it and starts another' : undefined} shortcut={smartish ? '↵' : undefined} className="inline-flex">
+          <button
+            onClick={() => submit()}
+            disabled={!canSubmit}
+            className={cn(
+              "flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
+              canSubmit
+                ? "bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/25"
+                : "bg-black/[0.03] dark:bg-white/5 text-ink-muted/50 cursor-not-allowed",
+            )}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add
+          </button>
+        </HoverTip>
       </div>
 
       {modalOpen && type === 'text' && (
@@ -1566,6 +1740,8 @@ interface FlatApi {
   renameFolder: (oldPath: string, newPath: string) => void
   deleteFolder: (path: string) => void
   addEntry: (prefix: string, name: string, value: unknown) => void
+  /** Several properties at once — one change, so one Undo. */
+  addEntries: (entries: Array<[string, unknown]>) => void
   existingKeys: () => string[]
   /** Put a key back as it was read (its value, or gone if it is new). */
   revert: (fullKey: string) => void
@@ -1627,7 +1803,7 @@ function GroupedObjectRoot({
   original?: Record<string, unknown>
   published?: Record<string, unknown>
   startAdding?: boolean
-  suggestions?: string[]
+  suggestions?: ReadonlyArray<string | PropertySuggestion>
 }) {
   const inline = useContext(InlineModeContext)
   const [flat, setFlat] = useState(false)
@@ -1665,6 +1841,7 @@ function GroupedObjectRoot({
     renameFolder: (oldPath, newPath) => liveRef.current.onChange(renamePrefix(liveRef.current.value, oldPath, newPath)),
     deleteFolder: (path) => liveRef.current.onChange(deletePrefix(liveRef.current.value, path)),
     addEntry: (prefix, name, val) => liveRef.current.onChange(addEntry(liveRef.current.value, prefix, name, val)),
+    addEntries: (entries) => liveRef.current.onChange({ ...liveRef.current.value, ...Object.fromEntries(entries) }),
     existingKeys: () => Object.keys(liveRef.current.value),
     // Back as it was published (or, without that, as read): its old value, or — for one added — gone.
     revert: (fullKey) => {
@@ -1686,9 +1863,13 @@ function GroupedObjectRoot({
 
   const empty = entries.length === 0
   const readsFormatted = readOnly || inline
+  const peers = useMemo<PropertySuggestion[]>(
+    () => (suggestions ?? []).map((sg) => (typeof sg === 'string' ? { key: sg, count: 0, examples: [] } : sg)),
+    [suggestions],
+  )
   const offered = useMemo(
-    () => (readOnly ? [] : (suggestions ?? []).filter((k) => !Object.prototype.hasOwnProperty.call(value, k)).slice(0, 5)),
-    [suggestions, value, readOnly],
+    () => (readOnly ? [] : peers.map((p) => p.key).filter((k) => !Object.prototype.hasOwnProperty.call(value, k)).slice(0, 5)),
+    [peers, value, readOnly],
   )
 
   return (
@@ -1752,7 +1933,7 @@ function GroupedObjectRoot({
         readOnly ? (
           <div className="text-xs text-ink-muted italic px-2 py-2">No properties</div>
         ) : (
-          <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} suggestions={offered} />
+          <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} suggestions={offered} peers={peers} />
         )
       ) : (
         <div className="space-y-1">
@@ -1768,7 +1949,7 @@ function GroupedObjectRoot({
             <div className="text-xs text-ink-muted px-2 py-3">No properties match “{query.trim()}”.</div>
           )}
           {!readOnly && !q && (
-            <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} suggestions={offered} />
+            <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} suggestions={offered} peers={peers} />
           )}
         </div>
       )}
@@ -1778,22 +1959,27 @@ function GroupedObjectRoot({
   )
 }
 
-function RootAdder({ api, adding, setAdding, suggestions = [] }: {
+function RootAdder({ api, adding, setAdding, suggestions = [], peers = [] }: {
   api: FlatApi
   /** `true`, or the name to start the form with. */
   adding: boolean | string
   setAdding: (b: boolean | string) => void
   /** Names worth adding, one click each. */
   suggestions?: string[]
+  /** What others of this type carry, offered as the name is typed. */
+  peers?: readonly PropertySuggestion[]
 }) {
   return adding ? (
     <PropertyComposer
       key={typeof adding === 'string' ? adding : ''}
       initialKey={typeof adding === 'string' ? adding : undefined}
-      onAdd={(name, val) => { api.addEntry('', name, val); setAdding(false) }}
+      onAdd={(name, val) => api.addEntry('', name, val)}
       onCancel={() => setAdding(false)}
       existingKeys={api.existingKeys()}
       variant="object"
+      suggestions={peers}
+      onAddMany={(entries) => api.addEntries(entries)}
+      onUpdateExisting={(k, v) => api.updateValue(k, v)}
     />
   ) : (
     <div className="flex items-center gap-x-2 gap-y-1.5 flex-wrap mt-1.5 ml-1">

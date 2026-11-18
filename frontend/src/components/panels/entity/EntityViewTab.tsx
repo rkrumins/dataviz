@@ -14,6 +14,8 @@ import { Check, Copy, FileText, History, Info, Link, Tag } from 'lucide-react'
 import { useFeature } from '@/store/features'
 import { useCanvasStore } from '@/store/canvas'
 import { userProperties } from '@/lib/nodeFields'
+import { inferFieldType, type FieldType } from '../property/fieldTypes'
+import type { PropertySuggestion } from '../property/composerModel'
 import { usePersonaMode } from '@/store/persona'
 import { usePreferencesStore, type DrawerSectionId } from '@/store/preferences'
 import type { EntityFieldDefinition } from '@/types/schema'
@@ -36,19 +38,29 @@ type Data = Record<string, unknown>
 /** Entities read before the suggestions give up: enough to see what a type usually carries. */
 const SUGGEST_SCAN = 2000
 
-/** Property names at least two other loaded entities of this type carry, most common first — read
- *  once from the canvas as it is when the drawer opens on the entity, never subscribed to. */
-function suggestedPropertyKeys(nodeId: string, typeId: string): string[] {
+/** What other loaded entities of this type carry, property by property — how many, a couple of
+ *  example values, and the type its values usually are — for those at least two carry, most common
+ *  first. Read once from the canvas as it is when the drawer opens on the entity, never subscribed to. */
+function peerPropertyStats(nodeId: string, typeId: string): PropertySuggestion[] {
   if (!typeId) return []
-  const counts = new Map<string, number>()
+  const stats = new Map<string, { count: number; examples: string[]; types: Map<FieldType, number> }>()
   let scanned = 0
   for (const n of useCanvasStore.getState().nodes) {
     const d = n.data as Data
     if (n.id === nodeId || d.type !== typeId) continue
     if (++scanned > SUGGEST_SCAN) break
-    for (const k of Object.keys(userProperties(d.properties))) counts.set(k, (counts.get(k) ?? 0) + 1)
+    for (const [k, v] of Object.entries(userProperties(d.properties))) {
+      let st = stats.get(k)
+      if (!st) stats.set(k, (st = { count: 0, examples: [], types: new Map() }))
+      st.count++
+      const t = inferFieldType(v)
+      st.types.set(t, (st.types.get(t) ?? 0) + 1)
+      const ex = typeof v === 'string' || typeof v === 'number' ? String(v) : null
+      if (ex && ex.length <= 40 && st.examples.length < 2 && !st.examples.includes(ex)) st.examples.push(ex)
+    }
   }
-  return [...counts].filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k]) => k)
+  return [...stats].filter(([, st]) => st.count >= 2).sort((a, b) => b[1].count - a[1].count).slice(0, 24)
+    .map(([key, st]) => ({ key, count: st.count, examples: st.examples, type: [...st.types].sort((a, b) => b[1] - a[1])[0]?.[0] }))
 }
 
 /** The descriptive node fields, when any has a value. */
@@ -126,7 +138,7 @@ export function EntityViewTab({
   // "Add properties" on an empty entity opens the form in place — for this entity only.
   const [addingFor, setAddingFor] = useState<string | null>(null)
   const adding = addingFor === nodeId
-  const suggestions = useMemo(() => (editsProps ? suggestedPropertyKeys(nodeId, typeId) : []), [editsProps, nodeId, typeId])
+  const suggestions = useMemo(() => (editsProps ? peerPropertyStats(nodeId, typeId) : []), [editsProps, nodeId, typeId])
   // A property removed is still listed (struck through, with Restore while editing).
   const removedSome = [originalProps, publishedProps].some((base) => !!base && Object.keys(base).some((k) => !(k in userProps)))
 
