@@ -5,6 +5,7 @@ import {
   Compass,
   LayoutTemplate,
   Boxes,
+  GitPullRequestArrow,
   DatabaseZap,
   Layers,
   LineChart,
@@ -29,6 +30,8 @@ import { useSidebarSpec } from '@/store/navCatalogue'
 import { useHelpPanelStore } from '@/store/helpPanel'
 import { useOnboardingProgress } from '@/hooks/useOnboardingProgress'
 import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
+import { useFeature } from '@/store/features'
+import { useReviewInboxCounts } from '@/features/versioning/hooks/useVersioning'
 
 // ── Sidebar sizing constants ────────────────────────────────────────
 const MIN_WIDTH = 220
@@ -57,6 +60,7 @@ const NAV_ITEMS_CONFIG: Omit<NavItemConfig, 'badge'>[] = [
   { id: 'explore', label: 'Explore', icon: Compass, description: 'Browse and open saved views', color: { bg: 'bg-violet-500/10', text: 'text-violet-500', border: 'border-violet-500/20', hoverBg: 'group-hover:bg-violet-500/10' } },
   { id: 'templates', label: 'Templates', icon: LayoutTemplate, description: 'Reusable layer layouts for Context Views', color: { bg: 'bg-fuchsia-500/10', text: 'text-fuchsia-500', border: 'border-fuchsia-500/20', hoverBg: 'group-hover:bg-fuchsia-500/10' } },
   { id: 'workspaces', label: 'Workspaces', icon: Boxes, description: 'Manage isolated data environments', color: { bg: 'bg-blue-500/10', text: 'text-blue-500', border: 'border-blue-500/20', hoverBg: 'group-hover:bg-blue-500/10' } },
+  { id: 'reviews', label: 'Reviews', icon: GitPullRequestArrow, description: 'Changes waiting on you in this workspace', color: { bg: 'bg-teal-500/10', text: 'text-teal-500', border: 'border-teal-500/20', hoverBg: 'group-hover:bg-teal-500/10' } },
   { id: 'ingestion', label: 'Ingestion', icon: DatabaseZap, description: 'Connect sources and import data', color: { bg: 'bg-emerald-500/10', text: 'text-emerald-500', border: 'border-emerald-500/20', hoverBg: 'group-hover:bg-emerald-500/10' } },
   { id: 'schema', label: 'Semantic Layers', icon: Layers, description: 'Define and manage ontology models', color: { bg: 'bg-amber-500/10', text: 'text-amber-500', border: 'border-amber-500/20', hoverBg: 'group-hover:bg-amber-500/10' } },
   { id: 'analytics', label: 'Analytics', icon: LineChart, description: 'Growth, engagement, and platform insights', color: { bg: 'bg-cyan-500/10', text: 'text-cyan-500', border: 'border-cyan-500/20', hoverBg: 'group-hover:bg-cyan-500/10' } },
@@ -487,7 +491,7 @@ export function SidebarNav() {
   const sidebarCollapsed = usePreferencesStore((s) => s.sidebarCollapsed)
   const toggleSidebar = usePreferencesStore((s) => s.toggleSidebar)
 
-  const { viewCount } = useWorkspaceContext()
+  const { viewCount, workspace } = useWorkspaceContext()
 
   // ── Resize state ──────────────────────────────────────────────────
   const [width, setWidth] = useState(DEFAULT_WIDTH)
@@ -526,6 +530,7 @@ export function SidebarNav() {
       case 'explore': navigate('/explorer'); break
       case 'templates': navigate('/templates'); break
       case 'workspaces': navigate('/workspaces'); break
+      case 'reviews': if (workspace) navigate(`/workspaces/${workspace.id}/reviews`); break
       case 'ingestion': navigate('/ingestion'); break
       case 'schema': navigate('/schema'); break
       case 'analytics': navigate('/analytics'); break
@@ -547,6 +552,13 @@ export function SidebarNav() {
   const templatesAllowed  = useNavPermission(useSidebarSpec('templates'))
   const templatesOn       = useLayoutTemplatesEnabled()
   const workspacesVisible = useNavPermission(useSidebarSpec('workspaces'))
+  // The open workspace's reviews: a permission, the version-control flag, and a workspace open.
+  const reviewsAllowed    = useNavPermission(useSidebarSpec('reviews'))
+  const versioningOn      = useFeature('versioningEnabled')
+  const reviewsVisible    = reviewsAllowed && versioningOn && !!workspace
+  // Its badge: what waits on the reader — reviews asked of them, and theirs sent back.
+  const reviewCounts      = useReviewInboxCounts(workspace?.id, reviewsVisible).data?.counts
+  const reviewsBadge      = reviewCounts ? reviewCounts.needs_review + reviewCounts.sent_back : undefined
   const ingestionVisible  = useNavPermission(useSidebarSpec('ingestion'))
   const schemaVisible     = useNavPermission(useSidebarSpec('schema'))
   // The one row whose visibility is a permission OR a feature flag —
@@ -559,6 +571,7 @@ export function SidebarNav() {
     explore:    exploreVisible,
     templates:  templatesAllowed && templatesOn,
     workspaces: workspacesVisible,
+    reviews:    reviewsVisible,
     ingestion:  ingestionVisible,
     schema:     schemaVisible,
     analytics:  analyticsVisible,
@@ -575,7 +588,7 @@ export function SidebarNav() {
     .filter((item) => visibility[item.id])
     .map((item) => ({
       ...item,
-      badge: item.id === 'explore' ? viewCount : undefined,
+      badge: item.id === 'explore' ? viewCount : item.id === 'reviews' ? reviewsBadge : undefined,
     }))
 
   return (
