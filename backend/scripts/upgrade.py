@@ -187,6 +187,16 @@ def _orm_metadata():
     return Base.metadata
 
 
+def _type_name(column_type, dialect) -> str:
+    """A column type as Postgres names it. A ``FLOAT`` with no precision is stored as ``DOUBLE
+    PRECISION`` and reflected so: told the same, or every ``Float`` column reads as a mismatch."""
+    try:
+        name = str(column_type.compile(dialect=dialect))
+    except Exception:  # unmappable type — fall back to the class name
+        return column_type.__class__.__name__.upper()
+    return "DOUBLE PRECISION" if name == "FLOAT" else name
+
+
 def _compare_schema(engine) -> tuple[list[str], list[str], list[str]]:
     """Compare the live database against ORM metadata.
 
@@ -208,10 +218,7 @@ def _compare_schema(engine) -> tuple[list[str], list[str], list[str]]:
     dialect = postgresql.dialect()
 
     def _type_of(column_type) -> str:
-        try:
-            return str(column_type.compile(dialect=dialect))
-        except Exception:  # unmappable type — fall back to the class name
-            return column_type.__class__.__name__.upper()
+        return _type_name(column_type, dialect)
 
     metadata = _orm_metadata()
     inspector = sa_inspect(engine)
