@@ -43,6 +43,7 @@ vi.mock('@/hooks/useRelationshipsBeneath', () => ({
 }))
 vi.mock('../useDrawerHistoryScope', () => ({ useDrawerHistoryScope: () => h.scope }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+  useChangeEntry: () => ({ data: undefined }),
   useEntitySummary: (ws?: string, g?: string | null, id?: string | null) => ({
     data: ws && g && id ? h.summary : undefined,
     isLoading: false,

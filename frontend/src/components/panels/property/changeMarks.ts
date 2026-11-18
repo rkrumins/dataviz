@@ -1,19 +1,35 @@
 /**
- * What each property says about its edit: new since the entity was read, changed from what was
- * read (and what it was), or removed. Compared key by key against the properties as first read —
- * the same base the save's patch is judged against — so a value put back reads as unchanged.
+ * What each property says about how it changed: new, changed (and what it was), or removed — and
+ * whether that change is saved in the draft yet or still only staged.
+ *
+ * Told against what is published (`published`: main where the draft began) when it is known, so a
+ * change saved in the draft keeps saying so; else against the properties as first read (`original`)
+ * — the same base the save's patch is judged against. A change differs from `original` when it is
+ * not saved yet (`unsaved`). A value put back reads as unchanged.
  */
 
 export type ChangeMark = 'new' | 'changed'
 
-export interface PropertyMarks {
-  /** Keys whose value differs from the one read, or that were not there. */
-  marks: Map<string, { mark: ChangeMark; was?: unknown }>
-  /** Keys that were read and are gone, with the value they had. */
-  removed: [string, unknown][]
+export interface MarkInfo {
+  mark: ChangeMark
+  /** What it was (published, or as read), for a changed one. */
+  was?: unknown
+  /** Staged, not saved in the draft yet. */
+  unsaved: boolean
 }
 
-const EMPTY: PropertyMarks = { marks: new Map(), removed: [] }
+export interface PropertyMarks {
+  /** Keys whose value differs from the base, or that were not there. */
+  marks: Map<string, MarkInfo>
+  /** Keys the base had that are gone, with the value they had. */
+  removed: [string, unknown][]
+  /** Of `removed`, those an edit not saved yet removed. */
+  unsavedRemoved: ReadonlySet<string>
+}
+
+const EMPTY: PropertyMarks = { marks: new Map(), removed: [], unsavedRemoved: new Set() }
+
+const has = (o: Record<string, unknown>, k: string) => Object.prototype.hasOwnProperty.call(o, k)
 
 const same = (a: unknown, b: unknown) => {
   if (a === b) return true
@@ -21,15 +37,25 @@ const same = (a: unknown, b: unknown) => {
   try { return JSON.stringify(a) === JSON.stringify(b) } catch { return false }
 }
 
-export function propertyMarks(value: Record<string, unknown>, original: Record<string, unknown> | undefined): PropertyMarks {
-  if (!original) return EMPTY
+export function propertyMarks(
+  value: Record<string, unknown>,
+  original: Record<string, unknown> | undefined,
+  published?: Record<string, unknown>,
+): PropertyMarks {
+  const base = published ?? original
+  if (!base) return EMPTY
+  // Not saved yet: it differs from the properties as read. Without a published base, every mark is.
+  const unsavedKey = (k: string) => (published === undefined ? true
+    : original === undefined ? false
+      : has(value, k) ? !(has(original, k) && same(value[k], original[k])) : has(original, k))
   const marks: PropertyMarks['marks'] = new Map()
   for (const [k, v] of Object.entries(value)) {
-    if (!Object.prototype.hasOwnProperty.call(original, k)) marks.set(k, { mark: 'new' })
-    else if (!same(v, original[k])) marks.set(k, { mark: 'changed', was: original[k] })
+    if (!has(base, k)) marks.set(k, { mark: 'new', unsaved: unsavedKey(k) })
+    else if (!same(v, base[k])) marks.set(k, { mark: 'changed', was: base[k], unsaved: unsavedKey(k) })
   }
-  const removed = Object.entries(original).filter(([k]) => !Object.prototype.hasOwnProperty.call(value, k))
-  return marks.size === 0 && removed.length === 0 ? EMPTY : { marks, removed }
+  const removed = Object.entries(base).filter(([k]) => !has(value, k))
+  if (marks.size === 0 && removed.length === 0) return EMPTY
+  return { marks, removed, unsavedRemoved: new Set(removed.filter(([k]) => unsavedKey(k)).map(([k]) => k)) }
 }
 
 /** A value as one short line, for "Was: …". */

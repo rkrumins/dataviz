@@ -77,7 +77,7 @@ function DetailsList({ form }: { form: Data }) {
 
 export function EntityViewTab({
   nodeId, form, original, urn, childCount, tagColors, userProps, copiedUrn, onCopyUrn, canEdit,
-  originalProps, onCommitProperties,
+  originalProps, publishedProps, digest, onCommitProperties,
   onFocusNode, onLocateMany, onRevealPath, history, typeId = '', typeName = '', fields, identity,
   customizing = false, onDoneCustomizing,
 }: {
@@ -96,6 +96,10 @@ export function EntityViewTab({
   canEdit: boolean
   /** The properties as first read — what each row's edit is told against. */
   originalProps?: Data
+  /** In a draft, the properties as published: what the draft changed, saved or not yet. */
+  publishedProps?: Data
+  /** What the draft has done to it, at the top. */
+  digest?: ReactNode
   /** Stage the properties as edited. */
   onCommitProperties?: (bag: Data) => void
   onFocusNode?: (nodeId: string) => void | Promise<unknown>
@@ -123,8 +127,8 @@ export function EntityViewTab({
   const [addingFor, setAddingFor] = useState<string | null>(null)
   const adding = addingFor === nodeId
   const suggestions = useMemo(() => (editsProps ? suggestedPropertyKeys(nodeId, typeId) : []), [editsProps, nodeId, typeId])
-  // A property removed since it was read is still listed (struck through, with Restore).
-  const removedSome = !!originalProps && Object.keys(originalProps).some((k) => !(k in userProps))
+  // A property removed is still listed (struck through, with Restore while editing).
+  const removedSome = [originalProps, publishedProps].some((base) => !!base && Object.keys(base).some((k) => !(k in userProps)))
 
   const render: Record<DrawerSectionId, () => ReactNode> = {
     overview: () => (
@@ -143,15 +147,15 @@ export function EntityViewTab({
     details: () => <DetailsList form={form} />,
     relationship: () => <PlacementSummary nodeId={nodeId} childCount={childCount} onFocusNode={onFocusNode} />,
     properties: () => (
-      <Section title="Properties" icon={FileText} flush={hasProps || (editsProps && (adding || removedSome))}>
-        {hasProps || (editsProps && (adding || removedSome)) ? (
+      <Section title="Properties" icon={FileText} flush={hasProps || removedSome || (editsProps && adding)}>
+        {hasProps || removedSome || (editsProps && adding) ? (
           <PanelErrorBoundary resetKeys={[urn]}>
             {editsProps ? (
               <PropertyEditor key={nodeId} value={userProps} onChange={(next) => onCommitProperties!(next as Data)}
-                inline original={originalProps} startAdding={adding && !hasProps} suggestions={suggestions}
+                inline original={originalProps} published={publishedProps} startAdding={adding && !hasProps} suggestions={suggestions}
                 searchable groupByPath bare />
             ) : (
-              <PropertyEditor value={userProps} onChange={() => {}} readOnly searchable groupByPath bare />
+              <PropertyEditor value={userProps} onChange={() => {}} readOnly published={publishedProps} searchable groupByPath bare />
             )}
           </PanelErrorBoundary>
         ) : (
@@ -189,6 +193,7 @@ export function EntityViewTab({
         <CustomizeDetails typeId={typeId} typeName={typeName || typeId || 'entity'} fields={fields}
           propertyKeys={featurableKeys(fields, form, userProps)} onDone={onDoneCustomizing} />
       )}
+      {digest}
       <div className="divide-y divide-glass-border">
         {sections.map((id) => <Fragment key={id}>{render[id]()}</Fragment>)}
       </div>

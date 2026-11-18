@@ -43,7 +43,8 @@ import {
 import { cn } from '@/lib/utils'
 import { HighlightedText } from '@/components/ui/HighlightedText'
 import { HoverTip } from '@/components/ui/HoverTip'
-import { fieldTone } from '@/features/versioning/model/changeTone'
+import { fieldTone, STATE_DOT } from '@/features/versioning/model/changeTone'
+import { FieldCountChips } from '@/features/versioning/components/ChangeSummary'
 import {
   type FieldType,
   FIELD_TYPE_META,
@@ -106,6 +107,9 @@ export interface PropertyEditorProps {
   inline?: boolean
   /** The properties as first read: each row then says New / Edited / Removed. Root objects only. */
   original?: Record<string, unknown>
+  /** The properties as published (main where the draft began): rows then say what the draft
+   *  changed, saved or not yet — read-only too — and Revert puts a property back as published. */
+  published?: Record<string, unknown>
   /** Open the add-property form straight away (an empty entity's "Add properties"). */
   startAdding?: boolean
   /** Property names worth adding, offered as one-click starts next to "Add property". */
@@ -149,13 +153,15 @@ export function PropertyEditor({
   groupByPath,
   inline,
   original,
+  published,
   startAdding,
   suggestions,
 }: PropertyEditorProps) {
   return (
     <InlineModeContext.Provider value={!!inline && !readOnly}>
       <PropertyEditorRoot value={value} onChange={onChange} readOnlyKeys={readOnlyKeys} bare={bare} readOnly={readOnly}
-        searchable={searchable} groupByPath={groupByPath} original={original} startAdding={startAdding} suggestions={suggestions} />
+        searchable={searchable} groupByPath={groupByPath} original={original} published={published}
+        startAdding={startAdding} suggestions={suggestions} />
     </InlineModeContext.Provider>
   )
 }
@@ -169,6 +175,7 @@ function PropertyEditorRoot({
   searchable,
   groupByPath,
   original,
+  published,
   startAdding,
   suggestions,
 }: Omit<PropertyEditorProps, 'inline'>) {
@@ -189,6 +196,7 @@ function PropertyEditorRoot({
         readOnly={readOnly}
         searchable={searchable}
         original={original}
+        published={published}
         startAdding={startAdding}
         suggestions={suggestions}
       />
@@ -364,6 +372,7 @@ function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, sear
             onDelete={() => deleteKey(key)}
             mark={marks?.get(key)?.mark}
             was={marks?.get(key)?.was}
+            unsaved={marks?.get(key)?.unsaved}
             onRevert={onRevert && marks?.has(key) ? () => onRevert(key) : undefined}
           />
         ))}
@@ -552,6 +561,8 @@ interface PropertyRowProps {
   mark?: ChangeMark
   /** The value as read, for an edited row. */
   was?: unknown
+  /** The change is staged, not saved in the draft yet. */
+  unsaved?: boolean
   /** Put the row back as it was read. */
   onRevert?: () => void
 }
@@ -575,6 +586,7 @@ const PropertyRow = memo(function PropertyRow({
   onDelete,
   mark,
   was,
+  unsaved = true,
   onRevert,
 }: PropertyRowProps) {
   const inline = useContext(InlineModeContext)
@@ -608,7 +620,9 @@ const PropertyRow = memo(function PropertyRow({
       <div className={cn(
         "relative flex items-start gap-1.5 py-1.5 px-1 rounded-lg",
         "hover:bg-black/[0.025] dark:hover:bg-white/[0.03] transition-colors",
-        mark && cn("before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full", MARK_STYLE[mark].bar),
+        mark && cn("before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full", MARK_STYLE[mark].bar,
+          // Saved in the draft: the quieter, solid form; staged: full strength.
+          !unsaved && 'before:opacity-60'),
       )}>
         {/* Expand / drag handle */}
         <div className="flex items-center h-6 w-4 flex-shrink-0">
@@ -665,12 +679,15 @@ const PropertyRow = memo(function PropertyRow({
           )}
           {mark && (
             <HoverTip
-              label={mark === 'new' ? 'Added since it was read' : `Was: ${shortValue(was)}`}
-              detail="Staged — saved with Review & Save"
+              label={mark === 'new' ? 'Added' : `Was: ${shortValue(was)}`}
+              detail={unsaved ? 'Not saved yet — saved with Review & Save' : 'Saved in this draft — published when it merges'}
               className="inline-flex flex-shrink-0 ml-1.5"
             >
-              <span className={cn('px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide', MARK_STYLE[mark].badge)}>
+              <span className={cn('inline-flex items-center gap-1 px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide', MARK_STYLE[mark].badge)}>
+                {/* Hollow and dashed: not saved yet; solid: saved in the draft. */}
+                <span aria-hidden className={cn('w-1.5 h-1.5 rounded-full', STATE_DOT[unsaved ? 'unsaved' : 'saved'])} />
                 {MARK_STYLE[mark].label}
+                <span className="sr-only">{unsaved ? ', not saved yet' : ', saved in this draft'}</span>
               </span>
             </HoverTip>
           )}
@@ -692,6 +709,14 @@ const PropertyRow = memo(function PropertyRow({
               query={query}
               fieldLabel={rowKey}
             />
+          )}
+          {mark === 'changed' && (
+            // What it was, under what it is: one glance says the change.
+            <HoverTip label={`Was: ${shortValue(was)}`} className="block min-w-0">
+              <span className="block mt-0.5 text-[10.5px] text-ink-muted truncate">
+                was <span className="line-through decoration-rose-400/70">{shortValue(was)}</span>
+              </span>
+            </HoverTip>
           )}
         </div>
 
@@ -1572,6 +1597,17 @@ function pruneTree(
   }
 }
 
+/** The tree pruned to the keys in `keep` (and the folders on the way to them). */
+function keepKeys(folders: TreeNode[], leaves: Leaf[], keep: ReadonlyMap<string, unknown>): { folders: TreeNode[]; leaves: Leaf[] } {
+  const pruneNode = (node: TreeNode): TreeNode | null => {
+    const subFolders = node.folders.map(pruneNode).filter(Boolean) as TreeNode[]
+    const subLeaves = node.leaves.filter((l) => keep.has(l.fullKey))
+    const own = node.own && keep.has(node.own.fullKey) ? node.own : undefined
+    return subFolders.length || subLeaves.length || own ? { ...node, folders: subFolders, leaves: subLeaves, own } : null
+  }
+  return { folders: folders.map(pruneNode).filter(Boolean) as TreeNode[], leaves: leaves.filter((l) => keep.has(l.fullKey)) }
+}
+
 function GroupedObjectRoot({
   value,
   onChange,
@@ -1579,6 +1615,7 @@ function GroupedObjectRoot({
   readOnly,
   searchable,
   original,
+  published,
   startAdding = false,
   suggestions,
 }: {
@@ -1588,6 +1625,7 @@ function GroupedObjectRoot({
   readOnly?: boolean
   searchable?: boolean
   original?: Record<string, unknown>
+  published?: Record<string, unknown>
   startAdding?: boolean
   suggestions?: string[]
 }) {
@@ -1603,12 +1641,22 @@ function GroupedObjectRoot({
   const tree = useMemo(() => buildPathTree(entries), [value])
   // What each property's edit did — computed once per edit, handed to rows as plain values so
   // only the rows whose mark changed re-render.
-  const { marks, removed } = useMemo(() => propertyMarks(value, readOnly ? undefined : original), [value, original, readOnly])
+  // Read-only, only what the draft changed is said (nothing is being edited here).
+  const { marks, removed, unsavedRemoved } = useMemo(
+    () => propertyMarks(value, readOnly ? undefined : original, published), [value, original, published, readOnly])
+  // Only what changed: the changed, new and removed properties, nothing else.
+  const [changesOnly, setChangesOnly] = useState(false)
+  const changeCounts = useMemo(() => {
+    let changed = 0, added = 0
+    for (const m of marks.values()) { if (m.mark === 'new') added++; else changed++ }
+    return { changed, added, removed: removed.length }
+  }, [marks, removed])
+  const anyChange = marks.size + removed.length > 0
 
   // Keep `api` identity stable across edits (it reads the latest value/onChange
   // through a ref) so memoized rows don't all re-render when one value changes.
-  const liveRef = useRef({ value, onChange, original })
-  liveRef.current = { value, onChange, original }
+  const liveRef = useRef({ value, onChange, original: published ?? original })
+  liveRef.current = { value, onChange, original: published ?? original }
   const api: FlatApi = useMemo(() => ({
     updateValue: (fullKey, v) => liveRef.current.onChange(setKeyValue(liveRef.current.value, fullKey, v)),
     renameLeaf: (fullKey, parentPath, newSegment) =>
@@ -1618,7 +1666,7 @@ function GroupedObjectRoot({
     deleteFolder: (path) => liveRef.current.onChange(deletePrefix(liveRef.current.value, path)),
     addEntry: (prefix, name, val) => liveRef.current.onChange(addEntry(liveRef.current.value, prefix, name, val)),
     existingKeys: () => Object.keys(liveRef.current.value),
-    // Back as it was read: its old value, or — for one added since — gone.
+    // Back as it was published (or, without that, as read): its old value, or — for one added — gone.
     revert: (fullKey) => {
       const { value: v, original: o } = liveRef.current
       if (o && Object.prototype.hasOwnProperty.call(o, fullKey)) liveRef.current.onChange(setKeyValue(v, fullKey, o[fullKey]))
@@ -1627,7 +1675,10 @@ function GroupedObjectRoot({
   }), [])
 
   const q = query.trim().toLowerCase()
-  const visible = useMemo(() => (q ? pruneTree(tree.folders, tree.leaves, q) : tree), [tree, q])
+  const visible = useMemo(() => {
+    const shown = changesOnly && anyChange ? keepKeys(tree.folders, tree.leaves, marks) : tree
+    return q ? pruneTree(shown.folders, shown.leaves, q) : shown
+  }, [tree, q, changesOnly, anyChange, marks])
   const shownRemoved = useMemo(
     () => (q ? removed.filter(([k, v]) => k.toLowerCase().includes(q) || searchableText(v).includes(q)) : removed),
     [removed, q],
@@ -1670,6 +1721,16 @@ function GroupedObjectRoot({
           <ModalTab active={!flat} onClick={() => setFlat(false)} label="Tree" />
           <ModalTab active={flat} onClick={() => setFlat(true)} label="Flat" />
         </div>
+        {anyChange && (
+          <HoverTip label={changesOnly ? 'Show every property' : 'Show only the properties that changed'} className="inline-flex">
+            <button type="button" aria-pressed={changesOnly} onClick={() => setChangesOnly((v) => !v)}
+              className={cn('inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[11px] font-semibold flex-shrink-0 transition-colors',
+                changesOnly ? 'bg-accent-lineage/10 text-accent-lineage ring-1 ring-accent-lineage/30' : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5')}>
+              Changes only
+              <FieldCountChips summary={changeCounts} />
+            </button>
+          </HoverTip>
+        )}
       </div>
 
       {flat ? (
@@ -1685,7 +1746,7 @@ function GroupedObjectRoot({
             marks={marks}
             onRevert={api.revert}
           />
-          <RemovedRows rows={shownRemoved} onRestore={api.revert} />
+          <RemovedRows rows={shownRemoved} onRestore={readOnly ? undefined : api.revert} unsaved={unsavedRemoved} />
         </>
       ) : empty && shownRemoved.length === 0 ? (
         readOnly ? (
@@ -1700,9 +1761,9 @@ function GroupedObjectRoot({
           ))}
           {visible.leaves.map((leaf) => (
             <LeafRow key={leaf.fullKey} leaf={leaf} parentPath="" depth={0} readOnly={readOnly} query={q} api={api}
-              mark={marks.get(leaf.fullKey)?.mark} was={marks.get(leaf.fullKey)?.was} />
+              mark={marks.get(leaf.fullKey)?.mark} was={marks.get(leaf.fullKey)?.was} unsaved={marks.get(leaf.fullKey)?.unsaved} />
           ))}
-          <RemovedRows rows={shownRemoved} onRestore={api.revert} />
+          <RemovedRows rows={shownRemoved} onRestore={readOnly ? undefined : api.revert} unsaved={unsavedRemoved} />
           {q && visible.folders.length === 0 && visible.leaves.length === 0 && shownRemoved.length === 0 && (
             <div className="text-xs text-ink-muted px-2 py-3">No properties match “{query.trim()}”.</div>
           )}
@@ -1764,23 +1825,33 @@ function RootAdder({ api, adding, setAdding, suggestions = [] }: {
   )
 }
 
-/** Properties read but removed since — struck through, each with Restore. */
-function RemovedRows({ rows, onRestore }: { rows: [string, unknown][]; onRestore: (key: string) => void }) {
+/** Properties removed — struck through, each with Restore while editing; a dashed dot when the
+ *  removal is not saved yet, a solid one when it is saved in the draft. */
+function RemovedRows({ rows, onRestore, unsaved }: {
+  rows: [string, unknown][]
+  onRestore?: (key: string) => void
+  unsaved?: ReadonlySet<string>
+}) {
   if (rows.length === 0) return null
   return (
     <div className="space-y-1 pt-1">
       {rows.map(([key, was]) => (
-        <div key={key} className="relative flex items-center gap-1.5 py-1.5 pl-5 pr-1 rounded-lg bg-rose-500/[0.04] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full before:bg-rose-500">
+        <div key={key} className={cn('relative flex items-center gap-1.5 py-1.5 pl-5 pr-1 rounded-lg bg-rose-500/[0.04] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full before:bg-rose-500',
+          unsaved && !unsaved.has(key) && 'before:opacity-60')}>
           <span className="basis-[132px] flex-shrink-0 min-w-0 text-xs font-mono text-ink-muted line-through truncate">{key}</span>
-          <span className="px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide bg-rose-500/12 text-rose-700 dark:text-rose-300 flex-shrink-0">Removed</span>
+          <span className="inline-flex items-center gap-1 px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide bg-rose-500/12 text-rose-700 dark:text-rose-300 flex-shrink-0">
+            <span aria-hidden className={cn('w-1.5 h-1.5 rounded-full', STATE_DOT[!unsaved || unsaved.has(key) ? 'unsaved' : 'saved'])} />
+            Removed
+            <span className="sr-only">{!unsaved || unsaved.has(key) ? ', not saved yet' : ', saved in this draft'}</span>
+          </span>
           <span className="flex-1 min-w-0 text-xs text-ink-muted line-through truncate">{shortValue(was)}</span>
-          <button
+          {onRestore && <button
             onClick={() => onRestore(key)}
             className="flex items-center gap-1 px-2 h-6 rounded-md text-2xs font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 flex-shrink-0"
           >
             <Undo2 className="w-3 h-3" aria-hidden />
             Restore
-          </button>
+          </button>}
         </div>
       ))}
     </div>
@@ -1800,6 +1871,7 @@ const LeafRow = memo(function LeafRow({
   api,
   mark,
   was,
+  unsaved,
 }: {
   leaf: Leaf
   parentPath: string
@@ -1809,6 +1881,7 @@ const LeafRow = memo(function LeafRow({
   api: FlatApi
   mark?: ChangeMark
   was?: unknown
+  unsaved?: boolean
 }) {
   return (
     <PropertyRow
@@ -1822,7 +1895,8 @@ const LeafRow = memo(function LeafRow({
       onDelete={() => api.deleteKey(leaf.fullKey)}
       mark={mark}
       was={was}
-      onRevert={mark ? () => api.revert(leaf.fullKey) : undefined}
+      unsaved={unsaved}
+      onRevert={mark && !readOnly ? () => api.revert(leaf.fullKey) : undefined}
     />
   )
 }, (prev, next) =>
@@ -1836,7 +1910,8 @@ const LeafRow = memo(function LeafRow({
   prev.query === next.query &&
   prev.api === next.api &&
   prev.mark === next.mark &&
-  prev.was === next.was)
+  prev.was === next.was &&
+  prev.unsaved === next.unsaved)
 
 // ============================================
 // FolderGroup — expandable folder header + recursive children
@@ -1988,14 +2063,14 @@ function FolderGroup({
         <div className="ml-5 pl-3 border-l border-glass-border/40 space-y-1">
           {node.own && (
             <LeafRow leaf={node.own} parentPath={parentPath} depth={depth + 1} readOnly={readOnly} query={query} api={api}
-              mark={marks?.get(node.own.fullKey)?.mark} was={marks?.get(node.own.fullKey)?.was} />
+              mark={marks?.get(node.own.fullKey)?.mark} was={marks?.get(node.own.fullKey)?.was} unsaved={marks?.get(node.own.fullKey)?.unsaved} />
           )}
           {node.folders.map((child) => (
             <FolderGroup key={child.path} node={child} depth={depth + 1} readOnly={readOnly} query={query} forceExpand={forceExpand} api={api} marks={marks} />
           ))}
           {node.leaves.map((leaf) => (
             <LeafRow key={leaf.fullKey} leaf={leaf} parentPath={node.path} depth={depth + 1} readOnly={readOnly} query={query} api={api}
-              mark={marks?.get(leaf.fullKey)?.mark} was={marks?.get(leaf.fullKey)?.was} />
+              mark={marks?.get(leaf.fullKey)?.mark} was={marks?.get(leaf.fullKey)?.was} unsaved={marks?.get(leaf.fullKey)?.unsaved} />
           ))}
           {!readOnly && (
             adding ? (

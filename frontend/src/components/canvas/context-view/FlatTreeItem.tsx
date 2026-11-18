@@ -15,6 +15,7 @@ import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { lastStagedFor, stagedIndexOf } from '@/store/stagedIndex'
 import { useEntityDecoration } from '@/features/versioning/canvas/useDiffDecoration'
+import { ChangePeek } from '../ChangePeek'
 import { useBranchStore } from '@/store/branchStore'
 import type { ChangeSet } from '@/features/versioning/model/changeModel'
 import { usePreferencesStore } from '@/store/preferences'
@@ -866,7 +867,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // `*:mt-0` drops the gaps the stacked layout puts between them.
           minimal ? "items-center gap-1.5 *:mt-0" : "flex-col justify-center",
         )}
-        title={stagedSummary ?? displayName}
+        // A changed row's name opens what changed (ChangePeek); the rest say their name, or what is inside.
+        title={directDeco ? undefined : (stagedSummary ?? displayName)}
       >
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
@@ -886,7 +888,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // its one line and truncates instead.
           minimal ? "truncate" : "line-clamp-3 break-words"
         )}>
-          {displayName}
+          {directDeco
+            ? <ChangePeek entityId={node.urn ?? node.id} deco={directDeco} staged={directChange}>{displayName}</ChangePeek>
+            : displayName}
           {lineEnd && !minimal && <LineEndTag end={lineEnd} className="ml-1.5 align-[1px]" />}
         </span>
         {/* A truncated name's ellipsis would take a tag set inside it, so
