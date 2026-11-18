@@ -68,7 +68,7 @@ describe('a review being merged', () => {
   it('shows its changes and offers no Dismiss', () => {
     render(<PrListRow wsId="ws1" pr={mergingPr} onOpen={() => {}} />)
     expect(screen.getByText('3 changes')).toBeInTheDocument()
-    expect(screen.queryByTitle(/Dismiss/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Dismiss/ })).not.toBeInTheDocument()
   })
 
   it('counts a draft’s review from its change list, not by merging it', () => {
