@@ -19,10 +19,13 @@ export function ContinueAddingPill({ added, insideName, onContinue, onAddInside,
   onAddInside?: () => void
   onDone: () => void
 }) {
+  // Centred by the wrapper: framer-motion writes its own `transform` for the rise, which would
+  // override a translate on the same element.
   return createPortal(
+    <div className="fixed bottom-6 inset-x-0 z-40 flex justify-center px-4 pointer-events-none">
     <motion.div role="group" aria-label="Adding entities"
       initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
-      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1 p-1 rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl">
+      className="pointer-events-auto flex items-center gap-1 p-1 rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl whitespace-nowrap max-w-full">
       <button type="button" onClick={onContinue}
         className="inline-flex items-center gap-1.5 h-9 pl-3 pr-3.5 rounded-xl text-[13px] font-semibold text-white bg-green-600 hover:bg-green-700 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500/50">
         <Plus className="w-4 h-4" aria-hidden />Continue adding
@@ -40,7 +43,8 @@ export function ContinueAddingPill({ added, insideName, onContinue, onAddInside,
           <X className="w-4 h-4" />
         </button>
       </HoverTip>
-    </motion.div>,
+    </motion.div>
+    </div>,
     document.body,
   )
 }
