@@ -111,7 +111,7 @@ function itemsOf(rows: ChangeListRow[], counts: Map<string, number>): Item[] {
   return out
 }
 
-function rowLabel(row: ChangeListRow): string {
+export function rowLabel(row: ChangeListRow): string {
   if (row.kind === 'node') return row.displayName || row.urn || row.entityId
   return `${row.sourceName || row.sourceEntityId || '…'} → ${row.targetName || row.targetEntityId || '…'}`
 }

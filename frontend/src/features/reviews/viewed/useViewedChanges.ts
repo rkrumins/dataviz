@@ -3,12 +3,15 @@
  * worked through and where they got to is kept. Each tick holds what the change said when it was
  * viewed (its status and what it changed): a change that moved on since reads "changed since you
  * viewed it", unticked. Kept in this browser, per review — a convenience, never a record; storage
- * that is unavailable just means nothing is remembered.
+ * that is unavailable just means nothing is remembered. Every use of it on a page (a review page's
+ * list and its change pane) stays in step.
  */
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { ChangeListRow } from '@/services/versioningApiService'
 
 const keyOf = (prId: string) => `nexus-viewed:${prId}`
+/** Said on the page when a review's ticks change, so every use of them reads the same. */
+const CHANGED = 'nexus-viewed-changed'
 
 /** What a change said, in short: a tick holds while it still says the same. */
 export function fingerprint(row: ChangeListRow): string {
@@ -38,6 +41,15 @@ export function useViewedChanges(prId: string | undefined) {
     setSeen(next)
     if (!prId) return
     try { window.localStorage.setItem(keyOf(prId), JSON.stringify(next)) } catch { /* not remembered */ }
+    window.dispatchEvent(new CustomEvent(CHANGED, { detail: { prId, seen: next } }))
+  }, [prId])
+  useEffect(() => {
+    const sync = (e: Event) => {
+      const d = (e as CustomEvent<{ prId: string; seen: Record<string, string> }>).detail
+      if (d.prId === prId) setSeen(d.seen)
+    }
+    window.addEventListener(CHANGED, sync)
+    return () => window.removeEventListener(CHANGED, sync)
   }, [prId])
 
   const isViewed = useCallback((row: ChangeListRow) => seen[row.entityId] === fingerprint(row), [seen])
