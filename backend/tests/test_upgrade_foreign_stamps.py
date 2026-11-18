@@ -30,18 +30,21 @@ def _script():
     return ScriptDirectory.from_config(_alembic_config())
 
 
-#: Revisions another line of work (PR #670) wrote on top of ``20261113_0900_gv_import_mentions``.
-OTHER_LINE = ["20261113_1000_gv_ps_served_fill", "20261113_1100_build_policy", "20261113_1200_gv_ps_window_rows",
-              "20261113_1300_gv_ps_read_mode", "20261113_1400_gv_ps_candidate", "20261116_1000_setting_values",
-              "20261116_1100_settings_import", "20261116_1200_graph_watch"]
+#: PR #670's line, off ``20261113_0900_gv_import_mentions``: its first five revisions are main's
+#: too (``20261119_1400_merge_ps_build`` joins them), so a database #670's build moved to one of
+#: them upgrades with no rewind; its later ones are not.
+ADOPTED = ["20261113_1000_gv_ps_served_fill", "20261113_1100_build_policy", "20261113_1200_gv_ps_window_rows",
+           "20261113_1300_gv_ps_read_mode", "20261113_1400_gv_ps_candidate"]
+OTHER_LINE = ["20261116_1000_setting_values", "20261116_1100_settings_import", "20261116_1200_graph_watch"]
 
 
 def test_where_the_chains_parted():
     script = _script()
     head = script.get_current_head()
+    assert upgrade._foreign(script, [*ADOPTED, head]) == []
     for rev in OTHER_LINE:
         assert upgrade._foreign(script, [rev, head]) == [rev]
-        assert upgrade._parting_point(script, [rev]) == "20261113_0900_gv_import_mentions", rev
+        assert upgrade._parting_point(script, [rev]) == "20261113_1400_gv_ps_candidate", rev
     # A newer release's: nothing of ours left to run.
     assert upgrade._parting_point(script, ["29991231_2359_from_the_future"]) == head
     # Older than everything of ours: nowhere to rewind to.
@@ -95,17 +98,17 @@ def test_another_branchs_database_upgrades_with_this_build(scratch_db):
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-2000:]
     # Another branch moved it on: its stamp, and a column of its own.
-    _sql(scratch_db, "ALTER TABLE workspaces ADD COLUMN gv_build_policy text")
-    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261113_1400_gv_ps_candidate'")
+    _sql(scratch_db, "ALTER TABLE workspaces ADD COLUMN other_line_column text")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261116_1200_graph_watch'")
     assert _job(scratch_db, "check").returncode == 1
 
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-3000:]
-    assert "Rewinding to 20261113_0900_gv_import_mentions" in out.stderr, out.stderr[-3000:]
+    assert "Rewinding to 20261113_1400_gv_ps_candidate" in out.stderr, out.stderr[-3000:]
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
     assert _job(scratch_db, "check").returncode == 0
     assert _sql(scratch_db, "SELECT count(*) FROM information_schema.columns "
-                            "WHERE table_name = 'workspaces' AND column_name = 'gv_build_policy'") == [(1,)]
+                            "WHERE table_name = 'workspaces' AND column_name = 'other_line_column'") == [(1,)]
 
 
 @E2E
