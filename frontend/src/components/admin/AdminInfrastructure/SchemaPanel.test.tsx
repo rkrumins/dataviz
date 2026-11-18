@@ -17,7 +17,8 @@ vi.mock('@/services/systemStatusService', async () => {
     return { ...actual, systemStatusService: { ...actual.systemStatusService, getSchema } }
 })
 
-import { SchemaPanel, schemaHeadline } from './SchemaPanel'
+import { SchemaPanel } from './SchemaPanel'
+import { schemaHeadline } from './schemaMeta'
 import type { SchemaStatus } from '@/services/systemStatusService'
 
 const HEAD = '20261119_1400_merge_ps_build'
@@ -48,7 +49,10 @@ describe('SchemaPanel', () => {
         expect(screen.getByText('main at abc123')).toBeInTheDocument()
         expect(screen.getByText(/nothing to run/)).toBeInTheDocument()
         expect(screen.getByText('What upgrades have done')).toBeInTheDocument()
-        expect(screen.getByText('stamped')).toBeInTheDocument()
+        expect(screen.getByText('Stamped')).toBeInTheDocument()
+        // A revision reads as a name and when it was written, its id kept beside it.
+        expect(screen.getAllByText('merge ps build').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('written 19 Nov 2026, 14:00').length).toBeGreaterThan(0)
     })
 
     it('shows where another build’s stamp would be placed and the migrations an upgrade would run', async () => {
@@ -89,7 +93,7 @@ describe('SchemaPanel', () => {
     })
 
     it('headlines warnings even when up to date', () => {
-        expect(schemaHeadline(status({}, { warnings: ['w'] }))).toEqual({ label: 'Up to date, with warnings', tone: 'warn' })
+        expect(schemaHeadline(status({}, { warnings: ['w'] }))).toMatchObject({ label: 'Up to date, with warnings', tone: 'warn' })
         expect(schemaHeadline(status({}, { verdict: 'fresh_install' })).label).toBe('Not installed')
     })
 })
