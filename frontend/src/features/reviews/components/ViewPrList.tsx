@@ -6,6 +6,7 @@
 import { useMemo, useState } from 'react'
 import { Loader2, GitPullRequestArrow, Layers } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { PullRequest } from '@/services/versioningApiService'
 import { useViewPullRequests, useDataSourcePullRequests } from '../../versioning/hooks/useVersioning'
 import { isLivePr } from '../../versioning/model/prStatus'
@@ -45,14 +46,15 @@ export function ViewPrList({
           >
             <GitPullRequestArrow className="w-3.5 h-3.5 inline mr-1" /> From this view
           </button>
-          <button
-            onClick={() => setWide(true)}
-            disabled={!dataSourceId}
-            className={cn('px-2.5 py-1 font-medium border-l border-glass-border disabled:opacity-50', wide ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay')}
-            title={dataSourceId ? 'All PRs on this data source' : 'No data source for this view'}
-          >
-            <Layers className="w-3.5 h-3.5 inline mr-1" /> Whole data source
-          </button>
+          <HoverTip label={dataSourceId ? 'List every review on this data source' : 'This view has no data source'} className="inline-flex">
+            <button
+              onClick={() => setWide(true)}
+              disabled={!dataSourceId}
+              className={cn('px-2.5 py-1 font-medium border-l border-glass-border disabled:opacity-50', wide ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay')}
+            >
+              <Layers className="w-3.5 h-3.5 inline mr-1" /> Whole data source
+            </button>
+          </HoverTip>
         </div>
         <label className="inline-flex items-center gap-1.5 text-xs text-ink-muted cursor-pointer ml-auto">
           <input type="checkbox" checked={activeOnly} onChange={(e) => setActiveOnly(e.target.checked)} className="accent-accent-lineage" />
