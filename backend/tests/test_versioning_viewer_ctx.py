@@ -16,7 +16,7 @@ from backend.app.db import engine
 from backend.app.services.versioning import service
 from backend.app.services.versioning.service import GraphVersioningService, Viewer
 
-_TEAM_SHARED = SimpleNamespace(id="br_1", kind="draft", owner="usr_owner", is_shared=True,
+_TEAM_SHARED = SimpleNamespace(id="br_1", graph_id="g1", kind="draft", owner="usr_owner", is_shared=True,
                                visibility="private")
 _PUBLIC = SimpleNamespace(id="br_2", kind="draft", owner="usr_owner", is_shared=False, visibility="public")
 
@@ -70,6 +70,9 @@ class _Session:
     async def execute(self, stmt):
         return _Rows([SimpleNamespace(branch_id="br_1", subject_type="group", subject_id="grp_data",
                                       role="viewer")])
+
+    async def scalar(self, stmt):
+        return None                         # no review asks a group
 
 
 async def test_someone_who_doesnt_manage_reads_through_their_team(monkeypatch):

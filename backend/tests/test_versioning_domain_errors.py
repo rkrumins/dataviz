@@ -255,7 +255,7 @@ def _reviewed_by(*people):
     """A service whose only reviews of the draft name ``people``."""
     svc = GraphVersioningService.__new__(GraphVersioningService)
 
-    async def reviews(s, branch_id, actor):
+    async def reviews(s, branch_id, actor, groups=()):
         return actor in people
     svc._is_pr_participant_for_branch = reviews
     return svc
