@@ -18,7 +18,10 @@ name: Guards
 #    default or a moved read changes the page, and the job fails until it is regenerated, so the
 #    reference operators configure deployments from cannot drift from the code.
 #
-# All three jobs run on EVERY pull request. They used to be filtered to `backend/alembic/**`, which
+# 4. MERGE CHAIN. `merge-chain` fails a merge that would leave a database stamped somewhere
+#    upgrading out of order.
+#
+# All four jobs run on EVERY pull request. They used to be filtered to `backend/alembic/**`, which
 # reads as thrift and behaves as a hole: these guards exist precisely to catch the change made
 # somewhere else that quietly breaks them.
 
@@ -45,7 +48,7 @@ jobs:
           python-version: '3.14'
 
       - name: Install pytest
-        run: pip install --disable-pip-version-check pytest
+        run: pip install --disable-pip-version-check pytest pyyaml
 
       # --noconftest is load-bearing, not tidiness. pytest loads backend/tests/conftest.py for
       # anything under that directory, and that conftest imports the whole app (argon2, FastAPI,
@@ -61,6 +64,16 @@ jobs:
       - name: The migration chain ends in one head
         run: python -m pytest backend/tests/test_alembic_single_head.py -q --noconftest
 
+      # The upgrade Job places a database another line of work's build stamped by walking the
+      # parents `backend/alembic/other_lines.json` records for it, down to this chain.
+      - name: The lineage record is whole, and the merge check holds
+        run: python -m pytest backend/tests/test_alembic_lineage.py -q --noconftest
+
+      # The Job's estimate-and-correct recovery is for dev: off by default in every deployment
+      # (Helm values, kustomize base and overlays), on in the dev presets and Compose.
+      - name: Production stops on an unplaced stamp; dev's presets recover it
+        run: python -m pytest backend/tests/test_upgrade_presets.py -q --noconftest
+
       # 3. THE ADDITIVE MIRROR. `init_aggregation_db` and the alembic chain are
       #    two halves of one contract, and the comments in each said "mirrored"
       #    while nothing checked it. `observed_cell_ratio` shipped with a
@@ -71,6 +84,34 @@ jobs:
       #    database did not, while the write path named it in an UPDATE.
       - name: db_init's additive list and the migrations still mirror
         run: python -m pytest backend/tests/test_additive_migrations_mirror.py -q --noconftest
+
+  # A database stamped at a revision is taken to have run everything below it. A merge that drops
+  # or re-parents a revision main has, or re-parents one a branch already pushed (and may have
+  # deployed), leaves databases stamped there with migrations skipped or stranded — #556's
+  # `20260815_1200_announce_poll_60s` was pushed with seven different parents. A migration main
+  # has whose file this changes is flagged too: databases that ran it never run the change.
+  merge-chain:
+    name: A merge keeps every database's place in the migration chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: pr
+          fetch-depth: 0                  # every branch's history: what each revision was pushed with
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          path: base
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+
+      # Stdlib only (`ast`, `git`), so there is no install step.
+      - name: Main's revisions keep their parents; new ones keep the parents they were pushed with
+        working-directory: pr
+        run: python -m backend.scripts.check_migration_chain ../base
+
 
   feature-wiring:
     name: Every feature flag is really wired

@@ -16,4 +16,4 @@ and `deploy.sh` at the repository root instead.
 | `helm/dataviz/` | Helm chart for any cluster behind ingress-nginx. Settings in `values.yaml`. |
 | `postgres-init/` | Reference SQL for the database role (`01-roles.sql`) and its schemas (`02-schemas.sql`). |
 | `topologies/` | Docker Compose harnesses that stand up FalkorDB and Redis in each supported topology (standalone, Sentinel, Cluster, with auth and TLS) for the topology integration tests — not production manifests. See [topologies/README.md](topologies/README.md). |
-| `build-images.sh` | Out of date: it stops at an image for a retired service and doesn't build `synodic-upgrade`, which the Helm chart needs. Use the build loop in the Kubernetes guide. |
+| `build-images.sh` | Builds (and pushes) every image the Helm chart pulls, `synodic-upgrade` among them, and `seed`, each recording the commit it was built from. |

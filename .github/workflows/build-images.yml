@@ -41,8 +41,22 @@ jobs:
             dockerfile: frontend/Dockerfile
           - name: seed
             dockerfile: backend/Dockerfile.seed
+          # The Helm chart's schema-upgrade Job and every backend pod's wait-for-schema check run
+          # this one. Left out, a release's chart pulls an upgrade image older than its migrations.
+          - name: synodic-upgrade
+            dockerfile: backend/Dockerfile.upgrade
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0                  # to tell whether the commit is on main
+
+      # What the upgrade Job holds a shared database to (deploy/build-images.sh does the same).
+      - name: Record where this was built from
+        id: built
+        run: |
+          on_main=false
+          if git merge-base --is-ancestor HEAD origin/main; then on_main=true; fi
+          echo "on_main=$on_main" >> "$GITHUB_OUTPUT"
 
       - name: Resolve org and tag
         id: meta
@@ -75,6 +89,10 @@ jobs:
           file: ${{ matrix.dockerfile }}
           load: true
           push: false
+          build-args: |
+            SYNODIC_BUILD_SHA=${{ github.sha }}
+            SYNODIC_BUILD_REF=${{ github.ref_name }}
+            SYNODIC_BUILD_ON_MAIN=${{ steps.built.outputs.on_main }}
           tags: docker.io/${{ steps.meta.outputs.org }}/${{ matrix.name }}:${{ steps.meta.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

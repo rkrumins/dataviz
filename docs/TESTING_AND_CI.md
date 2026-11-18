@@ -25,8 +25,8 @@ Every workflow lives in `.github/workflows/`. **Fails your PR?** says whether a 
 | | | **Live FalkorDB pipeline (informational)**: the aggregation rebuild and the search engine against a real FalkorDB v4.18.11 | No — `continue-on-error` |
 | | | **Full backend suite (informational)**: every unit test (`-m "not integration"`) | No — `continue-on-error` |
 | **frontend-tests** (`frontend-tests.yml`) | Every pull request; pushes to `main` | **Frontend unit suite (required)**: `npx vitest run`, which includes the documentation checks. Node 20. | Yes |
-| **Guards** (`alembic-guards.yml`) | Pull requests to `main`; pushes to `main` | **Revision ids fit alembic_version(32)**: migration revision ids are 32 characters or fewer, the migration chain ends in one head, and every column `init_aggregation_db` adds has a migration. **Every feature flag is really wired**: each switch's declared gates exist. **Configuration reference matches the code**: `docs/CONFIGURATION.md` matches the backend's environment-variable reads. Pure file parsing; seconds. | Yes |
-| **Schema** (`schema.yml`) | Pull requests to `main`; pushes to `main` | Against a real Postgres 16: **A fresh database installs at head**, **An existing database moves onto this PR** and **The migration chain still replays from empty**. Each runs `verify-schema`; the fresh install also checks that the role and permission rows were seeded. | Yes |
+| **Guards** (`alembic-guards.yml`) | Pull requests to `main`; pushes to `main` | **Revision ids fit alembic_version(32)**: migration revision ids are 32 characters or fewer, the migration chain ends in one head, the lineage record (`backend/alembic/other_lines.json`) reaches this chain, the upgrade Job's recovery is off in every deployment's defaults and on in the dev presets, and every column `init_aggregation_db` adds has a migration. **A merge keeps every database's place in the migration chain**: no revision `main` has is dropped or given new parents, and no revision a branch pushed comes in with other parents; a changed file of a migration `main` has is flagged as a warning (see `docs/MIGRATIONS.md`). **Every feature flag is really wired**: each switch's declared gates exist. **Configuration reference matches the code**: `docs/CONFIGURATION.md` matches the backend's environment-variable reads. Pure file parsing; seconds. | Yes |
+| **Schema** (`schema.yml`) | Pull requests to `main`; pushes to `main` | Against a real Postgres 16: **A fresh database installs at head**, **An existing database moves onto this PR** (built at the base branch's head, then upgraded; every step required; then squawk lints the SQL the PR's migrations ran, report-only), **The migration chain still replays from empty**, and **The upgrade Job places, refuses and recovers as it should** (`tests/test_upgrade_foreign_stamps.py`). Each runs `verify-schema`; the fresh install also checks that the role and permission rows were seeded. | Yes |
 | **security-scan** (`security-scan.yml`) | Every pull request; pushes to `main`; Mondays 06:00 UTC; manual runs | `npm audit --audit-level=high` for `frontend` and `landing`; `pip-audit` on both backend requirement files; a Trivy filesystem scan for fixable HIGH and CRITICAL vulnerabilities; a Trivy configuration scan | Yes, except the configuration scan, which only reports |
 | **CodeQL** (`codeql.yml`) | Pull requests to `main`; pushes to `main`; Mondays 06:00 UTC | Static analysis of the Python and JavaScript/TypeScript code with the `security-and-quality` queries | Findings appear as the repository's code-scanning alerts |
 | **Dependency review** (`dependency-review.yml`) | Pull requests to `main` | Fails if the pull request adds a dependency with a known vulnerability of moderate severity or higher, and comments a summary when it does | Yes |
@@ -73,14 +73,25 @@ Most suites under `backend/tests/integration/` also skip themselves unless you o
 
 ### Guards
 
-The three guard tests parse files and import only plain configuration modules, so they need nothing but `pytest`. That is how CI runs them, and why it passes `--noconftest`: the shared `conftest.py` imports the whole backend.
+The guard tests parse files and import only plain configuration modules, so they need nothing but `pytest`. That is how CI runs them, and why it passes `--noconftest`: the shared `conftest.py` imports the whole backend.
 
 ```bash
 python -m pytest backend/tests/test_alembic_revision_lengths.py \
+  backend/tests/test_alembic_single_head.py backend/tests/test_alembic_lineage.py \
+  backend/tests/test_upgrade_presets.py \
   backend/tests/test_additive_migrations_mirror.py \
   backend/tests/test_feature_wiring.py -q --noconftest
 python3 backend/scripts/export_config_reference.py --check
 ```
+
+The merge-chain check reads every branch's history, so fetch it first:
+
+```bash
+git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+python -m backend.scripts.check_migration_chain <a checkout of main>
+```
+
+It exits 1 and names what to fix: a revision to put back, or to give a new id.
 
 The pytest run ends with a `passed` count and no failures. The configuration check prints `docs/CONFIGURATION.md is up to date.` when the page matches the code; otherwise it prints a diff, says `docs/CONFIGURATION.md is out of date`, names the command that regenerates it, and exits 1.
 
@@ -100,7 +111,7 @@ python -m backend.scripts.upgrade verify-schema
 docker rm -f schema-check
 ```
 
-That is the **fresh install** job: each command exits 0 on success, and `upgrade` ends with `Running stamp_revision 0001_baseline -> <latest-revision>`. For the **chain replay** job, start a new empty container and run `python -m backend.scripts.upgrade upgrade --no-fast-path` instead. For the **forward migration** job, migrate the empty database from a checkout of `main` first (for example `git worktree add --detach ../main-check origin/main`, then run `python -m backend.scripts.upgrade upgrade` from `../main-check`), then run `upgrade`, `check` and `verify-schema` again from your branch. [Database Migrations](/docs/migrations) explains what each job catches.
+That is the **fresh install** job: each command exits 0 on success, and `upgrade` ends with `Running stamp_revision 0001_baseline -> <latest-revision>`. For the **chain replay** job, start a new empty container and run `python -m backend.scripts.upgrade upgrade --no-fast-path` instead. For the **forward migration** job, migrate the empty database from a checkout of `main` first (for example `git worktree add --detach ../main-check origin/main`, then run `python -m backend.scripts.upgrade upgrade` from `../main-check`), then run `upgrade`, `check` and `verify-schema` again from your branch. For the **upgrade paths** job, keep the container running and, from `backend/`, run `GRAPHVER_E2E=1 python -m pytest tests/test_upgrade_foreign_stamps.py -q`: each test makes a database of its own on that server and drops it after. [Database Migrations](/docs/migrations) explains what each job catches.
 
 ### Live FalkorDB tests
 
@@ -196,7 +207,7 @@ Open the failed job's log; the last lines name the failing test or file. Then:
 | Pytest settings and markers | `backend/pytest.ini` |
 | Shared backend fixtures | `backend/tests/conftest.py` (`db_session`, `test_client`) |
 | Files the required backend job runs by name | `backend/tests/ci-required-files.txt`, guarded by `backend/tests/test_ci_required_list.py` (entries exist, sorted, no duplicates, and the workflow still reads the list) |
-| Guard tests | `backend/tests/test_alembic_revision_lengths.py`, `test_alembic_single_head.py`, `test_additive_migrations_mirror.py`, `test_feature_wiring.py` |
+| Guard tests | `backend/tests/test_alembic_revision_lengths.py`, `test_alembic_single_head.py`, `test_alembic_lineage.py`, `test_upgrade_presets.py`, `test_additive_migrations_mirror.py`, `test_feature_wiring.py` |
 | Configuration reference generator | `backend/scripts/export_config_reference.py` |
 | Schema tool | `backend/scripts/upgrade.py` (`upgrade`, `check`, `verify-schema`, `repair`, `current`, `heads`, `history`) |
 | Vitest settings | `frontend/vite.config.ts` (`test` block) |
