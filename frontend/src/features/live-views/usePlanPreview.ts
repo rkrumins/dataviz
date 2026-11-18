@@ -18,9 +18,6 @@ export type PlanState =
   | { status: 'error'; message: string }
 
 const DEBOUNCE_MS = 250
-/** How long one ask lets the server work out a large set before answering
- *  with its progress (202): asked again at once, until the plan is ready. */
-const RESOLVE_WAIT_MS = 10_000
 
 type Settled =
   | { key: string; attempt: number; plan: MembershipPlan }
@@ -40,7 +37,9 @@ export function usePlanPreview(viewId: string | null, request: PlanRequest | nul
     const body = JSON.parse(key) as PlanRequest
     const controller = new AbortController()
     const ask = () => {
-      plan(viewId, { ...body, waitMs: RESOLVE_WAIT_MS }, { signal: controller.signal })
+      // The server's own wait applies (10 s, then 202 with its progress): no client
+      // sends one, so a server from before it took a wait still answers.
+      plan(viewId, body, { signal: controller.signal })
         .then((answer: MembershipPlan | MembershipResolving) => {
           if (controller.signal.aborted) return
           // Still working out what the sources reach: say how far, and carry on.

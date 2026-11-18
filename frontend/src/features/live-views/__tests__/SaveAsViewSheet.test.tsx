@@ -96,7 +96,8 @@ describe('SaveAsViewSheet', () => {
     renderSheet()
     expect(await screen.findByText(/Working out everything it reaches — 41,020 entities so far/)).toBeInTheDocument()
     await waitFor(() => expect(asked).toBe(2))
-    expect(planMembers.mock.calls[0][1].waitMs).toBe(10_000)
+    // No wait is sent: the server's own applies, and an older server still answers.
+    expect(planMembers.mock.calls[0][1]).not.toHaveProperty('waitMs')
   })
 
   it('over the limit, says why and what helps, and will not save', async () => {

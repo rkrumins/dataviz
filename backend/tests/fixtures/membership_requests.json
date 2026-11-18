@@ -1,0 +1,98 @@
+{
+  "about": "The requests the browser sends to make a view from a query: POST /{ws}/graph/members/plan (builder \"plan\": features/live-views/model.ts planRequestOf) and POST /views/from-members (\"create\": createRequestOf). The frontend test (features/live-views/__tests__/requests.contract.test.ts) builds each body from its input and must produce it exactly; the backend test (tests/test_membership_request_contract.py) validates each against the models, which forbid unknown fields. The rule this pins: a field reaches a request only once every deployed server accepts it — a body a server refuses is a 422 the reader sees as a broken preview.",
+  "cases": [
+    {
+      "name": "a trace, laid out as lineage stages",
+      "builder": "plan",
+      "input": {
+        "trace": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"], "showUpstream": true, "showDownstream": true, "depthUp": 25, "depthDown": 3},
+        "viewId": "view_base",
+        "choices": {"choice": "stages", "keep": "withResults", "nest": true}
+      },
+      "body": {
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": 0, "upstream": "all", "downstream": 3, "partnerChildren": 0}}}],
+        "layout": {"kind": "stages", "nest": true},
+        "keep": "withResults"
+      }
+    },
+    {
+      "name": "a narrowing, like the view it was made in, every layer kept",
+      "builder": "plan",
+      "input": {
+        "spec": {"v": 1, "seeds": {"urns": ["urn:li:container:gold"]}, "within": "view", "expand": {"children": 1, "upstream": 0, "downstream": 0, "partnerChildren": 0}},
+        "viewId": "view_base",
+        "choices": {"choice": "source", "keep": "all", "nest": false}
+      },
+      "body": {
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:container:gold"]}, "within": "view", "expand": {"children": 1, "upstream": 0, "downstream": 0, "partnerChildren": 0}}}],
+        "layout": {"kind": "source", "sourceViewId": "view_base", "nest": false},
+        "keep": "all"
+      }
+    },
+    {
+      "name": "a search's matches with their sources and consumers, by type, read in its view",
+      "builder": "plan",
+      "input": {
+        "spec": {"v": 1, "seeds": {"query": {"kind": "text", "value": "revenue"}}, "within": "dataSource", "expand": {"children": 0, "upstream": 1, "downstream": 1, "partnerChildren": 1}},
+        "viewId": "view_base",
+        "choices": {"choice": "auto", "keep": "withResults", "nest": true}
+      },
+      "body": {
+        "sources": [{"spec": {"v": 1, "seeds": {"query": {"kind": "text", "value": "revenue"}}, "within": "dataSource", "expand": {"children": 0, "upstream": 1, "downstream": 1, "partnerChildren": 1}}, "readIn": "view_base"}],
+        "layout": {"kind": "auto", "nest": true},
+        "keep": "withResults"
+      }
+    },
+    {
+      "name": "a template's layers, fitted to this data",
+      "builder": "plan",
+      "input": {
+        "spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders"]}, "within": "view", "expand": {"children": 0, "upstream": "all", "downstream": 0, "partnerChildren": 0}},
+        "viewId": "view_base",
+        "choices": {"choice": "template", "keep": "withResults", "nest": true, "templateId": "tpl_medallion", "templateLayers": [{"id": "bronze", "name": "Bronze", "entityTypes": ["dataset"]}]}
+      },
+      "body": {
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders"]}, "within": "view", "expand": {"children": 0, "upstream": "all", "downstream": 0, "partnerChildren": 0}}}],
+        "layout": {"kind": "template", "templateId": "tpl_medallion", "nest": true},
+        "keep": "withResults",
+        "layers": [{"id": "bronze", "name": "Bronze", "entityTypes": ["dataset"]}]
+      }
+    },
+    {
+      "name": "a trace kept up to date, in the workspace",
+      "builder": "create",
+      "input": {
+        "name": "  Revenue feed  ", "visibility": "workspace", "mode": "live", "workspaceId": "ws_1", "dataSourceId": "ds_1",
+        "trace": {"urns": ["urn:li:dataset:orders"], "showUpstream": false, "showDownstream": true, "depthUp": 25, "depthDown": 25},
+        "viewId": "view_base",
+        "choices": {"choice": "stages", "keep": "withResults", "nest": true},
+        "origin": "trace"
+      },
+      "body": {
+        "name": "Revenue feed", "visibility": "workspace", "workspaceId": "ws_1", "dataSourceId": "ds_1", "mode": "live",
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders"]}, "within": "view", "expand": {"children": 0, "upstream": 0, "downstream": "all", "partnerChildren": 0}}}],
+        "layout": {"kind": "stages", "nest": true},
+        "keep": "withResults",
+        "provenance": {"origin": "trace", "viewId": "view_base"}
+      }
+    },
+    {
+      "name": "a narrowing frozen as a snapshot, described",
+      "builder": "create",
+      "input": {
+        "name": "Gold, as it is", "description": " The gold layer today ", "visibility": "private", "mode": "snapshot", "workspaceId": "ws_1",
+        "spec": {"v": 1, "seeds": {"urns": ["urn:li:container:gold"]}, "within": "view", "expand": {"children": "all", "upstream": 0, "downstream": 0, "partnerChildren": 0}},
+        "viewId": "view_base",
+        "choices": {"choice": "source", "keep": "withResults", "nest": true},
+        "origin": "narrow"
+      },
+      "body": {
+        "name": "Gold, as it is", "description": "The gold layer today", "visibility": "private", "workspaceId": "ws_1", "mode": "snapshot",
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:container:gold"]}, "within": "view", "expand": {"children": "all", "upstream": 0, "downstream": 0, "partnerChildren": 0}}}],
+        "layout": {"kind": "source", "sourceViewId": "view_base", "nest": true},
+        "keep": "withResults",
+        "provenance": {"origin": "narrow", "viewId": "view_base"}
+      }
+    }
+  ]
+}

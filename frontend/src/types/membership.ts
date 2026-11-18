@@ -131,9 +131,6 @@ export interface PlanRequest {
   layers?: Array<Record<string, unknown>>
   keep: KeepLayers
   exclude?: string[]
-  /** How long the server works the sources out before answering (they resolve
-   *  a step at a time; ask again to carry on). */
-  waitMs?: number
 }
 
 /** The server is still working out what the sources reach (202): ask again,
@@ -188,8 +185,6 @@ export interface FromMembersRequest {
   keep: KeepLayers
   exclude?: string[]
   provenance: MembershipProvenance
-  /** As `PlanRequest.waitMs`: a large set answers 202 until it is worked out. */
-  waitMs?: number
 }
 
 export type MembershipStatusKind =
