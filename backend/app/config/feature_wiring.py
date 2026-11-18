@@ -824,7 +824,6 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /views/from-members — makes a list view of a narrowing",
             ("GET/PUT /views/{id}/membership, POST /views/{id}/membership/members and "
              "/views/{id}/membership/refresh — a list view's members and its updates"),
-            "POST /graph/view-members — a page of one layer of a list view's members",
         ),
         ui_surfaces=(
             "Context View: Narrow… on a selection, Narrow to this in an entity's right-click "
@@ -835,7 +834,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ),
         still_allowed=(
             "Other views, searches, Isolate and traces work as before. Views already made as "
-            "lists keep the members they last had, and stop updating until this is on again",
+            "lists keep the members they last had (POST /graph/view-members still pages them), "
+            "and stop updating until this is on again",
         ),
     ),
     "searchViewsEnabled": FeatureWiring(

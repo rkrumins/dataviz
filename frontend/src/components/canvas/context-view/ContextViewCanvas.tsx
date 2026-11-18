@@ -2219,8 +2219,8 @@ export function ContextViewCanvas({
   const subsetView = !!activeView?.search
   // A view made from a query lists its members the same way: each layer pages
   // them from the server's member table, placed where the server placed them.
-  const membershipOn = useFeature('viewMembershipEnabled')
-  const membersFed = !!activeView?.membership && !atRevision && membershipOn
+  // Whatever the preview switch says: switched off, a list view keeps the members it last had.
+  const membersFed = !!activeView?.membership && !atRevision
   const fedView = subsetView || membersFed
   // Its matches drawn inside the containers its base draws them in: the reader's choice.
   const showWhereTheySit = usePreferencesStore((s) => s.showWhereTheySit) ?? true

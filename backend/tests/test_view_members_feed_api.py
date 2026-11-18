@@ -189,11 +189,18 @@ async def test_a_reader_with_no_containment_walk_ships_nodes_without_their_path(
     assert len(page["nodes"]) == 4 and all("ancestorPath" not in n for n in page["nodes"])
 
 
-async def test_refusals(views, post):
+async def test_with_the_preview_off_a_view_keeps_the_members_it_last_had(views, post):
+    """The switch stops list views being made and updated; one already made still
+    shows its members, which only this feed can read."""
     _flags(viewMembershipEnabled=False)
+    ws, view, _ = await views()
+    page = await post(ws, view.id, {"layerId": "L1"})
+    assert page.status_code == 200, page.text
+    assert page.json()["totalCount"] == 4
+
+
+async def test_refusals(views, post):
     ws, view, plain = await views()
-    off = await post(ws, view.id, {"layerId": "L1"})
-    assert off.status_code == 403 and off.json()["detail"]["feature"] == "viewMembershipEnabled"
     _flags(viewMembershipEnabled=True)
     try:
         not_one = await post(ws, plain.id, {"layerId": "L1"})

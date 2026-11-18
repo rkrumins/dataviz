@@ -38,7 +38,6 @@ from backend.app.api.v1.endpoints.graph import (
     get_context_engine,
     get_engine_session,
 )
-from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.refusal import refusal_responses, refused
 from backend.app.db.models import ViewMembershipStateORM, ViewORM, view_is_live
 from backend.app.db.repositories import view_members_repo
@@ -51,8 +50,6 @@ from backend.common.models.view_membership import read_definition
 
 router = APIRouter()
 
-#: A preview: it ships off, and a flag that cannot be read means off.
-require_membership = require_feature("viewMembershipEnabled", default=False)
 
 #: Members a layer lists on the canvas; past them a page says ``capped`` (search in the layer,
 #: or export the view, for the rest).
@@ -162,8 +159,10 @@ async def _nodes(engine: ContextEngine, rows: List[Any], admit) -> List[Dict[str
     response_model=ViewFeedPage,
     response_model_by_alias=True,
     summary="Read one page of one layer of a view made from a query",
+    # Not behind ``viewMembershipEnabled``: the switch stops list views being made and
+    # updated, and a view already made keeps the members it last had — which a reader
+    # can only see through this feed, now that they are no longer in its layout.
     responses=refusal_responses(400, 403, 404, 429, 503),
-    dependencies=[Depends(require_membership)],
 )
 async def view_members(
     request: Request,
