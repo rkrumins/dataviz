@@ -33,6 +33,7 @@ from backend.app.services.feature_flags import feature_flags
 from backend.app.services.live_views import pipeline
 from backend.common.models.graph import GraphNode
 from backend.common.models.search import SearchHit, SearchResultPage
+from backend.common.models.search_view import REST_LAYER_ID
 from backend.common.models.view_membership import MACHINE
 from backend.tests.fixtures.membership_graph import FakeEngine
 
@@ -734,3 +735,188 @@ async def test_a_reader_who_can_not_open_the_view_it_follows_reads_it_all_the_sa
         app.dependency_overrides.pop(get_context_engine, None)
     assert page.status_code == 200, page.text
     assert page.json()["totalCount"] == 3
+
+
+# ── Following a view: what people put in it, over what that view places ─────
+
+
+async def status_of(db_session: AsyncSession, view_id: str) -> tuple:
+    state = (await db_session.execute(
+        select(ViewMembershipStateORM).where(ViewMembershipStateORM.view_id == view_id)
+        .execution_options(populate_existing=True))).scalar_one()
+    return state.status, json.loads(state.status_detail) if state.status_detail else None
+
+
+async def served_entries(client: AsyncClient, view_id: str) -> dict:
+    resp = await client.get(f"/api/v1/views/{view_id}")
+    assert resp.status_code == 200, resp.text
+    return {u: e["layerId"] for u, e in resp.json()["config"]["layout"]["referenceLayout"]["assignments"].items()}
+
+
+async def test_a_member_moved_by_hand_in_a_follower_is_placed_where_it_was_put(
+    test_client: AsyncClient, db_session, graph, membership_on,
+):
+    """Its canvas sends its entries, never layers. A member moved into a layer it is
+    served — "Other matches" among them — is placed there at once and remembered, and a
+    save that moves nothing leaves every member where it is. An entity put in a layer it
+    isn't served is refused; with the view it follows gone, so is every save."""
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    view_id = await following(test_client, ws, src)
+    url = f"/api/v1/views/{view_id}/layout"
+    before = await members_of(db_session, view_id)
+    resp = await test_client.put(url, json={"referenceLayout": {"layers": [], "assignments": {}}})
+    assert resp.status_code == 200, resp.text
+    assert await members_of(db_session, view_id) == before, "no layers stored is no layer deleted"
+
+    resp = await test_client.put(url, json={"referenceLayout": {"layers": [], "assignments": {
+        "tbl_a": {"layerId": "s_dash"}, "col_b1": {"layerId": REST_LAYER_ID},
+        "tbl_up": {"layerId": "s_tbl", "inheritsChildren": True, "assignedBy": "user"}}}})
+    assert resp.status_code == 200, resp.text
+    placed = await members_of(db_session, view_id)
+    assert {u: e["layerId"] for u, e in placed.items()} == {
+        "dom": "s_dom", "tbl_a": "s_dash", "tbl_b": "s_tbl", "col_a1": "s_col", "col_a2": "s_col",
+        "col_b1": REST_LAYER_ID}
+    config = await made(db_session, view_id)
+    assert config["layout"]["referenceLayout"]["layers"] == []
+    assert {u: e["layerId"] for u, e in assignments_of(config).items()} == {"tbl_up": "s_tbl"}, (
+        "a member is never an entry; an entity people placed is theirs")
+    assert {u: o["layerId"] for u, o in config["membership"]["overrides"].items()} == {
+        "tbl_a": "s_dash", "col_b1": REST_LAYER_ID}, "remembered"
+
+    nowhere = await test_client.put(url, json={"referenceLayout": {"layers": [], "assignments": {
+        "tbl_up": {"layerId": "s_nowhere", "assignedBy": "user"}}}})
+    assert nowhere.status_code == 422 and "s_nowhere" in nowhere.json()["detail"]
+
+    assert (await test_client.delete(f"/api/v1/views/{src}")).status_code in (200, 204)
+    gone = await test_client.put(url, json={"referenceLayout": {"layers": [], "assignments": {}}})
+    assert gone.status_code == 422 and "view it follows" in gone.json()["detail"]
+    assert await members_of(db_session, view_id) == placed, "nothing written"
+
+
+async def test_always_include_in_a_follower_names_a_layer_it_is_served(
+    test_client: AsyncClient, db_session, graph, membership_on,
+):
+    """An entity always included goes in a layer the view is served — "Other matches"
+    among them — and is served there beside that view's layers: its own entry, never a
+    member. The view it follows gone, there is no layer to include anything in."""
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    view_id = await following(test_client, ws, src)
+    url = f"/api/v1/views/{view_id}/membership/members"
+    nowhere = await test_client.post(url, json={"include": [{"urn": "col_b1", "layerId": "s_nowhere"}]})
+    assert (nowhere.status_code, nowhere.json()["detail"]["reason"]) == (422, "invalid_member_ops")
+
+    resp = await test_client.post(url, json={"include": [{"urn": "col_b1", "layerId": "s_dash"},
+                                                         {"urn": "tbl_up", "layerId": REST_LAYER_ID}]})
+    assert resp.status_code == 200, resp.text
+    assert "col_b1" not in await members_of(db_session, view_id)
+    assert [l["id"] for l in await served(test_client, view_id)] == [
+        "s_dom", "s_tbl", "s_col", "s_dash", REST_LAYER_ID]
+    assert await served_entries(test_client, view_id) == {"col_b1": "s_dash", "tbl_up": REST_LAYER_ID}
+    assert (await test_client.post(url, json={"exclude": ["col_a1"]})).status_code == 200
+
+    assert (await test_client.delete(f"/api/v1/views/{src}")).status_code in (200, 204)
+    gone = await test_client.post(url, json={"include": [{"urn": "col_a2", "layerId": "s_col"}]})
+    assert (gone.status_code, gone.json()["detail"]["reason"]) == (422, "invalid_member_ops")
+    assert (await test_client.post(url, json={"unexclude": ["col_a1"]})).status_code == 200
+
+
+async def test_what_people_put_in_a_follower_outlasts_how_the_view_it_follows_places_things(
+    test_client: AsyncClient, db_session, graph, membership_on, monkeypatch,
+):
+    """A member moved by hand stays where it was put however the members are placed again
+    — the data moving on, or the view it follows placing things another way — and an
+    entity always included stays in its layer. Put in a layer that view then deletes,
+    either is in "Other matches" from the next time the view is opened."""
+    data = {"version": "v1"}
+
+    async def version(engine):
+        return data["version"]
+
+    monkeypatch.setattr(pipeline, "search_data_version", version)
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    view_id = await following(test_client, ws, src)
+    assert (await test_client.put(f"/api/v1/views/{view_id}/layout", json={"referenceLayout": {
+        "layers": [], "assignments": {"tbl_a": {"layerId": "s_dash"}}}})).status_code == 200
+    assert (await test_client.post(f"/api/v1/views/{view_id}/membership/members", json={
+        "include": [{"urn": "col_b1", "layerId": "s_dash"}]})).status_code == 200
+
+    async def placed() -> dict:
+        return {u: e["layerId"] for u, e in (await members_of(db_session, view_id)).items()}
+
+    async def base_layers(layers: list) -> None:
+        resp = await test_client.put(f"/api/v1/views/{src}/layout",
+                                     json={"referenceLayout": {"layers": layers, "assignments": {}}})
+        assert resp.status_code == 200, resp.text
+
+    columns_with_tables = [{**l, "entityTypes": ["table", "column"]} if l["id"] == "s_tbl"
+                           else {**l, "entityTypes": []} if l["id"] == "s_col" else l for l in SOURCE_LAYERS]
+    await base_layers(columns_with_tables)
+    assert (await opened(test_client, db_session, view_id))["outcome"] == "applied"
+    assert await placed() == {"dom": "s_dom", "tbl_a": "s_dash", "tbl_b": "s_tbl", "col_a1": "s_tbl",
+                              "col_a2": "s_tbl"}, "placed again, and the one moved by hand where it was put"
+    assert await served_entries(test_client, view_id) == {"col_b1": "s_dash"}
+
+    data["version"] = "v2"
+    assert (await opened(test_client, db_session, view_id))["outcome"] in ("applied", "unchanged")
+    assert (await placed())["tbl_a"] == "s_dash", "the data moving on moves it nowhere"
+
+    await base_layers([l for l in columns_with_tables if l["id"] != "s_dash"])
+    out = await opened(test_client, db_session, view_id)
+    assert (out["outcome"], out["membership"]["status"]) == ("applied", "ok")
+    assert (await placed())["tbl_a"] == REST_LAYER_ID
+    assert await served_entries(test_client, view_id) == {"col_b1": REST_LAYER_ID}
+    assert [l["id"] for l in await served(test_client, view_id)] == ["s_dom", "s_tbl", "s_col", REST_LAYER_ID]
+
+
+async def test_a_follower_is_out_of_date_once_the_view_it_follows_places_things_another_way(
+    test_client: AsyncClient, db_session, graph, membership_on, data, view_portability_enabled,
+):
+    """Each view made from a query that follows it is pending until it is next opened —
+    not a snapshot, not one a run is working out now, and never a subset of it. A rename
+    changes nothing; the next open places the members again."""
+    from backend.app.db.repositories import view_membership_repo
+    from backend.app.db.repositories.view_membership_repo import later_iso
+
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    live = await following(test_client, ws, src)
+    running = await following(test_client, ws, src)
+    resp = await test_client.post(URL, json=body(ws, src, layout=follow(src), mode="snapshot"))
+    assert resp.status_code == 201, resp.text
+    snapshot = resp.json()["view"]["id"]
+    db_session.add(ViewORM(name="PII in sales", workspace_id=ws, view_type="reference", subset_of=src,
+                           config=json.dumps({"search": {"readIn": src, "layout": "inherit"}})))
+    await db_session.execute(update(ViewMembershipStateORM).where(ViewMembershipStateORM.view_id == running)
+                             .values(status="updating", lease_until=later_iso(300)))
+    await db_session.commit()
+    assert sorted(await view_membership_repo.followers(db_session, src)) == sorted([live, running, snapshot])
+
+    async def statuses() -> list:
+        return [await status_of(db_session, v) for v in (live, running, snapshot)]
+
+    before = await statuses()
+    assert [s for s, _ in before] == ["ok", "updating", "frozen"]
+    saved = (await test_client.post(f"/api/v1/views/{src}/versions", json={"message": "As it was"})).json()
+    renamed = [{**l, "name": "Every table"} if l["id"] == "s_tbl" else l for l in SOURCE_LAYERS]
+    assert (await test_client.put(f"/api/v1/views/{src}/layout", json={
+        "referenceLayout": {"layers": renamed, "assignments": {}}})).status_code == 200
+    assert await statuses() == before, "a rename places nothing another way"
+
+    moved = [{**l, "entityTypes": ["domain", "table"]} if l["id"] == "s_dom"
+             else {**l, "entityTypes": []} if l["id"] == "s_tbl" else l for l in renamed]
+    assert (await test_client.put(f"/api/v1/views/{src}/layout", json={
+        "referenceLayout": {"layers": moved, "assignments": {}}})).status_code == 200
+    assert await statuses() == [("pending", {"reason": "base_changed"}), before[1], before[2]]
+    status = (await test_client.get(f"/api/v1/views/{live}/membership")).json()
+    assert (status["status"], status["detail"]) == ("pending", {"reason": "base_changed"})
+
+    out = await opened(test_client, db_session, live)
+    assert (out["outcome"], out["diff"]["moved"], out["membership"]["status"]) == ("applied", 2, "ok")
+    assert (await opened(test_client, db_session, live))["detail"] == {"reason": "up_to_date"}
+
+    restored = await test_client.post(f"/api/v1/views/{src}/versions/{saved['version']['version']}/restore")
+    assert restored.status_code == 200, restored.text
+    assert await status_of(db_session, live) == ("pending", {"reason": "base_changed"}), "a version restored too"

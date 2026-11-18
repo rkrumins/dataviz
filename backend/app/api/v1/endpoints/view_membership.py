@@ -62,7 +62,7 @@ from backend.app.providers.manager import provider_manager
 from backend.app.services import template_access, view_access
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.graph_cache import ENDPOINT_TRACE_CLOSURE
-from backend.app.services.live_views import pipeline
+from backend.app.services.live_views import layouts, pipeline
 from backend.app.services.live_views.ownership import MemberOpError, apply_member_ops, layer_ids_of
 from backend.app.services.live_views.pipeline import EngineScope, PipelineError
 from backend.app.services.permission_service import PermissionClaims
@@ -654,9 +654,14 @@ async def change_view_members(
     state = await view_membership_repo.ensure(session, row)
     members = await view_members_repo.placements(session, view_id, state.members_epoch,
                                                  [item.urn for item in body.include])
+    layer_ids = layer_ids_of(ref)
+    if definition.layout.kind == "follow":
+        # It stores no layers: its own are the ones it is served (none, the view it follows gone).
+        base = await pipeline.source_config(session, definition, row.workspace_id)
+        layer_ids = layouts.layer_ids(layouts.followed(base)) if base is not None else []
     try:
         ref["assignments"], exclude, gone = apply_member_ops(
-            assignments, definition.exclude, body, members=members, layer_ids=layer_ids_of(ref), now=now_iso())
+            assignments, definition.exclude, body, members=members, layer_ids=layer_ids, now=now_iso())
     except MemberOpError as exc:
         raise refused(422, "invalid_member_ops", str(exc)) from exc
     # Kept out, or a person's own entry now: out of the members at once.

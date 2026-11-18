@@ -426,12 +426,13 @@ async def restore(
     # Members are data, not design: a version holds none, so a view made from a query
     # keeps its own (a snapshot its frozen ones) — in the restored layers, and worked
     # out again when it is kept up to date.
-    from backend.app.db.repositories import view_members_repo, view_membership_repo
+    from backend.app.db.repositories import view_members_repo, view_membership_repo, view_repo
     from backend.app.services.live_views.ownership import carry_into_config
 
     if carry_into_config(restored):
         await view_membership_repo.mark_pending(session, row, reason="design_replaced")
     await view_members_repo.rehome_view(session, row.id, restored)
+    await view_repo.tell_followers(session, row, restored)
     row.config = await asyncio.to_thread(json.dumps, restored)
     row.name = label["name"]
     row.description = label["description"]

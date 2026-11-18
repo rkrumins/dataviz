@@ -327,3 +327,22 @@ def test_following_a_view_never_keeps_a_member_where_it_sat():
     page = _page([member("col_a1")], previous={"col_a1": {"layerId": "b_tbls", "orderKey": "k"}})
     [row], _ = pipeline.place(page, _following(), now="t0")
     assert (row.layer_id, row.order_key) == ("b_cols", None), "where the view it follows places it now"
+
+
+def test_following_a_view_what_people_put_somewhere_stays_there_or_in_other_matches():
+    """A member moved by hand is where it was put, past where the view it follows places
+    it; moved — or an entity always included — in a layer that view has since deleted, it
+    is in Other matches, never in a layer the view doesn't have."""
+    definition = MembershipDefinition.model_validate({
+        "sources": [SOURCE.model_dump(by_alias=True)], "layout": {"kind": "follow", "sourceViewId": "base"},
+        "overrides": {"tbl_a": {"layerId": "b_cols", "at": "t0"}, "col_a1": {"layerId": "b_gone", "at": "t0"}}})
+    config = {"layout": {"referenceLayout": {"layers": [], "assignments": {
+        "col_b1": {"layerId": "b_gone", "orderKey": "k", "assignedBy": "user"},
+        "tbl_b": {"layerId": "b_cols", "assignedBy": "user"}}}}}
+    inputs = pipeline.inputs_of(config, definition, FOLLOWED)
+    assert inputs.user == {"col_b1": {"layerId": REST_LAYER_ID, "assignedBy": "user"},
+                           "tbl_b": {"layerId": "b_cols", "assignedBy": "user"}}
+    page = _page([member("tbl_a"), member("col_a1"), member("col_a2")],
+                 previous={"tbl_a": {"layerId": "b_tbls"}, "col_a1": {"layerId": "b_cols"}})
+    rows, _ = pipeline.place(page, inputs, now="t0")
+    assert {r.urn: r.layer_id for r in rows} == {"tbl_a": "b_cols", "col_a1": REST_LAYER_ID, "col_a2": "b_tbls"}

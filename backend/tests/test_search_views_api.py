@@ -478,3 +478,23 @@ class TestFollowedByAViewMadeFromAQuery:
         mine = await self.follower(test_client, ws, await base_view(test_client, ws))
         resp = await test_client.post(URL, json=body(ws, mine))
         assert (resp.status_code, resp.json()["detail"]["reason"]) == (422, "base_is_subset")
+
+    def test_it_is_served_its_own_entries_in_the_layers_it_follows(self):
+        """Served the base's layers, a view made from a query keeps the entries people placed
+        in it — one in a layer the base has since deleted in Other matches. A subset, which
+        places nothing by hand, is served none."""
+        from backend.app.services.search_views import served_config
+
+        base = {"layout": {"referenceLayout": {"layers": LAYERS, "assignments": {"x": {"layerId": "t"}}}}}
+        entries = {"a": {"layerId": "d", "assignedBy": "user"},
+                   "b": {"layerId": "gone", "orderKey": "k", "assignedBy": "user"}}
+        mine = {"membership": {"layout": {"kind": "follow", "sourceViewId": "base"}},
+                "layout": {"referenceLayout": {"layers": [], "assignments": entries}}}
+        ref = served_config(mine, base)["layout"]["referenceLayout"]
+        assert [l["id"] for l in ref["layers"]] == ["t", "d", REST_LAYER_ID]
+        assert ref["assignments"] == {"a": {"layerId": "d", "assignedBy": "user"},
+                                      "b": {"layerId": REST_LAYER_ID, "assignedBy": "user"}}
+        assert served_config(mine, None)["layout"]["referenceLayout"] == {"layers": [], "assignments": {}}
+        subset = {"search": {"predicate": P, "readIn": "base"},
+                  "layout": {"referenceLayout": {"layers": [], "assignments": entries}}}
+        assert served_config(subset, base)["layout"]["referenceLayout"]["assignments"] == {}

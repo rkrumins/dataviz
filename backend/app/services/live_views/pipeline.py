@@ -60,7 +60,7 @@ from backend.app.services.live_views.plan import (
 )
 from backend.app.services.member_sets import stepper
 from backend.app.services.member_sets import store as sets
-from backend.app.services.search_views import followed_base, is_subset
+from backend.app.services.search_views import followed_base, in_followed_layers, is_subset
 from backend.app.services.view_membership_search import make_seed_pages, seed_query_for
 from backend.app.services.view_placement import NodeFacts, PlacementSpec, facts_from_graph_node, placement_digest
 from backend.common.adapters import ProviderUnavailable
@@ -481,14 +481,19 @@ class Inputs:
 
 
 def inputs_of(config: dict, definition: MembershipDefinition, source_config: Optional[dict]) -> Inputs:
-    """Following a view, its layers are that view's as it is now (it stores none)."""
+    """Following a view, its layers are that view's as it is now (it stores none), and
+    what people put in a layer that view has since deleted is in its fallback layer."""
     layers, assignments = layout_of(config)
     if definition.layout.kind == "follow":
         if source_config is None:
             raise PipelineError("source_missing", "The view it follows can't be read.")
         layers = layouts.followed(source_config)
-    return Inputs(definition=definition, layers=layers, source_config=source_config,
-                  user={u: e for u, e in assignments.items() if e.get("assignedBy") != MACHINE})
+    inputs = Inputs(definition=definition, layers=layers, source_config=source_config,
+                    user={u: e for u, e in assignments.items() if e.get("assignedBy") != MACHINE})
+    if definition.layout.kind == "follow":
+        inputs.user = in_followed_layers(inputs.user, layers)
+        inputs.overrides = in_followed_layers(inputs.overrides, layers)
+    return inputs
 
 
 def place(page: Page, inputs: Inputs, *, now: str) -> Tuple[List[Placed], int]:

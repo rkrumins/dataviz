@@ -536,6 +536,7 @@ async def import_item(
             await view_members_repo.replace(session, await view_membership_repo.ensure(session, row),
                                             row.id, carried)
         await view_members_repo.rehome_view(session, row.id, imported)
+        await view_repo.tell_followers(session, row, imported)
         row.config = await asyncio.to_thread(json.dumps, imported)
         row.name = item.metadata["name"]
         row.description = item.metadata.get("description")
