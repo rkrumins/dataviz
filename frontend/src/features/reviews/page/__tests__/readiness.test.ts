@@ -39,6 +39,31 @@ describe('readiness — a reviewer', () => {
     expect(r.primary).toEqual({ kind: 'approve', label: 'Approve' })
   })
 
+  it('approves all and merges in one go, where only their approval holds it', () => {
+    const solo = pr({ reviewers: ['u_me'] })
+    const open = summary({ accepted: 1, rejected: 0, undecided: 3 })
+    const all = (c: Partial<ReadinessContext> = {}, p = solo) =>
+      readiness(p, ctx({ showApprove: true, canDecide: true, canApproveAll: true, decisions: open, ...c }))
+    expect(all().primary).toEqual({ kind: 'approve_all_merge', label: 'Approve all & merge' })
+    // Someone else's approval is awaited, or they may not merge, or it is behind: approve all, no merge.
+    expect(all({}, asked).primary).toEqual({ kind: 'approve_all', label: 'Approve all' })
+    expect(all({ canMerge: false }).primary).toEqual({ kind: 'approve_all', label: 'Approve all' })
+    expect(all({ needsPull: true }).primary).toEqual({ kind: 'approve_all', label: 'Approve all' })
+    // Every change accepted already: Approve & merge.
+    expect(all({ decisions: summary({ accepted: 4, rejected: 0, undecided: 0 }) }).primary)
+      .toEqual({ kind: 'approve_all_merge', label: 'Approve & merge' })
+    // Under a rule of N approvals, theirs completing it.
+    const review: ReviewState = {
+      requiredApprovals: 2, approvals: { required: 2, have: 1, satisfied: false },
+      reviewers: [{ type: 'user', id: 'u_bob', state: 'waiting', requestedAt: '2026-11-01T00:00:00Z' }],
+      changeRequests: [], threads: { open: 0, holdMerge: false },
+    }
+    expect(all({}, pr({ reviewers: ['u_me'], review })).primary).toMatchObject({ kind: 'approve_all_merge' })
+    // Not offered where something was rejected: that review merges what is accepted.
+    expect(readiness(solo, ctx({ showApprove: true, canDecide: true, canApproveAll: false, decisions: summary() })).primary)
+      .toEqual({ kind: 'approve', label: 'Approve' })
+  })
+
   it('is not asked to decide where changes are not decided one by one here', () => {
     expect(item(readiness(asked, ctx({ canDecide: true, decisions: summary(), listable: false })), 'decide')).toBeUndefined()
     expect(item(readiness(asked, ctx({ canDecide: false, decisions: summary() })), 'decide')).toBeUndefined()

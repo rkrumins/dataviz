@@ -18,6 +18,8 @@ import type { PrimaryAction, ReviewActionKind } from './readiness'
 
 const LOOK: Record<ReviewActionKind, { Icon: LucideIcon; cls: string; tip: string }> = {
   approve: { Icon: CheckCircle2, cls: 'bg-emerald-600 hover:bg-emerald-700', tip: 'Sign off on these changes so they can be merged' },
+  approve_all: { Icon: CheckCheck, cls: 'bg-emerald-600 hover:bg-emerald-700', tip: 'Accept every change still to decide and approve, in one go' },
+  approve_all_merge: { Icon: CheckCheck, cls: 'bg-gradient-to-r from-emerald-600 to-indigo-600 hover:from-emerald-700 hover:to-indigo-700', tip: 'Accept every change still to decide, approve, and merge into main, in one go' },
   merge: { Icon: GitMerge, cls: 'bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700', tip: 'Apply these changes to main' },
   merge_accepted: { Icon: GitMerge, cls: 'bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700', tip: 'Apply the accepted changes to main; the rest stay on the draft' },
   resolve_conflicts: { Icon: GitMerge, cls: 'bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700', tip: 'Merge, choosing what each conflicting field keeps' },
@@ -36,6 +38,7 @@ export function ReviewPrimaryAction({ wsId, actions, primary, onAct }: {
   const { pr } = actions
   if (!pr || (!primary && !actions.canSendBack)) return null
   const pending = actions.pending.merge || actions.pending.pull || actions.pending.discard || actions.pending.acceptMissing
+    || actions.pending.approveAll
   return (
     <div className="flex items-center gap-2 shrink-0">
       {actions.canSendBack && <SendBack actions={actions} />}
@@ -43,7 +46,8 @@ export function ReviewPrimaryAction({ wsId, actions, primary, onAct }: {
         <UpdateFromParentButton wsId={wsId} forkGraphId={pr.graphId} onUpdated={actions.clearForkBehind} />
       ) : (() => {
         const look = LOOK[primary.kind]
-        const off = !!primary.disabled || actions.busy || (primary.kind === 'approve' && actions.changesFetching)
+        const off = !!primary.disabled || actions.busy
+          || ((primary.kind === 'approve' || primary.kind === 'approve_all' || primary.kind === 'approve_all_merge') && actions.changesFetching)
         return (
           <HoverTip label={primary.why ?? look.tip} shortcut={off ? undefined : formatShortcut('mod+enter')} className="inline-flex">
             <button type="button" disabled={off} onClick={() => onAct(primary.kind)}

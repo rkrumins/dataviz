@@ -192,8 +192,14 @@ export function useReviewActions(wsId: string, prId: string, onClose: () => void
   // Sent back for changes, while that holds: it merges once the draft changes (or it is withdrawn).
   const sentBack = draftReview && !terminal ? pr?.changesRequested ?? null : null
   const canSendBack = draftReview && !terminal && !merging && !sentBack && !!viewerCan?.decide
+  // Approve all: every change still to decide accepted, the review approved and — asked for —
+  // merged, in one go. For a reviewer who decides a draft's review with nothing rejected: it never
+  // overrides a rejection (that review merges what is accepted).
+  const decideAllM = useDecideChanges(wsId, prId)
+  const toDecide = decisions ? decisions.undecided + decisions.stale : 0
+  const canApproveAll = deciding && !!decisions && !!viewerCan?.decide && showApprove && rejected === 0 && !sentBack
   const busy = approveM.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
-    || sendBackM.isPending || withdrawM.isPending || discardRejectedM.isPending
+    || sendBackM.isPending || withdrawM.isPending || discardRejectedM.isPending || decideAllM.isPending
 
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
   // banner + Pull-latest show up front (the 409 catch in runMerge is the backstop). A clean pull
@@ -323,6 +329,33 @@ export function useReviewActions(wsId: string, prId: string, onClose: () => void
     })
   }
 
+  /** Accept every change still to decide, approve, and (``andMerge``) merge — asked first. A step
+   *  the server refuses stops there, saying why; what was done before it stands. */
+  const approveAll = async (andMerge: boolean) => {
+    if (!pr || !decisions || !canApproveAll) return
+    const n = decisions.total
+    const all = `${n.toLocaleString()} change${n === 1 ? '' : 's'}`
+    const ask = toDecide > 0
+      ? `Accept ${toDecide === n ? `all ${all}` : `the ${toDecide.toLocaleString()} of ${all} still to decide`}, approve${andMerge ? ', and merge into main' : ''}?`
+      : `Approve${andMerge ? ' and merge into main' : ''}? All ${all} are accepted.`
+    if (!window.confirm(ask)) return
+    try {
+      if (toDecide > 0) {
+        await decideAllM.mutateAsync({ verdict: 'accepted', filter: { decision: 'undecided' }, expectedHeadCommitId: pr.headCommitId })
+      }
+      await approveM.mutateAsync({ prId, graphId: pr.graphId, expectedHeadCommitId: pr.headCommitId })
+    } catch (e) {
+      if (e instanceof HeadMovedError) {
+        void prQ.refetch()
+        if (listOrigin) void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.changeList(wsId, pr.graphId, listOrigin) })
+      }
+      notify('error', (e as Error).message)
+      return
+    }
+    if (andMerge) await runMerge()
+    else notify('success', toDecide > 0 ? `Accepted ${toDecide.toLocaleString()} change${toDecide === 1 ? '' : 's'} and approved.` : 'Approved.')
+  }
+
   /** Send it back to its author with why; `onSent` once they have been told. */
   const sendBack = (reason: string, onSent?: () => void) => {
     if (!pr) return
@@ -390,10 +423,12 @@ export function useReviewActions(wsId: string, prId: string, onClose: () => void
     discardOnMerge, setDiscardOnMerge,
     conflicts, seeds, seedError, resolverError, cancelConflicts, resolveConflicts,
     incoming, closeIncoming: () => setIncoming(null),
+    canApproveAll, toDecide, approveAll,
     runMerge, runPull, approve, sendBack, withdraw, discardRejected, dismiss, acceptMissing, saveDetails,
     pending: {
       merge: merge.isPending, pull: pullLatest.isPending, dismiss: closePr.isPending, sendBack: sendBackM.isPending,
       withdraw: withdrawM.isPending, discard: discardRejectedM.isPending, acceptMissing: acceptMissingM.isPending,
+      approveAll: decideAllM.isPending || approveM.isPending,
       update: update.isPending,
     },
   }

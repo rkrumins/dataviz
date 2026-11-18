@@ -23,7 +23,7 @@ import { motion } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
   Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
-  Undo2, LayoutTemplate, MessageSquare, CornerUpLeft, Trash2,
+  Undo2, LayoutTemplate, MessageSquare, CornerUpLeft, Trash2, CheckCheck,
 } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { Badge } from '@/components/ui/Badge'
@@ -49,7 +49,7 @@ import { MOTION } from '@/lib/motion'
 import { ReviewDiscussion } from '../comments/ReviewDiscussion'
 import { useReviewCommentCounts } from '../comments/useReviewComments'
 import { useReviewActions } from '../hooks/useReviewActions'
-import { behindText } from '../page/readiness'
+import { behindText, mergeFollowsApproval } from '../page/readiness'
 
 function Section({ icon: Icon, title, right, children }: {
   icon: React.ComponentType<{ className?: string }>; title: string; right?: React.ReactNode; children: React.ReactNode
@@ -80,6 +80,7 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
     needsPull, pullReason, forkBehind, clearForkBehind, discardOnMerge, setDiscardOnMerge,
     conflicts, seeds, seedError, resolverError, cancelConflicts, resolveConflicts, incoming, closeIncoming,
     runMerge, runPull, approve, sendBack, withdraw, discardRejected, dismiss, acceptMissing, saveDetails, pending,
+    canApproveAll, toDecide, approveAll,
   } = useReviewActions(wsId, prId, onClose)
   /** Sending it back: the form is open, and what it says. */
   const [sendingBack, setSendingBack] = useState(false)
@@ -114,6 +115,10 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
   const versioningEnabled = useFeature('versioningEnabled')
   const [reverting, setReverting] = useState(false)
   const openThreads = useReviewCommentCounts(wsId, prId).data?.open ?? 0
+  // Approve all: in one go, every change still to decide accepted and the review approved — and
+  // merged, where nothing but this approval holds it.
+  const allMerges = !!pr && canApproveAll && mergeFollowsApproval(pr, { me: user?.id ?? null, canMerge, needsPull, unsaved, openThreads })
+  const offerApproveAll = canApproveAll && !forksOff && (toDecide > 0 || allMerges)
   const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
 
   return createPortal(
@@ -499,7 +504,18 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
         {/* Action bar — none while a job merges it, which nothing may change meanwhile */}
         {pr && !terminal && canManage && !dismissing && !merging && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
-            {showApprove && (
+            {offerApproveAll ? (
+              <button
+                onClick={() => void approveAll(allMerges)}
+                disabled={busy || changesFetching}
+                title={allMerges ? 'Accept every change still to decide, approve, and merge into main, in one go'
+                  : 'Accept every change still to decide and approve, in one go'}
+                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-emerald-600 to-indigo-600 hover:from-emerald-700 hover:to-indigo-700 shadow-sm disabled:opacity-60"
+              >
+                {pending.approveAll || pending.merge ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCheck className="w-4 h-4" />}
+                {toDecide > 0 ? 'Approve all' : 'Approve'}{allMerges ? ' & merge' : ''}
+              </button>
+            ) : showApprove && (
               <button
                 onClick={approve}
                 disabled={busy || changesFetching}
@@ -515,7 +531,7 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
                 <CornerUpLeft className="w-4 h-4" aria-hidden /> Send back
               </button>
             )}
-            {needsPull ? (
+            {offerApproveAll && allMerges ? null : needsPull ? (
               <button
                 onClick={() => runPull()}
                 disabled={busy}

@@ -124,9 +124,10 @@ describe('ReviewPage', () => {
     expect(within(pane()).getByText('Owners moved to the new teams.')).toBeInTheDocument()
     expect(within(side()).getByText('Give your verdict')).toBeInTheDocument()
     expect(within(side()).getByRole('tab', { name: 'Discussion' })).toHaveAttribute('aria-selected', 'true')
-    // A requested reviewer who hasn't approved: Approve, with Send back beside it.
+    // A requested reviewer who hasn't approved, nothing rejected, only their approval awaited:
+    // Approve all & merge, with Send back beside it.
     const header = screen.getByRole('banner', { name: 'This review' })
-    expect(within(header).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(within(header).getByRole('button', { name: 'Approve all & merge' })).toBeInTheDocument()
     expect(within(header).getByRole('button', { name: 'Send back' })).toBeInTheDocument()
   })
 

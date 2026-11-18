@@ -10,7 +10,9 @@
  *
  * The primary action is the first item not yet done that has something to do about it — never a
  * step to another change — else Merge (Merge N accepted, merging in part), off with why where the
- * review says so. Where the review carries the server's count (`pr.review`), that is what is read;
+ * review says so. A reviewer who decides a draft's review with nothing rejected is offered Approve
+ * all: every change still to decide accepted and the review approved in one go — and merged, when
+ * they may merge and nothing but their approval holds it (Approve all & merge). Where the review carries the server's count (`pr.review`), that is what is read;
  * else the fields it had before.
  */
 import type { PullReason, PullRequest, ReviewDecisionSummary, ReviewerState } from '@/services/versioningApiService'
@@ -21,8 +23,8 @@ import { isDraftMr } from '../components/PrMeta'
 /** Where to go next: offered beside an item, never the primary action. */
 export type StepKind = 'next_unviewed' | 'next_undecided' | 'next_thread'
 export type ReviewActionKind =
-  | 'approve' | 'merge' | 'merge_accepted' | 'pull' | 'resolve_conflicts' | 'update_from_parent'
-  | 'discard_rejected' | 'accept_missing'
+  | 'approve' | 'approve_all' | 'approve_all_merge' | 'merge' | 'merge_accepted' | 'pull' | 'resolve_conflicts'
+  | 'update_from_parent' | 'discard_rejected' | 'accept_missing'
 export type ActionKind = ReviewActionKind | StepKind
 
 export interface ReadinessItem {
@@ -66,6 +68,8 @@ export interface ReadinessContext {
   mergeInPart: boolean
   /** The reader decides change by change (`viewerCan.decide`). */
   canDecide: boolean
+  /** The reader may accept every change still to decide and approve in one go (nothing rejected). */
+  canApproveAll?: boolean
   /** Its changes are listed one by one here (not a fork's review, not too large to list). */
   listable: boolean
   /** Changes the reader ticked viewed, of how many. */
@@ -125,6 +129,20 @@ function names(list: string[]): string {
 
 const STEPS = new Set<ActionKind>(['next_unviewed', 'next_undecided', 'next_thread'])
 
+/** Whether the reader's approval is all that holds the merge, and they may merge: then approving
+ *  all merges it too (Approve all & merge). Their approval counts toward the rule; nobody else's
+ *  is awaited; nothing else holds it — changes asked for, being behind, conflicts, unsaved edits,
+ *  open threads where they hold it. */
+export function mergeFollowsApproval(pr: PullRequest, ctx: Pick<ReadinessContext,
+  'me' | 'canMerge' | 'needsPull' | 'unsaved' | 'openThreads'>): boolean {
+  if (!ctx.canMerge || ctx.needsPull || ctx.unsaved > 0 || pr.status === 'conflicts') return false
+  if (changeRequests(pr).some((a) => a.holds)) return false
+  if (pr.review?.threads.holdMerge && ctx.openThreads > 0) return false
+  const progress = approvalProgress(pr)
+  if (pr.review && pr.review.requiredApprovals > 0) return progress.have + 1 >= progress.required
+  return !progress.waiting.some((r) => !(r.type === 'user' && r.id === ctx.me))
+}
+
 export function readiness(pr: PullRequest, ctx: ReadinessContext): Readiness {
   if (isTerminalPr(pr.status)) return { items: [], primary: null }
   if (pr.status === 'merging') {
@@ -146,6 +164,10 @@ export function readiness(pr: PullRequest, ctx: ReadinessContext): Readiness {
   const rejected = d?.rejected ?? 0
   const threadsHold = !!pr.review?.threads.holdMerge && ctx.openThreads > 0
 
+  const left = d ? d.undecided + d.stale : 0
+  const progress = approvalProgress(pr)
+  const mergeFollows = !!ctx.canApproveAll && mergeFollowsApproval(pr, ctx)
+
   // A reviewer's part.
   if (requested || ctx.canDecide) {
     if (ctx.total > 0) {
@@ -157,7 +179,6 @@ export function readiness(pr: PullRequest, ctx: ReadinessContext): Readiness {
       })
     }
     if (ctx.canDecide && ctx.listable && d) {
-      const left = d.undecided + d.stale
       items.push({
         key: 'decide', ok: left === 0, title: 'Decide each change',
         detail: left ? `${left.toLocaleString()} to decide${d.stale ? `, ${d.stale.toLocaleString()} of them changed since` : ''}`
@@ -179,7 +200,10 @@ export function readiness(pr: PullRequest, ctx: ReadinessContext): Readiness {
         title: approved ? 'You approved it' : askedByMe ? 'You asked for changes' : 'Give your verdict',
         detail: approved || askedByMe ? undefined
           : earlier ? 'You approved an earlier version: it changed since.' : 'Approve it, or send it back saying what should change.',
-        action: ctx.showApprove ? { label: 'Approve', kind: 'approve' } : undefined,
+        action: ctx.canApproveAll && (left > 0 || mergeFollows)
+          ? { label: `${left > 0 ? 'Approve all' : 'Approve'}${mergeFollows ? ' & merge' : ''}`,
+            kind: mergeFollows ? 'approve_all_merge' : 'approve_all' }
+          : ctx.showApprove ? { label: 'Approve', kind: 'approve' } : undefined,
       })
     }
   }
@@ -189,7 +213,6 @@ export function readiness(pr: PullRequest, ctx: ReadinessContext): Readiness {
     items.push({ key: 'forks_off', ok: false, title: 'Forks are turned off',
       detail: 'A fork’s review can be read but not approved or merged until an administrator turns forks on.' })
   }
-  const progress = approvalProgress(pr)
   if (progress.required > 0) {
     items.push({
       key: 'approvals', ok: progress.satisfied,

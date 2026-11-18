@@ -105,7 +105,7 @@ export function ReviewPage({ wsId, prId }: { wsId: string; prId: string }) {
     mergeBlockedWhy: actions.mergeBlockedWhy, forksOff: actions.forksOff, forkBehind: actions.forkBehind,
     canUpdateFromParent: actions.forksOn && actions.canPublish, needsPull: actions.needsPull, pullReason: actions.pullReason,
     unsaved: actions.unsaved, decisions: deciding ? decisions : null, mergeInPart: actions.mergeInPart,
-    canDecide: !!viewerCan?.decide, listable, viewed: viewedCount, total, openThreads,
+    canDecide: !!viewerCan?.decide, canApproveAll: actions.canApproveAll, listable, viewed: viewedCount, total, openThreads,
   }) : { items: [], primary: null }
 
   // Moving between changes.
@@ -128,6 +128,8 @@ export function ReviewPage({ wsId, prId }: { wsId: string; prId: string }) {
       case 'next_undecided': return go(order.seek(selected, 1, undecided))
       case 'next_thread': return threadStep(1)
       case 'approve': return actions.approve()
+      case 'approve_all': return void actions.approveAll(false)
+      case 'approve_all_merge': return void actions.approveAll(true)
       case 'merge': return void actions.runMerge()
       case 'merge_accepted': return void actions.runMerge(undefined, 'accepted')
       case 'resolve_conflicts': return void actions.runMerge(undefined, actions.mergeInPart ? 'accepted' : 'all')
