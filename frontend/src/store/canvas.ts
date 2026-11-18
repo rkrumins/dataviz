@@ -158,6 +158,9 @@ export interface SearchFeedState {
   capped: boolean
   /** Rows listed so far. */
   delivered: number
+  /** Which server feed lists it: the view's stored search (absent), or — a view
+   *  made from a query — its members, read from the server's member table. */
+  source?: 'members'
 }
 
 /** New roots a draft created that a curated view loads by URN: a page of them. They have no

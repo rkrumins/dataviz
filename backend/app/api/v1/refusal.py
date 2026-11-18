@@ -55,9 +55,11 @@ _MEANS = {
     404: "Not found, or not one you can read.",
     409: "Conflict with what is stored: someone else changed it (`changed`, with the "
          "`definitionHash` stored now), its base view is gone (`base_missing`), it is frozen "
-         "(`frozen`), or it can't be changed in a draft (`draft_refused`).",
+         "(`frozen`), it can't be changed in a draft (`draft_refused`), or the id sent is "
+         "another question's (`set_mismatch`).",
     422: "Can't be done as asked; `reason` and `message` say why.",
     429: "Busy (`PROVIDER_BUSY`) or too soon (`too_soon`): ask again after `Retry-After`.",
+    501: "The graph behind this data source can't answer this (it has no lineage walk).",
     503: "The graph store or its cache can't answer just now: ask again after `Retry-After`.",
 }
 
@@ -67,7 +69,7 @@ def refusal_responses(*statuses: int) -> dict[int, dict[str, Any]]:
     out: dict[int, dict[str, Any]] = {}
     for status in statuses:
         entry: dict[str, Any] = {"description": _MEANS[status]}
-        if status not in (304,):
+        if status not in (304, 501):
             entry["model"] = Refusal
         if status in (429, 503):
             entry["headers"] = _RETRY_AFTER

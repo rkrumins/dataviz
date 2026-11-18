@@ -5,9 +5,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { FromMembersRequest, MembershipPlan, PlanRequest } from '@/types/membership'
+import type { FromMembersRequest, MembershipPlan, MembershipResolving, PlanRequest } from '@/types/membership'
 
-const planMembers = vi.fn<(viewId: string, req: PlanRequest) => Promise<MembershipPlan>>()
+const planMembers = vi.fn<(viewId: string, req: PlanRequest) => Promise<MembershipPlan | MembershipResolving>>()
 const createFromMembers = vi.fn<(body: FromMembersRequest, key: string) => Promise<unknown>>()
 
 vi.mock('@/providers', () => ({ useGraphProvider: () => ({ planMembers }) }))
@@ -79,6 +79,24 @@ describe('SaveAsViewSheet', () => {
     fireEvent.click(screen.getByRole('radio', { name: /Medallion/ }))
     await waitFor(() => expect(planMembers.mock.calls.at(-1)![1].layout).toMatchObject({ kind: 'template', templateId: 'tpl' }))
     expect(planMembers.mock.calls.at(-1)![1].layers).toHaveLength(1)
+  })
+
+  it('a large set is worked out on the server: it says how far it has got, and carries on', async () => {
+    const counts = { seeds: 20, inside: 0, upstream: 30_000, downstream: 11_000, partnerInside: 0, total: 41_020 }
+    const resolving: MembershipResolving = { status: 'resolving', sets: [{
+      setId: 'ms_1', specHash: 'h', status: 'running', stage: 'downstream', counts, missingSeeds: 0, truncated: [],
+      dataVersion: '1', progress: { steps: 12, queued: 40 }, startedAt: '',
+    }] }
+    let asked = 0
+    planMembers.mockImplementation(() => new Promise((resolve) => {
+      asked += 1
+      // The first ask answers 202; the next one is held, so the progress stays on screen.
+      if (asked === 1) resolve(resolving)
+    }))
+    renderSheet()
+    expect(await screen.findByText(/Working out everything it reaches — 41,020 entities so far/)).toBeInTheDocument()
+    await waitFor(() => expect(asked).toBe(2))
+    expect(planMembers.mock.calls[0][1].waitMs).toBe(10_000)
   })
 
   it('over the limit, says why and what helps, and will not save', async () => {

@@ -192,3 +192,34 @@ describe('TraceDockTitleBar — a combined trace', () => {
     expect(document.activeElement).toBe(rows[0])
   })
 })
+
+// EXPORT & SAVE is one more control on the dock's toolbar: reached with the
+// arrow keys like the rest, and opening a panel that waits for the walk.
+describe('the Export & save control', () => {
+  const keep = (walking: boolean) => ({
+    rowCount: 12, walking, partial: false, outsideView: 0,
+    exportCsv: vi.fn(), exportJson: vi.fn(), saved: false, save: vi.fn(async () => null),
+    savedList: { items: [], persistent: true, onOpen: vi.fn(), onExport: vi.fn(), onCopyLink: vi.fn(() => null), onRename: vi.fn(), onRemove: vi.fn() },
+  })
+  const renderWithKeep = (walking: boolean) => render(
+    <TraceDockTitleBar
+      trace={trace} displayMap={new Map()} expanded={false} onToggleExpanded={vi.fn()} onExit={vi.fn()}
+      nativeMode seeds={[ORDERS, SALES]} focusLabel="2 entities" onRemoveSeed={vi.fn()} keep={keep(walking)}
+    />,
+  )
+
+  it('is in the toolbar’s roving tab order', () => {
+    renderWithKeep(false)
+    const button = screen.getByRole('button', { name: 'Export and save this trace' })
+    expect(button.hasAttribute('data-trace-control')).toBe(true)
+    expect(screen.getByRole('toolbar').contains(button)).toBe(true)
+  })
+
+  it('says what a file holds, and waits while the walk lands', () => {
+    renderWithKeep(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Export and save this trace' }))
+    const panel = screen.getByRole('dialog', { name: 'Export and save this trace' })
+    expect(panel.textContent).toMatch(/Waiting for the trace/)
+    expect(within(panel).getByText('CSV').closest('button')?.disabled).toBe(true)
+  })
+})

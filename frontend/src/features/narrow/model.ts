@@ -147,6 +147,7 @@ export function truncationNotes(result: Pick<MembershipResult, 'truncated'>): st
       case 'chains_cap': return `Only the first ${t.limit.toLocaleString()} can be opened up to on the canvas.`
       case 'deadline': return 'It ran out of time — what was reached is shown. Trying again may reach more.'
       case 'incomplete': return 'Part of the graph didn’t answer — what was reached is shown. Trying again may reach more.'
+      case 'edge_cap': return `It holds more than ${t.limit.toLocaleString()} flows — the first ${t.limit.toLocaleString()} are kept.`
     }
   })
 }

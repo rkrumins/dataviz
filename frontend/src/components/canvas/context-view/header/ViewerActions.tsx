@@ -32,6 +32,7 @@ import { DisplayMenu } from './DisplayMenu'
 import { ImportExportMenu, type ViewFileActions } from './ImportExportMenu'
 import { MoreMenu } from './MoreMenu'
 import { TraceHistoryPanel, type TraceHistoryPanelEntry } from './TraceHistoryPanel'
+import type { SavedTracesSectionProps } from '@/components/canvas/trace/SavedTracesSection'
 import { useFolded } from './toolbarFold'
 import { HoverTip } from '@/components/ui/HoverTip'
 
@@ -89,6 +90,8 @@ export interface ComprehensionToolsProps {
   /** A link that reopens the history entry at this stack index — the rows'
    *  own share action. Absent = no share action. */
   onCopyTraceHistoryLink?: (index: number) => string | null
+  /** The traces this reader saved in this view, listed in the launcher. */
+  savedTraces?: SavedTracesSectionProps
   /** Open the Lineage Lens on the current selection (same gating as
    *  Trace: a single non-logical entity). Optional — hosts that don't
    *  wire the lens show no button. */
@@ -158,6 +161,7 @@ export function ComprehensionTools({
   onResumeTraceHistory,
   onClearTraceHistory,
   onCopyTraceHistoryLink,
+  savedTraces,
   onOpenLens,
   onOpenOrphans,
   onOpenHistory,
@@ -172,7 +176,8 @@ export function ComprehensionTools({
   // A tucked-away tool that is ON stays on the row, so nobody is left with a
   // mode they cannot see to turn off.
   const technical = usePersonaMode() === 'technical'
-  const hasTraceHistory = technical && traceHistory.length > 0 && !!onResumeTraceHistory
+  const hasTraceHistory = technical && !!onResumeTraceHistory
+    && (traceHistory.length > 0 || (savedTraces?.items.length ?? 0) > 0)
   // The Lens focuses ONE entity by construction; Trace can take a whole
   // selection. Defaults to canTrace so a caller that never sets it is unchanged.
   const lensAllowed = canOpenLens ?? canTrace
@@ -445,6 +450,7 @@ export function ComprehensionTools({
               onClear={() => { setTraceHistoryOpen(false); onClearTraceHistory?.() }}
               onClose={() => setTraceHistoryOpen(false)}
               onCopyLink={onCopyTraceHistoryLink}
+              saved={savedTraces}
               triggerRef={traceLauncherRef}
             />
           )}

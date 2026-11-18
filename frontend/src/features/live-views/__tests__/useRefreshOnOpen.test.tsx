@@ -49,6 +49,20 @@ describe('useRefreshOnOpen', () => {
     expect(added).toHaveBeenCalled()
   })
 
+  it('a large view still being worked out is asked again until its new members are in', async () => {
+    refreshMembership
+      .mockResolvedValueOnce({ outcome: 'running', detail: {}, membership: {} })
+      .mockResolvedValueOnce({ outcome: 'applied', diff: { added: 40_000, removed: 0 }, detail: {}, membership: {} })
+    getView.mockResolvedValue({ id: 'v1', name: 'Orders' })
+    const { useCanvasStore } = await import('@/store/canvas')
+    const before = useCanvasStore.getState().subsetRefreshNonce
+    renderHook(() => useRefreshOnOpen(view({ v: 1, mode: 'live' })))
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('info', expect.stringMatching(/^Brought up to date/)), { timeout: 4000 })
+    expect(refreshMembership).toHaveBeenCalledTimes(2)
+    // Its layers page their members from the server: they are read again.
+    expect(useCanvasStore.getState().subsetRefreshNonce).toBe(before + 1)
+  })
+
   it('reads nothing again when it was already current', async () => {
     refreshMembership.mockResolvedValue({ outcome: 'current', detail: { reason: 'up_to_date' }, membership: {} })
     renderHook(() => useRefreshOnOpen(view({ v: 1, mode: 'live' })))

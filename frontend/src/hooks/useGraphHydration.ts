@@ -63,7 +63,7 @@ export const SUBSET_FOLLOW_MIN_MS = 1000
 export const SUBSET_FOLLOW_MAX_MS = 8000
 
 /** Where a subset view's layer stands after a page of its matches. */
-export function subsetFeedAfter(layerId: string, page: ViewFeedPage): TypeFeedState {
+export function subsetFeedAfter(layerId: string, page: ViewFeedPage, source?: 'members'): TypeFeedState {
     const running = page.status === 'running' && !!page.sessionId
     return {
         entityTypes: [],
@@ -80,6 +80,7 @@ export function subsetFeedAfter(layerId: string, page: ViewFeedPage): TypeFeedSt
             asOf: page.asOf ?? null,
             capped: page.capped,
             delivered: page.delivered,
+            ...(source ? { source } : {}),
         },
     }
 }
@@ -535,7 +536,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // A subset view's search, and how many times someone has asked its layers for
     // answers on the current data: either re-reads the layers.
     const subsetNonce = useCanvasStore(s => s.subsetRefreshNonce)
-    const subsetKey = activeView?.search ? `|subset:${JSON.stringify(activeView.search)}#${subsetNonce}` : ''
+    // A view made from a query re-reads its member feeds the same way, after an
+    // update swaps in its new members (useRefreshOnOpen bumps the nonce).
+    const subsetKey = activeView?.search ? `|subset:${JSON.stringify(activeView.search)}#${subsetNonce}`
+        : activeView?.membership ? `|members#${subsetNonce}` : ''
     const lastSubsetNonceRef = useRef(0)
     // The view a subset feed's next page is asked for, read when the page is
     // fetched (after commit), so it is set in an effect, not during render.
@@ -848,6 +852,39 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                                 }
                                 typeFeedSeeds.push([subsetFeedKey(layerIds[i]), subsetFeedAfter(layerIds[i], outcome.value)])
                             })
+                        }
+                    } else if (activeView?.membership && featureEnabled('viewMembershipEnabled')
+                        && provider.viewMembersPage && activeView?.id && !atRevision) {
+                        // ── A view made from a query: each layer lists its members ──
+                        // Paged by the server from the view's member table, in name
+                        // order — a view of a quarter of a million members opens on a
+                        // page a layer, never on every URN. What people placed by hand
+                        // (Always include) is still in the layout, and loads by URN.
+                        const membersPage = provider.viewMembersPage.bind(provider)
+                        const viewId = activeView.id
+                        const layerIds = normLayout.layers
+                            .map(l => l?.id).filter((id): id is string => typeof id === 'string' && !!id)
+                        const settled = await mapWithConcurrency(layerIds, HYDRATION_CONCURRENCY,
+                            layerId => membersPage(viewId, { layerId }))
+                        if (controller.signal.aborted) return
+                        const seen = new Set<string>()
+                        settled.forEach((outcome, i) => {
+                            if (outcome.status !== 'fulfilled') { batchErrors.push(outcome.reason); return }
+                            for (const node of outcome.value.nodes) {
+                                if (seen.has(node.urn)) continue
+                                seen.add(node.urn)
+                                allNodes.push(withFeedLayer(node, layerIds[i]))
+                            }
+                            typeFeedSeeds.push([subsetFeedKey(layerIds[i]),
+                                subsetFeedAfter(layerIds[i], outcome.value, 'members')])
+                        })
+                        const placedByHand = urnArray.filter(u => !seen.has(u))
+                        if (placedByHand.length > 0) {
+                            const batches: string[][] = []
+                            for (let i = 0; i < placedByHand.length; i += 100) batches.push(placedByHand.slice(i, i + 100))
+                            const placed = await loadNodeBatches(batches.map(batch => ({ urns: batch, limit: batch.length })))
+                            if (controller.signal.aborted) return
+                            allNodes = [...allNodes, ...placed]
                         }
                     } else if (loadByUrn) {
                         // ── Assignment-driven loading (by placement) ──
@@ -1572,13 +1609,17 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     if (feed.search) {
                         // A subset view's layer: its next page of matches, or more of a
                         // scan still running — the server's search, never a type's page.
+                        // A view made from a query: its next page of members.
                         const viewFeed = provider.viewFeedPage?.bind(provider)
+                        const membersPage = provider.viewMembersPage?.bind(provider)
                         const viewId = activeViewIdRef.current
-                        if (!viewFeed || !viewId) return
                         const s = feed.search
-                        const result = await viewFeed(viewId, s.status === 'running' && s.sessionId
-                            ? { layerId: s.layerId, sessionId: s.sessionId, waitMs: SUBSET_WAIT_MS }
-                            : { layerId: s.layerId, ...(s.cursor ? { cursor: s.cursor } : {}), waitMs: SUBSET_WAIT_MS })
+                        if (!viewId || !(s.source === 'members' ? membersPage : viewFeed)) return
+                        const result = s.source === 'members'
+                            ? await membersPage!(viewId, { layerId: s.layerId, ...(s.cursor ? { cursor: s.cursor } : {}) })
+                            : await viewFeed!(viewId, s.status === 'running' && s.sessionId
+                                ? { layerId: s.layerId, sessionId: s.sessionId, waitMs: SUBSET_WAIT_MS }
+                                : { layerId: s.layerId, ...(s.cursor ? { cursor: s.cursor } : {}), waitMs: SUBSET_WAIT_MS })
                         if (stale()) return
                         const pageUrns = result.nodes.map(n => n.urn)
                         const edges = await edgesForPage(pageUrns, [], stale)
@@ -1593,7 +1634,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                                 edges.map(e => toCanvasEdge(e)))
                             return
                         }
-                        store.addFeedPage(feedKey, subsetFeedAfter(s.layerId, result),
+                        store.addFeedPage(feedKey, subsetFeedAfter(s.layerId, result, s.source),
                             fresh.map(n => toCanvasNode(withFeedLayer(n, s.layerId))), edges.map(e => toCanvasEdge(e)))
                         return
                     }

@@ -22,17 +22,15 @@ limit is a truncation the result names, never a silent short answer.
 from __future__ import annotations
 
 import asyncio
-import heapq
-import math
 import time
 from contextlib import nullcontext
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from backend.app.services.graph_cache import ENDPOINT_MEMBERS
-from backend.common.models.graph import NodeQuery, TraceClosureRequest, TraceClosureResult
+from backend.app.services.member_sets import walk
+from backend.common.models.graph import NodeQuery
 from backend.common.models.search import Predicate
 from backend.common.models.view_membership import (
-    LINEAGE_DEPTH_MAX,
     SEEDS_MAX,
     MemberEntry,
     MembershipCounts,
@@ -51,17 +49,10 @@ READ_BATCH = 1_000
 #: Descendants per page, and roots read at once.
 DESCENDANTS_PAGE = 1_000
 DESCENDANTS_CONCURRENCY = 4
-#: A closure step's limits (TraceClosureRequest): seeds per request, URNs it may skip.
-CLOSURE_SEEDS = 500
-CLOSURE_EXCLUDE = 2_000
 #: Pages read from one hub (a node with more lineage than a hop can carry).
 HUB_PAGES_MAX = 20
 #: Seed-cursor pages for one batch of container seeds.
 SEED_PAGES_MAX = 50
-#: A closure step's reasons that mean it gave up rather than hit a cap — the walk ranks
-#: them ahead of ``max_nodes`` so the two are told apart. (``ancestors_failed`` is not one:
-#: the containers it nests partners in are no part of a membership.)
-_STEP_FAILURES = frozenset({"timeout", "seed_failed", "nodes_failed"})
 
 Admit = Optional[Callable[[], object]]
 #: A query seed's search: the predicate → (the URNs it finds, up to SEEDS_MAX; more existed).
@@ -73,22 +64,31 @@ class _Deadline(Exception):
 
 
 class _Members:
-    """The scope as it grows: each entity once, with the first reason it joined."""
+    """The scope as it grows: each entity once, with the first reason it joined and
+    the nearest distance it is found at for that reason."""
 
     def __init__(self, cap: int):
         self.cap = cap
         self.entries: Dict[str, MemberEntry] = {}
+        self.seq: Dict[str, int] = {}  # the order each joined
         self.full = False
         self.over = 0  # entities seen past the cap
 
     def add(self, urn: str, via: Via, hops: Optional[int] = None) -> bool:
         """True when ``urn`` is (now) in scope; False only when the cap refused it."""
-        if urn in self.entries:
+        entry = self.entries.get(urn)
+        if entry is not None:
+            # Found again, nearer, for the same reason: a walk can reach a node by a
+            # longer path first (another anchor's step), and the first distance it
+            # was found at is not its distance.
+            if hops is not None and entry.via == via and (entry.hops is None or hops < entry.hops):
+                entry.hops = hops
             return True
         if len(self.entries) >= self.cap:
             self.full = True
             self.over += 1
             return False
+        self.seq[urn] = len(self.entries)
         self.entries[urn] = MemberEntry(urn=urn, via=via, hops=hops)
         return True
 
@@ -317,159 +317,45 @@ async def _lineage(run: _Run, members: _Members, seeds: List[str], direction: st
     """Add the seeds' sources (``upstream``) or consumers (``downstream``), ``depth``
     hops out, or the whole way for ``"all"``. Returns how many joined.
 
-    A work queue of (absolute hops from the seeds, node): each step walks a batch
-    of nodes as far as the remaining depth allows (25 at most), reads every
-    partner's distance off the edges it shipped, and queues whatever the step
-    left unfinished — a node the budget cut, the depth boundary, a hub's next
-    page, a container's next page of seeds — so the walk completes rather than
-    stopping at the first step's horizon.
+    The walk is ``member_sets.walk`` — the one a member set takes too, here over
+    this request's members: each step walks the nearest unfinished nodes as far as
+    the remaining depth allows (25 at most), reads every partner's distance off the
+    edges it shipped, and queues whatever the step left unfinished — a node the
+    budget cut, the depth boundary, a hub's next page, a container's next page of
+    seeds — so the walk completes rather than stopping at the first step's horizon.
+    A Narrow answers inside one request, so it pages one hub at most
+    ``HUB_PAGES_MAX`` times and one batch's seeds ``SEED_PAGES_MAX`` times, and
+    says so (``trace_cap``).
     """
-    target = math.inf if depth == "all" else int(depth)
-    dist: Dict[str, int] = {s: 0 for s in seeds}
-    walked: Dict[str, float] = {}       # node → the depth it has been walked to
-    queue: List[Tuple[int, str]] = [(0, s) for s in seeds]
-    heapq.heapify(queue)
+    target = walk.ALL if depth == "all" else int(depth)
+    store = walk.DictStore(members, seeds)
+    state = walk.new_state()
+    hub_pages: Dict[str, int] = {}
     added = 0
-    up = direction == "upstream"
 
-    def follow(frontier) -> None:
-        # What a step left unfinished, at its distance, while there is depth left.
-        for entry in frontier:
-            hops = dist.get(entry.urn)
-            if hops is not None and hops < target:
-                heapq.heappush(queue, (hops, entry.urn))
-
-    while queue and not members.full:
-        # The nearest unfinished nodes first, in one batch at one remaining depth.
-        d0, first = heapq.heappop(queue)
-        remaining = target - d0
-        batch = [first]
-        rest: List[Tuple[int, str]] = []
-        while queue and len(batch) < CLOSURE_SEEDS:
-            d, urn = heapq.heappop(queue)
-            if target - d == remaining:
-                batch.append(urn)
-            else:
-                rest.append((d, urn))
-        for item in rest:
-            heapq.heappush(queue, item)
-        batch = sorted({u for u in batch if walked.get(u, -1) < remaining})
-        if not batch or remaining <= 0:
-            continue
-        step = int(min(remaining, LINEAGE_DEPTH_MAX))
-        for urn in batch:
-            walked[urn] = remaining
-        in_batch = set(batch)
-
-        seed_cursor: Optional[str] = None
-        for _page in range(SEED_PAGES_MAX):
-            run.check()
-            exclude = [u for u in dist if u not in in_batch][-CLOSURE_EXCLUDE:]
-            request = TraceClosureRequest(
-                urn=batch[0],
-                direction=direction,
-                upstream_depth=step if up else 0,
-                downstream_depth=0 if up else step,
-                seed_urns=batch,
-                exclude_urns=exclude or None,
-                seed_cursor=seed_cursor,
-            )
-            async with run.slot():
-                result = await run.engine.trace_closure(request)
-            _note_failure(run, result, dist)
-            added += _take(result, members, dist, batch, direction)
-            frontier = result.frontier_up if up else result.frontier_down
-            for entry in frontier:
-                if entry.next_cursor and entry.urn in dist:
-                    added += await _page_hub(run, members, dist, entry.urn, entry.next_cursor,
-                                             direction, follow)
-            follow(frontier)
-            seed_cursor = result.seed_cursor
-            if not seed_cursor or members.full:
-                break
-        else:
-            run.truncate("trace_cap", len(dist), len(dist))
-    return added
-
-
-def _note_failure(run: _Run, result: TraceClosureResult, dist: Dict[str, int]) -> None:
-    """A step that gave up (timed out, a read failed) may have left lineage unwalked
-    with nothing on its frontier to say so: the answer is incomplete, and says so."""
-    if result.truncated and result.truncation_reason in _STEP_FAILURES:
-        run.truncate("incomplete", len(dist), len(dist))
-
-
-def _take(result: TraceClosureResult, members: _Members, dist: Dict[str, int],
-          anchors: List[str], direction: str) -> int:
-    """Add a closure step's partners, each at its distance from the seeds. Returns
-    how many joined.
-
-    The step's anchors — ``anchors``, and the lineage-bearing entities inside them
-    that the closure walked from — sit at their known distance; every partner is
-    then one hop further than the nearest node that reaches it through an edge the
-    step shipped (a multi-source walk over those edges, nearest first).
-    """
-    up = direction == "upstream"
-    side = result.upstream_urns if up else result.downstream_urns
-    other = result.downstream_urns if up else result.upstream_urns
-    start: Dict[str, int] = {a: dist[a] for a in anchors if a in dist}
-    base = min(start.values(), default=0)
-    for node in result.nodes:
-        # The focus side: the anchors and what inside them carries lineage.
-        if node.urn not in side and node.urn not in other and node.urn not in start:
-            start[node.urn] = base
-    reach: Dict[str, List[str]] = {}
-    for edge in result.edges:
-        frm, to = (edge.target_urn, edge.source_urn) if up else (edge.source_urn, edge.target_urn)
-        reach.setdefault(frm, []).append(to)
-    best: Dict[str, int] = dict(start)
-    heap = [(d, u) for u, d in start.items()]
-    heapq.heapify(heap)
-    while heap:
-        d, u = heapq.heappop(heap)
-        if d > best.get(u, math.inf):
-            continue
-        for v in reach.get(u, ()):
-            if d + 1 < best.get(v, math.inf):
-                best[v] = d + 1
-                heapq.heappush(heap, (d + 1, v))
-    added = 0
-    for urn in side:
-        hops = best.get(urn)
-        if hops is None:
-            # Shipped on this side with no edge to place it by: one step out.
-            hops = base + 1
-        if hops < dist.get(urn, math.inf):
-            dist[urn] = hops
-        was = urn in members
-        if members.add(urn, direction, dist[urn]) and not was:
-            added += 1
-    return added
-
-
-async def _page_hub(run: _Run, members: _Members, dist: Dict[str, int], hub: str,
-                    cursor: str, direction: str, follow) -> int:
-    """Read a hub's lineage page by page — more than one closure step can carry —
-    handing what each page leaves unfinished to ``follow``."""
-    added = 0
-    up = direction == "upstream"
-    for _page in range(HUB_PAGES_MAX):
+    async def call(request):
         run.check()
         async with run.slot():
-            result = await run.engine.trace_closure(TraceClosureRequest(
-                urn=hub, direction=direction,
-                upstream_depth=1 if up else 0, downstream_depth=0 if up else 1,
-                after_cursor=cursor,
-            ))
-        _note_failure(run, result, dist)
-        added += _take(result, members, dist, [hub], direction)
-        frontier = result.frontier_up if up else result.frontier_down
-        follow([f for f in frontier if f.urn != hub])
-        nxt = next((f.next_cursor for f in frontier if f.urn == hub and f.next_cursor), None)
-        if not nxt or members.full:
-            return added
-        cursor = nxt
-    run.truncate("trace_cap", len(dist), len(dist))
+            return await run.engine.trace_closure(request)
+
+    while not members.full:
+        stepped = await walk.step(store, state, direction, target, call)
+        if stepped is None:
+            break
+        added += stepped.joined
+        if stepped.gave_up:
+            # A step that gave up left lineage unwalked: the answer is incomplete, and says so.
+            run.truncate("incomplete", len(store.hops), len(store.hops))
+        if stepped.work.kind == "hub":
+            hub = stepped.work.anchors[0]
+            hub_pages[hub] = hub_pages.get(hub, 0) + 1
+            if store.cursors.get(hub) and hub_pages[hub] >= HUB_PAGES_MAX:
+                store.cursors[hub] = ""
+                run.truncate("trace_cap", len(store.hops), len(store.hops))
+        pending = state.get("pending")
+        if pending and pending["pages"] >= SEED_PAGES_MAX:
+            state["pending"] = None
+            run.truncate("trace_cap", len(store.hops), len(store.hops))
     return added
 
 

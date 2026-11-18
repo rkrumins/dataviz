@@ -8,8 +8,8 @@
 
 import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition, ScopeFilterConfig, EntityAssignmentConfig } from '../types/schema'
 import type { TraceMeta } from '@/services/traceApi'
-import type { MembershipPlan, MembershipRequest, MembershipResult, PlanRequest } from '@/types/membership'
-import type { ViewFeedPage, ViewFeedRequest } from '@/types/searchView'
+import type { MembershipPlan, MembershipRequest, MembershipResolving, MembershipResult, PlanRequest } from '@/types/membership'
+import type { ViewFeedPage, ViewFeedRequest, ViewMembersRequest } from '@/types/searchView'
 
 // ============================================
 // URN Types (DataHub Compatible)
@@ -862,7 +862,7 @@ export interface GraphDataProvider {
         viewId: string,
         request: PlanRequest,
         opts?: { signal?: AbortSignal },
-    ): Promise<MembershipPlan>
+    ): Promise<MembershipPlan | MembershipResolving>
 
     /**
      * One page of one layer of a subset view (`POST /search/view-feed`): the
@@ -873,6 +873,17 @@ export interface GraphDataProvider {
     viewFeedPage?(
         viewId: string,
         request: ViewFeedRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<ViewFeedPage>
+
+    /**
+     * One page of one layer of a view made from a query (`POST /view-members`):
+     * its members as the server keeps them, in name order, however many there
+     * are — the canvas never loads every member at once. Optional capability.
+     */
+    viewMembersPage?(
+        viewId: string,
+        request: ViewMembersRequest,
         opts?: { signal?: AbortSignal },
     ): Promise<ViewFeedPage>
 
