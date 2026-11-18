@@ -309,10 +309,10 @@ const SHOTS = [
   },
   { name: 'review-center-list', async setup(ctx) { await openReviews(ctx) } },
   {
-    name: 'review-center-drawer',
+    name: 'review-center-page',
     async setup(ctx) {
       await openReviews(ctx)
-      // Click the request's title; the row opens its drawer.
+      // Click the review's title; the row opens its page.
       const opened = await ctx.evalJs(`
         const t = [...document.querySelectorAll('main *')]
           .find((e) => e.childElementCount === 0 && e.textContent.trim() === ${JSON.stringify(REVIEW_TITLE)})

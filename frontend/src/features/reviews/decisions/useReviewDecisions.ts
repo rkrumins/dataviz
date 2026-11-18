@@ -7,6 +7,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import {
   decideReviewChanges, getReviewDecisionSummary, listReviewChanges, type DecisionFilter,
 } from '@/services/versioningApiService'
+import { CHANGE_LIST_RETRY } from '@/features/versioning/hooks/useVersioning'
 
 const PAGE = 200
 
@@ -28,6 +29,7 @@ export function useReviewChanges(wsId: string, prId: string | null | undefined, 
     initialPageParam: 0,
     getNextPageParam: (last) => (last.hasMore ? last.offset + last.entries.length : undefined),
     enabled: enabled && !!prId,
+    ...CHANGE_LIST_RETRY,
   })
 }
 

@@ -40,7 +40,9 @@ spec:
       containers:
         - name: upgrade
           image: {{ include "dataviz.image" (dict "ctx" $ "name" "synodic-upgrade") | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- /* Defaults here, not only in values.yaml: `helm upgrade --reuse-values` leaves keys
+                 a newer chart adds empty. */}}
+          imagePullPolicy: {{ .Values.upgrade.pullPolicy | default "Always" }}
           args:
             - {{ .Values.upgrade.command | default "upgrade" | quote }}
             {{- if .Values.upgrade.targetRevision }}
@@ -52,6 +54,13 @@ spec:
                 name: dataviz-config
             - secretRef:
                 name: {{ include "dataviz.secretName" . }}
+          # As variables, not flags: an image older than the chart ignores them instead of
+          # failing on an argument it doesn't know.
+          env:
+            - name: SYNODIC_SHARED_DATABASE
+              value: {{ ne (toString .Values.upgrade.sharedDatabase) "false" | quote }}
+            - name: SYNODIC_UPGRADE_RECOVER
+              value: {{ eq (toString .Values.upgrade.recoverForeignStamps) "true" | quote }}
           resources:
             {{- toYaml .Values.upgrade.resources | nindent 12 }}
 {{- end }}

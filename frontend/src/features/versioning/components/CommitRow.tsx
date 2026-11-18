@@ -338,6 +338,7 @@ export function CommitRow({
           <ChangeTreePanel
             summary={summaryQ.data}
             isLoading={summaryQ.isLoading}
+            preparing={summaryQ.failureCount > 0}
             error={summaryQ.error}
             onRetry={() => void summaryQ.refetch()}
             fetchChildren={fetchChildren}

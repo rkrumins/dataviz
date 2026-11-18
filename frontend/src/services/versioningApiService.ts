@@ -589,8 +589,56 @@ export interface PullRequest {
   /** every actor id this PR references (actor/reviewers/approvedBy/mergedBy/closedBy/
    *  sourceBranchOwner) → resolved display name; unresolvable ids are absent. */
   userNames?: Record<string, string>
+  /** Every group id it names (a reviewer that is a group) → its name. */
+  groupNames?: Record<string, string>
   /** The single-PR read only: what the reader may do with it, and why not. */
   viewerCan?: ReviewViewerCan | null
+  /** The single-PR read: where its review stands — approvals, each reviewer, changes asked for,
+   *  open threads, and the reader's own part in it. Absent from servers that predate it. */
+  review?: ReviewState | null
+  /** The review inbox's rows only: something someone else did on it is unread to the reader. */
+  unread?: boolean
+  /** The review inbox's rows only: when anything last happened on it. */
+  lastActivityAt?: string
+  /** The review inbox's rows only: the data source it merges into. */
+  targetDataSourceId?: string
+}
+
+/** Where a review stands, as the server counts it. */
+export interface ReviewState {
+  /** How many approvals it needs; 0: everyone asked must approve. */
+  requiredApprovals: number
+  approvals: { required: number; have: number; satisfied: boolean }
+  reviewers: ReviewerState[]
+  /** Changes asked for, each with whether it still holds (the draft has not changed since). */
+  changeRequests: Array<{ by: string; at: string; reason?: string | null; holds: boolean }>
+  /** Open threads, and whether they hold the merge until resolved. */
+  threads: { open: number; holdMerge: boolean }
+  /** Each person's latest review, and whether it is of the draft as it is now. */
+  reviews?: Array<{ by: string; verdict: ReviewVerdict; at: string; current: boolean }>
+  /** The reader's own part. */
+  you?: {
+    requested: boolean
+    needsReview: boolean
+    /** It changed since they last reviewed it. */
+    updatedSinceReviewed: boolean
+    verdict?: 'approve' | 'request_changes' | 'comment' | null
+    reviewedAt?: string | null
+  }
+}
+
+/** One reviewer asked, and where they stand: approved (an earlier version, when it changed since),
+ *  asked for changes, commented, or not yet. */
+export interface ReviewerState {
+  type: 'user' | 'group'
+  id: string
+  /** A group's name. */
+  name?: string | null
+  state: 'approved' | 'approved_earlier' | 'changes_requested' | 'commented' | 'waiting'
+  /** Who answered: for a group, the member whose review answers for it. */
+  by?: string | null
+  at?: string | null
+  requestedAt: string
 }
 
 /** Whether a review's reader may approve it and merge it, decided as the server decides; a reason
@@ -611,6 +659,13 @@ export interface ReviewViewerCan {
    *  a draft's review), and why not: `fork_review` or an approve refusal. */
   decide?: boolean
   decideReason?: string | null
+  /** Whether the reader may ask for changes, and why not. */
+  requestChanges?: boolean
+  requestChangesReason?: string | null
+  /** Whether the reader may change who reviews it. */
+  editReviewers?: boolean
+  /** Whether the reader may withdraw the changes they asked for. */
+  withdraw?: boolean
 }
 
 /** A review decided change by change, refused: `decision_conflict` (it would reverse a decision
@@ -1509,6 +1564,10 @@ export interface DraftsPolicySettings {
   levels: DraftLevels | null
   selfApproval: boolean | null
   selfMerge: boolean | null
+  /** How many approvals a review needs: 0, everyone asked; N, any N that still stand. */
+  requiredApprovals: number | null
+  /** Whether open threads hold a review's merge until they are resolved. */
+  threadsHold: boolean | null
 }
 
 /** What holds, with the level each field came from (`data_source`, `workspace` or `default`). */
@@ -1517,6 +1576,8 @@ export interface EffectiveDraftsPolicy {
   levels: DraftLevels
   selfApproval: boolean
   selfMerge: boolean
+  requiredApprovals: number
+  threadsHold: boolean
   sources: Partial<Record<keyof DraftsPolicySettings, 'data_source' | 'workspace' | 'default'>>
 }
 
@@ -2584,7 +2645,8 @@ export function openMergeRequest(
   wsId: string,
   graphId: string,
   branchId: string,
-  data: { title?: string; description?: string; reviewers?: string[] } = {},
+  /** `reviewerGroups`: groups asked to review it (`listReviewerGroups`); any member answers for one. */
+  data: { title?: string; description?: string; reviewers?: string[]; reviewerGroups?: string[] } = {},
 ): Promise<{ prId: string }> {
   return vfetch<{ prId: string }>(
     `${base(wsId)}/graphs/${graphId}/branches/${branchId}/merge-requests`,
@@ -2826,16 +2888,74 @@ export function closeMergeRequest(wsId: string, prId: string): Promise<PullReque
   return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}/close`, jsonBody({}))
 }
 
-/** Send a draft's review back to its author, with why: it does not merge until the draft changes
- *  (or the request is withdrawn). The draft's people are told. */
-export function requestChanges(
-  wsId: string, prId: string, body: { reason?: string | null; expectedHeadCommitId?: string | null },
-): Promise<PullRequest> {
-  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/request-changes`, jsonBody(body))
-}
-
 export function withdrawChangesRequest(wsId: string, prId: string): Promise<PullRequest> {
   return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/request-changes`, { method: 'DELETE' })
+}
+
+// ── A review given, who reviews, and what happened ──────────────────────────
+
+/** A reviewer's verdict: approve, ask for changes, or comment (feedback, with a summary). */
+export type ReviewVerdict = 'approve' | 'request_changes' | 'comment'
+
+/** Give your review: a verdict and a summary, of the head the reviewer saw ({@link HeadMovedError}
+ *  when the draft has moved on since). It replaces their earlier verdict. Refused 403 with the
+ *  `viewerCan` reason, 422 `summary_required` for a comment with no summary. */
+export function submitReview(
+  wsId: string, prId: string, body: { verdict: ReviewVerdict; body?: string | null; expectedHeadCommitId?: string | null },
+): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/reviews`, jsonBody(body))
+}
+
+/** Who reviews it: each list given replaces its kind (one left out is untouched). Those newly asked
+ *  are told. 422 `unknown_group` for a group that may not review here. */
+export function setReviewers(wsId: string, prId: string, body: { users?: string[]; groups?: string[] }): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/reviewers`, {
+    method: 'PUT', body: JSON.stringify(body),
+  })
+}
+
+/** Ask people and groups already asked to review it again: it is back in their queue, and they are told. */
+export function reRequestReviewers(wsId: string, prId: string, body: { users: string[]; groups: string[] }): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/reviewers/re-request`, jsonBody(body))
+}
+
+/** A group that may be asked to review here, and how many people are in it. */
+export interface ReviewerGroup {
+  groupId: string
+  name: string
+  description?: string | null
+  memberCount: number
+}
+
+/** The groups that may be asked to review in this workspace. */
+export function listReviewerGroups(wsId: string): Promise<ReviewerGroup[]> {
+  return vfetch<ReviewerGroup[]>(`${base(wsId)}/reviewer-groups`)
+}
+
+/** One thing that happened on a review: opened; who was asked (`subjects`), asked again, no longer
+ *  asked; a review given (`verdict`, `body` its summary, `tally` what the reviewer did, `groups` the
+ *  groups an approval answers for); a verdict taken back (`withdrew`); merged; closed. */
+export interface ReviewEvent {
+  kind: 'opened' | 'requested' | 'unrequested' | 're_requested' | 'reviewed' | 'withdrew' | 'merged' | 'closed'
+  actor?: string | null
+  at?: string | null
+  verdict?: ReviewVerdict | null
+  body?: string | null
+  headCommitId?: string | null
+  subjects: Array<{ type: 'user' | 'group'; id: string }>
+  groups: string[]
+  tally?: { accepted: number; rejected: number; threads: number } | null
+}
+
+export interface ReviewEvents {
+  events: ReviewEvent[]
+  userNames: Record<string, string>
+  groupNames: Record<string, string>
+}
+
+/** A review's history, oldest first, with the names of the people and groups in it. */
+export function listReviewEvents(wsId: string, prId: string): Promise<ReviewEvents> {
+  return vfetch<ReviewEvents>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/events`)
 }
 
 /** What discarding a draft's saved changes did (or, `dryRun`, would do): how many it puts back,
@@ -2930,6 +3050,64 @@ export function openForkPullRequest(
  *  unified ChangesPanel. Counts match {@link previewMergeRequest}. */
 export function getMergeRequestDiff(wsId: string, prId: string): Promise<DiffVsMainResponse> {
   return vfetch<DiffVsMainResponse>(`${base(wsId)}/merge-requests/${prId}/diff`)
+}
+
+// ============================================
+// The review inbox — a workspace's reviews in the queues the reader works by
+// ============================================
+
+/** `needs_review`: asked of the reader (or a group of theirs) and not reviewed as it is now; the
+ *  reader's own — `waiting`, `sent_back`, `ready`; `open`: every live review they may see; `done`:
+ *  merged or closed. */
+export type ReviewInboxQueue = 'needs_review' | 'waiting' | 'sent_back' | 'ready' | 'open' | 'done'
+
+/** Each queue's count, and how many in it are unread (`done`'s unread is always 0). `capped`: more
+ *  than 1,000 live reviews, the oldest left out. */
+export interface ReviewInboxCounts {
+  counts: Record<ReviewInboxQueue, number>
+  unread: Record<ReviewInboxQueue, number>
+  capped: boolean
+}
+
+/** A page of one queue, with every queue's counts (filtered as the page is). */
+export interface ReviewInboxPage extends ReviewInboxCounts {
+  queue: ReviewInboxQueue
+  items: PullRequest[]
+  total: number
+}
+
+export interface ReviewInboxParams {
+  queue?: ReviewInboxQueue
+  /** Searches the title, the description and the id. */
+  q?: string
+  dataSourceId?: string | null
+  author?: string | null
+  sort?: 'activity' | 'created'
+  limit?: number
+  offset?: number
+}
+
+export function getReviewInbox(wsId: string, params: ReviewInboxParams = {}): Promise<ReviewInboxPage> {
+  const sp = new URLSearchParams()
+  if (params.queue) sp.set('queue', params.queue)
+  if (params.q?.trim()) sp.set('q', params.q.trim())
+  if (params.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
+  if (params.author) sp.set('author', params.author)
+  if (params.sort) sp.set('sort', params.sort)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return vfetch<ReviewInboxPage>(`${base(wsId)}/review-inbox${qs ? `?${qs}` : ''}`)
+}
+
+/** Each queue's count and unread count, no rows: what the Reviews badge shows. */
+export function getReviewInboxCounts(wsId: string): Promise<ReviewInboxCounts> {
+  return vfetch<ReviewInboxCounts>(`${base(wsId)}/review-inbox/counts`)
+}
+
+/** The reader looked at a review: it stops being unread, and their notifications of it are read. */
+export function markReviewSeen(wsId: string, prId: string): Promise<void> {
+  return vfetch<void>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/seen`, jsonBody({}))
 }
 
 // ============================================

@@ -179,6 +179,11 @@ The Postgres database that holds users, workspaces, views and settings. Per-role
 | `DB_POOL_SIZE` | — | `backend/app/db/engine.py` |
 | `DB_POOL_TIMEOUT_SECS` | `10` | `backend/app/db/engine.py` |
 | `DB_STARTUP_RETRY_TIMEOUT_SECS` | `60` | `backend/app/db/engine.py` |
+| `MIGRATION_LOCK_TIMEOUT` | `10s` | `backend/alembic/env.py` |
+| `MIGRATION_SQL_LOG` | — | `backend/alembic/env.py` |
+| `MIGRATION_STATEMENT_TIMEOUT` | `0` | `backend/alembic/env.py` |
+| `SYNODIC_BUILD_REF` | `?` / — *(differs by call site)* | `backend/app/db/migration_records.py`, `backend/scripts/upgrade.py` |
+| `SYNODIC_BUILD_SHA` | — | `backend/app/db/migration_records.py`, `backend/scripts/upgrade.py` |
 | `VIEWS_BATCH_ENRICH` | `true` | `backend/app/db/repositories/view_repo.py` |
 
 ## Redis
@@ -710,6 +715,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_REBUILD_LOCK_TTL` | `120` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_RESYNC_MAX_ENTITIES` | `250000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_REVISION_SETS_INLINE_FACTOR` | `0.5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_ROLLUP_NET_MAX_CELLS` | `200000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_ROLLUP_REASK_SECS` | `300` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SCHEMA` | `graphver` | `backend/app/services/versioning/config.py` |
@@ -891,8 +897,11 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | `SEED_SCENARIOS` | `finance,ecommerce` | `backend/scripts/docker_seed.py` |
 | `SYNODIC_API_KEY` | — (secret, set your own) | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_BASE_URL` | `http://localhost:8000` | `backend/scripts/publish_view_library.py` |
+| `SYNODIC_BUILD_ON_MAIN` | — | `backend/scripts/upgrade.py` |
 | `SYNODIC_EMAIL` | — | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_PASSWORD` | — (secret, set your own) | `backend/scripts/bench_versioning.py`, `backend/scripts/publish_view_library.py` |
+| `SYNODIC_SHARED_DATABASE` | — | `backend/scripts/upgrade.py` |
+| `SYNODIC_UPGRADE_RECOVER` | — | `backend/scripts/upgrade.py` |
 | `SYNODIC_USER` | `admin@synodic.local` | `backend/scripts/bench_versioning.py` |
 | `WORKSPACE_ID` | `dev` | `backend/scripts/check_trace_query_plans.py` |
 

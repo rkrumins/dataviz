@@ -17,6 +17,7 @@ export const PAGE_HELP: ReadonlyArray<{ path: string; slugs: readonly string[] }
   { path: '/workspaces', slugs: ['workspace-admin', 'admin-setup'] },
   { path: '/workspaces/:wsId', slugs: ['workspace-admin', 'data-freshness'] },
   { path: '/workspaces/:wsId/reviews', slugs: ['review-center', 'versioning-change-control'] },
+  { path: '/workspaces/:wsId/reviews/:prId', slugs: ['review-center', 'versioning-change-control'] },
   { path: '/ingestion', slugs: ['data-freshness', 'admin-setup'] },
   { path: '/datasources/:catalogId', slugs: ['data-freshness'] },
   { path: '/analytics', slugs: ['analytics'] },

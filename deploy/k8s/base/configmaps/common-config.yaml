@@ -69,6 +69,10 @@ data:
   # a shared store exists to eliminate. Set this only to override the
   # resolver.
   LOG_LEVEL: "INFO"
+  # Read by the schema-upgrade Job (docs/KUBERNETES.md): a database another build stamped, which
+  # no lineage places, is estimated and corrected from what its schema lacks, instead of the Job
+  # stopping with nothing changed. The dev overlay turns it on; never in production.
+  SYNODIC_UPGRADE_RECOVER: "false"
   DB_POOL_TIMEOUT_SECS: "10"
   DB_POOL_RECYCLE_SECS: "1800"
   DB_POOL_PRE_PING: "true"

@@ -88,11 +88,13 @@ async def _run() -> None:
         graph_id=gid, commit_id=c_edit, container_key="T1", containment_edge_types=CONT))["entries"]}
     assert e_t1["C1"]["status"] == "modified" and e_t1["C1"]["after"]["displayName"] == "c1_renamed"
 
-    # ---- structural: delete shows the removed column (rose) under its surviving table. A lone
-    # leaf-delete has no live seed for the upward climb, so the tree roots at the immediate
-    # surviving parent (T1), not the full chain to DOM — same as the branch-diff delete path. ----
+    # ---- structural: delete shows the removed column (rose) under its surviving table, and the
+    # table under its domain — the whole chain, as an added or edited column's. ----
     dele = await svc.diff_commit_summary(graph_id=gid, commit_id=c_del, containment_edge_types=CONT)
-    assert "T1" in _grp(dele) and _grp(dele)["T1"]["counts"]["removed"] >= 1, _grp(dele)
+    assert "DOM" in _grp(dele) and _grp(dele)["DOM"]["counts"]["removed"] >= 1, _grp(dele)
+    d_dom = {e["key"]: e for e in (await svc.diff_commit_children(
+        graph_id=gid, commit_id=c_del, container_key="DOM", containment_edge_types=CONT))["entries"]}
+    assert d_dom["T1"]["kind"] == "container" and d_dom["T1"]["status"] == "unchanged", d_dom
     d_t1 = {e["key"]: e for e in (await svc.diff_commit_children(
         graph_id=gid, commit_id=c_del, container_key="T1", containment_edge_types=CONT))["entries"]}
     assert d_t1["C2"]["status"] == "removed" and d_t1["C2"]["deleted"] is True

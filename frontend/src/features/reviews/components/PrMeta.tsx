@@ -6,6 +6,7 @@
  */
 import { GitMerge, CircleDot, CheckCircle2, XCircle, AlertTriangle, GitPullRequestArrow, GitFork } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { PullRequest } from '@/services/versioningApiService'
 import { ownerName } from '../../versioning/model/branchVocab'
 
@@ -32,24 +33,29 @@ export function PrStatusBadge({ status, className }: { status: string; className
   )
 }
 
-/** x/y reviewers approved — hidden when a PR has no requested reviewers. */
+/** x/y approvals — as the review's rule counts them (everyone asked, or N of anyone's) where the
+ *  server says, else reviewers approved; hidden when it needs no approval. */
 export function ApprovalPill({ pr, className }: { pr: PullRequest; className?: string }) {
-  const total = pr.reviewers?.length ?? 0
+  const counted = pr.review?.approvals
+  const total = counted ? counted.required : pr.reviewers?.length ?? 0
   if (total === 0) return null
-  const done = pr.approvedBy?.length ?? 0
-  const complete = pr.approvalStatus === 'approved'
+  const done = counted ? counted.have : pr.approvedBy?.length ?? 0
+  const complete = counted ? counted.satisfied : pr.approvalStatus === 'approved'
+  const asked = pr.review ? pr.review.requiredApprovals === 0 : true
   return (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium tabular-nums shrink-0',
-        complete ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600',
-        className,
-      )}
-      title={`${done} of ${total} reviewer(s) approved`}
-    >
-      <CheckCircle2 className="w-3 h-3" />
-      {done}/{total}
-    </span>
+    <HoverTip label={asked ? `${done} of ${total} reviewer(s) approved` : `${done} of ${total} approvals needed`}
+      className="inline-flex shrink-0">
+      <span
+        className={cn(
+          'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium tabular-nums shrink-0',
+          complete ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600',
+          className,
+        )}
+      >
+        <CheckCircle2 className="w-3 h-3" />
+        {done}/{total}
+      </span>
+    </HoverTip>
   )
 }
 

@@ -327,10 +327,10 @@ TOURS.push(
         body: 'Edits are **drafted**, opened as a merge request, **reviewed**, then **merged** — like a pull request for your graph. Leave any time with **Esc**.',
       },
       {
-        target: '[data-tour="reviews-stats"]',
-        placement: 'bottom',
-        title: 'The state of play',
-        body: 'See at a glance what’s **open**, **ready to merge**, **needs attention**, or **raised by you** — click a card to filter to it.',
+        target: '[data-tour="reviews-queues"]',
+        placement: 'right',
+        title: 'Who it waits on',
+        body: 'What **needs your review**, **your own requests** — waiting, sent back, ready to merge — and **everything open**, each with its count, and a dot while something in it is new.',
       },
       {
         target: '[data-tour="reviews-list"]',
@@ -342,7 +342,7 @@ TOURS.push(
         target: '[data-tour="reviews-filters"]',
         placement: 'bottom',
         title: 'Find the right one',
-        body: 'Narrow by **scope**, **author**, or **source**, or search by title and branch.',
+        body: 'Narrow by **data source** or **author**, search titles and descriptions, and order by **last activity** or when it was **opened**.',
       },
       {
         title: 'Approve & merge',

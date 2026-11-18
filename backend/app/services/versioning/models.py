@@ -29,6 +29,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     PrimaryKeyConstraint,
     Text,
     UniqueConstraint,
@@ -281,6 +282,9 @@ class MergeRequestORM(VersioningBase):
         Index("ix_mr_graph", "graph_id"),
         Index("ix_mr_source", "source_graph_id"),
         Index("ix_mr_status", "status"),
+        # A workspace's live reviews (the review inbox): its graphs', not merged or closed
+        # (20261119_1200_gv_review_seen).
+        Index("ix_mr_target_status", "target_graph_id", "status"),
         # ONE LIVE PR PER SOURCE BRANCH. A PR points at a branch and its diff is computed live from
         # that branch, so commits made after it was raised are already in it — a second PR from the
         # same branch is a duplicate, not a new proposal. Merging either marks the branch `merged`,
@@ -358,6 +362,103 @@ class ReviewDecisionORM(VersioningBase):
     )
 
 
+#: A review's subjects: a person, or a workspace group any of whose members answers for it.
+REVIEW_SUBJECT_TYPES = ("user", "group")
+#: What can happen on a review (``ck_re_kind``): who is asked changes, someone gives their review
+#: (with its verdict), or takes their verdict back. WIDEN-ONLY.
+REVIEW_EVENT_KINDS = ("requested", "unrequested", "re_requested", "reviewed", "withdrew")
+REVIEW_VERDICTS = ("approve", "request_changes", "comment")
+
+
+class ReviewRequestORM(VersioningBase):
+    """Who a review asks to review it: a person, or a group (any member answers for it). Asked
+    again, ``requested_at`` moves on, so the review is back in their queue. ``merge_requests.reviewers``
+    mirrors the people asked, for the reads that check who may see a private draft
+    (20261118_1000_gv_review_records)."""
+
+    __tablename__ = "review_requests"
+
+    pr_id = Column(Text, primary_key=True)
+    subject_type = Column(Text, primary_key=True)        # user | group
+    subject_id = Column(Text, primary_key=True)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    requested_by = Column(Text, nullable=True)
+    requested_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        CheckConstraint("subject_type IN (" + ",".join(f"'{v}'" for v in REVIEW_SUBJECT_TYPES) + ")",
+                        name="ck_rr_subject_type"),
+        Index("ix_rr_subject", "subject_type", "subject_id"),
+        Index("ix_rr_graph", "graph_id"),
+    )
+
+
+class ReviewEventORM(VersioningBase):
+    """What happened on a review, in order, never rewritten: who was asked (``subjects``), who gave
+    their review — a verdict (approve, request changes, or a comment), a summary (``body``), the
+    draft's head they reviewed, the group requests an approval answers for, and what they did
+    (``tally``) — and who took their verdict back. A reviewer's standing (``review_state``) is read
+    from their latest verdict against the draft's head (20261118_1000_gv_review_records)."""
+
+    __tablename__ = "review_events"
+
+    id = Column(Text, primary_key=True, default=lambda: prefixed_id("rev"))
+    pr_id = Column(Text, nullable=False)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    actor = Column(Text, nullable=False)
+    kind = Column(Text, nullable=False)
+    verdict = Column(Text, nullable=True)
+    body = Column(Text, nullable=True)
+    head_commit_id = Column(Text, nullable=True)
+    head_seq = Column(BigInteger, nullable=True)
+    subjects = Column(JSONB, nullable=True)              # [{type, id}] who was asked / not
+    groups = Column(JSONB, nullable=True)                # an approval: the group requests it answers
+    tally = Column(JSONB, nullable=True)                 # {accepted, rejected, threads} at the time
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        CheckConstraint("kind IN (" + ",".join(f"'{v}'" for v in REVIEW_EVENT_KINDS) + ")", name="ck_re_kind"),
+        CheckConstraint("verdict IS NULL OR verdict IN (" + ",".join(f"'{v}'" for v in REVIEW_VERDICTS) + ")",
+                        name="ck_re_verdict"),
+        Index("ix_re_pr", "pr_id", "created_at"),
+        Index("ix_re_graph", "graph_id"),
+    )
+
+
+class ChangeSetORM(VersioningBase):
+    """A change list built once and kept for every process to read (``change_sets.py``): a draft's
+    changes as of its head, a window of ``main``'s revisions, the containment tree of either, or
+    one revision's changes with each entity as it was before and after — what any two revisions
+    compared are composed from. ``key`` names exactly what it is of (a draft's head, a window's two
+    revisions, the containment types it was laid out by); ``origin`` groups a draft's versions, so
+    a newer one replaces the older (20261119_1100_gv_change_sets)."""
+
+    __tablename__ = "change_sets"
+
+    graph_id = Column(Text, primary_key=True)
+    key = Column(Text, primary_key=True)
+    origin = Column(Text, nullable=False)                # draft:<branch> | window | revision
+    built_at = Column(Text, nullable=False, default=_now)
+    size = Column(Integer, nullable=False)               # its entries
+    body = Column(LargeBinary, nullable=False)           # zlib-compressed JSON (change_sets.py)
+
+    __table_args__ = _plain(Index("ix_cs_origin", "graph_id", "origin", "built_at"))
+
+
+class ReviewSeenORM(VersioningBase):
+    """When each person last looked at a review: anything others did on it since is unread to them
+    (20261119_1200_gv_review_seen)."""
+
+    __tablename__ = "review_seen"
+
+    pr_id = Column(Text, primary_key=True)
+    user_id = Column(Text, primary_key=True)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    seen_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(Index("ix_rs_graph", "graph_id"))
+
+
 class ProjectionStateORM(VersioningBase):
     """FalkorDB projection watermark + placement/eviction state per graph
     (plan §5, §16.5 #9). Drives the read watermark and bounded-staleness."""
@@ -408,6 +509,30 @@ class ProjectionStateORM(VersioningBase):
     # NULL when the key holds no published version: never written, written from nothing (a move,
     # an Adopt, a repin), lost, evicted or reset (20261112_1800_gv_ps_served).
     served_commit_seq = Column(BigInteger, nullable=True)
+    # The version rows of the window a pass stopped part-way through (its time ran out at a page),
+    # NULL while none is: set by that pass, cleared by the pass that publishes. Until then the graph
+    # sits idle between passes with the window half written, so eviction leaves it alone
+    # (``cache_manager._evictable``): dropped, the key would lose that work and the version it
+    # serves, and its reads would go to Postgres until a load reseeded it. The capacity planner
+    # keeps room on its master for what the rest of the window may add
+    # (20261113_1200_gv_ps_window_rows).
+    window_rows = Column(BigInteger, nullable=True)
+    # What reads of this graph's main get while a newer version is written into FalkorDB, as a
+    # system administrator set it for this graph: ``latest``, ``in_place`` or ``beside``
+    # (``config.READ_MODES``). NULL takes the platform's (New-version builds' ``readMode``)
+    # (20261113_1300_gv_ps_read_mode).
+    read_mode = Column(Text, nullable=True)
+    # A new version built beside the key that serves (read mode ``beside``): the build's key and
+    # provider, the version it holds whole (NULL until written), and where it is
+    # (``candidates.STEPS``: its id, why it was asked for — a large window, a rebuild or a move,
+    # whose key and provider these are — its step, attempts, error, when it may try again). All
+    # NULL while none is: the serving key is then the only key, and every pass behaves as before.
+    # While one is, nothing writes the serving key: it keeps serving its version whole until the
+    # switch (20261113_1400_gv_ps_candidate).
+    candidate_graph_name = Column(Text, nullable=True)
+    candidate_provider = Column(Text, nullable=True)
+    candidate_seq = Column(BigInteger, nullable=True)
+    candidate_state = Column(JSONB(none_as_null=True), nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -462,6 +587,8 @@ class ProjectionStateORM(VersioningBase):
             name="ck_proj_status",
         ),
         CheckConstraint("residency IN ('always','standard','coldline')", name="ck_ps_residency"),
+        CheckConstraint("read_mode IS NULL OR read_mode IN ('latest','in_place','beside')",
+                        name="ck_ps_read_mode"),
         CheckConstraint(
             "evicted_reason IS NULL OR "
             "evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin',"
@@ -1063,6 +1190,15 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: ensure_ps_pressure_failures_column(conn), required=True)
     _bounded_step(conn, "projection_state.served_commit_seq was not added",
                   lambda: ensure_ps_served_column(conn), required=True)
+    # 20261113_1000_gv_ps_served_fill. Not required: the projector restores a row it missed.
+    _bounded_step(conn, "projection_state.served_commit_seq was not filled",
+                  lambda: backfill_ps_served(conn))
+    _bounded_step(conn, "projection_state.window_rows was not added",
+                  lambda: ensure_ps_window_rows_column(conn), required=True)
+    _bounded_step(conn, "projection_state.read_mode was not added",
+                  lambda: ensure_ps_read_mode_column(conn), required=True)
+    _bounded_step(conn, "projection_state's build columns were not added",
+                  lambda: ensure_ps_candidate_columns(conn), required=True)
     _bounded_step(conn, "import_rows.code was not added",
                   lambda: ensure_import_rows_code_column(conn), required=True)
     _bounded_step(conn, "jobs.allow_mass_delete was not added",
@@ -1087,6 +1223,12 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261117_1500_gv_mr_sendback.
     _bounded_step(conn, "merge_requests.changes_requested was not added",
                   lambda: ensure_mr_changes_requested_column(conn), required=True)
+    # 20261118_1000_gv_review_records. Required: until a review's approvals are carried over, its
+    # merge gate would not see them.
+    _bounded_step(conn, "the review records were not carried over",
+                  lambda: ensure_review_records(conn), required=True)
+    # 20261119_1200_gv_review_seen (``review_seen`` is a new table: ``create_all`` makes it).
+    _bounded_step(conn, "ix_mr_target_status was not built", lambda: ensure_mr_target_status_index(conn))
     # 20261018_1100_gv_ps_retired.
     _bounded_step(conn, "the retired_keys column was not added",
                   lambda: ensure_ps_retired_keys_column(conn), required=True)
@@ -1261,6 +1403,78 @@ def ensure_ps_served_column(conn) -> None:
                       "ADD COLUMN IF NOT EXISTS served_commit_seq BIGINT"))
 
 
+def ensure_ps_window_rows_column(conn) -> None:
+    """Add ``projection_state.window_rows``: the version rows of the window a pass stopped part-way
+    through, NULL (every existing graph) while none is. Nullable with no default, so nothing is
+    rewritten; a no-op without the table and once the column is there, like
+    :func:`ensure_ps_served_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "window_rows" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                  schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS window_rows BIGINT"))
+
+
+def ensure_ps_read_mode_column(conn) -> None:
+    """Add ``projection_state.read_mode``, a graph's own read mode, with its check
+    (``ck_ps_read_mode``): NULL (every existing graph) takes the platform's. Nullable with no
+    default, so nothing is rewritten; a no-op without the table and once both are there, like
+    :func:`ensure_ps_window_rows_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    ps = f'"{_SCHEMA}"."projection_state"'
+    present = {c["name"] for c in inspector.get_columns("projection_state", schema=_SCHEMA)}
+    checked = conn.execute(text(
+        "SELECT 1 FROM pg_constraint WHERE conrelid = CAST(:ps AS regclass) "
+        "AND conname = 'ck_ps_read_mode'"), {"ps": ps}).first() is not None
+    if "read_mode" in present and checked:
+        return
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS read_mode TEXT"))
+    conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_ps_read_mode"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD CONSTRAINT ck_ps_read_mode CHECK "
+                      "(read_mode IS NULL OR read_mode IN ('latest','in_place','beside'))"))
+
+
+def ensure_ps_candidate_columns(conn) -> None:
+    """Add ``projection_state``'s build columns (``candidate_graph_name``, ``candidate_provider``,
+    ``candidate_seq``, ``candidate_state``): a new version built beside the serving key. All
+    nullable with no default, so nothing is rewritten and every graph has no build; a no-op without
+    the table and once they are there, like :func:`ensure_ps_read_mode_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    ps = f'"{_SCHEMA}"."projection_state"'
+    present = {c["name"] for c in inspector.get_columns("projection_state", schema=_SCHEMA)}
+    for column, sql_type in (("candidate_graph_name", "TEXT"), ("candidate_provider", "TEXT"),
+                             ("candidate_seq", "BIGINT"), ("candidate_state", "JSONB")):
+        if column not in present:
+            conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS {column} {sql_type}"))
+
+
+def backfill_ps_served(conn) -> None:
+    """Fill ``projection_state.served_commit_seq`` for a graph whose key holds a published version
+    while the column, added after it last published, is still NULL: that version is its watermark.
+    Left NULL, a rebuild of the graph (the watermark at 0) sends its reads to Postgres for the whole
+    rebuild. A row already at 0 can't be filled from here: the projector restores it from the
+    key's marker. Only pinned keys whose status serves a version; a no-op once filled, and without
+    the table or the column."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "served_commit_seq" not in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                            schema=_SCHEMA)}:
+        return
+    conn.execute(text(
+        f'UPDATE "{_SCHEMA}"."projection_state" SET served_commit_seq = projected_commit_seq '
+        "WHERE served_commit_seq IS NULL AND projected_commit_seq > 1 "
+        "AND status NOT IN ('evicted', 'waiting_capacity', 'rehydrating', 'reseeding') "
+        "AND falkor_graph_name IS NOT NULL AND falkor_graph_name <> 'gv_' || graph_id"))
+
+
 def ensure_ps_reseeding_status(conn) -> None:
     """Let ``ck_proj_status`` allow ``reseeding``. A no-op without the table, and once it does:
     rebuilding the check takes the table's ACCESS EXCLUSIVE lock, and every worker start runs
@@ -1376,6 +1590,65 @@ def ensure_mr_approvals_column(conn) -> None:
     if "approvals" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."merge_requests" ADD COLUMN IF NOT EXISTS approvals JSONB'))
+
+
+def ensure_review_records(conn) -> None:
+    """Carry every review's reviewers, approvals and request for changes from the columns that held
+    them (``reviewers``, ``approved_by``/``approvals``, ``changes_requested``) into
+    ``review_requests`` and ``review_events``, which hold them from now on. Idempotent: each
+    carried event has an id derived from what it carries, and a review that already has a
+    request-kind event keeps the reviewers it has — someone removed since is not brought back. A
+    no-op without the tables. ``conn`` is a synchronous connection."""
+    inspector = sa_inspect(conn)
+    if not (inspector.has_table("merge_requests", schema=_SCHEMA)
+            and inspector.has_table("review_requests", schema=_SCHEMA)
+            and inspector.has_table("review_events", schema=_SCHEMA)):
+        return
+    mr, rr, re_ = (f'"{_SCHEMA}"."{t}"' for t in ("merge_requests", "review_requests", "review_events"))
+    untouched = (f"NOT EXISTS (SELECT 1 FROM {re_} e WHERE e.pr_id = m.id "
+                 "AND e.kind IN ('requested', 'unrequested', 're_requested'))")
+    # A list column may hold JSON null, or anything at all: only an array's elements are read (SQL
+    # does not promise to test the type first, so each read is guarded on its own).
+    def arr(col: str) -> str:
+        return f"(CASE WHEN jsonb_typeof({col}) = 'array' THEN {col} ELSE '[]'::jsonb END)"
+    asked = f"jsonb_array_length({arr('m.reviewers')}) > 0"
+    conn.execute(text(
+        f"INSERT INTO {rr} (pr_id, subject_type, subject_id, graph_id, requested_by, requested_at) "
+        f"SELECT m.id, 'user', r.value #>> '{{}}', m.target_graph_id, m.actor, m.created_at "
+        f"FROM {mr} m CROSS JOIN LATERAL jsonb_array_elements({arr('m.reviewers')}) r "
+        f"WHERE {asked} AND {untouched} ON CONFLICT DO NOTHING"))
+    conn.execute(text(
+        f"INSERT INTO {re_} (id, pr_id, graph_id, actor, kind, subjects, created_at) "
+        f"SELECT 'rev_' || md5(m.id || '/legacy-requested'), m.id, m.target_graph_id, "
+        f"coalesce(m.actor, 'system'), 'requested', "
+        f"(SELECT jsonb_agg(jsonb_build_object('type', 'user', 'id', r.value #>> '{{}}')) "
+        f" FROM jsonb_array_elements({arr('m.reviewers')}) r), m.created_at "
+        f"FROM {mr} m WHERE {asked} AND {untouched} ON CONFLICT (id) DO NOTHING"))
+    conn.execute(text(
+        f"INSERT INTO {re_} (id, pr_id, graph_id, actor, kind, verdict, head_commit_id, head_seq, created_at) "
+        f"SELECT 'rev_' || md5(m.id || ':' || (a.value #>> '{{}}') || '/legacy-approve'), m.id, "
+        f"m.target_graph_id, a.value #>> '{{}}', 'reviewed', 'approve', "
+        f"m.approvals -> (a.value #>> '{{}}') ->> 'headCommitId', "
+        f"(m.approvals -> (a.value #>> '{{}}') ->> 'headSeq')::bigint, "
+        f"coalesce(m.approvals -> (a.value #>> '{{}}') ->> 'at', m.updated_at) "
+        f"FROM {mr} m CROSS JOIN LATERAL jsonb_array_elements({arr('m.approved_by')}) a "
+        f"ON CONFLICT (id) DO NOTHING"))
+    conn.execute(text(
+        f"INSERT INTO {re_} (id, pr_id, graph_id, actor, kind, verdict, body, head_commit_id, head_seq, created_at) "
+        f"SELECT 'rev_' || md5(m.id || ':' || (m.changes_requested ->> 'by') || '/legacy-changes'), m.id, "
+        f"m.target_graph_id, m.changes_requested ->> 'by', 'reviewed', 'request_changes', "
+        f"m.changes_requested ->> 'reason', m.changes_requested ->> 'headCommitId', "
+        f"(m.changes_requested ->> 'headSeq')::bigint, coalesce(m.changes_requested ->> 'at', m.updated_at) "
+        f"FROM {mr} m WHERE m.changes_requested ->> 'by' IS NOT NULL "
+        f"ON CONFLICT (id) DO NOTHING"))
+
+
+def ensure_mr_target_status_index(conn) -> None:
+    """``ix_mr_target_status``: a workspace's live reviews, read by the review inbox. A no-op
+    without the table, and once the index is there."""
+    if sa_inspect(conn).has_table("merge_requests", schema=_SCHEMA):
+        conn.execute(text(f'CREATE INDEX IF NOT EXISTS ix_mr_target_status ON "{_SCHEMA}"."merge_requests" '
+                          "(target_graph_id, status)"))
 
 
 #: ``commits``' provenance columns (``20261110_1000_gv_commit_prov``): nullable, so adding one is a
