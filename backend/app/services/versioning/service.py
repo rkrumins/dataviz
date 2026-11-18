@@ -8505,6 +8505,26 @@ class GraphVersioningService:
         _BACKGROUND.add(task)
         task.add_done_callback(_BACKGROUND.discard)
 
+    async def keep_recent_revisions(self, graph_id: str, n: int = 20) -> None:
+        """Keep ``main``'s newest revisions' own changes — those not kept yet, up to ``n`` back —
+        so a look at one, or a compare of them, is composed at once rather than read from history.
+        Run after a write advanced ``main``. Best-effort: never raises."""
+        try:
+            async with self._session() as s:
+                graph = await s.get(GraphORM, graph_id)
+                if graph is None or graph.deleted_at is not None:
+                    return
+                main_id = await self._main_branch_id(s, graph_id)
+                head = graph.main_head_commit_seq or 0
+            seqs = list(range(max(1, head - n + 1), head + 1))
+            keys = {k: self._revision_key(graph_id, main_id, k) for k in seqs}
+            kept = await change_sets.STORE.get_many(graph_id, list(keys.values()))
+            for k in reversed(seqs):
+                if keys[k] not in kept:
+                    await self._revision_changes(graph_id, main_id, k)
+        except Exception:  # noqa: BLE001 — kept when first asked for instead
+            logger.warning("keeping the newest revisions of %s failed", graph_id, exc_info=True)
+
     async def keep_change_sets(self, *, graph_id: str, containment_edge_types,
                                branch_id: Optional[str] = None, seq: Optional[int] = None) -> None:
         """Build ahead what will be opened next, and keep it for every process (change_sets.py):

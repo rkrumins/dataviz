@@ -8,6 +8,8 @@
   not built.
 * **A draft's newer version replaces its older** in the store.
 * **Built once:** callers asking for the same list at the same moment wait for one build.
+* **Built ahead:** an import into a draft leaves its change list and tree kept; a write that
+  advances ``main`` leaves its newest revisions kept.
 """
 import asyncio
 import os
@@ -151,6 +153,55 @@ async def _run(monkeypatch) -> None:
         size_of=lambda _x: 1) for _ in range(2)])
     assert len(calls) == 1 and all(g["v"] for g in got), (calls, got)
     await change_sets.settled()
+
+    # Built ahead: main's newest revisions, after a write advanced it.
+    async with db.graphver_session() as s:
+        await s.execute(ChangeSetORM.__table__.delete().where(ChangeSetORM.graph_id == gid))
+    await _publish(svc, gid, [_u("T1", "after")])
+    head = (await svc.get_graph(gid))["main_head_commit_seq"]
+    await svc.keep_recent_revisions(gid, n=3)
+    await change_sets.settled()
+    kept = await change_sets.STORE.get_many(gid, [svc._revision_key(gid, main_id, k) for k in range(head - 2, head + 1)])
+    assert len(kept) == 3
+
+    # Built ahead: an import into a draft leaves its change list and tree kept.
+    import json
+    import shutil
+    import tempfile
+    from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
+    from backend.app.services.versioning.import_export.import_worker import ImportWorker
+    from backend.app.services.versioning.import_export.service import ImportExportService
+    root = tempfile.mkdtemp(prefix="change-sets-")
+    try:
+        store = LocalFsObjectStore(root)
+        ie = ImportExportService(versioning=svc, store=store)
+        key = storage_key("ws1", gid, os.urandom(4).hex(), "source.ndjson")
+        lines = [{"kind": "node", "urn": "T3", "entityType": "Table", "displayName": "imported"}]
+
+        async def body():
+            yield ("\n".join(json.dumps(x) for x in lines) + "\n").encode()
+        await store.put_stream(key, body())
+        job = await ie.create_import_job(workspace_id="ws1", data_source_id=gid, graph_id=gid, actor="ana",
+                                         import_format="ndjson", source_uri=key, reconcile_mode="upsert")
+        await ImportWorker(svc, store, ontology={"containment": CONT}).run(job["job_id"])
+        await change_sets.settled()
+        async with db.graphver_session() as s:
+            kept = (await s.execute(select(ChangeSetORM.key).where(
+                ChangeSetORM.graph_id == gid, ChangeSetORM.origin == f"draft:{job['branch_id']}"))).scalars().all()
+        assert len(kept) == 2, kept                     # its list and its tree
+        built.clear()
+        service_mod._CHANGE_INDEXES.clear()
+        real_draft = service_mod.GraphVersioningService._build_draft_change_index
+
+        async def draft_built(self, *a, **k):
+            built.append(a)
+            return await real_draft(self, *a, **k)
+        monkeypatch.setattr(service_mod.GraphVersioningService, "_build_draft_change_index", draft_built)
+        page = await svc.change_entries(graph_id=gid, origin=ChangeOrigin(branch_id=job["branch_id"]),
+                                        containment_edge_types=CONT, paths=True)
+        assert [e["entityId"] for e in page["entries"]] == ["T3"] and built == []   # read back, not built
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")

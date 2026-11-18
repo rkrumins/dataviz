@@ -252,7 +252,19 @@ async def project_now(graph_id: str) -> None:
     depending on a separate projection worker (the original "merge has no effect" cause). NEVER
     raises (the Postgres commit already landed). On any failure (FalkorDB down/slow/apply error) or
     when FalkorDB is unconfigured, defer to the async worker via ``nudge_projection``; the
-    watermark-gated Postgres read fallback (and the "refreshing" badge) cover the brief window."""
+    watermark-gated Postgres read fallback (and the "refreshing" badge) cover the brief window.
+    Then ``main``'s newest revisions are kept as their own changes, which History's looks at them
+    and compares of them are composed from (``change_sets.py``)."""
+    try:
+        await _project_now(graph_id)
+    finally:
+        try:
+            await get_versioning_service().keep_recent_revisions(graph_id)
+        except Exception:  # noqa: BLE001 — kept when first asked for instead
+            logger.warning("keeping the newest revisions of %s failed", graph_id, exc_info=True)
+
+
+async def _project_now(graph_id: str) -> None:
     orphan = await _repair_projection_target(graph_id)   # pin projection to the real graph (self-heal)
     proj = _get_projector()
     if proj is None:
