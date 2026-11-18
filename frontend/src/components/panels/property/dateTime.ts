@@ -5,7 +5,7 @@
  * A moment is stored in UTC as `YYYY-MM-DDTHH:MM:SSZ`, with `.sss` when it has milliseconds. The
  * server stores every write that way (`backend/common/moments.py`), and this module writes the same
  * form, so what is edited is what is stored. A moment with no zone reads as UTC, as the app shows
- * one (`toUtcDate`). Two writings of one moment are the same moment (`sameInstant`).
+ * one (`toUtcDate`).
  */
 
 const INSTANT = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?\s*(Z|[+-]\d{2}(?::?\d{2})?)?$/i
@@ -50,12 +50,6 @@ export function isIsoInstant(v: unknown): v is string {
 export function canonicalInstant<T>(v: T): T | string {
   const at = instantOf(v)
   return at === null ? v : stored(at)
-}
-
-/** The same moment, however each is written. */
-export function sameInstant(a: unknown, b: unknown): boolean {
-  const x = instantOf(a)
-  return x !== null && x === instantOf(b)
 }
 
 /** The moment for a date-and-time picker (`<input type="datetime-local">`), in the reader's time;

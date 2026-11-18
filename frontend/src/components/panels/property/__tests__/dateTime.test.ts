@@ -1,10 +1,9 @@
 /**
  * A moment is stored one way — UTC, `…Z`, as the server stores it — and picked in the reader's
- * time: read into the picker and put back, it is the same text; no zone reads as UTC; two writings
- * of one moment are the same moment.
+ * time: read into the picker and put back, it is the same text; no zone reads as UTC.
  */
 import { describe, expect, it } from 'vitest'
-import { canonicalInstant, fromLocalInput, isIsoInstant, nowInstant, sameInstant, toLocalInput } from '../dateTime'
+import { canonicalInstant, fromLocalInput, isIsoInstant, nowInstant, toLocalInput } from '../dateTime'
 import { detectValue } from '../composerModel'
 import { coerceToType, inferFieldType } from '../fieldTypes'
 
@@ -39,12 +38,6 @@ describe('dateTime', () => {
     const later = new Date(Date.parse('2026-11-18T05:42:00Z') + 3600_000)
     const pick = `${later.getFullYear()}-${String(later.getMonth() + 1).padStart(2, '0')}-${String(later.getDate()).padStart(2, '0')}T${String(later.getHours()).padStart(2, '0')}:${String(later.getMinutes()).padStart(2, '0')}`
     expect(fromLocalInput(pick)).toBe('2026-11-18T06:42:00Z')
-  })
-
-  it('says two writings of one moment are the same', () => {
-    expect(sameInstant('2026-11-18T05:42:00Z', '2026-11-18 05:42:00.000+00:00')).toBe(true)
-    expect(sameInstant('2026-11-18T07:42:00+02:00', '2026-11-18T05:42')).toBe(true)
-    expect(sameInstant('2026-11-18T05:42:00Z', '2026-11-18T05:43:00Z')).toBe(false)
   })
 
   it('a moment typed or retyped is stored in the one form', () => {
