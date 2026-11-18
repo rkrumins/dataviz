@@ -17,6 +17,10 @@ Subcommands:
               [--rewind-to REV]  another build moved on is rewound onto this
                                  build's chain first (see ``_rewind_foreign``),
                                  to REV when named
+    plan      [--json]           what ``upgrade`` would do now, changing nothing;
+                                 exit 1 when it would refuse
+    backup     --dir DIR         pg_dump before an upgrade changes the database
+                                 (only then, unless --force); see ``cmd_backup``
     downgrade  --revision REV    alembic downgrade
     repair                       reconcile a version pointer that trails the
                                  physical schema (see ``cmd_repair``)
@@ -35,19 +39,30 @@ Usage (in-container):
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 
-from backend.app.db import migration_records
+from backend.app.db import migration_records, schema_plan
 from backend.app.db.engine import _alembic_config
+from backend.app.db.schema_plan import Refused
+
+# Where a database stands, and what to do with a stamp another build wrote: app/db/schema_plan.py,
+# by the names this script, and its tests, use.
+_ancestors, _below_gaps, _built_from = schema_plan.ancestors, schema_plan.below_gaps, schema_plan.built_from
+_foreign, _is_virgin, _maximal = schema_plan.foreign, schema_plan.is_virgin, schema_plan.maximal
+_parting_point, _placed, _ran = schema_plan.parting_point, schema_plan.placed, schema_plan.ran
+_stamps = schema_plan.stamps
 
 # 'SYNO' as int — namespace for ``pg_advisory_lock`` so multiple
 # invocations of this script (Job + ad-hoc ``kubectl exec``) serialise
@@ -114,35 +129,6 @@ def _with_advisory_lock(fn):
     return _wrapped
 
 
-#: Any of these present means the database is not virgin. ``users`` alone
-#: would do; the other two make the check survive a future rename.
-_APP_TABLES = ("users", "workspaces", "providers")
-
-
-def _is_virgin(conn) -> bool:
-    """True when this database has no schema of ours at all.
-
-    Checked here rather than in ``alembic/env.py`` on purpose:
-    ``env.py::_ensure_wide_alembic_version_column`` creates
-    ``alembic_version`` as a side effect of being imported, so anything
-    asking this question after env.py has loaded sees a table that env.py
-    itself just made and concludes the database is not virgin.
-
-    ``alembic_version`` present but EMPTY still counts as virgin — that is
-    the state env.py leaves behind if a first run dies early, and treating
-    it as "already installed" would send a blank database down the
-    migration path to fail on the first ``ALTER``.
-    """
-    from sqlalchemy import inspect as sa_inspect
-
-    inspector = sa_inspect(conn)
-    if any(inspector.has_table(name) for name in _APP_TABLES):
-        return False
-    if not inspector.has_table("alembic_version"):
-        return True
-    return conn.execute(text("SELECT count(*) FROM alembic_version")).scalar() == 0
-
-
 def _install_fresh(cfg) -> None:
     """Build a virgin database directly at head instead of replaying.
 
@@ -168,136 +154,24 @@ def _install_fresh(cfg) -> None:
     # RBAC rows have only ever existed as INSERTs inside the migrations
     # we just skipped, and a database with no permissions and no roles
     # cannot authorise anybody.
-    from backend.app.db.seed_reference_data import seed_reference_data
+    from backend.app.db.seed_reference_data import (
+        reconcile_reference_data,
+        seed_reference_data,
+    )
 
     engine = create_engine(_sync_url(), pool_pre_ping=True)
     with engine.begin() as conn:
         written = seed_reference_data(conn)
+        reconcile_reference_data(conn)          # records every entry as applied
     log.info("Seeded reference data: %s", written)
 
     command.stamp(cfg, "heads")
     log.info("Stamped to head")
 
 
-def _stamps(conn) -> list[str]:
-    """The revisions ``alembic_version`` names (none without the table)."""
-    from sqlalchemy import inspect as sa_inspect
-
-    if not sa_inspect(conn).has_table("alembic_version"):
-        return []
-    return sorted(r[0] for r in conn.execute(text("SELECT version_num FROM alembic_version")))
-
-
-def _foreign(script, stamps: list[str]) -> list[str]:
-    """The stamps this build's script directory doesn't have: a database another build moved on —
-    another branch's, deployed to the same environment, or a newer release's before a rollback.
-    Alembic can't start from them ("Can't locate revision identified by …")."""
-    known = {rev.revision for rev in script.walk_revisions()}
-    return [v for v in stamps if v not in known]
-
-
-def _parting_point(script, foreign: list[str]) -> str | None:
-    """Where this build's chain and the one that wrote ``foreign`` most likely parted: walking this
-    build's chain down from its head, the first revision whose id — which leads with when it was
-    written, to the minute — is from an earlier minute than every foreign one. One from the same
-    minute may be newer or older, so it counts as not run. A newer release's stamp parts at this
-    build's head: nothing of ours to run. Walked in chain order, not sorted by id: a revision moved
-    onto a newer parent keeps its older id."""
-    oldest = min(foreign)[:13]                  # YYYYMMDD_HHMM
-    return next((rev.revision for rev in script.walk_revisions() if rev.revision[:13] < oldest), None)
-
-
 def _other_lines(cfg) -> dict[str, list[list[str]]]:
-    """``alembic/other_lines.json`` (``scripts/other_lines.py``): each revision another line of work
-    has and this chain doesn't, with the parents to walk — those it has at a branch's tip where it
-    is on one, else every set it was ever given. Empty when the file is missing or unreadable."""
-    import json
-    from pathlib import Path
-
-    try:
-        recorded = json.loads((Path(cfg.get_main_option("script_location")) / "other_lines.json")
-                              .read_text(encoding="utf-8"))["revisions"]
-        return {rev: entry.get("at_tips") or entry["parents"] for rev, entry in recorded.items()}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return {}
-
-
-def _ran(script, lines: dict, revision: str, depth: int = 0) -> list[frozenset] | None:
-    """The revisions of this chain a database stamped ``revision`` has run: one set for each way
-    its recorded parents could have been. None when its lineage reaches a revision nothing records."""
-    try:
-        ours = script.get_revision(revision) is not None
-    except Exception:  # noqa: BLE001 — not one of ours: look it up
-        ours = False
-    if ours:
-        return [frozenset(r.revision for r in script.iterate_revisions(revision, "base"))]
-    if revision not in lines or depth > 500:
-        return None
-    out: list[frozenset] = []
-    for parents in lines[revision]:
-        sets = [frozenset()]
-        for parent in parents:
-            below = _ran(script, lines, parent, depth + 1)
-            if below is None:
-                return None
-            sets = [a | b for a in sets for b in below]
-        out.extend(sets)
-    return out
-
-
-def _ancestors(script, stamps) -> set[str]:
-    """Every revision of ours a database stamped ``stamps`` (ours) has run, the stamps included."""
-    return {r.revision for stamp in stamps for r in script.iterate_revisions(stamp, "base")}
-
-
-def _maximal(script, ran: set) -> list[str]:
-    """The stamps of a database that has run exactly ``ran``: those of its revisions nothing in it
-    follows."""
-    return sorted(r for r in ran if not (script.get_revision(r).nextrev & ran))
-
-
-def _placed(script, lines: dict, foreign: list[str], kept: list[str]) -> list[str] | None:
-    """Exactly where a database stamped with ``foreign`` (beside ``kept``, ours) stands on this
-    chain, as the stamps of the last revisions it ran: what every recorded way each foreign stamp
-    could have come about has in common. None when a foreign stamp's lineage isn't recorded."""
-    ran = _ancestors(script, kept)
-    for revision in foreign:
-        sets = _ran(script, lines, revision)
-        if not sets:
-            return None
-        ran |= frozenset.intersection(*sets)
-    if not ran:
-        return None
-    return _maximal(script, ran)
-
-
-_GAP = re.compile(r"^(?:missing table|missing column|type mismatch|nullability mismatch) ([\w.]+)")
-
-
-def _below_gaps(script, stamps: list[str], kept: list[str], gaps: list[str]) -> list[str] | None:
-    """Where to place a database again when, upgraded from ``stamps``, its schema still lacks
-    ``gaps``: below each revision the placement took as run (``kept``, the stamps of ours it
-    had, it trusts) whose migration names what's missing — its table, or its table and column.
-    None when some gap is named by none of them: nothing of ours run again would bring it."""
-    claimed = _ancestors(script, stamps) - _ancestors(script, kept)
-    sources: dict[str, str] = {}
-    culprits: set[str] = set()
-    for gap in gaps:
-        found = _GAP.match(gap)
-        if not found:
-            return None
-        words = found.group(1).split(".")[1:]           # the schema is no name a migration uses
-        named = set()
-        for revision in claimed:
-            if revision not in sources:
-                sources[revision] = Path(script.get_revision(revision).path).read_text(encoding="utf-8")
-            if all(re.search(rf"\b{re.escape(w)}\b", sources[revision]) for w in words):
-                named.add(revision)
-        if not named:
-            return None
-        culprits |= named
-    ran = {r for r in _ancestors(script, stamps) if not (_ancestors(script, [r]) & culprits)}
-    return _maximal(script, ran) or None
+    """``alembic/other_lines.json`` beside this build's migrations (:func:`schema_plan.other_lines`)."""
+    return schema_plan.other_lines(cfg.get_main_option("script_location"))
 
 
 def _set_stamps(conn, stamps: list[str]) -> None:
@@ -306,75 +180,40 @@ def _set_stamps(conn, stamps: list[str]) -> None:
         conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": v})
 
 
-class Refused(Exception):
-    """The Job won't go on, and has changed nothing: the message says why, and what to do."""
-
-
 def _rewind_foreign(cfg, to: str | None = None,
                     recover: bool = False) -> tuple[list[str], list[str], list[str]] | None:
     """Move a database another build migrated onto this build's chain, so it can upgrade in order.
 
-    Its foreign stamps become the last revisions of this chain it ran, placed exactly from the
-    lineage the database keeps (``app/db/alembic_lineage.py``: every build since writes its chain
-    there) or other lines of work recorded (``alembic/other_lines.json``, :func:`_placed`); the
-    upgrade then runs only this build's migrations it lacks, in chain order, and none of the other
-    line's. The other build's tables and columns stay, for when its migrations arrive with it.
-
-    A stamp nothing records is refused (:class:`Refused`), with nothing changed, unless
-    ``recover``: then it goes where the chains most likely parted (:func:`_parting_point`), and this
-    build's migrations after it run, any the database had run already changing nothing — every
-    migration is safe to run twice (``schema.yml``'s chain replay holds them to it). ``to``: the
-    revision both chains share, named by an operator who knows it, in place of the lineage. Returns the stamps as they were (to put back if the upgrade doesn't
-    bring the schema to head), as placed, and those of ours it kept; None when nothing was
-    foreign."""
+    Where it goes is :func:`schema_plan.placement`: exactly, from the lineage the database keeps
+    (``app/db/migration_records.py``) or the record (``alembic/other_lines.json``); at ``to``, named
+    by an operator; with ``recover``, where the chains most likely parted. A stamp none of those
+    places is :class:`Refused`, with nothing changed. The other build's tables and columns stay,
+    for when its migrations arrive with it. Returns the stamps as they were (to put back if the
+    upgrade doesn't bring the schema to head), as placed, and those of ours it kept; None when
+    nothing was foreign."""
     script = ScriptDirectory.from_config(cfg)
     engine = create_engine(_sync_url(), pool_pre_ping=True)
     with engine.begin() as conn:
         was = _stamps(conn)
-        foreign = _foreign(script, was)
-        if not foreign:
+        place = schema_plan.placement(script, was, _other_lines(cfg),
+                                      migration_records.read_chain(conn), to, recover)
+        if place is None:
             if to is not None:
                 log.warning("--rewind-to %s: alembic_version names nothing this build doesn't have; "
                             "nothing to rewind", to)
             return None
-        kept = [v for v in was if v not in foreign]
-        own = migration_records.read_chain(conn)
-        placed = None if to is not None else _placed(script, {**_other_lines(cfg), **own}, foreign, kept)
-        if placed is not None:
-            stamps, how = placed, ("exactly, from this database's own lineage" if all(f in own for f in foreign)
-                                   else "exactly, from the lineage other lines recorded")
-        else:
-            if to is not None:
-                script.get_revision(to)                 # one of ours, or Alembic says it isn't
-                how = "as named (--rewind-to)"
-            elif recover:
-                to, how = _parting_point(script, foreign), "where the two most likely parted (--recover)"
-            else:
-                raise Refused(
-                    f"alembic_version names {foreign}, which this build doesn't have, and no lineage "
-                    "(this database's own, or alembic/other_lines.json) says what it ran. Nothing "
-                    "was changed. Name the last revision of this build's that it ran: "
-                    "`upgrade --rewind-to <revision>`; or let this build estimate it, checked "
-                    "against the schema: `upgrade --recover` (Helm: upgrade.recoverForeignStamps). "
-                    f"Its estimate would be {_parting_point(script, foreign)}.")
-            if to is None:
-                raise RuntimeError(f"alembic_version names {foreign}, which this build doesn't have, and "
-                                   "none of this build's revisions is older: deploy the build that has them")
-            # One of ours still stamped beside a foreign one may already be past the parting point.
-            past = any(to == rev.revision for k in kept for rev in script.iterate_revisions(k, "base"))
-            stamps = kept if past else sorted(set(kept) | {to})
         log.warning(
             "alembic_version names %s, which this build doesn't have: another build — another "
             "branch's, or a newer release's — moved this database on. Placing it at %s, %s; this "
             "build's migrations it lacks run in order, and the other build's tables and columns are "
-            "left as they are.", foreign, stamps, how)
-        _set_stamps(conn, stamps)
+            "left as they are.", place.foreign, place.stamps, place.how)
+        _set_stamps(conn, place.stamps)
         # With the stamps, in one transaction: a Job stopped before the schema is checked leaves
         # this open, and the next one checks it.
         migration_records.ensure(conn)
-        migration_records.record_step(conn, foreign[0], "placed", None,
-                                      {"was": was, "stamps": stamps, "kept": kept})
-    return was, stamps, kept
+        migration_records.record_step(conn, place.foreign[0], "placed", None,
+                                      {"was": was, "stamps": place.stamps, "kept": place.kept})
+    return was, place.stamps, place.kept
 
 
 def _upgrade(cfg, revision: str) -> None:
@@ -409,17 +248,6 @@ def _to_every_head(cfg, revision: str) -> str:
         log.warning("The migration chain has %d heads: %s. Upgrading to each; a merge revision "
                     "should join them.", len(heads), sorted(heads))
     return "heads"
-
-
-def _built_from() -> tuple[str, bool | None]:
-    """Where this upgrade image was built from, and whether that commit is on ``main``: True, False,
-    or None when the image doesn't say — ``deploy/build-images.sh`` records it
-    (``SYNODIC_BUILD_*``, baked in by ``Dockerfile.upgrade``); an image built any other way,
-    every one built before it did, doesn't."""
-    sha, ref = os.getenv("SYNODIC_BUILD_SHA"), os.getenv("SYNODIC_BUILD_REF")
-    if not sha:
-        return "an unrecorded commit", None
-    return f"{ref or '?'} at {sha}", os.getenv("SYNODIC_BUILD_ON_MAIN") == "true"
 
 
 @_with_advisory_lock
@@ -513,8 +341,136 @@ def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = N
             return 1
         with create_engine(_sync_url(), pool_pre_ping=True).begin() as conn:
             migration_records.record_step(conn, min(script.get_heads()), "verified", None)
+    if revision == "heads":
+        _reconcile_reference_data(script)
     log.info("Upgrade complete")
     return 0
+
+
+def _reconcile_reference_data(script) -> None:
+    """Built-in permissions, roles and grants this database hasn't had yet, added once
+    (:func:`reconcile_reference_data`); anything it did is in ``alembic_history`` as ``seeded``."""
+    from backend.app.db.seed_reference_data import reconcile_reference_data
+
+    with create_engine(_sync_url(), pool_pre_ping=True).begin() as conn:
+        report = reconcile_reference_data(conn)
+        if any(report["added"].values()) or report["notGranted"] or report["skipped"]:
+            migration_records.ensure(conn)
+            migration_records.record_step(conn, min(script.get_heads()), "seeded", None, report)
+
+
+def cmd_plan(as_json: bool = False, recover: bool = False, shared_database: bool = False,
+             rewind_to: str | None = None) -> int:
+    """What ``upgrade`` would do to this database now, changing nothing: no lock, no writes.
+
+    The decision is the Job's own (:func:`schema_plan.plan_upgrade`). Exit 0 when it would go
+    ahead, or there's nothing to do; 1 when it would refuse."""
+    cfg = _alembic_config()
+    script = ScriptDirectory.from_config(cfg)
+    with _connect(create_engine(_sync_url(), pool_pre_ping=True)) as conn:
+        inputs = schema_plan.gather(conn, script, cfg.get_main_option("script_location"))
+    plan = schema_plan.plan_upgrade(script, **inputs, built=_built_from(), recover=recover,
+                                    shared=shared_database, rewind_to=rewind_to)
+    print(json.dumps(plan, indent=2) if as_json else schema_plan.describe(plan))
+    return 1 if plan["verdict"] == "refused" else 0
+
+
+def cmd_backup(directory: str, keep: int = 5, bucket: str | None = None,
+               prefix: str = "synodic-db-backups", endpoint_url: str | None = None,
+               region: str | None = None, force: bool = False, recover: bool = False,
+               shared_database: bool = False) -> int:
+    """Back the database up before an upgrade changes it: ``pg_dump`` to ``directory``, checked,
+    the newest ``keep`` kept, and copied to ``bucket`` when one is named.
+
+    Only when the upgrade would change something (:func:`schema_plan.plan_upgrade` says
+    ``upgrade``), unless ``force``: a deploy with nothing to migrate costs nothing. Exit 0 when the
+    backup is made or not needed; 1 when it fails, so a pre-upgrade hook stops the upgrade instead
+    of migrating without one."""
+    cfg = _alembic_config()
+    script = ScriptDirectory.from_config(cfg)
+    if not force:
+        with _connect(create_engine(_sync_url(), pool_pre_ping=True)) as conn:
+            inputs = schema_plan.gather(conn, script, cfg.get_main_option("script_location"))
+        plan = schema_plan.plan_upgrade(script, **inputs, built=_built_from(), recover=recover,
+                                        shared=shared_database)
+        if plan["verdict"] != "upgrade":
+            log.info("No backup needed: an upgrade would be %s. %s",
+                     plan["verdict"].replace("_", " "), plan["reason"])
+            return 0
+        log.info("Backing up before the upgrade: %s", plan["reason"])
+    try:
+        path = _dump(Path(directory), min(script.get_heads()))
+        _prune(Path(directory), keep)
+        if bucket:
+            _upload(path, bucket, prefix, endpoint_url, region)
+    except (OSError, RuntimeError) as error:
+        log.error("Backup failed: %s", error)
+        return 1
+    return 0
+
+
+def _libpq_url() -> str:
+    """The database for ``pg_dump``: ``BACKUP_DATABASE_URL`` — a direct connection, where
+    ``MANAGEMENT_DB_URL`` goes through a transaction pooler ``pg_dump`` can't use — or
+    ``MANAGEMENT_DB_URL``, in libpq's form."""
+    url = os.getenv("BACKUP_DATABASE_URL") or os.environ["MANAGEMENT_DB_URL"]
+    return re.sub(r"^postgres(?:ql)?\+\w+://", "postgresql://", url)
+
+
+def _dump(directory: Path, head: str) -> Path:
+    """``pg_dump`` in its custom format, written beside its final name and moved there only once
+    ``pg_restore`` can read it back."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for left in directory.glob("*.dump.partial"):           # a run stopped part-way
+        left.unlink()
+    url = _libpq_url()
+    database = re.sub(r"[^\w.-]", "_", url.rsplit("/", 1)[-1].split("?", 1)[0]) or "db"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    final = directory / f"{database}-{stamp}-to-{head}.dump"
+    partial = final.with_name(final.name + ".partial")
+    started = time.monotonic()
+    done = subprocess.run(["pg_dump", "--format=custom", f"--file={partial}", f"--dbname={url}"],
+                          capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        partial.unlink(missing_ok=True)
+        raise RuntimeError(f"pg_dump exited {done.returncode}: {done.stderr.strip()[-500:]}")
+    if partial.stat().st_size == 0 or subprocess.run(["pg_restore", "--list", str(partial)],
+                                                     capture_output=True, check=False).returncode != 0:
+        partial.unlink(missing_ok=True)
+        raise RuntimeError("pg_dump wrote a file pg_restore can't read")
+    partial.rename(final)
+    log.info("Backed up to %s (%.1f MB in %.0fs)", final, final.stat().st_size / 1e6,
+             time.monotonic() - started)
+    return final
+
+
+def _prune(directory: Path, keep: int) -> None:
+    """Keep the newest ``keep`` dumps; their names lead with when they were made."""
+    for old in sorted(directory.glob("*.dump"), key=lambda p: p.name.rsplit("-to-", 1)[0])[:-keep or None]:
+        old.unlink()
+        log.info("Removed the older backup %s", old.name)
+
+
+def _upload(path: Path, bucket: str, prefix: str, endpoint_url: str | None, region: str | None) -> None:
+    """Copy ``path`` to an S3-compatible bucket (GCS through its S3 endpoint, with HMAC keys), with
+    the app's client settings: credentials from boto3's chain (``AWS_ACCESS_KEY_ID`` and
+    ``AWS_SECRET_ACCESS_KEY``, or a role). Retention is the bucket's lifecycle rule."""
+    try:
+        import boto3.session
+        from botocore.config import Config
+    except ImportError as error:
+        raise RuntimeError("uploading needs boto3: pip install -r backend/requirements-s3.txt") from error
+    client = boto3.session.Session().client("s3", endpoint_url=endpoint_url or None, region_name=region or None,
+                                            config=Config(signature_version="s3v4",
+                                                          retries={"mode": "standard", "max_attempts": 5},
+                                                          request_checksum_calculation="when_required",
+                                                          response_checksum_validation="when_required"))
+    key = f"{prefix.strip('/')}/{path.name}" if prefix.strip("/") else path.name
+    try:
+        client.upload_file(str(path), bucket, key)
+    except Exception as error:  # boto3 raises many kinds; the message says which
+        raise RuntimeError(f"uploading to s3://{bucket}/{key} failed: {error}") from error
+    log.info("Copied to s3://%s/%s", bucket, key)
 
 
 def _orm_metadata():
@@ -854,6 +810,25 @@ def main() -> int:
              "Or SYNODIC_SHARED_DATABASE=true",
     )
 
+    plan = sub.add_parser("plan", help="What `upgrade` would do to this database now, changing nothing")
+    plan.add_argument("--json", action="store_true", help="the plan as JSON, on stdout")
+    plan.add_argument("--recover", action="store_true", help="as `upgrade --recover` would")
+    plan.add_argument("--shared-database", action="store_true", help="as `upgrade --shared-database` would")
+    plan.add_argument("--rewind-to", metavar="REV", help="as `upgrade --rewind-to REV` would")
+
+    backup = sub.add_parser("backup", help="pg_dump the database before an upgrade changes it")
+    backup.add_argument("--dir", required=True, help="where the dumps go (a volume, to keep them)")
+    backup.add_argument("--keep", type=int, default=5, help="how many dumps to keep there (default 5)")
+    backup.add_argument("--bucket", help="also copy each dump to this S3-compatible bucket")
+    backup.add_argument("--prefix", default="synodic-db-backups", help="key prefix in the bucket")
+    backup.add_argument("--endpoint-url", help="the bucket's endpoint, e.g. https://storage.googleapis.com")
+    backup.add_argument("--region", help="the bucket's region")
+    backup.add_argument("--force", action="store_true",
+                        help="back up even when an upgrade would change nothing")
+    backup.add_argument("--recover", action="store_true", help="plan as `upgrade --recover` would")
+    backup.add_argument("--shared-database", action="store_true",
+                        help="plan as `upgrade --shared-database` would")
+
     down = sub.add_parser("downgrade", help="Run alembic downgrade")
     down.add_argument("--revision", required=True)
 
@@ -889,6 +864,16 @@ def main() -> int:
                            recover=args.recover or os.getenv("SYNODIC_UPGRADE_RECOVER") == "true",
                            shared_database=args.shared_database
                            or os.getenv("SYNODIC_SHARED_DATABASE") == "true")
+    if args.cmd == "plan":
+        return cmd_plan(args.json, recover=args.recover or os.getenv("SYNODIC_UPGRADE_RECOVER") == "true",
+                        shared_database=args.shared_database
+                        or os.getenv("SYNODIC_SHARED_DATABASE") == "true", rewind_to=args.rewind_to)
+    if args.cmd == "backup":
+        return cmd_backup(args.dir, keep=args.keep, bucket=args.bucket, prefix=args.prefix,
+                          endpoint_url=args.endpoint_url, region=args.region, force=args.force,
+                          recover=args.recover or os.getenv("SYNODIC_UPGRADE_RECOVER") == "true",
+                          shared_database=args.shared_database
+                          or os.getenv("SYNODIC_SHARED_DATABASE") == "true")
     if args.cmd == "downgrade":
         return cmd_downgrade(args.revision)
     if args.cmd == "repair":

@@ -24,6 +24,7 @@ import { useFleetCapacity } from '../shared/useAggregationCapacity'
 import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { BootstrapJobsPanel } from './BootstrapJobsPanel'
 import { VersionedGraphsPanel } from './VersionedGraphsPanel'
+import { SchemaPanel } from './SchemaPanel'
 import { ReseedProviderDialog } from './ReseedProviderDialog'
 import { compactNum, formatAgeMs } from './meta'
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -303,6 +304,8 @@ export function AdminInfrastructure() {
 
                     {/* Diagnostics & remediation — what's wrong, why, how to fix */}
                     <DiagnosticsPanel snapshot={data} />
+
+                    <SchemaPanel />
 
                     <BootstrapJobsPanel jobs={data.bootstrapJobs} />
                     <ProjectionPanel

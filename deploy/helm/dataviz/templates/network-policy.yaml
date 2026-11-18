@@ -204,6 +204,13 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/component: db-init
+        # The schema upgrade, and the backup before it (upgrade-job.yaml, db-backup.yaml).
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: upgrade
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: db-backup
         # Every versioning lane (versioning-worker.yaml).
         - podSelector:
             matchExpressions:
