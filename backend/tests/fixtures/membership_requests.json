@@ -2,6 +2,34 @@
   "about": "The requests the browser sends to make a view from a query: POST /{ws}/graph/members/plan (builder \"plan\": features/live-views/model.ts planRequestOf) and POST /views/from-members (\"create\": createRequestOf). The frontend test (features/live-views/__tests__/requests.contract.test.ts) builds each body from its input and must produce it exactly; the backend test (tests/test_membership_request_contract.py) validates each against the models, which forbid unknown fields. The rule this pins: a field reaches a request only once every deployed server accepts it — a body a server refuses is a 422 the reader sees as a broken preview.",
   "cases": [
     {
+      "name": "a trace, following the view it was traced in, as a subset",
+      "builder": "plan",
+      "input": {
+        "trace": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"], "showUpstream": true, "showDownstream": true, "depthUp": 25, "depthDown": 3},
+        "viewId": "view_base",
+        "choices": {"choice": "follow", "keep": "all", "nest": true}
+      },
+      "body": {
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": 0, "upstream": "all", "downstream": 3, "partnerChildren": 0}}}],
+        "layout": {"kind": "follow", "sourceViewId": "view_base", "nest": true},
+        "keep": "all"
+      }
+    },
+    {
+      "name": "a trace in a subset, following that subset's base",
+      "builder": "plan",
+      "input": {
+        "trace": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"], "showUpstream": true, "showDownstream": true, "depthUp": 25, "depthDown": 3},
+        "viewId": "view_subset",
+        "choices": {"choice": "follow", "keep": "all", "nest": true, "layoutViewId": "view_base"}
+      },
+      "body": {
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": 0, "upstream": "all", "downstream": 3, "partnerChildren": 0}}}],
+        "layout": {"kind": "follow", "sourceViewId": "view_base", "nest": true},
+        "keep": "all"
+      }
+    },
+    {
       "name": "a trace, laid out as lineage stages",
       "builder": "plan",
       "input": {
