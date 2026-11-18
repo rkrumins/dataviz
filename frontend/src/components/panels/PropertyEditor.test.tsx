@@ -648,6 +648,24 @@ describe('PropertyEditor — keys as stored, polished', () => {
 })
 
 describe('PropertyEditor — sections and the View menu', () => {
+  it('takes its sections from the keys’ own folders, at any depth — nothing named in advance', async () => {
+    const user = userEvent.setup()
+    render(<PropertyEditor value={{ 'Technical/path': '/data/orders', 'Technical/system': 'Snowflake', 'Technical/Storage/format': 'parquet',
+      'Finance/Cost centre': 'CC-42', owner: 'ana' }} onChange={() => {}} readOnly groupByPath bare />)
+    // A section per top-level folder, in the order the keys come; what has no folder under General.
+    expect(screen.getAllByRole('region').map((r) => r.getAttribute('aria-label'))).toEqual(['General', 'Technical', 'Finance'])
+    const technical = screen.getByRole('region', { name: 'Technical' })
+    expect(within(technical).getByText('3 properties')).toBeInTheDocument()
+    expect(within(technical).getByText('path')).toBeInTheDocument()
+    expect(within(technical).getByText('system')).toBeInTheDocument()
+    // Technical/Storage is a folder inside Technical, holding format.
+    const storage = within(technical).getByRole('group', { name: 'Storage' })
+    await user.click(within(storage).getByRole('button', { name: 'Expand' }))
+    expect(within(storage).getByText('format')).toBeInTheDocument()
+    expect(within(storage).getByText('parquet')).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: 'Finance' })).getByText('Cost centre')).toBeInTheDocument()
+  })
+
   it('offers the text as stored only in the Technical view', async () => {
     const user = userEvent.setup()
     usePersonaStore.setState({ mode: 'business' })
