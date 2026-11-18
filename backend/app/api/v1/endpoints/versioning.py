@@ -559,9 +559,16 @@ def _domain_errors():
     except AccessDenied as exc:
         raise HTTPException(status_code=403, detail={"type": "access_denied", "message": str(exc)})
     except ApprovalRequired as exc:
+        said = (f"This review needs approval from everyone asked before it merges: {exc.have} of "
+                f"{exc.required} have approved." if exc.pending else
+                f"This review needs {exc.required} approval{'s' if exc.required != 1 else ''} before it "
+                f"merges; it has {exc.have}.")
+        if exc.stale:
+            said += (f" {len(exc.stale)} approved an earlier version and "
+                     f"{'is' if len(exc.stale) == 1 else 'are'} asked again.")
         raise HTTPException(status_code=409, detail={"type": "approval_required", "pending": exc.pending,
                                                      "stale": exc.stale, "required": exc.required,
-                                                     "have": exc.have})
+                                                     "have": exc.have, "message": said})
     except ThreadsOpen as exc:
         raise HTTPException(status_code=409, detail={
             "type": "threads_open", "open": exc.count,

@@ -265,8 +265,10 @@ export function useReviewActions(wsId: string, prId: string, onClose: () => void
         setResolverError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
         return
       }
+      // The server says what holds it (approvals under the review's rule, open threads, a request
+      // for changes); an older one only named the refusal.
       const msg = (e as Error).message
-      const friendly = /approval_required/i.test(msg)
+      const friendly = msg === 'approval_required' || /^\{.*approval_required/.test(msg)
         ? 'This PR needs approval from its reviewers before it can be merged.'
         : msg
       if (resolutions) setResolverError(friendly)
