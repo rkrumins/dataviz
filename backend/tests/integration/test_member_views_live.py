@@ -1,0 +1,167 @@
+"""LIVE FalkorDB: a view of everything twenty seeds reach — fifty thousand members —
+made, opened and paged through the app's own routes.
+
+The member-set test (``test_member_sets_live.py``) pins the resolution; this pins
+what a person gets from it: Save as view answers 202 while the set is worked out
+and makes the view once it is, the view's own record stays small however many
+members it has (they are in their own table, never its layout), and each layer of
+it pages its members in name order, every one exactly once, with exact counts.
+
+Run:  RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
+      python -m pytest tests/integration/test_member_views_live.py -q
+"""
+from __future__ import annotations
+
+import os
+import time
+import uuid
+from contextlib import asynccontextmanager
+
+import pytest
+import pytest_asyncio
+from httpx import AsyncClient
+
+from backend.tests.integration.test_member_sets_live import LINEAGE, SEEDS, LiveEngine, _expected, _graph
+from backend.tests.test_views_from_members_api import flags, membership_on, workspace  # noqa: F401 — fixtures
+
+
+def on():
+    """The switches, read again: this runs longer than the flags' cache lives, and a
+    re-read here would reach for the real database."""
+    flags(viewMembershipEnabled=True, traceEnabled=True)
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_FALKOR_LIVE") != "1",
+    reason="Set RUN_FALKOR_LIVE=1 (with FalkorDB reachable) to run the live test.",
+)
+
+
+class ViewEngine(LiveEngine):
+    """The live graph as a view's pipeline and feed read it: nodes typed, chains read."""
+
+    async def get_ancestor_chains(self, urns):
+        return await self.provider.get_ancestor_chains(list(urns))
+
+
+@pytest_asyncio.fixture()
+async def live(db_session):
+    from backend.app.api.v1.endpoints import view_membership as routes
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+    from backend.app.main import app
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(
+        host=os.getenv("FALKORDB_HOST", "localhost"),
+        port=int(os.getenv("FALKORDB_PORT", "6379")),
+        graph_name=f"member_views_{uuid.uuid4().hex[:8]}",
+        auth_enabled=False,
+    )
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    await p._ensure_connected()
+    nodes, edges = _graph()
+    await p._graph.query("CREATE INDEX FOR (n:Domain) ON (n.urn)")
+    await p._graph.query("CREATE INDEX FOR (n:Dataset) ON (n.urn)")
+    await p._graph.query("UNWIND $rows AS r CREATE (:Domain {urn: r, displayName: r})",
+                         {"rows": sorted(set(nodes.values()))})
+    rows = [{"urn": u, "dom": d} for u, d in nodes.items()]
+    for i in range(0, len(rows), 5000):
+        await p._graph.query(
+            "UNWIND $rows AS r MATCH (d:Domain {urn: r.dom}) "
+            "CREATE (d)-[:CONTAINS]->(:Dataset {urn: r.urn, displayName: r.urn})", {"rows": rows[i:i + 5000]})
+    pairs = [{"a": a, "b": b} for a, b in edges]
+    for i in range(0, len(pairs), 5000):
+        await p._graph.query(
+            f"UNWIND $rows AS r MATCH (a:Dataset {{urn: r.a}}), (b:Dataset {{urn: r.b}}) "
+            f"CREATE (a)-[:{LINEAGE}]->(b)", {"rows": pairs[i:i + 5000]})
+
+    engine = ViewEngine(p)
+    engine._db_session = db_session
+
+    @asynccontextmanager
+    async def scope(workspace_id, data_source_id, actor):
+        yield engine
+
+    async def _engine():
+        return engine
+
+    app.dependency_overrides[routes.get_engine_scope] = lambda: scope
+    app.dependency_overrides[get_context_engine] = _engine
+    try:
+        yield nodes, edges
+    finally:
+        app.dependency_overrides.pop(routes.get_engine_scope, None)
+        app.dependency_overrides.pop(get_context_engine, None)
+        await p._graph.delete()
+
+
+async def test_a_view_of_fifty_thousand_members(test_client: AsyncClient, membership_on, live):  # noqa: F811
+    nodes, edges = live
+    up, down = _expected(nodes, edges)
+    members = SEEDS + len(up) + len(down)
+    ws = await workspace(test_client)
+    seeds = [f"urn:seed:{s}" for s in range(SEEDS)]
+    body = {
+        "name": "Everything twenty tables reach", "workspaceId": ws, "visibility": "private", "mode": "live",
+        "sources": [{"spec": {"seeds": {"urns": seeds}, "expand": {"upstream": "all", "downstream": "all"}}}],
+        "layout": {"kind": "stages", "nest": False}, "keep": "withResults",
+        "provenance": {"origin": "trace"}, "waitMs": 5000,
+    }
+
+    # Save as view: 202 with progress until the set is worked out, then the view.
+    started, asks, resolving = time.monotonic(), 0, 0
+    while True:
+        asks += 1
+        assert asks < 200
+        on()
+        resp = await test_client.post("/api/v1/views/from-members", json=body, headers={"Idempotency-Key": "live-1"})
+        if resp.status_code == 202:
+            resolving += 1
+            assert resp.json()["status"] == "resolving"
+            continue
+        break
+    assert resp.status_code == 201, resp.text
+    made = resp.json()
+    view_id = made["view"]["id"]
+
+    # Placing members may outlast the request: opening the view carries it on.
+    for _ in range(200):
+        on()
+        got = await test_client.get(f"/api/v1/views/{view_id}/membership")
+        assert got.status_code == 200, got.text
+        status = got.json()
+        if status["status"] in ("ok", "partial"):
+            break
+        out = await test_client.post(f"/api/v1/views/{view_id}/membership/refresh", params={"trigger": "open"})
+        assert out.status_code in (200, 202), out.text
+    assert status["status"] == "ok", status
+    assert status["counts"]["members"] == members
+    elapsed = time.monotonic() - started
+
+    # The view's own record stays small: its members are not in its layout.
+    view = await test_client.get(f"/api/v1/views/{view_id}")
+    assert len(view.content) < 50_000
+    listing = await test_client.get("/api/v1/views/", params={"workspaceId": ws})
+    assert len(listing.content) < 100_000
+
+    # Each layer pages its members in name order, every one once, its count exact.
+    seen, pages = set(), 0
+    for layer in view.json()["config"]["layout"]["referenceLayout"]["layers"]:
+        cursor, names = None, []
+        while True:
+            pages += 1
+            on()
+            page = (await test_client.post(f"/api/v1/{ws}/graph/view-members", params={"viewId": view_id},
+                                           json={"layerId": layer["id"], **({"cursor": cursor} if cursor else {}),
+                                                 "limit": 500})).json()
+            names += [n["displayName"] for n in page["nodes"]]
+            for n in page["nodes"]:
+                assert n["urn"] not in seen
+                seen.add(n["urn"])
+            cursor = page.get("cursor")
+            if not cursor:
+                break
+        assert names == sorted(names, key=lambda s: (s.lower(), s)) or len(names) == 0
+        assert page["countStatus"] == "exact"
+        assert len(names) == min(page["totalCount"], 5000)
+    print(f"\n{members:,} members: {resolving} answers of 202, view ready in {elapsed:.1f} s, "
+          f"{len(seen):,} listed across {pages} pages (each layer lists up to 5,000)")
