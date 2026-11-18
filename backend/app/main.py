@@ -1635,6 +1635,20 @@ async def lifespan(_app: FastAPI):
             name="refresh-token-gc",
         )
 
+    # Member-set sweep: sets nobody moves on or reads are expired and deleted in batches.
+    # Same owner role; a lock per pass.
+    _app.state._member_set_gc_shutdown = asyncio.Event()
+    _app.state._member_set_gc_task = None
+    if runs_scheduler():
+        from .services.member_sets.sweeper import run_sweeper as _run_member_set_gc
+        _app.state._member_set_gc_task = asyncio.create_task(
+            _run_member_set_gc(
+                get_jobs_session,
+                _app.state._member_set_gc_shutdown,
+            ),
+            name="member-set-gc",
+        )
+
     # API key expiry reminders: a week ahead, once per key. Same owner role,
     # and a lock per pass, so replicas never send the same reminder twice.
     _app.state._api_key_housekeeping_shutdown = asyncio.Event()
@@ -1839,6 +1853,21 @@ async def lifespan(_app: FastAPI):
             _refresh_gc_task.cancel()
             try:
                 await _refresh_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the member-set sweeper before DB pool teardown, same shape.
+    _member_set_gc_shutdown = getattr(_app.state, "_member_set_gc_shutdown", None)
+    _member_set_gc_task = getattr(_app.state, "_member_set_gc_task", None)
+    if _member_set_gc_shutdown is not None:
+        _member_set_gc_shutdown.set()
+    if _member_set_gc_task is not None and not _member_set_gc_task.done():
+        try:
+            await asyncio.wait_for(_member_set_gc_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _member_set_gc_task.cancel()
+            try:
+                await _member_set_gc_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -2898,6 +2927,9 @@ class _TimeoutMiddleware:
         # A search export's file, streamed from the object store: it holds nothing else while
         # it streams (graph.search_export_download).
         re.compile(r"^/api/v1/[^/]+/graph/search/exports/[^/]+/download$"),
+        # A member set's file, read from its rows a page at a time, taking turns with the
+        # graph exports (graph_member_sets.download_member_set).
+        re.compile(r"^/api/v1/[^/]+/graph/member-sets/[^/]+/download$"),
         # The activity log as CSV, platform-wide or one workspace's: at most 50,000 rows, a
         # short keyset read per chunk, two at a time per process (activity._EXPORTS).
         re.compile(r"^/api/v1/admin/(?:workspaces/[^/]+/)?activity/export\.csv$"),

@@ -176,6 +176,8 @@ tests/test_live_views_writes.py
 tests/test_loadtest_manifests.py
 tests/test_loadtest_protection_gate.py
 tests/test_loadtest_retry_model.py
+tests/test_member_sets.py
+tests/test_member_sets_api.py
 tests/test_metrics_backend.py
 tests/test_native_query_api.py
 tests/test_native_query_cells.py
