@@ -55,7 +55,7 @@ import { getSearchStatus, putSearch, SEARCH_VIEW_QUERY_KEY } from '@/services/se
 import type { SearchViewStatus } from '@/types/searchView'
 import { memberActionsFor } from '@/features/live-views/model'
 import { memberOps } from '@/services/liveViewsApi'
-import type { MemberOps, MembershipExpand } from '@/types/membership'
+import type { MemberOps, MembershipExpand, MembershipSpec } from '@/types/membership'
 import type { Predicate, SearchQuery } from '@/types/search'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
@@ -72,6 +72,7 @@ import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
 import { connectedEdgeTypes, deriveConnectableEdges } from '@/services/ontologyPreflightService'
 import { useGraphProvider } from '@/providers'
 import type { AggregatedEdgeInfo, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { layerClaimedTypes, subsetFeedKey, useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
@@ -211,6 +212,7 @@ import { useResolvedNames } from '@/hooks/useResolvedNames'
 import { buildTraceShareLink, decodeTraceShare } from '@/hooks/lib/traceShareCodec'
 import type { TraceShareSummary } from '@/components/canvas/trace/TraceSharePopover'
 import type { TraceKeepActions } from '@/components/canvas/trace/TraceKeepMenu'
+import { ExportLineageDialog } from '@/components/canvas/trace/ExportLineageDialog'
 import type { SavedTraceItem, SavedTracesSectionProps } from '@/components/canvas/trace/SavedTracesSection'
 import {
   countTraceRows,
@@ -2215,16 +2217,21 @@ export function ContextViewCanvas({
   // canvas's own type rules, nor a loaded container's column. Placed where a
   // session's drags would be, which win at any depth; a subset view has none.
   const subsetView = !!activeView?.search
+  // A view made from a query lists its members the same way: each layer pages
+  // them from the server's member table, placed where the server placed them.
+  const membershipOn = useFeature('viewMembershipEnabled')
+  const membersFed = !!activeView?.membership && !atRevision && membershipOn
+  const fedView = subsetView || membersFed
   // Its matches drawn inside the containers its base draws them in: the reader's choice.
   const showWhereTheySit = usePreferencesStore((s) => s.showWhereTheySit) ?? true
   const feedPlacements = useMemo(() => {
-    if (!subsetView) return null
+    if (!fedView) return null
     const placed = new Map<string, { layerId: string }>()
     for (const n of nodes) {
       if (n.data?.feedLayerId) placed.set(n.id, { layerId: n.data.feedLayerId })
     }
     return placed
-  }, [subsetView, nodes])
+  }, [fedView, nodes])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
   const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes, promotedAnchors, contractPlacements } = useLayerAssignment({
@@ -2237,7 +2244,7 @@ export function ContextViewCanvas({
     sortOverrides,
     placementSpec,
     placementChains,
-    whereTheySit: subsetView && showWhereTheySit,
+    whereTheySit: fedView && showWhereTheySit,
   })
   useEffect(() => { renderedLayerRef.current = nodeLayerMap }, [nodeLayerMap])
 
@@ -2329,7 +2336,7 @@ export function ContextViewCanvas({
     })
     // A subset view's containers, at any depth: drawn to show where its matches
     // sit, so open, like a group, until collapsed.
-    if (subsetView) {
+    if (fedView) {
       const stack = [...nodesByLayer.values()].flat()
       while (stack.length > 0) {
         const node = stack.pop()!
@@ -2343,7 +2350,7 @@ export function ContextViewCanvas({
       for (const id of unopened) next.add(id)
       return next
     })
-  }, [nodesByLayer, subsetView])
+  }, [nodesByLayer, fedView])
 
   // Live context for resolving a parent's effective child-sort direction inside
   // stable callbacks (refs so loadChildrenSorted keeps ONE identity — a dep on
@@ -4193,7 +4200,7 @@ export function ContextViewCanvas({
   // A subset view's layer pages its own feed (`layer:<id>`): its search's matches.
   const feedTypesByLayer = useMemo(() => {
     const out = new Map<string, string[]>()
-    if (subsetView) {
+    if (fedView) {
       for (const layer of sortedLayers) {
         const key = subsetFeedKey(layer.id)
         if (typeFeeds[key]) out.set(layer.id, [key])
@@ -4210,11 +4217,11 @@ export function ContextViewCanvas({
       if (types.length > 0) out.set(layer.id, types)
     }
     return out
-  }, [typeFeeds, sortedLayers, subsetView])
+  }, [typeFeeds, sortedLayers, fedView])
   // A subset view's layers: what each has listed, of how many, and as of when.
   const subsetFeedByLayer = useMemo(() => {
     const out = new Map<string, NonNullable<React.ComponentProps<typeof LayerColumn>['subsetFeed']>>()
-    if (!subsetView) return out
+    if (!fedView) return out
     for (const layer of sortedLayers) {
       const feed = typeFeeds[subsetFeedKey(layer.id)]
       if (feed?.search) {
@@ -4223,7 +4230,7 @@ export function ContextViewCanvas({
       }
     }
     return out
-  }, [subsetView, sortedLayers, typeFeeds])
+  }, [fedView, sortedLayers, typeFeeds])
   // Loaded entities per type, folded as the feeds are matched: what a type's
   // server total has already delivered, wherever its rows are drawn.
   const loadedByType = useMemo(() => {
@@ -4927,9 +4934,27 @@ export function ContextViewCanvas({
       origin: 'trace',
     })
   }, [canSaveAsView, traceActive, canvasTrace.tracedUrns, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown, tracedLabel, traceSeeds])
+  // EVERYTHING IT REACHES — the complete trace, worked out by the server (a
+  // member set), for when the browser holds only part of it or the reader
+  // wants what this view cannot place as well.
+  const graphExportEnabled = useFeature('graphExportEnabled')
+  const [lineageExport, setLineageExport] = useState<{ spec: MembershipSpec; seedsLabel: string } | null>(null)
+  const traceExportEverything = useMemo(() => {
+    if (!graphExportEnabled || !(provider instanceof RemoteGraphProvider) || !traceActive) return undefined
+    return () => setLineageExport({
+      spec: traceMembershipSpec({
+        urns: canvasTrace.tracedUrns,
+        showUpstream: traceShowUpstream, showDownstream: traceShowDownstream,
+        depthUp: traceDepthUp, depthDown: traceDepthDown,
+      }),
+      seedsLabel: tracedLabel ?? 'the traced entities',
+    })
+  }, [graphExportEnabled, provider, traceActive, canvasTrace.tracedUrns, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown, tracedLabel])
   const traceKeepActions = useMemo(
-    () => (traceKeep && traceSaveAsView ? { ...traceKeep, saveAsView: traceSaveAsView } : traceKeep),
-    [traceKeep, traceSaveAsView],
+    () => (traceKeep
+      ? { ...traceKeep, saveAsView: traceSaveAsView, exportEverything: traceExportEverything }
+      : traceKeep),
+    [traceKeep, traceSaveAsView, traceExportEverything],
   )
 
   // SUBSET VIEWS (features/search-views) — a search's matches kept as a view of
@@ -8504,6 +8529,14 @@ export function ContextViewCanvas({
 
       {/* Save as view — one sheet. A narrowing is kept live where a live view can keep
           what it reaches, else as a list of its members; the sheet switches between them. */}
+      {lineageExport && (
+        <ExportLineageDialog
+          viewId={activeView?.id ?? null}
+          spec={lineageExport.spec}
+          seedsLabel={lineageExport.seedsLabel}
+          onClose={() => setLineageExport(null)}
+        />
+      )}
       {canSaveAsView && saveAsDraft && narrowViewId && scopeWsId && (
         <SaveAsView
           source={{ kind: 'narrowing', draft: saveAsDraft }}

@@ -78,6 +78,8 @@ import { unsaveableReason } from '@/features/search-views/model'
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
 import { CreateRuleFromQuery } from './panel/CreateRuleModal'
 import { ExportMatchesDialog } from './panel/ExportMatchesDialog'
+import { ExportLineageDialog } from '@/components/canvas/trace/ExportLineageDialog'
+import { specFor } from '@/features/narrow/model'
 import { LibraryPopover } from './panel/LibraryPopover'
 import { MatchBar } from './panel/MatchBar'
 import { NoViewState } from './panel/NoViewState'
@@ -324,7 +326,9 @@ function PanelInner({
     // LibraryPopover for the lifecycle handoff.
     const [saveTarget, setSaveTarget] = useState<RecentQueryEntry | null>(null)
     const [exportOpen, setExportOpen] = useState(false)
+    const [lineageExportOpen, setLineageExportOpen] = useState(false)
     const exportEnabled = useFeature('graphExportEnabled')
+    const lineageEnabled = useFeature('traceEnabled')
     const provider = useGraphProvider()
 
     const openAdvanced = useCallback((tab: DrawerTab = 'options') => {
@@ -843,6 +847,21 @@ function PanelInner({
                     query={view.query}
                     matchCount={countIsExact ? resultsCount : null}
                     onClose={() => setExportOpen(false)}
+                    onWithLineage={lineageEnabled
+                        ? () => { setExportOpen(false); setLineageExportOpen(true) }
+                        : undefined}
+                />
+            )}
+            {lineageExportOpen && view.kind === 'results' && (
+                <ExportLineageDialog
+                    viewId={viewId}
+                    // A search's matches as the starting points, looked for where the
+                    // search looked: the whole data source, or this view.
+                    spec={specFor({ query: view.query.predicate }, {},
+                        view.query.scope.scopeMode === 'data_source' ? 'dataSource' : 'view')}
+                    seedsLabel="the matches of your search"
+                    adjustable
+                    onClose={() => setLineageExportOpen(false)}
                 />
             )}
             {studioOpen && !advancedOpen && (

@@ -4,12 +4,14 @@
  * preview (`POST /{ws}/graph/members/plan`) goes through the graph provider,
  * like every other graph read.
  */
-import type {
-  FromMembersRequest,
-  MemberOps,
-  MembershipStatus,
-  MembershipUpdate,
-  RefreshResult,
+import {
+  isResolving,
+  type FromMembersRequest,
+  type MemberOps,
+  type MembershipResolving,
+  type MembershipStatus,
+  type MembershipUpdate,
+  type RefreshResult,
 } from '@/types/membership'
 import { queryClient } from '@/lib/queryClient'
 
@@ -31,14 +33,31 @@ function invalidate(viewId: string) {
   void queryClient.invalidateQueries({ queryKey: ['view', viewId] })
 }
 
+/** How long one ask lets the server work out what the sources reach. */
+const RESOLVE_WAIT_MS = 10_000
+/** A backstop, not a budget: at ten seconds an ask, about five hours. */
+const RESOLVE_MAX_ASKS = 2_000
+
 /** Make a view from one or more queries. `idempotencyKey` makes a retry return
- *  the view the first attempt made, never a second one. */
-export async function createFromMembers(body: FromMembersRequest, idempotencyKey: string): Promise<ViewWithMembership> {
-  return authFetch<ViewWithMembership>('/api/v1/views/from-members', {
-    method: 'POST',
-    body: JSON.stringify(body),
-    headers: { 'Idempotency-Key': idempotencyKey },
-  })
+ *  the view the first attempt made, never a second one. A large set is worked
+ *  out a step at a time: the server answers 202 with its progress and makes
+ *  nothing until it is complete, so the same ask is sent again — reported to
+ *  `onProgress` — until the view is made. */
+export async function createFromMembers(
+  body: FromMembersRequest,
+  idempotencyKey: string,
+  onProgress?: (resolving: MembershipResolving) => void,
+): Promise<ViewWithMembership> {
+  for (let n = 0; n < RESOLVE_MAX_ASKS; n++) {
+    const out = await authFetch<ViewWithMembership | MembershipResolving>('/api/v1/views/from-members', {
+      method: 'POST',
+      body: JSON.stringify({ ...body, waitMs: body.waitMs ?? RESOLVE_WAIT_MS }),
+      headers: { 'Idempotency-Key': idempotencyKey },
+    })
+    if (!isResolving(out)) return out
+    onProgress?.(out)
+  }
+  throw new Error('Still working out what it reaches — try again later.')
 }
 
 /** What the view is made of, and how keeping it up to date is going. */

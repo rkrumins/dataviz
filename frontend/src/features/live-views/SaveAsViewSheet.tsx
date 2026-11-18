@@ -28,7 +28,7 @@ import { httpStatusOf } from '@/services/graphRequestFailure'
 import { createFromMembers } from '@/services/liveViewsApi'
 import type { View } from '@/services/viewApiService'
 import { useSchemaEntityTypes } from '@/store/schema'
-import type { MembershipPlan } from '@/types/membership'
+import type { MembershipPlan, MembershipResolving } from '@/types/membership'
 
 import {
   createRequestOf,
@@ -95,6 +95,7 @@ export function SaveAsViewSheet({
   const [visibility, setVisibility] = useState<'private' | 'workspace'>('private')
   const [choices, setChoices] = useState<SaveChoices>({ choice: firstOffer, keep: 'withResults', nest: true })
   const [saving, setSaving] = useState(false)
+  const [savingProgress, setSavingProgress] = useState<MembershipResolving | null>(null)
   const [error, setError] = useState<string | null>(null)
   // One per sheet: a retry of this save answers with the view the first attempt made.
   const [idempotencyKey] = useState(() => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`))
@@ -123,7 +124,7 @@ export function SaveAsViewSheet({
       const out = await createFromMembers(createRequestOf({
         name, visibility, mode: live ? 'live' : 'snapshot', workspaceId, dataSourceId,
         spec, viewId, choices: withTemplate, origin: draft.origin ?? (spec.seeds.query ? 'search' : 'narrow'),
-      }), idempotencyKey)
+      }), idempotencyKey, setSavingProgress)
       onSaved(out.view)
     } catch (err) {
       setError(saveErrorText(err))
@@ -336,7 +337,7 @@ export function SaveAsViewSheet({
               )}
             >
               {saving ? <LucideIcons.Loader2 className="w-4 h-4 animate-spin" /> : <LucideIcons.BookmarkPlus className="w-4 h-4" />}
-              {saving ? 'Saving…' : 'Save view'}
+              {saving ? (savingProgress ? resolvingText(savingProgress).replace(/…$/, '') : 'Saving…') : 'Save view'}
               {canSave && <Kbd shortcut="mod+enter" tone="onAccent" />}
             </button>
             </div>
@@ -441,6 +442,12 @@ function TemplateList({ loading, templates, value, onChange }: {
 }
 
 /** What the view would start with: its layers and what each holds, against the limit. */
+/** A large set the server is still working out: how far it has got. */
+function resolvingText(r: MembershipResolving): string {
+  const found = r.sets.reduce((n, set) => n + set.counts.total, 0)
+  return `Working out everything it reaches — ${found.toLocaleString()} ${found === 1 ? 'entity' : 'entities'} so far…`
+}
+
 function Preview({ state, plan, loading, waitingForTemplate, help, seedNote, onRetry }: {
   state: ReturnType<typeof usePlanPreview>['state']
   plan: MembershipPlan | null
@@ -462,9 +469,11 @@ function Preview({ state, plan, loading, waitingForTemplate, help, seedNote, onR
     )
   }
   if (!plan) {
+    const resolving = state.status === 'loading' ? state.resolving : null
     return (
-      <div className="flex items-center gap-2 rounded-xl border border-glass-border/70 px-4 py-3 text-[13px] text-ink-muted">
-        <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" /> Working out the layers it would start with…
+      <div className="flex items-center gap-2 rounded-xl border border-glass-border/70 px-4 py-3 text-[13px] text-ink-muted" data-plan-resolving={resolving ? '' : undefined}>
+        <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" />
+        {resolving ? resolvingText(resolving) : 'Working out the layers it would start with…'}
       </div>
     )
   }

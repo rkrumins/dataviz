@@ -552,7 +552,9 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "in full, list, then take everything a set of seeds reaches",
         ),
         ui_surfaces=("Export controls on the canvas and the context-view menu",
-                     "Export on a search's matches"),
+                     "Export on a search's matches",
+                     "Everything it reaches… on the trace dock, and a search's matches with their "
+                     "sources & consumers"),
         still_allowed=(
             "Reading, filtering and tracing every graph in the product",
             "Exports already downloaded are not recalled — this stops NEW ones",

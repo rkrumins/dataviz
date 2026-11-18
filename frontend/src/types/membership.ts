@@ -6,6 +6,7 @@
  * limit the resolution reached. The canvas calls the feature Narrow.
  */
 import type { Predicate } from './search'
+import type { MemberSetStatus } from './memberSet'
 
 /** Levels or hops; `'all'` is the whole way. */
 export type Depth = number | 'all'
@@ -42,7 +43,7 @@ export interface MemberEntry {
   hops?: number | null
 }
 
-export type TruncationReason = 'seed_cap' | 'member_cap' | 'trace_cap' | 'deadline' | 'incomplete' | 'chains_cap'
+export type TruncationReason = 'seed_cap' | 'member_cap' | 'trace_cap' | 'deadline' | 'incomplete' | 'chains_cap' | 'edge_cap'
 
 export interface MembershipTruncation {
   reason: TruncationReason
@@ -130,6 +131,20 @@ export interface PlanRequest {
   layers?: Array<Record<string, unknown>>
   keep: KeepLayers
   exclude?: string[]
+  /** How long the server works the sources out before answering (they resolve
+   *  a step at a time; ask again to carry on). */
+  waitMs?: number
+}
+
+/** The server is still working out what the sources reach (202): ask again,
+ *  the same way, to carry on — nothing is made until they are complete. */
+export interface MembershipResolving {
+  status: 'resolving'
+  sets: MemberSetStatus[]
+}
+
+export function isResolving(answer: unknown): answer is MembershipResolving {
+  return typeof answer === 'object' && answer !== null && (answer as { status?: unknown }).status === 'resolving'
 }
 
 export interface PlanLayer {
@@ -149,6 +164,8 @@ export interface MembershipPlan {
   included: number
   limit: number
   overCap: boolean
+  /** Layer counts placed from a sample of a large set, not every member. */
+  estimated?: boolean
   layers: PlanLayer[]
   fallback: number
   truncated: MembershipTruncation[]
@@ -171,6 +188,8 @@ export interface FromMembersRequest {
   keep: KeepLayers
   exclude?: string[]
   provenance: MembershipProvenance
+  /** As `PlanRequest.waitMs`: a large set answers 202 until it is worked out. */
+  waitMs?: number
 }
 
 export type MembershipStatusKind =
@@ -218,6 +237,8 @@ export interface MemberOps {
 
 export type RefreshOutcome =
   | 'applied' | 'unchanged' | 'current' | 'held' | 'over_cap' | 'deferred' | 'busy' | 'fenced' | 'source_missing' | 'failed'
+  /** A large set still being worked out: ask again to carry on. */
+  | 'running'
 
 export interface RefreshResult {
   outcome: RefreshOutcome
