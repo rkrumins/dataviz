@@ -69,6 +69,24 @@ describe('ChangeTreePanel', () => {
     expect(await screen.findByText('amount')).toBeInTheDocument()
   })
 
+  it('lists what changed one line each — a container’s own change and each change inside it open only when asked', async () => {
+    const own: DiffSummaryResponse = { ...summary, groups: [{ ...summary.groups[0], status: 'modified',
+      before: { displayName: 'Sales', description: 'old' }, after: { displayName: 'Sales', description: 'new' } }] }
+    const fetchChildren = vi.fn().mockResolvedValue(children)
+    render(<ChangeTreePanel summary={own} fetchChildren={fetchChildren} origin={origin} />)
+    fireEvent.click(screen.getByText('Sales'))
+    expect(await screen.findByText('amount')).toBeInTheDocument()
+    // Every affected entity is listed; no field is open yet.
+    expect(screen.getByText('Its own change')).toBeInTheDocument()
+    expect(screen.queryByText('old')).not.toBeInTheDocument()
+    expect(screen.queryByText('amount_usd')).not.toBeInTheDocument()
+    // Drilled into on demand.
+    fireEvent.click(screen.getByText('Its own change'))
+    expect(screen.getByText('old')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('amount'))
+    expect(screen.getByText('amount_usd')).toBeInTheDocument()
+  })
+
   it('shows the empty hint when there are no groups', () => {
     render(
       <ChangeTreePanel

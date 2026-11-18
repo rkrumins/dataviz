@@ -3,8 +3,9 @@
  * business reader: an impact summary header ("2 datasets · 17 tables · 40 columns affected")
  * over a containment tree where each change sits under its real container. Expanding a
  * container loads its direct children on demand (bounded, paged), so a draft touching
- * thousands of entities stays a handful of rows until you drill in. Leaves expand to the
- * same `EntityDiff` the flat ChangesPanel uses.
+ * thousands of entities stays a handful of rows until you drill in. Every change — a leaf, or a
+ * container's own — reads as one line until opened, then its key differences, then all of them
+ * (the same `EntityDiff` the flat ChangesPanel uses).
  */
 import { useMemo, useState } from 'react'
 import { ChevronRight, Loader2, AlertCircle, Folder, Boxes, Spline, RefreshCw } from 'lucide-react'
@@ -140,6 +141,29 @@ function LeafRow({ node, depth, origin }: { node: DiffTreeNode; depth: number; o
   )
 }
 
+/** A container's own change, at the top of what it holds: one line saying what changed, opened
+ *  on demand to its key differences, then to all of them — as each change inside it reads. */
+function OwnChange({ change, depth, kind }: { change: ReturnType<typeof treeLeafToChange>; depth: number; kind: 'node' | 'edge' }) {
+  const [level, setLevel] = useState<0 | 1 | 2>(0)
+  const open = level > 0
+  const summary = useMemo(() => summarizeFields(fieldsOfChange(change)), [change])
+  return (
+    <div className="pr-2.5 pb-1" style={{ paddingLeft: depth * 14 + 28 }}>
+      <button onClick={() => setLevel((l) => (l === 0 ? 1 : 0))} aria-expanded={open}
+        className="w-full flex items-center gap-1.5 py-1 text-left rounded-md hover:bg-black/[0.02] dark:hover:bg-white/[0.03]">
+        <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
+        <span className="text-[12px] font-medium text-ink-secondary shrink-0">Its own change</span>
+        <ChangeSummary summary={summary} status={change.status} kind={kind} className="min-w-0" />
+      </button>
+      {open && (
+        <div className="pl-5 pt-1">
+          <EntityDiff change={change} depth={level === 1 ? 'key' : 'all'} onShowAll={() => setLevel(2)} />
+        </div>
+      )}
+    </div>
+  )
+}
+
 function GroupRow({
   node,
   depth,
@@ -183,9 +207,7 @@ function GroupRow({
       {open && (
         <div className="pb-1.5 space-y-1 pt-0.5">
           {selfChange && (
-            <div className="px-2.5 pb-1" style={{ paddingLeft: depth * 14 + 28 }}>
-              <EntityDiff change={selfChange} />
-            </div>
+            <OwnChange change={selfChange} depth={depth} kind={node.entityKind === 'edge' ? 'edge' : 'node'} />
           )}
           {isLoading && !st && (
             <p className="flex items-center gap-1.5 text-[11px] text-ink-muted py-1.5" style={{ paddingLeft: depth * 14 + 28 }}>
