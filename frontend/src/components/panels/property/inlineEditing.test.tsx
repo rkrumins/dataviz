@@ -48,6 +48,31 @@ describe('PropertyEditor — inline', () => {
     expect(onChange).toHaveBeenCalledWith({ rows: 12 })
   })
 
+  it('a date has Today and Clear; a number reads back grouped; a link names its site', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<PropertyEditor value={{ due: '2026-01-02', rows: 10, docs: 'https://example.com/a' }} onChange={onChange} inline groupByPath bare />)
+    await user.click(screen.getByRole('button', { name: 'Edit due' }))
+    await user.click(screen.getByRole('button', { name: 'Today' }))
+    const d = new Date()
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ due: today }))
+
+    await user.click(screen.getByRole('button', { name: 'Edit rows' }))
+    const rows = screen.getByRole('textbox', { name: 'rows' })
+    await user.clear(rows)
+    await user.type(rows, '1250000')
+    expect(screen.getByText(`Reads as ${(1250000).toLocaleString()}`)).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    await user.click(screen.getByRole('button', { name: 'Edit docs' }))
+    const docs = screen.getByRole('textbox', { name: 'docs' })
+    expect(screen.getByText('Opens example.com/a')).toBeInTheDocument()
+    await user.clear(docs)
+    await user.type(docs, 'wiki page')
+    expect(screen.getByText(/Doesn’t look like a web address yet/)).toBeInTheDocument()
+  })
+
   it('a Yes/No is kept the moment it flips', async () => {
     const onChange = vi.fn()
     render(<PropertyEditor value={{ pii: false }} onChange={onChange} inline groupByPath bare />)

@@ -1420,8 +1420,9 @@ function PropertyComposer({
       {smartish && key.trim() && !isDup && (
         <div className="flex items-center gap-2 pl-1 text-xs min-w-0" aria-live="polite">
           <span className={cn('px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide shrink-0', fieldTone('added').chip)}>New</span>
-          <span className="font-mono text-ink truncate">{candidateKey}</span>
-          <span className="text-ink-secondary truncate">{shortValue(value)}</span>
+          <span className="font-mono text-ink-secondary truncate shrink-0 max-w-[40%]">{candidateKey}</span>
+          {/* Drawn as the list will draw it. */}
+          <span className="min-w-0 flex-1 truncate [&_*]:truncate"><RichValue value={value} fieldKey={candidateKey} /></span>
           {!typeChosen && text.trim() && detected.type !== 'text' && (
             <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted">read as {FIELD_TYPE_META[detected.type].label.toLowerCase()}</span>
           )}

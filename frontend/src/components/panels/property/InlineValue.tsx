@@ -13,8 +13,8 @@ import { Check, Maximize2, PencilLine, X as XIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { FieldType } from './fieldTypes'
-import { isIsoDate } from './fieldTypes'
-import { BooleanToggle, TagInput } from './valueWidgets'
+import { isIsoDate, isUrl } from './fieldTypes'
+import { BooleanToggle, TagInput, linkLabel } from './valueWidgets'
 import { MarkdownValueModal } from './MarkdownValueEditor'
 
 const FIELD = cn(
@@ -39,6 +39,23 @@ function parse(type: FieldType, draft: string): { value: unknown } | { error: st
 }
 
 const same = (a: unknown, b: unknown) => a === b || (Number.isNaN(a) && Number.isNaN(b))
+
+/** Today, as the reader's own calendar has it. */
+function today(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** What is being typed, read back the way it will show: a number grouped, a link by its site. */
+function readBack(type: FieldType, draft: string): string | null {
+  const t = draft.trim()
+  if (type === 'number' && t) {
+    const n = Number(t.replace(/,/g, ''))
+    return Number.isFinite(n) && Math.abs(n) >= 1000 ? `Reads as ${n.toLocaleString()}` : null
+  }
+  if (type === 'url' && t) return isUrl(t) ? `Opens ${linkLabel(t)}` : 'Doesn’t look like a web address yet — links start https://'
+  return null
+}
 
 export function InlineValue({ value, fieldType, fieldLabel, onCommit, readView }: {
   value: unknown
@@ -199,8 +216,17 @@ function FieldEditor({ value, fieldType, fieldLabel, onCommit, onDone }: {
       </div>
       {error ? (
         <p role="alert" className="text-2xs text-rose-600 dark:text-rose-400 pl-0.5">{error}</p>
-      ) : multiline && (
+      ) : multiline ? (
         <p className="text-2xs text-ink-muted pl-0.5">Enter keeps · Shift+Enter new line · Esc cancels</p>
+      ) : fieldType === 'date' ? (
+        <div className="flex items-center gap-1 pl-0.5">
+          <button type="button" onMouseDown={hold} onClick={() => { setDraft(today()); keep(today()) }}
+            className="px-1.5 h-5 rounded text-2xs font-semibold text-accent-lineage hover:bg-accent-lineage/10">Today</button>
+          <button type="button" onMouseDown={hold} onClick={() => { setDraft(''); keep('') }}
+            className="px-1.5 h-5 rounded text-2xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10">Clear</button>
+        </div>
+      ) : readBack(fieldType, draft) && (
+        <p aria-live="polite" className="text-2xs text-ink-muted pl-0.5 truncate">{readBack(fieldType, draft)}</p>
       )}
       {modal && (
         <MarkdownValueModal
