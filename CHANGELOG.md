@@ -36,6 +36,12 @@ versioned and unversioned graphs alike.
 - **`POST /{ws}/graph/view-members`**: a list view's members, one layer a page at a time.
 - **Search inside a list view of more than 5,000 members** reads its members in bands from
   `view_members` instead of refusing (FalkorDB).
+- **A view that follows another** (`layout.kind: "follow"`): a list view that is a subset of the
+  view it follows, served that view's layers live and placed as it places them. **Save as view…**
+  on a trace chooses it.
+- **Where each entity sits, in every export**: `parentUrn`, `parentName`, `parentType`, `path`
+  and `pathUrns` in the dock's CSV and JSON, saved traces and member-set downloads.
+- **List views' members nest in their containers** (`inLayer` on the member feed).
 
 ### Changed
 
@@ -45,6 +51,15 @@ versioned and unversioned graphs alike.
   pages each layer instead of loading every member.
 - Narrow's resolver asks each closure step for 10,000 nodes rather than 2,000, and keeps a node's
   shortest distance when it is found again nearer.
+- The base view's **Subsets** list shows when either `searchViewsEnabled` or
+  `viewMembershipEnabled` is on, and lists views that follow it.
+
+### Fixed
+
+- **Preview and Save as view answered 422 (`extra_forbidden` on `waitMs`)** against a server
+  older than the browser. The browser no longer sends `waitMs`; a cross-tier fixture pins every
+  request body it builds.
+- Saving a view from inside a subset view no longer fails with "This view has no layers to copy".
 
 ### Upgrading
 
@@ -57,6 +72,8 @@ versioned and unversioned graphs alike.
 - The canvas's own Narrow still starts from a search's first 5,000 matches; a view saved from it
   starts from every match. A layer lists 5,000 members on the canvas.
 - Saved traces stay in one browser; member sets are not on the API-key surface yet.
+- A view that follows another offers no Always include, and a layer filter searched inside it
+  matches nothing.
 
 ---
 

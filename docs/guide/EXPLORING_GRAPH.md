@@ -182,10 +182,10 @@ trace shows — N rows, open or not*, or, while the trace is still landing,
 
 | Choice | What you get |
 | --- | --- |
-| **CSV** | One row per entity the trace shows — seed, upstream, downstream or both, its hops each way, its layer, the containers it sits in, and which of your seeds reach it. Closed cards are included; the containers are each row's path, not rows of their own. Opens in any spreadsheet. |
+| **CSV** | One row per entity the trace shows — seed, upstream, downstream or both, its hops each way, the layer it is drawn in, where it sits, and which of your seeds reach it. Where it sits is its parent (`parentUrn`, `parentName`, `parentType`) and every container from the top down to it (`path` as names, `A / B`; `pathUrns` as URNs, `a; b`); both are empty for an entity at the top of the graph. Closed cards are included; the containers are each row's path, not rows of their own. Opens in any spreadsheet. |
 | **JSON** | The same entities and the flows between them, with the question that found them (the seeds and how far each way), so a script can ask it again. |
-| **Everything it reaches…** | The complete trace, worked out on the server: every source and consumer, inside this view or not, however many. Choose CSV, NDJSON or JSON, and **Include the flows between them** if you want the lineage itself as well (a second file, or part of the JSON). The panel shows how far it has got; close it and ask again later, and it carries on where it was. |
-| **Save as view…** | A view of its own of everything the trace reaches — see [Keep a narrowing as a view](#keep-a-narrowing-as-a-view). It starts on the **Lineage stages** layout. |
+| **Everything it reaches…** | The complete trace, worked out on the server: every source and consumer, inside this view or not, however many, each with its parent and path as in the CSV above (not its layer: it may not be in this view). Choose CSV, NDJSON or JSON, and **Include the flows between them** if you want the lineage itself as well (a second file, or part of the JSON). The panel shows how far it has got; close it and ask again later, and it carries on where it was. |
+| **Save as view…** | A view of its own of everything the trace reaches, as a subset of the view you traced in: its layers, each entity where that view places it — see [Keep a narrowing as a view](#keep-a-narrowing-as-a-view). |
 | **Save trace** | Keeps the trace in this browser, with what it found. |
 
 - The CSV and JSON hold what is on the board: the sides you're reading and the
@@ -332,9 +332,16 @@ Kept as a list, the panel offers:
    its data changed, what newly matches arrives and what stops matching leaves.
    Turn it off for a **snapshot**, which keeps the members it has now.
 3. **Layout** sets the layers the view starts with:
-   - **Like** the view you are in: its layers, each entity placed where that
-     view places it. **With results** keeps only the layers something lands
-     in; **All** keeps every layer.
+   - **Follow** the view you are in: the new view is a *subset* of it. Its
+     layers are that view's, as they change there — a rename, a new layer or
+     a new order shows in it too — and each entity is placed where that view
+     places it. Chosen for a trace. In a subset view, it follows that view's
+     base. Not offered in a view that is itself made from a query, or in a
+     subset with layers of its own; the panel says why.
+   - **Like** the view you are in: a copy of its layers, each entity placed
+     where that view places it, yours to change from then on. **With
+     results** keeps only the layers something lands in; **All** keeps every
+     layer.
    - **From a template**: a layout template's layers, fitted to this data.
    - **By type**: a layer for each kind of top-level entity.
    - **Lineage stages**: Sources · Feeds · Starting points · Consumers ·
@@ -351,7 +358,9 @@ Kept as a list, the panel offers:
    publish it from the view once it's saved.
 
 Press **Save view** (or `⌘`/`Ctrl` + `Enter`). The new view opens, and
-**Undo** on the message deletes it again.
+**Undo** on the message deletes it again. A view that follows another reads
+*Subset of <view> · Auto-updating · N* in its header, and is listed under
+**Subsets** on the view it follows.
 
 **The limit.** A view keeps up to 250,000 members (your administrator can
 change it with `LIVE_VIEW_MAX_MEMBERS`). Only the members count: the containers

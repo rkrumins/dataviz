@@ -1010,14 +1010,31 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
    ```
 
    `layout.kind` sets the layers it starts with:
-   - `source`: the layers of the view in `sourceViewId`, placed as that view places them;
+   - `follow`: a subset of the view in `sourceViewId`. It stores no layers: it is served that
+     view's, live, plus `other-matches` unless that view has a `showUnassigned` layer, and each
+     member is placed where that view places it. `GET /views/{id}/membership` names it in
+     `follows: {viewId, name, available}` (`name` is null for a reader who can't open it), and
+     `GET /views/{sourceViewId}/subsets` lists it with `"layout": "inherit"`. A layout write that
+     sends layers to it answers `422`. If that view is deleted, the view keeps its members and
+     its status is `source_missing` with `detail.reason: base_missing`. The view it follows
+     must be an ordinary one: `422`, `reason: base_is_subset` for a subset (or a view that
+     follows one) — follow its base instead — and `reason: base_is_list` for a view made from
+     a query;
+   - `source`: a copy of the layers of the view in `sourceViewId`, placed as that view places
+     them;
    - `auto`: one layer per top-level type;
    - `stages`: by lineage distance;
    - `template` or `custom`: the `layers` you send.
 
-   A view holds at most `limit` entries (5,000, lower if `DEEP_SEARCH_SCOPE_ROOT_URNS_CAP` is
-   set lower): its members, the containers drawn around them (`"nest": false` leaves those out),
-   and anything always included. A starting point whose whole inside is in scope
+   With `"nest": true`, the member feed (`POST /graph/view-members`) says of each member how
+   many of its nearest containers are drawn in its layer too (`inLayer`), and its
+   `ancestorPath` lists every container up to the top.
+
+   Send no `waitMs` unless every server you call accepts it: the server waits 10 seconds for a
+   large set by default, then answers `202` with its progress — ask again with the same body.
+
+   A view holds at most `limit` members (250,000 unless `LIVE_VIEW_MAX_MEMBERS` is set). The
+   containers drawn around them and anything always included don't count. A starting point whose whole inside is in scope
    (`"children": "all"`) is one entry, however much is inside it. A request names at most 5,000
    URNs, 8 sources and 2,000 entities kept out.
 

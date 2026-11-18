@@ -317,6 +317,35 @@ What the chip can say:
 | **Snapshot** | Its members stay as they are |
 | **Updates paused** | Views that keep themselves up to date are turned off. It shows the members it last had, and catches up the next time it's opened once they're on again |
 
+### One that follows another view
+
+Saved with **Follow** (the choice for a trace), a view made from a query is a
+subset of the view it follows. Its header reads *Subset of Sales overview ·
+Auto-updating · 6*, and the chip says **Follows Sales overview**.
+
+- **Its layers are that view's**, as they change there: rename, add or reorder a
+  layer in the view it follows and this one shows it. They are not changed in
+  this view, so the layer menus offer no renaming, adding or deleting.
+- **Each member is where that view places it.** When that view changes how it
+  places things — a type moved to another layer, a rule changed, a layer
+  removed — the members are placed again the next time this view is opened.
+  What that view places nowhere is in **Other matches**, unless it has a layer
+  of its own for that.
+- **Nothing in it is placed by hand**: no moving to another layer, grouping or
+  reordering, and no **Always include** (there are no layers of its own to keep
+  an entity in). **Keep out of this view** still works.
+- **Show where they sit** (in **Display**) draws each member inside the
+  containers drawn in its layer.
+- It is listed under **Subsets** on the view it follows, beside subset views
+  made from a search.
+- **If that view is deleted**, the chip says **Its view is gone**, the canvas
+  says why there are no layers, and the view keeps its members. Restore that
+  view and it shows them again.
+
+A view can follow an ordinary view only. To save from a subset, it follows that
+subset's base; a view made from a query, or a subset with layers of its own,
+can't be followed, and the panel says so.
+
 An update changes the view's data, not its design: it doesn't count as an edit,
 and doesn't add a version. Restoring a version of the view, or importing it
 over itself, keeps the members it has until it next updates.

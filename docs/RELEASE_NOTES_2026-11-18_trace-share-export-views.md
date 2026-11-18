@@ -73,9 +73,9 @@ rows of a combined trace share too.
 
 | Choice | Where it is worked out | What it holds |
 | --- | --- | --- |
-| **CSV**, **JSON** | The browser, at once | What the dock shows — the sides being read, the hop limits, the seeds still in it — every entity, open or not; hosts as each row's path. JSON adds the flows between them and the membership spec that found them, built as Blob parts (never one 50,000-row string). |
-| **Everything it reaches…** | The server (§3) | Every source and consumer, inside the view or not, up to a million; flows on request. CSV, NDJSON or JSON. |
-| **Save as view…** | The server (§4) | A view of everything the trace reaches, laid out as lineage stages, provenance `trace`. |
+| **CSV**, **JSON** | The browser, at once | What the dock shows — the sides being read, the hop limits, the seeds still in it — every entity, open or not, with the layer it is drawn in and where it sits (§2.1); hosts as each row's path. JSON adds the flows between them and the membership spec that found them, built as Blob parts (never one 50,000-row string). |
+| **Everything it reaches…** | The server (§3) | Every source and consumer, inside the view or not, up to a million, with where each sits (§2.1); flows on request. CSV, NDJSON or JSON. |
+| **Save as view…** | The server (§4) | A view of everything the trace reaches — a subset that follows the view it was traced in (§4.1) — provenance `trace`. |
 | **Save trace** | The browser | The recipe and a gzipped, columnar copy of the results, in IndexedDB. |
 
 **Saved traces** are per user and view, kept until removed (100 per view). Each one's results are
@@ -86,7 +86,24 @@ saved*, downloadable as CSV. Short of space, the oldest give up their results an
 recipes; with no IndexedDB they last for the visit. They are listed in the dock's panel and in the
 header's trace launcher, which now opens for saved traces even with no history.
 
-## 3. What changed — member sets: a scope resolved in full, a step at a time
+### 2.1 Where each entity sits, in every export
+
+Every row of the dock's files, of a saved trace's and of a member set's download says where the
+entity sits: `parentUrn`, `parentName`, `parentType`, and the whole chain of containers from the
+top down to it — `path` as names and `pathUrns` as URNs. CSV joins them (`A / B`, `a; b`); JSON and
+NDJSON keep arrays. An entity at the top of the graph has empty parent cells and an empty path.
+
+* **The dock** reads the chain from the containment the trace loaded, once per container
+  (memoised, cycle-guarded), so 50,000 rows cost one pass. Its `layer` column is the layer the row
+  is drawn in.
+* **A saved trace** stores them in its columnar snapshot (inner `v: 2`). Traces saved before keep
+  their lane path, with empty parent cells, rather than a guess.
+* **The server's download** asks the graph for the chains of each 1,000 rows in one admitted
+  statement (`get_ancestor_chains`, which FalkorDB, its drafts and versioned branches all
+  implement) and names the containers it hasn't already seen in one more. A provider that can't say
+  leaves the cells empty. It has no `layer`: a member set isn't drawn in a view.
+
+ What changed — member sets: a scope resolved in full, a step at a time
 
 One new primitive behind everything large: a **member set** (`services/member_sets/`,
 `POST /{ws}/graph/member-sets`) — a membership spec resolved completely, however long it takes.
@@ -140,6 +157,46 @@ Measured on a real FalkorDB (`tests/integration/test_member_views_live.py`): the
 above saved as a view — three answers of 202, the view ready in 32 s, its record a few kilobytes,
 every layer paged in name order with exact counts.
 
+### 4.1 A trace saved as a view follows the view it was traced in
+
+The first build made a trace's view a list view laid out as lineage stages, or with a one-off copy
+of the view's layers. Readers asked for the trace's own view — the same layers and layout, with the
+trace as the question that fills it. A subset view (`config.search`) can't express a trace: it
+reaches one lineage step, never 25 or "all". So the content stays a list of members, and the layout
+gains a kind that borrows the subset's machinery:
+
+* **`layout.kind: "follow"`, `sourceViewId`.** The view stores no layers. Every read serves it the
+  followed view's layers live (`search_views.served_config`, keyed by the new `followed_base()`),
+  plus *Other matches* unless that view has a `showUnassigned` layer. Renames, new layers and a new
+  order show at once.
+* **Placed by the followed view** (`source_placer` with identity links), re-placed on every run.
+  The applied answer records the followed view's placement digest, so a change to how it places
+  things (a type moved, a rule, a layer removed) places the members again on the next open.
+* **It is a subset.** `subset_of` is set; it is listed under the base's **Subsets** (now shown when
+  either `searchViewsEnabled` or `viewMembershipEnabled` is on); its chip reads *Subset of X ·
+  Auto-updating · N*. Nothing in it is placed by hand: assigning, reordering, groups, layer edits
+  and Always include are not offered, and a layout write carrying layers answers 422.
+* **Refusals.** A subset (or a view that follows one) can't be followed — follow its base:
+  `422 base_is_subset`. A view made from a query can't be: `422 base_is_list`. Saving from inside a
+  subset follows the subset's base, which also fixes "This view has no layers to copy".
+* **Its base gone**: the view keeps its members, its status is `source_missing` (`base_missing`),
+  it shows no layers, and the canvas says why.
+* **Members nest.** With **Show where they sit**, each member row carries `in_layer` — how many of
+  its nearest containers are drawn in its layer too — computed while placing and shipped by the
+  member feed as `inLayer`, with a full `ancestorPath`. List views of any layout now draw their
+  members inside their containers, as subset views do. The column is added to the unreleased
+  `20261118_1100_view_members` migration, with a guarded `add_column` for a database that already
+  ran it.
+
+### 4.2 Preview and Save as view answered 422 on an older server
+
+The sheet sent `waitMs` (10,000) with every preview and save. A server from before it accepted the
+field refused the body (`extra_forbidden`), so the preview never appeared and saving failed. The
+server already waits 10 seconds by default, so no client sends it now. The request bodies the
+browser builds are pinned in `backend/tests/fixtures/membership_requests.json`: the frontend test
+builds each one exactly, and the backend test validates each against the models (which forbid
+unknown fields). A field reaches a request only once every deployed server accepts it.
+
 ## 5. What changed — Advanced Search
 
 **Export → With their sources & consumers…** exports a search's matches with what they feed and are
@@ -191,8 +248,11 @@ a view and snapshots of up to 500,000 rows.
 * **Export & save → CSV**: one row per entity the dock shows. **Save trace**, reload, open it from
   **Saved in this browser**.
 * **Everything it reaches…** on a large trace: the dialog reports stages and counts, then downloads.
-* **Save as view…** on a trace of more than 5,000: the sheet reports progress, the view opens, its
-  layers page as they scroll.
+* **Save as view…** on a trace of more than 5,000: **Follow** is chosen, the sheet reports
+  progress, the view opens reading *Subset of <view>*, with that view's layers, and pages them as
+  they scroll. Rename a layer in the view it follows: the subset shows the new name.
+* **Export & save → CSV**: `parentUrn`, `parentName`, `parentType`, `path` and `pathUrns` are
+  filled for every entity inside a container.
 * The live tests: `RUN_FALKOR_LIVE=1 python -m pytest tests/integration/test_member_sets_live.py
   tests/integration/test_member_views_live.py -q` (run by CI's live FalkorDB job).
 
@@ -210,5 +270,11 @@ a view and snapshots of up to 500,000 rows.
 * **URN seeds stay at 5,000 per spec** (a trace has at most 25); only query seeds are unlimited.
 * **Member sets are not on the API-key surface yet**, so scripts using an API key can't reach them.
 * **Edges inside a container seed** are kept only when both ends are members.
+* **A view that follows another** can't keep an entity with **Always include** (it has no layers of
+  its own to keep it in), and a layer filter in a search inside it matches nothing. A change to the
+  followed view's layers reaches its members on the next open; until then a member of a deleted
+  layer isn't shown. Following a view made from a query is refused for now.
+* **`in_layer` in a stages layout** depends on which members share a page, so it can differ by
+  page size there (any other layout gives the same rows at any page size).
 * `tests/test_data_source_transfers.py::test_a_move_refused_for_a_job_names_every_kind_of_job_in_words`
   fails on the commit this work started from (job type `save` has no words); it is untouched here.
