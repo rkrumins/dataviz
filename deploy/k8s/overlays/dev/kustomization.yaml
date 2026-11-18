@@ -17,6 +17,14 @@ patches:
       - op: replace
         path: /data/LOG_LEVEL
         value: "DEBUG"
+  # The schema-upgrade Job recovers a database another build stamped (docs/MIGRATIONS.md)
+  - target:
+      kind: ConfigMap
+      name: common-config
+    patch: |-
+      - op: replace
+        path: /data/SYNODIC_UPGRADE_RECOVER
+        value: "true"
 
 images:
   - name: REGISTRY/viz-service

@@ -48,7 +48,7 @@ jobs:
           python-version: '3.14'
 
       - name: Install pytest
-        run: pip install --disable-pip-version-check pytest
+        run: pip install --disable-pip-version-check pytest pyyaml
 
       # --noconftest is load-bearing, not tidiness. pytest loads backend/tests/conftest.py for
       # anything under that directory, and that conftest imports the whole app (argon2, FastAPI,
@@ -68,6 +68,11 @@ jobs:
       # parents `backend/alembic/other_lines.json` records for it, down to this chain.
       - name: The lineage record is whole, and the merge check holds
         run: python -m pytest backend/tests/test_alembic_lineage.py -q --noconftest
+
+      # The Job's estimate-and-correct recovery is for dev: off by default in every deployment
+      # (Helm values, kustomize base and overlays), on in the dev presets and Compose.
+      - name: Production stops on an unplaced stamp; dev's presets recover it
+        run: python -m pytest backend/tests/test_upgrade_presets.py -q --noconftest
 
       # 3. THE ADDITIVE MIRROR. `init_aggregation_db` and the alembic chain are
       #    two halves of one contract, and the comments in each said "mirrored"

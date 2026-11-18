@@ -221,7 +221,12 @@ For each foreign stamp, the Job does the following:
 
 **A stamp nothing records is refused.** The Job changes nothing, exits 1, and says how to go on:
 - **Name the place:** `upgrade --rewind-to <revision>`, the last revision of this build's the database ran.
-- **Or let the Job estimate it:** `upgrade --recover`, or `SYNODIC_UPGRADE_RECOVER=true` (Helm: `upgrade.recoverForeignStamps`). For dev and local databases, never production. Compose turns it on, for a developer's own database moved between branches.
+- **Or let the Job estimate it:** `upgrade --recover`, or `SYNODIC_UPGRADE_RECOVER=true` (Helm: `upgrade.recoverForeignStamps`). For dev and local databases, never production. Each deployment keeps it off by default and has a dev preset that turns it on:
+  - **Helm:** add `-f deploy/helm/dataviz/values-dev.yaml`.
+  - **Kustomize:** the `dev` overlay sets it in `common-config`, which the schema-upgrade Job reads ([Deploying on Kubernetes](/docs/kubernetes)).
+  - **Compose:** on, for a developer's own database moved between branches.
+
+  Guards (`tests/test_upgrade_presets.py`) fails if production's defaults turn it on, or a dev preset loses it.
 
 With `--recover`, the estimate is a guess:
 - **Where it lands:** walking this image's chain down from its head, the first revision whose id is from an earlier minute. An id leads with when it was written, `YYYYMMDD_HHMM`. One from the same minute may be newer or older, so it counts as not run.

@@ -296,7 +296,8 @@ upgrade:
   sharedDatabase: true
   # A database another build stamped, which no lineage places: estimate where it stands, and
   # correct the estimate from what the schema lacks. Off, the Job stops instead with nothing
-  # changed and says how to place it (`upgrade --rewind-to`). For dev, never for production.
+  # changed and says how to place it (`upgrade --rewind-to`). For dev, never for production:
+  # values-dev.yaml turns it on.
   recoverForeignStamps: false
   # The Job's lock and statement timeouts come from the environment (dataviz-config):
   # MIGRATION_LOCK_TIMEOUT (10s; a migration waiting longer rolls back and is tried again) and

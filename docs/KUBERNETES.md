@@ -200,6 +200,13 @@ schema. It uses the `viz-service` image, which contains the upgrade command.
                # Migrate only from an image built from main (Database Migrations explains it).
                - name: SYNODIC_SHARED_DATABASE
                  value: "true"
+               # Off unless the overlay turns it on: the dev overlay does.
+               - name: SYNODIC_UPGRADE_RECOVER
+                 valueFrom:
+                   configMapKeyRef:
+                     name: common-config
+                     key: SYNODIC_UPGRADE_RECOVER
+                     optional: true
    ```
 
 2. On `dev` and `staging`, wait for the in-cluster Postgres first:
@@ -333,6 +340,9 @@ helm install dataviz deploy/helm/dataviz -n <namespace> \
   --set dbInit.enabled=false
 ```
 
+- For a dev environment, add `-f deploy/helm/dataviz/values-dev.yaml`. With it, the upgrade Job
+  recovers a database another build stamped instead of stopping; production keeps the defaults.
+  [Database Migrations](/docs/migrations) explains it.
 - `config.jwt.expiryMinutes=15` matters: the chart defaults to 60, above the 15-minute ceiling
   that `ENV=production` enforces.
 - `dbInit.enabled=false` skips the chart's database-bootstrap Job, because you prepared the
