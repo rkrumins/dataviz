@@ -71,8 +71,9 @@ export function usePublishFlow({
   // Seeded once: a title the person has started editing is theirs.
   const [message, setMessage] = useState(initialTitle)
   const [description, setDescription] = useState('')
-  /** Who must approve before the review can merge. */
+  /** Who must approve before the review can merge: people, and groups (any member answers for one). */
   const [reviewers, setReviewers] = useState<string[]>([])
+  const [reviewerGroups, setReviewerGroups] = useState<string[]>([])
   const [conflicts, setConflicts] = useState<number | null>(null)
   // Why the publish was refused for being behind Published (null: it wasn't).
   const [notUpToDate, setNotUpToDate] = useState<NotUpToDateError | null>(null)
@@ -143,6 +144,7 @@ export function usePublishFlow({
       {
         branchId, title: message || undefined, description: description || undefined,
         reviewers: reviewers.length ? reviewers : undefined,
+        reviewerGroups: reviewerGroups.length ? reviewerGroups : undefined,
       },
       {
         onSuccess: (res) => {
@@ -188,7 +190,7 @@ export function usePublishFlow({
 
   return {
     workspaceId, branchId, dataSourceId, changeSet, onClose, onLeave, canPublishDraft, changesLoading,
-    message, setMessage, description, setDescription, reviewers, setReviewers,
+    message, setMessage, description, setDescription, reviewers, setReviewers, reviewerGroups, setReviewerGroups,
     conflicts, notUpToDate, unique, confirmBypass, canManage, canPublish, reviewOnly,
     publish, openMr, prPending, busy, viewChanges, viewChangesQ, viewChangeCount, changeCount, hasChanges, unsaved,
     existingPr, inReview, goToReview, handleOpenMr, handlePublish,
@@ -205,7 +207,7 @@ export function PublishBody({ flow, offerSave = true }: {
 }) {
   const {
     branchId, changeSet, onClose, onLeave, changesLoading, message, setMessage, description, setDescription,
-    reviewers, setReviewers, conflicts, notUpToDate, unique, confirmBypass, viewChanges, viewChangesQ,
+    reviewers, setReviewers, reviewerGroups, setReviewerGroups, conflicts, notUpToDate, unique, confirmBypass, viewChanges, viewChangesQ,
     viewChangeCount, changeCount, hasChanges, unsaved, existingPr, inReview, goToReview, workspaceId, dataSourceId,
   } = flow
   return (
@@ -284,7 +286,8 @@ export function PublishBody({ flow, offerSave = true }: {
             <label className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
               Reviewers <span className="text-ink-muted/50 normal-case font-normal">· optional, they must approve before it merges</span>
             </label>
-            <ReviewerPicker wsId={workspaceId} dataSourceId={dataSourceId} value={reviewers} onChange={setReviewers} />
+            <ReviewerPicker wsId={workspaceId} dataSourceId={dataSourceId} value={reviewers} onChange={setReviewers}
+              groups={reviewerGroups} onGroupsChange={setReviewerGroups} />
           </div>
         </>
       )}

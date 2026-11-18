@@ -5,11 +5,12 @@
  * Narrower, the side follows the change; narrower still, the changes fold away above it.
  *
  * The change open, and a thread a link opened, are in the address (`useReviewSelection`); keys move
- * through the changes and act on the one open (`useReviewKeys`). What a review lets the reader do,
- * and doing it, is the drawer's own (`useReviewActions`).
+ * through the changes and act on the one open (`useReviewKeys`). `?finish=1` opens Finish your
+ * review (the drawer's way here to give a verdict). What a review lets the reader do, and doing it,
+ * is the drawer's own (`useReviewActions`).
  */
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, SearchX } from 'lucide-react'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Disclosure } from '@/components/ui/Disclosure'
@@ -91,6 +92,13 @@ export function ReviewPage({ wsId, prId }: { wsId: string; prId: string }) {
   const flow = useDecisionFlow(wsId, prId, pr?.headCommitId)
   const [asking, setAsking] = useState(false)
   const [picked, setPicked] = useState<ChangeListRow | null>(null)
+  // Finish your review, open — from the start where the address asks; closed, the address no longer does.
+  const [params, setParams] = useSearchParams()
+  const [finishing, setFinishing] = useState(() => params.get('finish') === '1')
+  const onFinishing = (open: boolean) => {
+    setFinishing(open)
+    if (!open && params.has('finish')) setParams((prev) => { const next = new URLSearchParams(prev); next.delete('finish'); return next }, { replace: true })
+  }
   const paneRef = useRef<HTMLDivElement>(null)
 
   // A thread on the review as a whole opens the Discussion.
@@ -106,7 +114,7 @@ export function ReviewPage({ wsId, prId }: { wsId: string; prId: string }) {
   const row = listedRow ?? (selected ? entryRow(entryQ.data) : null)
 
   const ready = pr ? readiness(pr, {
-    me: user?.id ?? null, canManage: actions.canManage, showApprove: actions.showApprove, canMerge: actions.canMerge,
+    me: user?.id ?? null, canManage: actions.canManage, canFinish: actions.canFinish, canMerge: actions.canMerge,
     mergeBlockedWhy: actions.mergeBlockedWhy, forksOff: actions.forksOff, forkBehind: actions.forkBehind,
     canUpdateFromParent: actions.forksOn && actions.canPublish, needsPull: actions.needsPull, pullReason: actions.pullReason,
     unsaved: actions.unsaved, decisions: deciding ? decisions : null, mergeInPart: actions.mergeInPart,
@@ -132,7 +140,7 @@ export function ReviewPage({ wsId, prId }: { wsId: string; prId: string }) {
       case 'next_unviewed': return go(order.seek(selected, 1, (r) => !viewed.isViewed(r)))
       case 'next_undecided': return go(order.seek(selected, 1, undecided))
       case 'next_thread': return threadStep(1)
-      case 'approve': return actions.approve()
+      case 'finish': return setFinishing(true)
       case 'approve_all': return void actions.approveAll(false)
       case 'approve_all_merge': return void actions.approveAll(true)
       case 'merge': return void actions.runMerge()
@@ -196,7 +204,8 @@ export function ReviewPage({ wsId, prId }: { wsId: string; prId: string }) {
   return (
     <div className="absolute inset-0 flex flex-col bg-canvas">
       <ReviewHeader wsId={wsId} actions={actions} shortcuts={shortcuts}
-        primaryAction={<ReviewPrimaryAction wsId={wsId} actions={actions} primary={ready.primary} onAct={act} />} />
+        primaryAction={<ReviewPrimaryAction wsId={wsId} actions={actions} primary={ready.primary} approveAll={ready.approveAll} onAct={act}
+          finish={{ open: finishing, onOpenChange: onFinishing, viewed: viewedCount, total, openThreads }} />} />
 
       <div className="flex-1 min-h-0 grid grid-cols-1 overflow-y-auto lg:overflow-hidden lg:grid-cols-[300px_minmax(0,1fr)] xl:grid-cols-[320px_minmax(0,1fr)_360px]">
         {wide && (

@@ -1,7 +1,8 @@
 /**
  * What a review still needs, said item by item, and the one thing to do next — the same rules the
- * drawer's buttons follow: Approve for a reviewer who hasn't, Pull the latest when behind, Resolve
- * conflicts, Merge N accepted when decided in part, Merge off with why where it can't yet.
+ * drawer's buttons follow: Finish your review for a reviewer who hasn't given their verdict (Approve
+ * all beside it, where offered), Pull the latest when behind, Resolve conflicts, Merge N accepted
+ * when decided in part, Merge off with why where it can't yet.
  */
 import { describe, it, expect } from 'vitest'
 import type { PullRequest, ReviewDecisionSummary, ReviewState } from '@/services/versioningApiService'
@@ -14,7 +15,7 @@ const pr = (over: Partial<PullRequest> = {}): PullRequest => ({
   ...over,
 })
 const ctx = (over: Partial<ReadinessContext> = {}): ReadinessContext => ({
-  me: 'u_me', canManage: true, showApprove: false, canMerge: true, mergeBlockedWhy: null, forksOff: false,
+  me: 'u_me', canManage: true, canFinish: false, canMerge: true, mergeBlockedWhy: null, forksOff: false,
   forkBehind: null, canUpdateFromParent: false, needsPull: false, pullReason: null, unsaved: 0, decisions: null,
   mergeInPart: false, canDecide: false, listable: true, viewed: 0, total: 4, openThreads: 0, ...over,
 })
@@ -26,8 +27,8 @@ const item = (r: ReturnType<typeof readiness>, key: string) => r.items.find((i) 
 describe('readiness — a reviewer', () => {
   const asked = pr({ reviewers: ['u_me', 'u_bob'] })
 
-  it('asks them to look, decide, resolve threads and give their verdict — Approve first', () => {
-    const r = readiness(asked, ctx({ showApprove: true, canDecide: true, decisions: summary(), viewed: 1, openThreads: 2 }))
+  it('asks them to look, decide, resolve threads and give their verdict — Finish your review first', () => {
+    const r = readiness(asked, ctx({ canFinish: true, canDecide: true, decisions: summary(), viewed: 1, openThreads: 2 }))
     expect(r.items.slice(0, 4).map((i) => [i.key, i.ok])).toEqual([
       ['look', false], ['decide', false], ['threads', false], ['verdict', false],
     ])
@@ -36,32 +37,38 @@ describe('readiness — a reviewer', () => {
     expect(item(r, 'decide')!.detail).toBe('1 to decide')
     expect(item(r, 'threads')!.title).toBe('Resolve 2 open threads')
     // Steps to another change are offered, never the primary action.
-    expect(r.primary).toEqual({ kind: 'approve', label: 'Approve' })
+    expect(r.primary).toEqual({ kind: 'finish', label: 'Finish your review' })
+    expect(item(r, 'verdict')!.action).toEqual({ kind: 'finish', label: 'Finish your review' })
+    // Not theirs to give here (a key, say): nothing to press.
+    expect(item(readiness(asked, ctx()), 'verdict')!.action).toBeUndefined()
   })
 
-  it('approves all and merges in one go, where only their approval holds it', () => {
+  it('offers approving all and merging in one go beside it, where only their approval holds it', () => {
     const solo = pr({ reviewers: ['u_me'] })
     const open = summary({ accepted: 1, rejected: 0, undecided: 3 })
     const all = (c: Partial<ReadinessContext> = {}, p = solo) =>
-      readiness(p, ctx({ showApprove: true, canDecide: true, canApproveAll: true, decisions: open, ...c }))
-    expect(all().primary).toEqual({ kind: 'approve_all_merge', label: 'Approve all & merge' })
+      readiness(p, ctx({ canFinish: true, canDecide: true, canApproveAll: true, decisions: open, ...c }))
+    expect(all().approveAll).toEqual({ kind: 'approve_all_merge', label: 'Approve all & merge' })
+    expect(all().primary).toEqual({ kind: 'finish', label: 'Finish your review' })
     // Someone else's approval is awaited, or they may not merge, or it is behind: approve all, no merge.
-    expect(all({}, asked).primary).toEqual({ kind: 'approve_all', label: 'Approve all' })
-    expect(all({ canMerge: false }).primary).toEqual({ kind: 'approve_all', label: 'Approve all' })
-    expect(all({ needsPull: true }).primary).toEqual({ kind: 'approve_all', label: 'Approve all' })
-    // Every change accepted already: Approve & merge.
-    expect(all({ decisions: summary({ accepted: 4, rejected: 0, undecided: 0 }) }).primary)
+    expect(all({}, asked).approveAll).toEqual({ kind: 'approve_all', label: 'Approve all' })
+    expect(all({ canMerge: false }).approveAll).toEqual({ kind: 'approve_all', label: 'Approve all' })
+    expect(all({ needsPull: true }).approveAll).toEqual({ kind: 'approve_all', label: 'Approve all' })
+    // Every change accepted already: Approve & merge; nothing left to accept and theirs not the last word: nothing.
+    expect(all({ decisions: summary({ accepted: 4, rejected: 0, undecided: 0 }) }).approveAll)
       .toEqual({ kind: 'approve_all_merge', label: 'Approve & merge' })
+    expect(all({ decisions: summary({ accepted: 4, rejected: 0, undecided: 0 }) }, asked).approveAll).toBeNull()
     // Under a rule of N approvals, theirs completing it.
     const review: ReviewState = {
       requiredApprovals: 2, approvals: { required: 2, have: 1, satisfied: false },
       reviewers: [{ type: 'user', id: 'u_bob', state: 'waiting', requestedAt: '2026-11-01T00:00:00Z' }],
       changeRequests: [], threads: { open: 0, holdMerge: false },
     }
-    expect(all({}, pr({ reviewers: ['u_me'], review })).primary).toMatchObject({ kind: 'approve_all_merge' })
+    expect(all({}, pr({ reviewers: ['u_me'], review })).approveAll).toMatchObject({ kind: 'approve_all_merge' })
     // Not offered where something was rejected: that review merges what is accepted.
-    expect(readiness(solo, ctx({ showApprove: true, canDecide: true, canApproveAll: false, decisions: summary() })).primary)
-      .toEqual({ kind: 'approve', label: 'Approve' })
+    const rejected = readiness(solo, ctx({ canFinish: true, canDecide: true, canApproveAll: false, decisions: summary() }))
+    expect(rejected.approveAll).toBeNull()
+    expect(rejected.primary).toEqual({ kind: 'finish', label: 'Finish your review' })
   })
 
   it('is not asked to decide where changes are not decided one by one here', () => {
@@ -71,7 +78,7 @@ describe('readiness — a reviewer', () => {
 
   it('says they approved, or that it changed since they did', () => {
     expect(item(readiness(pr({ reviewers: ['u_me'], approvedBy: ['u_me'] }), ctx()), 'verdict')).toMatchObject({ ok: true, title: 'You approved it' })
-    expect(item(readiness(pr({ reviewers: ['u_me'], staleApprovedBy: ['u_me'] }), ctx({ showApprove: true })), 'verdict'))
+    expect(item(readiness(pr({ reviewers: ['u_me'], staleApprovedBy: ['u_me'] }), ctx({ canFinish: true })), 'verdict'))
       .toMatchObject({ ok: false, detail: expect.stringMatching(/approved an earlier version/) })
   })
 
@@ -82,7 +89,7 @@ describe('readiness — a reviewer', () => {
       changeRequests: [], threads: { open: 0, holdMerge: false },
       you: { requested: true, needsReview: true, updatedSinceReviewed: true, verdict: 'approve' },
     }
-    const r = readiness(pr({ reviewers: [], review }), ctx({ showApprove: true }))
+    const r = readiness(pr({ reviewers: [], review }), ctx({ canFinish: true }))
     expect(item(r, 'verdict')).toMatchObject({ ok: false, detail: expect.stringMatching(/earlier version/) })
   })
 

@@ -10,10 +10,11 @@
  *
  * The primary action is the first item not yet done that has something to do about it — never a
  * step to another change — else Merge (Merge N accepted, merging in part), off with why where the
- * review says so. A reviewer who decides a draft's review with nothing rejected is offered Approve
- * all: every change still to decide accepted and the review approved in one go — and merged, when
- * they may merge and nothing but their approval holds it (Approve all & merge). Where the review carries the server's count (`pr.review`), that is what is read;
- * else the fields it had before.
+ * review says so. A reviewer's is Finish your review. One who decides a draft's review with nothing
+ * rejected is offered Approve all beside it: every change still to decide accepted and the review
+ * approved in one go — and merged, when they may merge and nothing but their approval holds it
+ * (Approve all & merge). Where the review carries the server's count (`pr.review`), that is what is
+ * read; else the fields it had before.
  */
 import type { PullReason, PullRequest, ReviewDecisionSummary, ReviewerState } from '@/services/versioningApiService'
 import { ownerName } from '@/features/versioning/model/branchVocab'
@@ -23,7 +24,7 @@ import { isDraftMr } from '../components/PrMeta'
 /** Where to go next: offered beside an item, never the primary action. */
 export type StepKind = 'next_unviewed' | 'next_undecided' | 'next_thread'
 export type ReviewActionKind =
-  | 'approve' | 'approve_all' | 'approve_all_merge' | 'merge' | 'merge_accepted' | 'pull' | 'resolve_conflicts'
+  | 'finish' | 'approve_all' | 'approve_all_merge' | 'merge' | 'merge_accepted' | 'pull' | 'resolve_conflicts'
   | 'update_from_parent' | 'discard_rejected' | 'accept_missing'
 export type ActionKind = ReviewActionKind | StepKind
 
@@ -46,6 +47,8 @@ export interface PrimaryAction {
 export interface Readiness {
   items: ReadinessItem[]
   primary: PrimaryAction | null
+  /** Approve all [& merge], offered beside the reviewer's Finish your review. */
+  approveAll?: PrimaryAction | null
 }
 
 /** What the review page knows beside the review: the reader, and what `useReviewActions` decided. */
@@ -53,7 +56,8 @@ export interface ReadinessContext {
   me: string | null
   /** Manages its data source: without it, nothing on a review is theirs to do. */
   canManage: boolean
-  showApprove: boolean
+  /** The reader gives their verdict here (Finish your review). */
+  canFinish: boolean
   canMerge: boolean
   mergeBlockedWhy?: string | null
   forksOff: boolean
@@ -90,8 +94,8 @@ export function behindText(pr: { behindBy?: number | null; behindByPeople?: numb
 }
 
 /** A reviewer (a person or a group), by name. */
-export function reviewerName(pr: PullRequest, r: Pick<ReviewerState, 'type' | 'id'>): string {
-  return r.type === 'group' ? pr.groupNames?.[r.id] ?? r.id : ownerName(r.id, pr.userNames)
+export function reviewerName(pr: PullRequest, r: Pick<ReviewerState, 'type' | 'id' | 'name'>): string {
+  return r.type === 'group' ? r.name ?? pr.groupNames?.[r.id] ?? r.id : ownerName(r.id, pr.userNames)
 }
 
 /** Each reviewer asked, and where they stand. */
@@ -168,6 +172,11 @@ export function readiness(pr: PullRequest, ctx: ReadinessContext): Readiness {
   const progress = approvalProgress(pr)
   const mergeFollows = !!ctx.canApproveAll && mergeFollowsApproval(pr, ctx)
 
+  // Approve all [& merge]: a reviewer with changes still to decide, or whose approval merges it.
+  const approveAll: PrimaryAction | null = ctx.canApproveAll && requested && (left > 0 || mergeFollows)
+    ? { kind: mergeFollows ? 'approve_all_merge' : 'approve_all', label: `${left > 0 ? 'Approve all' : 'Approve'}${mergeFollows ? ' & merge' : ''}` }
+    : null
+
   // A reviewer's part.
   if (requested || ctx.canDecide) {
     if (ctx.total > 0) {
@@ -199,11 +208,8 @@ export function readiness(pr: PullRequest, ctx: ReadinessContext): Readiness {
         key: 'verdict', ok: approved || askedByMe,
         title: approved ? 'You approved it' : askedByMe ? 'You asked for changes' : 'Give your verdict',
         detail: approved || askedByMe ? undefined
-          : earlier ? 'You approved an earlier version: it changed since.' : 'Approve it, or send it back saying what should change.',
-        action: ctx.canApproveAll && (left > 0 || mergeFollows)
-          ? { label: `${left > 0 ? 'Approve all' : 'Approve'}${mergeFollows ? ' & merge' : ''}`,
-            kind: mergeFollows ? 'approve_all_merge' : 'approve_all' }
-          : ctx.showApprove ? { label: 'Approve', kind: 'approve' } : undefined,
+          : earlier ? 'You approved an earlier version: it changed since.' : 'Approve it, ask for changes, or comment — with a summary.',
+        action: ctx.canFinish ? { label: 'Finish your review', kind: 'finish' } : undefined,
       })
     }
   }
@@ -281,7 +287,7 @@ export function readiness(pr: PullRequest, ctx: ReadinessContext): Readiness {
     items.push({ key: 'permission', ok: false, title: 'You can’t merge this', detail: ctx.mergeBlockedWhy ?? undefined })
   }
 
-  return { items, primary: primaryOf(items, ctx, { holding: !!holding, threadsHold, accepted }) }
+  return { items, primary: primaryOf(items, ctx, { holding: !!holding, threadsHold, accepted }), approveAll }
 }
 
 function primaryOf(items: ReadinessItem[], ctx: ReadinessContext, at: { holding: boolean; threadsHold: boolean; accepted: number }): PrimaryAction | null {

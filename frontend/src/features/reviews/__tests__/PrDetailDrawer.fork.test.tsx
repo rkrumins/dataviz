@@ -1,13 +1,13 @@
 /**
  * PrDetailDrawer on a fork's review (from a fork's main into its parent's):
- *   • a review a job is merging (`merging`) shows that it is merging, with nothing to press — the
- *     server refuses another merge, closing it or approving it meanwhile;
+ *   • a review a job is merging (`merging`) says it is merging, with nothing to press — the server
+ *     refuses another merge, closing it or approving it meanwhile;
  *   • merged — at once or by its job, the merge followed to its end — the drawer stays and reads as
  *     merged (a fork's review has no view to go back to), and the receipt is the parent's, where the
  *     merge landed;
  *   • a fork behind its parent says to update it first, and offers Update from parent, not a
  *     draft's "pull latest";
- *   • with forks off it offers neither Approve nor Merge, and says why; it can still be dismissed.
+ *   • with forks off it offers neither a verdict nor Merge, and says why.
  * A draft's review still closes after merging, and lands on the view it came from.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -52,7 +52,7 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
   useCloseMergeRequest: () => idle,
   useMergeMergeRequest: () => ({ ...idle, mutateAsync: mergeMutateAsync }),
   useUpdateMergeRequest: () => idle,
-  useRequestChanges: () => idle,
+  useSubmitReview: () => idle,
   useWithdrawChangesRequest: () => idle,
   useDiscardRejected: () => idle,
   useBranchViewChanges: () => ({ data: undefined }),
@@ -61,10 +61,6 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
 vi.mock('../../versioning/components/UpdateFromParentButton', () => ({
   UpdateFromParentButton: ({ forkGraphId, onUpdated }: { forkGraphId: string; onUpdated?: (r: unknown) => void }) =>
     <button data-fork={forkGraphId} onClick={() => onUpdated?.({ upToDate: false })}>Update from parent</button>,
-}))
-vi.mock('../../versioning/components/RollbackDialogs', () => ({
-  RevertDialog: ({ open, graphId }: { open: boolean; graphId: string }) =>
-    open ? <div data-testid="revert" data-graph={graphId} /> : null,
 }))
 vi.mock('@/store/auth', () => ({
   usePermission: () => true,
@@ -104,12 +100,12 @@ beforeEach(() => {
 
 describe('PrDetailDrawer — a fork’s review', () => {
   it('shows a review its job is merging as in progress, with nothing to press', () => {
-    pr = forkPr({ status: 'merging' })
+    pr = forkPr({ status: 'merging', reviewers: ['u_me'] })
     renderDrawer()
-    expect(screen.getByRole('status')).toHaveTextContent(/merging in the background/i)
-    expect(screen.queryByRole('button', { name: /^Merge$/ })).toBeNull()
-    expect(screen.queryByRole('button', { name: /Approve/ })).toBeNull()
-    expect(screen.queryByRole('button', { name: /Dismiss/ })).toBeNull()
+    expect(screen.getByText('Merging in the background')).toBeInTheDocument()
+    expect(screen.getByText(/Nothing can change it meanwhile/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Merge|Approve|Dismiss/ })).toBeNull()
+    expect(screen.queryByRole('link', { name: /Finish your review/ })).toBeNull()
   })
 
   it('stays open once merged, and the receipt is the parent’s', async () => {
@@ -127,31 +123,27 @@ describe('PrDetailDrawer — a fork’s review', () => {
     renderDrawer()
     fireEvent.click(screen.getByRole('button', { name: /^Merge$/ }))
     expect(await screen.findByText(/behind its parent by 4 changes/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Update from parent' })).toHaveAttribute('data-fork', 'g_f')
+    // What's next offers it, and it is the next thing to do.
+    const updates = screen.getAllByRole('button', { name: 'Update from parent' })
+    expect(updates).toHaveLength(2)
+    for (const u of updates) expect(u).toHaveAttribute('data-fork', 'g_f')
     expect(screen.queryByRole('button', { name: /Pull latest/ })).toBeNull()
     expect(notify).not.toHaveBeenCalledWith('error', expect.stringMatching(/pull the latest/))
     expect(refetch).toHaveBeenCalled()
     // Updated: nothing left to say, and Merge is the next step.
-    fireEvent.click(screen.getByRole('button', { name: 'Update from parent' }))
+    fireEvent.click(updates.at(-1)!)
     expect(screen.queryByText(/behind its parent/)).toBeNull()
     expect(screen.getByRole('button', { name: /^Merge$/ })).toBeEnabled()
   })
 
-  it('reverts a merged fork review on the parent, where the merge landed', () => {
-    pr = forkPr({ status: 'merged', resultingCommitId: 'c9', mergedBy: 'u_me' })
-    renderDrawer()
-    fireEvent.click(screen.getByRole('button', { name: /Revert this merge/ }))
-    expect(screen.getByTestId('revert')).toHaveAttribute('data-graph', 'g1')
-  })
-
-  it('with forks off, offers neither Approve nor Merge, says why, and can still be dismissed', () => {
+  it('with forks off, offers neither a verdict nor Merge, and says why', () => {
     forksOn = false
     pr = forkPr({ reviewers: ['u_me'] })
     renderDrawer()
-    expect(screen.getByText(/Forks are turned off for this deployment/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^Merge$/ })).toBeNull()
-    expect(screen.queryByRole('button', { name: /Approve/ })).toBeNull()
-    expect(screen.getByRole('button', { name: /Dismiss/ })).toBeInTheDocument()
+    expect(screen.getByText('Forks are turned off')).toBeInTheDocument()
+    expect(screen.getByText(/can be read but not approved or merged/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Merge|Approve/ })).toBeNull()
+    expect(screen.queryByRole('link', { name: /Finish your review/ })).toBeNull()
   })
 })
 

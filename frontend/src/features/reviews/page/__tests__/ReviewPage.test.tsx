@@ -1,6 +1,7 @@
 /**
  * The review page: its three regions; a change or a thread opened by link (`?change=`, `?thread=` —
- * one on the review as a whole opens the Discussion); the keys that move through the changes (j / k,
+ * one on the review as a whole opens the Discussion), and Finish your review (`?finish=1`, the
+ * drawer's way here); the keys that move through the changes (j / k,
  * n / p to what still needs you, round to the start, ⇧N / ⇧P to open threads); a fork's review,
  * which is not decided change by change; a review that isn't there; and looking at one marks it
  * seen, again as it changes.
@@ -125,11 +126,20 @@ describe('ReviewPage', () => {
     expect(within(pane()).getByText('Owners moved to the new teams.')).toBeInTheDocument()
     expect(within(side()).getByText('Give your verdict')).toBeInTheDocument()
     expect(within(side()).getByRole('tab', { name: 'Discussion' })).toHaveAttribute('aria-selected', 'true')
-    // A requested reviewer who hasn't approved, nothing rejected, only their approval awaited:
-    // Approve all & merge, with Send back beside it.
+    // A requested reviewer who hasn't given their verdict: Finish your review — and, nothing
+    // rejected and only their approval awaited, Approve all & merge beside it.
     const header = screen.getByRole('banner', { name: 'This review' })
+    expect(within(header).getByRole('button', { name: 'Finish your review' })).toBeInTheDocument()
     expect(within(header).getByRole('button', { name: 'Approve all & merge' })).toBeInTheDocument()
-    expect(within(header).getByRole('button', { name: 'Send back' })).toBeInTheDocument()
+  })
+
+  it('a link with ?finish=1 opens Finish your review; closed, the address no longer asks', async () => {
+    renderPage('?finish=1')
+    const panel = await screen.findByRole('dialog', { name: 'Finish your review' })
+    expect(await within(panel).findByText('You viewed 0 of 3 · accepted 1 · rejected 0 · 2 open threads')).toBeInTheDocument()
+    fireEvent.click(within(panel).getByRole('button', { name: 'Keep reviewing' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Finish your review' })).toBeNull())
+    expect(screen.getByTestId('where')).not.toHaveTextContent('finish')
   })
 
   it('picking a change in the list opens it beside the list, and the address says which', async () => {

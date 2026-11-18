@@ -55,6 +55,9 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'forkSources', ws] as const,
   mergeRequest: (ws?: string, prId?: string | null) =>
     [...VERSIONING_KEYS.all, 'mr', ws, prId] as const,
+  // Under the review's own key, so whatever refreshes the review refreshes its history too.
+  reviewEvents: (ws?: string, prId?: string | null) =>
+    [...VERSIONING_KEYS.mergeRequest(ws, prId), 'events'] as const,
   prDiff: (ws?: string, prId?: string | null) =>
     [...VERSIONING_KEYS.all, 'prDiff', ws, prId] as const,
   prPreview: (ws?: string, prId?: string | null) =>
@@ -1218,8 +1221,10 @@ export function useReconcileProjection(wsId: string, graphId: string) {
 export function useOpenMergeRequest(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (v: { branchId: string; title?: string; description?: string; reviewers?: string[] }) =>
-      api.openMergeRequest(wsId, graphId, v.branchId, { title: v.title, description: v.description, reviewers: v.reviewers }),
+    mutationFn: (v: { branchId: string; title?: string; description?: string; reviewers?: string[]; reviewerGroups?: string[] }) =>
+      api.openMergeRequest(wsId, graphId, v.branchId, {
+        title: v.title, description: v.description, reviewers: v.reviewers, reviewerGroups: v.reviewerGroups,
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
@@ -1306,21 +1311,53 @@ export function useCloseMergeRequest(wsId: string) {
   })
 }
 
-/** Send a draft's review back to its author, with why (it merges once the draft changes). */
-export function useRequestChanges(wsId: string) {
-  const invalidate = useInvalidatePr(wsId)
-  return useMutation({
-    mutationFn: (v: { prId: string; graphId: string; reason?: string | null; expectedHeadCommitId?: string | null }) =>
-      api.requestChanges(wsId, v.prId, { reason: v.reason, expectedHeadCommitId: v.expectedHeadCommitId }),
-    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
-  })
-}
-
 export function useWithdrawChangesRequest(wsId: string) {
   const invalidate = useInvalidatePr(wsId)
   return useMutation({
     mutationFn: (v: { prId: string; graphId: string }) => api.withdrawChangesRequest(wsId, v.prId),
     onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+// A review given, who reviews it, and what happened on it.
+
+/** Give your review — a verdict and a summary, of the head the reviewer saw. */
+export function useSubmitReview(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; verdict: api.ReviewVerdict; body?: string | null; expectedHeadCommitId?: string | null }) =>
+      api.submitReview(wsId, v.prId, { verdict: v.verdict, body: v.body, expectedHeadCommitId: v.expectedHeadCommitId }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** Who reviews it: each list given replaces its kind. */
+export function useSetReviewers(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; users?: string[]; groups?: string[] }) =>
+      api.setReviewers(wsId, v.prId, { users: v.users, groups: v.groups }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** Ask people and groups already asked to review it again. */
+export function useReRequestReviewers(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; users?: string[]; groups?: string[] }) =>
+      api.reRequestReviewers(wsId, v.prId, { users: v.users ?? [], groups: v.groups ?? [] }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** What happened on a review, oldest first. */
+export function useReviewEvents(wsId?: string, prId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.reviewEvents(wsId, prId),
+    queryFn: () => api.listReviewEvents(wsId!, prId!),
+    enabled: !!wsId && !!prId,
+    staleTime: 10_000,
   })
 }
 

@@ -614,6 +614,8 @@ export interface ReviewState {
   changeRequests: Array<{ by: string; at: string; reason?: string | null; holds: boolean }>
   /** Open threads, and whether they hold the merge until resolved. */
   threads: { open: number; holdMerge: boolean }
+  /** Each person's latest review, and whether it is of the draft as it is now. */
+  reviews?: Array<{ by: string; verdict: ReviewVerdict; at: string; current: boolean }>
   /** The reader's own part. */
   you?: {
     requested: boolean
@@ -630,7 +632,10 @@ export interface ReviewState {
 export interface ReviewerState {
   type: 'user' | 'group'
   id: string
+  /** A group's name. */
+  name?: string | null
   state: 'approved' | 'approved_earlier' | 'changes_requested' | 'commented' | 'waiting'
+  /** Who answered: for a group, the member whose review answers for it. */
   by?: string | null
   at?: string | null
   requestedAt: string
@@ -2640,7 +2645,8 @@ export function openMergeRequest(
   wsId: string,
   graphId: string,
   branchId: string,
-  data: { title?: string; description?: string; reviewers?: string[] } = {},
+  /** `reviewerGroups`: groups asked to review it (`listReviewerGroups`); any member answers for one. */
+  data: { title?: string; description?: string; reviewers?: string[]; reviewerGroups?: string[] } = {},
 ): Promise<{ prId: string }> {
   return vfetch<{ prId: string }>(
     `${base(wsId)}/graphs/${graphId}/branches/${branchId}/merge-requests`,
@@ -2882,16 +2888,74 @@ export function closeMergeRequest(wsId: string, prId: string): Promise<PullReque
   return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}/close`, jsonBody({}))
 }
 
-/** Send a draft's review back to its author, with why: it does not merge until the draft changes
- *  (or the request is withdrawn). The draft's people are told. */
-export function requestChanges(
-  wsId: string, prId: string, body: { reason?: string | null; expectedHeadCommitId?: string | null },
-): Promise<PullRequest> {
-  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/request-changes`, jsonBody(body))
-}
-
 export function withdrawChangesRequest(wsId: string, prId: string): Promise<PullRequest> {
   return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/request-changes`, { method: 'DELETE' })
+}
+
+// ── A review given, who reviews, and what happened ──────────────────────────
+
+/** A reviewer's verdict: approve, ask for changes, or comment (feedback, with a summary). */
+export type ReviewVerdict = 'approve' | 'request_changes' | 'comment'
+
+/** Give your review: a verdict and a summary, of the head the reviewer saw ({@link HeadMovedError}
+ *  when the draft has moved on since). It replaces their earlier verdict. Refused 403 with the
+ *  `viewerCan` reason, 422 `summary_required` for a comment with no summary. */
+export function submitReview(
+  wsId: string, prId: string, body: { verdict: ReviewVerdict; body?: string | null; expectedHeadCommitId?: string | null },
+): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/reviews`, jsonBody(body))
+}
+
+/** Who reviews it: each list given replaces its kind (one left out is untouched). Those newly asked
+ *  are told. 422 `unknown_group` for a group that may not review here. */
+export function setReviewers(wsId: string, prId: string, body: { users?: string[]; groups?: string[] }): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/reviewers`, {
+    method: 'PUT', body: JSON.stringify(body),
+  })
+}
+
+/** Ask people and groups already asked to review it again: it is back in their queue, and they are told. */
+export function reRequestReviewers(wsId: string, prId: string, body: { users: string[]; groups: string[] }): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/reviewers/re-request`, jsonBody(body))
+}
+
+/** A group that may be asked to review here, and how many people are in it. */
+export interface ReviewerGroup {
+  groupId: string
+  name: string
+  description?: string | null
+  memberCount: number
+}
+
+/** The groups that may be asked to review in this workspace. */
+export function listReviewerGroups(wsId: string): Promise<ReviewerGroup[]> {
+  return vfetch<ReviewerGroup[]>(`${base(wsId)}/reviewer-groups`)
+}
+
+/** One thing that happened on a review: opened; who was asked (`subjects`), asked again, no longer
+ *  asked; a review given (`verdict`, `body` its summary, `tally` what the reviewer did, `groups` the
+ *  groups an approval answers for); a verdict taken back (`withdrew`); merged; closed. */
+export interface ReviewEvent {
+  kind: 'opened' | 'requested' | 'unrequested' | 're_requested' | 'reviewed' | 'withdrew' | 'merged' | 'closed'
+  actor?: string | null
+  at?: string | null
+  verdict?: ReviewVerdict | null
+  body?: string | null
+  headCommitId?: string | null
+  subjects: Array<{ type: 'user' | 'group'; id: string }>
+  groups: string[]
+  tally?: { accepted: number; rejected: number; threads: number } | null
+}
+
+export interface ReviewEvents {
+  events: ReviewEvent[]
+  userNames: Record<string, string>
+  groupNames: Record<string, string>
+}
+
+/** A review's history, oldest first, with the names of the people and groups in it. */
+export function listReviewEvents(wsId: string, prId: string): Promise<ReviewEvents> {
+  return vfetch<ReviewEvents>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/events`)
 }
 
 /** What discarding a draft's saved changes did (or, `dryRun`, would do): how many it puts back,
