@@ -213,15 +213,20 @@ async def _routes_run(monkeypatch) -> None:
             r = await c.put(f"{V1}/merge-requests/{pr}/reviewers", json={"groups": [fin_id, ops_id]}, headers=h("ana"))
             assert r.status_code == 422 and r.json()["detail"]["groups"] == [ops_id], r.text
 
-            # A member reads it, approves it for the group.
+            # A member reads it — asked, through the group — and approves it for the group.
             r = await c.get(f"{V1}/merge-requests/{pr}", headers=h("erin"))
             assert r.status_code == 200, r.text
+            you = r.json()["review"]["you"]
+            assert you["requested"] is True and you["needsReview"] is True, you
             r = await c.post(f"{V1}/merge-requests/{pr}/reviews",
                              json={"verdict": "approve", "expectedHeadCommitId": r.json()["headCommitId"]},
                              headers=h("erin"))
             assert r.status_code == 200, r.text
             group = next(x for x in r.json()["review"]["reviewers"] if x["type"] == "group")
             assert (group["state"], group["by"]) == ("approved", "erin")
+            # Answered for: frank, also in it, is still asked, but it no longer waits on him.
+            you = (await c.get(f"{V1}/merge-requests/{pr}", headers=h("frank"))).json()["review"]["you"]
+            assert you["requested"] is True and you["needsReview"] is False, you
 
             told.clear()
             r = await c.post(f"{V1}/merge-requests/{pr}/reviewers/re-request", json={"groups": [fin_id]},

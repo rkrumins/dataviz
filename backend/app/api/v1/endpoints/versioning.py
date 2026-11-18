@@ -1816,21 +1816,39 @@ async def _name_groups(session: AsyncSession, items: List[dict]) -> None:
             r["name"] = names[r["id"]]
 
 
-def _you(pr: dict, viewer: str) -> None:
-    """Where the reader stands on a review (``review.you``): whether they are asked, whether it
-    waits on them — asked, live, not theirs, and not yet reviewed as the draft is now — whether the
-    draft changed since their latest review, and that review's verdict."""
+async def _your_groups(viewer: str, items: Iterable[dict]) -> tuple:
+    """The reader's groups, for :func:`_you` — looked up only when one of ``items`` asks a group
+    (none when they can't be read: they are then asked only as themselves)."""
+    if not any(r.get("type") == "group" for it in items if isinstance(it.get("review"), dict)
+               for r in it["review"].get("reviewers") or ()):
+        return ()
+    from backend.app.services.versioning.service import GroupsUnavailable, _load_actor_groups
+    try:
+        return await _load_actor_groups(viewer)
+    except GroupsUnavailable:
+        return ()
+
+
+def _you(pr: dict, viewer: str, groups: Iterable[str] = ()) -> None:
+    """Where the reader stands on a review (``review.you``): whether they are asked — themselves,
+    or through one of ``groups`` — whether it waits on them — asked, live, not theirs, and not yet
+    reviewed as the draft is now, or a group of theirs no member has answered for since it was
+    asked — whether the draft changed since their latest review, and that review's verdict."""
     review = pr.get("review")
     if not isinstance(review, dict):
         return
-    asked = next((r for r in review.get("reviewers") or () if r.get("type") == "user" and r.get("id") == viewer), None)
+    groups = set(groups)
+    asked = [r for r in review.get("reviewers") or ()
+             if (r.get("type") == "user" and r.get("id") == viewer) or (r.get("type") == "group" and r.get("id") in groups)]
+    waiting = [r for r in asked if r.get("type") == "user" or not (
+        r.get("state") == "approved" and (r.get("at") or "") >= (r.get("requestedAt") or ""))]
     mine = next((r for r in review.get("reviews") or () if r.get("by") == viewer), None)
     live = pr.get("status") not in ("merged", "closed")
-    answered = mine is not None and mine.get("current") and (
-        asked is None or (mine.get("at") or "") >= (asked.get("requestedAt") or ""))
+    answered = not waiting or (mine is not None and mine.get("current") and all(
+        (mine.get("at") or "") >= (r.get("requestedAt") or "") for r in waiting))
     review["you"] = {
-        "requested": asked is not None,
-        "needsReview": bool(asked is not None and live and pr.get("actor") != viewer and not answered),
+        "requested": bool(asked),
+        "needsReview": bool(asked and live and pr.get("actor") != viewer and not answered),
         "updatedSinceReviewed": bool(mine is not None and not mine.get("current")),
         "verdict": mine.get("verdict") if mine else None,
         "reviewedAt": mine.get("at") if mine else None,
@@ -5712,7 +5730,7 @@ async def get_pull_request(
     session: AsyncSession = Depends(get_db_session),
 ):
     await _review_out(svc, session, [pr])
-    _you(pr, user.id)
+    _you(pr, user.id, await _your_groups(user.id, [pr]))
     await _attach_user_names(session, [pr])
     pr["viewer_can"] = await _viewer_can(svc, session, pr, user.id, claims, ws_id)
     return pr
@@ -6351,12 +6369,13 @@ async def review_inbox(
     rules: Dict[Optional[str], Any] = {}
     out = await _inbox(svc, session, ws_id, viewer, rules, queue=queue, q=q, data_source_id=data_source_id,
                        author=author, sort=sort, limit=limit, offset=offset)
+    mine = await _your_groups(user.id, out["items"])
     for it in out["items"]:
         ds = it.get("target_data_source_id")
         if ds not in rules:
             rules[ds] = (await _drafts_policy_of(session, ds)).rule
         await _review_out(svc, session, [it], rules[ds])
-        _you(it, user.id)
+        _you(it, user.id, mine)
     await _attach_user_names(session, out["items"])
     return out
 
@@ -6400,7 +6419,7 @@ async def get_merge_request(
     session: AsyncSession = Depends(get_db_session),
 ):
     await _review_out(svc, session, [pr])
-    _you(pr, user.id)
+    _you(pr, user.id, await _your_groups(user.id, [pr]))
     await _attach_user_names(session, [pr])
     pr["viewer_can"] = await _viewer_can(svc, session, pr, user.id, claims, ws_id)
     return pr
@@ -6709,7 +6728,7 @@ async def submit_review(
                                  meta=await svc.get_graph(target) or {}, graph_id=target,
                                  branch_id=str(_pr["source_branch_id"]), actor=user.id, pr_id=pr_id)
     await _review_out(svc, session, [meta], policy.rule)
-    _you(meta, user.id)
+    _you(meta, user.id, await _your_groups(user.id, [meta]))
     return meta
 
 
@@ -6727,7 +6746,7 @@ async def withdraw_my_review(
     with _domain_errors():
         meta = await svc.withdraw_review(pr_id=pr_id, actor=user.id, rule=policy.rule)
     await _review_out(svc, session, [meta], policy.rule)
-    _you(meta, user.id)
+    _you(meta, user.id, await _your_groups(user.id, [meta]))
     return meta
 
 

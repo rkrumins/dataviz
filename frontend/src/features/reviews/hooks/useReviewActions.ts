@@ -169,9 +169,10 @@ export function useReviewActions(wsId: string, prId: string, onClose: () => void
   const isAuthor = !!user && pr?.actor === user.id
   const isOwner = !!user && pr?.sourceBranchOwner === user.id
   const alreadyApproved = !!user && (pr?.approvedBy ?? []).includes(user.id)
-  // Approve is asked of the requested reviewers. An approval gone stale is not in approvedBy, so
-  // its reviewer is offered Approve again.
-  const isRequested = !!user && (pr?.reviewers ?? []).includes(user.id)
+  // Approve is asked of the requested reviewers — themselves, or through a group of theirs (the
+  // server's `review.you`). An approval gone stale is not in approvedBy, so its reviewer is offered
+  // Approve again.
+  const isRequested = !!user && ((pr?.reviewers ?? []).includes(user.id) || !!pr?.review?.you?.requested)
   const showApprove = canManage && !terminal && !alreadyApproved && isRequested && !forksOff
     && (viewerCan ? viewerCan.approve : !isAuthor && !isOwner)
   const canMerge = viewerCan ? viewerCan.merge : canPublish

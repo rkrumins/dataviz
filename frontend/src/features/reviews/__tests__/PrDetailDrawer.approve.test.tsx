@@ -20,6 +20,8 @@ let owner = 'u_author'
 let actor = 'u_author'
 let viewerCan: Record<string, unknown> | undefined
 let approvedBy: string[] = []
+let reviewers: string[] = ['u_me']
+let review: Record<string, unknown> | undefined
 
 const { invalidateQueries } = vi.hoisted(() => ({ invalidateQueries: vi.fn() }))
 vi.mock('@tanstack/react-query', async (orig) => ({
@@ -39,8 +41,8 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
   useMergeRequest: () => ({
     data: {
       prId: 'pr_1', graphId: 'g1', targetGraphId: 'g1', sourceBranchId: 'br_1', targetBranch: 'main', status: 'mergeable',
-      actor, sourceBranchOwner: owner, title: 'Tidy', reviewers: ['u_me'], approvedBy,
-      behind: false, headCommitId: head, viewerCan,
+      actor, sourceBranchOwner: owner, title: 'Tidy', reviewers, approvedBy,
+      behind: false, headCommitId: head, viewerCan, review,
     },
     isLoading: false,
     refetch: refetchPr,
@@ -88,6 +90,8 @@ beforeEach(() => {
   actor = 'u_author'
   viewerCan = undefined
   approvedBy = []
+  reviewers = ['u_me']
+  review = undefined
 })
 
 const finish = () => screen.queryByRole('link', { name: /Finish your review/ })
@@ -116,6 +120,18 @@ describe('PrDetailDrawer — Finish your review', () => {
   it('is offered to whoever opened the review where the policy lets them approve it', () => {
     actor = 'u_me'
     viewerCan = { approve: true, merge: true, approveReason: null, mergeReason: null }
+    render(drawer())
+    expect(finish()).toBeInTheDocument()
+  })
+
+  it('is offered to someone asked through a group of theirs, as the server says', () => {
+    reviewers = []
+    render(drawer())
+    expect(finish()).toBeNull()
+    review = { requiredApprovals: 0, approvals: { required: 1, have: 0, satisfied: false },
+               reviewers: [{ type: 'group', id: 'grp_fin', name: 'Finance', state: 'waiting', requestedAt: 't' }],
+               changeRequests: [], threads: { open: 0, holdMerge: false },
+               you: { requested: true, needsReview: true, updatedSinceReviewed: false } }
     render(drawer())
     expect(finish()).toBeInTheDocument()
   })
