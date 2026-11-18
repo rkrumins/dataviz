@@ -879,6 +879,7 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | Variable | Default | Read in |
 |---|---|---|
 | `AGG_CONTROL_PLANE` | `http://localhost:8091` | `backend/scripts/rematerialize_all_graphs.py` |
+| `BACKUP_DATABASE_URL` | — | `backend/scripts/upgrade.py` |
 | `DATAVIZ_SKIP_LOAD_SIGNAL` | — | `backend/scripts/signal_data_changed.py` |
 | `FALKORDB_GRAPH_NAME` | `nexus_lineage` / `nexus` *(differs by call site)* | `backend/scripts/add_column_lineage.py`, `backend/scripts/docker_seed.py`, `backend/scripts/optimize_falkordb.py` +1 more |
 | `LINEAGE_IMPORT_CHUNK` | `10000` | `backend/scripts/import_layered_lineage.py` |

@@ -274,6 +274,17 @@ python -m backend.scripts.other_lines
 
 It takes the same `--recover`, `--shared-database` and `--rewind-to` as `upgrade`, reads the same variables, and exits 1 when the upgrade would refuse. `--json` prints the plan for a script or a pipeline.
 
+## A backup before every migration
+
+`synodic-upgrade backup --dir DIR` dumps the database (`pg_dump`, custom format) before an upgrade changes it:
+- **Only when there's something to change:** only when `plan` says the upgrade would run something. `--force` dumps anyway.
+- **Never half-written:** the dump is written beside its final name, and moved there once `pg_restore` reads it back.
+- **Old dumps go:** it keeps the newest `--keep` (5).
+- **A bucket copy:** with `--bucket`, it also copies the dump to an S3-compatible bucket.
+- **Failure stops the upgrade:** a failed dump exits 1, so a pre-upgrade hook stops the upgrade instead of migrating without one.
+
+The Helm chart runs it as a hook before the schema Job ([Deploying on Kubernetes](/docs/kubernetes)). Restoring the dump (`pg_restore --clean --if-exists`) is the rollback for a bad migration.
+
 ## Only builds from main migrate a shared database
 
 A branch's build that migrates a database others use stamps it with revisions `main` may never have. That is how every foreign stamp above came about. So the Job holds a shared database to `main`:
@@ -299,6 +310,7 @@ This is not the old recovery. `env.py` used to "recover" by stamping back to `00
 
 ```bash
 synodic-upgrade plan                       # what `upgrade` would do now, changing nothing (--json; exit 1 if it would refuse)
+synodic-upgrade backup --dir DIR           # pg_dump first, when an upgrade would change something (--force: always)
 synodic-upgrade upgrade                    # to every head (fast path on a virgin database)
 synodic-upgrade upgrade --no-fast-path     # force the chain even on a virgin database
 synodic-upgrade upgrade --rewind-to REV    # a database another build moved on: place it at REV first

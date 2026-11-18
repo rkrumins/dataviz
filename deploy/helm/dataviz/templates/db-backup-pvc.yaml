@@ -1,0 +1,26 @@
+{{- /*
+The volume the pre-upgrade backup (db-backup.yaml) keeps its dumps on. Kept when the release is
+uninstalled (resource-policy: keep): it holds backups. Needs a default StorageClass, or
+backup.volume.storageClass; backup.volume.enabled=false does without (a bucket only).
+*/ -}}
+{{- $b := default (dict) .Values.backup -}}
+{{- $vol := default (dict) $b.volume -}}
+{{- if and .Values.upgrade.enabled (ne (toString $b.enabled) "false") (ne (toString $vol.enabled) "false") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dataviz-db-backups
+  labels:
+    {{- include "dataviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-backup
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ $vol.size | default "20Gi" }}
+  {{- with $vol.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}

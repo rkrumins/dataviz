@@ -19,6 +19,8 @@ Subcommands:
                                  to REV when named
     plan      [--json]           what ``upgrade`` would do now, changing nothing;
                                  exit 1 when it would refuse
+    backup     --dir DIR         pg_dump before an upgrade changes the database
+                                 (only then, unless --force); see ``cmd_backup``
     downgrade  --revision REV    alembic downgrade
     repair                       reconcile a version pointer that trails the
                                  physical schema (see ``cmd_repair``)
@@ -40,8 +42,12 @@ import argparse
 import json
 import logging
 import os
+import re
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 from alembic import command
 from alembic.script import ScriptDirectory
@@ -367,6 +373,104 @@ def cmd_plan(as_json: bool = False, recover: bool = False, shared_database: bool
                                     shared=shared_database, rewind_to=rewind_to)
     print(json.dumps(plan, indent=2) if as_json else schema_plan.describe(plan))
     return 1 if plan["verdict"] == "refused" else 0
+
+
+def cmd_backup(directory: str, keep: int = 5, bucket: str | None = None,
+               prefix: str = "synodic-db-backups", endpoint_url: str | None = None,
+               region: str | None = None, force: bool = False, recover: bool = False,
+               shared_database: bool = False) -> int:
+    """Back the database up before an upgrade changes it: ``pg_dump`` to ``directory``, checked,
+    the newest ``keep`` kept, and copied to ``bucket`` when one is named.
+
+    Only when the upgrade would change something (:func:`schema_plan.plan_upgrade` says
+    ``upgrade``), unless ``force``: a deploy with nothing to migrate costs nothing. Exit 0 when the
+    backup is made or not needed; 1 when it fails, so a pre-upgrade hook stops the upgrade instead
+    of migrating without one."""
+    cfg = _alembic_config()
+    script = ScriptDirectory.from_config(cfg)
+    if not force:
+        with _connect(create_engine(_sync_url(), pool_pre_ping=True)) as conn:
+            inputs = schema_plan.gather(conn, script, cfg.get_main_option("script_location"))
+        plan = schema_plan.plan_upgrade(script, **inputs, built=_built_from(), recover=recover,
+                                        shared=shared_database)
+        if plan["verdict"] != "upgrade":
+            log.info("No backup needed: an upgrade would be %s. %s",
+                     plan["verdict"].replace("_", " "), plan["reason"])
+            return 0
+        log.info("Backing up before the upgrade: %s", plan["reason"])
+    try:
+        path = _dump(Path(directory), min(script.get_heads()))
+        _prune(Path(directory), keep)
+        if bucket:
+            _upload(path, bucket, prefix, endpoint_url, region)
+    except (OSError, RuntimeError) as error:
+        log.error("Backup failed: %s", error)
+        return 1
+    return 0
+
+
+def _libpq_url() -> str:
+    """The database for ``pg_dump``: ``BACKUP_DATABASE_URL`` — a direct connection, where
+    ``MANAGEMENT_DB_URL`` goes through a transaction pooler ``pg_dump`` can't use — or
+    ``MANAGEMENT_DB_URL``, in libpq's form."""
+    url = os.getenv("BACKUP_DATABASE_URL") or os.environ["MANAGEMENT_DB_URL"]
+    return re.sub(r"^postgres(?:ql)?\+\w+://", "postgresql://", url)
+
+
+def _dump(directory: Path, head: str) -> Path:
+    """``pg_dump`` in its custom format, written beside its final name and moved there only once
+    ``pg_restore`` can read it back."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for left in directory.glob("*.dump.partial"):           # a run stopped part-way
+        left.unlink()
+    url = _libpq_url()
+    database = re.sub(r"[^\w.-]", "_", url.rsplit("/", 1)[-1].split("?", 1)[0]) or "db"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    final = directory / f"{database}-{stamp}-to-{head}.dump"
+    partial = final.with_name(final.name + ".partial")
+    started = time.monotonic()
+    done = subprocess.run(["pg_dump", "--format=custom", f"--file={partial}", f"--dbname={url}"],
+                          capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        partial.unlink(missing_ok=True)
+        raise RuntimeError(f"pg_dump exited {done.returncode}: {done.stderr.strip()[-500:]}")
+    if partial.stat().st_size == 0 or subprocess.run(["pg_restore", "--list", str(partial)],
+                                                     capture_output=True, check=False).returncode != 0:
+        partial.unlink(missing_ok=True)
+        raise RuntimeError("pg_dump wrote a file pg_restore can't read")
+    partial.rename(final)
+    log.info("Backed up to %s (%.1f MB in %.0fs)", final, final.stat().st_size / 1e6,
+             time.monotonic() - started)
+    return final
+
+
+def _prune(directory: Path, keep: int) -> None:
+    """Keep the newest ``keep`` dumps; their names lead with when they were made."""
+    for old in sorted(directory.glob("*.dump"), key=lambda p: p.name.rsplit("-to-", 1)[0])[:-keep or None]:
+        old.unlink()
+        log.info("Removed the older backup %s", old.name)
+
+
+def _upload(path: Path, bucket: str, prefix: str, endpoint_url: str | None, region: str | None) -> None:
+    """Copy ``path`` to an S3-compatible bucket (GCS through its S3 endpoint, with HMAC keys), with
+    the app's client settings: credentials from boto3's chain (``AWS_ACCESS_KEY_ID`` and
+    ``AWS_SECRET_ACCESS_KEY``, or a role). Retention is the bucket's lifecycle rule."""
+    try:
+        import boto3.session
+        from botocore.config import Config
+    except ImportError as error:
+        raise RuntimeError("uploading needs boto3: pip install -r backend/requirements-s3.txt") from error
+    client = boto3.session.Session().client("s3", endpoint_url=endpoint_url or None, region_name=region or None,
+                                            config=Config(signature_version="s3v4",
+                                                          retries={"mode": "standard", "max_attempts": 5},
+                                                          request_checksum_calculation="when_required",
+                                                          response_checksum_validation="when_required"))
+    key = f"{prefix.strip('/')}/{path.name}" if prefix.strip("/") else path.name
+    try:
+        client.upload_file(str(path), bucket, key)
+    except Exception as error:  # boto3 raises many kinds; the message says which
+        raise RuntimeError(f"uploading to s3://{bucket}/{key} failed: {error}") from error
+    log.info("Copied to s3://%s/%s", bucket, key)
 
 
 def _orm_metadata():
@@ -712,6 +816,19 @@ def main() -> int:
     plan.add_argument("--shared-database", action="store_true", help="as `upgrade --shared-database` would")
     plan.add_argument("--rewind-to", metavar="REV", help="as `upgrade --rewind-to REV` would")
 
+    backup = sub.add_parser("backup", help="pg_dump the database before an upgrade changes it")
+    backup.add_argument("--dir", required=True, help="where the dumps go (a volume, to keep them)")
+    backup.add_argument("--keep", type=int, default=5, help="how many dumps to keep there (default 5)")
+    backup.add_argument("--bucket", help="also copy each dump to this S3-compatible bucket")
+    backup.add_argument("--prefix", default="synodic-db-backups", help="key prefix in the bucket")
+    backup.add_argument("--endpoint-url", help="the bucket's endpoint, e.g. https://storage.googleapis.com")
+    backup.add_argument("--region", help="the bucket's region")
+    backup.add_argument("--force", action="store_true",
+                        help="back up even when an upgrade would change nothing")
+    backup.add_argument("--recover", action="store_true", help="plan as `upgrade --recover` would")
+    backup.add_argument("--shared-database", action="store_true",
+                        help="plan as `upgrade --shared-database` would")
+
     down = sub.add_parser("downgrade", help="Run alembic downgrade")
     down.add_argument("--revision", required=True)
 
@@ -751,6 +868,12 @@ def main() -> int:
         return cmd_plan(args.json, recover=args.recover or os.getenv("SYNODIC_UPGRADE_RECOVER") == "true",
                         shared_database=args.shared_database
                         or os.getenv("SYNODIC_SHARED_DATABASE") == "true", rewind_to=args.rewind_to)
+    if args.cmd == "backup":
+        return cmd_backup(args.dir, keep=args.keep, bucket=args.bucket, prefix=args.prefix,
+                          endpoint_url=args.endpoint_url, region=args.region, force=args.force,
+                          recover=args.recover or os.getenv("SYNODIC_UPGRADE_RECOVER") == "true",
+                          shared_database=args.shared_database
+                          or os.getenv("SYNODIC_SHARED_DATABASE") == "true")
     if args.cmd == "downgrade":
         return cmd_downgrade(args.revision)
     if args.cmd == "repair":

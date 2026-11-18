@@ -78,7 +78,7 @@ The guard tests parse files and import only plain configuration modules, so they
 ```bash
 python -m pytest backend/tests/test_alembic_revision_lengths.py \
   backend/tests/test_alembic_single_head.py backend/tests/test_alembic_lineage.py \
-  backend/tests/test_upgrade_presets.py \
+  backend/tests/test_upgrade_presets.py backend/tests/test_helm_backup.py \
   backend/tests/test_additive_migrations_mirror.py \
   backend/tests/test_feature_wiring.py -q --noconftest
 python3 backend/scripts/export_config_reference.py --check
@@ -207,7 +207,7 @@ Open the failed job's log; the last lines name the failing test or file. Then:
 | Pytest settings and markers | `backend/pytest.ini` |
 | Shared backend fixtures | `backend/tests/conftest.py` (`db_session`, `test_client`) |
 | Files the required backend job runs by name | `backend/tests/ci-required-files.txt`, guarded by `backend/tests/test_ci_required_list.py` (entries exist, sorted, no duplicates, and the workflow still reads the list) |
-| Guard tests | `backend/tests/test_alembic_revision_lengths.py`, `test_alembic_single_head.py`, `test_alembic_lineage.py`, `test_upgrade_presets.py`, `test_additive_migrations_mirror.py`, `test_feature_wiring.py` |
+| Guard tests | `backend/tests/test_alembic_revision_lengths.py`, `test_alembic_single_head.py`, `test_alembic_lineage.py`, `test_upgrade_presets.py`, `test_helm_backup.py`, `test_additive_migrations_mirror.py`, `test_feature_wiring.py` |
 | Configuration reference generator | `backend/scripts/export_config_reference.py` |
 | Schema tool | `backend/scripts/upgrade.py` (`upgrade`, `check`, `verify-schema`, `repair`, `current`, `heads`, `history`) |
 | Vitest settings | `frontend/vite.config.ts` (`test` block) |

@@ -174,3 +174,63 @@ def test_built_in_entries_reach_an_existing_database_once_and_an_admins_removal_
     for _ in range(2):
         assert _job(scratch_db, "upgrade").returncode == 0
     assert "workspace:native-query:read" not in _grants(scratch_db, "workspace_viewer")
+
+
+@E2E
+def test_a_backup_is_made_only_when_an_upgrade_would_change_something(scratch_db, tmp_path):
+    script = _script()
+    head = script.get_current_head()
+    assert _job(scratch_db, "upgrade").returncode == 0
+    out = _job(scratch_db, "backup", "--dir", str(tmp_path))
+    assert out.returncode == 0 and "No backup needed" in out.stderr, out.stderr[-2000:]
+    assert list(tmp_path.iterdir()) == []
+
+    # Behind its head: dumped, readable, named for where the upgrade takes it.
+    _sql(scratch_db, f"UPDATE alembic_version SET version_num = '{min(script.get_revision(head).down_revision)}'")
+    _sql(scratch_db, "INSERT INTO alembic_version VALUES ('20261119_1300_merge_member_sets')")
+    out = _job(scratch_db, "backup", "--dir", str(tmp_path), "--keep", "2")
+    assert out.returncode == 0, out.stderr[-2000:]
+    [dump] = list(tmp_path.glob("*.dump"))
+    assert dump.name.endswith(f"-to-{head}.dump") and dump.stat().st_size > 0
+    assert subprocess.run(["pg_restore", "--list", str(dump)], capture_output=True, check=False).returncode == 0
+
+    # Forced, at any time; the newest two kept.
+    for _ in range(2):
+        assert _job(scratch_db, "backup", "--dir", str(tmp_path), "--keep", "2", "--force").returncode == 0
+    dumps = sorted(p.name for p in tmp_path.glob("*.dump"))
+    assert len(dumps) == 2 and dump.name not in dumps
+    assert not list(tmp_path.glob("*.partial"))
+
+
+@E2E
+def test_a_backup_that_fails_says_so_and_leaves_nothing_half_written(scratch_db, tmp_path):
+    assert _job(scratch_db, "upgrade").returncode == 0
+    out = _job(scratch_db, "backup", "--dir", str(tmp_path), "--force",
+               env={"BACKUP_DATABASE_URL": scratch_db.rsplit("/", 1)[0] + "/no_such_database"})
+    assert out.returncode == 1 and "Backup failed: pg_dump exited" in out.stderr, out.stderr[-2000:]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_backup_is_copied_to_the_bucket(tmp_path, monkeypatch):
+    import types
+
+    from backend.scripts import upgrade
+
+    sent = {}
+
+    class Client:
+        def upload_file(self, filename, bucket, key):
+            sent.update(filename=filename, bucket=bucket, key=key)
+
+    session = types.SimpleNamespace(Session=lambda: types.SimpleNamespace(client=lambda *a, **kw: (
+        sent.update(endpoint=kw["endpoint_url"], checksums=kw["config"].request_checksum_calculation), Client())[1]))
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(session=session))
+    monkeypatch.setitem(sys.modules, "boto3.session", session)
+    monkeypatch.setitem(sys.modules, "botocore", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "botocore.config", types.SimpleNamespace(
+        Config=lambda **kw: types.SimpleNamespace(**kw)))
+    dump = tmp_path / "synodic-20261118T200000Z-to-head.dump"
+    dump.write_bytes(b"x")
+    upgrade._upload(dump, "backups", "/synodic-db-backups/", "https://storage.googleapis.com", None)
+    assert sent == {"endpoint": "https://storage.googleapis.com", "checksums": "when_required",
+                    "filename": str(dump), "bucket": "backups", "key": f"synodic-db-backups/{dump.name}"}
