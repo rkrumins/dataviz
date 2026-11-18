@@ -68,7 +68,7 @@ screen.
 | **Layer** | A column of a Context View, holding the entity types or entities placed in it. A layer can carry properties of its own, such as an owner, which its card shows. | [Navigating Layers](/guide/navigating-layers) |
 | **Lineage** | How data flows from where it starts to where it's used. | [Reading Lineage](/guide/reading-lineage) |
 | **Lineage Lens** | A focused picture of one entity's connections over the canvas, walked one hop at a time. Open it with **Focus Lens**, or **Focus Connections** on the right-click menu. | [The Lineage Lens & Context View](/guide/lineage-lens) |
-| **List view** (**Auto-updating** / **Snapshot**) | A view that keeps a list of its members, up to 5,000, made with **Save as view** from a narrowing or a search's matches, kept **As a list · up to 5,000**. **Auto-updating** brings itself up to date when it's opened after its data changed; a **Snapshot** keeps the members it has. Its header chip says which. | [Managing & Sharing Views](/guide/managing-views#views-made-from-a-query) |
+| **List view** (**Auto-updating** / **Snapshot**) | A view that keeps a list of its members, up to 250,000, made with **Save as view** from a narrowing, a trace or a search's matches, kept **As a list of its members**. **Auto-updating** brings itself up to date when it's opened after its data changed; a **Snapshot** keeps the members it has. Its header chip says which. | [Managing & Sharing Views](/guide/managing-views#views-made-from-a-query) |
 
 ## M to R
 

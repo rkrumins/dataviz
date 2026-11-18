@@ -150,7 +150,7 @@ and the **Save as a view** panel, say what went wrong in the server's own words.
 | **An update is waiting for you** | An update would remove at least half of the view, and at least 50 entities, so it waits for someone who can edit the view. The view keeps its members meanwhile. | If you can edit the view, open the chip: *An update would remove 812 of 1,020*. Check the query is still what you want, then choose **Apply** or **Keep as is**. |
 | "This view was just updated. Try again in 20 seconds." | **Refresh now** works at most once every 30 seconds for each view. | Wait as long as it says, then try again. |
 | "The graph is busy right now. Try again in a moment." | The graph is answering too many requests, and the server asked your browser to wait. | Wait. The canvas, **Narrow** and the **Save as a view** preview ask again by themselves when the server allows, and a subset layer still counting **so far** carries on by itself. |
-| **More than a view can hold, so it can’t be saved as it is.** (or "This would hold 6,200 entries…") | A list holds at most 5,000 entries, and this one is over. Nothing was saved. | See [Save as view says "More than a view can hold"](#save-as-view-says-more-than-a-view-can-hold). |
+| **More than a view can hold, so it can’t be saved as it is.** (or "This would hold 260,000 members…") | A list holds at most 250,000 members, and this one is over. Nothing was saved. | See [Save as view says "More than a view can hold"](#save-as-view-says-more-than-a-view-can-hold). |
 
 ---
 
@@ -268,7 +268,7 @@ doesn't include it.
    - No **Import a view** in the Create View wizard — **View versions, import
      and export** (off by default) and **Import views**.
    - A view type missing from the wizard — **View modes**.
-   - No **Narrow**, or no **As a list · up to 5,000** in the **Save as a view**
+   - No **Narrow**, or no **As a list of its members** in the **Save as a view**
      panel — **Narrow: chosen entities and what they reach** (off by default).
    - No **Save as view…** on search results — **Subset views: a search's
      matches as a view** (off by default).
@@ -389,19 +389,19 @@ sooner at busy times.
 
 ### Save as view says "More than a view can hold"
 
-**Likely cause:** kept as a list, a view holds at most 5,000 entries: its
-entities, the containers drawn around them, and anything always included. This
-one is over, so nothing was saved. The panel says by how much, and which of
-these would help:
+**Likely cause:** kept as a list, a view holds at most 250,000 members (your
+administrator can change it with `LIVE_VIEW_MAX_MEMBERS`). This one is over, so
+nothing was saved. The panel says by how much, and which of these would help:
 
 1. Narrow the query, or start from fewer entities.
 2. Reach everything inside them (**All** under **Levels inside them**) rather
-   than a number of levels. Each starting point is then one entry, however much
+   than a number of levels. Each starting point is then one member, however much
    is inside it.
-3. Turn off **Show where they sit**, so the containers around them aren't
-   counted.
-4. For a very large set, choose **Live · any size** under **Keep it**, where
+3. For a very large set, choose **Live · any size** under **Keep it**, where
    it's offered. That makes a subset view, which has no limit.
+4. To take the whole set away rather than keep it as a view, use **Everything it
+   reaches…** in the trace dock, or **Export → With their sources &
+   consumers…** on a search's matches.
 
 See [Keep a narrowing as a view](/guide/exploring-graph#keep-a-narrowing-as-a-view).
 

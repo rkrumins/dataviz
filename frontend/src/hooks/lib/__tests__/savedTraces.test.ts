@@ -84,7 +84,11 @@ describe('the results it keeps', () => {
     hopsUp: i === 0 ? 0 : (i % 7) + 1,
     hopsDown: i % 3 ? null : (i % 7) + 1,
     layer: 'Warehouse',
+    parentUrn: i % 5 ? 'urn:li:container:analytics' : null,
+    parentName: i % 5 ? 'ANALYTICS' : null,
+    parentType: i % 5 ? 'container' : null,
     path: i % 5 ? ['snowflake', 'ANALYTICS'] : [],
+    pathUrns: i % 5 ? ['urn:li:dataPlatform:snowflake', 'urn:li:container:analytics'] : [],
     reachedFrom: i % 2 ? ['urn:seed:a'] : ['urn:seed:a', 'urn:seed:b'],
   }))
   const edges = rows.slice(1).map((r, i) => ({ source: r.urn, target: rows[i]!.urn, type: i % 2 ? 'TRANSFORMS' : null }))
@@ -98,6 +102,19 @@ describe('the results it keeps', () => {
   it('packs far smaller than the rows themselves', async () => {
     const snap = await packTraceSnapshot(rows, edges)
     expect(snap.bytes.byteLength).toBeLessThan(JSON.stringify({ rows, edges }).length / 5)
+  })
+
+  it('a record saved before rows kept their parent still reads, with no parent rather than a guess', async () => {
+    const v1 = {
+      v: 1, urns: ['urn:a'], names: ['a'], types: [['dataset'], [0]], roles: [2], hopsUp: [1], hopsDown: [null],
+      layers: [['Warehouse'], [0]], paths: [['snowflake\u0000ANALYTICS'], [0]], seeds: [], reached: [0],
+      edges: [], edgeTypes: [[], []],
+    }
+    const bytes = new TextEncoder().encode(JSON.stringify(v1))
+    const out = await unpackTraceSnapshot({ v: 1, encoding: 'none', bytes: bytes.buffer, rows: 1, edges: 0 })
+    expect(out?.rows[0]).toMatchObject({
+      urn: 'urn:a', path: ['snowflake', 'ANALYTICS'], pathUrns: [], parentUrn: null, parentName: null, parentType: null,
+    })
   })
 
   it('a record it cannot read is no results, never an error', async () => {

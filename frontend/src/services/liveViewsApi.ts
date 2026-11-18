@@ -33,8 +33,6 @@ function invalidate(viewId: string) {
   void queryClient.invalidateQueries({ queryKey: ['view', viewId] })
 }
 
-/** How long one ask lets the server work out what the sources reach. */
-const RESOLVE_WAIT_MS = 10_000
 /** A backstop, not a budget: at ten seconds an ask, about five hours. */
 const RESOLVE_MAX_ASKS = 2_000
 
@@ -51,7 +49,9 @@ export async function createFromMembers(
   for (let n = 0; n < RESOLVE_MAX_ASKS; n++) {
     const out = await authFetch<ViewWithMembership | MembershipResolving>('/api/v1/views/from-members', {
       method: 'POST',
-      body: JSON.stringify({ ...body, waitMs: body.waitMs ?? RESOLVE_WAIT_MS }),
+      // The server's own wait applies (10 s, then 202): sent by no client, so a server
+      // from before it took one still answers.
+      body: JSON.stringify(body),
       headers: { 'Idempotency-Key': idempotencyKey },
     })
     if (!isResolving(out)) return out

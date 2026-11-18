@@ -119,7 +119,7 @@ export function TraceKeepMenu(props: TraceKeepMenuProps) {
       transition={{ duration: 0.15, ease: 'easeOut' }}
       style={{ position: 'fixed', right: anchor.right, bottom: anchor.bottom, zIndex: 1000 }}
       className={cn(
-        'w-[340px] max-w-[calc(100vw-16px)] rounded-xl overflow-hidden',
+        'w-[380px] max-w-[calc(100vw-16px)] rounded-xl overflow-hidden',
         'bg-canvas-elevated/98 backdrop-blur-2xl',
         'border border-glass-border shadow-glass-lg',
       )}
@@ -141,7 +141,7 @@ export function TraceKeepMenu(props: TraceKeepMenuProps) {
           <FileSpreadsheet className="w-4 h-4 mt-0.5 text-emerald-600 dark:text-emerald-400 flex-shrink-0" />
           <span className="min-w-0">
             <span className="block text-[12.5px] font-medium text-ink">CSV</span>
-            <span className="block text-[10.5px] text-ink-muted">One row per entity — role, hops, layer, path, which seeds reach it</span>
+            <span className="block text-[10.5px] text-ink-muted">One row per entity — role, hops, its layer, parent and path, which seeds reach it</span>
           </span>
         </button>
         <button type="button" className={item} disabled={walking} onClick={() => { exportJson(); onClose() }} data-keep="json">

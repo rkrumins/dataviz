@@ -9,6 +9,75 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Traces you can hand on, take away and keep, and views of a quarter of a million members
+
+A trace of twenty selected tables could be read in the dock and nothing else: no link (a link
+carried one entity), no file, no view, no way to keep it. And a view of a search's sources and
+consumers stopped at 5,000 entries. Now a combined trace shares, exports, becomes a view and is kept
+in the browser with what it found; anything large — the complete trace, a search's matches with
+their lineage, a view of up to 250,000 members — is worked out on the server a step at a time, on
+versioned and unversioned graphs alike.
+
+**Full detail:** `docs/RELEASE_NOTES_2026-11-18_trace-share-export-views.md`.
+
+### Added
+
+- **Share a combined trace.** The link carries every seed (up to 25); one-entity links are
+  unchanged. A link too long to open leaves the open cards out and says so.
+- **Export & save on the trace dock:** CSV and JSON of what the trace shows; **Everything it
+  reaches…**, the complete trace from the server, with its flows on request; **Save as view…**;
+  **Save trace**.
+- **Saved traces**, kept in this browser per user and view with a compressed copy of their results:
+  re-export without a walk, reopen against live data and see what changed since.
+- **Member sets** (`POST /{ws}/graph/member-sets`, `…/members`, `…/download`): a membership spec
+  resolved completely, resumably and shared, up to `MEMBER_SET_MAX_MEMBERS` (1,000,000), streamed
+  as CSV, NDJSON or JSON.
+- **Advanced Search → Export → With their sources & consumers…**, uncapped.
+- **`POST /{ws}/graph/view-members`**: a list view's members, one layer a page at a time.
+- **Search inside a list view of more than 5,000 members** reads its members in bands from
+  `view_members` instead of refusing (FalkorDB).
+- **A view that follows another** (`layout.kind: "follow"`): a list view that is a subset of the
+  view it follows, served that view's layers live and placed as it places them, with members people
+  move or Always include kept on top; searched by its layers; **Waiting to update** when the view
+  it follows changes how it places things. **Save as view…** on a trace chooses it.
+- **Where each entity sits, in every export**: `parentUrn`, `parentName`, `parentType`, `path`
+  and `pathUrns` in the dock's CSV and JSON, saved traces and member-set downloads.
+- **List views' members nest in their containers** (`inLayer` on the member feed).
+
+### Changed
+
+- **List views hold up to `LIVE_VIEW_MAX_MEMBERS` (250,000) members**, counted alone (containers no
+  longer count), kept in a `view_members` table instead of the view's layout. Making, previewing and
+  refreshing a large one answer 202 / `running` with progress until it is worked out; the canvas
+  pages each layer instead of loading every member.
+- Narrow's resolver asks each closure step for 10,000 nodes rather than 2,000, and keeps a node's
+  shortest distance when it is found again nearer.
+- The base view's **Subsets** list shows when either `searchViewsEnabled` or
+  `viewMembershipEnabled` is on, and lists views that follow it.
+
+### Fixed
+
+- **Preview and Save as view answered 422 (`extra_forbidden` on `waitMs`)** against a server
+  older than the browser. The browser no longer sends `waitMs`; a cross-tier fixture pins every
+  request body it builds.
+- Saving a view from inside a subset view no longer fails with "This view has no layers to copy".
+
+### Upgrading
+
+- Migrations `20261118_1000_member_sets` and `20261118_1100_view_members`. The second moves list
+  views' members out of their layouts and marks each to be worked out again on its next open.
+
+### Known limitations
+
+- Neo4j and Spanner have no closure walk: member sets answer 501 there.
+- The canvas's own Narrow still starts from a search's first 5,000 matches; a view saved from it
+  starts from every match. A layer lists 5,000 members on the canvas.
+- Saved traces stay in one browser; member sets are not on the API-key surface yet.
+- A view that follows another re-places its members on its next open after the view it follows
+  changes how it places things, and can't have members moved in it on a draft yet.
+
+---
+
 ## [Unreleased] — Automation that leaves an audit trail, and never blocks people
 
 Integrations that change a versioned graph often left history hard to read: every commit looked

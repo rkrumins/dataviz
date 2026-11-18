@@ -7,12 +7,12 @@
  *  - hydration asks the member feed once per layer and never pages a type;
  *  - what people placed by hand (Always include) still loads by URN;
  *  - a layer pages on by the server's cursor, each row keeping its layer;
- *  - with the preview off the view loads as it did, by placement.
+ *  - with the preview off a view keeps the members it last had.
  */
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { FeedNode, ViewFeedPage, ViewFeedRequest } from '@/types/searchView'
+import type { FeedNode, ViewFeedPage } from '@/types/searchView'
 
 const { mockProvider } = vi.hoisted(() => ({
   mockProvider: {
@@ -97,7 +97,7 @@ describe('member feeds', () => {
     vi.clearAllMocks()
     useFeaturesStore.setState((s) => ({ values: { ...s.values, viewMembershipEnabled: true } }))
     useCanvasStore.getState().setGraph([], [])
-    mockProvider.getNodes.mockImplementation(async (q: { urns?: string[] }) => (q.urns ?? []).map(u => node(u)) as never)
+    mockProvider.getNodes.mockImplementation((async (q: { urns?: string[] }) => (q.urns ?? []).map(u => node(u))) as never)
     mockProvider.viewMembersPage.mockImplementation(async (_v: string, req: { layerId: string; cursor?: string }) => {
       if (req.layerId === 'up') {
         return req.cursor === 'c-1'
@@ -128,10 +128,10 @@ describe('member feeds', () => {
     expect(feed('up')).toMatchObject({ hasMore: false, search: { delivered: 3 } })
   })
 
-  it('with the preview off it loads by placement, as it did', async () => {
+  it('with the preview off it still shows the members it last had', async () => {
     useFeaturesStore.setState((s) => ({ values: { ...s.values, viewMembershipEnabled: false } }))
     await hydrate()
-    expect(mockProvider.viewMembersPage).not.toHaveBeenCalled()
-    expect(urns()).toEqual(['urn:kept'])
+    expect(mockProvider.viewMembersPage).toHaveBeenCalledTimes(2)
+    expect(urns()).toEqual(['urn:d1', 'urn:kept', 'urn:u1', 'urn:u2'])
   })
 })

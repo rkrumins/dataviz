@@ -332,6 +332,15 @@ class ViewFeedRequest(_Base):
     refresh: bool = False
 
 
+class ViewMembersRequest(_Base):
+    """``POST /{ws}/graph/view-members?viewId=`` — one page of one layer of a view made
+    from a query: its members, in name order, from the server's member table. ``cursor``
+    continues the page before; ``limit`` rows a page."""
+    layer_id: str = Field(alias="layerId", min_length=1, max_length=200)
+    cursor: Optional[str] = Field(None, max_length=4096)
+    limit: int = Field(200, ge=1, le=500)
+
+
 class ViewFeedPage(_Base):
     """A page of one layer's matches, as nodes the canvas draws.
 

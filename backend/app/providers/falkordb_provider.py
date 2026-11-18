@@ -6725,6 +6725,9 @@ class FalkorDBProvider(GraphDataProvider):
     #: Read by ``AdvancedSearchService.search``: this provider runs the
     #: uncapped engine (``deep_search_session``).
     supports_search_sessions = True
+    #: Read by ``AdvancedSearchService._members``: a view's members too many to
+    #: list as roots are searched where they are kept (``SearchRunContext.members``).
+    supports_member_scope = True
 
     @_search_reads
     async def deep_search_session(self, query, *, context):
@@ -6757,7 +6760,8 @@ class FalkorDBProvider(GraphDataProvider):
                 return await self._ro_query(cypher, params=params)
 
         return await evaluate_membership(self, scope, items, urns, run=run, timeout_s=5.0,
-                                         data_version=context.data_version)
+                                         data_version=context.data_version,
+                                         members=context.members)
 
     @_search_reads
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
@@ -6809,7 +6813,8 @@ class FalkorDBProvider(GraphDataProvider):
                 return await self._ro_query(cypher, params=params)
 
         return await resolve_refs(self, scope, refs, run=run, data_version=context.data_version,
-                                  confined=confined, with_paths=with_paths)
+                                  confined=confined, with_paths=with_paths,
+                                  members=context.members)
 
     async def deep_search_explain(self, query):
         """Compile-only path. Mirrors ``deep_search`` (lazy import to

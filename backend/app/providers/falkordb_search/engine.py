@@ -61,6 +61,7 @@ from backend.app.providers.falkordb_search.plan import (
     make_plan,
     page_statements,
     raw_probe_statement,
+    read_members,
     tally_statement,
     within_hops,
 )
@@ -140,6 +141,11 @@ FAILED_TTL_S = 120
 
 #: Facets computed in this process, by session, while they run.
 _FACET_TASKS: Dict[str, "asyncio.Task[None]"] = {}
+
+#: Why a search in a view whose members are too many to list as its roots
+#: answers without its facets (other than what its matches sit in).
+FACETS_PAST_THE_CAP = ("This view has too many members for its facets to be counted, so they "
+                       "are left empty — the matches and their count are exact.")
 
 
 async def execute_session_search(
@@ -236,6 +242,7 @@ async def execute_session_search(
         tally=(options.results == "both" and bool(containment)
                and any(a.by == "ancestor" for a in options.aggregations or [])),
         raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
+        members=context.members,
     )
     session, created = await _session_for(provider, query, compiler, store, run, query_id,
                                           k, after, context, deadline, settings)
@@ -247,8 +254,10 @@ async def execute_session_search(
     # from the capped engine's statements, computed beside it.
     capped_specs = [a for a in options.aggregations or [] if a.by != "ancestor"]
     if wants_facets and capped_specs:
-        facets = await _facets(provider, query, capped_specs, session.sid, store, run,
-                               settings)
+        # The capped statements read a view's listed roots alone, never its members.
+        facets = (await _facets(provider, query, capped_specs, session.sid, store, run,
+                                settings)
+                  if context.members is None else {"refused": FACETS_PAST_THE_CAP})
 
     # With a complete page to answer while it runs, this request moves the scan on
     # if it can, and never waits on another request's turn at it.
@@ -353,6 +362,7 @@ async def execute_count_session(
                  if query.scope.scope_mode == "visible" else None),
         within_hops=hops, hop_parts=hop_parts, tail=tuple(compiler.tail),
         raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
+        members=context.members,
     )
     query_id = query_identity(query, context.scope_hash, 0)
     store = store_for(provider)
@@ -410,7 +420,7 @@ async def _session_for(provider, query, compiler, store, run, query_id: str, k: 
         provider, query, compiler,
         run=lambda c, p: run(c, p, max(1.0, statement_s(settings))),
         width=settings.chunk_width, walk_max=settings.walk_max,
-        timeout_s=max(0.5, deadline - time.monotonic()),
+        timeout_s=max(0.5, deadline - time.monotonic()), members=context.members,
     )
     return Session.start(sid, query_id, context.data_version, after, k, plan,
                          scope_hash=context.scope_hash), True
@@ -839,6 +849,9 @@ async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: 
     tallies ancestors — its ``[urn, name, label, entity type, matches]``
     rows (a later page's session counts nothing — the total is page 1's;
     a count session keeps no rows)."""
+    unit = await read_members(unit, ctx)
+    if unit.kind == "members" and not unit.urns:
+        return 0, [], []        # every member of its band is whole, or inside one
     ctx = dataclasses.replace(ctx, clamp_depths=tuple(session.clamp_depths))
     ctx = await unit_context(unit, ctx, run, timeout_s)
     if session.k == 0:

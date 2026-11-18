@@ -157,17 +157,33 @@ async def test_a_set_is_resolved_listed_and_downloaded(client):
     assert "attachment" in file.headers["content-disposition"]
     table = rows(file.text)
     assert table[0] == ["urn", "name", "type", "qualifiedName", "via", "hops", "hopsUp", "hopsDown",
-                        "nearestSeed"]
-    assert table[2] == ["src1", "src1", "thing", "", "upstream", "1", "1", "", "col_a1"]
+                        "nearestSeed", "parentUrn", "parentName", "parentType", "path", "pathUrns"]
+    # Where it sits: col_a1 is in tbl_a, in dom; src1 is at the top of the graph.
+    assert table[1] == ["col_a1", "col_a1", "thing", "", "seed", "", "0", "", "col_a1",
+                        "tbl_a", "tbl_a", "thing", "dom / tbl_a", "dom; tbl_a"]
+    assert table[2] == ["src1", "src1", "thing", "", "upstream", "1", "1", "", "col_a1", "", "", "", "", ""]
 
     lines = (await client.get(url, params={"token": token, "format": "ndjson",
                                            "columns": "entityType,missing"})).text.splitlines()
     assert json.loads(lines[3])["urn"] == "src3" and json.loads(lines[3])["entityType"] == "thing"
     assert json.loads(lines[3])["missing"] is None
+    seed = json.loads(lines[0])
+    assert (seed["path"], seed["pathUrns"], seed["parentType"]) == (["dom", "tbl_a"], ["dom", "tbl_a"], "thing")
+    assert json.loads(lines[1])["path"] == [] and json.loads(lines[1])["parentUrn"] is None
 
     doc = (await client.get(url, params={"token": token, "format": "json"})).json()
     assert doc["meta"]["setId"] == body["setId"] and doc["meta"]["includeEdges"] is True
     assert len(doc["nodes"]) == 4 and len(doc["edges"]) == 3
+
+
+async def test_where_a_member_sits_is_blank_when_the_graph_cannot_say(client):
+    """A reader with no containment walk: the file still downloads, its parent and
+    path cells empty rather than wrong."""
+    client.state.engine = ScopedEngine(chains=False)
+    body = (await resolve(client, {"seeds": {"urns": ["col_a1"]}})).json()
+    table = rows((await client.get(f"{BASE}/{body['setId']}/download",
+                                   params={"token": body["downloadToken"]})).text)
+    assert table[1][9:] == ["", "", "", "", ""]
 
 
 async def test_edges_are_their_own_part(client):

@@ -8,7 +8,11 @@ for ever, and it cannot be deleted in one transaction either. Each pass:
   failed one shortly after it failed — freeing its key, so asking the question
   again starts afresh rather than finding it;
 * deletes up to ``_BATCH`` of one expired set's edges, else its rows, else the set
-  itself once both are gone.
+  itself once both are gone;
+* else up to ``_BATCH`` of one view's members at an epoch nobody needs any more — one
+  its answer was swapped away from, or one a run left behind (nothing changed, it
+  started placing again, it was overtaken) — which the run itself did not finish
+  deleting. A view keeps the epoch its readers see and the one a run is placing.
 
 Each pass is its own short transaction under an advisory lock (``db/advisory.py``),
 so replicas take turns rather than contend for the same rows, and it drains greedily:
@@ -22,11 +26,18 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.advisory import claim_this_pass
-from backend.app.db.models import MemberSetEdgeORM, MemberSetORM, MemberSetRowORM
+from backend.app.db.models import (
+    MemberSetEdgeORM,
+    MemberSetORM,
+    MemberSetRowORM,
+    ViewMemberORM,
+    ViewMembershipStateORM,
+)
+from backend.app.db.repositories import view_members_repo
 from backend.app.db.repositories.view_membership_repo import now_iso
 from backend.app.services.member_sets import store as sets
 
@@ -55,7 +66,7 @@ async def sweep_once(session: AsyncSession, *, batch: int = _BATCH) -> int:
         .order_by(MemberSetORM.updated_at).limit(1)
     )).scalar_one_or_none()
     if set_id is None:
-        return done
+        return done + await _sweep_view_members(session, batch=batch)
     for model in (MemberSetEdgeORM, MemberSetRowORM):
         first = (await session.execute(
             select(func.min(model.seq)).where(model.set_id == set_id))).scalar()
@@ -69,6 +80,27 @@ async def sweep_once(session: AsyncSession, *, batch: int = _BATCH) -> int:
     await session.execute(delete(MemberSetORM).where(MemberSetORM.id == set_id)
                           .execution_options(synchronize_session=False))
     return done + 1
+
+
+async def _sweep_view_members(session: AsyncSession, *, batch: int) -> int:
+    """Up to ``batch`` rows of the first view epoch nobody needs. A view is looked at
+    with index ranges around the epochs it keeps (one per state row: a view made from
+    a query), never by reading its members."""
+    m, s = ViewMemberORM, ViewMembershipStateORM
+    states = (await session.execute(
+        select(s.view_id, s.epoch, s.members_epoch, s.materialize.is_not(None)).order_by(s.view_id))).all()
+    for view_id, epoch, members_epoch, running in states:
+        keep = sorted({e for e in (members_epoch, epoch if running else None) if e is not None})
+        if not keep:
+            other = true()
+        else:
+            other = or_(m.epoch < keep[0], m.epoch > keep[-1],
+                        and_(m.epoch > keep[0], m.epoch < keep[-1]))
+        orphan = (await session.execute(
+            select(m.epoch).where(m.view_id == view_id, other).limit(1))).scalar_one_or_none()
+        if orphan is not None:
+            return await view_members_repo.delete_epoch(session, view_id, orphan, batch=batch)
+    return 0
 
 
 async def run_sweeper(

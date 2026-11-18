@@ -100,7 +100,7 @@ def test_a_schema_left_short_places_it_below_the_migrations_that_make_what_is_mi
     assert upgrade._below_gaps(script, ["20261118_1100_review_rules"], [], gap) == ["20261118_1000_gv_review_records"]
     # Below it on every line it's on, and nothing else moved.
     assert upgrade._below_gaps(script, [head], [], gap) == [
-        "20261113_1400_gv_ps_candidate", "20261118_1000_gv_review_records", "20261118_1000_member_sets"]
+        "20261113_1400_gv_ps_candidate", "20261118_1000_gv_review_records", "20261118_1100_view_members"]
     # Ours it had stamped itself are trusted, not searched.
     assert upgrade._below_gaps(script, [head], [head], gap) is None
     # Made by create_all alone, by no migration: nothing of ours run again would bring it.
