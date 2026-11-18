@@ -37,7 +37,7 @@ from typing import (Any, Awaitable, Callable, Collection, Dict, Iterable, List, 
                     Optional, Sequence, Set, Tuple)
 
 from sqlalchemy import (TIMESTAMP, Boolean, Text, TextClause, any_, bindparam, cast, insert, select, func,
-                        delete, null, literal, text, update, or_, tuple_, and_, case)
+                        delete, null, literal, text, true, update, or_, tuple_, and_, case)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -48,9 +48,10 @@ from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_state
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
+from . import change_sets
 from .change_index import (ROOT, ChangeIndex, ChangeIndexBuilder, ChangeOrigin, ChangeTree, IndexCache,
-                           compact_entries, entry_dict, restore_closure, review_closure, review_requirements,
-                           stat_changes)
+                           classify, compact_entries, entry_dict, restore_closure, review_closure,
+                           review_requirements, stat_changes)
 from .errors import (ChangesRequested, DraftMoved, AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen, ChangeListBusy,
                      ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable, DraftPruned,
                      EdgeEndsMissing, EntityExists, StagedChangesUnsaved, UniqueViolation,
@@ -7931,7 +7932,18 @@ class GraphVersioningService:
         async with lock:
             tree = getattr(index, "_tree", None)
             if tree is None:
-                tree = await self._build_change_tree(graph_id, origin, containment_edge_types, index)
+                def build():
+                    return self._build_change_tree(graph_id, origin, containment_edge_types, index)
+                kept = getattr(index, "kept_as", None)
+                if kept is None:
+                    tree = await build()
+                else:
+                    skey, kept_as = kept
+                    tree = await change_sets.shared(
+                        change_sets.STORE, graph_id, f"{skey}.tree", kept_as, build=build,
+                        dump=change_sets.dump_tree, load=lambda body: change_sets.load_tree(index, body),
+                        size_of=lambda t: len(t.parent_of),
+                        keep_prefix=skey if kept_as != "window" else None)
                 index._tree = tree
         return tree
 
@@ -8293,6 +8305,7 @@ class GraphVersioningService:
 
                 def build():
                     return self._build_draft_change_index(graph_id, branch_id, cset)
+                kept_as = f"draft:{branch_id}"
             else:
                 main_id = await self._window_main(s, graph_id, origin)
                 lo, hi = origin.from_seq, origin.to_seq
@@ -8300,7 +8313,19 @@ class GraphVersioningService:
 
                 def build():
                     return self._build_window_change_index(graph_id, main_id, lo, hi, cset)
-        return await _CHANGE_INDEXES.get(key, build)
+                kept_as = "window"
+        skey = change_sets.key_of(*key, config.CHANGE_LIST_MAX)       # what it lists depends on the cap
+
+        async def build_once() -> ChangeIndex:
+            # Built once for every process, and kept (change_sets.py): read back, or built here
+            # while the others asking wait for it.
+            index = await change_sets.shared(
+                change_sets.STORE, graph_id, skey, kept_as, build=build,
+                dump=change_sets.dump_index, load=change_sets.load_index,
+                size_of=lambda i: len(i.entries), keep_prefix=skey if kept_as != "window" else None)
+            index.kept_as = (skey, kept_as)
+            return index
+        return await _CHANGE_INDEXES.get(key, build_once)
 
     async def _draft_of(self, s, graph_id: str, branch_id: str, viewer: Optional[Viewer]) -> BranchORM:
         """The draft a change list of a branch is of, once the viewer may read it. ``main``'s
@@ -8362,7 +8387,8 @@ class GraphVersioningService:
 
     async def _build_window_change_index(self, graph_id: str, main_id: str, lo: int, hi: int,
                                          cset) -> ChangeIndex:
-        """``main``'s changes in ``(lo, hi]``: the entities its commits there touched
+        """``main``'s changes in ``(lo, hi]``: composed from each revision's own changes, kept once
+        built (:meth:`_composed_window`) — else the entities its commits there touched
         (:meth:`_changed_in_window`), each resolved at both ends from content hashes, a chunk at a
         time. A window past ``CHANGE_LIST_MAX`` entities is counted from what its revisions
         recorded of themselves instead, without reading its entities."""
@@ -8370,22 +8396,135 @@ class GraphVersioningService:
         async with self._bounded_session() as s:
             window, stats = await self._window_commits(s, graph_id, main_id, lo, hi)
             ids: Optional[set] = None
-            if await self._own_change_count(s, graph_id, main_id, lo, hi, cap) <= cap:
-                ids = await self._changed_in_window(s, graph_id, main_id, lo, hi)
-            if ids is None or len(ids) > cap:
+            pairs: Optional[list] = None
+            own = await self._own_change_count(s, graph_id, main_id, lo, hi, cap)
+            if own <= cap:
+                pairs = await self._composed_window(s, graph_id, main_id, lo, hi, own)
+                if pairs is None:
+                    ids = await self._changed_in_window(s, graph_id, main_id, lo, hi)
+            listed = len(pairs) if pairs is not None else len(ids) if ids is not None else cap + 1
+            if listed > cap:
                 create, update, delete = stats
                 return ChangeIndex.counted(
                     {"added": create, "modified": update, "removed": delete},
                     too_large={"changed": max(create + update + delete, cap + 1), "limit": cap},
                     window=window, approximate=window["commitCount"] > 1)
             builder = ChangeIndexBuilder(cset)
-            for chunk in _chunks(list(ids), _IN_LIST_MAX):
-                before = await self._hashes_at(s, graph_id, main_id, chunk, lo)
-                after = await self._hashes_at(s, graph_id, main_id, chunk, hi)
-                await asyncio.to_thread(_add_window_chunk, builder, chunk, before, after)
+            if pairs is not None:
+                await asyncio.to_thread(builder.add_pairs, pairs)
+            else:
+                for chunk in _chunks(list(ids), _IN_LIST_MAX):
+                    before = await self._hashes_at(s, graph_id, main_id, chunk, lo)
+                    after = await self._hashes_at(s, graph_id, main_id, chunk, hi)
+                    await asyncio.to_thread(_add_window_chunk, builder, chunk, before, after)
             index = await asyncio.to_thread(builder.finish, window=window)
             index.end_urns = await self._end_urns(s, graph_id, main_id, index, as_of_seq=hi)
         return index
+
+    # ------------------------------------------------------------------ #
+    # Each revision's own changes, kept: what two revisions compared are  #
+    # composed from (change_sets.py)                                      #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _revision_key(graph_id: str, main_id: str, seq: int) -> str:
+        return change_sets.key_of("revision", graph_id, main_id, seq)
+
+    async def _composed_window(self, s, graph_id: str, main_id: str, lo: int, hi: int,
+                               own: int) -> Optional[List[tuple]]:
+        """``(lo, hi]``'s changes, each entity as it was at ``lo`` and at ``hi`` — composed from
+        each revision's own changes (an entity is as its first revision there found it, and as its
+        last one left it), with no version row read again. The revisions not kept yet are built and
+        kept now (:meth:`_revision_changes`), unless that would read much more than the window
+        itself (``REVISION_SETS_INLINE_FACTOR`` × ``own``, its rows): then None — the caller reads
+        the window directly — and they are kept in the background, for the next compare."""
+        seqs = list(range(lo + 1, hi + 1))
+        keys = {k: self._revision_key(graph_id, main_id, k) for k in seqs}
+        bodies = await change_sets.STORE.get_many(graph_id, list(keys.values()))
+        missing = [k for k in seqs if keys[k] not in bodies]
+        if missing:
+            recorded = (await s.execute(select(CommitORM.stats).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                CommitORM.commit_seq.in_(missing)))).scalars().all()
+            if sum(sum(stat_changes(st)) for st in recorded) > config.REVISION_SETS_INLINE_FACTOR * max(own, 1):
+                # Kept once this window is built, so as not to slow it down.
+                asyncio.current_task().add_done_callback(
+                    lambda _t: self._keep_revisions_later(graph_id, main_id, missing))
+                return None
+        revisions: List[list] = []
+        for k in seqs:
+            if keys[k] in bodies:
+                rows = await asyncio.to_thread(change_sets.load_revision, bodies[keys[k]])
+            else:
+                rows = await self._revision_changes(graph_id, main_id, k)
+            if rows is None:                                 # a revision too large to keep
+                return None
+            revisions.append(rows)
+        return await asyncio.to_thread(_compose_revisions, revisions)
+
+    async def _revision_changes(self, graph_id: str, main_id: str, seq: int) -> Optional[List[list]]:
+        """Revision ``seq`` of ``main``'s own changes — each entity it changed, as it was at
+        ``seq - 1`` and at ``seq`` — built once for every process and kept (change_sets.py). None
+        for one past ``CHANGE_LIST_MAX`` entities, which is not kept."""
+        async def build() -> Optional[List[list]]:
+            cap = config.CHANGE_LIST_MAX
+            async with self._bounded_session() as s:
+                if await self._own_change_count(s, graph_id, main_id, seq - 1, seq, cap) > cap:
+                    return None
+                ids = sorted(await self._changed_in_window(s, graph_id, main_id, seq - 1, seq))
+                if len(ids) > cap:
+                    return None
+                rows: List[list] = []
+                for chunk in _chunks(ids, _IN_LIST_MAX):
+                    before = await self._hashes_at(s, graph_id, main_id, chunk, seq - 1)
+                    after = await self._hashes_at(s, graph_id, main_id, chunk, seq)
+                    rows += [_revision_row(eid, before.get(eid), after.get(eid)) for eid in chunk
+                             if classify(before.get(eid), after.get(eid)) is not None]
+                return rows
+
+        return await change_sets.shared(
+            change_sets.STORE, graph_id, self._revision_key(graph_id, main_id, seq), "revision",
+            build=build, dump=change_sets.dump_revision, load=change_sets.load_revision, size_of=len)
+
+    def _keep_revisions_later(self, graph_id: str, main_id: str, seqs: Sequence[int]) -> None:
+        """Keep these revisions' own changes in the background, newest first (at most 200 at a
+        time), each once however many compares ask for it. Best-effort."""
+        todo = [k for k in sorted(seqs, reverse=True) if (graph_id, k) not in _REVISIONS_KEEPING][:200]
+        if not todo:
+            return
+        _REVISIONS_KEEPING.update((graph_id, k) for k in todo)
+
+        async def run() -> None:
+            try:
+                for k in todo:
+                    await self._revision_changes(graph_id, main_id, k)
+            except Exception:  # noqa: BLE001 — kept when next asked for instead
+                logger.warning("keeping the revisions of %s failed", graph_id, exc_info=True)
+            finally:
+                _REVISIONS_KEEPING.difference_update((graph_id, k) for k in todo)
+        task = asyncio.ensure_future(run())
+        _BACKGROUND.add(task)
+        task.add_done_callback(_BACKGROUND.discard)
+
+    async def keep_change_sets(self, *, graph_id: str, containment_edge_types,
+                               branch_id: Optional[str] = None, seq: Optional[int] = None) -> None:
+        """Build ahead what will be opened next, and keep it for every process (change_sets.py):
+        after ``main`` gains revision ``seq`` (a publish, a merge), that revision's own changes and
+        its change list and tree, as History opens them; after a draft changes (an import), its
+        change list and tree, as its Changes tab opens them. Best-effort: never raises."""
+        try:
+            if seq is not None:
+                async with self._session() as s:
+                    main_id = await self._main_branch_id(s, graph_id)
+                await self._revision_changes(graph_id, main_id, seq)
+                origin = ChangeOrigin(from_seq=seq - 1, to_seq=seq)
+            else:
+                origin = ChangeOrigin(branch_id=branch_id)
+            index = await self._change_index(graph_id, origin, containment_edge_types, None)
+            if index.too_large is None:
+                await self._change_tree(graph_id, origin, containment_edge_types, None)
+        except Exception:  # noqa: BLE001 — built when first opened instead
+            logger.warning("keeping the change list of %s (%s) failed", graph_id,
+                           branch_id or f"revision {seq}", exc_info=True)
 
     async def _end_urns(self, s, graph_id: str, branch_id: str, index: ChangeIndex,
                         as_of_seq: Optional[int] = None) -> Dict[str, str]:
@@ -11907,25 +12046,18 @@ class GraphVersioningService:
         return layers
 
     async def _values_at(self, s, graph_id, branch_id, ids, seq) -> Dict[str, Optional[dict]]:
-        """Latest value (``commit_seq <= seq``) per entity in *ids* — O(ids) via
-        DISTINCT ON (``ix_*_entity_hist``). Deleted → ``None``; absent ids omitted. A fork's
+        """Latest value (``commit_seq <= seq``) per entity in *ids* — O(ids), one index probe each
+        (:func:`_latest_versions`). Deleted → ``None``; absent ids omitted. A fork's
         ``main`` reads its parent's for what it has no row of (:meth:`_layers`)."""
         out: Dict[str, Optional[dict]] = {}
-        id_list = list(ids)
+        id_list = list(dict.fromkeys(ids))
         if not id_list:
             return out
         for gid, bid, at in await self._layers(s, graph_id, branch_id, seq):
             for model in (NodeVersionORM, EdgeVersionORM):
-                # The ids go as one array (``= ANY``), a chunk at a time: an IN list of thousands is
-                # compiled one bind at a time, and a cascade delete can touch tens of thousands.
-                stmt = (
-                    select(model.entity_id, model.op, model.payload)
-                    .where(model.graph_id == gid, model.branch_id == bid,
-                           model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
-                           model.commit_seq <= at)
-                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-                    .distinct(model.entity_id)
-                )
+                # The ids go as one array, a chunk at a time: an IN list of thousands is compiled
+                # one bind at a time, and a cascade delete can touch tens of thousands.
+                stmt = _latest_versions(model, (model.op, model.payload), gid, bid, at)
                 for chunk in _chunks(id_list, _IN_LIST_MAX):
                     for eid, op, payload in (await s.execute(stmt, {"ids": list(chunk)})).all():
                         out[eid] = None if op == "delete" else payload
@@ -11939,28 +12071,21 @@ class GraphVersioningService:
         (deleted, absent, empty- and null-payload ids omitted) — whether a value changed, what it
         is called and where an edge points, told without loading it."""
         out: Dict[str, _Stored] = {}
-        id_list = list(ids)
+        id_list = list(dict.fromkeys(ids))
         if not id_list:
             return out
         # A draft's first read runs this over every id the draft changed, on the web process's
-        # loop: the ids go as one array (``= ANY``), not an IN list compiled one bind at a time,
-        # and the rows come back plain, without the ORM's loading.
+        # loop: the ids go as one array, not an IN list compiled one bind at a time, and the rows
+        # come back plain, without the ORM's loading.
         conn = await s.connection()
         for gid, bid, at in await self._layers(s, graph_id, branch_id, seq):
             seen: set = set()
             for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM)):
                 named = ((model.urn, model.entity_type, null(), null(), model.display_name,
                           model.qualified_name) if kind == "node"
-                         else (null().label("urn"), model.edge_type, model.source_entity_id,
+                         else (null(), model.edge_type, model.source_entity_id,
                                model.target_entity_id, null(), null()))
-                stmt = (
-                    select(model.entity_id, model.op, model.content_hash, *named)
-                    .where(model.graph_id == gid, model.branch_id == bid,
-                           model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
-                           model.commit_seq <= at)
-                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-                    .distinct(model.entity_id)
-                )
+                stmt = _latest_versions(model, (model.op, model.content_hash, *named), gid, bid, at)
                 for chunk in _chunks(id_list, _IN_LIST_MAX):
                     for eid, op, chash, urn, typ, src, tgt, name, qname in (
                             await conn.execute(stmt, {"ids": list(chunk)})).all():
@@ -11979,7 +12104,7 @@ class GraphVersioningService:
         :meth:`_values_at`, for the checks that only need to know what an entity is and where an
         edge points (integrity, typing an edge's ends) and not what it holds."""
         out: Dict[str, Optional[dict]] = {}
-        id_list = list(ids)
+        id_list = list(dict.fromkeys(ids))
         if not id_list:
             return out
         for gid, bid, at in await self._layers(s, graph_id, branch_id, seq):
@@ -11987,14 +12112,7 @@ class GraphVersioningService:
                 named = ((model.urn, model.entity_type, null(), null()) if kind == "node" else
                          (null(), func.coalesce(model.edge_type, model.payload["edge_type"].astext),
                           model.source_entity_id, model.target_entity_id))
-                stmt = (
-                    select(model.entity_id, model.op, model.content_hash, *named)
-                    .where(model.graph_id == gid, model.branch_id == bid,
-                           model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
-                           model.commit_seq <= at)
-                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-                    .distinct(model.entity_id)
-                )
+                stmt = _latest_versions(model, (model.op, model.content_hash, *named), gid, bid, at)
                 for chunk in _chunks(id_list, _IN_LIST_MAX):
                     for eid, op, chash, urn, typ, src, tgt in (
                             await s.execute(stmt, {"ids": list(chunk)})).all():
@@ -13225,6 +13343,23 @@ _PG_MAX_BIND_PARAMS = 32000
 # Max ids in a single ``... IN (:ids)`` predicate (the list dominates the param count;
 # a handful of fixed predicates add the rest) — keeps a cascade's bounded reads safe.
 _IN_LIST_MAX = 20000
+
+
+def _latest_versions(model, columns: Sequence[Any], graph_id: str, branch_id: str, seq: int):
+    """Each of the ids bound as ``ids`` (an array, no repeats), as its newest version row on
+    ``branch_id`` at or before ``seq`` had it: rows ``(entity_id, *columns)``, none for an id with
+    no such row. One backward probe of ``ix_*_entity_hist`` per id, stopping at the first row —
+    where ``DISTINCT ON`` read and sorted every version each entity ever had, on every branch, so
+    its cost grew with the history, not with the ids asked."""
+    ids = func.unnest(bindparam("ids", type_=ARRAY(Text))).table_valued("e").render_derived(name="i")
+    cols = [c.label(f"c{n}") for n, c in enumerate(columns)]
+    latest = (select(*cols)
+              .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                     model.entity_id == ids.c.e, model.commit_seq <= seq)
+              .order_by(model.commit_seq.desc(), model.created_at.desc()).limit(1)
+              .lateral("l"))
+    return select(ids.c.e, *[latest.c[f"c{n}"] for n in range(len(cols))]).select_from(
+        ids.join(latest, true()))
 # Nodes, by id, whose names :meth:`GraphVersioningService.schema_counts` samples per type.
 _SCHEMA_SAMPLE_ROWS = 50_000
 # Graphs whose schema counts this process keeps, for their head at the time (least recent out first).
@@ -13241,6 +13376,47 @@ _HEAD_PAGE = 5000
 
 #: This process's change indexes (change_index.py), bounded by the entries they hold together.
 _CHANGE_INDEXES = IndexCache(lambda: config.CHANGE_INDEX_CACHE_ENTRIES)
+#: Revisions being kept in the background in this process, and the tasks keeping them.
+_REVISIONS_KEEPING: set = set()
+_BACKGROUND: set = set()
+
+
+def _names(v: "_Stored") -> list:
+    return [v.type, v.name, v.qname, v.urn, v.src, v.tgt]
+
+
+def _revision_row(eid: str, before: Optional["_Stored"], after: Optional["_Stored"]) -> list:
+    """One entity a revision changed, as it is kept (``change_sets.RevisionRow``)."""
+    names_after = _names(after) if after is not None else None
+    names_before = _names(before) if before is not None else None
+    return [eid, (after or before).kind, before.content_hash if before is not None else None,
+            after.content_hash if after is not None else None, names_after,
+            names_before if names_before != names_after else None]
+
+
+def _stored_of(kind: str, chash: Optional[str], names: Optional[list]) -> Optional["_Stored"]:
+    if chash is None:
+        return None
+    typ, name, qname, urn, src, tgt = names
+    return _Stored(kind, chash, urn, typ, src, tgt, name, qname)
+
+
+def _compose_revisions(revisions: Sequence[Sequence[list]]) -> List[tuple]:
+    """Consecutive revisions' own changes as one window's: each entity as its first revision there
+    found it and as its last one left it — ``(entity_id, before, after)``, each a :class:`_Stored`
+    or None. Pure CPU, run in a thread."""
+    first: Dict[str, tuple] = {}
+    last: Dict[str, tuple] = {}
+    for rows in revisions:
+        for eid, kind, before, after, names_after, names_before in rows:
+            if eid not in first:
+                first[eid] = (kind, before, names_before if names_before is not None else names_after)
+            last[eid] = (after, names_after)
+    out = []
+    for eid, (kind, before, names_before) in first.items():
+        after, names_after = last[eid]
+        out.append((eid, _stored_of(kind, before, names_before), _stored_of(kind, after, names_after)))
+    return out
 #: History calendars by (graph, main head, time zone, view): a new revision moves the head, so an
 #: answer is never served for a head it was not counted at.
 _HISTORY_MONTHS: "OrderedDict[tuple, Dict[str, object]]" = OrderedDict()

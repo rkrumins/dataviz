@@ -472,6 +472,7 @@ class PurgeRunner:
                 f'DELETE FROM "{sch}"."review_decisions" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."review_requests" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."review_events" WHERE graph_id = :g',
+                f'DELETE FROM "{sch}"."change_sets" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."merge_requests" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."branches" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."projection_state" WHERE graph_id = :g',

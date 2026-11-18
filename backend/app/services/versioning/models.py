@@ -29,6 +29,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     PrimaryKeyConstraint,
     Text,
     UniqueConstraint,
@@ -419,6 +420,26 @@ class ReviewEventORM(VersioningBase):
         Index("ix_re_pr", "pr_id", "created_at"),
         Index("ix_re_graph", "graph_id"),
     )
+
+
+class ChangeSetORM(VersioningBase):
+    """A change list built once and kept for every process to read (``change_sets.py``): a draft's
+    changes as of its head, a window of ``main``'s revisions, the containment tree of either, or
+    one revision's changes with each entity as it was before and after — what any two revisions
+    compared are composed from. ``key`` names exactly what it is of (a draft's head, a window's two
+    revisions, the containment types it was laid out by); ``origin`` groups a draft's versions, so
+    a newer one replaces the older (20261119_1100_gv_change_sets)."""
+
+    __tablename__ = "change_sets"
+
+    graph_id = Column(Text, primary_key=True)
+    key = Column(Text, primary_key=True)
+    origin = Column(Text, nullable=False)                # draft:<branch> | window | revision
+    built_at = Column(Text, nullable=False, default=_now)
+    size = Column(Integer, nullable=False)               # its entries
+    body = Column(LargeBinary, nullable=False)           # zlib-compressed JSON (change_sets.py)
+
+    __table_args__ = _plain(Index("ix_cs_origin", "graph_id", "origin", "built_at"))
 
 
 class ProjectionStateORM(VersioningBase):
