@@ -182,8 +182,9 @@ The Postgres database that holds users, workspaces, views and settings. Per-role
 | `MIGRATION_LOCK_TIMEOUT` | `10s` | `backend/alembic/env.py` |
 | `MIGRATION_SQL_LOG` | — | `backend/alembic/env.py` |
 | `MIGRATION_STATEMENT_TIMEOUT` | `0` | `backend/alembic/env.py` |
-| `SYNODIC_BUILD_REF` | `?` / — *(differs by call site)* | `backend/app/db/migration_records.py`, `backend/scripts/upgrade.py` |
-| `SYNODIC_BUILD_SHA` | — | `backend/app/db/migration_records.py`, `backend/scripts/upgrade.py` |
+| `SYNODIC_BUILD_ON_MAIN` | — | `backend/app/db/schema_plan.py` |
+| `SYNODIC_BUILD_REF` | `?` / — *(differs by call site)* | `backend/app/db/migration_records.py`, `backend/app/db/schema_plan.py` |
+| `SYNODIC_BUILD_SHA` | — | `backend/app/db/migration_records.py`, `backend/app/db/schema_plan.py` |
 | `VIEWS_BATCH_ENRICH` | `true` | `backend/app/db/repositories/view_repo.py` |
 
 ## Redis
@@ -895,7 +896,6 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | `SEED_SCENARIOS` | `finance,ecommerce` | `backend/scripts/docker_seed.py` |
 | `SYNODIC_API_KEY` | — (secret, set your own) | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_BASE_URL` | `http://localhost:8000` | `backend/scripts/publish_view_library.py` |
-| `SYNODIC_BUILD_ON_MAIN` | — | `backend/scripts/upgrade.py` |
 | `SYNODIC_EMAIL` | — | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_PASSWORD` | — (secret, set your own) | `backend/scripts/bench_versioning.py`, `backend/scripts/publish_view_library.py` |
 | `SYNODIC_SHARED_DATABASE` | — | `backend/scripts/upgrade.py` |

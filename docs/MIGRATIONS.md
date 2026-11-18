@@ -256,6 +256,16 @@ python -m backend.scripts.other_lines
 - `20261113_1000_gv_ps_served_fill` … `20261113_1400_gv_ps_candidate` came into `main` this way, from #670.
 - `20261119_1400_merge_ps_build` joins them.
 
+## Seeing what an upgrade would do first
+
+`synodic-upgrade plan` reads the database and changes nothing: no lock, no writes. It reports what `upgrade` would do, because the decision is the Job's own (`backend/app/db/schema_plan.py`):
+- **The verdict:** refused (and why), a fresh install, up to date, or an upgrade.
+- **Placement:** for a database another build stamped, where it would be placed, and how.
+- **The migrations** an upgrade would run, in the order it would run them.
+- **What to know first:** a migration changed since it ran, a placement left unchecked, an unrecorded build on a shared database.
+
+It takes the same `--recover`, `--shared-database` and `--rewind-to` as `upgrade`, reads the same variables, and exits 1 when the upgrade would refuse. `--json` prints the plan for a script or a pipeline.
+
 ## Only builds from main migrate a shared database
 
 A branch's build that migrates a database others use stamps it with revisions `main` may never have. That is how every foreign stamp above came about. So the Job holds a shared database to `main`:
@@ -280,6 +290,7 @@ This is not the old recovery. `env.py` used to "recover" by stamping back to `00
 ## Commands
 
 ```bash
+synodic-upgrade plan                       # what `upgrade` would do now, changing nothing (--json; exit 1 if it would refuse)
 synodic-upgrade upgrade                    # to every head (fast path on a virgin database)
 synodic-upgrade upgrade --no-fast-path     # force the chain even on a virgin database
 synodic-upgrade upgrade --rewind-to REV    # a database another build moved on: place it at REV first
