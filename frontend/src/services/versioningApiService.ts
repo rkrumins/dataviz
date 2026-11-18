@@ -589,8 +589,45 @@ export interface PullRequest {
   /** every actor id this PR references (actor/reviewers/approvedBy/mergedBy/closedBy/
    *  sourceBranchOwner) → resolved display name; unresolvable ids are absent. */
   userNames?: Record<string, string>
+  /** Every group id it names (a reviewer that is a group) → its name. */
+  groupNames?: Record<string, string>
   /** The single-PR read only: what the reader may do with it, and why not. */
   viewerCan?: ReviewViewerCan | null
+  /** The single-PR read: where its review stands — approvals, each reviewer, changes asked for,
+   *  open threads, and the reader's own part in it. Absent from servers that predate it. */
+  review?: ReviewState | null
+}
+
+/** Where a review stands, as the server counts it. */
+export interface ReviewState {
+  /** How many approvals it needs; 0: everyone asked must approve. */
+  requiredApprovals: number
+  approvals: { required: number; have: number; satisfied: boolean }
+  reviewers: ReviewerState[]
+  /** Changes asked for, each with whether it still holds (the draft has not changed since). */
+  changeRequests: Array<{ by: string; at: string; reason?: string | null; holds: boolean }>
+  /** Open threads, and whether they hold the merge until resolved. */
+  threads: { open: number; holdMerge: boolean }
+  /** The reader's own part. */
+  you?: {
+    requested: boolean
+    needsReview: boolean
+    /** It changed since they last reviewed it. */
+    updatedSinceReviewed: boolean
+    verdict?: 'approve' | 'request_changes' | 'comment' | null
+    reviewedAt?: string | null
+  }
+}
+
+/** One reviewer asked, and where they stand: approved (an earlier version, when it changed since),
+ *  asked for changes, commented, or not yet. */
+export interface ReviewerState {
+  type: 'user' | 'group'
+  id: string
+  state: 'approved' | 'approved_earlier' | 'changes_requested' | 'commented' | 'waiting'
+  by?: string | null
+  at?: string | null
+  requestedAt: string
 }
 
 /** Whether a review's reader may approve it and merge it, decided as the server decides; a reason
@@ -611,6 +648,13 @@ export interface ReviewViewerCan {
    *  a draft's review), and why not: `fork_review` or an approve refusal. */
   decide?: boolean
   decideReason?: string | null
+  /** Whether the reader may ask for changes, and why not. */
+  requestChanges?: boolean
+  requestChangesReason?: string | null
+  /** Whether the reader may change who reviews it. */
+  editReviewers?: boolean
+  /** Whether the reader may withdraw the changes they asked for. */
+  withdraw?: boolean
 }
 
 /** A review decided change by change, refused: `decision_conflict` (it would reverse a decision

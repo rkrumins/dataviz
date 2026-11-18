@@ -47,15 +47,7 @@ import { MOTION } from '@/lib/motion'
 import { ReviewDiscussion } from '../comments/ReviewDiscussion'
 import { useReviewCommentCounts } from '../comments/useReviewComments'
 import { useReviewActions } from '../hooks/useReviewActions'
-
-/** " by 3 changes people made" — what holds a draft's review back from main; people's changes
- *  are what make it pull, so they are what it counts when the server says. */
-function behindText(pr: { behindBy?: number | null; behindByPeople?: number | null }): string {
-  const people = pr.behindByPeople ?? 0
-  if (people > 0) return ` by ${people} change${people === 1 ? '' : 's'} people made`
-  const n = pr.behindBy ?? 0
-  return n > 0 ? ` by ${n} commit${n === 1 ? '' : 's'}` : ''
-}
+import { behindText } from '../page/readiness'
 
 function Section({ icon: Icon, title, right, children }: {
   icon: React.ComponentType<{ className?: string }>; title: string; right?: React.ReactNode; children: React.ReactNode
