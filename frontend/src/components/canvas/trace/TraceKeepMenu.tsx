@@ -119,7 +119,7 @@ export function TraceKeepMenu(props: TraceKeepMenuProps) {
       transition={{ duration: 0.15, ease: 'easeOut' }}
       style={{ position: 'fixed', right: anchor.right, bottom: anchor.bottom, zIndex: 1000 }}
       className={cn(
-        'w-[340px] max-w-[calc(100vw-16px)] rounded-xl overflow-hidden',
+        'w-[380px] max-w-[calc(100vw-16px)] rounded-xl overflow-hidden',
         'bg-canvas-elevated/98 backdrop-blur-2xl',
         'border border-glass-border shadow-glass-lg',
       )}
