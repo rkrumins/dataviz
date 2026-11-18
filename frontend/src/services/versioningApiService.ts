@@ -1509,6 +1509,10 @@ export interface DraftsPolicySettings {
   levels: DraftLevels | null
   selfApproval: boolean | null
   selfMerge: boolean | null
+  /** How many approvals a review needs: 0, everyone asked; N, any N that still stand. */
+  requiredApprovals: number | null
+  /** Whether open threads hold a review's merge until they are resolved. */
+  threadsHold: boolean | null
 }
 
 /** What holds, with the level each field came from (`data_source`, `workspace` or `default`). */
@@ -1517,6 +1521,8 @@ export interface EffectiveDraftsPolicy {
   levels: DraftLevels
   selfApproval: boolean
   selfMerge: boolean
+  requiredApprovals: number
+  threadsHold: boolean
   sources: Partial<Record<keyof DraftsPolicySettings, 'data_source' | 'workspace' | 'default'>>
 }
 

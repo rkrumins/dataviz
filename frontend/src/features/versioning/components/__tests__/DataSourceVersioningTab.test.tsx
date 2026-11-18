@@ -468,10 +468,13 @@ describe('DataSourceVersioningTab — forks', () => {
 describe('DataSourceVersioningTab — drafts and reviews', () => {
   beforeEach(() => {
     dsPolicy = {
-      overrides: { defaultVisibility: null, levels: 'public_only', selfApproval: null, selfMerge: null },
-      workspace: { defaultVisibility: 'private', levels: null, selfApproval: false, selfMerge: null },
+      overrides: { defaultVisibility: null, levels: 'public_only', selfApproval: null, selfMerge: null,
+        requiredApprovals: null, threadsHold: null },
+      workspace: { defaultVisibility: 'private', levels: null, selfApproval: false, selfMerge: null,
+        requiredApprovals: 2, threadsHold: null },
       effective: {
         defaultVisibility: 'public', levels: 'public_only', selfApproval: false, selfMerge: true,
+        requiredApprovals: 2, threadsHold: false,
         sources: { defaultVisibility: 'data_source', levels: 'data_source', selfApproval: 'workspace', selfMerge: 'default' },
       },
     }
@@ -484,6 +487,7 @@ describe('DataSourceVersioningTab — drafts and reviews', () => {
     expect(screen.getByLabelText('Whoever opens a review may approve it')).toHaveDisplayValue('Use the workspace’s setting (No)')
     // The workspace sets none: it takes the default.
     expect(screen.getByLabelText('Whoever opens a review may merge it')).toHaveDisplayValue('Use the workspace’s setting (Yes)')
+    expect(screen.getByLabelText('Approvals a review needs')).toHaveDisplayValue('Use the workspace’s setting (2 approvals)')
     expect(screen.getByText('Drafts may only be public, so new drafts start public.')).toBeInTheDocument()
   })
 
