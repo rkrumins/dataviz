@@ -85,7 +85,9 @@ async def _policy_run(monkeypatch) -> None:
             pr = await review(reviewers=["dave"])
             assert await can(pr, "alice") == {"approve": False, "merge": True, "approveReason": "self_review",
                                               "mergeReason": None, "comment": True, "commentReason": None,
-                                              "moderate": True, "decide": False, "decideReason": "self_review"}
+                                              "moderate": True, "decide": False, "decideReason": "self_review",
+                                              "requestChanges": False, "requestChangesReason": "self_review",
+                                              "editReviewers": True, "withdraw": False}
             r = await approve(pr, "alice")
             assert (r.status_code, r.json()["detail"]["code"]) == (403, "self_review"), r.text
             assert (await approve(pr, "dave")).status_code == 200
@@ -97,7 +99,9 @@ async def _policy_run(monkeypatch) -> None:
             pr = await review()
             assert await can(pr, "alice") == {"approve": True, "merge": False, "approveReason": None,
                                               "mergeReason": "self_merge", "comment": True, "commentReason": None,
-                                              "moderate": True, "decide": True, "decideReason": None}
+                                              "moderate": True, "decide": True, "decideReason": None,
+                                              "requestChanges": True, "requestChangesReason": None,
+                                              "editReviewers": True, "withdraw": False}
             assert (await can(pr, "pat"))["merge"] is True
             assert (await can(pr, "bob"))["merge"] is True
             r = await c.post(f"{V1}/merge-requests/{pr}/merge", json={"message": "m"}, headers=h("alice"))
@@ -111,7 +115,9 @@ async def _policy_run(monkeypatch) -> None:
             # A merged review takes neither; without publish, merge isn't anyone's, whatever the policy.
             assert await can(pr, "carol") == {"approve": False, "merge": False, "approveReason": "merged",
                                               "mergeReason": "merged", "comment": True, "commentReason": None,
-                                              "moderate": True, "decide": False, "decideReason": "merged"}
+                                              "moderate": True, "decide": False, "decideReason": "merged",
+                                              "requestChanges": False, "requestChangesReason": "merged",
+                                              "editReviewers": False, "withdraw": False}
             pr2 = await review()
             r = await c.get(f"{V1}/merge-requests/{pr2}", headers=h("carol", publish=False))
             assert r.json()["viewerCan"]["mergeReason"] == "publish_required", r.text

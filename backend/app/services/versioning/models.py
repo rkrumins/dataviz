@@ -358,6 +358,69 @@ class ReviewDecisionORM(VersioningBase):
     )
 
 
+#: A review's subjects: a person, or a workspace group any of whose members answers for it.
+REVIEW_SUBJECT_TYPES = ("user", "group")
+#: What can happen on a review (``ck_re_kind``): who is asked changes, someone gives their review
+#: (with its verdict), or takes their verdict back. WIDEN-ONLY.
+REVIEW_EVENT_KINDS = ("requested", "unrequested", "re_requested", "reviewed", "withdrew")
+REVIEW_VERDICTS = ("approve", "request_changes", "comment")
+
+
+class ReviewRequestORM(VersioningBase):
+    """Who a review asks to review it: a person, or a group (any member answers for it). Asked
+    again, ``requested_at`` moves on, so the review is back in their queue. ``merge_requests.reviewers``
+    mirrors the people asked, for the reads that check who may see a private draft
+    (20261118_1000_gv_review_records)."""
+
+    __tablename__ = "review_requests"
+
+    pr_id = Column(Text, primary_key=True)
+    subject_type = Column(Text, primary_key=True)        # user | group
+    subject_id = Column(Text, primary_key=True)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    requested_by = Column(Text, nullable=True)
+    requested_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        CheckConstraint("subject_type IN (" + ",".join(f"'{v}'" for v in REVIEW_SUBJECT_TYPES) + ")",
+                        name="ck_rr_subject_type"),
+        Index("ix_rr_subject", "subject_type", "subject_id"),
+        Index("ix_rr_graph", "graph_id"),
+    )
+
+
+class ReviewEventORM(VersioningBase):
+    """What happened on a review, in order, never rewritten: who was asked (``subjects``), who gave
+    their review — a verdict (approve, request changes, or a comment), a summary (``body``), the
+    draft's head they reviewed, the group requests an approval answers for, and what they did
+    (``tally``) — and who took their verdict back. A reviewer's standing (``review_state``) is read
+    from their latest verdict against the draft's head (20261118_1000_gv_review_records)."""
+
+    __tablename__ = "review_events"
+
+    id = Column(Text, primary_key=True, default=lambda: prefixed_id("rev"))
+    pr_id = Column(Text, nullable=False)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    actor = Column(Text, nullable=False)
+    kind = Column(Text, nullable=False)
+    verdict = Column(Text, nullable=True)
+    body = Column(Text, nullable=True)
+    head_commit_id = Column(Text, nullable=True)
+    head_seq = Column(BigInteger, nullable=True)
+    subjects = Column(JSONB, nullable=True)              # [{type, id}] who was asked / not
+    groups = Column(JSONB, nullable=True)                # an approval: the group requests it answers
+    tally = Column(JSONB, nullable=True)                 # {accepted, rejected, threads} at the time
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        CheckConstraint("kind IN (" + ",".join(f"'{v}'" for v in REVIEW_EVENT_KINDS) + ")", name="ck_re_kind"),
+        CheckConstraint("verdict IS NULL OR verdict IN (" + ",".join(f"'{v}'" for v in REVIEW_VERDICTS) + ")",
+                        name="ck_re_verdict"),
+        Index("ix_re_pr", "pr_id", "created_at"),
+        Index("ix_re_graph", "graph_id"),
+    )
+
+
 class ProjectionStateORM(VersioningBase):
     """FalkorDB projection watermark + placement/eviction state per graph
     (plan §5, §16.5 #9). Drives the read watermark and bounded-staleness."""
@@ -1087,6 +1150,10 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261117_1500_gv_mr_sendback.
     _bounded_step(conn, "merge_requests.changes_requested was not added",
                   lambda: ensure_mr_changes_requested_column(conn), required=True)
+    # 20261118_1000_gv_review_records. Required: until a review's approvals are carried over, its
+    # merge gate would not see them.
+    _bounded_step(conn, "the review records were not carried over",
+                  lambda: ensure_review_records(conn), required=True)
     # 20261018_1100_gv_ps_retired.
     _bounded_step(conn, "the retired_keys column was not added",
                   lambda: ensure_ps_retired_keys_column(conn), required=True)
@@ -1376,6 +1443,57 @@ def ensure_mr_approvals_column(conn) -> None:
     if "approvals" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."merge_requests" ADD COLUMN IF NOT EXISTS approvals JSONB'))
+
+
+def ensure_review_records(conn) -> None:
+    """Carry every review's reviewers, approvals and request for changes from the columns that held
+    them (``reviewers``, ``approved_by``/``approvals``, ``changes_requested``) into
+    ``review_requests`` and ``review_events``, which hold them from now on. Idempotent: each
+    carried event has an id derived from what it carries, and a review that already has a
+    request-kind event keeps the reviewers it has — someone removed since is not brought back. A
+    no-op without the tables. ``conn`` is a synchronous connection."""
+    inspector = sa_inspect(conn)
+    if not (inspector.has_table("merge_requests", schema=_SCHEMA)
+            and inspector.has_table("review_requests", schema=_SCHEMA)
+            and inspector.has_table("review_events", schema=_SCHEMA)):
+        return
+    mr, rr, re_ = (f'"{_SCHEMA}"."{t}"' for t in ("merge_requests", "review_requests", "review_events"))
+    untouched = (f"NOT EXISTS (SELECT 1 FROM {re_} e WHERE e.pr_id = m.id "
+                 "AND e.kind IN ('requested', 'unrequested', 're_requested'))")
+    # A list column may hold JSON null, or anything at all: only an array's elements are read (SQL
+    # does not promise to test the type first, so each read is guarded on its own).
+    def arr(col: str) -> str:
+        return f"(CASE WHEN jsonb_typeof({col}) = 'array' THEN {col} ELSE '[]'::jsonb END)"
+    asked = f"jsonb_array_length({arr('m.reviewers')}) > 0"
+    conn.execute(text(
+        f"INSERT INTO {rr} (pr_id, subject_type, subject_id, graph_id, requested_by, requested_at) "
+        f"SELECT m.id, 'user', r.value #>> '{{}}', m.target_graph_id, m.actor, m.created_at "
+        f"FROM {mr} m CROSS JOIN LATERAL jsonb_array_elements({arr('m.reviewers')}) r "
+        f"WHERE {asked} AND {untouched} ON CONFLICT DO NOTHING"))
+    conn.execute(text(
+        f"INSERT INTO {re_} (id, pr_id, graph_id, actor, kind, subjects, created_at) "
+        f"SELECT 'rev_' || md5(m.id || '/legacy-requested'), m.id, m.target_graph_id, "
+        f"coalesce(m.actor, 'system'), 'requested', "
+        f"(SELECT jsonb_agg(jsonb_build_object('type', 'user', 'id', r.value #>> '{{}}')) "
+        f" FROM jsonb_array_elements({arr('m.reviewers')}) r), m.created_at "
+        f"FROM {mr} m WHERE {asked} AND {untouched} ON CONFLICT (id) DO NOTHING"))
+    conn.execute(text(
+        f"INSERT INTO {re_} (id, pr_id, graph_id, actor, kind, verdict, head_commit_id, head_seq, created_at) "
+        f"SELECT 'rev_' || md5(m.id || ':' || (a.value #>> '{{}}') || '/legacy-approve'), m.id, "
+        f"m.target_graph_id, a.value #>> '{{}}', 'reviewed', 'approve', "
+        f"m.approvals -> (a.value #>> '{{}}') ->> 'headCommitId', "
+        f"(m.approvals -> (a.value #>> '{{}}') ->> 'headSeq')::bigint, "
+        f"coalesce(m.approvals -> (a.value #>> '{{}}') ->> 'at', m.updated_at) "
+        f"FROM {mr} m CROSS JOIN LATERAL jsonb_array_elements({arr('m.approved_by')}) a "
+        f"ON CONFLICT (id) DO NOTHING"))
+    conn.execute(text(
+        f"INSERT INTO {re_} (id, pr_id, graph_id, actor, kind, verdict, body, head_commit_id, head_seq, created_at) "
+        f"SELECT 'rev_' || md5(m.id || ':' || (m.changes_requested ->> 'by') || '/legacy-changes'), m.id, "
+        f"m.target_graph_id, m.changes_requested ->> 'by', 'reviewed', 'request_changes', "
+        f"m.changes_requested ->> 'reason', m.changes_requested ->> 'headCommitId', "
+        f"(m.changes_requested ->> 'headSeq')::bigint, coalesce(m.changes_requested ->> 'at', m.updated_at) "
+        f"FROM {mr} m WHERE m.changes_requested ->> 'by' IS NOT NULL "
+        f"ON CONFLICT (id) DO NOTHING"))
 
 
 #: ``commits``' provenance columns (``20261110_1000_gv_commit_prov``): nullable, so adding one is a

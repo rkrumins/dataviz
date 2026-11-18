@@ -67,7 +67,8 @@ from .ids import derived_entity_id, new_entity_id, prefixed_id, uuid_urn
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
-from . import main_activity, provenance
+from . import main_activity, provenance, review_state
+from .review_state import ReviewRule
 from .provenance import commit_provenance
 from .ontology import (
     Ontology, OntologyRules, canonicalize_payload_types,
@@ -85,7 +86,11 @@ from .models import (
     MergeRequestORM,
     NodeVersionORM,
     ProjectionStateORM,
+    ReviewCommentORM,
     ReviewDecisionORM,
+    ReviewEventORM,
+    ReviewRequestORM,
+    REVIEW_VERDICTS,
     WorkingChangeORM,
     _now,
 )
@@ -471,14 +476,24 @@ class OntologyViolation(RuntimeError):
 
 
 class ApprovalRequired(RuntimeError):
-    """A PR's required reviewers haven't all approved yet — merge is blocked. ``stale`` are those
-    of them whose approval was of an earlier version of the PR."""
+    """A PR's approvals don't meet its rule yet — merge is blocked. ``pending``: those asked who
+    haven't approved (a group as ``group:<id>``); ``stale``: those of them whose approval was of an
+    earlier version of the PR; ``required`` / ``have``: approvals needed, and standing."""
 
-    def __init__(self, pr_id: str, pending, stale=()):
+    def __init__(self, pr_id: str, pending, stale=(), required: int = 0, have: int = 0):
         super().__init__(f"pr {pr_id} needs approval from {pending}")
         self.pr_id = pr_id
         self.pending = list(pending)
         self.stale = list(stale)
+        self.required, self.have = required, have
+
+
+class ThreadsOpen(RuntimeError):
+    """The data source's policy holds a review while it has open threads: resolve them first."""
+
+    def __init__(self, pr_id: str, count: int):
+        super().__init__(f"pr {pr_id} has {count} open thread(s)")
+        self.pr_id, self.count = pr_id, count
 
 
 # Peak bytes of RSS `sync_ingest` costs per entity, MEASURED — not guessed. A 478,430-entity
@@ -3571,6 +3586,8 @@ class GraphVersioningService:
             )
             s.add(pr)
             await s.flush()
+            if revs:
+                await self._set_requests(s, pr, users=revs, actor=actor)
             return pr.id
 
     @staticmethod
@@ -4080,52 +4097,98 @@ class GraphVersioningService:
 
     async def approve_pr(
         self, *, pr_id: str, actor: str, expected_head_commit_id: Optional[str] = None,
-        self_approval: bool = True,
+        self_approval: bool = True, groups: Sequence[str] = (), rule: ReviewRule = ReviewRule(),
     ) -> dict:
-        """Record ``actor``'s approval of a PR. Whoever opened it approves it too, unless its data
-        source's policy says someone else does (``self_approval`` False: :class:`SelfReview`); its
-        draft's owner, when someone else opened it, approves either way. Once every requested
-        reviewer has approved,
-        ``approval_status`` flips to ``approved`` (and an otherwise-mergeable PR to status
-        ``approved``).
+        """``actor`` approves a PR: :meth:`submit_review` with the verdict ``approve``."""
+        return await self.submit_review(pr_id=pr_id, actor=actor, verdict="approve",
+                                        expected_head_commit_id=expected_head_commit_id,
+                                        self_approval=self_approval, groups=groups, rule=rule)
 
-        The approval is of the source branch's head now, and records that commit's seq, never
-        a later commit's: a content commit after it makes it stale (:meth:`_approvals`).
-        ``expected_head_commit_id`` is the head the reviewer saw; :class:`HeadMoved` when the
-        branch has moved on since.
+    async def submit_review(
+        self, *, pr_id: str, actor: str, verdict: str, body: Optional[str] = None,
+        expected_head_commit_id: Optional[str] = None, self_approval: bool = True,
+        groups: Sequence[str] = (), rule: ReviewRule = ReviewRule(),
+    ) -> dict:
+        """``actor`` gives their review of a PR, of the source branch's head now: a verdict —
+        ``approve``; ``request_changes``, which sends a draft's review back (it doesn't merge until
+        the draft changes, or they take it back); or ``comment``, feedback with no verdict — and a
+        summary (``body``). A verdict replaces their earlier one: approving takes back their request
+        for changes, and asking for changes takes back their approval. What they did is recorded
+        with it (their decisions and threads on the review).
 
-        The PR row is locked for the transaction, so a second reviewer approving at the same
-        moment waits and adds to this approval rather than writing over it. A service account
-        never approves (:class:`PersonRequired`): its managers would approve through it."""
+        Whoever opened a PR approves it too, unless its data source's policy says someone else does
+        (``self_approval`` False: :class:`SelfReview`). An approval answers for the groups asked that
+        ``actor`` is in (``groups``: theirs). ``expected_head_commit_id`` is the head the reviewer saw
+        (:class:`HeadMoved` for a verdict when the branch has moved on since). A fork's review is
+        sent back by closing it (``fork_review``). A service account never reviews
+        (:class:`PersonRequired`): its managers would, through it.
+
+        Under the PR's row lock, so two reviewers at the same moment both count; the approval
+        status (and approved ⇄ mergeable) is then written under ``rule`` (:meth:`_restate`)."""
+        if verdict not in REVIEW_VERDICTS:
+            raise ValueError(f"unknown verdict {verdict!r}")
         if is_service_account(actor):
-            raise PersonRequired("a service account cannot approve a PR: approving is a person's call")
+            raise PersonRequired({"approve": "a service account cannot approve a PR: approving is a person's call",
+                                  "request_changes": "a service account cannot send a review back: "
+                                                     "that is a person's call"}.get(
+                verdict, "a service account cannot review a PR: reviewing is a person's call"))
+        summary = (body or "").strip()[:10_000] or None
+        async with self._session() as s:
+            pr = await self._lock_pr(s, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pr {pr_id}")
+            if pr.status in ("merged", "closed") or (verdict == "request_changes" and pr.status == "merging"):
+                raise ValueError(f"pr {pr_id} is {pr.status}")
+            if verdict == "request_changes" and not self._is_draft_mr(pr):
+                raise PartialMergeUnsupported("fork_review", "A fork's review is sent back by closing it.")
+            if verdict == "approve" and not self_approval and actor == pr.actor:
+                raise SelfReview(pr_id)
+            src = await s.get(BranchORM, pr.source_branch_id)
+            head = src.head_commit_id if src else None
+            if verdict != "comment" and expected_head_commit_id is not None and expected_head_commit_id != head:
+                raise HeadMoved(pr_id, head)
+            # The head's own seq: a checkpoint committed since the head was read is after it.
+            head_seq = (await s.scalar(select(CommitORM.commit_seq).where(
+                CommitORM.graph_id == pr.graph_id, CommitORM.id == head))) if head else 0
+            answers = None
+            if verdict == "approve" and groups:
+                asked = set((await s.execute(select(ReviewRequestORM.subject_id).where(
+                    ReviewRequestORM.pr_id == pr.id, ReviewRequestORM.subject_type == "group"))).scalars())
+                answers = sorted(asked & set(groups)) or None
+            s.add(ReviewEventORM(
+                pr_id=pr.id, graph_id=pr.target_graph_id, actor=actor, kind="reviewed", verdict=verdict,
+                body=summary, head_commit_id=head, head_seq=head_seq, groups=answers,
+                tally=await self._reviewer_tally(s, pr.id, actor), created_at=_now()))
+            await s.flush()
+            await self._restate(s, pr, rule)
+            return await self._pr_meta(s, pr)
+
+    async def withdraw_review(self, *, pr_id: str, actor: str, only: Optional[str] = None,
+                              rule: ReviewRule = ReviewRule()) -> dict:
+        """``actor`` takes back their verdict on a PR — their approval or their request for changes
+        (``only``: just that one). Refused (:class:`AccessDenied`) when they hold no such verdict and
+        someone else does; a no-op when nobody does."""
         async with self._session() as s:
             pr = await self._lock_pr(s, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pr {pr_id}")
             if pr.status in ("merged", "closed"):
                 raise ValueError(f"pr {pr_id} is {pr.status}")
-            if not self_approval and actor == pr.actor:
-                raise SelfReview(pr_id)
-            src = await s.get(BranchORM, pr.source_branch_id)
-            head = src.head_commit_id if src else None
-            if expected_head_commit_id is not None and expected_head_commit_id != head:
-                raise HeadMoved(pr_id, head)
-            # The head's own seq: a checkpoint committed since the head was read is after it.
-            head_seq = (await s.scalar(select(CommitORM.commit_seq).where(
-                CommitORM.graph_id == pr.graph_id, CommitORM.id == head))) if head else 0
-            approved = list(dict.fromkeys((pr.approved_by or []) + [actor]))
-            pr.approved_by = approved
-            if (pr.changes_requested or {}).get("by") == actor:
-                pr.changes_requested = None                    # approving withdraws their request
-            pr.approvals = {**(pr.approvals or {}), actor: {
-                "headCommitId": head, "at": _now(), "headSeq": head_seq}}
-            standing, _stale = await self._approvals(s, pr)
-            reviewers = set(pr.reviewers or [])
-            pr.approval_status = "approved" if reviewers <= set(standing) else "pending"
-            if pr.approval_status == "approved" and pr.status == "mergeable":
-                pr.status = "approved"
-            pr.updated_at = _now()
+            st = await self._standing(s, pr)
+            mine = {"approve": actor in st.approvals,
+                    "request_changes": any(r["by"] == actor for r in st.change_requests)}
+            anyone = {"approve": bool(st.approvals), "request_changes": bool(st.change_requests)}
+            kinds = [only] if only else list(mine)
+            if not any(mine[k] for k in kinds):
+                if any(anyone[k] for k in kinds):
+                    raise AccessDenied("only the reviewer who asked for changes withdraws the request"
+                                       if only == "request_changes" else
+                                       "only the reviewer who gave a verdict takes it back")
+                return await self._pr_meta(s, pr)
+            s.add(ReviewEventORM(pr_id=pr.id, graph_id=pr.target_graph_id, actor=actor,
+                                 kind="withdrew", created_at=_now()))
+            await s.flush()
+            await self._restate(s, pr, rule)
             return await self._pr_meta(s, pr)
 
     async def close_pr(self, *, pr_id: str, actor: Optional[str] = None) -> dict:
@@ -4152,53 +4215,19 @@ class GraphVersioningService:
 
     async def request_changes(
         self, *, pr_id: str, actor: str, reason: Optional[str] = None,
-        expected_head_commit_id: Optional[str] = None,
+        expected_head_commit_id: Optional[str] = None, rule: ReviewRule = ReviewRule(),
     ) -> dict:
-        """Send a draft's review back to its author: it does not merge until the draft changes (a
-        content commit after now) or ``actor`` withdraws the request (:meth:`withdraw_changes_request`).
-        Takes back ``actor``'s own approval. ``expected_head_commit_id``: the head they reviewed
-        (:class:`HeadMoved` when it moved on). The caller tells the author."""
-        if is_service_account(actor):
-            raise PersonRequired("a service account cannot send a review back: that is a person's call")
-        async with self._session() as s:
-            pr = await self._lock_pr(s, pr_id)
-            if pr is None:
-                raise ValueError(f"unknown pr {pr_id}")
-            if pr.status in ("merged", "closed", "merging"):
-                raise ValueError(f"pr {pr_id} is {pr.status}")
-            if not self._is_draft_mr(pr):
-                raise PartialMergeUnsupported("fork_review", "A fork's review is sent back by closing it.")
-            src = await s.get(BranchORM, pr.source_branch_id)
-            head = src.head_commit_id if src else None
-            if expected_head_commit_id is not None and expected_head_commit_id != head:
-                raise HeadMoved(pr_id, head)
-            head_seq = (await s.scalar(select(CommitORM.commit_seq).where(
-                CommitORM.graph_id == pr.graph_id, CommitORM.id == head))) if head else 0
-            pr.changes_requested = {"by": actor, "at": _now(), "reason": (reason or "").strip()[:2000] or None,
-                                    "headCommitId": head, "headSeq": head_seq}
-            if actor in (pr.approved_by or []):
-                pr.approved_by = [a for a in pr.approved_by if a != actor]
-                pr.approvals = {a: v for a, v in (pr.approvals or {}).items() if a != actor}
-                if pr.reviewers:
-                    standing, _stale = await self._approvals(s, pr)
-                    pr.approval_status = "approved" if set(pr.reviewers) <= set(standing) else "pending"
-                if pr.status == "approved" and pr.approval_status != "approved":
-                    pr.status = "mergeable"
-            pr.updated_at = _now()
-            return await self._pr_meta(s, pr)
+        """Send a draft's review back to its author (:meth:`submit_review`, ``request_changes``,
+        ``reason`` its summary). The caller tells the author."""
+        return await self.submit_review(pr_id=pr_id, actor=actor, verdict="request_changes",
+                                        body=(reason or "").strip()[:2000] or None,
+                                        expected_head_commit_id=expected_head_commit_id, rule=rule)
 
-    async def withdraw_changes_request(self, *, pr_id: str, actor: str, admin: bool = False) -> dict:
-        """Withdraw a request for changes — its reviewer's call (or an admin's, ``admin``)."""
-        async with self._session() as s:
-            pr = await self._lock_pr(s, pr_id)
-            if pr is None:
-                raise ValueError(f"unknown pr {pr_id}")
-            req = pr.changes_requested or {}
-            if req and req.get("by") != actor and not admin:
-                raise AccessDenied("only the reviewer who asked for changes withdraws the request")
-            pr.changes_requested = None
-            pr.updated_at = _now()
-            return await self._pr_meta(s, pr)
+    async def withdraw_changes_request(self, *, pr_id: str, actor: str, admin: bool = False,
+                                       rule: ReviewRule = ReviewRule()) -> dict:
+        """Withdraw a request for changes — its reviewer's call (:meth:`withdraw_review`). ``admin``
+        is not used: nobody takes back someone else's verdict."""
+        return await self.withdraw_review(pr_id=pr_id, actor=actor, only="request_changes", rule=rule)
 
     @staticmethod
     async def _lock_pr(s, pr_id: str) -> Optional[MergeRequestORM]:
@@ -4213,7 +4242,8 @@ class GraphVersioningService:
 
     async def update_pr(
         self, *, pr_id: str, title: Optional[str] = None, description: Optional[str] = None,
-        reviewers: Optional[Sequence[str]] = None,
+        reviewers: Optional[Sequence[str]] = None, actor: Optional[str] = None,
+        rule: ReviewRule = ReviewRule(),
     ) -> dict:
         """Edit a PR's human title + description, and who must review it. PATCH semantics: a
         field left ``None`` is untouched, an empty string (or list) clears it. New ``reviewers``
@@ -4237,15 +4267,8 @@ class GraphVersioningService:
                     raise JobActive(await self._merging_job(s, pr_id),
                                     "This review is being merged by a job; its reviewers can change "
                                     "if that job ends without merging it.")
-                pr.reviewers = list(dict.fromkeys(reviewers)) or None
-                pr.approval_status = None
-                if pr.reviewers:
-                    standing, _stale = await self._approvals(s, pr)
-                    pr.approval_status = "approved" if set(pr.reviewers) <= set(standing) else "pending"
-                if pr.approval_status == "approved" and pr.status == "mergeable":
-                    pr.status = "approved"
-                elif pr.approval_status != "approved" and pr.status == "approved":
-                    pr.status = "mergeable"
+                await self._set_requests(s, pr, users=list(dict.fromkeys(reviewers)), actor=actor)
+                await self._restate(s, pr, rule)
             pr.updated_at = _now()
             return await self._pr_meta(s, pr)
 
@@ -4275,6 +4298,7 @@ class GraphVersioningService:
         self_merge: bool = True,
         pinned_seq: Optional[int] = None,
         queued: bool = False,
+        rule: ReviewRule = ReviewRule(),
     ) -> str:
         """Squash-merge a fork's review into its parent's ``main`` (plan §8, §12.5). Only up to date
         with the parent: the base the fork agrees with at the head it merges
@@ -4329,7 +4353,7 @@ class GraphVersioningService:
                 squash, warnings = await self._squash_fork(
                     s, parent, fork, took, actor, message,
                     containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
-                    before_write=lambda: self._require_approvals(s, pr))
+                    before_write=lambda: self._review_gate(s, pr, rule))
                 pr.checks_status = {"ontology": {"ok": True, "violations": warnings[:100],
                                                  "total": len(warnings)}}
                 pr.status = "merged"
@@ -4522,6 +4546,8 @@ class GraphVersioningService:
             )
             s.add(pr)
             await s.flush()
+            if revs:
+                await self._set_requests(s, pr, users=revs, actor=actor)
             return pr.id
 
     async def preview_mr(self, *, mr_id: str) -> Dict[str, object]:
@@ -4754,6 +4780,7 @@ class GraphVersioningService:
         node_identity: Optional[ResolvedNodeIdentity] = None,
         self_merge: bool = True,
         mode: str = "all",
+        rule: ReviewRule = ReviewRule(),
     ) -> str:
         """Merge a merge request, dispatching on its kind: a fork PR delegates to
         :meth:`merge_pr`; a draft→main MR recomputes the 3-way merge at merge time
@@ -4782,7 +4809,7 @@ class GraphVersioningService:
             return await self.merge_pr(
                 pr_id=mr_id, actor=actor, message=message, resolutions=resolutions,
                 containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
-                self_merge=self_merge,
+                self_merge=self_merge, rule=rule,
             )
         if not self_merge and actor == opener:
             raise SelfMerge(mr_id)
@@ -4807,13 +4834,10 @@ class GraphVersioningService:
                 await self._require_no_import(s, pr.source_branch_id)
                 if await self._pending_count(s, graph.id, pr.source_branch_id):
                     raise _StaleHead()
-                # The approval gate (plan §17 #5), ahead of the merge computation: a refusal costs
-                # one indexed read, never a 3-way merge of the draft. A review sent back for
-                # changes waits for them (or for the reviewer to withdraw the request).
-                await self._require_approvals(s, pr)
-                held = await self._changes_request(s, pr)
-                if held is not None:
-                    raise ChangesRequested(pr.id, held.get("by") or "")
+                # The review's gate (plan §17 #5), ahead of the merge computation: a refusal costs
+                # a few indexed reads, never a 3-way merge of the draft — its approvals under the
+                # rule, any request for changes that holds, and open threads where they hold it.
+                await self._review_gate(s, pr, rule)
                 main_id = await self._main_branch_id(s, graph.id)
                 # Require-up-to-date gate (see publish / docs 03 §3.13): a PR whose source draft is
                 # behind main must pull latest (rebase_draft) before merging, so the reviewed diff is
@@ -5084,22 +5108,6 @@ class GraphVersioningService:
         return {"entries": out, "total": len(positions), "offset": offset, "limit": limit,
                 "hasMore": offset + len(page) < len(positions), "tooLarge": None}
 
-    async def _approvals(self, s, pr: MergeRequestORM) -> Tuple[List[str], List[str]]:
-        """``(standing, stale)``: who approved ``pr``, split by whether the approval still holds
-        (doc 13 'Staleness').
-
-        An approval records the source branch's head when it was given (:meth:`approve_pr`) and
-        holds until a content commit lands on the branch after it. A pull that rewrote none of
-        the draft's own edits (``stats.rebased`` all zero) is not content, so it keeps approvals;
-        nor is a fork's Update from parent that wrote no rows.
-        An approval with no recorded head was given before approvals were bound to one: stale.
-        Past 1000 later commits, an approval older than all of them counts as stale too."""
-        approved = list(pr.approved_by or [])
-        seqs = {a: v["headSeq"] for a, v in (pr.approvals or {}).items() if a in approved}
-        last_content = await self._last_content_seq(s, pr, min(seqs.values())) if seqs else 0
-        standing = [a for a in approved if a in seqs and seqs[a] >= last_content]
-        return standing, [a for a in approved if a not in standing]
-
     @staticmethod
     async def _last_content_seq(s, pr: MergeRequestORM, since: int) -> int:
         """The seq of the last content commit on a review's source branch after ``since`` (0: none).
@@ -5117,23 +5125,126 @@ class GraphVersioningService:
                 return seq
         return rows[-1].commit_seq if len(rows) > 1000 else 0
 
-    async def _changes_request(self, s, pr: MergeRequestORM) -> Optional[dict]:
-        """A reviewer's request for changes, while it holds: until a content commit lands on the
-        draft after it (the author changed it)."""
-        req = pr.changes_requested
-        if not req or pr.status in ("merged", "closed"):
-            return None
-        return None if await self._last_content_seq(s, pr, int(req.get("headSeq") or 0)) else req
+    # ------------------------------------------------------------------ #
+    # Where a review stands (review_state)                                #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    async def _review_rows(s, pr_ids: Sequence[str]) -> Tuple[Dict[str, List[dict]], Dict[str, List[dict]]]:
+        """Each review's requests, and its events oldest first: two reads, however many reviews."""
+        requests: Dict[str, List[dict]] = {p: [] for p in pr_ids}
+        events: Dict[str, List[dict]] = {p: [] for p in pr_ids}
+        if not pr_ids:
+            return requests, events
+        ids = list(pr_ids)
+        for r in (await s.execute(select(ReviewRequestORM).where(ReviewRequestORM.pr_id.in_(ids))
+                                  .order_by(ReviewRequestORM.requested_at, ReviewRequestORM.subject_id))).scalars():
+            requests[r.pr_id].append({"subject_type": r.subject_type, "subject_id": r.subject_id,
+                                      "requested_at": r.requested_at, "requested_by": r.requested_by})
+        for e in (await s.execute(select(ReviewEventORM).where(ReviewEventORM.pr_id.in_(ids))
+                                  .order_by(ReviewEventORM.created_at, ReviewEventORM.id))).scalars():
+            events[e.pr_id].append({"id": e.id, "actor": e.actor, "kind": e.kind, "verdict": e.verdict,
+                                    "body": e.body, "head_commit_id": e.head_commit_id,
+                                    "head_seq": e.head_seq, "groups": e.groups, "subjects": e.subjects,
+                                    "tally": e.tally, "created_at": e.created_at})
+        return requests, events
 
-    async def _require_approvals(self, s, pr: MergeRequestORM) -> None:
-        """The approval gate (plan §17 #5): every requested reviewer's approval must still hold.
-        A PR with no requested reviewers needs none."""
-        if not pr.reviewers:
-            return
-        standing, stale = await self._approvals(s, pr)
-        pending = sorted(set(pr.reviewers) - set(standing))
-        if pending:
-            raise ApprovalRequired(pr.id, pending, stale=sorted(set(pending) & set(stale)))
+    async def _standing(self, s, pr: MergeRequestORM, requests: Optional[List[dict]] = None,
+                        events: Optional[List[dict]] = None) -> "review_state.Standing":
+        """Where ``pr`` stands (:mod:`review_state`): its requests and events — read here when not
+        given — against the source branch's last content commit since the earliest verdict."""
+        if requests is None or events is None:
+            rq, ev = await self._review_rows(s, [pr.id])
+            requests, events = rq[pr.id], ev[pr.id]
+        since = review_state.since_seq(events)
+        last = await self._last_content_seq(s, pr, since) if since is not None else 0
+        return review_state.standing(requests, events, last, live=pr.status not in ("merged", "closed"))
+
+    async def _restate(self, s, pr: MergeRequestORM, rule: ReviewRule) -> "review_state.Standing":
+        """Write ``pr``'s approval status — and approved ⇄ mergeable — as its approvals now leave it
+        under ``rule``: what the status filter, and a merge job handing a review back, read."""
+        st = await self._standing(s, pr)
+        verdict = review_state.apply_rule(st.reviewers, len(st.standing), rule)
+        pr.approval_status = verdict["status"]
+        pr.status = review_state.shown_status(pr.status, verdict["status"])
+        pr.updated_at = _now()
+        return st
+
+    async def _set_requests(self, s, pr: MergeRequestORM, *, users: Optional[Sequence[str]] = None,
+                            groups: Optional[Sequence[str]] = None, actor: Optional[str] = None):
+        """Who ``pr`` asks to review it: ``users`` and ``groups`` (None leaves that kind as it is).
+        Records who is newly asked and who no longer is (``review_events``), and mirrors the people
+        in ``merge_requests.reviewers`` — which the reads deciding who may see a private draft use.
+        Returns ``(added, removed)``, each a list of ``(type, id)``."""
+        rows = (await s.execute(select(ReviewRequestORM).where(ReviewRequestORM.pr_id == pr.id))).scalars().all()
+        have = {(r.subject_type, r.subject_id): r for r in rows}
+        want = [k for k in have if (k[0] == "user" and users is None) or (k[0] == "group" and groups is None)]
+        want += [("user", u) for u in dict.fromkeys(users or ())] + [("group", g) for g in dict.fromkeys(groups or ())]
+        added = [k for k in want if k not in have]
+        removed = [k for k in have if k not in want]
+        now = _now()
+        for k in removed:
+            await s.delete(have[k])
+        for kind, sid in added:
+            s.add(ReviewRequestORM(pr_id=pr.id, subject_type=kind, subject_id=sid, graph_id=pr.target_graph_id,
+                                   requested_by=actor, requested_at=now))
+        for kind_of_event, subjects in (("requested", added), ("unrequested", removed)):
+            if subjects:
+                s.add(ReviewEventORM(pr_id=pr.id, graph_id=pr.target_graph_id, actor=actor or pr.actor or "system",
+                                     kind=kind_of_event, created_at=now,
+                                     subjects=[{"type": t, "id": i} for t, i in subjects]))
+        people = [i for t, i in want if t == "user"]
+        pr.reviewers = people or None
+        await s.flush()
+        return added, removed
+
+    @staticmethod
+    async def _reviewer_tally(s, pr_id: str, actor: str) -> dict:
+        """What ``actor`` did on a review so far: changes accepted and rejected, threads started."""
+        by_verdict = dict((await s.execute(
+            select(ReviewDecisionORM.verdict, func.count()).where(
+                ReviewDecisionORM.pr_id == pr_id, ReviewDecisionORM.actor == actor)
+            .group_by(ReviewDecisionORM.verdict))).all())
+        threads = await s.scalar(select(func.count()).select_from(ReviewCommentORM).where(
+            ReviewCommentORM.pr_id == pr_id, ReviewCommentORM.author == actor,
+            ReviewCommentORM.thread_id == ReviewCommentORM.id, ReviewCommentORM.deleted_at.is_(None)))
+        return {"accepted": int(by_verdict.get("accepted") or 0), "rejected": int(by_verdict.get("rejected") or 0),
+                "threads": int(threads or 0)}
+
+    @staticmethod
+    async def _open_threads(s, pr_ids: Sequence[str]) -> Dict[str, int]:
+        """Each review's open threads (not resolved, not deleted): one read."""
+        if not pr_ids:
+            return {}
+        return {p: int(n) for p, n in (await s.execute(
+            select(ReviewCommentORM.pr_id, func.count()).where(
+                ReviewCommentORM.pr_id.in_(list(pr_ids)), ReviewCommentORM.thread_id == ReviewCommentORM.id,
+                ReviewCommentORM.resolved_at.is_(None), ReviewCommentORM.deleted_at.is_(None))
+            .group_by(ReviewCommentORM.pr_id))).all()}
+
+    async def _require_approvals(self, s, pr: MergeRequestORM,
+                                 rule: ReviewRule = ReviewRule()) -> "review_state.Standing":
+        """The approval gate (plan §17 #5): the approvals that still hold must meet ``rule`` —
+        everyone asked (a PR asking no one needs none), or N of anyone's. Returns the standing."""
+        st = await self._standing(s, pr)
+        verdict = review_state.apply_rule(st.reviewers, len(st.standing), rule)
+        if not verdict["satisfied"]:
+            pending = [m["id"] if m["type"] == "user" else f"group:{m['id']}" for m in verdict["missing"]]
+            raise ApprovalRequired(pr.id, pending, stale=sorted(set(pending) & set(st.stale)),
+                                   required=verdict["required"], have=verdict["have"])
+        return st
+
+    async def _review_gate(self, s, pr: MergeRequestORM, rule: ReviewRule = ReviewRule()) -> None:
+        """What a review must clear to merge, before any merge work: its approvals under ``rule``
+        (:class:`ApprovalRequired`); no request for changes that still holds
+        (:class:`ChangesRequested`); and, where the rule says, no open thread (:class:`ThreadsOpen`)."""
+        st = await self._require_approvals(s, pr, rule)
+        held = st.holding
+        if held:
+            raise ChangesRequested(pr.id, held[0]["by"] or "")
+        if rule.threads_hold:
+            n = (await self._open_threads(s, [pr.id])).get(pr.id, 0)
+            if n:
+                raise ThreadsOpen(pr.id, n)
 
     async def _fork_merge_base(self, s, fork) -> int:
         """The seq of the fork's ``main`` its next PR merges from: the fork's head its last merged
@@ -9041,7 +9152,11 @@ class GraphVersioningService:
                 groups=await self._viewer_groups(s, viewer) if viewer is not None else None,
             ).order_by(MergeRequestORM.created_at.desc()).limit(limit).offset(offset)
             rows = (await s.execute(stmt)).scalars().all()
-            return [await self._pr_meta(s, pr) for pr in rows]
+            ids = [pr.id for pr in rows]
+            requests, events = await self._review_rows(s, ids)
+            threads = await self._open_threads(s, ids)
+            return [await self._pr_meta(s, pr, rows=(requests[pr.id], events[pr.id]), threads=threads)
+                    for pr in rows]
 
     async def count_pulls(
         self, *, target_graph_id: Optional[str] = None, data_source_id: Optional[str] = None,
@@ -9190,7 +9305,8 @@ class GraphVersioningService:
             .limit(limit))).all()
         return [actor for actor, _n, _latest in rows]
 
-    async def _pr_meta(self, s, pr: MergeRequestORM) -> dict:
+    async def _pr_meta(self, s, pr: MergeRequestORM, rows: Optional[Tuple[List[dict], List[dict]]] = None,
+                       threads: Optional[Dict[str, int]] = None) -> dict:
         # A draft MR is "behind" when its base lags the target graph's main head; the FE gates
         # Merge on this so reviewers pull latest first. A fork's PR waits on its fork's Update
         # from parent instead (ForkNotUpToDate at merge; the fork's listing says how far behind it
@@ -9216,14 +9332,19 @@ class GraphVersioningService:
                 s, pr.target_graph_id), base, head)) if behind else 0
         # A live PR shows only the approvals that still hold, so a reviewer whose approval went
         # stale is asked again, and the PR is no longer shown as approved. ``stale`` names them.
-        status, approved_by, approval_status = pr.status, pr.approved_by, pr.approval_status
-        stale: List[str] = []
-        if approved_by and status not in ("merged", "closed"):
-            approved_by, stale = await self._approvals(s, pr)
-            if pr.reviewers:
-                approval_status = "approved" if set(pr.reviewers) <= set(approved_by) else "pending"
-                if status == "approved" and approval_status != "approved":
-                    status = "mergeable"
+        # Judged here under the built-in rule (everyone asked); the route applies the data source's
+        # own (``_review_out``). ``rows``/``threads``: read already, for a list of reviews.
+        requests, events = rows if rows is not None else (lambda r: (r[0][pr.id], r[1][pr.id]))(
+            await self._review_rows(s, [pr.id]))
+        st = await self._standing(s, pr, requests, events)
+        live = pr.status not in ("merged", "closed")
+        verdict = review_state.apply_rule(st.reviewers, len(st.standing), ReviewRule())
+        status = review_state.shown_status(pr.status, verdict["status"]) if live else pr.status
+        approval_status = verdict["status"] if live else pr.approval_status
+        approved_by = (st.standing if live else list(st.approvals)) if st.approvals else None
+        stale = st.stale if live else []
+        held = st.holding if self._is_draft_mr(pr) else []
+        open_threads = (threads if threads is not None else await self._open_threads(s, [pr.id])).get(pr.id, 0)
         return {
             "pr_id": pr.id, "graph_id": pr.graph_id, "source_graph_id": pr.source_graph_id,
             "source_branch_id": pr.source_branch_id,
@@ -9237,8 +9358,21 @@ class GraphVersioningService:
             "conflicts": pr.conflicts, "resulting_commit_id": pr.resulting_commit_id,
             "reviewers": pr.reviewers, "approved_by": approved_by, "stale_approved_by": stale,
             "approval_status": approval_status, "checks_status": pr.checks_status,
-            # A reviewer's request for changes, while it holds (the draft has not changed since).
-            "changes_requested": await self._changes_request(s, pr) if self._is_draft_mr(pr) else None,
+            # The latest request for changes that still holds (the draft has not changed since).
+            "changes_requested": ({k: held[0][k] for k in ("by", "at", "reason", "headCommitId", "headSeq")}
+                                  if held else None),
+            # Who is asked and where each stands, every request for changes, and open threads.
+            "review": {
+                "requiredApprovals": 0,
+                "approvals": {k: verdict[k] for k in ("required", "have", "satisfied")},
+                "reviewers": [{k: r[k] for k in ("type", "id", "state", "by", "at", "requestedAt")}
+                              for r in st.reviewers],
+                "changeRequests": [{k: r[k] for k in ("by", "at", "reason", "holds")} for r in st.change_requests],
+                # Each person's latest review, and whether it is of the draft as it is now.
+                "reviews": [{"by": a, "verdict": r["verdict"], "at": r["at"], "current": st.current(a)}
+                            for a, r in st.reviewed.items()],
+                "threads": {"open": open_threads, "holdMerge": False},
+            },
             "actor": pr.actor, "created_at": pr.created_at, "updated_at": pr.updated_at,
             "merged_at": pr.merged_at, "merged_by": pr.merged_by, "merged_via": pr.merged_via,
             "closed_at": pr.closed_at, "closed_by": pr.closed_by,
