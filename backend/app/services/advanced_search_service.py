@@ -28,6 +28,7 @@ from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.repositories.view_members_repo import SearchMembers
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
     CompileError,
@@ -433,7 +434,7 @@ def _is_unbounded_text_any(predicate) -> bool:
 
 
 def _reject_unbounded_text_any(
-    query: SearchQuery, *, entity_types_capped: bool = False,
+    query: SearchQuery, *, entity_types_capped: bool = False, members: bool = False,
 ) -> None:
     """Reject queries that would force a full-graph CONTAINS scan.
 
@@ -451,6 +452,8 @@ def _reject_unbounded_text_any(
         the candidate scan is filtered to the URNs the canvas
         rendered. (An empty list is no clamp: the compiler falls
         back to view semantics.)
+      * ``members`` — the view's members, too many to list as roots,
+        are read where they are kept (``SearchRunContext.members``).
       * Predicate tree contains at least one non-text-any leaf — the
         compiler routes the bounding leaf to an indexed Cypher path
         and the text filter applies only to that pre-filtered set.
@@ -467,7 +470,7 @@ def _reject_unbounded_text_any(
     view has no boundaries yet" is false (the view may have hundreds of
     declared types); the message instead names the real cause.
     """
-    if query.scope.root_urns:
+    if query.scope.root_urns or members:
         return
     if query.scope.entity_types:
         return
@@ -498,6 +501,13 @@ SHARED_LINK_RELATIONSHIPS = (
     "This link can't follow lineage or relationships: they lead outside its view."
 )
 _ROUTE_KINDS = frozenset({"path", "withinHops", "related", "edges"})
+
+#: Why a Connections rule isn't counted in a view whose members are too many to list
+#: as roots: the far end of each edge is checked against the roots alone.
+CONNECTIONS_PAST_THE_CAP = (
+    "This view has more members than a Connections search can check its far end against, "
+    "so this rule can't be counted here."
+)
 
 def _subset_search(eff_scope):
     """A subset view's search, or None for any other scope."""
@@ -793,7 +803,7 @@ def _empty_page(query: SearchQuery) -> SearchResultPage:
 
 
 def _stamp_resolved_scope(
-    query: SearchQuery, eff_scope: EffectiveViewScope,
+    query: SearchQuery, eff_scope: EffectiveViewScope, *, members: bool = False,
 ) -> Tuple[SearchQuery, Optional[str]]:
     """Overwrite ``query.scope`` with the server-resolved values.
 
@@ -814,10 +824,15 @@ def _stamp_resolved_scope(
     when the resolved entity-type allow-list itself exceeds
     ``SearchScope.entity_types``'s cap (a view's own ontology, never a
     client input) and had to be dropped rather than stamped.
+
+    ``members``: the search reads a view's members where they are kept
+    (``SearchRunContext.members``), so only its listed roots count against the
+    cap; any other search in such a view counts every member, and is refused.
     """
     root_urns = None
     # A view made from a query past the cap does not list its members (``unlisted_roots``).
-    roots = len(eff_scope.root_urns) + eff_scope.unlisted_roots
+    roots = len(eff_scope.root_urns) + (
+        0 if members and eff_scope.member_scope is not None else eff_scope.unlisted_roots)
     if query.scope.scope_mode == "view" and roots:
         # ``SearchScope`` raises a pydantic error above the cap, which
         # would escape as a 500. Check first and raise the service's
@@ -939,7 +954,15 @@ class AdvancedSearchService:
         client_requested_urns = bool(query.scope.root_urns)
         eff_scope = await self._resolve_scope(query.scope)
         await self._guard_view_data_source(eff_scope)
-        query, entity_types_note = _stamp_resolved_scope(query, eff_scope)
+        # Only the uncapped engine reads a view's members where they are kept — and not
+        # for Connections, whose far end is checked against the roots alone.
+        members = (self._members(query.scope, eff_scope)
+                   if run_context is not None and _returns_hits(query)
+                   and not isinstance(query.predicate, EdgesPredicate) else None)
+        if members is not None:
+            run_context = replace(run_context, members=members)
+        query, entity_types_note = _stamp_resolved_scope(query, eff_scope,
+                                                         members=members is not None)
 
         # Security guard: if the client passed root_urns but every one
         # was dropped by the resolver (none belonged to this view), we
@@ -979,6 +1002,7 @@ class AdvancedSearchService:
         # theirs.
         _reject_unbounded_text_any(
             query, entity_types_capped=entity_types_note is not None,
+            members=members is not None,
         )
         query, resolved_refs = await self._resolve_query_refs(query, run_context)
         layer_notes: list = []
@@ -1041,12 +1065,13 @@ class AdvancedSearchService:
         client."""
         _validate_items(request.items)
         refused = self._refused_on_a_shared_link(request.items)
-        scope, _eff = await self._rule_scope(request.scope)
+        scope, _eff = await self._rule_scope(request.scope, members=True)
         if scope is None:
             return SearchMembershipResult(matches={item.id: [] for item in request.items},
                                           errors=refused)
         op = self._provider_op("deep_search_membership")
-        context = run_context or SearchRunContext()
+        context = replace(run_context or SearchRunContext(),
+                          members=self._members(request.scope, _eff))
         items, unusable = await self._resolve_item_refs(
             [item for item in request.items if item.id not in refused], scope, context)
         items, unplaced = _resolve_item_layers(items, _eff)
@@ -1083,12 +1108,13 @@ class AdvancedSearchService:
             item.model_copy(update={"predicate": unwrap_edges(item.predicate)})
             for item in request.items]})
         _validate_items(request.items, rule=request.purpose == "rule")
-        scope, eff = await self._rule_scope(request.scope)
+        scope, eff = await self._rule_scope(request.scope, members=True)
         if scope is None:
             return SearchCountsResult(counts={
                 item.id: SearchRuleCount(count=0, status="complete") for item in request.items})
         op = self._provider_op("deep_search_count")
-        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
+        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash,
+                          members=self._members(request.scope, eff))
         deadline = started + min(request.wait_ms / 1000.0, _COUNTS_WAIT_S)
 
         def query_of(item: SearchRuleItem, wait_ms: int, session: Optional[str]) -> SearchQuery:
@@ -1098,6 +1124,9 @@ class AdvancedSearchService:
 
         answers: dict = {}
         errors: dict = self._refused_on_a_shared_link(request.items)
+        if context.members is not None:
+            errors.update({item.id: CONNECTIONS_PAST_THE_CAP for item in request.items
+                           if isinstance(item.predicate, EdgesPredicate)})
         resolved, unusable = await self._resolve_item_refs(
             [item for item in request.items if item.id not in errors], scope, context)
         resolved, unplaced = _resolve_item_layers(resolved, eff)
@@ -1195,7 +1224,8 @@ class AdvancedSearchService:
         max_leaves = get_deep_search_settings().max_leaf_count
         if leaves > max_leaves:
             raise ValidationError(f"$.predicate has {leaves} leaves (max {max_leaves})")
-        scope, eff = await self._rule_scope(request.scope)
+        edges = isinstance(request.predicate, EdgesPredicate)
+        scope, eff = await self._rule_scope(request.scope, members=not edges)
         if scope is None:
             # Every root the client named lies outside the view: nothing.
             return SearchExportResult(
@@ -1203,7 +1233,8 @@ class AdvancedSearchService:
                 columns=export_columns(request.columns,
                                        edges=isinstance(request.predicate, EdgesPredicate)))
         op = self._provider_op("deep_search_export")
-        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
+        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash,
+                          members=None if edges else self._members(request.scope, eff))
         predicate, _resolved = await self._resolve_predicate_refs(
             request.predicate, scope, context, at="$.predicate")
         predicate = _with_resolved_layers(predicate, eff, [])
@@ -1256,8 +1287,9 @@ class AdvancedSearchService:
         """Which entities each name reference names in the view's scope —
         what the reference picker checks as the path is typed."""
         started = time.monotonic()
-        context = run_context or SearchRunContext()
-        scope, _eff = await self._rule_scope(request.scope)
+        scope, _eff = await self._rule_scope(request.scope, members=True)
+        context = replace(run_context or SearchRunContext(),
+                          members=self._members(request.scope, _eff))
         self._refuse_outside_subset(_eff, "look entities up by name")
         if scope is None:
             return SearchResolveResult(results=[SearchRefResolution(count=0)
@@ -1320,15 +1352,17 @@ class AdvancedSearchService:
         return [item.model_copy(update={"predicate": _with_resolved_refs(item.predicate, named)})
                 for item in items if item.id not in errors], errors
 
-    async def _rule_scope(self, requested: SearchScope):
+    async def _rule_scope(self, requested: SearchScope, *, members: bool = False):
         """The resolved scope a rule is evaluated in, or None when every root
         the client named lies outside the view (then nothing matches —
-        never a widened search)."""
+        never a widened search). ``members``: the caller reads a view's
+        members where they are kept (``_members``) when it can."""
         client_requested_urns = bool(requested.root_urns)
         eff_scope = await self._resolve_scope(requested)
         await self._guard_view_data_source(eff_scope)
         stamped, _note = _stamp_resolved_scope(
-            SearchQuery(predicate=MatchAllPredicate(), scope=requested), eff_scope)
+            SearchQuery(predicate=MatchAllPredicate(), scope=requested), eff_scope,
+            members=members and self._members(requested, eff_scope) is not None)
         if _finds_nothing(requested, eff_scope) or (client_requested_urns and not eff_scope.root_urns):
             return None, eff_scope
         return stamped.scope, eff_scope
@@ -1499,7 +1533,8 @@ class AdvancedSearchService:
         redact = getattr(eff_scope, "redact_roots", False)
         if redact:
             notes.append(SUBSET_BASE_HIDDEN)
-        elif not eff_scope.root_urns and not eff_scope.holds_nothing:
+        elif (not eff_scope.root_urns and not eff_scope.holds_nothing
+              and eff_scope.member_scope is None):
             notes.append(
                 f"View '{eff_scope.view_id}' has no rootUrns configured "
                 "and the client supplied none — search ran across the "
@@ -1642,6 +1677,17 @@ class AdvancedSearchService:
             return
         raise ValidationError(f"shared_link_subset: A shared link can't {what}: "
                               "it opens this view's matches, not what they are found in.")
+
+    def _members(self, scope: SearchScope, eff_scope: EffectiveViewScope) -> Optional[SearchMembers]:
+        """What reads the view's members, when they are too many to list as its roots
+        (``member_scope``), the search is bounded by them (``view`` mode) and the
+        provider searches them where they are kept (``supports_member_scope``). None
+        otherwise — and a search bounded by them is refused, as one past the root cap."""
+        held = eff_scope.member_scope
+        if (held is None or scope.scope_mode != "view" or self._session is None
+                or not getattr(self._engine.provider, "supports_member_scope", False)):
+            return None
+        return SearchMembers(self._session, held.view_id, held.epoch, held.count)
 
     async def resolve_scope(self, requested: SearchScope) -> EffectiveViewScope:
         """The scope a search would run in, after the checks it makes: the view

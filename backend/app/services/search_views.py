@@ -505,18 +505,21 @@ def layer_filters_in_subset(predicate, layers: Sequence[SubsetLayer],
 
 def boundary_hash(*, view_id: Optional[str], data_source_id: Optional[str],
                   root_urns: Iterable[str], entity_types: Iterable[str], max_depth: int,
-                  predicate_hash: str, placement: str = "") -> str:
+                  predicate_hash: str, placement: str = "",
+                  members_epoch: Optional[int] = None) -> str:
     """The identity of where a subset's matches are looked for, and of what they
     must meet: its base's scope as that scope reads — never when the base was
     last saved, so renaming it or recolouring a layer keeps every scan — its
     search, and, placed as the base places them, what decides that placement
     (``placement_digest``). Two subsets of one base with one search share their
-    scans."""
+    scans. ``members_epoch``: a base made from a query whose members are too many
+    to list among its roots — which answer they are."""
     payload = {
         "base": view_id or "", "ds": data_source_id or "",
         "roots": sorted(set(root_urns)), "types": sorted({fold_case(t) for t in entity_types}),
         "depth": max_depth, "p": predicate_hash,
         **({"placement": placement} if placement else {}),
+        **({"members": members_epoch} if members_epoch is not None else {}),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return "sv" + hashlib.sha1(blob.encode()).hexdigest()[:12]

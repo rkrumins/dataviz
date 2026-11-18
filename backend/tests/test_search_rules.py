@@ -429,6 +429,24 @@ class TestMembershipStatement:
         assert "[(n)<-[:CONTAINS*0..1]-(_ma0) | _ma0.urn]" in cypher
         assert "[(n)<-[:CONTAINS*0..12]-(_ma1) | _ma1.urn]" in cypher
 
+    async def test_a_view_too_large_to_list_holds_its_members_and_what_its_roots_hold(self):
+        """Past the root cap a view's members aren't among its roots: one is in the
+        view by being a member, as what lies under an entry people placed is."""
+        graph = _Graph({"m": ("A", ["m", "far"], {0: True}),
+                        "in": ("A", ["in", "root"], {0: True}),
+                        "out": ("A", ["out", "far"], {0: True})})
+
+        class _Held:
+            async def holds(self, urns):
+                return {u for u in urns if u == "m"}
+
+        rule = [("r", P({"kind": "all"}))]
+        for roots, matched in ((["root"], ["m", "in"]), (None, ["m"])):
+            scope = SearchScope(view_id="v", scope_mode="view", root_urns=roots)
+            out = await evaluate_membership(_provider(graph), scope, rule, ["m", "in", "out"],
+                                            run=graph.run, timeout_s=1.0, members=_Held())
+            assert out["matches"] == {"r": matched}, roots
+
     async def test_without_roots_the_views_types_bound_it(self):
         graph = _Graph({"a": ("A", [], {0: True}), "b": ("B", [], {0: True})})
         scope = SearchScope(view_id="v", scope_mode="data_source", entity_types=["b"])
@@ -519,8 +537,8 @@ class TestRoutes:
 
         monkeypatch.setattr(graph_mod, "_search_data_version", version)
 
-        async def rule_scope(self, requested):
-            return requested, SimpleNamespace(scope_hash="h")
+        async def rule_scope(self, requested, *, members=False):
+            return requested, SimpleNamespace(scope_hash="h", member_scope=None)
 
         monkeypatch.setattr(AdvancedSearchService, "_rule_scope", rule_scope)
         monkeypatch.setattr(AdvancedSearchService, "_provider_op",
@@ -543,8 +561,8 @@ class TestRoutes:
             counted.append(query.predicate.kind)
             return {"count": 3, "status": "complete", "sessionId": None, "progress": None}
 
-        async def rule_scope(self, requested):
-            return requested, SimpleNamespace(scope_hash="h")
+        async def rule_scope(self, requested, *, members=False):
+            return requested, SimpleNamespace(scope_hash="h", member_scope=None)
 
         async def version(engine):
             return "1"

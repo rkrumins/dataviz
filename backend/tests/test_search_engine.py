@@ -1890,3 +1890,233 @@ class TestReuse:
         windows = {engine_mod.reuse_window(q, 100.0) for q in ("00000000aa", "ffffffffbb", "80000000cc")}
         assert min(windows) == pytest.approx(80.0) and max(windows) == pytest.approx(120.0)
         assert engine_mod.reuse_window("80000000cc", 100.0) == engine_mod.reuse_window("80000000dd", 100.0)
+
+
+# ---------------------------------------------------------------------------
+# A view's members past the root cap
+# ---------------------------------------------------------------------------
+
+class _Members:
+    """A view's members as ``view_members_repo.SearchMembers`` reads them:
+    ``{label: [urn, …]}`` in ``label_ord`` order, ``None`` where a member
+    the search doesn't read itself (whole, or inside a whole one) sits."""
+
+    def __init__(self, by_label, *, others=()):
+        self.by_label = by_label
+        self.others = set(others)           # members it reads under the roots
+        self.count = sum(u is not None for urns in by_label.values() for u in urns) + len(others)
+        self.reads = []
+
+    async def counts(self):
+        return {lbl: (sum(u is not None for u in urns), len(urns))
+                for lbl, urns in self.by_label.items()}
+
+    async def read(self, label, lo, hi):
+        self.reads.append((label, lo, hi))
+        return [u for u in self.by_label.get(label, [])[lo:hi] if u is not None]
+
+    async def holds(self, urns):
+        every = {u for urns in self.by_label.values() for u in urns if u} | self.others
+        return {u for u in urns if u in every}
+
+
+class TestViewMembers:
+    """A view made from a query whose members are too many to list as its
+    roots: its members are read a band at a time where the view keeps them,
+    beside the roots it does list (the entries people placed, the members
+    kept whole) — each match once."""
+
+    def _view(self, predicate=None, roots=None):
+        return SearchQuery.model_validate({
+            "predicate": predicate or {"kind": "text", "value": "x"},
+            "scope": {"viewId": "v", "scopeMode": "view", "rootUrns": roots},
+            "options": {"results": "hits"}})
+
+    async def _plan(self, db, query, members, **kw):
+        return await make_plan(_provider(db), query, _compiled(query), run=db.run,
+                               width=kw.pop("width", 100), walk_max=kw.pop("walk_max", 1000),
+                               timeout_s=1.0, members=members)
+
+    def _ctx(self, **kw):
+        return Context(where="n.x = $p0", params={"p0": 1}, sort=SortSpec((SortKey("n.urn"),)),
+                       containment=("CONTAINS",), max_depth=12, **kw)
+
+    async def test_members_are_read_a_band_at_a_time_beside_the_listed_roots(self):
+        db = _PlanDb(labels=["A", "B"], counts={"A": 10_000, "B": 10}, ids={"w1": 7}, walk=40)
+        members = _Members({"A": [f"urn:a{i}" for i in range(4_500)], "B": ["urn:b0"]})
+        plan = await self._plan(db, self._view(roots=["w1"]), members)
+        walk, *bands = plan.units
+        # The listed roots walked as any view's are, held by none of the clamps
+        # the members need.
+        assert (walk.kind, walk.roots, walk.clamps) == ("walk", [7], [])
+        assert [(u.label, u.lo, u.hi) for u in bands] == [
+            ("A", 0, 2_000), ("A", 2_000, 4_000), ("A", 4_000, 4_500), ("B", 0, 1)]
+        # Each band lies outside the roots: what is under them is the walk's.
+        assert plan.clamps == [[7]] and plan.clamp_depths == [12]
+        assert all(u.kind == "members" and u.outside == 0 and u.clamps == [] for u in bands)
+        assert members.reads == [], "planned from the counts alone"
+        assert plan.notes[-1] == ("This view has 4,501 members: the search reads the members "
+                                  "themselves, and everything inside the ones kept whole.")
+
+    async def test_with_no_roots_listed_only_the_members_are_read(self):
+        db = _PlanDb(labels=["A"], counts={"A": 10_000})
+        plan = await self._plan(db, self._view(), _Members({"A": ["u1", None, "u3"]}))
+        # Never the label's every node: the view is its members.
+        assert [(u.kind, u.lo, u.hi, u.outside, u.size) for u in plan.units] == [
+            ("members", 0, 3, None, 2)]
+        assert plan.clamps == []
+
+    async def test_an_inside_condition_holds_the_members_and_the_roots_alike(self):
+        db = _PlanDb(labels=["A"], counts={"A": 10_000}, ids={"w1": 7, "d1": 3}, walk=10**9)
+        query = self._view({"kind": "group", "op": "and", "children": [
+            {"kind": "descendantOf", "urns": ["d1"], "maxDepth": 2},
+            {"kind": "text", "value": "x"}]}, roots=["w1"])
+        plan = await self._plan(db, query, _Members({"A": ["u1"]}), walk_max=100)
+        rooted = [u for u in plan.units if u.kind != "members"]
+        [band] = [u for u in plan.units if u.kind == "members"]
+        first = len(rooted[0].clamps)
+        # The rooted units keep their own clamps; the band is held by the
+        # "inside" set alone and kept outside the roots.
+        assert all(u.clamps == rooted[0].clamps for u in rooted)
+        assert plan.clamps[first:] == [[3], [7]] and plan.clamp_depths[first:] == [2, 12]
+        assert (band.clamps, band.outside) == ([first], first + 1)
+
+    async def test_members_whose_type_was_not_read_are_looked_for_under_every_label(self):
+        db = _PlanDb(labels=["B", "A"], counts={"A": 1, "B": 1})
+        members = _Members({"": ["u1", "u2"], "Gone": ["u3"]})
+        plan = await self._plan(db, self._view(), members)
+        # Each once, under its first label; a label the graph has never had, nowhere.
+        assert [(u.label, u.bucket, u.exclude) for u in plan.units] == [
+            ("A", "", ()), ("B", "", ("A",))]
+        sent = []
+
+        async def run(cypher, params, timeout_s):
+            sent.append(params["_visible"])
+            return SimpleNamespace(result_set=[[0, []]])
+
+        session = Session.start("s1", "q", "1", None, 5, plan)
+        await engine_mod._run_unit(plan.units[1], session, self._ctx(members=members), run, 1.0)
+        assert members.reads == [("", 0, 2)] and sent == [["u1", "u2"]]
+
+    async def test_a_band_runs_exactly_the_visible_statement_for_its_members(self):
+        members = _Members({"A": ["u1", None, "u3"]})
+        sent = []
+
+        async def run(cypher, params, timeout_s):
+            sent.append((cypher, params))
+            return SimpleNamespace(result_set=[[0, []]])
+
+        session = Session.start("s1", "q", "1", None, 5, Plan([]))
+        ctx = self._ctx(members=members)
+        await engine_mod._run_unit(Unit("members", "A", 0, 3), session, ctx, run, 1.0)
+        await engine_mod._run_unit(Unit("visible", "A", urns=["u1", "u3"]), session, ctx, run, 1.0)
+        assert members.reads == [("A", 0, 3)]
+        assert sent[0] == sent[1] and sent[0][1]["_visible"] == ["u1", "u3"]
+
+    async def test_a_band_with_nothing_to_read_runs_no_statement(self):
+        async def run(cypher, params, timeout_s):
+            raise AssertionError(cypher)
+
+        session = Session.start("s1", "q", "1", None, 5, Plan([]))
+        out = await engine_mod._run_unit(Unit("members", "A", 0, 2), session,
+                                         self._ctx(members=_Members({"A": [None, None]})), run, 1.0)
+        assert out == (0, [], [])
+
+    def test_a_band_is_held_by_its_clamps_and_kept_outside_the_roots(self):
+        band = Unit("members", "A", 0, 2, urns=["u1"], clamps=[0], outside=2)
+        cypher, params = plan_mod.match_statement(band, self._ctx(clamp_depths=(2, 12, 12)),
+                                                  [[3], [9], [7]])
+        assert "WHERE ID(_r0) IN $_roots0" in cypher and "_roots1" not in cypher
+        # The view's roots themselves too (``*0..``): an entry read under them
+        # is never read again as a member.
+        assert ("WITH n, [(n)<-[:CONTAINS*0..12]-(_q2) | ID(_q2)] AS _a2 "
+                "WHERE NOT ANY(_o2 IN _a2 WHERE _o2 IN $_roots2)") in cypher
+        assert params["_roots0"] == [3] and params["_roots2"] == [7] and "_roots1" not in params
+        walk, _ = plan_mod.match_statement(Unit("walk", roots=[7], clamps=[1]), self._ctx(),
+                                           [[3], [9], [7]])
+        assert "$_roots1" in walk and "$_roots0" not in walk and "$_roots2" not in walk
+
+    def test_a_band_splits_by_its_members_order_down_to_one(self):
+        halves = Unit("members", "A", 0, 2_000, size=2_000, outside=0).split()
+        assert [(h.lo, h.hi, h.size, h.outside) for h in halves] == [
+            (0, 1_000, 1_000, 0), (1_000, 2_000, 1_000, 0)]
+        assert Unit("members", "A", 5, 6).split() is None
+
+    async def test_a_band_that_runs_out_of_time_is_read_in_halves_each_member_once(self):
+        urns = [f"urn:a{i}" for i in range(8)]
+        members = _Members({"A": urns})
+        session = Session.start("s1", "q", "1", None, 10, Plan([Unit("members", "A", 0, 8, size=8)]))
+        read = []
+
+        async def run(cypher, params, timeout_s):
+            if len(params["_visible"]) > 2:
+                raise TimeoutError("Query timed out")
+            read.extend(params["_visible"])
+            return SimpleNamespace(result_set=[[len(params["_visible"]),
+                                                [[u] for u in params["_visible"]]]])
+
+        from backend.app.services.deep_search import get_deep_search_settings
+        work = engine_mod._SearchWork(session, self._ctx(members=members), run)
+        await engine_mod._hop(session, work, time.monotonic() + 5, get_deep_search_settings(), 5.0)
+        assert session.status == "complete" and session.count == 8
+        assert sorted(read) == urns and [r[0] for r in session.rows] == sorted(urns)
+
+    async def test_a_session_keeps_bands_never_members(self):
+        """However many members, the session holds the bands it reads — not
+        their URNs, which are read again as each band runs."""
+        class _Counted:
+            def __init__(self, n):
+                self.count = n
+
+            async def counts(self):
+                return {"A": (self.count, self.count)}
+
+        db = _PlanDb(labels=["A"], counts={"A": 10**6})
+        sizes = {}
+        for n in (25_000, 250_000):
+            plan = await self._plan(db, self._view(), _Counted(n))
+            sizes[n] = len(Session.start("s1", "q", "1", None, 10, plan).to_json())
+            assert len(plan.units) == -(-n // plan_mod.MEMBER_CHUNK)
+            assert all(u.urns is None for u in plan.units)
+        # A few hundred bytes a band: under a byte a member, whose URNs would
+        # be tens of bytes each.
+        assert sizes[250_000] < 250_000
+        assert sizes[250_000] / sizes[25_000] < 11
+
+    async def test_its_facets_are_left_empty_and_say_why(self, scan, monkeypatch):
+        """The capped facet statements read the listed roots alone: never
+        counted without the members, while the hits and their count stand."""
+        scan({"A": _rows("a", 3)})
+
+        async def facets(*args):
+            raise AssertionError("no facet statement runs")
+
+        monkeypatch.setattr(engine_mod, "_compute_facets", facets)
+        page = await engine_mod.execute_session_search(
+            _Provider(), _query(results="both", aggregations=[{"by": "entityType"}]),
+            context=SearchRunContext(data_version="1", scope_hash="h",
+                                     members=_Members({"A": ["urn:a000"]})))
+        assert page.aggregates == [[]] and page.total_count == 3
+        assert engine_mod.FACETS_PAST_THE_CAP in page.scope_diagnostics.notes
+
+    async def test_named_entities_are_in_scope_as_members_or_under_the_roots(self):
+        """A search planned from the entities it names keeps those the view
+        holds: its members, and what lies under (or is one of) its roots."""
+        async def run(cypher, params):
+            if "RETURN ID(r) AS id" in cypher:              # the roots, by urn
+                return SimpleNamespace(result_set=[[7]] if "w1" in params["_urns"] else [])
+            assert "UNWIND $_ids AS _ii MATCH (n)" in cypher
+            ancestors = {1: [], 2: [[7, 2]], 3: [], 7: [[7, 0]]}
+            return SimpleNamespace(result_set=[
+                [i, f"u{i}", ["A"], ancestors[i]] for i in params["_ids"]])
+
+        query = self._view(roots=["w1"])
+        members = _Members({"A": ["u1"]})
+        provider = _provider(_PlanDb(labels=[], counts={}))
+        kept = await plan_mod._in_scope(run, provider, query, _compiled(query), ["A"],
+                                        ("CONTAINS",), [1, 2, 3, 7], members)
+        assert kept == [1, 2, 7]
+        # With no roots listed, only its members.
+        bare = self._view()
+        assert await plan_mod._in_scope(run, provider, bare, _compiled(bare), ["A"],
+                                        ("CONTAINS",), [1, 2, 3], members) == [1]
