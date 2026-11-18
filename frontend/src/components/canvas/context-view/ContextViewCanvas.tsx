@@ -4814,7 +4814,9 @@ export function ContextViewCanvas({
     // An errored pass leaves `effectiveAssignments` at its previous value —
     // an empty Map on a first load — so without this a provider blip reports
     // the green "Placed 0 items across 6 layers", once per bounded retry.
-    assignmentStatus === 'error',
+    // A view whose members the server places (a subset, a view made from a query)
+    // places none here, so it reports none: its layers say what they hold.
+    assignmentStatus === 'error' || fedView,
   )
   // A spinner while it works, and NOTHING in the record afterwards. Summarising
   // is a consequence of expanding something, not a thing the user did: it

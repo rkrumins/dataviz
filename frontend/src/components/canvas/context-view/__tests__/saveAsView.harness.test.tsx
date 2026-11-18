@@ -130,12 +130,13 @@ describe('Save as view from a trace', () => {
     setPreview(true)
     useAuthStore.setState({ permissions: { sid: 's', global: [], ws: { 'harness-ws': ['workspace:view:create'] } } } as never)
     const planned: PlanRequest[] = []
+    const askedIn: string[] = []
     createFromMembers.mockResolvedValue({ view: { id: 'v-new', name: 'cfo' }, membership: {} })
     const h = await renderCanvasWithTrace(cfoEstate(), {
       focus: 'cfo',
       wrapProvider: (p) => ({
         ...p,
-        planMembers: async (_v: string, r: PlanRequest) => { planned.push(r); return PLAN },
+        planMembers: async (v: string, r: PlanRequest) => { askedIn.push(v); planned.push(r); return PLAN },
       }) as GraphDataProvider,
     })
     await h.startTrace('cfo')
@@ -146,10 +147,11 @@ describe('Save as view from a trace', () => {
     await act(async () => { fireEvent.click(offer!) })
     expect(await screen.findByRole('dialog', { name: 'Save as a view' })).toBeInTheDocument()
     await waitFor(() => expect(planned.length).toBeGreaterThan(0))
-    // Upstream only: a side switched off is no reach; the walk's ceiling is the whole way.
+    // Upstream only: a side switched off is no reach; the walk's ceiling is the whole way. It
+    // follows the view it was traced in, as a subset of it.
     expect(planned.at(-1)).toMatchObject({
       sources: [{ spec: { seeds: { urns: ['cfo'] }, expand: { upstream: 'all', downstream: 0, children: 0, partnerChildren: 0 } } }],
-      layout: { kind: 'stages' },
+      layout: { kind: 'follow', sourceViewId: askedIn.at(-1), nest: true },
     })
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Save view/ })) })
