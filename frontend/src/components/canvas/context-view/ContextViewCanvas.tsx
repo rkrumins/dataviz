@@ -1358,7 +1358,13 @@ export function ContextViewCanvas({
     // Arm the debounced durable save — managers only (viewers' edits stay session-local, matching the
     // prior blueprint-autosync gate).
     if (!canManage) return
-    pendingLayoutSave.current = { viewId: view.id, referenceLayout, entityScope, branchId: effectiveBranchId }
+    // A view that follows another keeps no layers of its own — they are that view's, served on
+    // every read — so only where people put things in it is saved.
+    const follows = view.membership?.layout?.kind === 'follow'
+    pendingLayoutSave.current = {
+      viewId: view.id, referenceLayout: follows ? { ...referenceLayout, layers: [] } : referenceLayout,
+      entityScope, branchId: effectiveBranchId,
+    }
     armLayoutSave()
   }, [canManage, armLayoutSave, effectiveBranchId])
 
@@ -2223,8 +2229,9 @@ export function ContextViewCanvas({
   const membersFed = !!activeView?.membership && !atRevision
   const fedView = subsetView || membersFed
   // A view made from a query that FOLLOWS another (layout `follow`): a subset of it, its
-  // layers that view's as they change there, each member where that view places it. Like a
-  // subset view, nothing in it is placed, grouped or reordered by hand.
+  // layers that view's as they change there, each member where that view places it — or
+  // where someone put it in this view. Like a subset view, nothing is added, built, grouped
+  // or reordered in it.
   const followsBase = activeView?.membership?.layout?.kind === 'follow'
   const serverPlaced = subsetView || followsBase
   // Its matches drawn inside the containers its base draws them in: the reader's choice.
@@ -5093,8 +5100,7 @@ export function ContextViewCanvas({
         }, 8000)
       })
     }
-    // A view that follows another keeps no layers of its own to pin a member in.
-    const actions = memberActionsFor(entry).filter(a => !(followsBase && a === 'include')).map((action): ContextMenuAction => {
+    const actions = memberActionsFor(entry).map((action): ContextMenuAction => {
       if (action === 'exclude') {
         return { id: 'member-exclude', label: 'Keep out of this view', icon: 'EyeOff',
           onClick: run({ exclude: [urn] }, `“${name}” is kept out of this view, whatever its query finds`, { unexclude: [urn] }) }
@@ -5109,7 +5115,7 @@ export function ContextViewCanvas({
     if (actions.length) actions[actions.length - 1] = { ...actions[actions.length - 1], dividerAfter: true }
     return actions
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interactions.state.contextMenu.target, membersEditable, displayMap, applyMemberOps, notify, followsBase])
+  }, [interactions.state.contextMenu.target, membersEditable, displayMap, applyMemberOps, notify])
   const nodeCustomActions = useMemo(() => [...memberMenuActions, ...reorderMenuActions], [memberMenuActions, reorderMenuActions])
   // Right-click → Narrow to this: one entry per reach, applied at once; or
   // choose in the composer. The selection the entity is part of narrows together.
@@ -8214,7 +8220,9 @@ export function ContextViewCanvas({
                 emptyText={subsetView ? 'No matches' : undefined}
                 onSearchInLayer={subsetView ? searchInLayer : undefined}
                 onScroll={handleLayerScroll}
-                onAssignToLayer={serverPlaced ? undefined : handleAssignToLayer}
+                // A subset of a search's matches is placed by the search alone; in a view that
+                // follows another, people may put a member in another of its layers.
+                onAssignToLayer={subsetView ? undefined : handleAssignToLayer}
                 // Draft-only layer management (create lives in AddLayerColumn; these are per-column).
                 // A subset that follows its base takes its layers from there.
                 onRenameLayer={isDraft && !subsetFollows ? renameLayer : undefined}

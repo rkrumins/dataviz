@@ -178,6 +178,9 @@ export function statusWords(status: MembershipStatus): StatusWords {
     case 'partial':
       return { label: 'Up to date, within limits', tone: 'attention', detail: 'The last update reached a limit — what it reached is shown.' }
     case 'pending':
+      if (d.reason === 'base_changed') {
+        return { label: 'Waiting to update', tone: 'attention', detail: 'The view it follows changed where it places things. Its members move to match the next time it’s opened — or refresh now.' }
+      }
       return d.reason === 'graph_busy' || d.reason === 'short_answer'
         ? { label: 'Waiting to update', tone: 'attention', detail: 'The graph didn’t answer in full last time, so the view kept its members. Refresh again in a moment.' }
         : { label: 'Waiting to update', tone: 'attention', detail: 'A change is waiting to be worked out. Refresh now to see it.' }

@@ -117,6 +117,7 @@ describe('how keeping it is going', () => {
       .toBe('An update would remove 812 of 1,020. Apply it, or keep the view as it is.')
     expect(statusWords(status({ status: 'over_cap', detail: { keys: 6200, limit: 5000 } })).detail).toMatch(/6,200 entries/)
     expect(statusWords(status({ status: 'pending', detail: { reason: 'short_answer' } })).detail).toMatch(/didn’t answer in full/)
+    expect(statusWords(status({ status: 'pending', detail: { reason: 'base_changed' } })).detail).toMatch(/view it follows changed/)
   })
 
   it('reads the chip as auto-updating with its count, or a snapshot with its date', () => {
