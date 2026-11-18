@@ -1,9 +1,10 @@
 /**
  * WorkspaceReviewsPage — the standalone review inbox at /workspaces/:wsId/reviews. Page
  * chrome (back link + header) around the shared WorkspaceReviewsInbox. Deep-linkable via
- * ?pr=<prId>, which opens that review's drawer; a review's own page is /workspaces/:wsId/reviews/:prId.
+ * ?queue=<queue>, and ?pr=<prId>, which opens that review's drawer; a review's own page is
+ * /workspaces/:wsId/reviews/:prId.
  */
-import { useParams, useSearchParams, Link } from 'react-router-dom'
+import { useParams, Link } from 'react-router-dom'
 import { GitPullRequestArrow, ArrowLeft } from 'lucide-react'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { WorkspaceReviewsInbox } from '@/features/reviews/components/WorkspaceReviewsInbox'
@@ -13,7 +14,6 @@ import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 
 export function WorkspaceReviewsPage() {
   const { wsId } = useParams<{ wsId: string }>()
-  const [searchParams] = useSearchParams()
   const workspaceName = useWorkspacesStore((s) => s.workspaces.find((w) => w.id === wsId)?.name)
 
   useDocumentTitle(workspaceName ? `Reviews · ${workspaceName}` : 'Reviews')
@@ -39,7 +39,7 @@ export function WorkspaceReviewsPage() {
           </div>
         </div>
 
-        <WorkspaceReviewsInbox wsId={wsId} initialPrId={searchParams.get('pr')} initialThreadId={searchParams.get('thread')} />
+        <WorkspaceReviewsInbox wsId={wsId} />
       </PageContainer>
     </div>
   )

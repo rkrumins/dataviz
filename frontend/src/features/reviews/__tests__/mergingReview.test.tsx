@@ -1,12 +1,10 @@
 /**
- * A fork's review merged by a job is `merging` until the job ends: its badge says so, the inbox
- * counts and lists it among the reviews in progress, and its row shows its changes but offers no
- * Dismiss — the server refuses to close a review a job is merging.
+ * A fork's review merged by a job is `merging` until the job ends: its badge says so, and its row
+ * shows its changes but offers no Dismiss — the server refuses to close a review a job is merging.
+ * (Which inbox queues it is in is the server's to say: every live review is in Everything open.)
  */
-import { useEffect } from 'react'
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import type { ReviewItem } from '../components/DataSourceReviewFeed'
 import type { PullRequest } from '@/services/versioningApiService'
 
 const mergingPr: PullRequest = {
@@ -15,28 +13,6 @@ const mergingPr: PullRequest = {
   targetBranch: 'main',
 }
 
-const state = {
-  workspaces: [{ id: 'ws1', dataSources: [{ id: 'ds1', label: 'Sales' }] }],
-  loadWorkspaces: vi.fn(),
-}
-vi.mock('@/store/workspaces', () => ({
-  useWorkspacesStore: (sel: (s: typeof state) => unknown) => sel(state),
-}))
-vi.mock('@/store/auth', () => ({
-  useAuthStore: (sel: (s: { user: null }) => unknown) => sel({ user: null }),
-}))
-vi.mock('../components/DataSourceReviewFeed', () => ({
-  DataSourceReviewFeed: ({ dataSourceId, sourceLabel, onLoaded }: {
-    dataSourceId: string; sourceLabel: string
-    onLoaded: (ds: string, items: ReviewItem[], failed: boolean) => void
-  }) => {
-    useEffect(() => {
-      onLoaded(dataSourceId, [{ pr: mergingPr, sourceLabel }], false)
-    }, [dataSourceId, sourceLabel, onLoaded])
-    return null
-  },
-}))
-vi.mock('../components/PrDetailDrawer', () => ({ PrDetailDrawer: () => null }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
   usePrDiffSummary: (wsId?: string, prId?: string) => ({
     data: wsId && prId ? { counts: { added: 2, modified: 1, removed: 0 } } : undefined,
@@ -51,18 +27,11 @@ vi.mock('@/features/versioning/hooks/useVersioning', () => ({
 
 import { PrStatusBadge } from '../components/PrMeta'
 import { PrListRow } from '../components/PrListRow'
-import { WorkspaceReviewsInbox } from '../components/WorkspaceReviewsInbox'
 
 describe('a review being merged', () => {
   it('is badged Merging', () => {
     render(<PrStatusBadge status="merging" />)
     expect(screen.getByText('Merging')).toBeInTheDocument()
-  })
-
-  it('is listed and counted among the reviews in progress', () => {
-    render(<WorkspaceReviewsInbox wsId="ws1" />)
-    expect(screen.getByText('Q3 fork')).toBeInTheDocument()
-    expect(screen.getAllByText('Merging').length).toBeGreaterThan(0)
   })
 
   it('shows its changes and offers no Dismiss', () => {

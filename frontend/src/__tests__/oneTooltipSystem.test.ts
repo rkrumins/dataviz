@@ -61,6 +61,9 @@ const SCOPE = [
   'components/canvas/search/studio',
   'features/versioning/components',
   'features/reviews/page',
+  'features/reviews/components/WorkspaceReviewsInbox.tsx',
+  'features/reviews/components/PrListRow.tsx',
+  'features/reviews/components/PrMeta.tsx',
 ]
 
 /**
