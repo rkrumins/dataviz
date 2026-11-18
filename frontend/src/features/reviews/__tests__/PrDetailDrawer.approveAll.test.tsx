@@ -2,7 +2,7 @@
  * Approve all: a reviewer accepts every change still to decide, approves, and merges — one click,
  * asked first — where nothing but their approval holds it; with someone else's approval awaited,
  * it approves all without merging; with anything rejected, it isn't offered (that review merges
- * what is accepted).
+ * what is accepted). Finish your review is beside it either way.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -50,7 +50,7 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
   useCloseMergeRequest: () => idle,
   useMergeMergeRequest: () => ({ ...idle, mutateAsync: mergeMutateAsync }),
   useUpdateMergeRequest: () => idle,
-  useRequestChanges: () => idle,
+  useSubmitReview: () => idle,
   useWithdrawChangesRequest: () => idle,
   useDiscardRejected: () => idle,
   useBranchViewChanges: () => ({ data: undefined }),
@@ -116,13 +116,13 @@ describe('PrDetailDrawer — approve all', () => {
     open()
     fireEvent.click(screen.getByRole('button', { name: 'Approve all' }))
     await waitFor(() => expect(calls).toEqual(['decide', 'approve']))
-    expect(screen.getByRole('button', { name: 'Merge 2 accepted' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Finish your review/ })).toBeInTheDocument()
   })
 
   it('is not offered where something was rejected', () => {
     state.summary = summary({ rejected: 1, undecided: 1 })
     open()
     expect(screen.queryByRole('button', { name: /Approve all/ })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Finish your review/ })).toHaveAttribute('href', '/workspaces/ws1/reviews/pr_1?finish=1')
   })
 })

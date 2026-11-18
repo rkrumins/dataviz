@@ -1,7 +1,7 @@
 /**
  * A draft's review decided change by change merges what is accepted: Merge N accepted, the draft
- * keeping the rest; it waits while what is accepted needs a change that is not, and offers to
- * accept those too.
+ * keeping the rest; while what is accepted needs a change that is not, accepting those too is the
+ * next thing to do. What's next says each.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -51,7 +51,7 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
   useCloseMergeRequest: () => idle,
   useMergeMergeRequest: () => ({ ...idle, mutateAsync: mergeMutateAsync }),
   useUpdateMergeRequest: () => idle,
-  useRequestChanges: () => idle,
+  useSubmitReview: () => idle,
   useWithdrawChangesRequest: () => idle,
   useDiscardRejected: () => idle,
   useBranchViewChanges: () => ({ data: undefined }),
@@ -85,17 +85,23 @@ describe('PrDetailDrawer — merging what is accepted', () => {
     decisions.summary = summary()
     mergeMutateAsync.mockResolvedValue({ commitId: 'c10', outcome: 'published' })
     render(<MemoryRouter><PrDetailDrawer wsId="ws1" prId="pr_1" onClose={vi.fn()} /></MemoryRouter>)
-    expect(screen.getByText('Only what is accepted merges; the rest stays on the draft.')).toBeInTheDocument()
+    expect(screen.getByText('1 change rejected')).toBeInTheDocument()
+    expect(screen.getByText('Merge only what is accepted, or discard what was rejected from the draft.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Merge 2 accepted' }))
+    // What's next offers it, and it is the next thing to do.
+    const merges = screen.getAllByRole('button', { name: 'Merge 2 accepted' })
+    expect(merges).toHaveLength(2)
+    fireEvent.click(merges.at(-1)!)
     await waitFor(() => expect(mergeMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ prId: 'pr_1', mode: 'accepted' })))
   })
 
-  it('waits while what is accepted needs a change that is not, and offers to accept it', () => {
+  it('while what is accepted needs a change that is not, accepting it is next', () => {
     decisions.summary = summary({ missing: 1, missingIds: ['T3'] })
     render(<MemoryRouter><PrDetailDrawer wsId="ws1" prId="pr_1" onClose={vi.fn()} /></MemoryRouter>)
-    expect(screen.getByRole('button', { name: 'Merge 2 accepted' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: 'Accept them too' }))
+    expect(screen.getByText('1 change the accepted ones need isn’t accepted')).toBeInTheDocument()
+    const accept = screen.getAllByRole('button', { name: 'Accept them too' })
+    expect(accept).toHaveLength(2)
+    fireEvent.click(accept.at(-1)!)
     expect(decisions.mutate).toHaveBeenCalledWith(
       expect.objectContaining({ verdict: 'accepted', entityIds: ['T3'], expectedHeadCommitId: 'c9' }), expect.anything())
   })

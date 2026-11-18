@@ -1,14 +1,15 @@
 /**
- * Sending a draft's review back: Send back asks why and tells the author; while it holds, Merge
- * waits and says so; its reviewer can withdraw it; its author can discard what was rejected in one
- * step; and merging what is accepted can discard what was rejected too.
+ * Sending a draft's review back: whoever decides its changes does it from Finish your review, on the
+ * review page; while it holds, What's next says by whom and why and Merge waits; its author can
+ * discard what was rejected in one step; and merging what is accepted can discard what was rejected
+ * too.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const mergeMutateAsync = vi.fn()
-const sendBack = vi.hoisted(() => ({ request: vi.fn(), withdraw: vi.fn(), discard: vi.fn() }))
+const sendBack = vi.hoisted(() => ({ discard: vi.fn() }))
 const prState = vi.hoisted(() => ({ over: {} as Record<string, unknown>, me: 'u_me' }))
 const idle = { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }
 const api = vi.hoisted(() => ({ getChangeEntry: vi.fn(), getMergeRequestDiff: vi.fn() }))
@@ -55,8 +56,8 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
   useCloseMergeRequest: () => idle,
   useMergeMergeRequest: () => ({ ...idle, mutateAsync: mergeMutateAsync }),
   useUpdateMergeRequest: () => idle,
-  useRequestChanges: () => ({ ...idle, mutate: sendBack.request }),
-  useWithdrawChangesRequest: () => ({ ...idle, mutate: sendBack.withdraw }),
+  useSubmitReview: () => idle,
+  useWithdrawChangesRequest: () => idle,
   useDiscardRejected: () => ({ ...idle, mutate: sendBack.discard }),
   useBranchViewChanges: () => ({ data: undefined }),
 }))
@@ -90,25 +91,19 @@ beforeEach(() => {
 })
 
 describe('PrDetailDrawer — sending a review back', () => {
-  it('asks why, and sends it back at the head reviewed', () => {
+  it('is done from Finish your review, on the review page', () => {
     drawer()
-    fireEvent.click(screen.getByRole('button', { name: 'Send back' }))
-    expect(screen.getByText('Send this back for changes?')).toBeInTheDocument()
-    fireEvent.change(screen.getByPlaceholderText('What should change, and why?'), { target: { value: ' Use ISO codes ' } })
-    fireEvent.click(screen.getAllByRole('button', { name: 'Send back' }).at(-1)!)
-    expect(sendBack.request).toHaveBeenCalledWith(
-      { prId: 'pr_1', graphId: 'g1', reason: 'Use ISO codes', expectedHeadCommitId: 'c9' }, expect.anything())
+    expect(screen.getByRole('link', { name: /Finish your review/ })).toHaveAttribute('href', '/workspaces/ws1/reviews/pr_1?finish=1')
+    expect(screen.queryByRole('button', { name: 'Send back' })).not.toBeInTheDocument()
   })
 
-  it('while sent back, says by whom and why, holds Merge, and lets its reviewer withdraw', () => {
+  it('while sent back, says by whom and why, and holds Merge', () => {
     prState.over = { changesRequested: SENT_BACK }
     drawer()
-    expect(screen.getByRole('status')).toHaveTextContent(/Sent back for changes by Bo/)
-    expect(screen.getByText('“Use ISO codes”')).toBeInTheDocument()
+    expect(screen.getByText('Bo asked for changes')).toBeInTheDocument()
+    expect(screen.getByText('“Use ISO codes” It merges once the draft changes.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Merge 2 accepted' })).toBeDisabled()
-    expect(screen.queryByRole('button', { name: 'Send back' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Withdraw' }))
-    expect(sendBack.withdraw).toHaveBeenCalledWith({ prId: 'pr_1', graphId: 'g1' }, expect.anything())
+    expect(screen.queryByRole('link', { name: /Finish your review/ })).not.toBeInTheDocument()
   })
 
   it('its author discards what was rejected in one step', () => {
@@ -116,8 +111,10 @@ describe('PrDetailDrawer — sending a review back', () => {
     prState.me = 'u_author'
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     drawer()
-    expect(screen.queryByRole('button', { name: 'Withdraw' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Discard the rejected' }))
+    // What's next offers it, and it is the next thing to do.
+    const discard = screen.getAllByRole('button', { name: 'Discard the rejected' })
+    expect(discard).toHaveLength(2)
+    fireEvent.click(discard.at(-1)!)
     expect(confirmSpy).toHaveBeenCalled()
     expect(sendBack.discard).toHaveBeenCalledWith({ prId: 'pr_1', graphId: 'g1', branchId: 'br_1' }, expect.anything())
     confirmSpy.mockRestore()
@@ -127,7 +124,7 @@ describe('PrDetailDrawer — sending a review back', () => {
     mergeMutateAsync.mockResolvedValue({ commitId: 'c10', outcome: 'published' })
     drawer()
     fireEvent.click(screen.getByRole('checkbox', { name: /Also discard the 1 rejected change from the draft/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Merge 2 accepted' }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Merge 2 accepted' }).at(-1)!)
     await waitFor(() => expect(mergeMutateAsync).toHaveBeenCalledWith(
       expect.objectContaining({ mode: 'accepted', discardRejected: true })))
   })
