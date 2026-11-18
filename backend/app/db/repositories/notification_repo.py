@@ -188,6 +188,25 @@ async def mark_read(
     return int(result.rowcount or 0)
 
 
+async def mark_read_for_resource(
+    session: AsyncSession, user_id: str, *, resource_type: str, resource_id: str,
+) -> int:
+    """Mark read this user's unread notifications about one thing (a review, say): what they were
+    told of it they have now seen, by opening it."""
+    now = datetime.now(timezone.utc).isoformat()
+    result = await session.execute(
+        update(NotificationORM)
+        .where(
+            NotificationORM.user_id == user_id,
+            NotificationORM.read_at.is_(None),
+            NotificationORM.resource_type == resource_type,
+            NotificationORM.resource_id == resource_id,
+        )
+        .values(read_at=now)
+    )
+    return int(result.rowcount or 0)
+
+
 # ── recipient resolution ─────────────────────────────────────────────
 
 async def workspace_member_count(

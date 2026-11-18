@@ -17,6 +17,7 @@ _EXPECTED_TABLES = {
     "merkle_nodes", "working_changes", "bootstrap_nodes", "fork_bases",
     "projection_quarantine", "rollup_deltas", "key_index", "entity_keys", "import_mentions",
     "review_comments", "review_decisions", "review_requests", "review_events", "change_sets",
+    "review_seen",
 }
 
 

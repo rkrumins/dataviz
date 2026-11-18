@@ -31,7 +31,7 @@ import logging
 import os
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -1678,6 +1678,11 @@ class PrResponse(_ApiModel):
     # (``reviewers``), every request for changes and whether it holds, open threads and whether
     # they hold the merge; on the single-PR read, ``you``: where the reader stands.
     review: Optional[Dict[str, Any]] = None
+    # The review inbox's rows: whether something someone else did on it is unread to the reader,
+    # when anything last happened on it, and the data source it merges into.
+    unread: Optional[bool] = None
+    last_activity_at: Optional[str] = Field(default=None, alias="lastActivityAt")
+    target_data_source_id: Optional[str] = Field(default=None, alias="targetDataSourceId")
 
 
 # --------------------------------------------------------------------------- #
@@ -2088,11 +2093,14 @@ _DRAFT_NEWS = {
 
 async def _tell_draft_people(session: AsyncSession, svc: GraphVersioningService, kind: str, *,
                              ws_id: str, meta: dict, graph_id: str, branch_id: str, actor: str,
-                             to: Optional[str] = None, pr_id: Optional[str] = None) -> None:
+                             to: Optional[str] = None, pr_id: Optional[str] = None,
+                             skip: Iterable[str] = ()) -> set:
     """Tell a draft's people (``draft_people``) what became of it, in their Inbox: its readers;
     for ``draft.made_private`` the ones who read it no longer; else just ``to``. Never its actor,
-    and not again while an earlier notice of it is unread. Best-effort: failing to tell anyone
-    never fails the change."""
+    nor anyone in ``skip`` (told of it another way), and not again while an earlier notice of it is
+    unread. Returns who was meant to hear it. Best-effort: failing to tell anyone never fails the
+    change."""
+    recipients: set = set()
     try:
         people = await svc.draft_people(graph_id=graph_id, branch_id=branch_id)
         if to is not None:
@@ -2101,6 +2109,7 @@ async def _tell_draft_people(session: AsyncSession, svc: GraphVersioningService,
             recipients = set(people["people"]) - set(people["readers"])
         else:
             recipients = set(people["readers"])
+        recipients -= set(skip)
         view = people["originating_view_id"]
         if pr_id:
             link = f"/workspaces/{ws_id}/reviews?pr={pr_id}"
@@ -2117,6 +2126,45 @@ async def _tell_draft_people(session: AsyncSession, svc: GraphVersioningService,
             dedupe_unread=True)
     except Exception:  # noqa: BLE001 — telling people never fails the change it tells of
         logger.warning("could not tell the people of draft %s (%s)", branch_id, kind, exc_info=True)
+    return recipients
+
+
+_REVIEW_NEWS = {
+    "review.requested": ('You were asked to review "{name}"',
+                         "Look through its changes, then approve it, ask for changes, or comment."),
+    "review.approved": ('"{name}" was approved', "A reviewer approved it."),
+    "review.commented": ('A reviewer commented on "{name}"', None),
+    "review.merged": ('"{name}" was merged', "Its changes are in the published version now."),
+    "review.closed": ('"{name}" was closed', "It was closed without being merged."),
+}
+
+
+def _review_authors(pr: dict) -> set:
+    """Whoever opened a review, and its draft's owner."""
+    return {x for x in (pr.get("actor"), pr.get("source_branch_owner")) if x}
+
+
+def _review_people(pr: dict) -> set:
+    """The people a review asks, and everyone who gave it a verdict or a comment."""
+    review = pr.get("review") or {}
+    asked = {r["id"] for r in review.get("reviewers") or () if r.get("type") == "user"}
+    return asked | set(pr.get("reviewers") or ()) | {r["by"] for r in review.get("reviews") or () if r.get("by")}
+
+
+async def _tell_review_people(session: AsyncSession, kind: str, *, ws_id: str, pr: dict, actor: str,
+                              to: Iterable[str], body: Optional[str] = None) -> None:
+    """Tell ``to`` what happened to a review, in their Inbox, linking to its page: never its actor,
+    and not again while an earlier notice of the same kind on it is unread (``resource_type``
+    ``review``, which opening the review marks read). Best-effort: never fails the change."""
+    try:
+        title, default = _REVIEW_NEWS[kind]
+        name = (pr.get("title") or "").strip() or "Untitled review"
+        await notification_repo.notify(
+            session, user_ids=set(to), kind=kind, title=title.format(name=name),
+            body=(body or "").strip()[:280] or default, link=f"/workspaces/{ws_id}/reviews/{pr['pr_id']}",
+            actor_id=actor, resource_type="review", resource_id=pr["pr_id"], dedupe_unread=True)
+    except Exception:  # noqa: BLE001 — telling people never fails the change it tells of
+        logger.warning("could not tell the people of review %s (%s)", pr.get("pr_id"), kind, exc_info=True)
 
 
 async def _drafts_policy_of(session: AsyncSession, data_source_id: Optional[str]):
@@ -2732,8 +2780,13 @@ async def abandon_draft(
     with _domain_errors():
         result = await svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=user.id)
     await _drop_view_layout_overlays(branch_id)   # layout edits vanish with the draft (Git-like)
-    await _tell_draft_people(session, svc, "draft.discarded", ws_id=ws_id, meta=_meta, graph_id=graph_id,
-                             branch_id=branch_id, actor=user.id)
+    told = await _tell_draft_people(session, svc, "draft.discarded", ws_id=ws_id, meta=_meta, graph_id=graph_id,
+                                    branch_id=branch_id, actor=user.id)
+    if result.get("closed_review_id"):                      # its review closed with it
+        closed = await svc.get_pr(result["closed_review_id"])
+        if closed:
+            await _tell_review_people(session, "review.closed", ws_id=ws_id, pr=closed, actor=user.id,
+                                      to=_review_people(closed) - told)
     return result
 
 
@@ -5526,6 +5579,7 @@ async def open_pull_request(
     user: User = Depends(requires(_READ, workspace="ws_id")),       # read can propose
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     # A fork's pull request lands in its parent: an API key must cover the
     # parent's data source too, not only the fork's.
@@ -5544,6 +5598,9 @@ async def open_pull_request(
             description=body.description if body else None,
             reviewers=body.reviewers if body else None,
         )
+    pr = await svc.get_pr(pr_id) or {"pr_id": pr_id}
+    await _tell_review_people(session, "review.requested", ws_id=ws_id, pr=pr, actor=user.id,
+                              to=pr.get("reviewers") or ())
     return {"pr_id": pr_id}
 
 
@@ -5598,6 +5655,9 @@ async def update_pull_request(
     with _domain_errors():
         meta = await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description,
                                    reviewers=body.reviewers, actor=_user.id, rule=policy.rule)
+    if body.reviewers is not None:
+        await _tell_review_people(session, "review.requested", ws_id=ws_id, pr=meta, actor=_user.id,
+                                  to=set(body.reviewers) - set(_pr.get("reviewers") or ()))
     await _review_out(svc, session, [meta], policy.rule)
     return meta
 
@@ -5743,6 +5803,8 @@ async def approve_pull_request(
         meta = await svc.approve_pr(pr_id=pr_id, actor=user.id,
                                     expected_head_commit_id=body.expected_head_commit_id if body else None,
                                     self_approval=policy.self_approval, rule=policy.rule)
+    await _tell_review_people(session, "review.approved", ws_id=ws_id, pr=meta, actor=user.id,
+                              to=_review_authors(meta))
     await _review_out(svc, session, [meta], policy.rule)
     return meta
 
@@ -5757,6 +5819,8 @@ async def close_pull_request(
 ):
     with _domain_errors():
         meta = await svc.close_pr(pr_id=pr_id, actor=user.id)
+    await _tell_review_people(session, "review.closed", ws_id=ws_id, pr=meta, actor=user.id,
+                              to=_review_people(meta) | _review_authors(meta))
     await _review_out(svc, session, [meta])
     return meta
 
@@ -5854,8 +5918,11 @@ async def open_merge_request(
             description=body.description if body else None,
             reviewers=body.reviewers if body else None,
         )
+    pr = await svc.get_pr(pr_id) or {"pr_id": pr_id}
+    asked = set(pr.get("reviewers") or ())
+    await _tell_review_people(session, "review.requested", ws_id=ws_id, pr=pr, actor=user.id, to=asked)
     await _tell_draft_people(session, svc, "draft.sent_for_review", ws_id=ws_id, meta=_meta,
-                             graph_id=graph_id, branch_id=branch_id, actor=user.id, pr_id=pr_id)
+                             graph_id=graph_id, branch_id=branch_id, actor=user.id, pr_id=pr_id, skip=asked)
     return {"pr_id": pr_id}
 
 
@@ -6106,6 +6173,98 @@ async def list_data_source_pull_requests(
     return prs
 
 
+# --------------------------------------------------------------------------- #
+# The review inbox: a workspace's reviews in the queues the reader works by    #
+# --------------------------------------------------------------------------- #
+InboxQueue = Literal["needs_review", "waiting", "sent_back", "ready", "open", "done"]
+
+
+class ReviewInboxCountsResponse(_ApiModel):
+    #: Reviews in each queue, and how many of them are unread.
+    counts: Dict[str, int]
+    unread: Dict[str, int]
+    #: More live reviews than the inbox reads at once: the oldest are left out.
+    capped: bool
+
+
+class ReviewInboxResponse(ReviewInboxCountsResponse):
+    queue: str
+    items: List[PrResponse]
+    total: int
+
+
+async def _inbox(svc: GraphVersioningService, session: AsyncSession, ws_id: str, viewer: Viewer,
+                 rules: Dict[Optional[str], Any], **kw) -> dict:
+    async def rule_of(ds: Optional[str]):
+        if ds not in rules:
+            rules[ds] = (await _drafts_policy_of(session, ds)).rule
+        return rules[ds]
+    with _domain_errors():
+        return await svc.review_inbox(workspace_id=ws_id, viewer=viewer, rule_of=rule_of, **kw)
+
+
+@router.get("/review-inbox", response_model=ReviewInboxResponse)
+async def review_inbox(
+    ws_id: str,
+    queue: InboxQueue = Query("needs_review"),
+    q: Optional[str] = Query(None, max_length=200),
+    data_source_id: Optional[str] = Query(None, alias="dataSourceId", max_length=200),
+    author: Optional[str] = Query(None, max_length=200),
+    sort: Literal["activity", "created"] = Query("activity"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The workspace's reviews the reader may see, in the queues they work by: ``needs_review``
+    (asked of them, and not reviewed as it is now), their own — ``waiting``, ``sent_back``,
+    ``ready`` — ``open`` (every live review) and ``done`` (merged or closed). Each queue's count and
+    unread count; a page of the one asked for, filtered by ``q``, ``dataSourceId`` and ``author``,
+    by last activity or by when it was opened."""
+    rules: Dict[Optional[str], Any] = {}
+    out = await _inbox(svc, session, ws_id, viewer, rules, queue=queue, q=q, data_source_id=data_source_id,
+                       author=author, sort=sort, limit=limit, offset=offset)
+    for it in out["items"]:
+        ds = it.get("target_data_source_id")
+        if ds not in rules:
+            rules[ds] = (await _drafts_policy_of(session, ds)).rule
+        await _review_out(svc, session, [it], rules[ds])
+        _you(it, user.id)
+    await _attach_user_names(session, out["items"])
+    return out
+
+
+@router.get("/review-inbox/counts", response_model=ReviewInboxCountsResponse)
+async def review_inbox_counts(
+    ws_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Each queue's count and unread count, no rows: what the Reviews badge shows."""
+    return await _inbox(svc, session, ws_id, viewer, {}, limit=0)
+
+
+@router.post("/merge-requests/{pr_id}/seen", status_code=204)
+@router.post("/pulls/{pr_id}/seen", status_code=204)
+async def mark_review_seen(
+    ws_id: str, pr_id: str,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The reader looked at a review: what others did on it until now is read — in the inbox, and
+    their notifications of it."""
+    with _domain_errors():
+        await svc.mark_review_seen(pr_id=pr_id, user_id=user.id)
+    await notification_repo.mark_read_for_resource(session, user.id, resource_type="review", resource_id=pr_id)
+    return Response(status_code=204)
+
+
 @router.get("/merge-requests/{pr_id}", response_model=PrResponse)
 async def get_merge_request(
     ws_id: str, pr_id: str,
@@ -6135,6 +6294,9 @@ async def update_merge_request(
     with _domain_errors():
         meta = await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description,
                                    reviewers=body.reviewers, actor=_user.id, rule=policy.rule)
+    if body.reviewers is not None:
+        await _tell_review_people(session, "review.requested", ws_id=ws_id, pr=meta, actor=_user.id,
+                                  to=set(body.reviewers) - set(_pr.get("reviewers") or ()))
     await _review_out(svc, session, [meta], policy.rule)
     return meta
 
@@ -6212,6 +6374,8 @@ async def approve_merge_request(
         meta = await svc.approve_pr(pr_id=pr_id, actor=user.id,
                                     expected_head_commit_id=body.expected_head_commit_id if body else None,
                                     self_approval=policy.self_approval, rule=policy.rule)
+    await _tell_review_people(session, "review.approved", ws_id=ws_id, pr=meta, actor=user.id,
+                              to=_review_authors(meta))
     await _review_out(svc, session, [meta], policy.rule)
     return meta
 
@@ -6226,6 +6390,8 @@ async def close_merge_request(
 ):
     with _domain_errors():
         meta = await svc.close_pr(pr_id=pr_id, actor=user.id)
+    await _tell_review_people(session, "review.closed", ws_id=ws_id, pr=meta, actor=user.id,
+                              to=_review_people(meta) | _review_authors(meta))
     await _review_out(svc, session, [meta])
     return meta
 
@@ -6323,6 +6489,9 @@ async def submit_review(
         meta = await svc.submit_review(pr_id=pr_id, actor=user.id, verdict=body.verdict, body=body.body,
                                        expected_head_commit_id=body.expected_head_commit_id,
                                        self_approval=policy.self_approval, rule=policy.rule)
+    if body.verdict in ("approve", "comment"):
+        await _tell_review_people(session, f"review.{'approved' if body.verdict == 'approve' else 'commented'}",
+                                  ws_id=ws_id, pr=meta, actor=user.id, to=_review_authors(meta), body=body.body)
     if body.verdict == "request_changes":
         target = str(_pr["target_graph_id"])
         await _tell_draft_people(session, svc, "review.changes_requested", ws_id=ws_id,
@@ -6434,10 +6603,15 @@ async def merge_merge_request(
         return await _publish_answer(svc, target, commit_id)
     # The merged draft — fold its layout overlay into the published view
     await _promote_view_layout_overlay(str(_src_branch) if _src_branch else None, user.id)
+    told: set = set()
     if _src_branch and _pr.get("source_graph_id") == target:                 # a draft's, not a fork's
-        await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id,
-                                 meta=await svc.get_graph(target) or {}, graph_id=target,
-                                 branch_id=str(_src_branch), actor=user.id)
+        told = await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id,
+                                        meta=await svc.get_graph(target) or {}, graph_id=target,
+                                        branch_id=str(_src_branch), actor=user.id)
+    merged = await svc.get_pr(pr_id)
+    if merged:
+        await _tell_review_people(session, "review.merged", ws_id=ws_id, pr=merged, actor=user.id,
+                                  to=_review_people(merged) - told)
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
     return await _publish_answer(svc, target, commit_id)
 

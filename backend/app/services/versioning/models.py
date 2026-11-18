@@ -282,6 +282,9 @@ class MergeRequestORM(VersioningBase):
         Index("ix_mr_graph", "graph_id"),
         Index("ix_mr_source", "source_graph_id"),
         Index("ix_mr_status", "status"),
+        # A workspace's live reviews (the review inbox): its graphs', not merged or closed
+        # (20261119_1200_gv_review_seen).
+        Index("ix_mr_target_status", "target_graph_id", "status"),
         # ONE LIVE PR PER SOURCE BRANCH. A PR points at a branch and its diff is computed live from
         # that branch, so commits made after it was raised are already in it — a second PR from the
         # same branch is a duplicate, not a new proposal. Merging either marks the branch `merged`,
@@ -440,6 +443,20 @@ class ChangeSetORM(VersioningBase):
     body = Column(LargeBinary, nullable=False)           # zlib-compressed JSON (change_sets.py)
 
     __table_args__ = _plain(Index("ix_cs_origin", "graph_id", "origin", "built_at"))
+
+
+class ReviewSeenORM(VersioningBase):
+    """When each person last looked at a review: anything others did on it since is unread to them
+    (20261119_1200_gv_review_seen)."""
+
+    __tablename__ = "review_seen"
+
+    pr_id = Column(Text, primary_key=True)
+    user_id = Column(Text, primary_key=True)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    seen_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(Index("ix_rs_graph", "graph_id"))
 
 
 class ProjectionStateORM(VersioningBase):
@@ -1175,6 +1192,8 @@ def _ensure_schema_upgrades(conn) -> None:
     # merge gate would not see them.
     _bounded_step(conn, "the review records were not carried over",
                   lambda: ensure_review_records(conn), required=True)
+    # 20261119_1200_gv_review_seen (``review_seen`` is a new table: ``create_all`` makes it).
+    _bounded_step(conn, "ix_mr_target_status was not built", lambda: ensure_mr_target_status_index(conn))
     # 20261018_1100_gv_ps_retired.
     _bounded_step(conn, "the retired_keys column was not added",
                   lambda: ensure_ps_retired_keys_column(conn), required=True)
@@ -1515,6 +1534,14 @@ def ensure_review_records(conn) -> None:
         f"(m.changes_requested ->> 'headSeq')::bigint, coalesce(m.changes_requested ->> 'at', m.updated_at) "
         f"FROM {mr} m WHERE m.changes_requested ->> 'by' IS NOT NULL "
         f"ON CONFLICT (id) DO NOTHING"))
+
+
+def ensure_mr_target_status_index(conn) -> None:
+    """``ix_mr_target_status``: a workspace's live reviews, read by the review inbox. A no-op
+    without the table, and once the index is there."""
+    if sa_inspect(conn).has_table("merge_requests", schema=_SCHEMA):
+        conn.execute(text(f'CREATE INDEX IF NOT EXISTS ix_mr_target_status ON "{_SCHEMA}"."merge_requests" '
+                          "(target_graph_id, status)"))
 
 
 #: ``commits``' provenance columns (``20261110_1000_gv_commit_prov``): nullable, so adding one is a

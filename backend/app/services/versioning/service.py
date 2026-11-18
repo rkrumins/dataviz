@@ -89,7 +89,7 @@ from .models import (
     ProjectionStateORM,
     ReviewCommentORM,
     ReviewDecisionORM,
-    ReviewEventORM,
+    ReviewEventORM, ReviewSeenORM,
     ReviewRequestORM,
     REVIEW_VERDICTS,
     WorkingChangeORM,
@@ -617,6 +617,10 @@ ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 # It is also the definition of "live" for the one-live-PR-per-branch invariant (PullRequestExists,
 # uq_mr_live_source_branch): a PR is live until it is merged or closed.
 _TERMINAL_PR_STATUS = ("merged", "closed")
+#: The review inbox's queues (:meth:`GraphVersioningService.review_inbox`).
+INBOX_QUEUES = ("needs_review", "waiting", "sent_back", "ready", "open", "done")
+#: The most live reviews the inbox reads at once; past it, the oldest are left out (``capped``).
+INBOX_LIVE_CAP = 1000
 #: A draft's own rows, table by table — its heads first, so a draft whose removal is cut off reads as
 #: ``main`` from the start — each with the columns of the index that finds a branch's rows, which
 #: its windows are ordered by so each window is an index scan (``purge_worker.delete_window``).
@@ -2916,8 +2920,8 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
     ) -> dict:
         """Mark an open draft ``abandoned`` (plan §17 #8): it becomes inert — no
-        further stage/checkpoint/publish. Re-abandoning is idempotent; ``main`` and
-        already-merged drafts cannot be abandoned. The owner abandons it, or a maintainer of
+        further stage/checkpoint/publish — and its open review is closed (``closed_review_id``).
+        Re-abandoning is idempotent; ``main`` and already-merged drafts cannot be abandoned. The owner abandons it, or a maintainer of
         a shared draft. Staged rows are left in place for audit (the branch is simply unreachable),
         until the retention window removes the draft's changes (:meth:`prune_closed_drafts`)."""
         async with self._session() as s:
@@ -2929,8 +2933,15 @@ class GraphVersioningService:
             self._require_open(branch)                    # merged/publishing → reject
             await self._require_manage(s, branch, actor, actor_groups)
             branch.status = "abandoned"
-            branch.updated_at = _now()
-            return self._branch_meta(branch)
+            branch.updated_at = now = _now()
+            # Its review closes with it: a draft nobody can merge waits on no reviewer.
+            closed = None
+            for pr in (await s.execute(select(MergeRequestORM).where(
+                    MergeRequestORM.source_branch_id == branch.id,
+                    MergeRequestORM.status.notin_(_TERMINAL_PR_STATUS)))).scalars():
+                pr.status, pr.closed_at, pr.closed_by, pr.updated_at = "closed", now, actor, now
+                closed = pr.id
+            return {**self._branch_meta(branch), "closed_review_id": closed}
 
     async def update_branch(
         self, *, graph_id: str, branch_id: str, actor: str, actor_groups: Sequence[str] = (),
@@ -5158,15 +5169,37 @@ class GraphVersioningService:
         return requests, events
 
     async def _standing(self, s, pr: MergeRequestORM, requests: Optional[List[dict]] = None,
-                        events: Optional[List[dict]] = None) -> "review_state.Standing":
+                        events: Optional[List[dict]] = None, last: Optional[int] = None) -> "review_state.Standing":
         """Where ``pr`` stands (:mod:`review_state`): its requests and events — read here when not
-        given — against the source branch's last content commit since the earliest verdict."""
+        given — against the source branch's last content commit since the earliest verdict (``last``,
+        when the caller read it: :meth:`_last_content_seqs`)."""
         if requests is None or events is None:
             rq, ev = await self._review_rows(s, [pr.id])
             requests, events = rq[pr.id], ev[pr.id]
-        since = review_state.since_seq(events)
-        last = await self._last_content_seq(s, pr, since) if since is not None else 0
+        if last is None:
+            since = review_state.since_seq(events)
+            last = await self._last_content_seq(s, pr, since) if since is not None else 0
         return review_state.standing(requests, events, last, live=pr.status not in ("merged", "closed"))
+
+    @staticmethod
+    async def _last_content_seqs(s, prs: Sequence[MergeRequestORM]) -> Dict[str, int]:
+        """Each review's last content commit on its source branch (0: none), by :meth:`_last_content_seq`'s
+        rule, in one read however many reviews. All of a branch's commits are read, not just those after
+        its earliest verdict: a content commit before it leaves every verdict standing either way."""
+        pairs = sorted({(pr.graph_id, pr.source_branch_id) for pr in prs if pr.source_branch_id})
+        if not pairs:
+            return {pr.id: 0 for pr in prs}
+        content = text(
+            "(commits.kind NOT IN ('pull', 'sync_parent') "
+            "OR jsonb_typeof(commits.stats -> 'rebased') IS DISTINCT FROM 'object' "
+            "OR EXISTS (SELECT 1 FROM jsonb_each(commits.stats -> 'rebased') kv "
+            "WHERE kv.value NOT IN ('0', 'false', 'null', '\"\"')))")
+        last = {(g, b): int(seq) for g, b, seq in (await s.execute(
+            select(CommitORM.graph_id, CommitORM.branch_id, func.max(CommitORM.commit_seq))
+            .where(CommitORM.graph_id.in_(sorted({g for g, _ in pairs})),
+                   tuple_(CommitORM.graph_id, CommitORM.branch_id).in_(pairs), content)
+            .group_by(CommitORM.graph_id, CommitORM.branch_id))).all()}
+        return {pr.id: last.get((pr.graph_id, pr.source_branch_id), 0) for pr in prs}
 
     async def _restate(self, s, pr: MergeRequestORM, rule: ReviewRule) -> "review_state.Standing":
         """Write ``pr``'s approval status — and approved ⇄ mergeable — as its approvals now leave it
@@ -5254,6 +5287,158 @@ class GraphVersioningService:
             n = (await self._open_threads(s, [pr.id])).get(pr.id, 0)
             if n:
                 raise ThreadsOpen(pr.id, n)
+
+    # ------------------------------------------------------------------ #
+    # The review inbox: who each live review waits on, and what is unread  #
+    # ------------------------------------------------------------------ #
+    async def review_inbox(
+        self, *, workspace_id: str, viewer: "Viewer", queue: str = "needs_review",
+        rule_of: Optional[Callable[[Optional[str]], Awaitable[ReviewRule]]] = None,
+        q: Optional[str] = None, data_source_id: Optional[str] = None, author: Optional[str] = None,
+        sort: str = "activity", limit: int = 50, offset: int = 0,
+    ) -> dict:
+        """A workspace's reviews as ``viewer`` works through them, in queues (:data:`INBOX_QUEUES`):
+
+        * ``needs_review`` — they are asked (themselves, or a group of theirs), it is not theirs,
+          and they have not reviewed it as it is now;
+        * their own (``actor``): ``sent_back`` — a request for changes holds; ``ready`` — its
+          approvals meet its rule and nothing holds its merge; ``waiting`` — the rest;
+        * ``open`` — every live review they may see; ``done`` — merged or closed, newest first.
+
+        Each queue's count, and how many in it are unread: something someone else did on a review
+        since ``viewer`` last looked (:meth:`mark_review_seen`), on a review they are part of.
+        ``rule_of``: a data source's rule (``drafts_policy``), asked once per data source. Filters:
+        ``q`` (the title, the description or the id), ``data_source_id``, ``author``. The live set is
+        read whole, up to :data:`INBOX_LIVE_CAP` (``capped`` past it), in a fixed number of reads;
+        ``done`` is paged in SQL. ``limit`` 0 counts only. Items are PR reads (:meth:`_pr_meta`) with
+        ``unread``, ``last_activity_at`` and ``target_data_source_id``."""
+        if queue not in INBOX_QUEUES:
+            raise ValueError(f"unknown queue {queue!r}")
+        me = viewer.actor
+        rules: Dict[Optional[str], ReviewRule] = {}
+
+        async def rule_for(ds: Optional[str]) -> ReviewRule:
+            if ds not in rules:
+                rules[ds] = await rule_of(ds) if rule_of is not None else ReviewRule()
+            return rules[ds]
+
+        async with self._session() as s:
+            groups = await self._viewer_groups(s, viewer)
+
+            def scoped(stmt, *, live: bool):
+                stmt = stmt.join(GraphORM, GraphORM.id == MergeRequestORM.target_graph_id).where(
+                    GraphORM.workspace_id == workspace_id, GraphORM.deleted_at.is_(None),
+                    MergeRequestORM.status.notin_(_TERMINAL_PR_STATUS) if live
+                    else MergeRequestORM.status.in_(_TERMINAL_PR_STATUS))
+                if data_source_id:
+                    stmt = stmt.where(GraphORM.data_source_id == data_source_id)
+                if author:
+                    stmt = stmt.where(MergeRequestORM.actor == author)
+                if q and q.strip():
+                    like = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                    stmt = stmt.where(or_(MergeRequestORM.title.ilike(like, escape="\\"),
+                                          MergeRequestORM.description.ilike(like, escape="\\"),
+                                          MergeRequestORM.id == q.strip()))
+                return self._pulls_filtered(stmt, target_graph_id=None, data_source_id=None,
+                                            originating_view_id=None, status=None, active_only=False,
+                                            viewer=viewer, groups=groups)
+
+            live = (await s.execute(scoped(select(MergeRequestORM, GraphORM.data_source_id), live=True)
+                                    .order_by(MergeRequestORM.created_at.desc())
+                                    .limit(INBOX_LIVE_CAP + 1))).all()
+            capped = len(live) > INBOX_LIVE_CAP
+            live = live[:INBOX_LIVE_CAP]
+            prs = [pr for pr, _ in live]
+            ds_of = {pr.id: ds for pr, ds in live}
+            ids = [pr.id for pr in prs]
+            requests, events = await self._review_rows(s, ids)
+            last = await self._last_content_seqs(s, prs)
+            threads = await self._open_threads(s, ids)
+            said = dict((await s.execute(
+                select(ReviewCommentORM.pr_id, func.max(ReviewCommentORM.created_at)).where(
+                    ReviewCommentORM.pr_id.in_(ids), ReviewCommentORM.author != me,
+                    ReviewCommentORM.deleted_at.is_(None)).group_by(ReviewCommentORM.pr_id))).all()) if ids else {}
+            seen = dict((await s.execute(select(ReviewSeenORM.pr_id, ReviewSeenORM.seen_at).where(
+                ReviewSeenORM.pr_id.in_(ids), ReviewSeenORM.user_id == me))).all()) if ids else {}
+            if any(r["subject_type"] == "group" for rows in requests.values() for r in rows) and not groups:
+                try:
+                    groups = set(await _load_actor_groups(me))
+                except GroupsUnavailable:
+                    groups = set()
+
+            members: Dict[str, List[MergeRequestORM]] = {k: [] for k in INBOX_QUEUES}
+            unread: Dict[str, int] = {k: 0 for k in INBOX_QUEUES}
+            flags: Dict[str, dict] = {}
+            for pr in prs:
+                st = review_state.standing(requests[pr.id], events[pr.id], last[pr.id])
+                rule = await rule_for(ds_of[pr.id])
+                verdict = review_state.apply_rule(st.reviewers, len(st.standing), rule)
+                asked = [r for r in requests[pr.id] if (r["subject_type"], r["subject_id"]) == ("user", me)
+                         or (r["subject_type"] == "group" and r["subject_id"] in groups)]
+                mine = st.reviewed.get(me)
+                answered = mine is not None and st.current(me) and all(
+                    (mine["at"] or "") >= (r["requested_at"] or "") for r in asked)
+                others = [e["created_at"] for e in events[pr.id] if e["actor"] != me]
+                if pr.actor != me:
+                    others.append(pr.created_at)
+                if said.get(pr.id):
+                    others.append(said[pr.id])
+                theirs = max(others) if others else None
+                involved = bool(asked) or pr.actor == me or mine is not None
+                flags[pr.id] = {
+                    "unread": bool(involved and theirs and theirs > (seen.get(pr.id) or "")),
+                    "last_activity_at": max([pr.updated_at or pr.created_at, theirs or ""]
+                                            + [e["created_at"] for e in events[pr.id]]),
+                }
+                held = bool(st.holding) or bool(rule.threads_hold and threads.get(pr.id))
+                inn = ["open"]
+                if asked and pr.actor != me and not answered:
+                    inn.append("needs_review")
+                if pr.actor == me:
+                    inn.append("sent_back" if st.holding else "ready" if verdict["satisfied"] and not held
+                               else "waiting")
+                for k in inn:
+                    members[k].append(pr)
+                    unread[k] += flags[pr.id]["unread"]
+
+            done_q = scoped(select(MergeRequestORM, GraphORM.data_source_id), live=False)
+            counts = {k: len(v) for k, v in members.items()}
+            counts["done"] = int(await s.scalar(scoped(select(func.count(MergeRequestORM.id)), live=False)) or 0)
+            out = {"queue": queue, "items": [], "total": counts[queue], "counts": counts, "unread": unread,
+                   "capped": capped}
+            if limit <= 0:
+                return out
+            if queue == "done":
+                page = (await s.execute(done_q.order_by(
+                    (MergeRequestORM.created_at if sort == "created" else MergeRequestORM.updated_at).desc(),
+                    MergeRequestORM.id.desc()).limit(limit).offset(offset))).all()
+                rows = [pr for pr, _ in page]
+                ds_of.update({pr.id: ds for pr, ds in page})
+                requests, events = await self._review_rows(s, [pr.id for pr in rows])
+                threads = await self._open_threads(s, [pr.id for pr in rows])
+                for pr in rows:
+                    flags[pr.id] = {"unread": False, "last_activity_at": pr.updated_at or pr.created_at}
+            else:
+                key = (lambda pr: pr.created_at or "") if sort == "created" else \
+                    (lambda pr: flags[pr.id]["last_activity_at"] or "")
+                rows = sorted(members[queue], key=key, reverse=True)[offset:offset + limit]
+            for pr in rows:
+                meta = await self._pr_meta(s, pr, rows=(requests[pr.id], events[pr.id]), threads=threads)
+                meta.update(flags[pr.id], target_data_source_id=ds_of.get(pr.id))
+                out["items"].append(meta)
+            return out
+
+    async def mark_review_seen(self, *, pr_id: str, user_id: str) -> str:
+        """``user_id`` looked at a review now: what others did on it until now is read."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pr {pr_id}")
+            now = _now()
+            await s.execute(pg_insert(ReviewSeenORM).values(
+                pr_id=pr_id, user_id=user_id, graph_id=pr.target_graph_id, seen_at=now)
+                .on_conflict_do_update(index_elements=["pr_id", "user_id"], set_={"seen_at": now}))
+            return now
 
     async def _fork_merge_base(self, s, fork) -> int:
         """The seq of the fork's ``main`` its next PR merges from: the fork's head its last merged

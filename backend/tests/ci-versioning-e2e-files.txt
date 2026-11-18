@@ -114,6 +114,7 @@ tests/integration/test_repair_revert_commit.py
 tests/integration/test_restore_and_send_back.py
 tests/integration/test_resync_identity_invariant.py
 tests/integration/test_review_comments.py
+tests/integration/test_review_inbox.py
 tests/integration/test_review_inbox_open_prs.py
 tests/integration/test_review_partial_merge.py
 tests/integration/test_review_policy.py
