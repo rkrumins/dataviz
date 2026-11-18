@@ -4109,7 +4109,7 @@ class GraphVersioningService:
 
     async def approve_pr(
         self, *, pr_id: str, actor: str, expected_head_commit_id: Optional[str] = None,
-        self_approval: bool = True, groups: Sequence[str] = (), rule: ReviewRule = ReviewRule(),
+        self_approval: bool = True, groups: Optional[Sequence[str]] = None, rule: ReviewRule = ReviewRule(),
     ) -> dict:
         """``actor`` approves a PR: :meth:`submit_review` with the verdict ``approve``."""
         return await self.submit_review(pr_id=pr_id, actor=actor, verdict="approve",
@@ -4119,7 +4119,7 @@ class GraphVersioningService:
     async def submit_review(
         self, *, pr_id: str, actor: str, verdict: str, body: Optional[str] = None,
         expected_head_commit_id: Optional[str] = None, self_approval: bool = True,
-        groups: Sequence[str] = (), rule: ReviewRule = ReviewRule(),
+        groups: Optional[Sequence[str]] = None, rule: ReviewRule = ReviewRule(),
     ) -> dict:
         """``actor`` gives their review of a PR, of the source branch's head now: a verdict —
         ``approve``; ``request_changes``, which sends a draft's review back (it doesn't merge until
@@ -4130,7 +4130,7 @@ class GraphVersioningService:
 
         Whoever opened a PR approves it too, unless its data source's policy says someone else does
         (``self_approval`` False: :class:`SelfReview`). An approval answers for the groups asked that
-        ``actor`` is in (``groups``: theirs). ``expected_head_commit_id`` is the head the reviewer saw
+        ``actor`` is in (``groups``: theirs; None looks them up, when a group is asked). ``expected_head_commit_id`` is the head the reviewer saw
         (:class:`HeadMoved` for a verdict when the branch has moved on since). A fork's review is
         sent back by closing it (``fork_review``). A service account never reviews
         (:class:`PersonRequired`): its managers would, through it.
@@ -4163,10 +4163,12 @@ class GraphVersioningService:
             head_seq = (await s.scalar(select(CommitORM.commit_seq).where(
                 CommitORM.graph_id == pr.graph_id, CommitORM.id == head))) if head else 0
             answers = None
-            if verdict == "approve" and groups:
+            if verdict == "approve":
                 asked = set((await s.execute(select(ReviewRequestORM.subject_id).where(
                     ReviewRequestORM.pr_id == pr.id, ReviewRequestORM.subject_type == "group"))).scalars())
-                answers = sorted(asked & set(groups)) or None
+                if asked and groups is None:            # their teams, as they are now
+                    groups = await _load_actor_groups(actor)
+                answers = sorted(asked & set(groups or ())) or None
             s.add(ReviewEventORM(
                 pr_id=pr.id, graph_id=pr.target_graph_id, actor=actor, kind="reviewed", verdict=verdict,
                 body=summary, head_commit_id=head, head_seq=head_seq, groups=answers,
@@ -4254,11 +4256,12 @@ class GraphVersioningService:
 
     async def update_pr(
         self, *, pr_id: str, title: Optional[str] = None, description: Optional[str] = None,
-        reviewers: Optional[Sequence[str]] = None, actor: Optional[str] = None,
-        rule: ReviewRule = ReviewRule(),
+        reviewers: Optional[Sequence[str]] = None, reviewer_groups: Optional[Sequence[str]] = None,
+        actor: Optional[str] = None, rule: ReviewRule = ReviewRule(),
     ) -> dict:
-        """Edit a PR's human title + description, and who must review it. PATCH semantics: a
-        field left ``None`` is untouched, an empty string (or list) clears it. New ``reviewers``
+        """Edit a PR's human title + description, and who must review it: people (``reviewers``)
+        and groups (``reviewer_groups``, any member answers for one). PATCH semantics: a
+        field left ``None`` is untouched, an empty string (or list) clears it. New reviewers
         re-judge ``approval_status`` from the approvals that still stand (:meth:`_approvals`);
         a merged or closed PR's reviewers are settled, and a merging one's held while its job runs
         (:class:`JobActive`). A service account is never a reviewer (:class:`PersonRequired`)."""
@@ -4272,16 +4275,49 @@ class GraphVersioningService:
                 pr.title = title.strip() or None
             if description is not None:
                 pr.description = description.strip() or None
-            if reviewers is not None:
-                if pr.status in ("merged", "closed"):
-                    raise ValueError(f"pr {pr_id} is {pr.status}")
-                if pr.status == "merging":
-                    raise JobActive(await self._merging_job(s, pr_id),
-                                    "This review is being merged by a job; its reviewers can change "
-                                    "if that job ends without merging it.")
-                await self._set_requests(s, pr, users=list(dict.fromkeys(reviewers)), actor=actor)
+            if reviewers is not None or reviewer_groups is not None:
+                await self._reviewers_open(s, pr)
+                await self._set_requests(s, pr, users=None if reviewers is None else list(dict.fromkeys(reviewers)),
+                                         groups=reviewer_groups, actor=actor)
                 await self._restate(s, pr, rule)
             pr.updated_at = _now()
+            return await self._pr_meta(s, pr)
+
+    async def _reviewers_open(self, s, pr: MergeRequestORM) -> None:
+        """A merged or closed PR's reviewers are settled, and a merging one's held while its job runs."""
+        if pr.status in ("merged", "closed"):
+            raise ValueError(f"pr {pr.id} is {pr.status}")
+        if pr.status == "merging":
+            raise JobActive(await self._merging_job(s, pr.id),
+                            "This review is being merged by a job; its reviewers can change "
+                            "if that job ends without merging it.")
+
+    async def re_request(self, *, pr_id: str, users: Sequence[str] = (), groups: Sequence[str] = (),
+                         actor: Optional[str] = None) -> dict:
+        """Ask people and groups already asked to review a PR again: it is back in their queue
+        (needs review) until they give their review again, whatever they said before. Someone not
+        asked is a :class:`ValueError` — add them as a reviewer instead."""
+        want = [("user", u) for u in dict.fromkeys(users)] + [("group", g) for g in dict.fromkeys(groups)]
+        if not want:
+            raise ValueError("name who to ask again")
+        async with self._session() as s:
+            pr = await self._lock_pr(s, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pr {pr_id}")
+            await self._reviewers_open(s, pr)
+            rows = {(r.subject_type, r.subject_id): r for r in (await s.execute(
+                select(ReviewRequestORM).where(ReviewRequestORM.pr_id == pr.id))).scalars()}
+            missing = [i for t, i in want if (t, i) not in rows]
+            if missing:
+                raise ValueError(f"not asked to review {pr_id}: {', '.join(missing)}")
+            now = _now()
+            for k in want:
+                rows[k].requested_at, rows[k].requested_by = now, actor
+            s.add(ReviewEventORM(pr_id=pr.id, graph_id=pr.target_graph_id, actor=actor or pr.actor or "system",
+                                 kind="re_requested", created_at=now,
+                                 subjects=[{"type": t, "id": i} for t, i in want]))
+            pr.updated_at = now
+            await s.flush()
             return await self._pr_meta(s, pr)
 
     async def preview_pr(self, *, pr_id: str) -> Dict[str, object]:
@@ -4517,13 +4553,13 @@ class GraphVersioningService:
     async def open_draft_mr(
         self, *, graph_id: str, branch_id: str, actor: str,
         title: Optional[str] = None, description: Optional[str] = None,
-        reviewers: Optional[Sequence[str]] = None,
+        reviewers: Optional[Sequence[str]] = None, reviewer_groups: Optional[Sequence[str]] = None,
     ) -> str:
         """Open a merge request from a per-user ``draft`` back to its own graph's
         ``main`` — the reviewed alternative to a bare :meth:`publish`. Records the
         current mergeability/conflict set + the ``title``/``description``;
-        ``reviewers`` makes approval a merge precondition (plan §17 #5). A service account is
-        never a reviewer (:class:`PersonRequired`)."""
+        ``reviewers`` (people) and ``reviewer_groups`` make approval a merge precondition
+        (plan §17 #5). A service account is never a reviewer (:class:`PersonRequired`)."""
         if any(is_service_account(r) for r in reviewers or ()):
             raise PersonRequired("a service account cannot review a PR: name a person")
         async with self._session() as s:
@@ -4541,6 +4577,7 @@ class GraphVersioningService:
                 s, graph_id, graph, draft, main_id, {}
             )
             revs = list(dict.fromkeys(reviewers or []))      # dedup, keep order
+            teams = list(dict.fromkeys(reviewer_groups or []))
             pr = MergeRequestORM(
                 graph_id=graph_id,
                 source_graph_id=graph_id,                    # source == target ⇒ draft MR
@@ -4553,13 +4590,13 @@ class GraphVersioningService:
                 description=(description or None),
                 conflicts=conflicts or None,
                 reviewers=revs or None,
-                approval_status="pending" if revs else None,
+                approval_status="pending" if revs or teams else None,
                 actor=actor,
             )
             s.add(pr)
             await s.flush()
-            if revs:
-                await self._set_requests(s, pr, users=revs, actor=actor)
+            if revs or teams:
+                await self._set_requests(s, pr, users=revs, groups=teams, actor=actor)
             return pr.id
 
     async def preview_mr(self, *, mr_id: str) -> Dict[str, object]:
@@ -5239,6 +5276,26 @@ class GraphVersioningService:
         await s.flush()
         return added, removed
 
+    async def review_events(self, *, pr_id: str) -> List[dict]:
+        """What happened on a review, oldest first: opened, who was asked (and asked again, and no
+        longer), each review given — verdict, summary, the head it was of, the groups an approval
+        answers for, and what the reviewer did — each verdict taken back, and merged or closed."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pr {pr_id}")
+            rows = (await s.execute(select(ReviewEventORM).where(ReviewEventORM.pr_id == pr_id)
+                                    .order_by(ReviewEventORM.created_at, ReviewEventORM.id))).scalars().all()
+        out = [{"kind": "opened", "actor": pr.actor, "at": pr.created_at}]
+        out += [{"kind": e.kind, "actor": e.actor, "at": e.created_at, "verdict": e.verdict, "body": e.body,
+                 "head_commit_id": e.head_commit_id, "subjects": e.subjects or [], "groups": e.groups or [],
+                 "tally": e.tally} for e in rows]
+        if pr.merged_at:
+            out.append({"kind": "merged", "actor": pr.merged_by, "at": pr.merged_at})
+        if pr.closed_at and pr.status == "closed":
+            out.append({"kind": "closed", "actor": pr.closed_by, "at": pr.closed_at})
+        return sorted(out, key=lambda e: e["at"] or "")       # stable: opened first, events in order
+
     @staticmethod
     async def _reviewer_tally(s, pr_id: str, actor: str) -> dict:
         """What ``actor`` did on a review so far: changes accepted and rejected, threads started."""
@@ -5299,8 +5356,8 @@ class GraphVersioningService:
     ) -> dict:
         """A workspace's reviews as ``viewer`` works through them, in queues (:data:`INBOX_QUEUES`):
 
-        * ``needs_review`` — they are asked (themselves, or a group of theirs), it is not theirs,
-          and they have not reviewed it as it is now;
+        * ``needs_review`` — they are asked (themselves, or a group of theirs no member has
+          answered for since), it is not theirs, and they have not reviewed it as it is now;
         * their own (``actor``): ``sent_back`` — a request for changes holds; ``ready`` — its
           approvals meet its rule and nothing holds its merge; ``waiting`` — the rest;
         * ``open`` — every live review they may see; ``done`` — merged or closed, newest first.
@@ -5376,8 +5433,13 @@ class GraphVersioningService:
                 asked = [r for r in requests[pr.id] if (r["subject_type"], r["subject_id"]) == ("user", me)
                          or (r["subject_type"] == "group" and r["subject_id"] in groups)]
                 mine = st.reviewed.get(me)
-                answered = mine is not None and st.current(me) and all(
-                    (mine["at"] or "") >= (r["requested_at"] or "") for r in asked)
+                # A group's request waits on its members until one of them approves it, since it was asked.
+                by_subject = {(x["type"], x["id"]): x for x in st.reviewers}
+                waiting = [r for r in asked if r["subject_type"] == "user" or not (
+                    (g := by_subject.get(("group", r["subject_id"]))) and g["state"] == "approved"
+                    and (g["at"] or "") >= (r["requested_at"] or ""))]
+                answered = not waiting or (mine is not None and st.current(me) and all(
+                    (mine["at"] or "") >= (r["requested_at"] or "") for r in waiting))
                 others = [e["created_at"] for e in events[pr.id] if e["actor"] != me]
                 if pr.actor != me:
                     others.append(pr.created_at)
@@ -9526,6 +9588,7 @@ class GraphVersioningService:
             draft_mr = MergeRequestORM.source_graph_id == MergeRequestORM.target_graph_id
             seen = [MergeRequestORM.actor == viewer.actor,
                     MergeRequestORM.reviewers.contains([viewer.actor]),
+                    *GraphVersioningService._asked_as_group(groups or ()),
                     and_(draft_mr, MergeRequestORM.source_branch_id.in_(
                         select(BranchORM.id).where(
                             GraphVersioningService._readable_draft_clause(viewer, groups))))]
@@ -9884,7 +9947,7 @@ class GraphVersioningService:
             return
         if branch.is_shared and await self._branch_role(s, branch, actor, groups, need="viewer") is not None:
             return
-        if not await self._is_pr_participant_for_branch(s, branch.id, actor):
+        if not await self._is_pr_participant_for_branch(s, branch.id, actor, groups):
             raise DraftNotReadable(f"{actor} cannot view branch {branch.id}")
 
     async def _require_publish(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
@@ -9904,17 +9967,28 @@ class GraphVersioningService:
             raise
 
     # ── Read visibility (draft privacy + PR scoping) ──────────────────────────
-    async def _is_pr_participant_for_branch(self, s, branch_id: str, actor: str) -> bool:
-        """True if *actor* authored or is a reviewer of any MR sourced from this branch — lets PR
-        reviewers read the draft's commits/diff without being draft members. One indexed lookup."""
+    async def _is_pr_participant_for_branch(self, s, branch_id: str, actor: str,
+                                            groups: Collection[str] = ()) -> bool:
+        """True if *actor* authored or is a reviewer of any MR sourced from this branch — asked
+        themselves, or through a group of theirs in ``groups`` — which lets PR reviewers read the
+        draft's commits/diff without being draft members. One indexed lookup."""
         row = (await s.execute(
             select(MergeRequestORM.id).where(
                 MergeRequestORM.source_branch_id == branch_id,
                 or_(MergeRequestORM.actor == actor,
-                    MergeRequestORM.reviewers.contains([actor])),
+                    MergeRequestORM.reviewers.contains([actor]),
+                    *GraphVersioningService._asked_as_group(groups)),
             ).limit(1)
         )).first()
         return row is not None
+
+    @staticmethod
+    def _asked_as_group(groups: Collection[str]) -> list:
+        """A review that asks one of ``groups``: a condition on ``merge_requests`` (none for none)."""
+        if not groups:
+            return []
+        return [MergeRequestORM.id.in_(select(ReviewRequestORM.pr_id).where(
+            ReviewRequestORM.subject_type == "group", ReviewRequestORM.subject_id.in_(sorted(groups))))]
 
     async def _branch_readable(self, s, branch: BranchORM, viewer: "Viewer") -> bool:
         """Who may READ a branch's history/content. ``main`` is readable by any
@@ -9929,7 +10003,8 @@ class GraphVersioningService:
         if branch.is_shared and await self._branch_role(s, branch, viewer.actor, viewer.groups,
                                                         need="viewer") is not None:
             return True
-        return await self._is_pr_participant_for_branch(s, branch.id, viewer.actor)
+        return await self._is_pr_participant_for_branch(
+            s, branch.id, viewer.actor, await self._viewer_groups(s, viewer, graph_id=branch.graph_id))
 
     @staticmethod
     def _readable_draft_clause(viewer: "Viewer", groups, *, graph_id: Optional[str] = None):
@@ -9939,7 +10014,8 @@ class GraphVersioningService:
         ``graph_id`` narrows the reviews looked at to one graph's."""
         member = GraphVersioningService._member_of(viewer, groups)
         reviews = select(MergeRequestORM.source_branch_id).where(
-            or_(MergeRequestORM.actor == viewer.actor, MergeRequestORM.reviewers.contains([viewer.actor])))
+            or_(MergeRequestORM.actor == viewer.actor, MergeRequestORM.reviewers.contains([viewer.actor]),
+                *GraphVersioningService._asked_as_group(groups or ())))
         if graph_id is not None:
             reviews = reviews.where(MergeRequestORM.graph_id == graph_id)
         terms = [BranchORM.owner == viewer.actor,
@@ -9974,16 +10050,21 @@ class GraphVersioningService:
     @staticmethod
     async def _viewer_groups(s, viewer: "Viewer", *, graph_id: Optional[str] = None) -> set:
         """``viewer``'s teams for :meth:`_readable_draft_clause`: as given, else looked up once,
-        and only when a shared draft (of ``graph_id``, when given) has a team's row; a failed
-        lookup keeps their own rows, as in :meth:`_my_roles`."""
+        and only when a shared draft (of ``graph_id``, when given) has a team's row, or a review
+        asks a team; a failed lookup keeps their own rows, as in :meth:`_my_roles`."""
         if viewer.groups:
             return set(viewer.groups)
         teams = select(BranchMemberORM.branch_id).join(
             BranchORM, BranchORM.id == BranchMemberORM.branch_id).where(
             BranchORM.is_shared, BranchMemberORM.subject_type == "group")
+        asked = select(ReviewRequestORM.pr_id).where(ReviewRequestORM.subject_type == "group")
         if graph_id is not None:
             teams = teams.where(BranchORM.graph_id == graph_id)
-        if not await s.scalar(teams.limit(1)):
+            asked = asked.where(or_(      # a fork's review is on its parent: its draft, on the fork
+                ReviewRequestORM.graph_id == graph_id,
+                ReviewRequestORM.pr_id.in_(select(MergeRequestORM.id).where(
+                    MergeRequestORM.source_graph_id == graph_id))))
+        if not await s.scalar(teams.limit(1)) and not await s.scalar(asked.limit(1)):
             return set()
         try:
             return set(await _load_actor_groups(viewer.actor))

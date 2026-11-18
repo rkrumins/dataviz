@@ -119,6 +119,7 @@ tests/integration/test_review_inbox_open_prs.py
 tests/integration/test_review_partial_merge.py
 tests/integration/test_review_policy.py
 tests/integration/test_review_records.py
+tests/integration/test_review_reviewers.py
 tests/integration/test_revision_overlay_reads.py
 tests/integration/test_rollup_delta_staging.py
 tests/integration/test_seed_identity.py

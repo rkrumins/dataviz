@@ -36,6 +36,7 @@ from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Unio
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1601,6 +1602,8 @@ class OpenMrRequest(_ApiModel):
     title: Optional[str] = None
     description: Optional[str] = None
     reviewers: Optional[List[str]] = None
+    #: Groups asked to review it (``GET /reviewer-groups``): any member answers for one.
+    reviewer_groups: Optional[List[str]] = Field(default=None, alias="reviewerGroups")
 
 
 class UpdatePrRequest(_ApiModel):
@@ -1608,6 +1611,48 @@ class UpdatePrRequest(_ApiModel):
     title: Optional[str] = None
     description: Optional[str] = None
     reviewers: Optional[List[str]] = None
+
+
+class ReviewersRequest(_ApiModel):
+    """Who reviews a review: the people and the groups asked. Each list replaces its kind; one left
+    unset is untouched."""
+    users: Optional[List[str]] = None
+    groups: Optional[List[str]] = None
+
+
+class ReRequestRequest(_ApiModel):
+    """People and groups already asked, to ask again."""
+    users: List[str] = Field(default_factory=list)
+    groups: List[str] = Field(default_factory=list)
+
+
+class ReviewerGroup(_ApiModel):
+    group_id: str = Field(alias="groupId")
+    name: str
+    description: Optional[str] = None
+    member_count: int = Field(alias="memberCount")
+
+
+class ReviewEventResponse(_ApiModel):
+    """One thing that happened on a review: ``opened``, ``requested`` / ``unrequested`` /
+    ``re_requested`` (``subjects``: who), ``reviewed`` (``verdict``, ``body``: its summary,
+    ``headCommitId``: what it was of, ``groups``: the groups an approval answers for, ``tally``:
+    what the reviewer did), ``withdrew`` (``verdict``: the one taken back), ``merged``, ``closed``."""
+    kind: str
+    actor: Optional[str] = None
+    at: Optional[str] = None
+    verdict: Optional[str] = None
+    body: Optional[str] = None
+    head_commit_id: Optional[str] = Field(default=None, alias="headCommitId")
+    subjects: List[Dict[str, Any]] = Field(default_factory=list)
+    groups: List[str] = Field(default_factory=list)
+    tally: Optional[Dict[str, Any]] = None
+
+
+class ReviewEventsResponse(_ApiModel):
+    events: List[ReviewEventResponse]
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+    group_names: Dict[str, str] = Field(default_factory=dict, alias="groupNames")
 
 
 class ReviewerCandidate(_ApiModel):
@@ -1730,6 +1775,7 @@ async def _review_out(svc: GraphVersioningService, session: AsyncSession, items:
     item with no ``review`` is left as it is."""
     from backend.app.services.versioning import review_state
 
+    await _name_groups(session, items)
     by_graph: Dict[str, Any] = {}
     for it in items:
         review = it.get("review")
@@ -1749,6 +1795,25 @@ async def _review_out(svc: GraphVersioningService, session: AsyncSession, items:
         if live:
             it["approval_status"] = verdict["status"]
             it["status"] = review_state.shown_status(it["status"], verdict["status"])
+
+
+async def _name_groups(session: AsyncSession, items: List[dict]) -> None:
+    """Each group a review asks gets its ``name`` (one read for every item); a deleted group keeps
+    its id."""
+    from backend.app.db.models import GroupORM
+    asked = [r for it in items if isinstance(it.get("review"), dict)
+             for r in it["review"].get("reviewers") or () if r.get("type") == "group"]
+    if not asked:
+        return
+    try:
+        names = dict((await session.execute(select(GroupORM.id, GroupORM.name).where(
+            GroupORM.id.in_(sorted({r["id"] for r in asked})), GroupORM.deleted_at.is_(None)))).all())
+    except Exception:  # noqa: BLE001 — a name is a nicety: the id stands in
+        logger.warning("could not name the groups asked to review", exc_info=True)
+        return
+    for r in asked:
+        if r["id"] in names:
+            r["name"] = names[r["id"]]
 
 
 def _you(pr: dict, viewer: str) -> None:
@@ -2165,6 +2230,17 @@ async def _tell_review_people(session: AsyncSession, kind: str, *, ws_id: str, p
             actor_id=actor, resource_type="review", resource_id=pr["pr_id"], dedupe_unread=True)
     except Exception:  # noqa: BLE001 — telling people never fails the change it tells of
         logger.warning("could not tell the people of review %s (%s)", pr.get("pr_id"), kind, exc_info=True)
+
+
+async def _group_people(session: AsyncSession, groups: Iterable[str], cap: int = 200) -> set:
+    """The members of ``groups``, to tell what is asked of their group: the first ``cap`` of them."""
+    from backend.app.db.repositories import group_repo
+    people: set = set()
+    for g in groups:
+        people.update(m.user_id for m in await group_repo.list_group_members(session, g))
+        if len(people) >= cap:
+            return set(sorted(people)[:cap])
+    return people
 
 
 async def _drafts_policy_of(session: AsyncSession, data_source_id: Optional[str]):
@@ -5876,17 +5952,12 @@ async def list_reviewer_candidates(
     through a group, whose role here grants manage (approve needs it; workspace admin implies
     it). The caller, who opens the review, too, unless the policy — of ``dataSourceId``, else the
     workspace's — says someone else approves. Never a service account, which never reviews."""
-    from backend.app.db.repositories import binding_repo, group_repo, permission_repo, user_repo
+    from backend.app.db.repositories import group_repo, user_repo
     from backend.app.services import drafts_policy
     ws = await _policy_workspace(session, ws_id)
     ds = await _policy_source(session, ws_id, data_source_id) if data_source_id else None
-    bindings = await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id)
-    role_perms = await permission_repo.get_role_permissions_for_roles(
-        session, sorted({b.role_name for b in bindings}))
     ids: set = set()
-    for b in bindings:
-        if not {_MANAGE, "workspace:admin"} & set(role_perms.get(b.role_name, ())):
-            continue
+    for b in await _reviewing_bindings(session, ws_id):
         if b.subject_type == "user":
             ids.add(b.subject_id)
         elif b.subject_type == "group":
@@ -5900,6 +5971,55 @@ async def list_reviewer_candidates(
     return sorted(people, key=lambda p: (p["display_name"] or p["user_id"]).lower())
 
 
+async def _reviewing_bindings(session: AsyncSession, ws_id: str) -> list:
+    """The workspace's role bindings that let their subjects review: manage (approve needs it), or
+    workspace admin, which implies it."""
+    from backend.app.db.repositories import binding_repo, permission_repo
+    bindings = await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id)
+    role_perms = await permission_repo.get_role_permissions_for_roles(
+        session, sorted({b.role_name for b in bindings}))
+    return [b for b in bindings if {_MANAGE, "workspace:admin"} & set(role_perms.get(b.role_name, ()))]
+
+
+async def _reviewer_groups(session: AsyncSession, ws_id: str) -> List[dict]:
+    """The groups that can be asked to review here: bound to the workspace with a role that reviews."""
+    from backend.app.db.models import GroupORM
+    from backend.app.db.repositories import group_repo
+    ids = sorted({b.subject_id for b in await _reviewing_bindings(session, ws_id) if b.subject_type == "group"})
+    if not ids:
+        return []
+    groups = (await session.execute(select(GroupORM).where(
+        GroupORM.id.in_(ids), GroupORM.deleted_at.is_(None)).order_by(GroupORM.name))).scalars().all()
+    counts = await group_repo.count_members_batch(session, [g.id for g in groups])
+    return [{"group_id": g.id, "name": g.name, "description": g.description,
+             "member_count": counts.get(g.id, 0)} for g in groups]
+
+
+async def _known_groups(session: AsyncSession, ws_id: str, groups: List[str]) -> None:
+    """422 ``unknown_group`` unless each of ``groups`` may be asked to review here."""
+    if not groups:
+        return
+    known = {g["group_id"] for g in await _reviewer_groups(session, ws_id)}
+    unknown = [g for g in groups if g not in known]
+    if unknown:
+        raise HTTPException(status_code=422, detail={
+            "type": "unknown_group", "groups": unknown,
+            "message": "Only a group that may review here can be asked: "
+                       "it is bound to this workspace with a role that manages its data."})
+
+
+@router.get("/reviewer-groups", response_model=List[ReviewerGroup])
+async def list_reviewer_groups(
+    ws_id: str,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The groups the caller can ask to review: bound to the workspace with a role that grants
+    manage (or workspace admin), with how many people are in each. Any member's approval answers
+    for their group."""
+    return await _reviewer_groups(session, ws_id)
+
+
 @router.post("/graphs/{graph_id}/branches/{branch_id}/merge-requests",
              response_model=OpenPrResponse, status_code=201)
 async def open_merge_request(
@@ -5911,16 +6031,21 @@ async def open_merge_request(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Raise a formal merge request from a per-user draft to its graph's ``main``."""
+    groups = list(dict.fromkeys(body.reviewer_groups or ())) if body else []
+    await _known_groups(session, ws_id, groups)
     with _domain_errors():
         pr_id = await svc.open_draft_mr(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
             title=body.title if body else None,
             description=body.description if body else None,
             reviewers=body.reviewers if body else None,
+            reviewer_groups=groups,
         )
     pr = await svc.get_pr(pr_id) or {"pr_id": pr_id}
     asked = set(pr.get("reviewers") or ())
-    await _tell_review_people(session, "review.requested", ws_id=ws_id, pr=pr, actor=user.id, to=asked)
+    await _tell_asked(session, ws_id=ws_id, pr=pr, actor=user.id,
+                      subjects=[("user", u) for u in asked] + [("group", g) for g in groups])
+    asked |= await _group_people(session, groups)
     await _tell_draft_people(session, svc, "draft.sent_for_review", ws_id=ws_id, meta=_meta,
                              graph_id=graph_id, branch_id=branch_id, actor=user.id, pr_id=pr_id, skip=asked)
     return {"pr_id": pr_id}
@@ -6299,6 +6424,92 @@ async def update_merge_request(
                                   to=set(body.reviewers) - set(_pr.get("reviewers") or ()))
     await _review_out(svc, session, [meta], policy.rule)
     return meta
+
+
+def _asked(pr: dict) -> set:
+    """Who a review asks, as ``(type, id)``."""
+    review = pr.get("review") if isinstance(pr.get("review"), dict) else {}
+    return {(r["type"], r["id"]) for r in review.get("reviewers") or ()} | {
+        ("user", u) for u in pr.get("reviewers") or ()}
+
+
+async def _tell_asked(session: AsyncSession, *, ws_id: str, pr: dict, actor: str,
+                      subjects: Iterable[tuple]) -> None:
+    """Tell the people asked to review, and the members of the groups asked (``review.requested``)."""
+    subjects = list(subjects)
+    people = {i for t, i in subjects if t == "user"}
+    people |= await _group_people(session, [i for t, i in subjects if t == "group"])
+    if people:
+        await _tell_review_people(session, "review.requested", ws_id=ws_id, pr=pr, actor=actor, to=people)
+
+
+@router.put("/merge-requests/{pr_id}/reviewers", response_model=PrResponse)
+@router.put("/pulls/{pr_id}/reviewers", response_model=PrResponse)
+async def set_reviewers(
+    ws_id: str, pr_id: str, body: ReviewersRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Who reviews a review: the people and groups asked. Those newly asked are told; a group's
+    members are (``review.requested``). A group asked must be one that may review here
+    (``GET /reviewer-groups``), unless it was asked already: 422 ``unknown_group``."""
+    before = _asked(_pr)
+    await _known_groups(session, ws_id, [g for g in dict.fromkeys(body.groups or ()) if ("group", g) not in before])
+    policy = await _pr_policy(svc, session, _pr)
+    with _domain_errors():
+        meta = await svc.update_pr(pr_id=pr_id, reviewers=body.users, reviewer_groups=body.groups,
+                                   actor=user.id, rule=policy.rule)
+    await _tell_asked(session, ws_id=ws_id, pr=meta, actor=user.id, subjects=_asked(meta) - before)
+    await _attach_user_names(session, [meta])
+    await _review_out(svc, session, [meta], policy.rule)
+    return meta
+
+
+@router.post("/merge-requests/{pr_id}/reviewers/re-request", response_model=PrResponse)
+@router.post("/pulls/{pr_id}/reviewers/re-request", response_model=PrResponse)
+async def re_request_reviewers(
+    ws_id: str, pr_id: str, body: ReRequestRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Ask people and groups already asked to review again: the review is back in their queue
+    until they review it again, and they are told (a group's members are)."""
+    policy = await _pr_policy(svc, session, _pr)
+    with _domain_errors():
+        meta = await svc.re_request(pr_id=pr_id, users=body.users, groups=body.groups, actor=user.id)
+    await _tell_asked(session, ws_id=ws_id, pr=meta, actor=user.id,
+                      subjects=[("user", u) for u in body.users] + [("group", g) for g in body.groups])
+    await _attach_user_names(session, [meta])
+    await _review_out(svc, session, [meta], policy.rule)
+    return meta
+
+
+@router.get("/merge-requests/{pr_id}/events", response_model=ReviewEventsResponse)
+@router.get("/pulls/{pr_id}/events", response_model=ReviewEventsResponse)
+async def list_review_events(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A review's history, oldest first, with the names of the people and groups in it."""
+    from backend.app.db.models import GroupORM
+    with _domain_errors():
+        events = await svc.review_events(pr_id=pr_id)
+    people = {e["actor"] for e in events if e.get("actor")} | {
+        x["id"] for e in events for x in e.get("subjects") or () if x.get("type") == "user"}
+    groups = {x["id"] for e in events for x in e.get("subjects") or () if x.get("type") == "group"} | {
+        g for e in events for g in e.get("groups") or ()}
+    resolved = await resolve_user_ids(session, people) if people else {}
+    group_names = dict((await session.execute(select(GroupORM.id, GroupORM.name).where(
+        GroupORM.id.in_(sorted(groups))))).all()) if groups else {}
+    return {"events": events, "user_names": {u: d for u, (d, _e) in resolved.items() if d},
+            "group_names": group_names}
 
 
 @router.get("/merge-requests/{pr_id}/preview", response_model=MergePreviewResponse)
