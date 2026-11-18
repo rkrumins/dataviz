@@ -91,11 +91,16 @@ function nameHint(original: Data | null, form: Data, mapping: DataSourceResponse
   }
 }
 
-export function EntityEditTab({ nodeId, form, original, entityType, urn, userProps, onEdit, onCommit, onCancel, onCopyUrn }: {
+export function EntityEditTab({
+  nodeId, form, original, entityType, urn, userProps, originalProps, publishedProps, onEdit, onCommit, onCancel, onCopyUrn,
+}: {
   nodeId: string
   form: Data
   /** The entity as first read — what a save is judged against — or null for one not saved yet. */
   original: Data | null
+  /** The properties as first read, and — in a draft — as published: what each row says changed. */
+  originalProps?: Data
+  publishedProps?: Data
   entityType?: { fields?: SchemaField[] } | null
   urn: string
   /** The node's own properties (reserved names the reader mirrors in are left out). */
@@ -214,6 +219,8 @@ export function EntityEditTab({ nodeId, form, original, entityType, urn, userPro
             <PropertyEditor
               value={userProps}
               onChange={(next) => onCommit((d) => withPropertyBag(d, next as Data))}
+              original={originalProps}
+              published={publishedProps}
               searchable
               groupByPath
               bare

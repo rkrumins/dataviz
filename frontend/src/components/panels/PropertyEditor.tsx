@@ -43,6 +43,8 @@ import {
 import { cn } from '@/lib/utils'
 import { HighlightedText } from '@/components/ui/HighlightedText'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { fieldTone, STATE_DOT } from '@/features/versioning/model/changeTone'
+import { FieldCountChips } from '@/features/versioning/components/ChangeSummary'
 import {
   type FieldType,
   FIELD_TYPE_META,
@@ -65,6 +67,8 @@ import {
 import { MarkdownValueModal } from './property/MarkdownValueEditor'
 import { InlineValue } from './property/InlineValue'
 import { propertyMarks, shortValue, type ChangeMark, type PropertyMarks } from './property/changeMarks'
+import { detectValue, parsePastedLines, rankSuggestions, type PastedProperty, type PropertySuggestion } from './property/composerModel'
+import { useRecentPropertyKeys } from '@/store/recentPropertyKeys'
 
 // ============================================
 // Types
@@ -105,10 +109,14 @@ export interface PropertyEditorProps {
   inline?: boolean
   /** The properties as first read: each row then says New / Edited / Removed. Root objects only. */
   original?: Record<string, unknown>
+  /** The properties as published (main where the draft began): rows then say what the draft
+   *  changed, saved or not yet — read-only too — and Revert puts a property back as published. */
+  published?: Record<string, unknown>
   /** Open the add-property form straight away (an empty entity's "Add properties"). */
   startAdding?: boolean
-  /** Property names worth adding, offered as one-click starts next to "Add property". */
-  suggestions?: string[]
+  /** Property names worth adding — offered as one-click starts next to "Add property", and as the
+   *  name is typed (with how many others of the type carry each, and an example value). */
+  suggestions?: ReadonlyArray<string | PropertySuggestion>
 }
 
 const MAX_DEPTH = 6
@@ -148,13 +156,15 @@ export function PropertyEditor({
   groupByPath,
   inline,
   original,
+  published,
   startAdding,
   suggestions,
 }: PropertyEditorProps) {
   return (
     <InlineModeContext.Provider value={!!inline && !readOnly}>
       <PropertyEditorRoot value={value} onChange={onChange} readOnlyKeys={readOnlyKeys} bare={bare} readOnly={readOnly}
-        searchable={searchable} groupByPath={groupByPath} original={original} startAdding={startAdding} suggestions={suggestions} />
+        searchable={searchable} groupByPath={groupByPath} original={original} published={published}
+        startAdding={startAdding} suggestions={suggestions} />
     </InlineModeContext.Provider>
   )
 }
@@ -168,6 +178,7 @@ function PropertyEditorRoot({
   searchable,
   groupByPath,
   original,
+  published,
   startAdding,
   suggestions,
 }: Omit<PropertyEditorProps, 'inline'>) {
@@ -188,6 +199,7 @@ function PropertyEditorRoot({
         readOnly={readOnly}
         searchable={searchable}
         original={original}
+        published={published}
         startAdding={startAdding}
         suggestions={suggestions}
       />
@@ -363,6 +375,7 @@ function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, sear
             onDelete={() => deleteKey(key)}
             mark={marks?.get(key)?.mark}
             was={marks?.get(key)?.was}
+            unsaved={marks?.get(key)?.unsaved}
             onRevert={onRevert && marks?.has(key) ? () => onRevert(key) : undefined}
           />
         ))}
@@ -551,14 +564,17 @@ interface PropertyRowProps {
   mark?: ChangeMark
   /** The value as read, for an edited row. */
   was?: unknown
+  /** The change is staged, not saved in the draft yet. */
+  unsaved?: boolean
   /** Put the row back as it was read. */
   onRevert?: () => void
 }
 
 /** The row's left edge and badge for what its edit did. */
 const MARK_STYLE: Record<ChangeMark, { bar: string; badge: string; label: string }> = {
-  new: { bar: 'before:bg-emerald-500', badge: 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300', label: 'New' },
-  changed: { bar: 'before:bg-amber-500', badge: 'bg-amber-500/12 text-amber-700 dark:text-amber-300', label: 'Edited' },
+  // The tree's colours (`changeTone`): green for new, orange for edited.
+  new: { bar: 'before:bg-green-500', badge: fieldTone('added').chip, label: 'New' },
+  changed: { bar: 'before:bg-orange-500', badge: fieldTone('changed').chip, label: 'Edited' },
 }
 
 const PropertyRow = memo(function PropertyRow({
@@ -573,6 +589,7 @@ const PropertyRow = memo(function PropertyRow({
   onDelete,
   mark,
   was,
+  unsaved = true,
   onRevert,
 }: PropertyRowProps) {
   const inline = useContext(InlineModeContext)
@@ -585,7 +602,10 @@ const PropertyRow = memo(function PropertyRow({
 
   useEffect(() => { setKeyDraft(rowKey) }, [rowKey])
 
+  // Esc puts the name back: the blur that follows (the input leaving) must not rename it after all.
+  const keyCancelled = useRef(false)
   const commitKey = () => {
+    if (keyCancelled.current) { keyCancelled.current = false; return }
     setEditingKey(false)
     if (keyDraft !== rowKey && keyDraft.trim()) {
       onKeyChange?.(keyDraft.trim())
@@ -603,7 +623,9 @@ const PropertyRow = memo(function PropertyRow({
       <div className={cn(
         "relative flex items-start gap-1.5 py-1.5 px-1 rounded-lg",
         "hover:bg-black/[0.025] dark:hover:bg-white/[0.03] transition-colors",
-        mark && cn("before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full", MARK_STYLE[mark].bar),
+        mark && cn("before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full", MARK_STYLE[mark].bar,
+          // Saved in the draft: the quieter, solid form; staged: full strength.
+          !unsaved && 'before:opacity-60'),
       )}>
         {/* Expand / drag handle */}
         <div className="flex items-center h-6 w-4 flex-shrink-0">
@@ -639,13 +661,19 @@ const PropertyRow = memo(function PropertyRow({
               onBlur={commitKey}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') commitKey()
-                if (e.key === 'Escape') { setKeyDraft(rowKey); setEditingKey(false) }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  keyCancelled.current = true
+                  setKeyDraft(rowKey)
+                  setEditingKey(false)
+                }
               }}
               className="text-xs font-mono px-1.5 py-0.5 rounded bg-black/[0.06] dark:bg-white/10 border border-accent-lineage/40 outline-none min-w-0 w-full"
             />
           ) : (
             <button
-              onClick={() => setEditingKey(true)}
+              onClick={() => { keyCancelled.current = false; setEditingKey(true) }}
               className="text-xs font-mono text-ink hover:text-accent-lineage truncate text-left max-w-full"
               title={`${rowKey} — click to rename`}
             >
@@ -654,12 +682,15 @@ const PropertyRow = memo(function PropertyRow({
           )}
           {mark && (
             <HoverTip
-              label={mark === 'new' ? 'Added since it was read' : `Was: ${shortValue(was)}`}
-              detail="Staged — saved with Review & Save"
+              label={mark === 'new' ? 'Added' : `Was: ${shortValue(was)}`}
+              detail={unsaved ? 'Not saved yet — saved with Review & Save' : 'Saved in this draft — published when it merges'}
               className="inline-flex flex-shrink-0 ml-1.5"
             >
-              <span className={cn('px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide', MARK_STYLE[mark].badge)}>
+              <span className={cn('inline-flex items-center gap-1 px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide', MARK_STYLE[mark].badge)}>
+                {/* Hollow and dashed: not saved yet; solid: saved in the draft. */}
+                <span aria-hidden className={cn('w-1.5 h-1.5 rounded-full', STATE_DOT[unsaved ? 'unsaved' : 'saved'])} />
                 {MARK_STYLE[mark].label}
+                <span className="sr-only">{unsaved ? ', not saved yet' : ', saved in this draft'}</span>
               </span>
             </HoverTip>
           )}
@@ -681,6 +712,14 @@ const PropertyRow = memo(function PropertyRow({
               query={query}
               fieldLabel={rowKey}
             />
+          )}
+          {mark === 'changed' && (
+            // What it was, under what it is: one glance says the change.
+            <HoverTip label={`Was: ${shortValue(was)}`} className="block min-w-0">
+              <span className="block mt-0.5 text-[10.5px] text-ink-muted truncate">
+                was <span className="line-through decoration-rose-400/70">{shortValue(was)}</span>
+              </span>
+            </HoverTip>
           )}
         </div>
 
@@ -731,13 +770,15 @@ const PropertyRow = memo(function PropertyRow({
             </HoverTip>
           )}
           {!readOnly && (
-            <button
-              onClick={onDelete}
-              className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10"
-              title="Delete"
-            >
-              <Trash2 className="w-3 h-3" />
-            </button>
+            <HoverTip label={`Delete ${rowKey}`} detail="It stays listed, struck through, until you save — Restore brings it back." className="inline-flex">
+              <button
+                onClick={onDelete}
+                aria-label={`Delete ${rowKey}`}
+                className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-rose-500 hover:bg-rose-500/10"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            </HoverTip>
           )}
         </div>
         </div>
@@ -1083,6 +1124,9 @@ function PropertyComposer({
   variant,
   prefixLabel,
   initialKey = '',
+  suggestions = [],
+  onAddMany,
+  onUpdateExisting,
 }: {
   /** key is '' for array items; value is the fully-formed value to insert. */
   onAdd: (key: string, value: unknown) => void
@@ -1093,28 +1137,128 @@ function PropertyComposer({
   prefixLabel?: string
   /** The name to start with (a suggestion). */
   initialKey?: string
+  /** Names others of this type carry, offered as the name is typed. */
+  suggestions?: readonly PropertySuggestion[]
+  /** Several properties pasted at once, added as one change (one Undo). */
+  onAddMany?: (entries: Array<[string, unknown]>) => void
+  /** A name already there: set its value instead. */
+  onUpdateExisting?: (key: string, value: unknown) => void
 }) {
+  const smartish = variant === 'object'
   const [key, setKey] = useState(initialKey)
   const [type, setType] = useState<FieldType>('text')
   const [draft, setDraft] = useState<unknown>('')
+  // Until a type is picked, the value is typed as text and what it is is detected (a number, yes/no,
+  // a date, a link) — stored as that.
+  const [typeChosen, setTypeChosen] = useState(!smartish)
+  const [text, setText] = useState('')
+  const detected = useMemo(() => detectValue(text), [text])
   const [modalOpen, setModalOpen] = useState(false)
+  const [pasted, setPasted] = useState<PastedProperty[] | null>(null)
+  const [highlight, setHighlight] = useState(-1)
+  const [nameFocused, setNameFocused] = useState(false)
+  const nameRef = useRef<HTMLInputElement>(null)
+  const recent = useRecentPropertyKeys((st) => st.keys)
+  const remember = useRecentPropertyKeys((st) => st.remember)
 
   const candidateKey = prefixLabel ? `${prefixLabel}/${key.trim()}` : key.trim()
   const isDup = variant === 'object' && key.trim() !== '' && existingKeys.includes(candidateKey)
   const canSubmit = variant === 'array' || (key.trim() !== '' && !isDup)
+  const value = typeChosen ? draft : detected.value
+  const shownType: FieldType = typeChosen ? type : detected.type
+  const offered = useMemo(
+    () => (smartish ? rankSuggestions(key, suggestions, recent, existingKeys.map((k) => (prefixLabel && k.startsWith(`${prefixLabel}/`) ? k.slice(prefixLabel.length + 1) : k))) : []),
+    [smartish, key, suggestions, recent, existingKeys, prefixLabel])
+  const listOpen = nameFocused && offered.length > 0 && !(offered.length === 1 && offered[0].key === key.trim())
+  const picked = suggestions.find((p) => p.key === key.trim())
 
   const changeType = (t: FieldType) => {
     setType(t)
-    setDraft(valueForType(t))
+    setTypeChosen(true)
+    setDraft(text.trim() ? coerceToType(detected.value, t) : valueForType(t))
+  }
+  const pick = (k: string) => {
+    setKey(k)
+    setHighlight(-1)
+    setNameFocused(false)
   }
 
-  const submit = () => {
+  /** Add it; `next`: and start another (⌘↵), else close. */
+  const submit = (next = false) => {
     if (!canSubmit) return
-    onAdd(variant === 'array' ? '' : key.trim(), draft)
+    const k = variant === 'array' ? '' : key.trim()
+    onAdd(k, value)
+    if (k) remember([candidateKey])
+    if (next && smartish) {
+      setKey(''); setText(''); setDraft(''); setTypeChosen(false); setType('text')
+      requestAnimationFrame(() => nameRef.current?.focus())
+    } else {
+      onCancel()
+    }
+  }
+  const updateInstead = () => {
+    onUpdateExisting?.(candidateKey, value)
+    onCancel()
+  }
+  const addPasted = () => {
+    if (!pasted?.length) return
+    const entries = pasted.filter((p) => !existingKeys.includes(prefixLabel ? `${prefixLabel}/${p.key}` : p.key))
+      .map((p): [string, unknown] => [prefixLabel ? `${prefixLabel}/${p.key}` : p.key, p.value])
+    if (entries.length) {
+      onAddMany?.(entries)
+      remember(entries.map(([k]) => k))
+    }
+    onCancel()
+  }
+  // Several lines pasted read as several properties: say so, and add them in one go.
+  const onPaste = (e: React.ClipboardEvent) => {
+    if (!smartish || !onAddMany) return
+    const many = parsePastedLines(e.clipboardData.getData('text'))
+    if (many.length) { e.preventDefault(); setPasted(many) }
   }
 
   const onFormKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') { e.preventDefault(); onCancel() }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (pasted) setPasted(null); else onCancel() }
+    // ⌘↵ adds it and starts the next — not the drawer's own ⌘↵.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); submit(true) }
+  }
+
+  if (pasted) {
+    const dupes = pasted.filter((p) => existingKeys.includes(prefixLabel ? `${prefixLabel}/${p.key}` : p.key)).length
+    const adding = pasted.length - dupes
+    return (
+      <div onKeyDown={onFormKeyDown}
+        className="mt-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-accent-lineage/30 p-3 space-y-2.5 shadow-sm">
+        <p className="text-xs font-semibold text-ink">
+          {pasted.length.toLocaleString()} properties pasted
+          {dupes > 0 && <span className="font-normal text-ink-muted"> · {dupes} already there, left as they are</span>}
+        </p>
+        <div className="max-h-56 overflow-y-auto custom-scrollbar rounded-lg border border-glass-border divide-y divide-glass-border">
+          {pasted.map((p) => {
+            const there = existingKeys.includes(prefixLabel ? `${prefixLabel}/${p.key}` : p.key)
+            return (
+              <div key={p.key} className={cn('flex items-center gap-2 px-2.5 py-1.5 text-xs', there && 'opacity-50')}>
+                <span className="basis-[40%] min-w-0 font-mono text-ink truncate">{p.key}</span>
+                <span className="flex-1 min-w-0 text-ink-secondary truncate">{shortValue(p.value)}</span>
+                <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
+                  {there ? 'There' : FIELD_TYPE_META[p.type].label}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+        <div className="flex items-center justify-end gap-2">
+          <button type="button" onClick={() => setPasted(null)}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5 transition-colors">
+            Back
+          </button>
+          <button type="button" onClick={addPasted} disabled={adding === 0} autoFocus
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-accent-lineage text-white hover:brightness-110 shadow-sm disabled:opacity-50">
+            <Plus className="w-3.5 h-3.5" aria-hidden />Add {adding.toLocaleString()}
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -1122,74 +1266,142 @@ function PropertyComposer({
       onKeyDown={onFormKeyDown}
       className="mt-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-accent-lineage/30 p-3 space-y-2.5 shadow-sm"
     >
-      {/* Row 1: name + type */}
+      {/* Row 1: name (with what others of this type carry) + type */}
       <div className="flex items-center gap-2">
         {prefixLabel && (
-          <span
-            className="text-2xs font-mono text-ink-muted bg-black/[0.03] dark:bg-white/5 rounded px-1.5 py-0.5 max-w-[140px] truncate flex-shrink-0"
-            title={prefixLabel}
-          >
-            {prefixLabel}/
-          </span>
+          <HoverTip label={prefixLabel} className="inline-flex flex-shrink-0">
+            <span className="text-2xs font-mono text-ink-muted bg-black/[0.03] dark:bg-white/5 rounded px-1.5 py-0.5 max-w-[140px] truncate">
+              {prefixLabel}/
+            </span>
+          </HoverTip>
         )}
         {variant === 'object' ? (
-          <input
-            autoFocus
-            value={key}
-            placeholder="Property name"
-            onChange={(e) => setKey(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') submit() }}
-            className={cn(
-              "flex-1 min-w-0 text-sm px-2.5 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border outline-none",
-              isDup ? "border-red-500/40" : "border-black/10 dark:border-white/10 focus:border-accent-lineage/50",
+          <div className="relative flex-1 min-w-0">
+            <input
+              ref={nameRef}
+              autoFocus
+              value={key}
+              placeholder="Property name"
+              aria-label="Property name"
+              role="combobox"
+              aria-expanded={listOpen}
+              aria-autocomplete="list"
+              onChange={(e) => { setKey(e.target.value); setHighlight(-1); setNameFocused(true) }}
+              onFocus={() => setNameFocused(true)}
+              onBlur={() => window.setTimeout(() => setNameFocused(false), 120)}
+              onPaste={onPaste}
+              onKeyDown={(e) => {
+                if (listOpen && e.key === 'ArrowDown') { e.preventDefault(); setHighlight((h) => Math.min(offered.length - 1, h + 1)); return }
+                if (listOpen && e.key === 'ArrowUp') { e.preventDefault(); setHighlight((h) => Math.max(-1, h - 1)); return }
+                if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+                  if (listOpen && highlight >= 0) { e.preventDefault(); pick(offered[highlight].key); return }
+                  submit()
+                }
+              }}
+              className={cn(
+                "w-full text-sm px-2.5 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border outline-none",
+                isDup ? "border-red-500/40" : "border-black/10 dark:border-white/10 focus:border-accent-lineage/50",
+              )}
+            />
+            {listOpen && (
+              <ul role="listbox" aria-label="Suggested names"
+                className="absolute left-0 right-0 top-full mt-1 z-20 rounded-lg border border-glass-border bg-canvas-elevated shadow-lg py-1 max-h-56 overflow-y-auto">
+                {offered.map((o, i) => (
+                  <li key={o.key} role="option" aria-selected={i === highlight}
+                    onMouseDown={(e) => { e.preventDefault(); pick(o.key) }}
+                    className={cn('flex items-center gap-2 px-2.5 py-1.5 cursor-pointer text-xs',
+                      i === highlight ? 'bg-accent-lineage/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]')}>
+                    <span className="font-mono text-ink truncate">{o.key}</span>
+                    <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted truncate max-w-[55%]">
+                      {o.recent ? 'You used it recently'
+                        : `${o.count.toLocaleString()} other${o.count === 1 ? '' : 's'}${o.examples[0] ? ` · e.g. ${o.examples[0]}` : ''}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             )}
-          />
+          </div>
         ) : (
           <span className="flex-1 text-xs text-ink-muted">New {FIELD_TYPE_META[type].label} item</span>
         )}
-        <FieldTypeChip fieldType={type} onChange={changeType} />
+        <FieldTypeChip fieldType={shownType} onChange={changeType} />
       </div>
 
       {isDup && (
-        <p className="text-2xs text-red-500 pl-1">“{candidateKey}” already exists.</p>
+        <p className="flex items-center gap-2 text-2xs text-red-500 pl-1">
+          “{candidateKey}” already exists.
+          {onUpdateExisting && (
+            <button type="button" onClick={updateInstead} className="font-semibold text-accent-lineage hover:underline">
+              Update it instead
+            </button>
+          )}
+        </p>
       )}
 
-      {/* Row 2: value (adapts to the chosen type) */}
+      {/* Row 2: value — typed as text and detected, until a type is picked */}
       <div className="flex items-center gap-2">
         <span className="text-2xs uppercase tracking-wider text-ink-muted w-10 flex-shrink-0">Value</span>
         <div className="flex-1 min-w-0">
-          <ComposerValueField
-            type={type}
-            value={draft}
-            onChange={setDraft}
-            onExpand={() => setModalOpen(true)}
-            onEnter={submit}
-          />
+          {typeChosen ? (
+            <ComposerValueField
+              type={type}
+              value={draft}
+              onChange={setDraft}
+              onExpand={() => setModalOpen(true)}
+              onEnter={() => submit()}
+            />
+          ) : (
+            <input
+              value={text}
+              aria-label="Value"
+              placeholder={picked?.examples[0] ? `e.g. ${picked.examples[0]}` : 'Enter a value…'}
+              onChange={(e) => setText(e.target.value)}
+              onPaste={onPaste}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) submit() }}
+              className="w-full text-sm px-2.5 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 focus:border-accent-lineage/50 outline-none"
+            />
+          )}
         </div>
       </div>
 
+      {/* What it will read as, before it is added. */}
+      {smartish && key.trim() && !isDup && (
+        <div className="flex items-center gap-2 pl-1 text-xs min-w-0" aria-live="polite">
+          <span className={cn('px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide shrink-0', fieldTone('added').chip)}>New</span>
+          <span className="font-mono text-ink truncate">{candidateKey}</span>
+          <span className="text-ink-secondary truncate">{shortValue(value)}</span>
+          {!typeChosen && text.trim() && detected.type !== 'text' && (
+            <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted">read as {FIELD_TYPE_META[detected.type].label.toLowerCase()}</span>
+          )}
+        </div>
+      )}
+
       {/* Row 3: actions */}
       <div className="flex items-center justify-end gap-2 pt-0.5">
+        {smartish && onAddMany && (
+          <span className="mr-auto text-[10.5px] text-ink-muted hidden sm:inline">Paste several “name: value” lines to add them all</span>
+        )}
         <button
           onClick={onCancel}
           className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5 transition-colors"
         >
           Cancel
         </button>
-        <button
-          onClick={submit}
-          disabled={!canSubmit}
-          className={cn(
-            "flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
-            canSubmit
-              ? "bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/25"
-              : "bg-black/[0.03] dark:bg-white/5 text-ink-muted/50 cursor-not-allowed",
-          )}
-          title="Add property"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          Add
-        </button>
+        <HoverTip label="Add property" detail={smartish ? 'Enter adds it · ⌘↵ adds it and starts another' : undefined} shortcut={smartish ? '↵' : undefined} className="inline-flex">
+          <button
+            onClick={() => submit()}
+            disabled={!canSubmit}
+            className={cn(
+              "flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
+              canSubmit
+                ? "bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/25"
+                : "bg-black/[0.03] dark:bg-white/5 text-ink-muted/50 cursor-not-allowed",
+            )}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add
+          </button>
+        </HoverTip>
       </div>
 
       {modalOpen && type === 'text' && (
@@ -1528,6 +1740,8 @@ interface FlatApi {
   renameFolder: (oldPath: string, newPath: string) => void
   deleteFolder: (path: string) => void
   addEntry: (prefix: string, name: string, value: unknown) => void
+  /** Several properties at once — one change, so one Undo. */
+  addEntries: (entries: Array<[string, unknown]>) => void
   existingKeys: () => string[]
   /** Put a key back as it was read (its value, or gone if it is new). */
   revert: (fullKey: string) => void
@@ -1559,6 +1773,17 @@ function pruneTree(
   }
 }
 
+/** The tree pruned to the keys in `keep` (and the folders on the way to them). */
+function keepKeys(folders: TreeNode[], leaves: Leaf[], keep: ReadonlyMap<string, unknown>): { folders: TreeNode[]; leaves: Leaf[] } {
+  const pruneNode = (node: TreeNode): TreeNode | null => {
+    const subFolders = node.folders.map(pruneNode).filter(Boolean) as TreeNode[]
+    const subLeaves = node.leaves.filter((l) => keep.has(l.fullKey))
+    const own = node.own && keep.has(node.own.fullKey) ? node.own : undefined
+    return subFolders.length || subLeaves.length || own ? { ...node, folders: subFolders, leaves: subLeaves, own } : null
+  }
+  return { folders: folders.map(pruneNode).filter(Boolean) as TreeNode[], leaves: leaves.filter((l) => keep.has(l.fullKey)) }
+}
+
 function GroupedObjectRoot({
   value,
   onChange,
@@ -1566,6 +1791,7 @@ function GroupedObjectRoot({
   readOnly,
   searchable,
   original,
+  published,
   startAdding = false,
   suggestions,
 }: {
@@ -1575,8 +1801,9 @@ function GroupedObjectRoot({
   readOnly?: boolean
   searchable?: boolean
   original?: Record<string, unknown>
+  published?: Record<string, unknown>
   startAdding?: boolean
-  suggestions?: string[]
+  suggestions?: ReadonlyArray<string | PropertySuggestion>
 }) {
   const inline = useContext(InlineModeContext)
   const [flat, setFlat] = useState(false)
@@ -1590,12 +1817,22 @@ function GroupedObjectRoot({
   const tree = useMemo(() => buildPathTree(entries), [value])
   // What each property's edit did — computed once per edit, handed to rows as plain values so
   // only the rows whose mark changed re-render.
-  const { marks, removed } = useMemo(() => propertyMarks(value, readOnly ? undefined : original), [value, original, readOnly])
+  // Read-only, only what the draft changed is said (nothing is being edited here).
+  const { marks, removed, unsavedRemoved } = useMemo(
+    () => propertyMarks(value, readOnly ? undefined : original, published), [value, original, published, readOnly])
+  // Only what changed: the changed, new and removed properties, nothing else.
+  const [changesOnly, setChangesOnly] = useState(false)
+  const changeCounts = useMemo(() => {
+    let changed = 0, added = 0
+    for (const m of marks.values()) { if (m.mark === 'new') added++; else changed++ }
+    return { changed, added, removed: removed.length }
+  }, [marks, removed])
+  const anyChange = marks.size + removed.length > 0
 
   // Keep `api` identity stable across edits (it reads the latest value/onChange
   // through a ref) so memoized rows don't all re-render when one value changes.
-  const liveRef = useRef({ value, onChange, original })
-  liveRef.current = { value, onChange, original }
+  const liveRef = useRef({ value, onChange, original: published ?? original })
+  liveRef.current = { value, onChange, original: published ?? original }
   const api: FlatApi = useMemo(() => ({
     updateValue: (fullKey, v) => liveRef.current.onChange(setKeyValue(liveRef.current.value, fullKey, v)),
     renameLeaf: (fullKey, parentPath, newSegment) =>
@@ -1604,8 +1841,9 @@ function GroupedObjectRoot({
     renameFolder: (oldPath, newPath) => liveRef.current.onChange(renamePrefix(liveRef.current.value, oldPath, newPath)),
     deleteFolder: (path) => liveRef.current.onChange(deletePrefix(liveRef.current.value, path)),
     addEntry: (prefix, name, val) => liveRef.current.onChange(addEntry(liveRef.current.value, prefix, name, val)),
+    addEntries: (entries) => liveRef.current.onChange({ ...liveRef.current.value, ...Object.fromEntries(entries) }),
     existingKeys: () => Object.keys(liveRef.current.value),
-    // Back as it was read: its old value, or — for one added since — gone.
+    // Back as it was published (or, without that, as read): its old value, or — for one added — gone.
     revert: (fullKey) => {
       const { value: v, original: o } = liveRef.current
       if (o && Object.prototype.hasOwnProperty.call(o, fullKey)) liveRef.current.onChange(setKeyValue(v, fullKey, o[fullKey]))
@@ -1614,7 +1852,10 @@ function GroupedObjectRoot({
   }), [])
 
   const q = query.trim().toLowerCase()
-  const visible = useMemo(() => (q ? pruneTree(tree.folders, tree.leaves, q) : tree), [tree, q])
+  const visible = useMemo(() => {
+    const shown = changesOnly && anyChange ? keepKeys(tree.folders, tree.leaves, marks) : tree
+    return q ? pruneTree(shown.folders, shown.leaves, q) : shown
+  }, [tree, q, changesOnly, anyChange, marks])
   const shownRemoved = useMemo(
     () => (q ? removed.filter(([k, v]) => k.toLowerCase().includes(q) || searchableText(v).includes(q)) : removed),
     [removed, q],
@@ -1622,9 +1863,13 @@ function GroupedObjectRoot({
 
   const empty = entries.length === 0
   const readsFormatted = readOnly || inline
+  const peers = useMemo<PropertySuggestion[]>(
+    () => (suggestions ?? []).map((sg) => (typeof sg === 'string' ? { key: sg, count: 0, examples: [] } : sg)),
+    [suggestions],
+  )
   const offered = useMemo(
-    () => (readOnly ? [] : (suggestions ?? []).filter((k) => !Object.prototype.hasOwnProperty.call(value, k)).slice(0, 5)),
-    [suggestions, value, readOnly],
+    () => (readOnly ? [] : peers.map((p) => p.key).filter((k) => !Object.prototype.hasOwnProperty.call(value, k)).slice(0, 5)),
+    [peers, value, readOnly],
   )
 
   return (
@@ -1657,6 +1902,16 @@ function GroupedObjectRoot({
           <ModalTab active={!flat} onClick={() => setFlat(false)} label="Tree" />
           <ModalTab active={flat} onClick={() => setFlat(true)} label="Flat" />
         </div>
+        {anyChange && (
+          <HoverTip label={changesOnly ? 'Show every property' : 'Show only the properties that changed'} className="inline-flex">
+            <button type="button" aria-pressed={changesOnly} onClick={() => setChangesOnly((v) => !v)}
+              className={cn('inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[11px] font-semibold flex-shrink-0 transition-colors',
+                changesOnly ? 'bg-accent-lineage/10 text-accent-lineage ring-1 ring-accent-lineage/30' : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5')}>
+              Changes only
+              <FieldCountChips summary={changeCounts} />
+            </button>
+          </HoverTip>
+        )}
       </div>
 
       {flat ? (
@@ -1672,13 +1927,13 @@ function GroupedObjectRoot({
             marks={marks}
             onRevert={api.revert}
           />
-          <RemovedRows rows={shownRemoved} onRestore={api.revert} />
+          <RemovedRows rows={shownRemoved} onRestore={readOnly ? undefined : api.revert} unsaved={unsavedRemoved} />
         </>
       ) : empty && shownRemoved.length === 0 ? (
         readOnly ? (
           <div className="text-xs text-ink-muted italic px-2 py-2">No properties</div>
         ) : (
-          <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} suggestions={offered} />
+          <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} suggestions={offered} peers={peers} />
         )
       ) : (
         <div className="space-y-1">
@@ -1687,14 +1942,14 @@ function GroupedObjectRoot({
           ))}
           {visible.leaves.map((leaf) => (
             <LeafRow key={leaf.fullKey} leaf={leaf} parentPath="" depth={0} readOnly={readOnly} query={q} api={api}
-              mark={marks.get(leaf.fullKey)?.mark} was={marks.get(leaf.fullKey)?.was} />
+              mark={marks.get(leaf.fullKey)?.mark} was={marks.get(leaf.fullKey)?.was} unsaved={marks.get(leaf.fullKey)?.unsaved} />
           ))}
-          <RemovedRows rows={shownRemoved} onRestore={api.revert} />
+          <RemovedRows rows={shownRemoved} onRestore={readOnly ? undefined : api.revert} unsaved={unsavedRemoved} />
           {q && visible.folders.length === 0 && visible.leaves.length === 0 && shownRemoved.length === 0 && (
             <div className="text-xs text-ink-muted px-2 py-3">No properties match “{query.trim()}”.</div>
           )}
           {!readOnly && !q && (
-            <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} suggestions={offered} />
+            <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} suggestions={offered} peers={peers} />
           )}
         </div>
       )}
@@ -1704,22 +1959,27 @@ function GroupedObjectRoot({
   )
 }
 
-function RootAdder({ api, adding, setAdding, suggestions = [] }: {
+function RootAdder({ api, adding, setAdding, suggestions = [], peers = [] }: {
   api: FlatApi
   /** `true`, or the name to start the form with. */
   adding: boolean | string
   setAdding: (b: boolean | string) => void
   /** Names worth adding, one click each. */
   suggestions?: string[]
+  /** What others of this type carry, offered as the name is typed. */
+  peers?: readonly PropertySuggestion[]
 }) {
   return adding ? (
     <PropertyComposer
       key={typeof adding === 'string' ? adding : ''}
       initialKey={typeof adding === 'string' ? adding : undefined}
-      onAdd={(name, val) => { api.addEntry('', name, val); setAdding(false) }}
+      onAdd={(name, val) => api.addEntry('', name, val)}
       onCancel={() => setAdding(false)}
       existingKeys={api.existingKeys()}
       variant="object"
+      suggestions={peers}
+      onAddMany={(entries) => api.addEntries(entries)}
+      onUpdateExisting={(k, v) => api.updateValue(k, v)}
     />
   ) : (
     <div className="flex items-center gap-x-2 gap-y-1.5 flex-wrap mt-1.5 ml-1">
@@ -1751,23 +2011,33 @@ function RootAdder({ api, adding, setAdding, suggestions = [] }: {
   )
 }
 
-/** Properties read but removed since — struck through, each with Restore. */
-function RemovedRows({ rows, onRestore }: { rows: [string, unknown][]; onRestore: (key: string) => void }) {
+/** Properties removed — struck through, each with Restore while editing; a dashed dot when the
+ *  removal is not saved yet, a solid one when it is saved in the draft. */
+function RemovedRows({ rows, onRestore, unsaved }: {
+  rows: [string, unknown][]
+  onRestore?: (key: string) => void
+  unsaved?: ReadonlySet<string>
+}) {
   if (rows.length === 0) return null
   return (
     <div className="space-y-1 pt-1">
       {rows.map(([key, was]) => (
-        <div key={key} className="relative flex items-center gap-1.5 py-1.5 pl-5 pr-1 rounded-lg bg-rose-500/[0.04] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full before:bg-rose-500">
+        <div key={key} className={cn('relative flex items-center gap-1.5 py-1.5 pl-5 pr-1 rounded-lg bg-rose-500/[0.04] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full before:bg-rose-500',
+          unsaved && !unsaved.has(key) && 'before:opacity-60')}>
           <span className="basis-[132px] flex-shrink-0 min-w-0 text-xs font-mono text-ink-muted line-through truncate">{key}</span>
-          <span className="px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide bg-rose-500/12 text-rose-700 dark:text-rose-300 flex-shrink-0">Removed</span>
+          <span className="inline-flex items-center gap-1 px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide bg-rose-500/12 text-rose-700 dark:text-rose-300 flex-shrink-0">
+            <span aria-hidden className={cn('w-1.5 h-1.5 rounded-full', STATE_DOT[!unsaved || unsaved.has(key) ? 'unsaved' : 'saved'])} />
+            Removed
+            <span className="sr-only">{!unsaved || unsaved.has(key) ? ', not saved yet' : ', saved in this draft'}</span>
+          </span>
           <span className="flex-1 min-w-0 text-xs text-ink-muted line-through truncate">{shortValue(was)}</span>
-          <button
+          {onRestore && <button
             onClick={() => onRestore(key)}
             className="flex items-center gap-1 px-2 h-6 rounded-md text-2xs font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 flex-shrink-0"
           >
             <Undo2 className="w-3 h-3" aria-hidden />
             Restore
-          </button>
+          </button>}
         </div>
       ))}
     </div>
@@ -1787,6 +2057,7 @@ const LeafRow = memo(function LeafRow({
   api,
   mark,
   was,
+  unsaved,
 }: {
   leaf: Leaf
   parentPath: string
@@ -1796,6 +2067,7 @@ const LeafRow = memo(function LeafRow({
   api: FlatApi
   mark?: ChangeMark
   was?: unknown
+  unsaved?: boolean
 }) {
   return (
     <PropertyRow
@@ -1809,7 +2081,8 @@ const LeafRow = memo(function LeafRow({
       onDelete={() => api.deleteKey(leaf.fullKey)}
       mark={mark}
       was={was}
-      onRevert={mark ? () => api.revert(leaf.fullKey) : undefined}
+      unsaved={unsaved}
+      onRevert={mark && !readOnly ? () => api.revert(leaf.fullKey) : undefined}
     />
   )
 }, (prev, next) =>
@@ -1823,7 +2096,8 @@ const LeafRow = memo(function LeafRow({
   prev.query === next.query &&
   prev.api === next.api &&
   prev.mark === next.mark &&
-  prev.was === next.was)
+  prev.was === next.was &&
+  prev.unsaved === next.unsaved)
 
 // ============================================
 // FolderGroup — expandable folder header + recursive children
@@ -1860,7 +2134,9 @@ function FolderGroup({
   // Edited properties inside — said on the folder, so a closed one still shows its changes.
   const edited = marks && marks.size > 0 ? countMarked(node, marks) : 0
 
+  const nameCancelled = useRef(false)
   const commitName = () => {
+    if (nameCancelled.current) { nameCancelled.current = false; return }
     setEditingName(false)
     const next = nameDraft.trim()
     if (next && next !== node.name && !next.includes(PATH_SEP)) {
@@ -1899,13 +2175,19 @@ function FolderGroup({
               onBlur={commitName}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') commitName()
-                if (e.key === 'Escape') { setNameDraft(node.name); setEditingName(false) }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  nameCancelled.current = true
+                  setNameDraft(node.name)
+                  setEditingName(false)
+                }
               }}
               className="text-xs font-semibold px-1.5 py-0.5 rounded bg-black/[0.06] dark:bg-white/10 border border-accent-lineage/40 outline-none min-w-0 w-full"
             />
           ) : (
             <button
-              onClick={() => setEditingName(true)}
+              onClick={() => { nameCancelled.current = false; setEditingName(true) }}
               className="text-xs font-semibold text-ink hover:text-accent-lineage truncate text-left max-w-full"
               title={`${node.path} — click to rename folder`}
             >
@@ -1917,8 +2199,8 @@ function FolderGroup({
         <span className="text-2xs text-ink-muted flex-1 flex items-center gap-1.5">
           {count} {count === 1 ? 'item' : 'items'}
           {edited > 0 && (
-            <span className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-300 font-semibold">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" aria-hidden />{edited} edited
+            <span className={cn('inline-flex items-center gap-1 font-semibold', fieldTone('changed').text)}>
+              <span className={cn('w-1.5 h-1.5 rounded-full', fieldTone('changed').bar)} aria-hidden />{edited} edited
             </span>
           )}
         </span>
@@ -1967,14 +2249,14 @@ function FolderGroup({
         <div className="ml-5 pl-3 border-l border-glass-border/40 space-y-1">
           {node.own && (
             <LeafRow leaf={node.own} parentPath={parentPath} depth={depth + 1} readOnly={readOnly} query={query} api={api}
-              mark={marks?.get(node.own.fullKey)?.mark} was={marks?.get(node.own.fullKey)?.was} />
+              mark={marks?.get(node.own.fullKey)?.mark} was={marks?.get(node.own.fullKey)?.was} unsaved={marks?.get(node.own.fullKey)?.unsaved} />
           )}
           {node.folders.map((child) => (
             <FolderGroup key={child.path} node={child} depth={depth + 1} readOnly={readOnly} query={query} forceExpand={forceExpand} api={api} marks={marks} />
           ))}
           {node.leaves.map((leaf) => (
             <LeafRow key={leaf.fullKey} leaf={leaf} parentPath={node.path} depth={depth + 1} readOnly={readOnly} query={query} api={api}
-              mark={marks?.get(leaf.fullKey)?.mark} was={marks?.get(leaf.fullKey)?.was} />
+              mark={marks?.get(leaf.fullKey)?.mark} was={marks?.get(leaf.fullKey)?.was} unsaved={marks?.get(leaf.fullKey)?.unsaved} />
           ))}
           {!readOnly && (
             adding ? (

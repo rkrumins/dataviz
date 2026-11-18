@@ -10,7 +10,7 @@
  * pass. `useStageBuildRows` commits that plan with a single `addNodes` +
  * `addEdges` + `stageMany` call — one state update per store instead of one
  * per row — then fires `onRowStaged` per row for the caller's layer
- * assignment (mirrors `useDuplicateSubtree`'s `onNodeCopied`).
+ * assignment (mirrors `useDuplicateSubtree`'s `onNodesCopied`).
  *
  * Each row's `create_entity` change mirrors `useStageEntityCreation.stageEntity`
  * exactly: same optimistic node/edge shape, same `apply`/`discard` hooks

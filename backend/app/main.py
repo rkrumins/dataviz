@@ -2904,6 +2904,9 @@ class _TimeoutMiddleware:
         # The API key inventory as CSV: at most 10,000 keys, a short read per page of 500, two
         # at a time per process (api_keys._EXPORTS).
         re.compile(r"^/api/v1/admin/api-keys/export\.csv$"),
+        # A change list as CSV: at most GRAPHVER_CHANGE_LIST_MAX changes, a page of 1,000 at a
+        # time from the cached index, two at a time per process (versioning._CHANGE_EXPORTS).
+        re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/diff/export\.csv$"),
     )
 
     def __init__(self, app):

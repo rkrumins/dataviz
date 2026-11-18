@@ -159,6 +159,15 @@ async def _run() -> None:
     entry = await svc.change_entry(graph_id=gid, origin=draft, entity_id="C1")
     assert (entry["before"]["displayName"], entry["after"]["displayName"]) == ("amount", "amount_eur")
 
+    # Exported as CSV, property by property, a page at a time — with the list's filters.
+    pages = [p async for p in svc.change_export_rows(
+        graph_id=gid, origin=draft, containment_edge_types=CONT, kind="node", detail="properties", chunk=1)]
+    renamed = [r for page in pages for r in page if r[6] == "C1"]
+    assert [r[:2] + r[9:] for r in renamed] == [["Entity", "Edited", "Name", "", "amount", "amount_eur"]]
+    one_per_change = [r for p in [p async for p in svc.change_export_rows(
+        graph_id=gid, origin=draft, containment_edge_types=CONT, statuses=("added",))] for r in p]
+    assert {r[6] for r in one_per_change} >= {"T3"} and all(r[1] == "Added" for r in one_per_change)
+
     # A new checkpoint is a new index, never the last one served again.
     await svc.stage_changes(graph_id=gid, branch_id=d, actor="ana", ops=[_n("T4", "refunds")])
     await svc.checkpoint(graph_id=gid, branch_id=d, actor="ana", containment_edge_types=CONT)

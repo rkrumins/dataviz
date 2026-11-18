@@ -18,6 +18,8 @@ vi.mock('@/services/viewTransferApiService', () => {
 vi.mock('@/hooks/useAggregatedLineage', () => ({ invalidateAggregatedEdges: vi.fn() }))
 
 const KEY = 'ws1::ds1::br1'
+/** Let what a save and a restore wait on (the snapshot marked, the snapshot read) settle. */
+const settle = () => act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve() })
 const target = { wsId: 'ws1', dataSourceId: 'ds1', branchId: 'br1', provider: {} as never, message: 'm' }
 
 /** A fresh page: every module (and so every store and the in-memory pending save) starts over;
@@ -54,6 +56,7 @@ describe('useStagedDraftPersistence — a reload while a save runs', () => {
     apply.mockReturnValueOnce(new Promise(() => {}))
     act(() => { p1.useStagedChangesStore.setState({ applyStatus: 'applying' }) })
     void p1.saveStagedChangesToDraft(p1.useStagedChangesStore.getState().changes, target)
+    await settle()
     expect(apply.mock.calls[0][5]).toBe('key-1')
     expect(p1.readSnapshot(KEY)).toMatchObject({ phase: 'committing', pendingSave: { key: 'key-1' } })
     h1.unmount()
@@ -61,6 +64,7 @@ describe('useStagedDraftPersistence — a reload while a save runs', () => {
     // Page 2: the reload.
     const p2 = await load()
     renderHook(() => p2.useStagedDraftPersistence(KEY, 'br1', true))
+    await settle()
     const restored = p2.useStagedChangesStore.getState().changes
     expect(restored.map((c) => c.summary)).toEqual(['Edit A'])
 
@@ -84,12 +88,14 @@ describe('useStagedDraftPersistence — a reload while a save runs', () => {
     apply.mockReturnValueOnce(new Promise(() => {}))
     act(() => { p1.useStagedChangesStore.setState({ applyStatus: 'applying' }) })
     void p1.saveStagedChangesToDraft(p1.useStagedChangesStore.getState().changes, target)
+    await settle()
     const firstSave = apply.mock.calls[0]
     h1.unmount()
 
     // Page 2: the work comes back, and the user edits something else before saving again.
     const p2 = await load()
     renderHook(() => p2.useStagedDraftPersistence(KEY, 'br1', true))
+    await settle()
     act(() => {
       p2.useStagedChangesStore.getState().stage({
         type: 'update_entity', targetId: 'urn:b', targetUrn: 'urn:b',

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { StagedChange } from '@/store/stagedChangesStore'
-import { buildReviewIndex, filterRows, NO_FILTER, isNarrowed } from '../reviewIndex'
+import { buildReviewIndex, filterRows, headingLabel, headingOf, NO_FILTER, isNarrowed } from '../reviewIndex'
 
 const lookup = { nameOf: (id: string) => id.replace('urn:', ''), typeOf: (id: string) => (id.includes('col') ? 'Column' : 'Table') }
 let n = 0
@@ -38,6 +38,23 @@ describe('buildReviewIndex', () => {
     expect(names({ attention: true })).toEqual(['sales'])
     expect(isNarrowed(NO_FILTER)).toBe(false)
     expect(isNarrowed({ ...NO_FILTER, q: ' x ' })).toBe(true)
+  })
+
+  it('lists entities, then relationships, then layout — each by type, the most changed first', () => {
+    const mixed = [
+      change({ targetUrn: 'urn:col1', targetId: 'urn:col1' }),
+      change({ type: 'create_edge', targetId: 'e9', targetUrn: undefined, after: { source: 'urn:a', target: 'urn:b', edgeType: 'FEEDS' } }),
+      change({ targetUrn: 'urn:t1', targetId: 'urn:t1' }),
+      change({ type: 'layer_config', targetId: 'l9', targetUrn: undefined }),
+      change({ targetUrn: 'urn:t2', targetId: 'urn:t2' }),
+      change({ targetUrn: 'urn:col2', targetId: 'urn:col2' }),
+      change({ targetUrn: 'urn:t3', targetId: 'urn:t3' }),
+    ]
+    const ix = buildReviewIndex(mixed, lookup)
+    const order = filterRows(ix, NO_FILTER).map((i) => ix.groups[i])
+    expect(order.map((g) => (g.kind === 'layout' ? 'layout' : g.key))).toEqual(['urn:t1', 'urn:t2', 'urn:t3', 'urn:col1', 'urn:col2', 'e9', 'layout'])
+    expect(order.map((g) => headingLabel(headingOf(g)))).toEqual(
+      ['Table', 'Table', 'Table', 'Column', 'Column', 'FEEDS relationships', 'View layout'])
   })
 
   it('indexes and filters 50,000 staged changes within a frame budget', () => {

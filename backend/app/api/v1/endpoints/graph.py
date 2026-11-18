@@ -4354,8 +4354,7 @@ async def apply_graph_changes(
     key that already committed is not applied again, and the answer is the first save's commit
     with the entities' current values. A reused key returns the first result whatever the body,
     so send a new key for a new batch."""
-    from backend.app.services.versioning.service import (
-        GraphVersioningService, OntologyViolation, MergeConflict, ConcurrencyError)
+    from backend.app.services.versioning.service import GraphVersioningService
     actor = user.id
     svc = GraphVersioningService()
     g = await svc.get_graph_by_data_source(dataSourceId)
@@ -4377,7 +4376,24 @@ async def apply_graph_changes(
 
     if not ops:
         return {"commitId": None, "assigned": assigned}
+    return await _apply_resolved_save(
+        svc, graph_id=graph_id, branch_id=branchId, actor=actor, ops=ops, assigned=assigned,
+        message=request.message, idempotency_key=idempotency_key,
+        containment_edge_types=await _resolve_containment_types(engine),
+        ontology_rules=await _resolve_ontology_rules(engine, fail_closed=(g.get("kind") == "blank")),
+        node_identity=await _node_identity_for_write(engine),
+        cache_scope=CacheScope(workspace_id=ws_id, data_source_id=dataSourceId, branch_id=branchId))
 
+
+async def _apply_resolved_save(svc, *, graph_id: str, branch_id: str, actor: str, ops, assigned,
+                               message: Optional[str], idempotency_key: Optional[str],
+                               containment_edge_types, ontology_rules, node_identity,
+                               cache_scope) -> dict:
+    """A draft save once its ops are resolved (:func:`_resolve_change_ops`): one atomic commit, its
+    refusals as the HTTP answers the route gives, and the answer the route returns. Shared by
+    ``POST /graph/changes`` and the save a client sent in parts (``save`` jobs), so a save is the
+    same save however it arrived — and, under one Idempotency-Key, lands once."""
+    from backend.app.services.versioning.service import OntologyViolation, MergeConflict, ConcurrencyError
     from backend.app.services.versioning.entity_audit import ENTITY_VIEW_CAP, entity_views
     from backend.app.services.versioning.errors import (AmbiguousUrn, EdgeEndsMissing,
                                                         EntityExists, NotAnEdge)
@@ -4393,13 +4409,12 @@ async def apply_graph_changes(
 
     try:
         result = await svc.apply_ops_detailed(
-            graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
-            message=request.message or "Canvas edits",
+            graph_id=graph_id, branch_id=branch_id, ops=ops, actor=actor,
+            message=message or "Canvas edits",
             idempotency_key=f"changes:{actor}:{idempotency_key}" if idempotency_key else None,
-            containment_edge_types=await _resolve_containment_types(engine),
-            ontology_rules=await _resolve_ontology_rules(
-                engine, fail_closed=(g.get("kind") == "blank")),
-            node_identity=await _node_identity_for_write(engine),
+            containment_edge_types=containment_edge_types,
+            ontology_rules=ontology_rules,
+            node_identity=node_identity,
             # An edge copied in whose id was also an item's is ``edge:<id>`` in history, while
             # the graph the canvas reads still calls it ``<id>``: each edge update or delete goes
             # to the edge its id names, never to an item that shares it.
@@ -4434,9 +4449,7 @@ async def apply_graph_changes(
     # Draft reads key on CacheScope(ws, ds, branch), so we bump that exact scope.
     # bump_generation swallows Redis errors and never raises, so this can't fail
     # the user's write.
-    await get_graph_cache().bump_generation(
-        CacheScope(workspace_id=ws_id, data_source_id=dataSourceId, branch_id=branchId)
-    )
+    await get_graph_cache().bump_generation(cache_scope)
     entities, truncated = entity_views(result.written, result.urns, cap=ENTITY_VIEW_CAP)
     # Under the names the canvas sent — a node by its urn — never an id it never saw.
     entities = {result.names.get(k, k): v for k, v in entities.items()}

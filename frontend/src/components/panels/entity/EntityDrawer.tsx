@@ -26,6 +26,7 @@ import { usePersonaStore } from '@/store/persona'
 import { useFeature } from '@/store/features'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
+import { useEntityBaseline } from '@/features/versioning/hooks/useEntityBaseline'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { NO_VERSION_CONTROL, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
@@ -42,6 +43,8 @@ import { EntityHeader, type EntityTab } from './EntityHeader'
 import { EntityViewTab } from './EntityViewTab'
 import { EntityEditTab, withPropertyBag } from './EntityEditTab'
 import { EntityFooter } from './EntityFooter'
+import { EntityChangeDigest } from './EntityChangeDigest'
+import { changedFieldCount, useStagedNodeEdit } from './EntityChangeStrip'
 
 export interface EntityDrawerProps {
   /** The canvas owning this drawer accepts graph edits — a draft, in edit mode.
@@ -147,6 +150,14 @@ function OpenEntityDrawer({
     () => (original ? userProperties((original as Record<string, unknown>).properties) : undefined),
     [original],
   )
+  // In a draft, the properties as published (main where the draft began): each row then says what
+  // the draft changed — saved, or not yet — and Revert puts it back as published.
+  const baseline = useEntityBaseline(versioningEnabled ? scope : {}, unsavedCreate ? null : ((data.urn as string | undefined) ?? node.id))
+  const publishedProps = useMemo(
+    () => (baseline ? userProperties(baseline.published.properties) : undefined),
+    [baseline],
+  )
+  const unsavedFields = changedFieldCount(useStagedNodeEdit(node.id))
   const commitProperties = useCallback(
     (bag: Record<string, unknown>) => commit((d) => withPropertyBag(d, bag)),
     [commit],
@@ -233,6 +244,8 @@ function OpenEntityDrawer({
                 onCopyUrn={copyUrn}
                 canEdit={editable}
                 originalProps={originalProps}
+                publishedProps={publishedProps}
+                digest={<EntityChangeDigest baseline={baseline} unsavedFields={unsavedFields} />}
                 onCommitProperties={commitProperties}
                 onFocusNode={onFocusNode}
                 onLocateMany={onLocateMany}
@@ -255,6 +268,8 @@ function OpenEntityDrawer({
                   entityType={entityType}
                   urn={urn}
                   userProps={userProps}
+                  originalProps={originalProps}
+                  publishedProps={publishedProps}
                   onEdit={edit}
                   onCommit={commit}
                   onCancel={discard}

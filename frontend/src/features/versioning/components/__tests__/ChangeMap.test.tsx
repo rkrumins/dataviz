@@ -61,7 +61,7 @@ describe('ChangeMap', () => {
       change({ targetId: `urn:n${i}`, targetUrn: `urn:n${i}`, before: { label: `n${i}`, properties: { a: 1 } }, after: { label: `n${i}`, properties: { a: 2 } } })),
     { nameOf, typeOf: () => 'Table' })
     render(<ChangeMap groups={groups} nameOf={nameOf} selectedKey="urn:n7" onSelect={() => {}} />)
-    expect(screen.getAllByText('urn:n7').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('n7').length).toBeGreaterThan(0)   // named as the change names it, not by its urn
   })
 
   it('has nothing to draw for layout-only changes, and says so', () => {

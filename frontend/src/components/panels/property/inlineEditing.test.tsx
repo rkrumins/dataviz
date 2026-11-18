@@ -14,7 +14,7 @@ describe('propertyMarks', () => {
       { owner: 'bea', sla: '1h', tier: 'gold' },
       { owner: 'ana', sla: '1h', legacy: true },
     )
-    expect([...marks]).toEqual([['owner', { mark: 'changed', was: 'ana' }], ['tier', { mark: 'new' }]])
+    expect([...marks]).toEqual([['owner', { mark: 'changed', was: 'ana', unsaved: true }], ['tier', { mark: 'new', unsaved: true }]])
     expect(removed).toEqual([['legacy', true]])
   })
 

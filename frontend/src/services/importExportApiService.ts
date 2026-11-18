@@ -446,6 +446,26 @@ export async function sendInParts<U extends PartsUpload>(file: File, opts: {
 }
 
 /**
+ * Send ``file`` (NDJSON) to the graph's resumable uploads, resuming one this browser remembers under
+ * ``key`` — what a draft save too large for one request travels as (``saveGraphChangesInParts``).
+ * The upload is the caller's to forget (``remember(key, null)``) once it is done with.
+ */
+export function sendNdjsonInParts(wsId: string, graphId: string, file: File, opts: {
+  key: string
+  onProgress?: (sent: number, total: number) => void
+  signal?: AbortSignal
+}): Promise<ImportUpload> {
+  return sendInParts(file, {
+    key: opts.key,
+    find: (id) => authFetch<ImportUpload>(`${uploadsUrl(wsId, graphId)}/${id}`),
+    create: () => createImportUpload(wsId, graphId, file, 'ndjson'),
+    partUrl: (id, n) => `${uploadsUrl(wsId, graphId)}/${id}/parts/${n}`,
+    onProgress: opts.onProgress,
+    signal: opts.signal,
+  })
+}
+
+/**
  * Import ``file`` through a resumable upload (``sendInParts``), then start the import from its
  * parts. The same file chosen again after a failure or a reload resumes the upload where it
  * stopped. ``onProgress`` hears the bytes the server holds so far.

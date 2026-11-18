@@ -9,7 +9,7 @@
  */
 import { userProperties } from '@/lib/nodeFields'
 import type { RevisionChange } from '@/services/versioningApiService'
-import type { ChangeKind, FieldDelta } from './changeModel'
+import type { ChangeKind, FieldDelta, GraphChange } from './changeModel'
 
 export interface FieldChange {
   /** What the drawer calls it. */
@@ -20,6 +20,9 @@ export interface FieldChange {
   after: unknown
   kind: 'added' | 'changed' | 'removed'
 }
+
+/** A field's place on its entity — `Description`, `Technical/Owner` — what a comment on it names. */
+export const fieldPath = (f: FieldChange) => (f.folder ? `${f.folder}/${f.label}` : f.label)
 
 type Bag = Record<string, unknown>
 const asBag = (v: unknown): Bag => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Bag) : {})
@@ -175,4 +178,74 @@ export function fieldChangeCounts(fields: readonly FieldChange[]): Record<FieldC
   const n = { added: 0, changed: 0, removed: 0 }
   for (const f of fields) n[f.kind] += 1
   return n
+}
+
+// ── Seeing a change at a glance: a summary line, its key differences, its sections ───────────────
+
+const NAMED_LABELS = new Set([...NODE_FIELDS, ...EDGE_FIELDS].map(([label]) => label))
+const KIND_RANK: Record<FieldChange['kind'], number> = { changed: 0, added: 1, removed: 2 }
+const isNamed = (f: FieldChange) => !f.folder && NAMED_LABELS.has(f.label)
+
+/** The fields to show first, at most `n`: the named ones in reading order (Name, Type,
+ *  Description…), then properties edited, added, then removed — each in the order given (by
+ *  folder, then name). What a person reads to know what a change is about. */
+export function keyDifferences(fields: readonly FieldChange[], n = 5): FieldChange[] {
+  const named = fields.filter(isNamed)
+  const rest = fields.filter((f) => !isNamed(f))
+    .map((f, i) => [f, i] as const)
+    .sort(([a, i], [b, j]) => KIND_RANK[a.kind] - KIND_RANK[b.kind] || i - j)
+    .map(([f]) => f)
+  return [...named, ...rest].slice(0, n)
+}
+
+export interface FieldSummary {
+  changed: number
+  added: number
+  removed: number
+  total: number
+  /** The first few, as `keyDifferences` orders them: label and how it changed. */
+  top: Array<{ label: string; folder?: string | null; kind: FieldChange['kind']; before?: unknown; after?: unknown }>
+}
+
+/** A change's fields counted, with the first few named — what its one-line summary reads. */
+export function summarizeFields(fields: readonly FieldChange[], top = 3): FieldSummary {
+  const n = fieldChangeCounts(fields)
+  return { ...n, total: fields.length, top: keyDifferences(fields, top) }
+}
+
+export interface FieldSection {
+  /** The folder (`Technical/Physical`), or null for the entity's own fields and loose properties. */
+  folder: string | null
+  fields: FieldChange[]
+  counts: Record<FieldChange['kind'], number>
+}
+
+/** Fields in sections: the unfoldered first, then each folder in order. */
+export function byFolder(fields: readonly FieldChange[]): FieldSection[] {
+  const map = new Map<string | null, FieldChange[]>()
+  for (const f of fields) {
+    const key = f.folder ?? null
+    const list = map.get(key)
+    if (list) list.push(f)
+    else map.set(key, [f])
+  }
+  const keys = [...map.keys()].sort((a, b) => (a === null ? -1 : b === null ? 1 : a.localeCompare(b)))
+  return keys.map((folder) => {
+    const list = map.get(folder)!
+    return { folder, fields: list, counts: fieldChangeCounts(list) }
+  })
+}
+
+/** The server's summary of a change (`fields.top`) as field changes a row can show. */
+export function fromSummaryTop(top: FieldSummary['top']): FieldChange[] {
+  return top.map((t) => ({ label: t.label, folder: t.folder ?? undefined, kind: t.kind, before: t.before, after: t.after }))
+}
+
+/** A change's rows: from its two sides where it has them, else from its field deltas. */
+export function fieldsOfChange(change: GraphChange): FieldChange[] {
+  if (change.status === 'modified' && !(change.before && change.after) && change.fields) {
+    return fromFieldDeltas(change.fields, change.kind)
+  }
+  return entityFieldChanges(change.status === 'added' ? undefined : change.before,
+    change.status === 'removed' ? undefined : change.after, change.kind)
 }

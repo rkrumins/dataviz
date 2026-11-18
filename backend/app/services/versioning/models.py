@@ -261,6 +261,9 @@ class MergeRequestORM(VersioningBase):
     # content commit after it makes the approval stale (GraphVersioningService._approvals).
     approvals = Column(JSONB, nullable=True)
     approval_status = Column(Text, nullable=True)
+    # A reviewer sent it back for changes: {by, at, reason, headCommitId, headSeq}. It holds until a
+    # content commit lands on the draft after headSeq (the author changed it), or they withdraw it.
+    changes_requested = Column(JSONB, nullable=True)
     checks_status = Column(JSONB, nullable=True)          # ontology re-validation etc.
     resulting_commit_id = Column(Text, nullable=True)
     actor = Column(Text, nullable=True)                   # who raised it
@@ -294,6 +297,64 @@ class MergeRequestORM(VersioningBase):
             "status IN (" + ",".join(f"'{v}'" for v in MR_STATUSES) + ")",
             name="ck_mr_status",
         ),
+    )
+
+
+class ReviewCommentORM(VersioningBase):
+    """A comment on a review: on one change (``entity_id``), on one field or property of it
+    (``path``), or on the review as a whole (neither). A thread is its first comment and the replies
+    that name it (``thread_id`` — a first comment names itself); resolving is the first comment's.
+    ``entity_hash`` is the draft's content hash of the entity when it was written: a later edit to
+    it marks the thread outdated. Deleting keeps the row (``deleted_at``), so a thread's replies
+    still read in order (20261117_1200_gv_review_comments)."""
+
+    __tablename__ = "review_comments"
+
+    id = Column(Text, primary_key=True, default=lambda: prefixed_id("rc"))
+    pr_id = Column(Text, nullable=False)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    thread_id = Column(Text, nullable=False)
+    entity_id = Column(Text, nullable=True)
+    path = Column(Text, nullable=True)
+    body = Column(Text, nullable=False)
+    mentions = Column(JSONB, nullable=True)
+    author = Column(Text, nullable=False)
+    entity_hash = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    edited_at = Column(Text, nullable=True)
+    deleted_at = Column(Text, nullable=True)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+
+    __table_args__ = _plain(
+        Index("ix_rc_pr_entity", "pr_id", "entity_id"),
+        Index("ix_rc_thread", "thread_id"),
+        Index("ix_rc_graph", "graph_id"),
+    )
+
+
+class ReviewDecisionORM(VersioningBase):
+    """A reviewer's verdict on one change of a draft's review: ``accepted`` or ``rejected`` (with
+    why). ``content_hash`` is the draft's hash of the entity when it was decided: the verdict holds
+    only while it still matches — an edit since makes it stale. ``implied_by`` names the change it
+    was decided with (accepting a new edge accepts the new entities it joins); ``None`` for one
+    decided on its own (20261117_1300_gv_decisions)."""
+
+    __tablename__ = "review_decisions"
+
+    pr_id = Column(Text, primary_key=True)
+    entity_id = Column(Text, primary_key=True)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    verdict = Column(Text, nullable=False)               # accepted | rejected
+    reason = Column(Text, nullable=True)
+    content_hash = Column(Text, nullable=True)
+    implied_by = Column(Text, nullable=True)
+    actor = Column(Text, nullable=False)
+    decided_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        CheckConstraint("verdict IN ('accepted', 'rejected')", name="ck_rd_verdict"),
+        Index("ix_rd_graph", "graph_id"),
     )
 
 
@@ -418,7 +479,7 @@ class ProjectionStateORM(VersioningBase):
 # An import that holds its draft (``uq_jobs_ingest_active``).
 _INGEST_ACTIVE = "job_type = 'ingest' AND status IN ('pending','running')"
 JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish", "purge",
-             "package_inspect", "fork_update", "fork_merge")
+             "package_inspect", "fork_update", "fork_merge", "save")
 
 
 class ProjectionQuarantineORM(VersioningBase):
@@ -1023,6 +1084,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261018_1000_gv_mr_approvals.
     _bounded_step(conn, "merge_requests.approvals was not added",
                   lambda: ensure_mr_approvals_column(conn), required=True)
+    # 20261117_1500_gv_mr_sendback.
+    _bounded_step(conn, "merge_requests.changes_requested was not added",
+                  lambda: ensure_mr_changes_requested_column(conn), required=True)
     # 20261018_1100_gv_ps_retired.
     _bounded_step(conn, "the retired_keys column was not added",
                   lambda: ensure_ps_retired_keys_column(conn), required=True)
@@ -1289,6 +1353,17 @@ def ensure_branch_visibility(conn) -> None:
     if has_members:
         conn.execute(text(
             f"CREATE INDEX IF NOT EXISTS ix_bm_subject ON {members} (subject_type, subject_id)"))
+
+
+def ensure_mr_changes_requested_column(conn) -> None:
+    """Add ``merge_requests.changes_requested``: a reviewer's request for changes. A no-op without
+    the table, and once it is there. ``conn`` is a synchronous connection."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("merge_requests", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if "changes_requested" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."merge_requests" ADD COLUMN IF NOT EXISTS changes_requested JSONB'))
 
 
 def ensure_mr_approvals_column(conn) -> None:

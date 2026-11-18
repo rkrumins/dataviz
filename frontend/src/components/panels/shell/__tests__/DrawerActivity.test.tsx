@@ -9,6 +9,7 @@ import type { EntitySummary, Watermark } from '@/services/versioningApiService'
 
 const h = vi.hoisted(() => ({ watermark: undefined as Watermark | undefined }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+  useChangeEntry: () => ({ data: undefined }),
   useProjectionWatermark: () => ({ data: h.watermark }),
 }))
 

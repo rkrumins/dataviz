@@ -21,6 +21,7 @@ vi.mock('../../useDrawerHistoryScope', () => ({
   useDrawerHistoryScope: () => ({ wsId: undefined, graphId: null, mainBranchId: null, branchId: null }),
 }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+  useChangeEntry: () => ({ data: undefined }),
   useEntitySummary: () => ({ data: undefined, isLoading: false }),
   useProjectionWatermark: () => ({ data: undefined }),
   useBranches: () => ({ data: [] }),
@@ -98,7 +99,7 @@ describe('EntityDrawer — an edit in a draft', () => {
     await user.click(screen.getByRole('tab', { name: /^Edit/ }))
     const slaRow = screen.getByText('sla').closest('.group') as HTMLElement
     // Staged as it is made — there is no separate Stage step.
-    await user.click(within(slaRow).getByTitle('Delete'))
+    await user.click(within(slaRow).getByRole('button', { name: /^Delete / }))
 
     expect(ops()).toEqual([{
       op: 'update', kind: 'node', id: 'urn:orders', baseVersion: 'v1', payload: {}, unsetProperties: ['sla'],

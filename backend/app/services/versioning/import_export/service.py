@@ -14,6 +14,7 @@ worker's transfer lane claims it from ``jobs`` and runs it on a lease (:mod:`.ru
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,6 +42,7 @@ from .resolve import _ALREADY_GONE, _STATUS
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
 from .snapshot import open_snapshot
+from . import uploads
 from .uploads import PACKAGE_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -152,6 +154,7 @@ class ImportExportService:
         replace_scope_resolver=None,
         identity_resolver=None,
         fork_hook=None,
+        save_hook=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
@@ -178,6 +181,9 @@ class ImportExportService:
         # API layer, which resolves the ontology and owns those side effects; a refusal comes back
         # as the HTTP answer the route gives when it publishes inside the request.
         self._publish_hook = publish_hook
+        # Optional async ``(job, ops) -> the save's answer | {"error": {"status", "detail"}}`` — a
+        # draft save sent in parts (``save`` jobs), run as ``POST /graph/changes`` runs it.
+        self._save_hook = save_hook
         # The same for a fork's jobs (``fork_update``, ``fork_merge``): ``(job) -> its answer |
         # {"error": …}``.
         self._fork_hook = fork_hook
@@ -832,6 +838,100 @@ class ImportExportService:
             await s.flush()
             return {"job_id": job.id}
 
+    # ------------------------------------------------------------------ #
+    # A draft save too large for one request: its ops sent in parts       #
+    # ------------------------------------------------------------------ #
+    async def create_save_job(
+        self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, branch_id: str,
+        actor: str, record: Dict[str, Any], message: Optional[str], key: str,
+    ) -> Dict[str, Any]:
+        """Queue a draft save whose ops arrived as an upload (``record``: NDJSON, one op a line), to
+        be written as ONE commit by the transfer lane — what ``POST /graph/changes`` would have done
+        were it small enough to send in one request. One job per ``key`` (the save's Idempotency-Key):
+        asked again it answers with the same job, so a retry never queues the save twice — and a job
+        that failed is answered too (its refusal), never run again: a new batch takes a new key. The
+        upload is bound to the job, so it is never imported or saved twice."""
+        async with db.graphver_session() as s:
+            await self._lock_in_workspace(s, graph_id, workspace_id)
+            existing = (await s.execute(select(JobORM).where(
+                JobORM.graph_id == graph_id, JobORM.branch_id == branch_id, JobORM.job_type == "save",
+                JobORM.field_scope["key"].astext == key, JobORM.field_scope["actor"].astext == actor,
+            ).order_by(JobORM.created_at.desc()).limit(1))).scalar_one_or_none()
+            if existing is not None:
+                return {"job_id": existing.id, "status": existing.status}
+            if record.get("jobId"):
+                raise uploads.UploadError("This upload was already used. Send the save again.", 409)
+            job = JobORM(job_type="save", graph_id=graph_id, workspace_id=workspace_id,
+                         data_source_id=data_source_id, branch_id=branch_id,
+                         field_scope={"actor": actor, "key": key, "message": message,
+                                      "uploadId": record["uploadId"], "sourceUri": uploads.record_key(record)},
+                         status="pending", current_phase=QUEUED, updated_at=_now(),
+                         provenance=provenance.snapshot())
+            s.add(job)
+            await s.flush()
+            job_id = job.id
+        await uploads.save(self._store, {**record, "jobId": job_id})
+        return {"job_id": job_id, "status": "pending"}
+
+    @staticmethod
+    def save_result_key(job_id: str) -> str:
+        return storage_key("save-results", f"{job_id}.json")
+
+    async def run_save(self, job_id: str, lease: Optional[Lease] = None) -> Dict[str, Any]:
+        """Write a save sent in parts: its ops read from the upload, in order, then the hook — the
+        save route's own apply, under the save's key, so it lands once however often it runs. The
+        answer (every id it minted and every version it wrote: large) is kept in the object store
+        (:meth:`save_result_key`); the job's summary says how it went."""
+        lease = lease or await lease_job(job_id)
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+            fields = dict(row.field_scope or {})
+            job = {**fields, "graphId": row.graph_id, "branchId": row.branch_id,
+                   "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id}
+        ops: List[Dict[str, Any]] = []
+        try:
+            buf = b""
+            async for chunk in uploads.open_source(self._store, fields["sourceUri"]):
+                buf += chunk
+                *lines, buf = buf.split(b"\n")
+                ops.extend(json.loads(line) for line in lines if line.strip())
+            if buf.strip():
+                ops.append(json.loads(buf))
+        except (ValueError, FileNotFoundError) as exc:
+            result: Dict[str, Any] = {"error": {"status": 422, "detail": {
+                "type": "invalid_upload", "message": f"The save's changes could not be read: {exc}"[:500]}}}
+        else:
+            lease.check()
+            result = await self._save_hook(job, ops)
+        values: Dict[str, Any] = {}
+        if "error" in result:
+            detail = result["error"].get("detail")
+            values.update(status="failed", summary=result, error_message=str(
+                detail.get("message") or detail.get("type") if isinstance(detail, dict) else detail)[:2000])
+        else:
+            await self._store.put_stream(self.save_result_key(job_id), _bytes_once(json.dumps(result).encode("utf-8")))
+            values["summary"] = {"commitId": result.get("commitId"), "ops": len(ops),
+                                 "created": len(result.get("assigned") or {})}
+        if not await lease.finish(**values):
+            raise Superseded(f"save job {job_id} (epoch {lease.epoch}) was taken over before it could finish")
+        return result
+
+    async def save_job_actor(self, job_id: str) -> Optional[str]:
+        """Whose save a ``save`` job is (only they follow it)."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+            return (row.field_scope or {}).get("actor") if row is not None and row.job_type == "save" else None
+
+    async def run_save_safe(self, job_id: str, lease: Lease) -> None:
+        await self._run_safe(job_id, lease, self.run_save)
+
+    async def save_result(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """A finished save job's answer, as ``POST /graph/changes`` gives it."""
+        key = self.save_result_key(job_id)
+        if not (await self._store.stat(key)).exists:
+            return None
+        return json.loads(b"".join([c async for c in self._store.open_stream(key)]))
+
     async def start_publish(self, job_id: str) -> str:
         """Queue the publish job (see :meth:`_start`). Returns the status to report."""
         return await self._start(job_id)
@@ -1283,3 +1383,7 @@ class ImportExportService:
                 "package": {k: v for k, v in row.field_scope["package"].items() if k != "actor"}
                 if isinstance(row.field_scope, dict) and row.field_scope.get("package") else None,
             }
+
+
+async def _bytes_once(data: bytes):
+    yield data

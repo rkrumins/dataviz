@@ -32,10 +32,11 @@ import { clearPendingSave, getPendingSave, resumePendingSave } from '@/features/
 import {
   clearSnapshot,
   markSnapshotCommitting,
-  readSnapshot,
+  readSnapshotAsync,
   reconcileSnapshot,
   toSerializableChange,
   writeSnapshot,
+  writeSnapshotAsync,
   type SerializableChange,
   type StagedDraftSnapshot,
 } from './stagedDraftPersistence'
@@ -126,50 +127,56 @@ export function useStagedDraftPersistence(
     if (!scopeKey || !hydrationComplete) return
     if (restoredForKeyRef.current === scopeKey) return
     restoredForKeyRef.current = scopeKey
-
-    const snapshot = readSnapshot(scopeKey)
-    const verdict = reconcileSnapshot(snapshot, currentBranchId)
-    if (verdict === 'discard') {
-      clearSnapshot(scopeKey)
-      return
-    }
-    if (verdict === 'noop' || !snapshot) return
-    // A save that was in flight (or never answered): saving this batch again reuses its key.
-    if (snapshot.pendingSave) resumePendingSave(snapshot.pendingSave, scopeKey)
-
-    // Lay the unsaved work ON TOP of the hydrated (committed) canvas by the same rule every later
-    // load follows (stagedOverlay): the snapshot's copies win for what the work touches (a new node,
-    // an edited one), and what it removed stays removed. Then the review op-log, so Save + the
-    // review panel see the same changes — and every later reload keeps all of it.
-    const changes = snapshot.changes.map(hydrateChange)
-    const cs = useCanvasStore.getState()
-    const { nodes, edges } = overlayOnReplace(
-      { nodes: cs.nodes, edges: cs.edges },
-      { nodes: snapshot.pendingNodes, edges: snapshot.pendingEdges },
-      changes,
-    )
-    useCanvasStore.setState({
-      nodes, edges, _nodeIndex: new Set(nodes.map((n) => n.id)), _edgeIndex: new Set(edges.map((e) => e.id)),
+    // A large snapshot is read from IndexedDB: restore when it arrives, if this is still the draft.
+    void readSnapshotAsync(scopeKey).then((snapshot) => {
+      if (restoredForKeyRef.current === scopeKey) restore(snapshot)
     })
-    useStagedChangesStore.setState({
-      changes,
-      redoStack: [],
-      applyStatus: 'idle',
-      lastApplyResult: null,
-    })
-    // Unsaved top-level entities get their column back (see StagedDraftSnapshot.pins).
-    const writer = layoutWriter()
-    const pins = Object.entries(snapshot.pins ?? {})
-    if (writer && pins.length > 0) {
-      let layout = writer.current()
-      for (const [urn, layerId] of pins) {
-        if (!layout.assignments[urn] && layout.layers.some((l) => l.id === layerId)) {
-          layout = assignEntities(layout, [urn], layerId)
-        }
+
+    function restore(snapshot: Awaited<ReturnType<typeof readSnapshotAsync>>) {
+      if (!scopeKey) return
+      const verdict = reconcileSnapshot(snapshot, currentBranchId)
+      if (verdict === 'discard') {
+        clearSnapshot(scopeKey)
+        return
       }
-      if (layout !== writer.current()) writer.persist(layout)
+      if (verdict === 'noop' || !snapshot) return
+      // A save that was in flight (or never answered): saving this batch again reuses its key.
+      if (snapshot.pendingSave) resumePendingSave(snapshot.pendingSave, scopeKey)
+
+      // Lay the unsaved work ON TOP of the hydrated (committed) canvas by the same rule every later
+      // load follows (stagedOverlay): the snapshot's copies win for what the work touches (a new node,
+      // an edited one), and what it removed stays removed. Then the review op-log, so Save + the
+      // review panel see the same changes — and every later reload keeps all of it.
+      const changes = snapshot.changes.map(hydrateChange)
+      const cs = useCanvasStore.getState()
+      const { nodes, edges } = overlayOnReplace(
+        { nodes: cs.nodes, edges: cs.edges },
+        { nodes: snapshot.pendingNodes, edges: snapshot.pendingEdges },
+        changes,
+      )
+      useCanvasStore.setState({
+        nodes, edges, _nodeIndex: new Set(nodes.map((n) => n.id)), _edgeIndex: new Set(edges.map((e) => e.id)),
+      })
+      useStagedChangesStore.setState({
+        changes,
+        redoStack: [],
+        applyStatus: 'idle',
+        lastApplyResult: null,
+      })
+      // Unsaved top-level entities get their column back (see StagedDraftSnapshot.pins).
+      const writer = layoutWriter()
+      const pins = Object.entries(snapshot.pins ?? {})
+      if (writer && pins.length > 0) {
+        let layout = writer.current()
+        for (const [urn, layerId] of pins) {
+          if (!layout.assignments[urn] && layout.layers.some((l) => l.id === layerId)) {
+            layout = assignEntities(layout, [urn], layerId)
+          }
+        }
+        if (layout !== writer.current()) writer.persist(layout)
+      }
+      setRestoredCount(snapshot.changes.length)
     }
-    setRestoredCount(snapshot.changes.length)
   }, [scopeKey, currentBranchId, hydrationComplete])
 
   // Persist on change; mark committing during a save; clear when empty.
@@ -179,22 +186,27 @@ export function useStagedDraftPersistence(
     // The first edit the pending write holds, for the max wait; and whether the warning was given.
     let pendingSince: number | null = null
     let warned = false
-    const write = () => {
+    // Written when the browser is idle: building and cloning tens of thousands of changes must
+    // not land in the middle of typing.
+    const idle = (fn: () => void) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 1000 }) : setTimeout(fn, 0))
+    const write = () => idle(() => {
       pendingSince = null
       const snapshot = buildSnapshot(scopeKey, currentBranchId)
       if (!snapshot) { clearSnapshot(scopeKey); return }
-      if (writeSnapshot(snapshot)) { warned = false; return }
-      if (!warned) {
-        warned = true
-        useNotificationStore.getState().add({ type: 'warning', message: TOO_LARGE })
-      }
-    }
+      void writeSnapshotAsync(snapshot).then((kept) => {
+        if (kept) { warned = false; return }
+        if (!warned) {
+          warned = true
+          useNotificationStore.getState().add({ type: 'warning', message: TOO_LARGE })
+        }
+      })
+    })
 
     const unsub = useStagedChangesStore.subscribe((state, prev) => {
       // A save going in-flight: mark the snapshot 'committing' (the save adds
       // its Idempotency-Key before the request leaves — see StagedDraftSnapshot).
       if (state.applyStatus === 'applying' && prev.applyStatus !== 'applying') {
-        markSnapshotCommitting(scopeKey)
+        void markSnapshotCommitting(scopeKey)
         return
       }
       // A save that settles with its changes still staged (it failed) rewrites the snapshot as

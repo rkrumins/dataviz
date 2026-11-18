@@ -65,7 +65,7 @@ describe('Review & Save while a save is running', () => {
 
     expect(screen.getByRole('button', { name: 'Discard all' })).toHaveProperty('disabled', true)
     fireEvent.click(screen.getByRole('button', { name: 'Discard all' }))
-    for (const b of screen.getAllByRole('button', { name: 'Discard change' })) fireEvent.click(b)
+    for (const b of screen.getAllByRole('button', { name: /^Discard (the change to|\d+ changes to)/ })) fireEvent.click(b)
     fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
     fireEvent.click(screen.getByRole('button', { name: 'Redo' }))
     expect(state().changes.map((c) => c.id)).toEqual(['a', 'b'])

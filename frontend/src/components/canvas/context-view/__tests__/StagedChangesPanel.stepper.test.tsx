@@ -73,7 +73,8 @@ describe('Review & Save — the guided flow', () => {
     renderPanel()
     act(() => state().openReviewPanel())
     const dialog = screen.getByRole('dialog', { name: 'Review & Save Changes' })
-    expect(within(dialog).getByText((_, el) => el?.tagName === 'P' && el.textContent === 'Changed 2 fields on Orders')).toBeInTheDocument()
+    // A summary first — what it edits — then (one change: opened at once) the values themselves.
+    expect(within(dialog).getAllByText(/^Edited (labels and owner|owner and labels)$/).length).toBeGreaterThan(0)
     expect(within(dialog).getByText('owner')).toBeInTheDocument()
     expect(within(dialog).getByText('bea')).toBeInTheDocument()
     expect(within(dialog).getByText('+ gdpr')).toBeInTheDocument()

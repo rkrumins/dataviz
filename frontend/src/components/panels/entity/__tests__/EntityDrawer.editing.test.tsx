@@ -24,6 +24,7 @@ vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) =
     useEntityEditing: () => editing,
 }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+  useChangeEntry: () => ({ data: undefined }),
     useResolveGraph: () => ({ data: undefined, isError: false }),
     useEntitySummary: () => ({ data: undefined, isLoading: false }),
     useProjectionWatermark: () => ({ data: undefined }),

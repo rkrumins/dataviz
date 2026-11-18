@@ -175,7 +175,9 @@ export function GraphCanvas({ className }: { className?: string }) {
   // inspectors ("creation takes the rail"). Selector, not getState-in-render.
   // `surface` distinguishes the 400px rail from the wider Build Mode panel —
   // only one of the two (never both) mounts at a time.
-  const builderOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'rail')
+  const builderMounted = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'rail')
+  // The builder holds the rail unless it stepped aside for an entity's details (it stays mounted, hidden).
+  const builderOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'rail' && !s.suspended)
   const buildOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'build')
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   // Advanced search (Map + Builder + Power tools + Ask) — mounted as a
@@ -1635,7 +1637,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       {/* Right rail — mutual exclusion: creation takes the rail (an explicit
           action), so the builder is never hidden behind an inspector the user
           left open. Mirrors ContextViewCanvas. */}
-      {builderOpen && (
+      {builderMounted && (
         <HierarchyBuilderPanel
           onClose={() => useHierarchyBuilderStore.getState().close()}
           onEntityStaged={(_tempUrn, parentUrn) => {

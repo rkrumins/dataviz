@@ -217,7 +217,7 @@ describe('PropertyEditor', () => {
     expect(screen.queryByPlaceholderText('Property name')).not.toBeInTheDocument()
     // And the editor is still interactive afterwards (regression for the lockup).
     const ownerRow = screen.getByText('owner').closest('.group') as HTMLElement
-    await user.click(within(ownerRow).getByTitle('Delete'))
+    await user.click(within(ownerRow).getByRole('button', { name: /^Delete / }))
     expect(onChange).toHaveBeenCalledWith({})
   })
 
@@ -234,13 +234,52 @@ describe('PropertyEditor', () => {
     expect(onChange).toHaveBeenCalledWith({ maintainer: 'analytics' })
   })
 
+  it('puts a renamed key back on Esc — even when the drawer blurs the field as it closes the edit', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    // The entity drawer blurs whatever is focused on Escape (DrawerShell): the blur must not rename.
+    render(
+      <div onKeyDown={(e) => { if (e.key === 'Escape') (document.activeElement as HTMLElement | null)?.blur() }}>
+        <Harness initial={{ owner: 'analytics' }} onChange={onChange} />
+      </div>,
+    )
+    await user.click(screen.getByTitle(/click to rename/i))
+    const input = screen.getByDisplayValue('owner')
+    await user.clear(input)
+    await user.type(input, 'maintainer{Escape}')
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByText('owner')).toBeInTheDocument()
+    // And the next rename still lands.
+    await user.click(screen.getByTitle(/click to rename/i))
+    const again = screen.getByDisplayValue('owner')
+    await user.clear(again)
+    await user.type(again, 'steward{Enter}')
+    expect(onChange).toHaveBeenCalledWith({ steward: 'analytics' })
+  })
+
+  it('puts a renamed folder back on Esc', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(
+      <div onKeyDown={(e) => { if (e.key === 'Escape') (document.activeElement as HTMLElement | null)?.blur() }}>
+        <Harness initial={{ 'A/x': 1, 'A/y': 2, 'B/z': 3, top: 4 }} groupByPath onChange={onChange} />
+      </div>,
+    )
+    const folderA = screen.getByText('A').closest('.group') as HTMLElement
+    await user.click(within(folderA).getByTitle(/click to rename folder/i))
+    const input = within(folderA).getByDisplayValue('A')
+    await user.clear(input)
+    await user.type(input, 'Z{Escape}')
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
   it('deletes a property', async () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ owner: 'analytics', region: 'us' }} onChange={onChange} />)
 
     const ownerRow = screen.getByText('owner').closest('.group') as HTMLElement
-    await user.click(within(ownerRow).getByTitle('Delete'))
+    await user.click(within(ownerRow).getByRole('button', { name: /^Delete / }))
 
     expect(onChange).toHaveBeenCalledWith({ region: 'us' })
   })
@@ -270,7 +309,7 @@ describe('PropertyEditor', () => {
     await user.click(screen.getByRole('button', { name: 'Add' }))
     // After adding, deleting the original property must still work.
     const ownerRow = screen.getByText('owner').closest('.group') as HTMLElement
-    await user.click(within(ownerRow).getByTitle('Delete'))
+    await user.click(within(ownerRow).getByRole('button', { name: /^Delete / }))
     expect(onChange).toHaveBeenLastCalledWith({ region: '' })
   })
 })

@@ -29,6 +29,8 @@ export interface ReviewGroup {
   name: string
   /** The entity's type, for its colour. */
   typeId?: string
+  /** A relationship's type. */
+  edgeType?: string
   status: ChangeStatus
   changes: StagedChange[]
   sentence: Sentence
@@ -58,7 +60,7 @@ function statusOf(type: StagedChangeType): ChangeStatus {
 }
 
 /** The edge a change is about, in whichever shape its surface staged it. */
-function edgeOf(change: StagedChange): { source?: string; target?: string; type?: string } {
+export function edgeOf(change: StagedChange): { source?: string; target?: string; type?: string } {
   const after = asObj(change.after)
   const before = asObj(change.before)
   const e = change.type === 'create_edge' ? after : asObj(before.edge ?? before)
@@ -167,6 +169,7 @@ class Group implements ReviewGroup {
   kind: ReviewKind
   name: string
   typeId?: string
+  edgeType?: string
   status: ChangeStatus
   changes: StagedChange[]
   revealId?: string
@@ -176,6 +179,7 @@ class Group implements ReviewGroup {
     this.kind = init.kind
     this.name = init.name
     this.typeId = init.typeId
+    this.edgeType = init.edgeType
     this.status = init.status
     this.changes = init.changes
     this.revealId = init.revealId
@@ -210,7 +214,11 @@ export function buildReviewGroups(changes: readonly StagedChange[], lookup: Name
       if (statusOf(c.type) !== 'modified') existing.lead(c)
       continue
     }
+    // Named as the canvas names it — or, for an entity the canvas has not loaded (scrolled away, a
+    // large draft), as the change itself does, never by its urn.
+    const known = lookup.nameOf(key)
     const afterName = str(asObj(c.after).displayName)
+      ?? (known !== key ? known : labelOf(asObj(c.after)) ?? labelOf(asObj(c.before)) ?? labelOf(asObj(asObj(asObj(c.before).node).data)))
     const ends = kind === 'edge' ? edgeOf(c) : null
     groups.set(`${kind}:${key}`, new Group({
       key,
@@ -218,6 +226,7 @@ export function buildReviewGroups(changes: readonly StagedChange[], lookup: Name
       name: kind === 'node' ? (afterName ?? lookup.nameOf(key))
         : ends?.source && ends.target ? `${lookup.nameOf(ends.source)} → ${lookup.nameOf(ends.target)}` : c.summary,
       typeId: kind === 'node' ? (str(asObj(c.after).entityType) ?? lookup.typeOf?.(key)) : undefined,
+      edgeType: ends?.type,
       status: statusOf(c.type),
       changes: [c],
       revealId: kind === 'node' && c.type !== 'delete_entity' ? key : undefined,

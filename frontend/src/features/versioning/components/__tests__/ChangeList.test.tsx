@@ -80,7 +80,7 @@ describe('ChangeList', () => {
     expect(screen.getByText('Column')).toBeInTheDocument()
     // The second page was asked for from where the first ended.
     expect(api.getChangeEntries).toHaveBeenNthCalledWith(2, 'ws1', 'g1', { branchId: 'br_1' },
-      expect.objectContaining({ kind: 'node' }), 1, 100)
+      expect.objectContaining({ kind: 'node' }), 1, 100, true, false)
     expect(screen.getByText('4 entities')).toBeInTheDocument()
   })
 
@@ -93,12 +93,12 @@ describe('ChangeList', () => {
 
     await user.click(screen.getByRole('radio', { name: /Relationships/ }))
     await waitFor(() => expect(api.getChangeEntries).toHaveBeenLastCalledWith(
-      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge' }), 0, 100))
+      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge' }), 0, 100, true, false))
 
     const statuses = screen.getByRole('group', { name: /Show changes that were/ })
     await user.click(within(statuses).getByRole('button', { name: /Added/ }))
     await waitFor(() => expect(api.getChangeEntries).toHaveBeenLastCalledWith(
-      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge', statuses: ['added'] }), 0, 100))
+      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge', statuses: ['added'] }), 0, 100, true, false))
   })
 
   it('opens a row to its before and after, fetched for that row alone', async () => {
@@ -137,7 +137,11 @@ describe('ChangeList', () => {
     expect(screen.queryByRole('button', { name: 'Show amount on canvas' })).not.toBeInTheDocument()
     const nav = useChangeNavigatorStore.getState()
     expect(nav.active).toBe(true)
-    expect(nav.stops[nav.index]).toMatchObject({ id: 'urn:customers', name: 'customers', saved: true })
+    expect(nav.index).toBe(0)
+    // The navigator reads what this list lists that is still there, a page at a time, with names.
+    await waitFor(() => expect(nav.source?.at(0)).toMatchObject({ id: 'urn:customers', name: 'customers', saved: true }))
+    expect(api.getChangeEntries).toHaveBeenLastCalledWith('ws1', 'g1', { branchId: 'br_1' },
+      expect.objectContaining({ kind: 'node', statuses: ['added', 'modified'] }), 0, 500)
     useChangeNavigatorStore.setState({ canReveal: false, active: false })
   })
 

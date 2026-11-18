@@ -22,8 +22,10 @@ Boundary policy
 from __future__ import annotations
 
 import asyncio
+import csv
 import dataclasses
 import inspect
+import io
 import json
 import logging
 import os
@@ -31,8 +33,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Query, Request, Response, status
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +51,7 @@ from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, 
                                                 sync_override_gate)
 from backend.app.auth import api_key_auth, api_key_errors
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
-from backend.app.common.bulkhead import Bulkhead
+from backend.app.common.bulkhead import Bulkhead, Busy
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import (api_key_repo, data_source_repo, group_repo, notification_repo,
                                          provider_repo, service_account_repo, user_repo)
@@ -80,6 +82,7 @@ from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
     ApprovalRequired,
+    ChangeListTooLarge,
     ConcurrencyError,
     DiffTooLarge,
     GraphVersioningService,
@@ -163,7 +166,8 @@ def get_import_export_service():
             ontology_resolver=_resolve_ontology_types,
             layout_writer=_write_view_import_assignments,
             publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope,
-            identity_resolver=_resolve_node_identity_for_import, fork_hook=_fork_from_job)
+            identity_resolver=_resolve_node_identity_for_import, fork_hook=_fork_from_job,
+            save_hook=_save_from_job)
     return _ie_service
 
 
@@ -542,7 +546,10 @@ def _domain_errors():
     except HTTP_MAPPED as exc:       # first: BranchNotOpen is a ValueError, answered 404 below
         raise HTTPException(status_code=exc.status_code, detail=exc.detail, headers=exc.headers)
     except MergeConflict as exc:
-        raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+        raise HTTPException(status_code=409, detail={
+            "type": "merge_conflict", "conflicts": exc.conflicts,
+            **({"seeds": exc.seeds} if exc.seeds else {}),
+        })
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except DraftNotReadable:         # before AccessDenied: a 404, as for a branch that doesn't exist
@@ -805,6 +812,11 @@ class RebaseRequest(_ApiModel):
 class MergePrRequest(_ApiModel):
     message: str
     resolutions: Optional[Dict[str, Optional[dict]]] = None
+    # A draft's review: ``accepted`` merges only its accepted changes, and the draft keeps the rest.
+    mode: Literal["all", "accepted"] = "all"
+    # With ``accepted``: also discard the rejected changes from the draft (one restore commit), so
+    # what stays on it is what nobody decided yet.
+    discard_rejected: bool = Field(default=False, alias="discardRejected")
 
 
 class ApproveRequest(_ApiModel):
@@ -1408,6 +1420,10 @@ class ChangeRow(_ApiModel):
     target_entity_id: Optional[str] = Field(default=None, alias="targetEntityId")
     source_name: Optional[str] = Field(default=None, alias="sourceName")
     target_name: Optional[str] = Field(default=None, alias="targetName")
+    # With ``summary=true``: what the change did — counts, and its first few fields before and after.
+    fields: Optional[Dict[str, Any]] = None
+    # With ``paths=true``: its containers' names, top down.
+    path: Optional[List[str]] = None
 
 
 class ChangeEntriesResponse(_ApiModel):
@@ -1590,6 +1606,9 @@ class PrResponse(_ApiModel):
     # Reviewers whose approval went stale (a content commit since): they must approve again.
     stale_approved_by: Optional[List[str]] = Field(default=None, alias="staleApprovedBy")
     approval_status: Optional[str] = Field(default=None, alias="approvalStatus")
+    # A reviewer sent it back for changes, while that holds: {by, at, reason, headCommitId}. It
+    # merges once the draft changes, or once they withdraw it.
+    changes_requested: Optional[Dict[str, Any]] = Field(default=None, alias="changesRequested")
     checks_status: Optional[dict] = Field(default=None, alias="checksStatus")
     actor: Optional[str] = None                                       # who raised it
     created_at: str = Field(alias="createdAt")                        # when raised
@@ -1634,6 +1653,9 @@ def _collect_actor_ids(item: dict) -> set:
         for v in item.get(f) or ():
             if v:
                 ids.add(v)
+    sent_back = item.get("changes_requested")              # a review sent back: by whom
+    if isinstance(sent_back, dict) and sent_back.get("by"):
+        ids.add(sent_back["by"])
     return ids
 
 
@@ -1947,6 +1969,12 @@ _DRAFT_NEWS = {
                            "You no longer have access to it. Anything you had staged in it was saved "
                            "first, under your name."),
     "draft.transferred": ('You own "{name}" now', "A draft was handed to you."),
+    "draft.returned": ('Part of "{name}" was published',
+                       "What its review accepted is in the published version now. The rest is still on "
+                       "the draft, ready for another review."),
+    "review.changes_requested": ('"{name}" was sent back for changes',
+                                 "A reviewer asked for changes before it is published. Open the review to "
+                                 "see what they rejected, and why."),
 }
 
 
@@ -3320,6 +3348,8 @@ async def get_change_entries(
                              "urn, type or id; any case"),
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
+    summary: bool = Query(False, description="Each row also says what it changed (at most 200 rows a page)"),
+    paths: bool = Query(False, description="Each row also says where it sits: its containers, top down"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -3329,14 +3359,84 @@ async def get_change_entries(
     """A page of a change list, in a fixed order: entities, then relationships, then
     structure; by type, then name. ``offset`` counts into the filtered list, which holds still
     for its key (a draft's head, or two revisions), so paging neither skips nor repeats. No
-    payloads: open one row with ``/diff/entries/{entityId}``."""
+    payloads: open one row with ``/diff/entries/{entityId}``. ``summary=true``: each row also
+    says what it changed — counts and its first few fields, before and after (``fields``)."""
     origin = _change_origin(branch_id, from_seq, to_seq)
     statuses = _change_statuses(status)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     with _domain_errors():
         return await svc.change_entries(
             graph_id=graph_id, origin=origin, containment_edge_types=cset, viewer=viewer,
-            kind=kind, statuses=statuses, type_=entity_type, q=q, offset=offset, limit=limit)
+            kind=kind, statuses=statuses, type_=entity_type, q=q, offset=offset,
+            limit=min(limit, _SUMMARY_PAGE_MAX) if summary or paths else limit, summary=summary, paths=paths)
+
+
+# A page of change rows that each say what they changed reads both sides of every row: at most this many.
+_SUMMARY_PAGE_MAX = 200
+
+# Two change-list exports at once per process: each holds a read of the index and, property by
+# property, a page of values at a time while it streams.
+_CHANGE_EXPORTS = Bulkhead("change list exports", 2, wait_seconds=10.0, retry_after_seconds=30)
+
+
+@router.get("/graphs/{graph_id}/diff/export.csv", response_class=StreamingResponse)
+async def export_change_list(
+    ws_id: str, graph_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    kind: Optional[_ChangeKind] = Query(None),
+    status: Optional[str] = Query(None, description="added, modified, removed; comma-separated"),
+    entity_type: Optional[str] = Query(None, alias="type", max_length=256),
+    q: Optional[str] = Query(None, max_length=200),
+    detail: Literal["changes", "properties"] = Query(
+        "changes", description="One row per change, or one per changed field and property"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A change list as CSV — the same origin, filters and order as ``/diff/entries`` — streamed
+    a page of 1,000 changes at a time, so 100,000 changes export as they are read. ``detail=
+    properties`` writes one row per changed field and property, named as the app names them.
+    Cells are defused against spreadsheet formulas. Past ``GRAPHVER_CHANGE_LIST_MAX`` changes the
+    list is counted, not listed: 409 ``too_large_to_list``."""
+    from backend.app.services.versioning import change_csv
+
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    statuses = _change_statuses(status)
+    if _CHANGE_EXPORTS.full:
+        raise Busy(_CHANGE_EXPORTS.kind, _CHANGE_EXPORTS.retry_after_seconds)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    rows = svc.change_export_rows(graph_id=graph_id, origin=origin, containment_edge_types=cset,
+                                  viewer=viewer, kind=kind, statuses=statuses, type_=entity_type,
+                                  q=q, detail=detail)
+    # The first page is read before a byte is sent, so a refusal is an answer, not a cut file.
+    with _domain_errors():
+        try:
+            first = await rows.__anext__()
+        except StopAsyncIteration:
+            first = []
+        except ChangeListTooLarge as exc:
+            raise HTTPException(status_code=409, detail={"type": "too_large_to_list", **exc.too_large})
+
+    def _csv(lines) -> str:
+        buf = io.StringIO()
+        csv.writer(buf).writerows(lines)
+        return buf.getvalue()
+
+    async def _stream():
+        async with _CHANGE_EXPORTS.slot():
+            columns = change_csv.FIELD_COLUMNS if detail == "properties" else change_csv.CHANGE_COLUMNS
+            # A BOM, so a spreadsheet reads the names as UTF-8.
+            yield "\ufeff" + _csv([columns]) + _csv(first)
+            async for chunk in rows:
+                yield _csv(chunk)
+
+    name = change_csv.filename(dataclasses.asdict(origin), detail)
+    return StreamingResponse(_stream(), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @router.get("/graphs/{graph_id}/diff/entries/{entity_id}", response_model=ChangeEntryResponse)
@@ -5467,8 +5567,16 @@ async def _viewer_can(svc: GraphVersioningService, session: AsyncSession, pr: di
         (not manages, "manage_required"),
         (not publishes, "publish_required"),
         (opened and not policy.self_merge, "self_merge"))
+    # Anyone who sees a review may discuss it — a person, not a key; someone who manages the data
+    # source may also remove what others wrote.
+    comment = _first_refusal((is_service_account(viewer), "person_required"))
+    # Accepting or rejecting its changes one by one is reviewing it: whoever may approve it, on a
+    # draft's review (a fork's merges its committed history whole).
+    decide = _first_refusal((pr.get("source_graph_id") != pr.get("target_graph_id"), "fork_review")) or approve
     return {"approve": approve is None, "merge": merge is None,
-            "approveReason": approve, "mergeReason": merge}
+            "approveReason": approve, "mergeReason": merge,
+            "comment": comment is None, "commentReason": comment, "moderate": manages,
+            "decide": decide is None, "decideReason": decide}
 
 
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
@@ -5947,6 +6055,67 @@ async def close_merge_request(
         return await svc.close_pr(pr_id=pr_id, actor=user.id)
 
 
+class RequestChangesRequest(_ApiModel):
+    reason: Optional[str] = Field(default=None, max_length=2000)
+    # The source head the reviewer saw: 409 head_moved when the draft has moved on since.
+    expected_head_commit_id: Optional[str] = Field(default=None, alias="expectedHeadCommitId")
+
+
+@router.post("/merge-requests/{pr_id}/request-changes", response_model=PrResponse)
+async def request_changes_on_merge_request(
+    ws_id: str, pr_id: str, body: RequestChangesRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Send a draft's review back to its author: it does not merge until the draft changes, or
+    until this reviewer withdraws the request (``DELETE``). Whoever may decide its changes may; the
+    draft's people are told, with a link to the review."""
+    can = await _viewer_can(svc, session, _pr, user.id, claims, ws_id)
+    if not can["decide"]:
+        raise HTTPException(status_code=403, detail={"type": can["decideReason"] or "forbidden",
+                                                     "message": "You can't send this review back."})
+    with _domain_errors():
+        meta = await svc.request_changes(pr_id=pr_id, actor=user.id, reason=body.reason,
+                                         expected_head_commit_id=body.expected_head_commit_id)
+    target = str(_pr["target_graph_id"])
+    await _tell_draft_people(session, svc, "review.changes_requested", ws_id=ws_id,
+                             meta=await svc.get_graph(target) or {}, graph_id=target,
+                             branch_id=str(_pr["source_branch_id"]), actor=user.id, pr_id=pr_id)
+    return meta
+
+
+@router.delete("/merge-requests/{pr_id}/request-changes", response_model=PrResponse)
+async def withdraw_changes_request(
+    ws_id: str, pr_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Withdraw a request for changes: the reviewer who made it."""
+    with _domain_errors():
+        return await svc.withdraw_changes_request(pr_id=pr_id, actor=user.id)
+
+
+@router.post("/merge-requests/{pr_id}/discard-rejected")
+async def discard_rejected_changes(
+    ws_id: str, pr_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Discard what a draft's review rejected from the draft, as one restore commit — its author
+    taking the review's answer — and with it what holds those changes together (``implied``)."""
+    if _pr.get("source_graph_id") != _pr.get("target_graph_id"):
+        raise HTTPException(status_code=422, detail={"type": "fork_review", "message": "A fork's review has no rejected changes to discard."})
+    cset = await _pr_containment_types(svc, session, ws_id, _pr)
+    with _tree_errors():
+        return await svc.discard_rejected(pr_id=pr_id, actor=user.id, containment_edge_types=cset)
+
+
 @router.post("/merge-requests/{pr_id}/merge", response_model=PublishResponse)
 async def merge_merge_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
@@ -5968,9 +6137,11 @@ async def merge_merge_request(
         raise api_key_errors.key_forbidden(
             "api_key_not_allowed", "A fork's review cannot be merged with an API key.")
     policy = await _pr_policy(svc, session, _pr)
-    if source and await svc.branch_change_count(
+    partial = body.mode == "accepted"
+    if source and not partial and await svc.branch_change_count(
             graph_id=target, branch_id=str(source)) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
         with _domain_errors():
+            await svc.refuse_if_rejected(pr_id=pr_id)       # refused now, not by the job
             if not policy.self_merge and user.id == _pr.get("actor"):   # refused now, not by the job
                 raise SelfMerge(pr_id)
             return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
@@ -5990,11 +6161,26 @@ async def merge_merge_request(
         commit_id = await svc.merge_mr(
             mr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
             containment_edge_types=cset, ontology_rules=rules, node_identity=identity,
-            self_merge=policy.self_merge,
+            self_merge=policy.self_merge, mode=body.mode,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
-    _src_branch = _pr.get("source_branch_id")   # the merged draft — fold its layout overlay into the published view
+    _src_branch = _pr.get("source_branch_id")
+    if partial and ((await svc.get_pr(pr_id)) or {}).get("merged_via") == "review_partial":
+        # Merged in part: the draft stays open with the rest — its views and layout go live with
+        # its last part, and its people hear it is back for another review. Asked to, what was
+        # rejected leaves the draft too (best-effort: the merge stands either way).
+        if body.discard_rejected:
+            try:
+                await svc.discard_rejected(pr_id=pr_id, actor=user.id, containment_edge_types=cset)
+            except Exception:  # noqa: BLE001 — the merge landed; the rejected changes stay on the draft
+                logger.warning("discarding the rejected changes of %s failed", pr_id, exc_info=True)
+        await _tell_draft_people(session, svc, "draft.returned", ws_id=ws_id,
+                                 meta=await svc.get_graph(target) or {}, graph_id=target,
+                                 branch_id=str(_src_branch), actor=user.id, pr_id=pr_id)
+        background.add_task(project_now, target)
+        return await _publish_answer(svc, target, commit_id)
+    # The merged draft — fold its layout overlay into the published view
     await _promote_view_layout_overlay(str(_src_branch) if _src_branch else None, user.id)
     if _src_branch and _pr.get("source_graph_id") == target:                 # a draft's, not a fork's
         await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id,
@@ -6002,3 +6188,530 @@ async def merge_merge_request(
                                  branch_id=str(_src_branch), actor=user.id)
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
     return await _publish_answer(svc, target, commit_id)
+
+
+# --------------------------------------------------------------------------- #
+# A review's discussion: threads on a change (or one field of it), or on the  #
+# review as a whole — replies, resolve, people mentioned                       #
+# --------------------------------------------------------------------------- #
+class PostCommentRequest(_ApiModel):
+    body: str = Field(max_length=10_000)
+    entity_id: Optional[str] = Field(default=None, alias="entityId", max_length=512)
+    path: Optional[str] = Field(default=None, max_length=512)
+    thread_id: Optional[str] = Field(default=None, alias="threadId", max_length=64)
+    mentions: List[str] = Field(default_factory=list, max_length=20)
+
+
+class EditCommentRequest(_ApiModel):
+    body: str = Field(max_length=10_000)
+
+
+def get_review_comments():
+    from backend.app.services.versioning.review_comments import ReviewComments
+    return ReviewComments()
+
+
+@contextmanager
+def _comment_errors():
+    from backend.app.services.versioning.review_comments import CommentRefused, NotYours
+    try:
+        yield
+    except NotYours as exc:
+        raise HTTPException(status_code=403, detail={"type": "not_yours", "message": str(exc)})
+    except CommentRefused as exc:
+        raise HTTPException(status_code=422, detail={"type": "comment_refused", "message": str(exc)})
+
+
+async def _named(session: AsyncSession, items: List[dict]) -> Dict[str, str]:
+    """Authors and mentioned people by name, for a page of threads."""
+    ids = {i["author"] for i in items} | {m for i in items for m in i.get("mentions") or ()}
+    ids |= {r["author"] for i in items for r in i.get("replies") or ()}
+    ids |= {i["resolvedBy"] for i in items if i.get("resolvedBy")}
+    resolved = await resolve_user_ids(session, ids) if ids else {}
+    return {uid: disp for uid, (disp, _email) in resolved.items() if disp}
+
+
+async def _workspace_people(session: AsyncSession, ws_id: str) -> List[dict]:
+    """Who can be mentioned: the workspace's active people, bound directly or through a group."""
+    from backend.app.db.repositories import binding_repo, group_repo, user_repo
+    ids: set = set()
+    for b in await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id):
+        if b.subject_type == "user":
+            ids.add(b.subject_id)
+        elif b.subject_type == "group":
+            ids.update(m.user_id for m in await group_repo.list_group_members(session, b.subject_id))
+    idents = await user_repo.get_identities_by_ids(session, sorted(ids))
+    people = [{"user_id": uid, "display_name": i["name"] or None, "email": i["email"]}
+              for uid, i in idents.items()
+              if i["status"] == "active" and not i["deleted"] and not is_service_account(uid)]
+    return sorted(people, key=lambda p: (p["display_name"] or p["user_id"]).lower())
+
+
+@router.get("/merge-requests/{pr_id}/comments")
+async def list_review_comments(
+    ws_id: str, pr_id: str,
+    entity_id: Optional[str] = Query(None, alias="entityId", max_length=512),
+    general: bool = Query(False, description="Only threads on the review as a whole"),
+    thread_id: Optional[str] = Query(None, alias="threadId", max_length=64),
+    state: Literal["open", "resolved", "all"] = Query("all"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    comments=Depends(get_review_comments),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A review's threads, newest first, each with its replies in order — on one change, on the
+    review as a whole, or all; ``outdated`` where the change was edited since."""
+    with _comment_errors():
+        page = await comments.threads(pr_id=pr_id, entity_id=entity_id, general=general, thread_id=thread_id,
+                                      state=state, offset=offset, limit=limit)
+    return {**page, "userNames": await _named(session, page["threads"])}
+
+
+@router.get("/merge-requests/{pr_id}/comments/counts")
+async def count_review_comments(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    comments=Depends(get_review_comments),
+):
+    """Threads per change (open and in all) and on the review — what a change list badges."""
+    return await comments.counts(pr_id=pr_id)
+
+
+@router.get("/merge-requests/{pr_id}/comments/people", response_model=List[ReviewerCandidate])
+async def review_comment_people(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Who can be mentioned in this review's discussion."""
+    return await _workspace_people(session, ws_id)
+
+
+@router.post("/merge-requests/{pr_id}/comments", status_code=201)
+async def post_review_comment(
+    ws_id: str, pr_id: str, body: PostCommentRequest,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    comments=Depends(get_review_comments),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A new thread — on a change (``entityId``), one field or property of it (``path``), or the
+    review — or a reply (``threadId``). People mentioned are told, and so are the thread's people
+    and whoever opened the review."""
+    from backend.app.db.repositories import notification_repo
+    from backend.app.services.versioning.review_comments import mention_candidates_filter
+    if is_service_account(user.id):
+        raise HTTPException(status_code=403, detail={"type": "person_required",
+                                                     "message": "A key does not take part in a review's discussion."})
+    allowed = [p["user_id"] for p in await _workspace_people(session, ws_id)] if body.mentions else []
+    with _comment_errors():
+        posted = await comments.post(pr_id=pr_id, actor=user.id, body=body.body, entity_id=body.entity_id,
+                                     path=body.path, thread_id=body.thread_id,
+                                     mentions=mention_candidates_filter(body.mentions, allowed))
+    title = pr.get("title") or "a review"
+    link = f"/workspaces/{ws_id}/reviews?pr={pr_id}&thread={posted.comment['threadId']}"
+    excerpt = posted.comment["body"][:240]
+    try:
+        if posted.mentioned:
+            await notification_repo.notify(session, user_ids=posted.mentioned, kind="review.mention",
+                                           title=f"You were mentioned on “{title}”", body=excerpt, link=link,
+                                           actor_id=user.id, resource_type="review", resource_id=pr_id)
+        if posted.told:
+            await notification_repo.notify(
+                session, user_ids=posted.told, kind="review.reply" if body.thread_id else "review.comment",
+                title=(f"A reply on “{title}”" if body.thread_id else f"A comment on “{title}”"),
+                body=excerpt, link=link, actor_id=user.id, resource_type="review", resource_id=pr_id)
+    except Exception:  # noqa: BLE001 — telling people never fails the comment it tells of
+        logger.warning("could not tell the people of review %s about a comment", pr_id, exc_info=True)
+    return {**posted.comment, "userNames": await _named(session, [posted.comment])}
+
+
+@router.patch("/merge-requests/{pr_id}/comments/{comment_id}")
+async def edit_review_comment(
+    ws_id: str, pr_id: str, comment_id: str, body: EditCommentRequest,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    comments=Depends(get_review_comments),
+):
+    """Edit one's own comment."""
+    with _comment_errors():
+        return await comments.edit(pr_id=pr_id, comment_id=comment_id, actor=user.id, body=body.body)
+
+
+@router.delete("/merge-requests/{pr_id}/comments/{comment_id}", status_code=204)
+async def delete_review_comment(
+    ws_id: str, pr_id: str, comment_id: str,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    comments=Depends(get_review_comments),
+):
+    """Delete a comment — one's own, or anyone's for someone who manages the data source. Its
+    place in the thread stays, marked deleted."""
+    with _comment_errors():
+        await comments.delete(pr_id=pr_id, comment_id=comment_id, actor=user.id,
+                              may_moderate=has_permission(claims, _MANAGE, workspace_id=ws_id))
+    return Response(status_code=204)
+
+
+@router.post("/merge-requests/{pr_id}/comments/{thread_id}/{action}")
+async def resolve_review_thread(
+    ws_id: str, pr_id: str, thread_id: str, action: Literal["resolve", "reopen"],
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    comments=Depends(get_review_comments),
+):
+    """Resolve a thread, or reopen it."""
+    if is_service_account(user.id):
+        raise HTTPException(status_code=403, detail={"type": "person_required", "message": "A person resolves a thread."})
+    with _comment_errors():
+        return await comments.resolve(pr_id=pr_id, thread_id=thread_id, actor=user.id, resolved=action == "resolve")
+
+
+# --------------------------------------------------------------------------- #
+# A draft's review decided change by change — accept, reject (with why) — and  #
+# merged in part: what is accepted lands, the draft keeps the rest             #
+# --------------------------------------------------------------------------- #
+class DecisionFilter(_ApiModel):
+    kind: Optional[_ChangeKind] = None
+    statuses: List[Literal["added", "modified", "removed"]] = Field(default_factory=list)
+    type: Optional[str] = Field(default=None, max_length=256)
+    q: Optional[str] = Field(default=None, max_length=200)
+    decision: Optional[Literal["undecided", "accepted", "rejected", "stale"]] = None
+
+
+class DecideRequest(_ApiModel):
+    verdict: Optional[Literal["accepted", "rejected"]] = None
+    entity_ids: Optional[List[str]] = Field(default=None, alias="entityIds", max_length=1000)
+    filter: Optional[DecisionFilter] = None
+    reason: Optional[str] = Field(default=None, max_length=2000)
+    expected_head_commit_id: Optional[str] = Field(default=None, alias="expectedHeadCommitId")
+    dry_run: bool = Field(default=False, alias="dryRun")
+    force: bool = False
+
+
+@router.put("/merge-requests/{pr_id}/decisions")
+async def decide_review_changes(
+    ws_id: str, pr_id: str, body: DecideRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Accept or reject changes of a draft's review — ``entityIds``, or every change ``filter``
+    lists — or clear their decision (``verdict`` null). What they need is decided with them and
+    named in ``implied``; reversing a decision on one of those is 409 ``decision_conflict`` unless
+    ``force``. ``dryRun`` answers what it would decide. 409 ``head_moved`` when the draft moved on
+    from ``expectedHeadCommitId``."""
+    if (body.entity_ids is None) == (body.filter is None):
+        raise HTTPException(status_code=422, detail="Name the changes (entityIds) or a filter, not both.")
+    can = await _viewer_can(svc, session, pr, user.id, claims, ws_id)
+    if not can["decide"]:
+        raise HTTPException(status_code=403, detail={"type": can["decideReason"] or "forbidden",
+                                                     "message": "You can't decide this review's changes."})
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    f = body.filter
+    with _domain_errors():
+        return await svc.decide_changes(
+            pr_id=pr_id, actor=user.id, verdict=body.verdict, containment_edge_types=cset,
+            entity_ids=body.entity_ids,
+            filter=None if f is None else {"kind": f.kind, "statuses": f.statuses, "type": f.type, "q": f.q,
+                                           "decision": f.decision},
+            reason=body.reason, expected_head_commit_id=body.expected_head_commit_id,
+            dry_run=body.dry_run, force=body.force)
+
+
+@router.get("/merge-requests/{pr_id}/decisions/summary")
+async def review_decision_summary(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Where a draft's review stands, change by change: accepted, rejected, undecided, changed
+    since decided — and what *Merge accepted* still needs (``missing``)."""
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    with _domain_errors():
+        return await svc.review_decision_summary(pr_id=pr_id, containment_edge_types=cset)
+
+
+@router.get("/merge-requests/{pr_id}/changes")
+async def review_changes(
+    ws_id: str, pr_id: str,
+    decision: Optional[Literal["undecided", "accepted", "rejected", "stale"]] = Query(None),
+    kind: Optional[_ChangeKind] = Query(None),
+    status: Optional[str] = Query(None, description="added, modified, removed; comma-separated"),
+    entity_type: Optional[str] = Query(None, alias="type", max_length=256),
+    q: Optional[str] = Query(None, max_length=200),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    summary: bool = Query(False, description="Each row also says what it changed (at most 200 rows a page)"),
+    paths: bool = Query(False, description="Each row also says where it sits: its containers, top down"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A page of a draft review's change list (as ``/graphs/{id}/diff/entries``), each change
+    with its decision, narrowed by ``decision`` too; ``summary=true`` as there."""
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    with _domain_errors():
+        return await svc.review_change_entries(
+            pr_id=pr_id, containment_edge_types=cset, decision=decision, kind=kind,
+            statuses=_change_statuses(status), type_=entity_type, q=q, offset=offset,
+            limit=min(limit, _SUMMARY_PAGE_MAX) if summary or paths else limit, summary=summary, paths=paths)
+
+
+# --------------------------------------------------------------------------- #
+# A draft save too large for one request: its ops sent in parts (the import   #
+# upload), then written as ONE commit by the transfer lane                     #
+# --------------------------------------------------------------------------- #
+#: The most ops one save takes, however it is sent: one commit holds them all.
+SAVE_MAX_OPS = int(os.getenv("GRAPHVER_SAVE_MAX_OPS", "200000"))
+
+
+async def _save_from_job(job: dict, ops: list) -> dict:
+    """Write a save sent in parts exactly as ``POST /graph/changes`` writes one: its ops resolved
+    under its Idempotency-Key (the ids a retry of it would mint, in one request or in parts), the
+    data source's live rules, ONE commit (``graph._apply_resolved_save``); a refusal comes back as
+    the HTTP answer the route gives."""
+    from pydantic import ValidationError
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.db.engine import get_async_session
+    from backend.app.services.graph_cache import CacheScope
+    from backend.common.property_patch import InvalidPatch
+    svc = get_versioning_service()
+    gid, bid, actor, key, ws = job["graphId"], job["branchId"], job["actor"], job["key"], job["workspaceId"]
+    try:
+        with _domain_errors():
+            meta = await svc.get_graph(gid)
+            if meta is None:
+                raise HTTPException(status_code=404, detail="graph not found")
+            if meta.get("fork_parent_graph_id"):
+                await require_forks_enabled()
+            if len(ops) > SAVE_MAX_OPS:
+                raise HTTPException(status_code=413, detail={
+                    "type": "too_many_changes", "message": f"A save holds up to {SAVE_MAX_OPS:,} changes. "
+                    "Save part of them, then the rest."})
+            try:
+                typed = [graph_ep.GraphChangeOp.model_validate(o) for o in ops]
+                resolved, assigned = graph_ep._resolve_change_ops(
+                    typed, *graph_ep._replay_minters(f"{gid}/{bid}/{actor}", key), by_ref=True)
+            except (ValidationError, InvalidPatch) as exc:
+                raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)[:500]})
+            if not resolved:
+                return {"commitId": None, "assigned": assigned}
+            async with get_async_session() as session:
+                cset = await _live_containment_types(session, ws, meta.get("data_source_id"))
+                rules = await _rules_for_meta(session, ws, meta)
+                identity = await _node_identity_for_meta(session, meta)
+            return await graph_ep._apply_resolved_save(
+                svc, graph_id=gid, branch_id=bid, actor=actor, ops=resolved, assigned=assigned,
+                message=job.get("message"), idempotency_key=key, containment_edge_types=cset,
+                ontology_rules=rules, node_identity=identity,
+                cache_scope=CacheScope(workspace_id=ws, data_source_id=meta.get("data_source_id"), branch_id=bid))
+    except HTTPException as exc:
+        return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
+
+
+class SaveInPartsRequest(_ApiModel):
+    upload_id: str = Field(alias="uploadId", max_length=64)
+    message: Optional[str] = Field(default=None, max_length=2000)
+
+
+class SaveJobResponse(_ApiModel):
+    job_id: str = Field(alias="jobId")
+    status: str
+    phase: Optional[str] = None
+    error: Optional[Dict[str, Any]] = None
+    result: Optional[Dict[str, Any]] = None
+
+
+def _save_job_view(row: dict, result: Optional[dict] = None) -> dict:
+    summary = row.get("summary") or {}
+    error = summary.get("error") if row["status"] == "failed" else None
+    if row["status"] == "failed" and error is None:      # failed outside the save (the worker, say)
+        error = {"status": 500, "detail": {"type": "save_failed",
+                                           "message": row.get("errorMessage") or "The save failed. Send it again."}}
+    return {"jobId": row["jobId"], "status": row["status"], "phase": row.get("phase"), "error": error,
+            "result": result}
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/saves", status_code=202, response_model=SaveJobResponse,
+             dependencies=[Depends(require_feature("editModeEnabled"))])
+async def save_in_parts(
+    ws_id: str, graph_id: str, branch_id: str, body: SaveInPartsRequest,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=128),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Save a draft batch too large for one ``POST /graph/changes``: its ops (that route's, one
+    JSON object a line) were sent as an upload (``…/imports/uploads``, format ``ndjson``), and this
+    queues them to be written as ONE commit — 202 with the job to follow (``…/save-jobs/{jobId}``),
+    whose result is the route's answer. The Idempotency-Key is the save's own: the same key never
+    queues it twice, and a save first tried in one request lands once."""
+    from backend.app.services.versioning.import_export import uploads
+    record = await _load_upload(ie, ws_id, graph_id, meta, body.upload_id, user)
+    with _upload_errors():
+        missing = record["parts"] - len(await uploads.received(ie.store, record))
+        if missing:
+            raise HTTPException(status_code=409, detail={
+                "type": "parts_missing", "message": f"{missing} of the save's {record['parts']} parts haven't arrived."})
+        job = await ie.create_save_job(
+            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id, branch_id=branch_id,
+            actor=user.id, record=record, message=body.message, key=idempotency_key)
+    row = await ie.get_job(job["job_id"])
+    result = await ie.save_result(job["job_id"]) if row and row["status"] == "completed" else None
+    return _save_job_view(row or {"jobId": job["job_id"], "status": job["status"]}, result)
+
+
+@router.get("/graphs/{graph_id}/save-jobs/{job_id}", response_model=SaveJobResponse)
+async def get_save_job(
+    ws_id: str, graph_id: str, job_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """A save sent in parts: queued, running, or — done — its answer as ``POST /graph/changes``
+    gives it (``result``), or its refusal (``error``: that route's status and detail)."""
+    row = await ie.get_job(job_id)
+    if row is None or row.get("graphId") != graph_id or row.get("jobType") != "save" \
+            or await ie.save_job_actor(job_id) != user.id:
+        raise HTTPException(status_code=404, detail="save not found")
+    result = await ie.save_result(job_id) if row["status"] == "completed" else None
+    return _save_job_view(row, result)
+
+
+# --------------------------------------------------------------------------- #
+# Changes top-down: the containment tree they sit in, a level at a time      #
+# --------------------------------------------------------------------------- #
+@contextmanager
+def _tree_errors():
+    with _domain_errors():
+        try:
+            yield
+        except ChangeListTooLarge as exc:
+            raise HTTPException(status_code=409, detail={"type": "too_large_to_list", **exc.too_large})
+
+
+@router.get("/graphs/{graph_id}/diff/tree")
+async def get_change_tree_level(
+    ws_id: str, graph_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    parent: Optional[str] = Query(None, max_length=512, description="The container to list; the top when none"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=_SUMMARY_PAGE_MAX),
+    summary: bool = Query(False),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One level of a change list top-down: what sits directly in ``parent`` — each change, or
+    a container no change touched — most-changed first, with how many changes are under each, a
+    page at a time. Built once per version of the change list, without payloads."""
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _tree_errors():
+        return await svc.change_tree_level(graph_id=graph_id, origin=origin, containment_edge_types=cset,
+                                           parent=parent, viewer=viewer, offset=offset, limit=limit,
+                                           summary=summary)
+
+
+@router.get("/graphs/{graph_id}/diff/tree/path")
+async def get_change_tree_path(
+    ws_id: str, graph_id: str,
+    entity_id: str = Query(..., alias="entityId", max_length=512),
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Where a change sits, its containers from the top down — what a search result reveals."""
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _tree_errors():
+        return await svc.change_tree_path(graph_id=graph_id, origin=origin, containment_edge_types=cset,
+                                          entity_id=entity_id, viewer=viewer)
+
+
+@router.get("/merge-requests/{pr_id}/tree")
+async def get_review_change_tree_level(
+    ws_id: str, pr_id: str,
+    parent: Optional[str] = Query(None, max_length=512),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=_SUMMARY_PAGE_MAX),
+    summary: bool = Query(False),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A draft review's changes top-down (as ``/graphs/{id}/diff/tree``), each change with its
+    decision."""
+    if pr.get("source_graph_id") != pr.get("target_graph_id"):
+        raise HTTPException(status_code=422, detail={"type": "fork_review", "message": "A fork's review is laid out as its own tree."})
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    with _tree_errors():
+        return await svc.change_tree_level(
+            graph_id=str(pr["target_graph_id"]), origin=ChangeOrigin(branch_id=str(pr["source_branch_id"])),
+            containment_edge_types=cset, parent=parent, offset=offset, limit=limit, summary=summary,
+            decisions_for=pr_id)
+
+
+# --------------------------------------------------------------------------- #
+# A draft's saved changes discarded: each back to where the draft began       #
+# --------------------------------------------------------------------------- #
+class RestoreFilter(_ApiModel):
+    kind: Optional[_ChangeKind] = None
+    statuses: List[Literal["added", "modified", "removed"]] = Field(default_factory=list)
+    type: Optional[str] = Field(default=None, max_length=256)
+    q: Optional[str] = Field(default=None, max_length=200)
+
+
+class RestoreChangesRequest(_ApiModel):
+    entity_ids: Optional[List[str]] = Field(default=None, alias="entityIds", max_length=1000)
+    filter: Optional[RestoreFilter] = None
+    expected_head_commit_id: Optional[str] = Field(default=None, alias="expectedHeadCommitId")
+    dry_run: bool = Field(default=False, alias="dryRun")
+    message: Optional[str] = Field(default=None, max_length=2000)
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/restore", dependencies=[Depends(require_feature("editModeEnabled"))])
+async def restore_draft_changes(
+    ws_id: str, graph_id: str, branch_id: str, body: RestoreChangesRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Discard saved changes from a draft — ``entityIds``, or every change ``filter`` lists — as
+    one ``restore`` commit that puts each back where the draft began; what holds a change together
+    goes with it, named in ``implied``. ``dryRun`` answers what it would discard. 409 ``draft_moved``
+    when the draft moved on from ``expectedHeadCommitId``."""
+    if (body.entity_ids is None) == (body.filter is None):
+        raise HTTPException(status_code=422, detail="Name the changes (entityIds) or a filter, not both.")
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    f = body.filter
+    with _tree_errors():
+        return await svc.restore_draft_changes(
+            graph_id=graph_id, branch_id=branch_id, actor=user.id, containment_edge_types=cset,
+            entity_ids=body.entity_ids,
+            filter=None if f is None else {"kind": f.kind, "statuses": f.statuses, "type": f.type, "q": f.q},
+            expected_head_commit_id=body.expected_head_commit_id, dry_run=body.dry_run,
+            message=body.message, viewer=viewer)

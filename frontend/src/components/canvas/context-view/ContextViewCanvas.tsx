@@ -800,7 +800,7 @@ export function ContextViewCanvas({
   const drawnRowsRef = useRef<ReadonlySet<string>>(new Set())
   const isDrawnRow = useCallback((id: string) => drawnRowsRef.current.has(id), [])
 
-  // Forward-ref for the duplicate-subtree layer wiring. onNodeCopied /
+  // Forward-ref for the duplicate-subtree layer wiring. onNodesCopied /
   // onNodeDuplicated fire from useDuplicateSubtree / useCanvasInteractions,
   // both wired BEFORE nodeLayerMap / sortedLayers / assignEntityToLayer /
   // parentMap exist in render order (mirrors startTraceRef). Keep a ref whose
@@ -816,7 +816,7 @@ export function ContextViewCanvas({
     persistReferenceLayout: (next: NormalizedReferenceLayout) => void
   } | null>(null)
 
-  // Duplicate a node's whole subtree as freshly-staged copies. onNodeCopied
+  // Duplicate a node's whole subtree as freshly-staged copies. onNodesCopied
   // assigns EACH copy (root + every descendant) to its ORIGINAL's layer —
   // ContextView only renders nodes that resolve to a layer, so without
   // per-node assignment the descendant copies would vanish (don't rely on
@@ -861,14 +861,21 @@ export function ContextViewCanvas({
   }
 
   const { duplicateSubtree, prepareDuplicate, commitDuplicate } = useDuplicateSubtree({
-    onNodeCopied: (originalId, _originalUrn, copyUrn) => {
+    // Each copy in its original's layer — every one, in one layout write.
+    onNodesCopied: (copies) => {
       const wiring = duplicateWiringRef.current
       if (!wiring) return
-      const layer = wiring.nodeLayerMap.get(originalId) ?? wiring.sortedLayers[0]?.id
-      if (layer) {
+      const byLayer = new Map<string, string[]>()
+      for (const { originalId, copyUrn } of copies) {
+        const layer = wiring.nodeLayerMap.get(originalId) ?? wiring.sortedLayers[0]?.id
+        if (!layer) continue
         wiring.assignEntityToLayer(copyUrn, layer)
-        wiring.persistReferenceLayout(assignmentOps.assignEntities(wiring.currentLayout(), [copyUrn], layer))
+        byLayer.set(layer, [...(byLayer.get(layer) ?? []), copyUrn])
       }
+      if (byLayer.size === 0) return
+      let layout = wiring.currentLayout()
+      for (const [layer, urns] of byLayer) layout = assignmentOps.assignEntities(layout, urns, layer)
+      wiring.persistReferenceLayout(layout)
     },
   })
 
@@ -1435,7 +1442,9 @@ export function ContextViewCanvas({
   // guard. Subscribed via selectors so unrelated store writes don't re-render.
   // `surface` distinguishes the 400px rail from the wider Build Mode panel —
   // only one of the two (never both) mounts at a time.
-  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
+  const builderMounted = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
+  // The builder holds the rail unless it stepped aside for an entity's details (it stays mounted, hidden).
+  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail' && !s.suspended)
   const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build')
   const builderLayerId = useHierarchyBuilderStore(s => s.layerId)
   const builderParentUrn = useHierarchyBuilderStore(s => s.parentUrn)
@@ -2334,7 +2343,7 @@ export function ContextViewCanvas({
   reorderTreeRef.current = { displayMap, parentMap, nodesByLayer, nodeLayerMap }
 
   // Refresh the duplicate-subtree wiring ref now that its deps exist (see the
-  // ref declaration near the interactions call). Read lazily by onNodeCopied /
+  // ref declaration near the interactions call). Read lazily by onNodesCopied /
   // onNodeDuplicated so each duplicate action sees live layer state.
   duplicateWiringRef.current = {
     nodeLayerMap, sortedLayers, assignEntityToLayer, parentMap, setExpandedNodes, currentLayout, persistReferenceLayout,
@@ -7979,7 +7988,7 @@ export function ContextViewCanvas({
       <AnimatePresence>
         {/* Creation takes the rail when active (it's an explicit action), so it
             is never hidden behind a drawer the user happened to leave open. */}
-        {builderOpen && (
+        {builderMounted && (
           <HierarchyBuilderPanel
             key="hierarchy-builder-panel"
             onClose={() => useHierarchyBuilderStore.getState().close()}

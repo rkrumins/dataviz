@@ -10,10 +10,14 @@ import { useMemo, useState } from 'react'
 import { ChevronRight, Loader2, AlertCircle, Folder, Boxes, Spline, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChangeOrigin } from '../model/changeModel'
-import type { ChangeListOrigin, DiffSummaryResponse, DiffTreeNode } from '@/services/versioningApiService'
+import { changeListExportUrl, type ChangeListOrigin, type DiffSummaryResponse, type DiffTreeNode } from '@/services/versioningApiService'
+import { triggerBrowserDownload } from '@/services/importExportApiService'
 import { ChangeList } from './ChangeList'
+import { ExportMenu } from './ExportMenu'
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
+import { ChangeSummary } from './ChangeSummary'
+import { fieldsOfChange, summarizeFields } from '../model/fieldDiff'
 import { entityTypeStyle } from '@/components/canvas/property-manager/entityTypeStyles'
 import { treeLeafToChange } from '../model/changeTreeModel'
 import { useChangeTreeExpansion, type FetchChildren } from '../hooks/useChangeTreeExpansion'
@@ -103,13 +107,17 @@ function Indent({ depth }: { depth: number }) {
 }
 
 function LeafRow({ node, depth, origin }: { node: DiffTreeNode; depth: number; origin: ChangeOrigin }) {
-  const [open, setOpen] = useState(false)
+  // Closed, a summary; open, the key differences; then all of them.
+  const [level, setLevel] = useState<0 | 1 | 2>(0)
+  const open = level > 0
   const status = node.status && node.status !== 'unchanged' ? node.status : 'modified'
   const meta = STATUS_META[status]
   const change = useMemo(() => treeLeafToChange(node, origin), [node, origin])
+  const summary = useMemo(() => summarizeFields(fieldsOfChange(change)), [change])
   return (
     <div className={cn('rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent)}>
-      <button onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-1.5 px-2 py-1.5 text-left group">
+      <button onClick={() => setLevel((l) => (l === 0 ? 1 : 0))} aria-expanded={open}
+        className="w-full flex items-center gap-1.5 px-2 py-1.5 text-left group">
         <Indent depth={depth} />
         <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
         <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} />
@@ -118,11 +126,14 @@ function LeafRow({ node, depth, origin }: { node: DiffTreeNode; depth: number; o
         ) : node.entityType ? (
           <span className="w-2 h-2 rounded-full shrink-0" style={{ background: entityTypeStyle(node.entityType).ring }} />
         ) : null}
-        <span className="text-sm text-ink truncate flex-1" title={node.label}>{node.label}</span>
+        <span className="min-w-0 flex-1 flex items-baseline gap-2">
+          <span className="text-sm text-ink truncate">{node.label}</span>
+          <ChangeSummary summary={summary} status={status} kind={node.entityKind === 'edge' ? 'edge' : 'node'} className="min-w-0" />
+        </span>
       </button>
       {open && (
         <div className="px-2.5 pb-2" style={{ paddingLeft: depth * 14 + 28 }}>
-          <EntityDiff change={change} />
+          <EntityDiff change={change} depth={level === 1 ? 'key' : 'all'} onShowAll={() => setLevel(2)} />
         </div>
       )}
     </div>
@@ -313,7 +324,15 @@ export function ChangeTreePanel({
 
   return (
     <div className={cn('space-y-2.5', className)}>
-      <ImpactHeader summary={summary} />
+      <div className="flex items-start gap-2">
+        <div className="flex-1 min-w-0"><ImpactHeader summary={summary} /></div>
+        {/* The same changes as a list exist: they export as CSV, streamed by the server. */}
+        {list && (
+          <ExportMenu count={totalChanges} onExport={(detail) => triggerBrowserDownload(
+            changeListExportUrl(list.wsId, list.graphId, list.origin, {}, detail),
+            `changes${detail === 'properties' ? '-properties' : ''}.csv`)} />
+        )}
+      </div>
       {summaryFirst && (
         <button
           onClick={() => setTreeOpen(!isOpen)}

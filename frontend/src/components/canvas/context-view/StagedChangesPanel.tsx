@@ -22,9 +22,10 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   AlertTriangle, Check, CheckCircle2, ChevronRight, FileStack, GitPullRequest,
-  Layers, ListTree, Loader2, Map as MapIcon, OctagonAlert, Rocket, Save, Undo2, Redo2, X,
+  Layers, List, ListTree, Loader2, Map as MapIcon, OctagonAlert, Rocket, Save, Undo2, Redo2, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useSaveProgressStore } from '@/store/saveProgressStore'
 import { formatShortcut } from '@/lib/platform'
 import { useBranchStore } from '@/store/branchStore'
 import { usePermission } from '@/store/auth'
@@ -44,17 +45,20 @@ import { useChangeSummary, useDataSourceDraftsPolicy } from '@/features/versioni
 import { useActiveDraftAccess } from '@/features/versioning/hooks/useActiveDraftAccess'
 import { ChangesPanel, ChangeCountChips } from '@/features/versioning/components/ChangesPanel'
 import { ChangeList } from '@/features/versioning/components/ChangeList'
+import { useChangeListLayout } from '@/features/versioning/hooks/useChangeListLayout'
 import { STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { PublishActions, PublishBody, usePublishFlow } from '@/features/versioning/components/PublishForm'
 import { ReviewExplorer, ReviewFilterBar } from './review/ReviewExplorer'
 import { canvasLookup } from './review/canvasLookup'
+import { stagedCsvLines } from '@/features/versioning/model/reviewCsv'
+import { downloadCsv } from '@/lib/csv'
 import { stopsFromGroups, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 
 // Drawn only when the Map is opened: React Flow and the layout engine stay out of the first paint.
 const ChangeMap = lazy(() => import('@/features/versioning/components/ChangeMap'))
 
 const EMPTY_INDEX: ReviewIndex = {
-  groups: [], groupOf: new Map(),
+  groups: [], groupOf: new Map(), headingCounts: new Map(),
   facets: { status: { added: 0, modified: 0, removed: 0 }, kind: { node: 0, edge: 0, layout: 0 }, types: [] },
 }
 
@@ -114,6 +118,8 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   const [step, setStep] = useState<'review' | 'publish'>('review')
   const [destination, setDestination] = useState<ReviewDestination>('draft')
   const [view, setView] = useState<'list' | 'map'>('list')
+  // The list top-down or as one list — the same choice as every change list.
+  const [layout, setLayout] = useChangeListLayout()
   const [filter, setFilter] = useState<ReviewFilter>(NO_FILTER)
   /** The selected row (`rowKey`): the List's detail and the Map's highlight. */
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
@@ -177,6 +183,15 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   const attention = useMemo(() => groups.reduce((n, g) => n + (needsAttention(g, problemIds) ? 1 : 0), 0), [groups, problemIds])
   const shownGroups = useMemo(() => rows.map(i => groups[i]), [rows, groups])
   const counts = index.facets.status
+  const [exporting, setExporting] = useState(false)
+  const exportShown = async (detail: 'changes' | 'properties') => {
+    setExporting(true)
+    try {
+      downloadCsv(`staged-changes${detail === 'properties' ? '-properties' : ''}.csv`, await stagedCsvLines(shownGroups, detail))
+    } finally {
+      setExporting(false)
+    }
+  }
   const discardShown = () => {
     const ids = shownGroups.flatMap(g => g.changes.map(c => c.id))
     const n = shownGroups.length
@@ -214,7 +229,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
     const at = groups.find(g => rowKey(g) === key)?.revealId
     if (stops.length === 0) return
     close()
-    useChangeNavigatorStore.getState().start(stops, { scope: 'unsaved', at, narrowed: isNarrowed(filter) })
+    useChangeNavigatorStore.getState().start(stops, { scope: 'unsaved', atId: at, narrowed: isNarrowed(filter) })
   } : undefined
   /** A group's row key from the key the Map knows it by. */
   const rowOf = (key: string) => {
@@ -318,9 +333,13 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                   </div>
                   <Segmented
                     label="Show the changes as"
-                    value={view}
-                    onChange={setView}
-                    options={[{ value: 'list', label: 'List', icon: ListTree }, { value: 'map', label: 'Map', icon: MapIcon }]}
+                    value={view === 'map' ? 'map' : layout}
+                    onChange={(v) => { if (v === 'map') setView('map'); else { setView('list'); setLayout(v) } }}
+                    options={[
+                      { value: 'tree', label: 'Hierarchy', icon: ListTree },
+                      { value: 'list', label: 'List', icon: List },
+                      { value: 'map', label: 'Map', icon: MapIcon },
+                    ]}
                   />
                   <UndoRedoCluster
                     canUndo={(changes.length > 0 || past.length > 0) && applyStatus !== 'applying'}
@@ -342,6 +361,8 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                     shown={rows.length}
                     attention={attention}
                     onDiscardShown={discardShown}
+                    onExport={(detail) => void exportShown(detail)}
+                    exporting={exporting}
                     disabled={applyStatus === 'applying'}
                     searchRef={filterInputRef}
                   />
@@ -385,6 +406,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                     <ReviewExplorer
                       index={index}
                       rows={rows}
+                      narrowed={isNarrowed(filter)}
                       selected={selectedKey}
                       onSelect={setSelectedKey}
                       problemIds={problemIds}
@@ -450,7 +472,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                         {applyStatus === 'applying' ? (
                           <>
                             <Loader2 className="w-4 h-4 animate-spin" />
-                            Saving…
+                            <SaveProgressLabel />
                           </>
                         ) : destination === 'draft' || !canPublishHere ? (
                           <>
@@ -614,7 +636,8 @@ function DraftSavedSection({ changeSet, list, defaultOpen = false }: {
       {open && (
         <div className="px-4 pb-4">
           {list && origin
-            ? <ChangeList wsId={list.wsId} graphId={list.graphId} origin={origin} emptyHint="Nothing saved on this draft yet." />
+            ? <ChangeList wsId={list.wsId} graphId={list.graphId} origin={origin} emptyHint="Nothing saved on this draft yet."
+                restore={{ branchId: list.branchId }} />
             : <ChangesPanel changeSet={changeSet} emptyHint="Nothing saved on this draft yet." />}
         </div>
       )}
@@ -802,4 +825,18 @@ function SaveProblemsBanner({ problems, onDiscard }: {
       </ul>
     </div>
   )
+}
+
+const MB = 1024 * 1024
+/** "Saving…", or — a save too large for one request — how far it has got: its changes going up,
+ *  then the server writing them as one commit. */
+function SaveProgressLabel() {
+  const p = useSaveProgressStore((s) => s.progress)
+  if (!p) return <>Saving…</>
+  if (p.phase === 'uploading') {
+    const unit = p.total >= 10 * MB ? MB : 1024
+    const n = (b: number) => (b / unit).toLocaleString(undefined, { maximumFractionDigits: unit === MB ? 0 : 1 })
+    return <span className="tabular-nums" aria-live="polite">Uploading {n(p.sent)} of {n(p.total)} {unit === MB ? 'MB' : 'KB'}…</span>
+  }
+  return <span aria-live="polite">{p.phase === 'preparing' ? 'Preparing the save…' : 'Writing one commit…'}</span>
 }

@@ -64,11 +64,29 @@ describe('EntityHistory', () => {
     expect(h.lastOpts?.branchId).toBeNull()
   })
 
-  it('shows what each revision changed, property by property', () => {
+  it('says in one line what each revision changed, and opens to the values', async () => {
     render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId="draft1" />)
-    expect(screen.getByText('owner')).toBeInTheDocument()
+    // Collapsed: the summary names what changed, the values wait.
+    expect(screen.getAllByText(/Edited owner/).length).toBeGreaterThan(0)
+    expect(screen.queryByText('ana')).not.toBeInTheDocument()
+    const [first] = screen.getAllByRole('button', { expanded: false })
+    await userEvent.click(first)
     expect(screen.getByText('ana')).toBeInTheDocument()
     expect(screen.getByText('bo')).toBeInTheDocument()
+  })
+
+  it('opens every revision shown, and moves between them by keyboard', async () => {
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId="draft1" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Expand all' }))
+    expect(screen.getAllByRole('button', { expanded: true }).length).toBeGreaterThan(1)
+    await userEvent.click(screen.getByRole('button', { name: 'Collapse all' }))
+    expect(screen.queryAllByRole('button', { expanded: true })).toHaveLength(0)
+    const rows = screen.getAllByRole('button', { expanded: false })
+    rows[0].focus()
+    await userEvent.keyboard('j')
+    expect(rows[1]).toHaveFocus()
+    await userEvent.keyboard('{ArrowRight}')
+    expect(rows[1]).toHaveAttribute('aria-expanded', 'true')
   })
 
   it('marks a revision published after the draft began, with its commit message', () => {

@@ -4,10 +4,14 @@
  *   - a filter bar (what changed, how, which type, a search, what needs attention) with counts,
  *     "1,240 shown of 10,482", and Discard the N shown;
  *   - a virtualized list — one row per entity, relationship or layout item, drawn only while on
- *     screen, its sentence worded only then — moved through with ↑/↓ (or J/K), Home/End;
- *   - the selected change beside it: what it does, each field it changes as the value it is, a
- *     move's from/to, a delete's cascade, conflicts and errors — with Prev / Next ("312 of 1,240"),
- *     Show on canvas, Step through on canvas and Discard.
+ *     screen — each a summary first ("Edited Owner, Tier and 2 more", or what it does: "Moves it
+ *     into Finance"), opened to its key differences, then to everything: each field as the value
+ *     it is, a move's from/to, a delete's cascade, conflicts and errors;
+ *   - J/K (↑/↓) move, → / ← open and close, Shift+→ opens everything shown, o shows it on the
+ *     canvas, Delete discards, n jumps to the next that needs attention, / searches;
+ *   - or top-down (`Hierarchy`, the same choice as every change list): each change under its
+ *     container as the canvas places it (`buildReviewTree`), a level at a time; filtered, the list
+ *     says where each change sits, and "In hierarchy" opens the way down to it.
  *
  * Everything per row is built for the rows drawn and the one selected; the index behind it is built
  * once per list of changes (`buildReviewIndex`).
@@ -15,8 +19,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
-  AlertTriangle, ArrowUpRight, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Code2, Layers,
-  ListFilter, Navigation, Search, SearchX, Trash2, X,
+  AlertTriangle, ArrowUpRight, CheckCircle2, ChevronsDownUp, ChevronsUpDown, CircleAlert, Code2, Layers,
+  ListFilter, ListTree, Navigation, Search, SearchX, Trash2, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
@@ -29,20 +33,33 @@ import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { JsonView } from '@/components/panels/shell/JsonView'
 import { nodeUpdatePatch } from '@/features/versioning/model/stagedChangesToOps'
 import { fieldChanges, type ReviewGroup, type ReviewKind, type Sentence } from '@/features/versioning/model/reviewModel'
-import { isNarrowed, needsAttention, NO_FILTER, rowKey, type ReviewFilter, type ReviewIndex } from '@/features/versioning/model/reviewIndex'
+import {
+  headingLabel, headingOf, isNarrowed, needsAttention, NO_FILTER, rowKey, type ReviewFilter, type ReviewIndex,
+} from '@/features/versioning/model/reviewIndex'
 import type { ChangeStatus } from '@/features/versioning/model/changeModel'
 import { CascadeImpactList } from '@/features/versioning/components/CascadeImpactList'
 import { ConflictChoices } from '@/features/versioning/components/ConflictChoices'
-import { NodeDiffBadge, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
+import { NodeDiffBadge } from '@/features/versioning/components/NodeDiffBadge'
 import { ReviewValue } from '@/features/versioning/components/ReviewValue'
+import { ExpandableChangeRow } from '@/features/versioning/components/ExpandableChangeRow'
+import { ChangeSummary } from '@/features/versioning/components/ChangeSummary'
+import { fieldPath, keyDifferences, summarizeFields, type FieldChange } from '@/features/versioning/model/fieldDiff'
+import { useExpandableRows, type RowLevel } from '@/hooks/useExpandableRows'
+import { ExportMenu, type ExportDetail } from '@/features/versioning/components/ExportMenu'
+import { TreeView, type TreeRowFrame } from '@/features/versioning/components/TreeView'
+import { useChangeListLayout } from '@/features/versioning/hooks/useChangeListLayout'
+import { useReviewTree } from '@/features/versioning/hooks/useReviewTree'
+import { pathOf, treeIdOf } from '@/features/versioning/model/reviewTree'
+import type { ChangeTreeItem } from '@/services/versioningApiService'
+import { canvasPlacement } from './canvasLookup'
 
-const ROW_HEIGHT = 52
+/** A row closed: its name, and under it what it does. */
+const ROW_HEIGHT = 58
+const HEADING_HEIGHT = 30
 const STATUSES: ChangeStatus[] = ['added', 'modified', 'removed']
 const KIND_LABEL: Record<ReviewKind | 'all', string> = { all: 'All', node: 'Entities', edge: 'Relationships', layout: 'Layout' }
 /** Changes of one group laid out in its detail before "and N more". */
 const DETAIL_CHANGES = 20
-
-const sentenceText = (s: Sentence) => s.map((p) => (typeof p === 'string' ? p : p.name)).join('')
 
 function SentenceView({ sentence }: { sentence: Sentence }) {
   return (
@@ -57,7 +74,7 @@ function SentenceView({ sentence }: { sentence: Sentence }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Filter bar
 
-export function ReviewFilterBar({ index, filter, onChange, shown, attention, onDiscardShown, disabled, searchRef }: {
+export function ReviewFilterBar({ index, filter, onChange, shown, attention, onDiscardShown, onExport, exporting, disabled, searchRef }: {
   index: ReviewIndex
   filter: ReviewFilter
   onChange: (f: ReviewFilter) => void
@@ -67,6 +84,9 @@ export function ReviewFilterBar({ index, filter, onChange, shown, attention, onD
   attention: number
   /** Discard every change the filter shows (offered only while it narrows). */
   onDiscardShown?: () => void
+  /** Save what is shown as CSV. */
+  onExport?: (detail: ExportDetail) => void
+  exporting?: boolean
   disabled?: boolean
   searchRef?: RefObject<HTMLInputElement | null>
 }) {
@@ -167,25 +187,31 @@ export function ReviewFilterBar({ index, filter, onChange, shown, attention, onD
           <button type="button" onClick={() => { setText(''); onChange(NO_FILTER) }}
             className="text-[11px] font-semibold text-accent-lineage hover:underline">Clear filters</button>
         )}
+        <span className="ml-auto" />
         {narrowed && shown > 0 && onDiscardShown && (
           <button type="button" disabled={disabled} onClick={onDiscardShown}
-            className="ml-auto inline-flex items-center gap-1 px-2 h-6 rounded-md text-[11px] font-semibold text-rose-600 dark:text-rose-300 hover:bg-rose-500/10 disabled:opacity-50 disabled:pointer-events-none">
+            className="inline-flex items-center gap-1 px-2 h-6 rounded-md text-[11px] font-semibold text-rose-600 dark:text-rose-300 hover:bg-rose-500/10 disabled:opacity-50 disabled:pointer-events-none">
             <Trash2 className="w-3 h-3" aria-hidden />Discard the {shown.toLocaleString()} shown
           </button>
         )}
+        {onExport && shown > 0 && <ExportMenu onExport={onExport} busy={exporting} count={shown} />}
       </div>
     </div>
   )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// List + detail
+// The list: every change a summary first, opened to its key differences, then to all of it
 
-export function ReviewExplorer({ index, rows, selected, onSelect, problemIds, onDiscard, onReveal, onStepThrough, onClearFilter, searchRef, disabled }: {
+const domId = (key: string) => `review-row-${key}`
+
+export function ReviewExplorer({ index, rows, narrowed = false, selected, onSelect, problemIds, onDiscard, onReveal, onStepThrough, onClearFilter, searchRef, disabled }: {
   index: ReviewIndex
   /** The groups shown, as indices into `index.groups`. */
   rows: number[]
-  /** The selected group's key (`rowKey`). */
+  /** The filter narrows them: top-down, they are listed with where each sits. */
+  narrowed?: boolean
+  /** The current group's key (`rowKey`) — shared with the Map. */
   selected: string | null
   onSelect: (key: string) => void
   problemIds?: ReadonlySet<string>
@@ -198,248 +224,397 @@ export function ReviewExplorer({ index, rows, selected, onSelect, problemIds, on
   disabled?: boolean
 }) {
   const { groups } = index
-  // The selection is one of the rows shown: lost to a filter (or never made), the first.
-  const position = useMemo(() => {
-    if (selected) for (let i = 0; i < rows.length; i++) if (rowKey(groups[rows[i]]) === selected) return i
-    return rows.length ? 0 : -1
-  }, [rows, groups, selected])
-  const current = position >= 0 ? groups[rows[position]] : undefined
+  // Top-down (unless filtered): each change under its container, as the canvas places it.
+  const [layout] = useChangeListLayout()
+  const topDown = layout === 'tree'
+  const showTree = topDown && !narrowed
+  const tree = useReviewTree(groups, canvasPlacement, topDown)
+  const [land, setLand] = useState<string | null>(null)
+  const showInTree = (g: ReviewGroup) => {
+    const id = treeIdOf(g)
+    onClearFilter()
+    tree.reveal(id)
+    setLand(id)
+  }
+  const pathNames = (g: ReviewGroup) => (topDown && tree.tree ? pathOf(tree.tree, treeIdOf(g)).map((p) => tree.tree!.nameOf(p)) : undefined)
+  const keys = useMemo(() => rows.map((r) => rowKey(groups[r])), [rows, groups])
+  const posOf = useMemo(() => new Map(keys.map((k, i) => [k, i])), [keys])
+  // The current row is one of those shown: lost to a filter (or never chosen), the first.
+  const currentKey = selected !== null && posOf.has(selected) ? selected : (keys[0] ?? null)
+  const position = currentKey !== null ? (posOf.get(currentKey) ?? -1) : -1
+  const groupAt = (key: string | null) => (key !== null && posOf.has(key) ? groups[rows[posOf.get(key)!]] : undefined)
 
+  // The rows as drawn: a heading before each run of a type (rows come ordered by it), then the
+  // rows. `itemOf` finds a row's place among them — the keyboard moves between rows, never onto a
+  // heading.
+  const { items, itemOf } = useMemo(() => listItems(rows, groups), [rows, groups])
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
-    count: rows.length,
+    count: items.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
-    overscan: 10,
-    getItemKey: (i) => rowKey(groups[rows[i]]),
+    estimateSize: (i) => (items[i].heading ? HEADING_HEIGHT : ROW_HEIGHT),
+    overscan: 8,
+    getItemKey: (i) => items[i].key,
   })
-  const go = (to: number) => {
-    if (rows.length === 0) return
-    const i = Math.max(0, Math.min(rows.length - 1, to))
-    onSelect(rowKey(groups[rows[i]]))
-    virtualizer.scrollToIndex(i, { align: 'auto' })
+  const focusRow = (key: string, at: number) => {
+    // A run's first row brings its heading into view with it.
+    virtualizer.scrollToIndex(at === 0 ? 0 : itemOf[at], { align: 'auto' })
+    requestAnimationFrame(() => document.getElementById(domId(key))?.focus())
   }
-  const discardCurrent = () => {
-    if (!current || disabled) return
+  const discard = (key: string) => {
+    const g = groupAt(key)
+    if (!g || disabled) return
     // The row after it takes its place (or the one before, at the end).
-    const next = rows[position + 1] ?? rows[position - 1]
-    if (next !== undefined) onSelect(rowKey(groups[next]))
-    onDiscard(current.changes.map((c) => c.id))
+    const at = posOf.get(key)!
+    const next = keys[at + 1] ?? keys[at - 1]
+    if (next !== undefined) {
+      onSelect(next)
+      requestAnimationFrame(() => document.getElementById(domId(next))?.focus())
+    }
+    onDiscard(g.changes.map((c) => c.id))
   }
-  const onKey = (e: React.KeyboardEvent) => {
-    if (e.metaKey || e.ctrlKey || e.altKey) return
-    const k = e.key
-    const step = k === 'ArrowDown' || k === 'j' ? 1 : k === 'ArrowUp' || k === 'k' ? -1 : 0
-    if (step) go(position + step)
-    else if (k === 'Home') go(0)
-    else if (k === 'End') go(rows.length - 1)
-    else if (k === 'PageDown') go(position + 10)
-    else if (k === 'PageUp') go(position - 10)
-    else if ((k === 'o' || k === 'Enter') && current?.revealId && onReveal) onReveal(current.revealId)
-    else if (k === 'Delete' || k === 'Backspace') discardCurrent()
-    else if (k === '/') searchRef?.current?.focus()
-    else return
-    e.preventDefault()
-  }
+  const expand = useExpandableRows(keys, {
+    current: currentKey,
+    onCurrentChange: onSelect,
+    // One change: open, there is nothing else to browse. Chosen on the Map: open on it.
+    initialLevel: rows.length === 1 ? 1 : 0,
+    initiallyOpen: selected,
+    onNavigate: focusRow,
+    extraKeys: (e, cur) => {
+      const g = groupAt(cur)
+      if (e.key === 'o' && g?.revealId && onReveal) { onReveal(g.revealId); return true }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && cur) { discard(cur); return true }
+      if (e.key === '/') { searchRef?.current?.focus(); return true }
+      if (e.key === 'n') {
+        // The next change that needs attention, wrapping round.
+        for (let k = 1; k <= rows.length; k++) {
+          const at = (position + k) % rows.length
+          if (needsAttention(groups[rows[at]], problemIds)) { onSelect(keys[at]); focusRow(keys[at], at); break }
+        }
+        return true
+      }
+      return false
+    },
+  })
+  // A new filter: show the current row (the first, unless it is still shown).
+  useEffect(() => {
+    if (position >= 0) virtualizer.scrollToIndex(position === 0 ? 0 : itemOf[position], { align: 'auto' })
+  }, [rows]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (groups.length === 0) return <EmptyState />
   if (rows.length === 0) return <EmptyState filtered onClear={onClearFilter} />
 
-  const items = virtualizer.getVirtualItems()
+  const current = groupAt(currentKey)
+  const drawn = virtualizer.getVirtualItems()
   return (
-    <div className="grid gap-3 md:grid-cols-[minmax(260px,360px)_minmax(0,1fr)] h-[min(58vh,600px)] max-md:h-auto">
-      <div
-        ref={scrollRef}
-        role="listbox"
-        aria-label="Staged changes"
-        tabIndex={0}
-        aria-activedescendant={current ? `review-row-${position}` : undefined}
-        onKeyDown={onKey}
-        className="relative overflow-y-auto custom-scrollbar rounded-2xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 max-md:max-h-[36vh]"
-      >
-        <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
-          {items.map((v) => {
-            const g = groups[rows[v.index]]
+    <div className="flex flex-col gap-2 min-h-0">
+      <div className="flex items-center gap-1.5 flex-wrap text-[11px] text-ink-muted">
+        {showTree ? (
+          <span className="tabular-nums" aria-live="polite">
+            {groups.length.toLocaleString()} changed · under their containers
+          </span>
+        ) : (
+          <span className="tabular-nums" aria-live="polite">
+            Change <span className="font-semibold text-ink">{(position + 1).toLocaleString()}</span> of {rows.length.toLocaleString()}
+          </span>
+        )}
+        <span className="hidden lg:inline-flex items-center gap-1 ml-1"><Kbd shortcut="j" /><Kbd shortcut="k" /> move · <Kbd shortcut="→" /> open</span>
+        <div className="flex-1" />
+        {!showTree && rows.length > 1 && (
+          <HoverTip label={expand.allOpen ? 'Collapse every change' : 'Open every change to its key differences'}
+            shortcut={expand.allOpen ? '⇧←' : '⇧→'} className="inline-flex">
+            <button type="button" onClick={expand.allOpen ? expand.collapseAll : expand.expandAll}
+              className="inline-flex items-center gap-1 px-2 h-7 rounded-lg font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+              {expand.allOpen ? <ChevronsDownUp className="w-3.5 h-3.5" aria-hidden /> : <ChevronsUpDown className="w-3.5 h-3.5" aria-hidden />}
+              {expand.allOpen ? 'Collapse all' : 'Expand all'}
+            </button>
+          </HoverTip>
+        )}
+        {!showTree && onStepThrough && current && current.kind !== 'layout' && (
+          <HoverTip label="Step through these on the canvas" detail="One at a time, in this order — the dialog closes" className="inline-flex">
+            <button type="button" onClick={() => onStepThrough(rowKey(current))}
+              className="inline-flex items-center gap-1 px-2 h-7 rounded-lg font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+              <Navigation className="w-3.5 h-3.5" aria-hidden />Step through
+            </button>
+          </HoverTip>
+        )}
+      </div>
+      {showTree && tree.tree ? (
+        <div className="rounded-2xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02] p-1.5 pt-1 h-[min(58vh,600px)] max-md:h-[50vh] flex flex-col min-h-0">
+          <TreeView model={tree} label="Staged changes, top-down" maxHeight="100%" className="flex-1"
+            isChange={(item) => tree.tree!.groupOf.has(item.id)} nameOf={(item) => item.name ?? item.id}
+            land={land} onLanded={() => setLand(null)}
+            onCurrent={(id) => { const i = tree.tree!.groupOf.get(id); if (i !== undefined) onSelect(rowKey(groups[i])) }}
+            itemKeys={(e, item) => {
+              const g = groups[tree.tree!.groupOf.get(item.id)!]
+              if (e.key === 'o' && g.revealId && onReveal) { onReveal(g.revealId); return true }
+              if ((e.key === 'Delete' || e.key === 'Backspace') && !disabled) { onDiscard(g.changes.map((c) => c.id)); return true }
+              if (e.key === '/') { searchRef?.current?.focus(); return true }
+              return false
+            }}
+            renderChange={(item: ChangeTreeItem, f: TreeRowFrame) => {
+              const g = groups[tree.tree!.groupOf.get(item.id)!]
+              return (
+                <ReviewRow id={f.domId} group={g} level={f.level} current={f.current}
+                  onToggle={f.onToggle} onLevel={f.onLevel} onFocus={f.onFocus}
+                  setsize={f.setsize} posinset={f.posinset} heading={headingLabel(headingOf(g))}
+                  depth={f.depth} lead={f.lead} inside={f.inside}
+                  attention={needsAttention(g, problemIds)} problemIds={problemIds}
+                  onReveal={onReveal} onDiscard={() => { if (!disabled) onDiscard(g.changes.map((c) => c.id)) }} disabled={disabled} />
+              )
+            }} />
+        </div>
+      ) : (
+      <div ref={scrollRef} onKeyDown={expand.onKeyDown}
+        className="relative overflow-y-auto custom-scrollbar rounded-2xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02] p-1.5 h-[min(58vh,600px)] max-md:h-[50vh]">
+        <div role="list" aria-label="Staged changes" className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+          {drawn.map((v) => {
+            const item = items[v.index]
+            if (item.heading) {
+              return (
+                <div key={v.key} data-index={v.index} ref={virtualizer.measureElement} role="presentation"
+                  className="absolute left-0 top-0 w-full px-2.5 flex items-end gap-2 pb-1"
+                  style={{ height: HEADING_HEIGHT, transform: `translateY(${v.start}px)` }}>
+                  <span className="text-[10.5px] font-semibold uppercase tracking-wider text-ink-muted/80 truncate">{item.heading}</span>
+                  <span className="text-[10.5px] text-ink-muted/70 tabular-nums">{item.count.toLocaleString()}</span>
+                </div>
+              )
+            }
+            const g = groups[rows[item.row]]
+            const key = keys[item.row]
             return (
-              <div key={v.key} className="absolute left-0 top-0 w-full px-1.5 pt-1.5" style={{ height: ROW_HEIGHT, transform: `translateY(${v.start}px)` }}>
-                <Row id={`review-row-${v.index}`} group={g} selected={v.index === position}
-                  attention={needsAttention(g, problemIds)} onClick={() => onSelect(rowKey(g))} />
+              <div key={v.key} data-index={v.index} ref={virtualizer.measureElement}
+                className="absolute left-0 top-0 w-full" style={{ transform: `translateY(${v.start}px)` }}>
+                <ReviewRow key={key} id={domId(key)} group={g} level={expand.levelOf(key)} current={key === currentKey}
+                  onToggle={() => { onSelect(key); expand.toggle(key) }}
+                  onLevel={(l) => expand.setLevel(key, l)}
+                  onFocus={() => onSelect(key)}
+                  setsize={rows.length} posinset={item.row + 1} heading={headingLabel(headingOf(g))}
+                  attention={needsAttention(g, problemIds)} problemIds={problemIds}
+                  path={pathNames(g)} onShowInTree={topDown ? () => showInTree(g) : undefined}
+                  onReveal={onReveal} onDiscard={() => discard(key)} disabled={disabled} />
               </div>
             )
           })}
         </div>
       </div>
-
-      {current && (
-        <Detail
-          key={rowKey(current)}
-          group={current}
-          position={position}
-          count={rows.length}
-          problemIds={problemIds}
-          onPrev={() => go(position - 1)}
-          onNext={() => go(position + 1)}
-          onDiscard={discardCurrent}
-          onReveal={onReveal}
-          onStepThrough={onStepThrough ? () => onStepThrough(rowKey(current)) : undefined}
-          disabled={disabled}
-        />
       )}
     </div>
   )
 }
 
-function Row({ id, group, selected, attention, onClick }: {
+type ListItem = { key: string; heading: string; count: number; row: -1 } | { key: string; heading: null; count: 0; row: number }
+
+/** Headings and rows, in order — a heading before each run of one type — and each row's item. */
+function listItems(rows: readonly number[], groups: readonly ReviewGroup[]): { items: ListItem[]; itemOf: number[] } {
+  const items: ListItem[] = []
+  const itemOf: number[] = new Array(rows.length)
+  let last: string | null = null
+  let headingAt = -1
+  for (let i = 0; i < rows.length; i++) {
+    const g = groups[rows[i]]
+    const h = headingOf(g)
+    if (h !== last) {
+      headingAt = items.length
+      items.push({ key: `heading:${h}`, heading: headingLabel(h), count: 0, row: -1 })
+      last = h
+    }
+    ;(items[headingAt] as { count: number }).count++
+    itemOf[i] = items.length
+    items.push({ key: rowKey(g), heading: null, count: 0, row: i })
+  }
+  return { items, itemOf }
+}
+
+const isEmptyValue = (v: unknown) => v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0)
+
+/** Everything a group's edits change, field by field, as one: a field edited twice is shown once,
+ *  from where it started to where it ended. Built only for a row on screen. */
+function groupFields(group: ReviewGroup): FieldChange[] {
+  const byPath = new Map<string, FieldChange>()
+  for (const c of group.changes) {
+    for (const f of fieldChanges(c)) {
+      const path = fieldPath(f)
+      const seen = byPath.get(path)
+      byPath.set(path, seen ? { ...seen, after: f.after } : f)
+    }
+  }
+  const out: FieldChange[] = []
+  for (const f of byPath.values()) {
+    if (JSON.stringify(f.before ?? null) === JSON.stringify(f.after ?? null)) continue
+    out.push({ ...f, kind: isEmptyValue(f.before) ? 'added' : isEmptyValue(f.after) ? 'removed' : 'changed' })
+  }
+  return out
+}
+
+function ReviewRow({
+  id, group, level, current, onToggle, onLevel, onFocus, setsize, posinset, heading, attention, problemIds, onReveal, onDiscard,
+  disabled, depth, lead, inside, path, onShowInTree,
+}: {
   id: string
   group: ReviewGroup
-  selected: boolean
+  level: RowLevel
+  current: boolean
+  onToggle: () => void
+  onLevel: (level: RowLevel) => void
+  onFocus: () => void
+  setsize: number
+  posinset: number
+  /** The heading it is listed under, said with it. */
+  heading: string
   attention: boolean
-  onClick: () => void
+  problemIds?: ReadonlySet<string>
+  onReveal?: (id: string) => void
+  onDiscard: () => void
+  disabled?: boolean
+  /** In the tree: how deep it sits, what opens its children, how many changes are under it. */
+  depth?: number
+  lead?: ReactNode
+  inside?: ReactNode
+  /** Filtered, top-down: its containers, named — and opening the way down to it. */
+  path?: string[]
+  onShowInTree?: () => void
 }) {
-  const meta = STATUS_META[group.status]
   const colors = useEntityColorSet(group.typeId ?? '')
   const layout = group.kind === 'layout'
-  const sentence = sentenceText(group.sentence)
   const n = group.changes.length
+  const fields = useMemo(() => (layout ? [] : groupFields(group)), [group, layout])
+  const edits = group.status === 'modified' && fields.length > 0
+  const summary = useMemo(() => (edits ? summarizeFields(fields) : null), [edits, fields])
+  const error = group.changes.find((c) => c.error)?.error
+  const technical = usePersonaMode() === 'technical'
+
   return (
-    <div
-      id={id}
-      role="option"
-      aria-selected={selected}
-      onClick={onClick}
-      className={cn(
-        'h-[46px] flex items-center gap-2 pl-2 pr-2.5 rounded-xl border-l-[3px] cursor-pointer select-none transition-colors',
-        layout ? 'border-l-indigo-500' : meta.accent,
-        selected
-          ? 'bg-accent-lineage/[0.09] ring-1 ring-accent-lineage/35'
-          : 'hover:bg-black/[0.035] dark:hover:bg-white/[0.05]',
+    <ExpandableChangeRow
+      id={id} status={group.status} level={level} current={current} onToggle={onToggle} onFocus={onFocus}
+      setsize={setsize} posinset={posinset} depth={depth} lead={lead} chevron={lead === undefined}
+      title={(
+        <span className="inline-flex items-center gap-1.5 min-w-0 max-w-full">
+          {layout
+            ? <Layers className="w-3.5 h-3.5 text-indigo-500 shrink-0" aria-hidden />
+            : group.kind === 'node' && group.typeId && <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: colors.hex }} aria-hidden />}
+          <span className="truncate">{layout ? 'View layout' : group.name}</span>
+          <span className="sr-only">{`, ${heading}`}</span>
+        </span>
+      )}
+      sub={path?.length
+        ? <span aria-label={`in ${path.join(', ')}`}>{path.join(' › ')}</span>
+        : group.kind === 'edge' ? group.edgeType : layout ? 'This view only' : undefined}
+      summary={summary
+        ? <ChangeSummary summary={summary} status="modified" kind={group.kind === 'edge' ? 'edge' : 'node'} />
+        : <span className="block text-[11.5px] text-ink-secondary truncate"><SentenceView sentence={group.sentence} /></span>}
+      badges={n > 1 || attention || inside ? (
+        <>
+          {inside}
+          {n > 1 && (
+            <HoverTip label={`${n.toLocaleString()} changes to it`} detail="Shown as one: where it started, where it ends" className="inline-flex">
+              <span className="px-1.5 h-5 inline-flex items-center rounded-md bg-black/[0.05] dark:bg-white/[0.08] text-[10px] font-semibold text-ink-secondary tabular-nums">×{n}</span>
+            </HoverTip>
+          )}
+          {attention && (
+            <HoverTip label="Needs attention" detail={error ?? 'The last save was refused because of it'} className="inline-flex">
+              <CircleAlert className="w-3.5 h-3.5 text-rose-500" aria-label="Needs attention" />
+            </HoverTip>
+          )}
+        </>
+      ) : undefined}
+      actions={(
+        <>
+          {onShowInTree && (
+            <HoverTip label="Open the way down to it, top-down" className="inline-flex">
+              <button type="button" onClick={onShowInTree} aria-label={`Show ${group.name} in the hierarchy`}
+                className="inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]">
+                <ListTree className="w-3 h-3" aria-hidden />In hierarchy
+              </button>
+            </HoverTip>
+          )}
+          {onReveal && group.revealId && (
+            <HoverTip label="Show it on the canvas" shortcut="o" className="inline-flex">
+              <button type="button" onClick={() => onReveal(group.revealId!)} aria-label={`Show ${group.name} on canvas`}
+                className="inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/10">
+                Show<ArrowUpRight className="w-3 h-3" aria-hidden />
+              </button>
+            </HoverTip>
+          )}
+          <HoverTip label={n === 1 ? 'Discard this change' : `Discard these ${n} changes`} detail="Undo brings it back" shortcut="⌫" className="inline-flex">
+            <button type="button" onClick={onDiscard} disabled={disabled}
+              aria-label={n === 1 ? `Discard the change to ${group.name}` : `Discard ${n} changes to ${group.name}`}
+              className="w-6 h-6 rounded-md flex items-center justify-center text-ink-muted hover:text-rose-600 dark:hover:text-rose-300 hover:bg-rose-500/10 disabled:opacity-50 disabled:pointer-events-none">
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </HoverTip>
+        </>
       )}
     >
-      {layout
-        ? <Layers className="w-3.5 h-3.5 text-indigo-500 shrink-0" aria-hidden />
-        : <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} aria-hidden />}
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-1.5 min-w-0">
-          {group.kind === 'node' && group.typeId && (
-            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: colors.hex }} aria-hidden />
+      {(lvl) => (
+        <div className="space-y-2.5">
+          {error && (
+            <p className="flex items-start gap-1.5 text-[12px] leading-snug text-rose-700 dark:text-rose-300 rounded-xl border border-rose-500/30 bg-rose-500/[0.06] px-3 py-2">
+              <CircleAlert className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />
+              <span><span className="font-semibold">Not saved — </span>{error}</span>
+            </p>
           )}
-          <span className="text-[12.5px] font-semibold text-ink truncate">{layout ? 'View layout' : group.name}</span>
-          {n > 1 && <span className="text-[10px] text-ink-muted tabular-nums shrink-0">×{n}</span>}
-          {attention && <CircleAlert className="w-3 h-3 text-rose-500 shrink-0" aria-label="Needs attention" />}
-        </span>
-        <span className="block text-[11px] text-ink-muted truncate leading-tight mt-0.5">{sentence}</span>
-      </span>
-    </div>
+          {!error && group.changes.some((c) => problemIds?.has(c.id)) && (
+            <p className="flex items-start gap-1.5 text-[12px] leading-snug text-rose-700 dark:text-rose-300">
+              <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />The last save was refused because of this change — see above.
+            </p>
+          )}
+          {group.changes.map((c) => c.conflict && <ConflictChoices key={c.id} change={c} />)}
+          {layout ? (
+            <p className="text-[11.5px] text-ink-muted">Saved with the view — it never changes the data source.</p>
+          ) : lvl === 1 && edits ? (
+            // Its key differences: the few fields that say what this is about.
+            <KeyFields fields={fields} onShowAll={fields.length > KEY_FIELDS || n > 1 || technical ? () => onLevel(2) : undefined} />
+          ) : (
+            <div className="space-y-3">
+              {group.changes.slice(0, lvl === 1 ? 3 : DETAIL_CHANGES).map((c) => (
+                <ChangeDetail key={c.id} change={c} several={n > 1} depth={lvl === 1 ? 'key' : 'all'} onShowAll={() => onLevel(2)} />
+              ))}
+              {lvl === 1 && n > 3 && (
+                <button type="button" onClick={() => onLevel(2)} className="text-[11px] font-semibold text-accent-lineage hover:underline">
+                  Show all {n.toLocaleString()} changes to it
+                </button>
+              )}
+              {lvl === 2 && n > DETAIL_CHANGES && <p className="text-[11px] text-ink-muted">and {(n - DETAIL_CHANGES).toLocaleString()} more changes to it</p>}
+            </div>
+          )}
+        </div>
+      )}
+    </ExpandableChangeRow>
   )
 }
 
-function Detail({ group, position, count, problemIds, onPrev, onNext, onDiscard, onReveal, onStepThrough, disabled }: {
-  group: ReviewGroup
-  position: number
-  count: number
-  problemIds?: ReadonlySet<string>
-  onPrev: () => void
-  onNext: () => void
-  onDiscard: () => void
-  onReveal?: (id: string) => void
-  onStepThrough?: () => void
-  disabled?: boolean
-}) {
-  const meta = STATUS_META[group.status]
-  const colors = useEntityColorSet(group.typeId ?? '')
-  const layout = group.kind === 'layout'
-  const n = group.changes.length
-  const error = group.changes.find((c) => c.error)?.error
-  const urn = group.changes.find((c) => c.targetUrn && c.targetUrn !== c.targetId)?.targetUrn
-  const navBtn = 'w-7 h-7 rounded-lg flex items-center justify-center text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] disabled:opacity-35 disabled:pointer-events-none'
+/** Fields shown before "Show all". */
+const KEY_FIELDS = 5
 
+function KeyFields({ fields, onShowAll }: { fields: FieldChange[]; onShowAll?: () => void }) {
+  const key = keyDifferences(fields, KEY_FIELDS)
   return (
-    <section aria-label="The selected change" className="min-w-0 flex flex-col rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
-      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-glass-border bg-black/[0.015] dark:bg-white/[0.02]">
-        <button type="button" className={navBtn} onClick={onPrev} disabled={position <= 0} aria-label="Previous change">
-          <ChevronLeft className="w-4 h-4" />
-        </button>
-        <span className="text-[11px] text-ink-muted tabular-nums px-1">
-          <span className="font-semibold text-ink">{(position + 1).toLocaleString()}</span> of {count.toLocaleString()}
-        </span>
-        <button type="button" className={navBtn} onClick={onNext} disabled={position >= count - 1} aria-label="Next change">
-          <ChevronRight className="w-4 h-4" />
-        </button>
-        <span className="hidden lg:flex items-center gap-1 text-[10.5px] text-ink-muted ml-1"><Kbd shortcut="j" /><Kbd shortcut="k" /> to move</span>
-        <div className="flex-1" />
-        {onStepThrough && !layout && (
-          <HoverTip label="Step through these on the canvas" detail="One at a time, in this order — the dialog closes" className="inline-flex">
-            <button type="button" onClick={onStepThrough}
-              className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]">
-              <Navigation className="w-3.5 h-3.5" aria-hidden />Step through
-            </button>
-          </HoverTip>
-        )}
-        {onReveal && group.revealId && (
-          <button type="button" onClick={() => onReveal(group.revealId!)}
-            className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/10">
-            Show on canvas<ArrowUpRight className="w-3.5 h-3.5" aria-hidden />
-          </button>
-        )}
-        <HoverTip label={n === 1 ? 'Discard this change' : `Discard these ${n} changes`} detail="Redo brings it back" className="inline-flex">
-          <button type="button" onClick={onDiscard} disabled={disabled}
-            aria-label={n === 1 ? 'Discard change' : `Discard ${n} changes`}
-            className="w-7 h-7 rounded-lg flex items-center justify-center text-ink-muted hover:text-rose-600 dark:hover:text-rose-300 hover:bg-rose-500/10 disabled:opacity-50 disabled:pointer-events-none">
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-        </HoverTip>
+    <div className="space-y-1.5">
+      <div className="rounded-xl border border-glass-border overflow-hidden bg-black/[0.015] dark:bg-white/[0.02]">
+        {key.map((f, i) => <ReviewValue key={`${f.folder ?? ''}/${f.label}/${i}`} field={f} />)}
       </div>
-
-      <div className="flex-1 overflow-y-auto custom-scrollbar px-4 py-3.5 space-y-3">
-        <div>
-          <div className="flex items-center gap-2 min-w-0">
-            {layout
-              ? <Layers className="w-4 h-4 text-indigo-500 shrink-0" aria-hidden />
-              : group.kind === 'node' && <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: group.typeId ? colors.hex : undefined }} aria-hidden />}
-            <h4 className="text-[15px] font-bold text-ink truncate">{layout ? 'View layout' : group.name}</h4>
-            {layout ? (
-              <span className="px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide shrink-0 bg-indigo-500/10 text-indigo-600 dark:text-indigo-300">This view only</span>
-            ) : (
-              <span className={cn('px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide shrink-0', meta.bg, meta.text)}>
-                {group.kind === 'edge' ? `${meta.label} link` : meta.label}
-              </span>
-            )}
-            {group.typeId && <span className="text-[11px] text-ink-muted truncate">{group.typeId}</span>}
-          </div>
-          <p className="text-[12.5px] text-ink-secondary mt-1 leading-snug"><SentenceView sentence={group.sentence} /></p>
-          {urn && <p className="text-[10.5px] text-ink-muted mt-0.5 font-mono truncate">{urn}</p>}
-          {layout && <p className="text-[11px] text-ink-muted mt-1">Saved with the view — it never changes the data source.</p>}
-        </div>
-
-        {error && (
-          <p className="flex items-start gap-1.5 text-[12px] leading-snug text-rose-700 dark:text-rose-300 rounded-xl border border-rose-500/30 bg-rose-500/[0.06] px-3 py-2">
-            <CircleAlert className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />
-            <span><span className="font-semibold">Not saved — </span>{error}</span>
-          </p>
-        )}
-        {!error && group.changes.some((c) => problemIds?.has(c.id)) && (
-          <p className="flex items-start gap-1.5 text-[12px] leading-snug text-rose-700 dark:text-rose-300">
-            <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />The last save was refused because of this change — see above.
-          </p>
-        )}
-        {group.changes.map((c) => c.conflict && <ConflictChoices key={c.id} change={c} />)}
-
-        {!layout && (
-          <div className="space-y-3">
-            {group.changes.slice(0, DETAIL_CHANGES).map((c) => <ChangeDetail key={c.id} change={c} several={n > 1} />)}
-            {n > DETAIL_CHANGES && <p className="text-[11px] text-ink-muted">and {(n - DETAIL_CHANGES).toLocaleString()} more changes to it</p>}
-          </div>
-        )}
-      </div>
-    </section>
+      {onShowAll && (
+        <button type="button" onClick={onShowAll} className="text-[11px] font-semibold text-accent-lineage hover:underline">
+          {fields.length > key.length ? `Show all ${fields.length.toLocaleString()} fields` : 'Show every change to it'}
+        </button>
+      )}
+    </div>
   )
 }
 
 /** One change's detail: its fields as values, a move's from/to, a delete's cascade. */
-function ChangeDetail({ change, several }: { change: StagedChange; several: boolean }) {
-  const technical = usePersonaMode() === 'technical'
+function ChangeDetail({ change, several, depth = 'all', onShowAll }: {
+  change: StagedChange
+  several: boolean
+  /** `key`: its first few fields (and "Show all"); `all`: every field, and the technical view. */
+  depth?: 'key' | 'all'
+  onShowAll?: () => void
+}) {
+  const technical = usePersonaMode() === 'technical' && depth === 'all'
   const [json, setJson] = useState(false)
-  const fields = useMemo(() => fieldChanges(change), [change])
+  const all = useMemo(() => fieldChanges(change), [change])
+  const fields = depth === 'key' ? keyDifferences(all, KEY_FIELDS) : all
   const cascade = change.type === 'delete_entity' ? (change.before as { cascade?: Parameters<typeof CascadeImpactList>[0]['impact'] } | undefined)?.cascade : undefined
   // What the save sends — the patch, never the whole node twice.
   const patch = useMemo(() => {
@@ -456,8 +631,15 @@ function ChangeDetail({ change, several }: { change: StagedChange; several: bool
   else if (cascade) body = <CascadeImpactList impact={cascade} rootUrn={change.targetUrn} />
   else if (fields.length > 0) {
     body = (
-      <div className="rounded-xl border border-glass-border overflow-hidden bg-black/[0.015] dark:bg-white/[0.02]">
-        {fields.map((f, i) => <ReviewValue key={`${f.folder ?? ''}/${f.label}/${i}`} field={f} />)}
+      <div className="space-y-1.5">
+        <div className="rounded-xl border border-glass-border overflow-hidden bg-black/[0.015] dark:bg-white/[0.02]">
+          {fields.map((f, i) => <ReviewValue key={`${f.folder ?? ''}/${f.label}/${i}`} field={f} />)}
+        </div>
+        {depth === 'key' && all.length > fields.length && onShowAll && (
+          <button type="button" onClick={onShowAll} className="text-[11px] font-semibold text-accent-lineage hover:underline">
+            Show all {all.length.toLocaleString()} fields
+          </button>
+        )}
       </div>
     )
   }

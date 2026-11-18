@@ -118,7 +118,11 @@ function StatCard({
   )
 }
 
-export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; initialPrId?: string | null }) {
+export function WorkspaceReviewsInbox({ wsId, initialPrId, initialThreadId }: {
+  wsId: string; initialPrId?: string | null
+  /** A thread of that review to open on (a notification's link). */
+  initialThreadId?: string | null
+}) {
   const workspaces = useWorkspacesStore((s) => s.workspaces)
   const loadWorkspaces = useWorkspacesStore((s) => s.loadWorkspaces)
   const workspace = workspaces.find((w) => w.id === wsId)
@@ -303,7 +307,8 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
         </div>
       )}
 
-      {openPrId && <PrDetailDrawer wsId={wsId} prId={openPrId} onClose={() => setOpenPrId(null)} />}
+      {openPrId && <PrDetailDrawer wsId={wsId} prId={openPrId} onClose={() => setOpenPrId(null)}
+        focusThreadId={openPrId === initialPrId ? initialThreadId : null} />}
     </div>
   )
 }

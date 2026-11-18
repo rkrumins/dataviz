@@ -39,7 +39,7 @@ export function WorkspaceReviewsPage() {
           </div>
         </div>
 
-        <WorkspaceReviewsInbox wsId={wsId} initialPrId={searchParams.get('pr')} />
+        <WorkspaceReviewsInbox wsId={wsId} initialPrId={searchParams.get('pr')} initialThreadId={searchParams.get('thread')} />
       </PageContainer>
     </div>
   )

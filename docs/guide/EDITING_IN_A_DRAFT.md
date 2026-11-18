@@ -74,15 +74,37 @@ You can also start from where you are:
    press `Enter`), type, and press `Enter` — or click away. `Shift-Enter` starts
    a new line; ⤢ opens the full editor for long text; a Yes/No switch is kept
    the moment it flips. `Esc` puts the value back.
-3. The edit is staged straight away: the row is marked **Edited** (hover it to
-   see what it was, or choose ↺ to put it back), the entity gets a dashed halo
-   on the canvas, and the footer says how many changes are staged on the
-   entity, with **Revert** and **Review & Save**.
+3. The edit is staged straight away: the row is marked **Edited**, with what it
+   was underneath (*was ~~silver~~*; choose ↺ to put it back), the entity gets a
+   dashed halo on the canvas, and the footer says how many changes are staged
+   on the entity, with **Revert** and **Review & Save**.
 
-- **Add property** adds one in place; under it, **Suggested** offers names
-  other entities of the same type carry — one click starts it.
-- A property you delete stays listed, struck through and marked **Removed**,
-  until you save; **Restore** brings it back.
+Every property says what your draft changed — not only what you just typed:
+
+- **New** (green), **Edited** (orange) and **Removed** (rose, struck through),
+  the tree's colours. A hollow dot means *not saved yet*; a solid dot means
+  *saved in this draft*. The marks show in the read-only view too.
+- **Changes only** narrows the properties to the ones that changed, with how
+  many of each (*~2 +1 −1*).
+- The drawer opens with a line saying what the draft did to the entity — *In
+  this draft · Edited owner · added steward* — and how many fields are staged
+  on top.
+- **Restore** on a removed property, or ↺ on an edited one, puts it back as it
+  is on Published.
+
+To add a property, choose **Add property**:
+
+- As you type the name, the names other entities of the same type carry are
+  offered — *owner · 12 others · e.g. Finance* — then names you used recently.
+  `↑` / `↓` and `Enter` pick one.
+- Type the value as you'd say it: a number, *yes* / *no*, a date or a link is
+  stored as one (*read as number*); the type chip changes it.
+- **Paste** several `name: value` lines (or two spreadsheet columns) to add them
+  all in one step — one **Undo** takes them back. Names already there are left
+  as they are.
+- `Enter` adds it; `⌘↵` / `Ctrl-Enter` adds it and starts the next. A name that
+  is already there offers **Update it instead**.
+- **Suggested**, under **Add property**, starts one of those names in one click.
 - The **Edit** tab holds the entity's other fields — **Name**, **Business
   label** (the name the business knows it by), **Description**, **Qualified
   name**, **Source system**, **Schema properties** — and each is staged when
@@ -161,6 +183,12 @@ All of these are staged too — nothing is saved until **Review & Save**.
   top of a layer). The **Add entities** panel opens: pick the type, type a
   name, then choose **Add** — or **Add & nest inside** to create the next
   entity inside it. **Paste a list** adds many at once.
+  - Click an entity that is already on the canvas while you add, and the panel
+    steps aside for its details — kept exactly as you left it. **Continue
+    adding** (at the bottom of the canvas, with how many you've added) brings
+    it back; **Add inside** *entity* brings it back adding inside that entity;
+    closing the details brings it back too. An entity you just added opens in
+    the panel itself.
 - **Add a child:** choose the **+** on an entity's row (**Add child entity**),
   or right-click the entity and choose **Add Child Entity**.
 - **Connect two entities — no dragging needed:** click the **+** on an
@@ -258,8 +286,20 @@ read-only.
      behind them. Past 200 entities it groups them by type and kind of change —
      *Table · 4,812 edited* — with the relationships between the groups
      summed; choose a group to list just those.
+   - **Hierarchy** lays the same changes out under their containers — a
+     database, then its schemas, then its tables — each container saying how
+     many changes sit inside (*240 inside ~179 +60 −1*). Open one with →, step
+     back with ←. Search or narrow, and each change shown says where it sits;
+     **In hierarchy** opens the way down to it. Changes on entities the canvas
+     hasn't loaded sit under **Elsewhere in the graph**. **Hierarchy**, **List**
+     and **Map** are one choice, remembered.
    - **Already saved on this draft** lists what earlier saves and imports
-     changed, a page at a time — it is published with the rest.
+     changed, a page at a time — it is published with the rest. To take a saved
+     change back out of the draft, choose ↺ (**Discard this change from the
+     draft**) on its row, or **Discard the N shown** when you've narrowed the
+     list. Each goes back to how it was when the draft began, in one new save;
+     if others hold it together (a new entity's links, a removed table's
+     columns), you're asked first and they go with it.
 3. Under **Where should these go?** choose:
    - **Save to draft** — save and keep working; save again whenever you like.
    - **Save & publish** — save, then publish straight away (if you may).
@@ -269,6 +309,14 @@ read-only.
    dialog moves on to **Publish** — see
    [Submit your draft for review](#submit-your-draft-for-review); **Not now**
    leaves everything saved on the draft.
+
+A very large save — more than 20,000 changes at once, say after a bulk edit —
+is sent in parts and then written as **one** save on the draft, all or
+nothing, as any save is. The button says how far it has got: *Uploading 38 of
+120 MB…*, then *Writing one commit…*. If the connection drops or you reload
+part-way, saving again picks the upload up where it stopped and never saves
+the same changes twice. Up to 200,000 changes go in one save; past that, save
+part of them, then the rest.
 
 **Cancel** closes the dialog and keeps your edits staged. **Discard all**
 throws every staged edit away. With nothing staged but changes saved on the

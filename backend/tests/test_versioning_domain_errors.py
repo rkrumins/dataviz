@@ -388,3 +388,47 @@ async def test_a_plain_access_denied_outside_the_versioning_router_is_403_not_50
     assert json.loads(bytes(resp.body))["detail"] == {"type": "access_denied",
                                                       "message": "author cannot approve their own PR"}
     assert main.app.exception_handlers[NotDraftOwner] is not main.app.exception_handlers[AccessDenied]
+
+
+def test_a_review_merge_conflict_carries_each_entitys_own_value():
+    """What a resolution is built on comes with the conflicts — never the review's whole diff."""
+    from backend.app.services.versioning.service import MergeConflict
+
+    conflicts = [{"entity_id": "e1", "path": ["description"], "base": "a", "ours": "b", "theirs": "c", "kind": "field"}]
+    with pytest.raises(HTTPException) as caught:
+        with _domain_errors():
+            raise MergeConflict(conflicts, seeds={"e1": {"displayName": "Orders", "description": "b"}})
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {
+        "type": "merge_conflict", "conflicts": conflicts,
+        "seeds": {"e1": {"displayName": "Orders", "description": "b"}},
+    }
+
+    with pytest.raises(HTTPException) as plain:
+        with _domain_errors():
+            raise MergeConflict(conflicts)
+    assert "seeds" not in plain.value.detail
+
+
+@pytest.mark.parametrize("exc, status, detail", [
+    ("DecisionConflict", 409, {"type": "decision_conflict", "count": 1}),
+    ("ReviewIncomplete", 409, {"type": "review_incomplete", "count": 1}),
+    ("ChangesRejected", 409, {"type": "changes_rejected", "count": 2}),
+    ("NothingAccepted", 409, {"type": "nothing_accepted"}),
+    ("PartialMergeUnsupported", 422, {"type": "partial_merge_unsupported", "reason": "pull_first"}),
+])
+def test_a_review_decided_change_by_change_refuses_in_words_the_drawer_reads(exc, status, detail):
+    from backend.app.services.versioning import errors
+
+    made = {
+        "DecisionConflict": lambda: errors.DecisionConflict([{"entityId": "T3", "verdict": "rejected"}], 1),
+        "ReviewIncomplete": lambda: errors.ReviewIncomplete(["T3"], 1),
+        "ChangesRejected": lambda: errors.ChangesRejected(2),
+        "NothingAccepted": lambda: errors.NothingAccepted(),
+        "PartialMergeUnsupported": lambda: errors.PartialMergeUnsupported("pull_first", "Pull first."),
+    }[exc]()
+    with pytest.raises(HTTPException) as caught:
+        with _domain_errors():
+            raise made
+    assert caught.value.status_code == status
+    assert {k: caught.value.detail[k] for k in detail} == detail and caught.value.detail["message"]

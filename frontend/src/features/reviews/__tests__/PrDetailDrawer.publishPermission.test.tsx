@@ -17,6 +17,13 @@ vi.mock('@tanstack/react-query', async (orig) => ({
   ...(await orig<typeof import('@tanstack/react-query')>()),
   useQueryClient: () => ({ invalidateQueries }),
 }))
+vi.mock('../decisions/useReviewDecisions', () => ({
+  DECISION_KEYS: { all: (...a: unknown[]) => ['reviewDecisions', ...a] },
+  useReviewDecisionSummary: () => ({ data: undefined }),
+  useDecideChanges: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+}))
+vi.mock('../comments/ReviewDiscussion', () => ({ ReviewDiscussion: () => null }))
+vi.mock('../comments/useReviewComments', () => ({ useReviewCommentCounts: () => ({ data: undefined }) }))
 vi.mock('../../versioning/components/ChangeList', () => ({ ChangeList: () => null }))
 vi.mock('../../versioning/components/ChangeTreePanel', () => ({ ChangeTreePanel: () => null }))
 vi.mock('../../versioning/hooks/useVersioning', () => ({
@@ -28,7 +35,6 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
     },
     isLoading: false,
   }),
-  usePullRequestDiff: () => ({ data: undefined }),
   useChangeSummary: () => ({ data: undefined, isFetching: false }),
   usePrDiffSummary: () => ({ data: undefined, isFetching: false }),
   VERSIONING_KEYS: {
@@ -41,6 +47,9 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
   useCloseMergeRequest: () => idle,
   useMergeMergeRequest: () => ({ ...idle, mutateAsync: mergeMutateAsync }),
   useUpdateMergeRequest: () => idle,
+  useRequestChanges: () => idle,
+  useWithdrawChangesRequest: () => idle,
+  useDiscardRejected: () => idle,
   useBranchViewChanges: () => ({ data: undefined }),
   useRevertCommit: () => idle,
 }))

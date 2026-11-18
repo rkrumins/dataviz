@@ -25,7 +25,7 @@ import threading
 from array import array
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Set, Tuple
 
 STATUSES = ("added", "modified", "removed")
 #: What a list can be narrowed to: entities, relationships, or the containment links that say
@@ -339,3 +339,193 @@ class IndexCache:
     def clear(self) -> None:
         self._items.clear()
         self._held = 0
+
+
+# --------------------------------------------------------------------------- #
+# A review's changes decided one by one: what each takes with it               #
+# --------------------------------------------------------------------------- #
+def review_requirements(entries: Mapping[str, ChangeEntry]) -> Dict[str, Set[str]]:
+    """What merging each change of a draft needs merged with it, so that what lands holds
+    together and what stays on the draft does too — ``{change: {changes it needs}}``:
+
+    * a new or changed edge needs the new entities it joins (they are not on main yet);
+    * a removed entity takes the changes to its edges (they go with it);
+    * a new entity takes the new link to its parent (it is not left outside every parent);
+    * an entity's links to its parents change together (a move takes one off and one on);
+    * a removed link to a removed child takes the child (a subtree is deleted whole).
+
+    Containment edges run parent → child (source → target). Pure: over the change index's
+    entries, which carry each edge's ends."""
+    req: Dict[str, Set[str]] = {}
+    on_end: Dict[str, List[str]] = {}
+    to_child: Dict[str, List[str]] = {}
+
+    def need(a: str, b: str) -> None:
+        if a != b:
+            req.setdefault(a, set()).add(b)
+
+    for e in entries.values():
+        if e.kind == "edge":
+            for end in {e.src, e.tgt}:
+                if end:
+                    on_end.setdefault(end, []).append(e.entity_id)
+            if e.structural and e.tgt:
+                to_child.setdefault(e.tgt, []).append(e.entity_id)
+    for e in entries.values():
+        if e.kind == "edge":
+            if e.status != "removed":
+                for end in (e.src, e.tgt):
+                    other = entries.get(end) if end else None
+                    if other is not None and other.kind == "node" and other.status == "added":
+                        need(e.entity_id, other.entity_id)
+            elif e.structural and e.tgt:
+                child = entries.get(e.tgt)
+                if child is not None and child.kind == "node" and child.status == "removed":
+                    need(e.entity_id, child.entity_id)
+        elif e.status == "removed":
+            for eid in on_end.get(e.entity_id, ()):
+                need(e.entity_id, eid)
+        elif e.status == "added":
+            for eid in to_child.get(e.entity_id, ()):
+                if entries[eid].status == "added":
+                    need(e.entity_id, eid)
+    for links in to_child.values():
+        for a in links:
+            for b in links:
+                need(a, b)
+    return req
+
+
+def review_closure(requires: Mapping[str, Set[str]], chosen: Iterable[str], *,
+                   accept: bool = True) -> Dict[str, Optional[str]]:
+    """``chosen`` and everything deciding them decides too — ``{change: the chosen one it came
+    with}`` (``None`` for a chosen one). Accepting takes what each needs (:func:`review_requirements`);
+    rejecting takes whatever needs it."""
+    graph: Mapping[str, Set[str]] = requires
+    if not accept:
+        inverse: Dict[str, Set[str]] = {}
+        for a, bs in requires.items():
+            for b in bs:
+                inverse.setdefault(b, set()).add(a)
+        graph = inverse
+    out: Dict[str, Optional[str]] = {c: None for c in chosen}
+    stack = list(out)
+    while stack:
+        x = stack.pop()
+        for y in graph.get(x, ()):
+            if y not in out:
+                out[y] = out[x] or x
+                stack.append(y)
+    return out
+
+
+def restore_closure(entries: Mapping[str, ChangeEntry], requires: Mapping[str, Set[str]],
+                    chosen: Iterable[str]) -> Dict[str, Optional[str]]:
+    """``chosen`` and what discarding them from the draft takes with them — ``{change: the chosen
+    one it came with}`` (``None`` for a chosen one) — so the draft still holds together: a change
+    put back takes whatever needs it (a new entity, its new relationships and the link to its
+    parent; one link of a move, the other), and a removed entity brought back brings back what it
+    lost with it (its links and relationships — a removed subtree comes back whole). Over
+    :func:`review_requirements`."""
+    inverse: Dict[str, Set[str]] = {}
+    for a, bs in requires.items():
+        for b in bs:
+            inverse.setdefault(b, set()).add(a)
+    out: Dict[str, Optional[str]] = {c: None for c in chosen}
+    stack = list(out)
+    while stack:
+        x = stack.pop()
+        nxt = set(inverse.get(x, ()))
+        e = entries.get(x)
+        if e is not None and e.kind == "node" and e.status == "removed":
+            nxt |= requires.get(x, set())
+        for y in nxt:
+            if y not in out:
+                out[y] = out[x] or x
+                stack.append(y)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Changes top-down: the containment tree they sit in                           #
+# --------------------------------------------------------------------------- #
+ROOT = ""
+
+
+class ChangeTree:
+    """An origin's changes in the containment tree they sit in, built once per version of its
+    change index from what each change's version row says and a parent pointer per entity — no
+    payloads. Every change sits under its container: an entity under its parent, a relationship or
+    a containment link under its source. Each container counts the changes under it, at any depth
+    (``rollup``), and lists its children most-changed first (``children``), so a level is a page
+    of a list already sorted."""
+
+    def __init__(self, index: "ChangeIndex", parent_of: Mapping[str, Optional[str]],
+                 names: Mapping[str, Tuple[Optional[str], Optional[str]]]):
+        self.index = index
+        #: Entity → its container (``None``: at the top). Changed entities and their ancestors.
+        self.parent_of: Dict[str, Optional[str]] = dict(parent_of)
+        #: An unchanged ancestor's name and type, from its version row.
+        self.names = dict(names)
+        self.position: Dict[str, int] = {e.entity_id: i for i, e in enumerate(index.entries)}
+        rollup: Dict[str, List[int]] = {}
+        kids: Dict[str, List[str]] = {}
+
+        def container_of(e: ChangeEntry) -> str:
+            if e.kind == "node":
+                return self.parent_of.get(e.entity_id) or ROOT
+            return e.src or ROOT
+
+        def count_up(start: str, status: str) -> None:
+            k = _STATUS_SLOT[status]
+            seen = 0
+            at: Optional[str] = start
+            while at and seen < 64:                     # a cycle in bad data never loops forever
+                rollup.setdefault(at, [0, 0, 0])[k] += 1
+                at = self.parent_of.get(at)
+                seen += 1
+
+        for e in index.entries:
+            kids.setdefault(container_of(e), []).append(e.entity_id)
+            count_up(container_of(e), e.status)
+        # Unchanged ancestors under their own containers, so every level can be walked down to.
+        for eid, parent in self.parent_of.items():
+            if eid not in self.position:
+                kids.setdefault(parent or ROOT, []).append(eid)
+        self.rollup = rollup
+
+        def order(eid: str) -> tuple:
+            e = self.entry(eid)
+            node = e is None or e.kind == "node"
+            inside = sum(rollup.get(eid, (0, 0, 0)))
+            name = (e.name if e is not None else (self.names.get(eid) or (None, None))[0]) or eid
+            return (not node, -inside, name.casefold(), eid)
+        self.children = {k: sorted(dict.fromkeys(v), key=order) for k, v in kids.items()}
+        #: Where each sits among its container's children — the page a reveal opens there.
+        self.rank: Dict[str, int] = {eid: i for v in self.children.values() for i, eid in enumerate(v)}
+
+    def entry(self, eid: str) -> Optional[ChangeEntry]:
+        i = self.position.get(eid)
+        return self.index.entries[i] if i is not None else None
+
+    def path(self, eid: str) -> List[str]:
+        """Its containers from the top down, itself not included."""
+        out: List[str] = []
+        at = self.parent_of.get(eid) if self.entry(eid) is None or self.entry(eid).kind == "node" else (self.entry(eid).src or None)
+        while at and len(out) < 64:
+            out.append(at)
+            at = self.parent_of.get(at)
+        return list(reversed(out))
+
+    def name_of(self, eid: str) -> Optional[str]:
+        e = self.entry(eid)
+        if e is not None:
+            return e.name or e.urn
+        return (self.names.get(eid) or (None, None))[0]
+
+    def type_of(self, eid: str) -> Optional[str]:
+        e = self.entry(eid)
+        return e.type if e is not None else (self.names.get(eid) or (None, None))[1]
+
+
+_STATUS_SLOT = {"added": 0, "modified": 1, "removed": 2}
