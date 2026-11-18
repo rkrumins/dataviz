@@ -136,6 +136,13 @@ function OpenEntityDrawer({
   // The Business view has no JSON tab: a drawer left on it reads the View tab there.
   const technical = personaMode === 'technical'
   const shownTab: EntityTab = (tab === 'edit' && !editable) || (tab === 'json' && !technical) ? 'view' : tab
+  // "See history": the View tab, its History shown (even where the layout hides it) and in view.
+  const [historyFor, setHistoryFor] = useState<string | null>(null)
+  const seeHistory = () => {
+    setTab('view')
+    setHistoryFor(node.id)
+    requestAnimationFrame(() => document.getElementById(`history-${node.id}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+  }
   // Customize opens above the View tab's sections, and stays open as the drawer moves.
   const [customizing, setCustomizing] = useState(false)
   const toggleCustomize = useCallback(() => {
@@ -257,6 +264,7 @@ function OpenEntityDrawer({
                 identity={identity}
                 customizing={customizing}
                 onDoneCustomizing={() => setCustomizing(false)}
+                showHistory={historyFor === node.id}
               />
             </TabsContent>
             {editable && (
@@ -296,6 +304,7 @@ function OpenEntityDrawer({
             graphId={scope.graphId}
             inDraft={!!draftId}
             externalUrl={externalUrl}
+            onSeeHistory={versioningEnabled && scope.wsId && scope.graphId ? seeHistory : undefined}
           />
         </Tabs>
       </DrawerShell>

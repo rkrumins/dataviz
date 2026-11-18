@@ -94,7 +94,7 @@ export function EntityViewTab({
   nodeId, form, original, urn, childCount, tagColors, userProps, copiedUrn, onCopyUrn, canEdit,
   originalProps, publishedProps, digest, onCommitProperties,
   onFocusNode, onLocateMany, onRevealPath, history, typeId = '', typeName = '', fields, identity,
-  customizing = false, onDoneCustomizing,
+  customizing = false, onDoneCustomizing, showHistory = false,
 }: {
   nodeId: string
   form: Data
@@ -130,11 +130,16 @@ export function EntityViewTab({
   /** The Customize panel is open above the sections. */
   customizing?: boolean
   onDoneCustomizing?: () => void
+  /** History was asked for ("See history"): shown even where the layout hides it. */
+  showHistory?: boolean
 }) {
   const versioningEnabled = useFeature('versioningEnabled')
   const mode = usePersonaMode()
   const storedLayout = usePreferencesStore((s) => s.drawerLayout?.[mode] ?? null)
-  const sections = useMemo(() => shownSections(resolveLayout(storedLayout, mode)), [storedLayout, mode])
+  const sections = useMemo(() => {
+    const shown = shownSections(resolveLayout(storedLayout, mode))
+    return showHistory && !shown.includes('history') ? [...shown, 'history' as const] : shown
+  }, [storedLayout, mode, showHistory])
   const hasProps = Object.keys(userProps).length > 0
   const tags = Array.isArray(form.classifications) ? (form.classifications as string[]) : []
   const editsProps = canEdit && !!onCommitProperties
@@ -228,10 +233,12 @@ export function EntityViewTab({
       <LineageNeighbors nodeId={nodeId} onFocusNode={onFocusNode} onLocateMany={onLocateMany} onRevealPath={onRevealPath} />
     ),
     history: () => versioningEnabled && history.wsId && history.graphId && (
+      <div id={`history-${nodeId}`} className="scroll-mt-2">
         <Section title="History" icon={History}>
           <EntityHistory wsId={history.wsId} graphId={history.graphId} entityId={nodeId}
             mainBranchId={history.mainBranchId} branchId={history.branchId} kind="node" />
         </Section>
+      </div>
     ),
   }
 

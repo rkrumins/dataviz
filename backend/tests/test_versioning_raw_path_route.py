@@ -55,8 +55,18 @@ async def client(test_client: AsyncClient, monkeypatch):
                 "created": None, "updated": None, "revisions": {"published": 1, "draft": 0},
                 "changedOnMainSinceBranch": False, "baseCommitSeq": None}
 
+    async def revision(_svc, *, graph_id, entity_id, version_id, branch_id, kind):
+        svc.calls.append(("revision", entity_id, version_id, branch_id))
+        if version_id == "nv_gone":
+            return None
+        return {"id": version_id, "commit_id": "c1", "commit_seq": 3, "branch_id": branch_id or "b_main",
+                "op": "update", "actor": "u1", "change_reason": None, "created_at": "2026-01-01T00:00:00+00:00",
+                "commit_kind": "edit", "commit_message": "m", "on_draft": bool(branch_id),
+                "value": {"kind": "edge", "version": "h", "edge": {"id": entity_id}}}
+
     monkeypatch.setattr(versioning, "entity_history_page", page)
     monkeypatch.setattr(versioning, "entity_summary", summary)
+    monkeypatch.setattr(versioning, "entity_revision", revision)
     app.dependency_overrides[get_versioning_service] = lambda: svc
     yield test_client, svc
     app.dependency_overrides.pop(get_versioning_service, None)
@@ -109,3 +119,18 @@ async def test_paging_bounds_are_enforced(client):
     c, _ = client
     assert (await c.get(_entity("ent_1", "history") + "?limit=500")).status_code == 422
     assert (await c.get(_entity("ent_1", "history") + "?scope=everything")).status_code == 422
+
+
+async def test_a_revision_reaches_a_slash_bearing_id_and_checks_the_draft(client):
+    c, svc = client
+    resp = await c.get(_entity(EDGE_ID, "revisions/ev_1") + "?branchId=d1")
+    assert resp.status_code == 200, resp.text
+    assert svc.calls == [("readable", "d1"), ("revision", EDGE_ID, "ev_1", "d1")]
+    body = resp.json()
+    assert body["on_draft"] is True and body["value"]["edge"]["id"] == EDGE_ID
+    assert "userNames" in body
+
+
+async def test_a_revision_not_on_the_line_is_a_404(client):
+    c, _ = client
+    assert (await c.get(_entity("ent_1", "revisions/nv_gone"))).status_code == 404

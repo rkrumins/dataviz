@@ -8,20 +8,22 @@
  * published graph after the draft began is said above the cards: the draft still shows the entity
  * as it was.
  */
-import { AlertTriangle, Loader2, PencilLine, RefreshCcw } from 'lucide-react'
+import { AlertTriangle, History, Loader2, PencilLine, RefreshCcw } from 'lucide-react'
 import type { EntityEvent, EntitySummary } from '@/services/versioningApiService'
 import { useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { actorName } from '@/features/versioning/model/branchVocab'
 import { timeAgo } from '@/lib/timeAgo'
 import { FreshnessStat } from './FreshnessStat'
 
-export function DrawerActivity({ summary, loading, wsId, graphId, inDraft }: {
+export function DrawerActivity({ summary, loading, wsId, graphId, inDraft, onSeeHistory }: {
   summary?: EntitySummary
   loading: boolean
   wsId?: string
   graphId?: string | null
   /** A draft is open — its own revisions are counted apart. */
   inDraft: boolean
+  /** Go to its history, in the drawer. */
+  onSeeHistory?: () => void
 }) {
   const watermark = useProjectionWatermark(wsId, graphId).data
   // "Synced" = when the live read layer last caught up — always at or after the last update, so it
@@ -69,6 +71,16 @@ export function DrawerActivity({ summary, loading, wsId, graphId, inDraft }: {
           tip="When the live graph last caught up with saved changes."
         />
       </div>
+      {onSeeHistory && summary?.exists && (
+        <button type="button" onClick={onSeeHistory}
+          className="w-full inline-flex items-center justify-center gap-1 text-[11px] font-medium text-accent-lineage hover:underline focus-visible:outline-none focus-visible:underline">
+          <History className="w-3 h-3" aria-hidden />
+          See history{' '}
+          {summary.revisions.published + summary.revisions.draft > 0 && (
+            <span className="text-ink-muted font-normal">· {(summary.revisions.published + summary.revisions.draft).toLocaleString()} revisions</span>
+          )}
+        </button>
+      )}
     </div>
   )
 }

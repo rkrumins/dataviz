@@ -147,6 +147,18 @@ export function entityFieldChanges(before: unknown, after: unknown, kind: Change
   return [...out, ...props.sort(byFolderThenName)]
 }
 
+/** An entity's named fields that have a value — `Name`, `Type`, `Description`… (an edge's
+ *  `Relationship`, `From`, `To`) — in reading order, as one snapshot reads (a revision "as it was"). */
+export function namedFields(value: unknown, kind: ChangeKind = 'node'): Array<{ label: string; value: unknown }> {
+  const bag = asBag(value)
+  const out: Array<{ label: string; value: unknown }> = []
+  for (const [label, keys] of kind === 'edge' ? EDGE_FIELDS : NODE_FIELDS) {
+    const key = keys.find((k) => k in bag && bag[k] !== null && bag[k] !== undefined && bag[k] !== '')
+    if (key) out.push({ label, value: bag[key] })
+  }
+  return out
+}
+
 /** Shallow field deltas (a `properties` delta among them) → one row per field and per property. */
 export function fromFieldDeltas(deltas: readonly FieldDelta[], kind: ChangeKind = 'node'): FieldChange[] {
   const before: Bag = {}

@@ -464,6 +464,7 @@ function RelationshipPanel({
               </Section>
 
               {historyOn && !unsaved && entityId && (
+                <div id={`history-${entityId}`} className="scroll-mt-2">
                 <Section title="History" icon={History}>
                   <EntityHistory
                     wsId={scope.wsId!}
@@ -474,6 +475,7 @@ function RelationshipPanel({
                     kind="edge"
                   />
                 </Section>
+                </div>
               )}
             </div>
           </TabsContent>
@@ -510,7 +512,11 @@ function RelationshipPanel({
           {editing ? (
             <StageBar dirty={hasChanges} justStaged={justStaged} onCancel={discard} onStage={stage} />
           ) : historyOn && !unsaved ? (
-            <DrawerActivity summary={summary} loading={summaryQ.isLoading} wsId={scope.wsId} graphId={scope.graphId} inDraft={!!draftId} />
+            <DrawerActivity summary={summary} loading={summaryQ.isLoading} wsId={scope.wsId} graphId={scope.graphId} inDraft={!!draftId}
+              onSeeHistory={entityId ? () => {
+                setMode('view')
+                requestAnimationFrame(() => document.getElementById(`history-${entityId}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+              } : undefined} />
           ) : (
             <p className="text-[11px] text-ink-muted text-center py-1">
               {unsaved ? 'Save your changes to start this relationship’s history.' : 'History is available with version control.'}

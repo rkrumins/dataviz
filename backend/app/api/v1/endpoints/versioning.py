@@ -43,7 +43,8 @@ from backend.app.api.raw_path_route import RawPathSegmentRoute
 from backend.common.property_patch import InvalidPatch, normalize_update
 from backend.common.service_accounts import is_service_account
 from backend.app.services.versioning.entity_audit import (
-    HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
+    HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_revision,
+    entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, require_forks_enabled,
@@ -1235,6 +1236,25 @@ class EntityHistoryResponse(_ApiModel):
     has_more: bool = Field(default=False, alias="hasMore")
     # Cursor for the next (older) page; pass it back as `before`.
     next_before: Optional[str] = Field(default=None, alias="nextBefore")
+
+
+class EntityRevisionResponse(_ApiModel):
+    """One revision of an entity, under its history row's names, with the entity as that revision
+    left it (see entity_audit.entity_revision)."""
+    id: str
+    commit_id: str
+    commit_seq: int
+    branch_id: str
+    op: str
+    actor: Optional[str] = None
+    change_reason: Optional[str] = None
+    created_at: str
+    commit_kind: Optional[str] = None
+    commit_message: Optional[str] = None
+    on_draft: bool = False
+    # {kind, version, node|edge}, as the summary's `value`; a deletion's is {kind, version: null, deleted: true}.
+    value: Optional[Dict[str, Any]] = None
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
 class EntitySummaryResponse(_ApiModel):
@@ -3035,6 +3055,32 @@ async def get_entity_history(
                "has_more": page["hasMore"], "next_before": page["nextBefore"]}
     await _attach_user_names(session, page["versions"], wrapper=payload)
     return payload
+
+
+@router.get("/graphs/{graph_id}/entities/{entity_id}/revisions/{version_id}",
+            response_model=EntityRevisionResponse)
+async def get_entity_revision(
+    ws_id: str, graph_id: str, entity_id: str, version_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId",
+                                     description="the draft being viewed — its own revisions join main's"),
+    kind: Optional[str] = Query(None, pattern="^(node|edge)$"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One revision of an entity — a row of its history, by its ``id`` — with the entity as that
+    revision left it, in the shape the summary's ``include=value`` has. **404** for a revision
+    that isn't this entity's on ``main`` or the draft being viewed."""
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
+    with _domain_errors():
+        revision = await entity_revision(svc, graph_id=graph_id, entity_id=entity_id,
+                                         version_id=version_id, branch_id=branch_id, kind=kind)
+    if revision is None:
+        raise HTTPException(status_code=404, detail=f"no revision {version_id} of this entity on this line")
+    await _attach_user_names(session, [revision], wrapper=revision)
+    return revision
 
 
 @router.get("/graphs/{graph_id}/entities/{entity_id}/summary", response_model=EntitySummaryResponse)
