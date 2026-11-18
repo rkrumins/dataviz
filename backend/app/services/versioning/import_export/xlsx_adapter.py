@@ -18,6 +18,8 @@ import re
 import zipfile
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
+from backend.common.moments import from_cell, is_temporal
+
 from .rowmodel import cell_text, parse_list_cells
 
 # Identity / system columns — greyed in the header so users know not to touch them.
@@ -128,7 +130,8 @@ def _read_sheet(ws, *, at: bool = False) -> List[Dict[str, Any]]:
         rec: Dict[str, Any] = {}
         for i, val in enumerate(row):
             if i < len(header) and header[i] and val is not None and str(val).strip() != "":
-                rec[header[i]] = val             # empty cells dropped (PATCH semantics)
+                # A date or time cell (one retyped in Excel) as text — never a datetime object.
+                rec[header[i]] = from_cell(val)  # empty cells dropped (PATCH semantics)
         if rec:
             parsed = parse_list_cells(rec)
             if at:
@@ -158,6 +161,9 @@ _XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
 _ILLEGAL = re.compile("[%s]" % "".join(map(chr, [*range(0x09), 0x0B, 0x0C, *range(0x0E, 0x20), 0xFFFE, 0xFFFF])))
 # Cell styles, indexes into styles.xml's cellXfs: plain, header, locked header, title.
 _PLAIN, _HEADER, _LOCKED_HEADER, _TITLE = 0, 1, 2, 3
+#: A cell formatted as text (Excel's "@"): a date or moment is written in one, so Excel keeps what is
+#: typed over it as typed, rather than turning it into a date cell in the machine's own format.
+_AS_TEXT = 4
 
 
 class _Sink:
@@ -206,6 +212,8 @@ def _cell_xml(ref: str, value: Any, style: int = _PLAIN) -> str:
     if isinstance(value, (int, float)) and math.isfinite(value):
         return f'<c r="{ref}"{s}><v>{value!r}</v></c>'
     text = value if isinstance(value, str) else cell_text(value)
+    if style == _PLAIN and is_temporal(text):
+        s = f' s="{_AS_TEXT}"'
     return f'<c r="{ref}"{s} t="inlineStr"><is><t xml:space="preserve">{_text(text)}</t></is></c>'
 
 
@@ -288,10 +296,11 @@ _STYLES = (
     '<fill><patternFill patternType="solid"><fgColor rgb="FFE8E8E8"/><bgColor indexed="64"/></patternFill></fill>'
     '</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
     '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-    '<cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+    '<cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
     '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
     '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
-    '<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>'
+    '<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+    '<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>'
     '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>')
 
 
