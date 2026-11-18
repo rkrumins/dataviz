@@ -29,7 +29,7 @@ import {
     type WalkPhase,
     type LensWalkStatus,
 } from './useLensWalk'
-import { unionWalkModels } from '@/components/canvas/context-view/lens/closure-adapter'
+import { unionWalkModels, type LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 
 /** Stable empty seed list, so "not tracing" keeps one identity. */
 const EMPTY_SEEDS: readonly string[] = []
@@ -62,6 +62,9 @@ export interface CanvasTraceWalk {
     continuePastCheckpoint: () => void
     /** Give failed steps one more attempt, or re-kick a failed INITIAL fetch. */
     retryWalk: () => void
+    /** One seed's own walk, as it stands — what an export reads to say which
+     *  seeds reach a row. Null for a seed whose walk has not landed. */
+    seedModelOf: (urn: string) => LensWalkModel | null
 }
 
 export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTraceWalk {
@@ -212,6 +215,8 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         }
     }, [walkFor, retry, retrySeedWalk, tracedUrns])
 
+    const seedModelOf = useCallback((urn: string) => walkFor(urn)?.model ?? null, [walkFor])
+
     // Memoized: see `useUnifiedTrace`'s return. A fresh literal here re-triggered
     // every consumer memo that depends on the walk.
     return useMemo(() => ({
@@ -225,5 +230,6 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         progress,
         continuePastCheckpoint,
         retryWalk,
-    }), [tracedUrn, tracedUrns, start, removeSeed, exit, walkEntry, progress, continuePastCheckpoint, retryWalk])
+        seedModelOf,
+    }), [tracedUrn, tracedUrns, start, removeSeed, exit, walkEntry, progress, continuePastCheckpoint, retryWalk, seedModelOf])
 }

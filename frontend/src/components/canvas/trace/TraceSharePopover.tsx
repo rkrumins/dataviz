@@ -32,8 +32,10 @@ export interface TraceShareSummary {
   depthDown: number
   /** Cards the reader has open right now — what "the picture" amounts to. */
   openCards: number
-  /** The link itself, built on demand from what is on screen. */
-  buildLink: (includePicture: boolean) => string
+  /** The link itself, built on demand from what is on screen.
+   *  `pictureDropped` — the open cards would have made it too long to open,
+   *  so they were left out. */
+  buildLink: (includePicture: boolean) => { url: string; pictureDropped: boolean }
 }
 
 export interface TraceSharePopoverProps extends TraceShareSummary {
@@ -74,6 +76,8 @@ export function TraceSharePopover({
    *  permission): the link is shown to be selected by hand rather than the
    *  gesture failing silently. */
   const [manualLink, setManualLink] = useState<string | null>(null)
+  /** The last copy had to leave the open cards out to stay openable. */
+  const [pictureDropped, setPictureDropped] = useState(false)
 
   useTraceEscStack(true, onClose, 100)
 
@@ -98,7 +102,8 @@ export function TraceSharePopover({
   }, [triggerRef])
 
   const copy = async () => {
-    const url = buildLink(includePicture)
+    const { url, pictureDropped: dropped } = buildLink(includePicture)
+    setPictureDropped(dropped)
     try {
       await navigator.clipboard.writeText(url)
       setManualLink(null)
@@ -198,6 +203,12 @@ export function TraceSharePopover({
               which reaches a screen reader on its own. */}
           <span aria-live="polite">{copied ? 'Link copied' : 'Copy link'}</span>
         </button>
+
+        {pictureDropped && (
+          <p role="status" className="mt-2 text-[10.5px] text-amber-700 dark:text-amber-400 leading-snug">
+            Open cards left out — the link would be too long to open.
+          </p>
+        )}
 
         {manualLink && (
           <div className="mt-2">

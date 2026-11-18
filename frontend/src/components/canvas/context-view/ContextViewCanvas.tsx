@@ -185,7 +185,7 @@ import {
 } from './lens/lensHistory'
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensWalk } from '@/hooks/useLensWalk'
-import { selectionMembers, selectionFocusUrn, unionWalkModels, withSelectionFocus } from './lens/closure-adapter'
+import { selectionMembers, selectionFocusUrn, unionWalkModels, withSelectionFocus, type LensWalkModel } from './lens/closure-adapter'
 import { MAX_TRACE_SEEDS, useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
 import { useTraceOverlay, type TraceOverlay } from '@/hooks/useTraceOverlay'
 import { lanesToRenderTrees } from '@/hooks/lib/traceViewModel'
@@ -208,8 +208,26 @@ import {
 } from '@/hooks/lib/traceHistoryStack'
 import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
 import { useResolvedNames } from '@/hooks/useResolvedNames'
-import { decodeTraceShare, encodeTraceShare } from '@/hooks/lib/traceShareCodec'
+import { buildTraceShareLink, decodeTraceShare } from '@/hooks/lib/traceShareCodec'
 import type { TraceShareSummary } from '@/components/canvas/trace/TraceSharePopover'
+import type { TraceKeepActions } from '@/components/canvas/trace/TraceKeepMenu'
+import type { SavedTraceItem, SavedTracesSectionProps } from '@/components/canvas/trace/SavedTracesSection'
+import {
+  countTraceRows,
+  traceCsvLines,
+  traceExportEdges,
+  traceExportFilename,
+  traceExportRows,
+  traceJsonParts,
+  traceMembershipSpec,
+  type TraceExportEdge,
+  type TraceExportMeta,
+  type TraceExportRow,
+} from '@/hooks/lib/traceExport'
+import { diffSinceSaved, findSavedTrace, savedTraceKey, type SavedTrace } from '@/hooks/lib/savedTraces'
+import { useSavedTraces } from '@/hooks/useSavedTraces'
+import { csvLine, downloadCsv } from '@/lib/csv'
+import { triggerBrowserDownload } from '@/services/importExportApiService'
 
 /** The native canvas trace has no per-edge drilldowns — the closure walk
  *  model is complete at leaf grain. One shared empty map keeps the trace
@@ -2577,6 +2595,7 @@ export function ContextViewCanvas({
     return initialTraceShare
       ? pushTraceFocal(stored, {
           urn: initialTraceShare.urn,
+          ...(initialTraceShare.v === 2 ? { urns: initialTraceShare.urns } : {}),
           focusId: initialTraceShare.urn,
           view: {
             showUpstream: initialTraceShare.up,
@@ -2770,7 +2789,8 @@ export function ContextViewCanvas({
     if (initialTraceShare.open.length > 0) {
       overlayRef.current?.restoreExpansion(initialTraceShare.urn, initialTraceShare.open)
     }
-    beginTrace(initialTraceShare.urn)
+    // A combined link traces its whole seed set.
+    beginTrace(traceEntrySeeds(initialTraceShare))
   }, [initialTraceShare, beginTrace])
 
   const traceHistoryGo = useCallback((next: TraceHistoryStack) => {
@@ -2960,8 +2980,7 @@ export function ContextViewCanvas({
       label: historyEntryLabel(e),
       mode: (e.view.showUpstream && e.view.showDownstream ? 'both' : e.view.showUpstream ? 'up' : 'down') as 'up' | 'down' | 'both',
       timestamp: e.timestamp,
-      // `traceHistoryLink` has no link to give a combined entry.
-      shareable: traceEntrySeeds(e).length === 1,
+      shareable: true,
     })).reverse()
   ), [traceHistory, historyEntryLabel])
   // PICKING AN ENTRY IS NOT BACK/FORWARD. `traceHistoryGo` is the cursor
@@ -2985,21 +3004,17 @@ export function ContextViewCanvas({
   // right to refuse, and the link would quietly do nothing.
   const traceHistoryLink = useCallback((index: number): string | null => {
     const entry = traceHistory.entries[index]
-    // A link carries one urn: a combined entry has no honest one to give.
-    if (!entry || traceEntrySeeds(entry).length > 1) return null
-    const token = encodeTraceShare({
+    if (!entry) return null
+    return buildTraceShareLink({
       urn: entry.urn,
+      urns: traceEntrySeeds(entry),
       label: historyLabels.get(entry.urn),
       up: entry.view.showUpstream,
       down: entry.view.showDownstream,
       depthUp: Math.min(entry.view.depthUp, FULL_WALK_INITIAL_DEPTH),
       depthDown: Math.min(entry.view.depthDown, FULL_WALK_INITIAL_DEPTH),
       open: entry.view.traceExpansion,
-    })
-    const url = new URL(window.location.href)
-    url.searchParams.set('trace', token)
-    url.searchParams.delete('lens')
-    return url.toString()
+    }, window.location.href).url
   }, [traceHistory, historyLabels])
   const clearTraceHistory = useCallback(() => setTraceHistory(emptyTraceHistory()), [])
 
@@ -3041,36 +3056,241 @@ export function ContextViewCanvas({
   // cards that are open. `buildLink` is called on click, so the link is
   // always the trace as it stands rather than as it stood when the popover
   // opened. `lens` is dropped from the URL — one link, one thing to open.
-  // None for a combined trace: a link carries ONE urn, and offering it would
-  // quietly hand over the first seed's trace as if it were the whole picture.
+  // A combined trace carries every seed, so the recipient traces the whole
+  // picture; the label travels for the first seed, which the link opens on.
   const traceShare = useMemo<TraceShareSummary | undefined>(() => {
     const urn = canvasTrace.tracedUrn
-    if (!traceActive || !urn || !tracedLabel || combinedTrace) return undefined
-    const label = tracedLabel
+    if (!traceActive || !urn || !tracedLabel) return undefined
+    const urns = canvasTrace.tracedUrns
     const open = [...(overlay.traceExpansion ?? [])] as string[]
     return {
-      label,
+      label: tracedLabel,
       direction: traceShowUpstream && traceShowDownstream ? 'both' : traceShowUpstream ? 'up' : 'down',
       depthUp: traceDepthUp,
       depthDown: traceDepthDown,
       openCards: open.length,
-      buildLink: (includePicture: boolean) => {
-        const token = encodeTraceShare({
-          urn,
-          label,
-          up: traceShowUpstream,
-          down: traceShowDownstream,
-          depthUp: traceDepthUp,
-          depthDown: traceDepthDown,
-          open: includePicture ? open : [],
-        })
-        const url = new URL(window.location.href)
-        url.searchParams.set('trace', token)
-        url.searchParams.delete('lens')
-        return url.toString()
+      buildLink: (includePicture: boolean) => buildTraceShareLink({
+        urn,
+        urns,
+        label: traceSeeds[0]?.label,
+        up: traceShowUpstream,
+        down: traceShowDownstream,
+        depthUp: traceDepthUp,
+        depthDown: traceDepthDown,
+        open: includePicture ? open : [],
+      }, window.location.href),
+    }
+  }, [traceActive, canvasTrace.tracedUrn, canvasTrace.tracedUrns, tracedLabel, traceSeeds, overlay.traceExpansion, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
+
+  // ── EXPORT & SAVE (2026-11-18) ─────────────────────────────────────
+  // The trace as a file, exactly as the dock shows it (`traceExport`), and
+  // as a copy kept in this browser with what it found (`useSavedTraces`).
+  // Rows are built on the click that asks for them, never per render: a
+  // twenty-seed trace is tens of thousands of rows.
+  const { notify: notifyTraceKeep } = useAppNotifications()
+  const savedTraces = useSavedTraces(authUserId, activeView?.id ?? 'no-view')
+  const traceLayerName = useCallback(
+    (layerId: string) => sortedLayers.find(l => l.id === layerId)?.name ?? layerId,
+    [sortedLayers],
+  )
+  const tracePhase = canvasTrace.progress?.phase ?? null
+  const traceWalking = !traceModel || tracePhase === 'loading' || tracePhase === 'seeding' || tracePhase === 'walking'
+  const tracePartial = !!traceModel && (traceModel.truncated || tracePhase === 'checkpoint' || tracePhase === 'error')
+  const buildTraceFile = useCallback((): { rows: TraceExportRow[]; edges: TraceExportEdge[]; meta: TraceExportMeta } | null => {
+    const view = overlay.view
+    if (!view || !traceModel) return null
+    const seeds = canvasTrace.tracedUrns
+    const seedModels = new Map<string, LensWalkModel>()
+    for (const u of seeds) {
+      const m = canvasTrace.seedModelOf(u)
+      if (m) seedModels.set(u, m)
+    }
+    const rows = traceExportRows({
+      view, seeds, showUpstream: traceShowUpstream, showDownstream: traceShowDownstream,
+      layerName: traceLayerName, seedModels,
+    })
+    return {
+      rows,
+      edges: traceExportEdges(traceModel, rows),
+      meta: {
+        view: { id: activeView?.id ?? null, name: activeView?.name ?? null },
+        dataSourceId,
+        generatedAt: new Date().toISOString(),
+        seeds: traceSeeds.map(t => ({ urn: t.urn, label: t.label })),
+        direction: traceShowUpstream && traceShowDownstream ? 'both' : traceShowUpstream ? 'up' : 'down',
+        depthUp: traceDepthUp,
+        depthDown: traceDepthDown,
+        walkPhase: tracePhase,
+        truncated: tracePartial,
+        outsideView: view.outsideView,
       },
     }
-  }, [traceActive, canvasTrace.tracedUrn, tracedLabel, combinedTrace, overlay.traceExpansion, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
+  }, [overlay.view, traceModel, canvasTrace, traceShowUpstream, traceShowDownstream, traceLayerName, activeView?.id, activeView?.name, dataSourceId, traceSeeds, traceDepthUp, traceDepthDown, tracePhase, tracePartial])
+  const downloadTraceJson = useCallback((label: string, meta: TraceExportMeta, rows: readonly TraceExportRow[], edges: readonly TraceExportEdge[]) => {
+    const spec = traceMembershipSpec({
+      urns: meta.seeds.map(t => t.urn),
+      showUpstream: meta.direction !== 'down', showDownstream: meta.direction !== 'up',
+      depthUp: meta.depthUp, depthDown: meta.depthDown,
+    })
+    const url = URL.createObjectURL(new Blob(traceJsonParts(meta, spec, rows, edges), { type: 'application/json' }))
+    triggerBrowserDownload(url, traceExportFilename(label, 'json'))
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  }, [])
+  /** The trace on screen as a history entry — what a saved trace re-runs. */
+  const currentTraceRecipe = useCallback((): TraceHistoryEntryRecord | null => {
+    const urns = canvasTrace.tracedUrns
+    if (!urns[0] || !tracedNodeId) return null
+    return {
+      urn: urns[0],
+      ...(urns.length > 1 ? { urns: [...urns] } : {}),
+      focusId: tracedNodeId,
+      view: {
+        showUpstream: traceShowUpstream,
+        showDownstream: traceShowDownstream,
+        depthUp: traceDepthUp,
+        depthDown: traceDepthDown,
+        traceExpansion: [...(overlay.traceExpansion ?? [])].sort(),
+      },
+      timestamp: Date.now(),
+    }
+  }, [canvasTrace.tracedUrns, tracedNodeId, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown, overlay.traceExpansion])
+  const savedForTrace = traceActive ? findSavedTrace(savedTraces.list, canvasTrace.tracedUrns) : undefined
+  // OPENED FROM A SAVED COPY: once the walk settles, what moved since. The
+  // saved urns are read once per opening — the snapshot is not re-read per render.
+  const [openedFromSaved, setOpenedFromSaved] = useState<{ id: string; key: string; urns: Set<string> | null } | null>(null)
+  const openSavedTrace = useCallback((t: SavedTrace) => {
+    flushExpansionRecord()
+    setTraceHistory(h => pushTraceFocal(h, { ...t.recipe, timestamp: Date.now() }))
+    restoreTraceEntry(t.recipe)
+    setOpenedFromSaved({ id: t.id, key: savedTraceKey(t), urns: null })
+    if (t.hasResults) {
+      void savedTraces.results(t.id).then((r) => {
+        if (r) setOpenedFromSaved(o => (o?.id === t.id ? { ...o, urns: new Set(r.rows.map(row => row.urn)) } : o))
+      })
+    }
+  }, [flushExpansionRecord, restoreTraceEntry, savedTraces])
+  const traceSeedSetKey = traceSeedKey(canvasTrace.tracedUrns)
+  const sinceSaved = useMemo(() => {
+    if (!openedFromSaved?.urns || openedFromSaved.key !== traceSeedSetKey) return null
+    if (traceWalking || tracePhase === 'error') return null
+    const file = buildTraceFile()
+    if (!file) return null
+    const { added, removed } = diffSinceSaved(openedFromSaved.urns, file.rows.map(r => r.urn))
+    const byUrn = new Map(file.rows.map(r => [r.urn, r]))
+    return {
+      added: added.length,
+      removed: removed.length,
+      onExport: () => {
+        const lines = [csvLine(['change', 'urn', 'name', 'type', 'role', 'hops'])]
+        for (const u of added) { const r = byUrn.get(u); lines.push(csvLine(['new', u, r?.name, r?.type, r?.role, r?.hops])) }
+        for (const u of removed) lines.push(csvLine(['gone', u]))
+        downloadCsv(traceExportFilename(`${tracedLabel ?? 'trace'} changes`, 'csv'), lines)
+      },
+    }
+  }, [openedFromSaved, traceSeedSetKey, traceWalking, tracePhase, buildTraceFile, tracedLabel])
+  const openSavedById = useCallback((id: string) => {
+    const t = savedTraces.list.find(x => x.id === id)
+    if (t) openSavedTrace(t)
+  }, [savedTraces.list, openSavedTrace])
+  const savedList = useMemo<SavedTracesSectionProps>(() => {
+    const byId = new Map(savedTraces.list.map(t => [t.id, t]))
+    const activeKey = traceActive ? traceSeedSetKey : null
+    const items: SavedTraceItem[] = savedTraces.list.map(t => ({
+      id: t.id,
+      name: t.name,
+      savedAt: t.savedAt,
+      seeds: traceEntrySeeds(t.recipe).length,
+      mode: t.recipe.view.showUpstream && t.recipe.view.showDownstream ? 'both' : t.recipe.view.showUpstream ? 'up' : 'down',
+      rows: t.counts.nodes,
+      hasResults: t.hasResults,
+      partial: t.partial,
+      active: savedTraceKey(t) === activeKey,
+    }))
+    return {
+      items,
+      persistent: savedTraces.persistent,
+      onOpen: openSavedById,
+      onExport: (id, format) => {
+        const t = byId.get(id)
+        if (!t) return
+        void savedTraces.results(id).then((r) => {
+          if (!r) { notifyTraceKeep('warning', 'The saved results of this trace are no longer in this browser.'); return }
+          if (format === 'csv') { downloadCsv(traceExportFilename(t.name, 'csv', new Date(t.savedAt)), traceCsvLines(r.rows)); return }
+          const seeds = traceEntrySeeds(t.recipe)
+          downloadTraceJson(t.name, {
+            view: { id: activeView?.id ?? null, name: activeView?.name ?? null },
+            dataSourceId,
+            generatedAt: new Date(t.savedAt).toISOString(),
+            seeds: seeds.map((urn, n) => ({ urn, label: t.seedLabels[n] ?? urn })),
+            direction: t.recipe.view.showUpstream && t.recipe.view.showDownstream ? 'both' : t.recipe.view.showUpstream ? 'up' : 'down',
+            depthUp: t.recipe.view.depthUp,
+            depthDown: t.recipe.view.depthDown,
+            walkPhase: t.partial ? 'checkpoint' : 'done',
+            truncated: t.partial,
+            outsideView: 0,
+          }, r.rows, r.edges)
+        })
+      },
+      onCopyLink: (id) => {
+        const t = byId.get(id)
+        if (!t) return null
+        return buildTraceShareLink({
+          urn: t.recipe.urn,
+          urns: traceEntrySeeds(t.recipe),
+          label: t.seedLabels[0],
+          up: t.recipe.view.showUpstream,
+          down: t.recipe.view.showDownstream,
+          depthUp: Math.min(t.recipe.view.depthUp, FULL_WALK_INITIAL_DEPTH),
+          depthDown: Math.min(t.recipe.view.depthDown, FULL_WALK_INITIAL_DEPTH),
+          open: t.recipe.view.traceExpansion,
+        }, window.location.href).url
+      },
+      onRename: savedTraces.rename,
+      onRemove: savedTraces.remove,
+    }
+  }, [savedTraces, traceActive, traceSeedSetKey, openSavedById, notifyTraceKeep, downloadTraceJson, activeView?.id, activeView?.name, dataSourceId])
+  const traceKeep = useMemo<TraceKeepActions | undefined>(() => {
+    if (!traceActive || !traceModel) return undefined
+    const label = tracedLabel ?? 'trace'
+    return {
+      rowCount: overlay.view
+        ? countTraceRows(overlay.view, canvasTrace.tracedUrns, traceShowUpstream, traceShowDownstream)
+        : 0,
+      walking: traceWalking,
+      partial: tracePartial,
+      outsideView: overlay.view?.outsideView ?? 0,
+      exportCsv: () => {
+        const file = buildTraceFile()
+        if (file) downloadCsv(traceExportFilename(label, 'csv'), traceCsvLines(file.rows))
+      },
+      exportJson: () => {
+        const file = buildTraceFile()
+        if (file) downloadTraceJson(label, file.meta, file.rows, file.edges)
+      },
+      saved: !!savedForTrace,
+      save: async () => {
+        const file = buildTraceFile()
+        const recipe = currentTraceRecipe()
+        if (!file || !recipe) return null
+        const { note } = await savedTraces.save({
+          name: savedForTrace?.name ?? label,
+          recipe,
+          seedLabels: traceSeeds.map(t => t.label),
+          rows: file.rows,
+          edges: file.edges,
+          counts: {
+            nodes: file.rows.length,
+            upstream: file.rows.filter(r => r.role === 'upstream' || r.role === 'both').length,
+            downstream: file.rows.filter(r => r.role === 'downstream' || r.role === 'both').length,
+            edges: file.edges.length,
+          },
+          partial: tracePartial,
+        })
+        return note
+      },
+      savedList,
+    }
+  }, [traceActive, traceModel, tracedLabel, overlay.view, canvasTrace.tracedUrns, traceShowUpstream, traceShowDownstream, traceWalking, tracePartial, buildTraceFile, downloadTraceJson, savedForTrace, currentTraceRecipe, savedTraces, traceSeeds, savedList])
 
   const dockTrace = useMemo<UseUnifiedTraceResult>(() => {
     if (!traceActive || !traceModel || !tracedNodeId) return trace
@@ -6775,6 +6995,7 @@ export function ContextViewCanvas({
         onResumeTraceHistory={resumeTraceHistory}
         onClearTraceHistory={clearTraceHistory}
         onCopyTraceHistoryLink={traceHistoryLink}
+        savedTraces={savedList}
         onOpenLens={() => openLensForSelection(selectedNodeIds)}
         onSetTraceDepth={(dir, value) => {
           // A VIEW limit on the already-walked flow — applies instantly,
@@ -6856,6 +7077,8 @@ export function ContextViewCanvas({
               seeds={traceSeeds}
               onRemoveSeed={removeTraceSeed}
               outsideView={overlay.view?.outsideView ?? 0}
+              keep={traceKeep}
+              sinceSaved={sinceSaved}
             />
         )}
 
