@@ -26,6 +26,8 @@ export interface ChangeTreeProps {
   changeKeys?: (e: KeyboardEvent, row: ChangeListRow, setLevel: (level: RowLevel) => void, show: () => void) => boolean
   /** Open the way down to this change, then land on it (a new `nonce` each time it is asked). */
   reveal?: { entityId: string; nonce: number } | null
+  /** The change to make current when it changes (picked elsewhere), without moving focus. */
+  follow?: string | null
   maxHeight?: number | string
 }
 
@@ -35,7 +37,7 @@ const nameOf = (i: ChangeTreeItem) => (i.change
     : `${i.change.sourceName || '…'} → ${i.change.targetName || '…'}`)
   : i.name || i.id)
 
-export function ChangeTree({ source, renderChange, changeKeys, reveal, maxHeight = '60vh' }: ChangeTreeProps) {
+export function ChangeTree({ source, renderChange, changeKeys, reveal, follow, maxHeight = '60vh' }: ChangeTreeProps) {
   const tree = useChangeTree(source)
 
   // The changes at a level, as canvas stops: what "Show" steps through.
@@ -65,7 +67,7 @@ export function ChangeTree({ source, renderChange, changeKeys, reveal, maxHeight
     <TreeView model={tree} label="Changes, top-down" isChange={isChange} nameOf={nameOf}
       renderChange={(item, frame) => renderChange(item.change!, frame)}
       itemKeys={changeKeys ? (e, item, setLevel, show) => changeKeys(e, item.change!, setLevel, show) : undefined}
-      showFrom={showFrom} land={land} onLanded={() => setLand(null)} maxHeight={maxHeight}
+      showFrom={showFrom} land={land} onLanded={() => setLand(null)} follow={follow} maxHeight={maxHeight}
       notice={revealFailed ? <p role="alert" className="text-[11px] text-ink-muted">Couldn't find where that change sits. Try again in a moment.</p> : null} />
   )
 }

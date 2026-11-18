@@ -15,7 +15,9 @@ type Value = NonNullable<DraftsPolicySettings[Field]>
 type Choice = Value | 'inherit'
 
 /** What holds where neither a data source nor its workspace sets a field (`drafts_policy.FIELDS`). */
-const BUILT_IN: Record<Field, Value> = { defaultVisibility: 'public', levels: 'any', selfApproval: true, selfMerge: true }
+const BUILT_IN: Record<Field, Value> = {
+  defaultVisibility: 'public', levels: 'any', selfApproval: true, selfMerge: true, requiredApprovals: 0, threadsHold: false,
+}
 
 const YES_NO: Array<[Value, string]> = [[true, 'Yes'], [false, 'No']]
 
@@ -25,6 +27,10 @@ const FIELDS: Array<{ key: Field; label: string; options: Array<[Value, string]>
     options: [['any', 'Public or private'], ['public_only', 'Public only'], ['private_only', 'Private only']] },
   { key: 'selfApproval', label: 'Whoever opens a review may approve it', options: YES_NO },
   { key: 'selfMerge', label: 'Whoever opens a review may merge it', options: YES_NO },
+  { key: 'requiredApprovals', label: 'Approvals a review needs',
+    options: [[0, 'Everyone asked'], ...Array.from({ length: 10 }, (_, i): [Value, string] =>
+      [i + 1, i === 0 ? '1 approval' : `${i + 1} approvals`])] },
+  { key: 'threadsHold', label: 'Open threads hold the merge', options: YES_NO },
 ]
 
 export function DraftsPolicyFields({ own, workspace, canEdit, onSave }: {
@@ -74,6 +80,10 @@ export function DraftsPolicyFields({ own, workspace, canEdit, onSave }: {
     defaultVisibility: only !== null && `Drafts may only be ${only}, so new drafts start ${only}.`,
     levels: 'Turning private drafts off leaves existing private drafts as they are.',
     selfMerge: holds('selfMerge') === false && 'Drafts are then published only through a review someone else merges.',
+    requiredApprovals: holds('requiredApprovals') === 0
+      ? 'Everyone asked to review must approve. A review that asks no one needs no approval.'
+      : 'Any approvals count, from whoever may approve, asked or not. An approval no longer counts once the draft changes after it.',
+    threadsHold: holds('threadsHold') === true && 'A review merges once every thread on it is resolved.',
   }
 
   return (

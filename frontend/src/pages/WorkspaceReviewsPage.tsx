@@ -1,7 +1,7 @@
 /**
  * WorkspaceReviewsPage — the standalone review inbox at /workspaces/:wsId/reviews. Page
  * chrome (back link + header) around the shared WorkspaceReviewsInbox. Deep-linkable via
- * ?pr=<prId> (e.g. straight from the commit dialog after opening an MR).
+ * ?pr=<prId>, which opens that review's drawer; a review's own page is /workspaces/:wsId/reviews/:prId.
  */
 import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { GitPullRequestArrow, ArrowLeft } from 'lucide-react'

@@ -727,10 +727,14 @@ class WorkspaceORM(Base):
     #                              may have. Drafts that already exist keep theirs.
     #   review_self_approval     — whether the person who opened a review may approve it.
     #   review_self_merge        — whether they may merge it, and publish a draft without one.
+    #   review_required_approvals — approvals a review needs: 0, everyone asked; N, any N.
+    #   review_threads_hold      — whether open threads hold a review's merge.
     draft_default_visibility = Column(Text, nullable=True)
     draft_levels = Column(Text, nullable=True)
     review_self_approval = Column(Boolean, nullable=True)
     review_self_merge = Column(Boolean, nullable=True)
+    review_required_approvals = Column(Integer, nullable=True)
+    review_threads_hold = Column(Boolean, nullable=True)
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -764,6 +768,10 @@ class WorkspaceORM(Base):
         CheckConstraint(
             "draft_levels IS NULL OR draft_levels IN ('any', 'public_only', 'private_only')",
             name="ck_workspaces_draft_levels",
+        ),
+        CheckConstraint(
+            "review_required_approvals IS NULL OR review_required_approvals BETWEEN 0 AND 10",
+            name="ck_workspaces_required_approvals",
         ),
     )
 
@@ -818,6 +826,8 @@ class WorkspaceDataSourceORM(Base):
     draft_levels = Column(Text, nullable=True)
     review_self_approval = Column(Boolean, nullable=True)
     review_self_merge = Column(Boolean, nullable=True)
+    review_required_approvals = Column(Integer, nullable=True)
+    review_threads_hold = Column(Boolean, nullable=True)
     # This source's import settings (``backend.app.services.import_settings``): what an import's rows
     # find their entities by when it names no identifier (``entity_id``, ``urn`` or ``prop.<name>``),
     # and the replace guard's limits. NULL = the platform's (``GRAPHVER_IMPORT_IDENTIFIER``,
@@ -922,6 +932,10 @@ class WorkspaceDataSourceORM(Base):
         CheckConstraint(
             "draft_levels IS NULL OR draft_levels IN ('any', 'public_only', 'private_only')",
             name="ck_ds_draft_levels",
+        ),
+        CheckConstraint(
+            "review_required_approvals IS NULL OR review_required_approvals BETWEEN 0 AND 10",
+            name="ck_ds_required_approvals",
         ),
         CheckConstraint(
             "aggregation_status IN ('none', 'pending', 'running', 'ready', 'failed', 'skipped')",

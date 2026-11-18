@@ -672,4 +672,4 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate,
                CrossesUpdate, AmbiguousUrn, EntityExists, EdgeEndsMissing, UniqueViolation,
                DraftPruned, DecisionConflict, ReviewIncomplete, ChangesRejected, NothingAccepted,
-               PartialMergeUnsupported)
+               PartialMergeUnsupported, ChangesRequested)

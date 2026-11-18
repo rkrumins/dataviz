@@ -32,12 +32,15 @@ export function PrStatusBadge({ status, className }: { status: string; className
   )
 }
 
-/** x/y reviewers approved — hidden when a PR has no requested reviewers. */
+/** x/y approvals — as the review's rule counts them (everyone asked, or N of anyone's) where the
+ *  server says, else reviewers approved; hidden when it needs no approval. */
 export function ApprovalPill({ pr, className }: { pr: PullRequest; className?: string }) {
-  const total = pr.reviewers?.length ?? 0
+  const counted = pr.review?.approvals
+  const total = counted ? counted.required : pr.reviewers?.length ?? 0
   if (total === 0) return null
-  const done = pr.approvedBy?.length ?? 0
-  const complete = pr.approvalStatus === 'approved'
+  const done = counted ? counted.have : pr.approvedBy?.length ?? 0
+  const complete = counted ? counted.satisfied : pr.approvalStatus === 'approved'
+  const asked = pr.review ? pr.review.requiredApprovals === 0 : true
   return (
     <span
       className={cn(
@@ -45,7 +48,7 @@ export function ApprovalPill({ pr, className }: { pr: PullRequest; className?: s
         complete ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600',
         className,
       )}
-      title={`${done} of ${total} reviewer(s) approved`}
+      title={asked ? `${done} of ${total} reviewer(s) approved` : `${done} of ${total} approvals needed`}
     >
       <CheckCircle2 className="w-3 h-3" />
       {done}/{total}

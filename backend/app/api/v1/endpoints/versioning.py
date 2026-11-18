@@ -35,7 +35,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,6 +83,7 @@ from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
     ApprovalRequired,
+    ThreadsOpen,
     ChangeListTooLarge,
     ConcurrencyError,
     DiffTooLarge,
@@ -251,7 +252,19 @@ async def project_now(graph_id: str) -> None:
     depending on a separate projection worker (the original "merge has no effect" cause). NEVER
     raises (the Postgres commit already landed). On any failure (FalkorDB down/slow/apply error) or
     when FalkorDB is unconfigured, defer to the async worker via ``nudge_projection``; the
-    watermark-gated Postgres read fallback (and the "refreshing" badge) cover the brief window."""
+    watermark-gated Postgres read fallback (and the "refreshing" badge) cover the brief window.
+    Then ``main``'s newest revisions are kept as their own changes, which History's looks at them
+    and compares of them are composed from (``change_sets.py``)."""
+    try:
+        await _project_now(graph_id)
+    finally:
+        try:
+            await get_versioning_service().keep_recent_revisions(graph_id)
+        except Exception:  # noqa: BLE001 — kept when first asked for instead
+            logger.warning("keeping the newest revisions of %s failed", graph_id, exc_info=True)
+
+
+async def _project_now(graph_id: str) -> None:
     orphan = await _repair_projection_target(graph_id)   # pin projection to the real graph (self-heal)
     proj = _get_projector()
     if proj is None:
@@ -558,8 +571,20 @@ def _domain_errors():
     except AccessDenied as exc:
         raise HTTPException(status_code=403, detail={"type": "access_denied", "message": str(exc)})
     except ApprovalRequired as exc:
+        said = (f"This review needs approval from everyone asked before it merges: {exc.have} of "
+                f"{exc.required} have approved." if exc.pending else
+                f"This review needs {exc.required} approval{'s' if exc.required != 1 else ''} before it "
+                f"merges; it has {exc.have}.")
+        if exc.stale:
+            said += (f" {len(exc.stale)} approved an earlier version and "
+                     f"{'is' if len(exc.stale) == 1 else 'are'} asked again.")
         raise HTTPException(status_code=409, detail={"type": "approval_required", "pending": exc.pending,
-                                                     "stale": exc.stale})
+                                                     "stale": exc.stale, "required": exc.required,
+                                                     "have": exc.have, "message": said})
+    except ThreadsOpen as exc:
+        raise HTTPException(status_code=409, detail={
+            "type": "threads_open", "open": exc.count,
+            "message": f"{exc.count} open thread(s): resolve them before this review merges"})
     except NotUpToDate as exc:
         raise HTTPException(status_code=409, detail={
             "type": "not_up_to_date", "branchId": exc.branch_id, "behindBy": exc.behind_by,
@@ -1648,6 +1673,11 @@ class PrResponse(_ApiModel):
     # Single-PR reads only: whether the reader may approve it and merge it, and why not
     # (``_viewer_can``). What it still waits for — approvals, a pull of latest — is above.
     viewer_can: Optional[Dict[str, Any]] = Field(default=None, alias="viewerCan")
+    # Where the review stands under its data source's rule (``_review_out``): ``requiredApprovals``,
+    # ``approvals {required, have, satisfied}``, each subject asked with its state
+    # (``reviewers``), every request for changes and whether it holds, open threads and whether
+    # they hold the merge; on the single-PR read, ``you``: where the reader stands.
+    review: Optional[Dict[str, Any]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -1678,7 +1708,63 @@ def _collect_actor_ids(item: dict) -> set:
     sent_back = item.get("changes_requested")              # a review sent back: by whom
     if isinstance(sent_back, dict) and sent_back.get("by"):
         ids.add(sent_back["by"])
+    review = item.get("review")                            # who is asked, who answered, who asked for changes
+    if isinstance(review, dict):
+        for r in review.get("reviewers") or ():
+            ids.update(v for v in ((r["id"] if r.get("type") == "user" else None), r.get("by")) if v)
+        ids.update(c["by"] for c in review.get("changeRequests") or () if c.get("by"))
     return ids
+
+
+async def _review_out(svc: GraphVersioningService, session: AsyncSession, items: List[dict],
+                      rule=None) -> None:
+    """Judge each review's approvals under its data source's rule (``drafts_policy``): the service
+    reads them under the built-in one (everyone asked). Sets ``review.requiredApprovals``,
+    ``review.approvals``, whether threads hold, ``approval_status``, and approved ⇄ mergeable.
+    ``rule``: known already (the routes that read the policy); else read once per data source. An
+    item with no ``review`` is left as it is."""
+    from backend.app.services.versioning import review_state
+
+    by_graph: Dict[str, Any] = {}
+    for it in items:
+        review = it.get("review")
+        if not isinstance(review, dict):
+            continue
+        r = rule
+        if r is None:
+            g = str(it["target_graph_id"])
+            if g not in by_graph:
+                by_graph[g] = (await _pr_policy(svc, session, it)).rule
+            r = by_graph[g]
+        live = it.get("status") not in ("merged", "closed")
+        verdict = review_state.apply_rule(review.get("reviewers") or [], len(it.get("approved_by") or []), r)
+        review["requiredApprovals"] = r.required_approvals
+        review["approvals"] = {k: verdict[k] for k in ("required", "have", "satisfied")}
+        review.setdefault("threads", {})["holdMerge"] = r.threads_hold
+        if live:
+            it["approval_status"] = verdict["status"]
+            it["status"] = review_state.shown_status(it["status"], verdict["status"])
+
+
+def _you(pr: dict, viewer: str) -> None:
+    """Where the reader stands on a review (``review.you``): whether they are asked, whether it
+    waits on them — asked, live, not theirs, and not yet reviewed as the draft is now — whether the
+    draft changed since their latest review, and that review's verdict."""
+    review = pr.get("review")
+    if not isinstance(review, dict):
+        return
+    asked = next((r for r in review.get("reviewers") or () if r.get("type") == "user" and r.get("id") == viewer), None)
+    mine = next((r for r in review.get("reviews") or () if r.get("by") == viewer), None)
+    live = pr.get("status") not in ("merged", "closed")
+    answered = mine is not None and mine.get("current") and (
+        asked is None or (mine.get("at") or "") >= (asked.get("requestedAt") or ""))
+    review["you"] = {
+        "requested": asked is not None,
+        "needsReview": bool(asked is not None and live and pr.get("actor") != viewer and not answered),
+        "updatedSinceReviewed": bool(mine is not None and not mine.get("current")),
+        "verdict": mine.get("verdict") if mine else None,
+        "reviewedAt": mine.get("at") if mine else None,
+    }
 
 
 async def _attach_user_names(
@@ -2554,7 +2640,7 @@ async def _publish_from_job(job: dict) -> dict:
                     commit_id = await svc.merge_mr(
                         mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
                         resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
-                        queued=True, node_identity=identity, self_merge=policy.self_merge)
+                        queued=True, node_identity=identity, self_merge=policy.self_merge, rule=policy.rule)
                 else:
                     commit_id = await svc.publish(
                         graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
@@ -5423,7 +5509,7 @@ async def _fork_merge_from_job(job: dict) -> dict:
                 commit_id = await svc.merge_pr(
                     pr_id=job["prId"], actor=actor, message=job["message"], pinned_seq=job["pinnedSeq"],
                     queued=True, containment_edge_types=cset, ontology_rules=rules,
-                    self_merge=policy.self_merge)
+                    self_merge=policy.self_merge, rule=policy.rule)
         except HTTPException as exc:
             return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
     await _bump_main_cache(graph_id)
@@ -5478,6 +5564,7 @@ async def list_pull_requests(
     prs = await svc.list_pulls(
         target_graph_id=graph_id, limit=limit, offset=offset, viewer=viewer,
         originating_view_id=view_id)
+    await _review_out(svc, session, prs)
     await _attach_user_names(session, prs)
     return prs
 
@@ -5491,6 +5578,8 @@ async def get_pull_request(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
+    await _review_out(svc, session, [pr])
+    _you(pr, user.id)
     await _attach_user_names(session, [pr])
     pr["viewer_can"] = await _viewer_can(svc, session, pr, user.id, claims, ws_id)
     return pr
@@ -5502,11 +5591,15 @@ async def update_pull_request(
     _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Edit a PR's title/description/reviewers (review metadata)."""
+    policy = await _pr_policy(svc, session, _pr)
     with _domain_errors():
-        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description,
-                                   reviewers=body.reviewers)
+        meta = await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description,
+                                   reviewers=body.reviewers, actor=_user.id, rule=policy.rule)
+    await _review_out(svc, session, [meta], policy.rule)
+    return meta
 
 
 @router.get("/pulls/{pr_id}/preview", response_model=MergePreviewResponse)
@@ -5622,10 +5715,17 @@ async def _viewer_can(svc: GraphVersioningService, session: AsyncSession, pr: di
     # Accepting or rejecting its changes one by one is reviewing it: whoever may approve it, on a
     # draft's review (a fork's merges its committed history whole).
     decide = _first_refusal((pr.get("source_graph_id") != pr.get("target_graph_id"), "fork_review")) or approve
+    review = pr.get("review") if isinstance(pr.get("review"), dict) else {}
+    holds_verdict = viewer in (pr.get("approved_by") or []) or viewer in (pr.get("stale_approved_by") or []) \
+        or any(c.get("by") == viewer for c in review.get("changeRequests") or ())
     return {"approve": approve is None, "merge": merge is None,
             "approveReason": approve, "mergeReason": merge,
             "comment": comment is None, "commentReason": comment, "moderate": manages,
-            "decide": decide is None, "decideReason": decide}
+            "decide": decide is None, "decideReason": decide,
+            # Asking for changes is deciding them: a draft's review, by whoever may approve it.
+            "requestChanges": decide is None, "requestChangesReason": decide,
+            "editReviewers": manages and settled is None,
+            "withdraw": settled is None and holds_verdict}
 
 
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
@@ -5640,9 +5740,11 @@ async def approve_pull_request(
     await _not_their_own(session, _pr, user.id)
     policy = await _pr_policy(svc, session, _pr)
     with _domain_errors():
-        return await svc.approve_pr(pr_id=pr_id, actor=user.id,
+        meta = await svc.approve_pr(pr_id=pr_id, actor=user.id,
                                     expected_head_commit_id=body.expected_head_commit_id if body else None,
-                                    self_approval=policy.self_approval)
+                                    self_approval=policy.self_approval, rule=policy.rule)
+    await _review_out(svc, session, [meta], policy.rule)
+    return meta
 
 
 @router.post("/pulls/{pr_id}/close", response_model=PrResponse)
@@ -5651,9 +5753,12 @@ async def close_pull_request(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # a manager rejects/closes
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     with _domain_errors():
-        return await svc.close_pr(pr_id=pr_id, actor=user.id)
+        meta = await svc.close_pr(pr_id=pr_id, actor=user.id)
+    await _review_out(svc, session, [meta])
+    return meta
 
 
 @router.post("/pulls/{pr_id}/merge", response_model=PublishResponse)
@@ -5685,6 +5790,7 @@ async def merge_pull_request(
         commit_id = await svc.merge_pr(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
             containment_edge_types=cset, ontology_rules=rules, self_merge=policy.self_merge,
+            rule=policy.rule,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # base advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
@@ -5766,6 +5872,7 @@ async def list_merge_requests(
 ):
     """All merge requests targeting this graph's ``main`` (draft MRs + incoming fork PRs)."""
     prs = await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
+    await _review_out(svc, session, prs)
     await _attach_user_names(session, prs)
     return prs
 
@@ -5788,6 +5895,7 @@ async def list_view_pull_requests(
     """PRs raised from this view (matched via the source branch's ``originating_view_id``)."""
     prs = await svc.list_pulls(
         originating_view_id=view_id, status=pr_status, limit=limit, offset=offset, viewer=viewer)
+    await _review_out(svc, session, prs)
     await _attach_user_names(session, prs)
     return prs
 
@@ -5821,6 +5929,10 @@ class DraftsPolicySettings(_ApiModel):
     levels: Optional[Literal["any", "public_only", "private_only", "inherit"]] = None
     self_approval: Optional[Union[bool, Literal["inherit"]]] = Field(default=None, alias="selfApproval")
     self_merge: Optional[Union[bool, Literal["inherit"]]] = Field(default=None, alias="selfMerge")
+    # StrictInt: ``true`` is not 1 approval.
+    required_approvals: Optional[Union[Annotated[StrictInt, Field(ge=0, le=10)], Literal["inherit"]]] = Field(
+        default=None, alias="requiredApprovals")
+    threads_hold: Optional[Union[bool, Literal["inherit"]]] = Field(default=None, alias="threadsHold")
 
 
 class EffectiveDraftsPolicyModel(_ApiModel):
@@ -5828,6 +5940,8 @@ class EffectiveDraftsPolicyModel(_ApiModel):
     levels: str
     self_approval: bool = Field(alias="selfApproval")
     self_merge: bool = Field(alias="selfMerge")
+    required_approvals: int = Field(default=0, alias="requiredApprovals")
+    threads_hold: bool = Field(default=False, alias="threadsHold")
     sources: Dict[str, str]
 
 
@@ -5987,6 +6101,7 @@ async def list_data_source_pull_requests(
         raise HTTPException(status_code=404, detail="data source not found in workspace")
     prs = await svc.list_pulls(
         data_source_id=data_source_id, status=pr_status, limit=limit, offset=offset, viewer=viewer)
+    await _review_out(svc, session, prs)
     await _attach_user_names(session, prs)
     return prs
 
@@ -6000,6 +6115,8 @@ async def get_merge_request(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
+    await _review_out(svc, session, [pr])
+    _you(pr, user.id)
     await _attach_user_names(session, [pr])
     pr["viewer_can"] = await _viewer_can(svc, session, pr, user.id, claims, ws_id)
     return pr
@@ -6011,11 +6128,15 @@ async def update_merge_request(
     _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Edit a merge request's title/description/reviewers (review metadata)."""
+    policy = await _pr_policy(svc, session, _pr)
     with _domain_errors():
-        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description,
-                                   reviewers=body.reviewers)
+        meta = await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description,
+                                   reviewers=body.reviewers, actor=_user.id, rule=policy.rule)
+    await _review_out(svc, session, [meta], policy.rule)
+    return meta
 
 
 @router.get("/merge-requests/{pr_id}/preview", response_model=MergePreviewResponse)
@@ -6088,9 +6209,11 @@ async def approve_merge_request(
     await _not_their_own(session, _pr, user.id)
     policy = await _pr_policy(svc, session, _pr)
     with _domain_errors():
-        return await svc.approve_pr(pr_id=pr_id, actor=user.id,
+        meta = await svc.approve_pr(pr_id=pr_id, actor=user.id,
                                     expected_head_commit_id=body.expected_head_commit_id if body else None,
-                                    self_approval=policy.self_approval)
+                                    self_approval=policy.self_approval, rule=policy.rule)
+    await _review_out(svc, session, [meta], policy.rule)
+    return meta
 
 
 @router.post("/merge-requests/{pr_id}/close", response_model=PrResponse)
@@ -6099,9 +6222,12 @@ async def close_merge_request(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     with _domain_errors():
-        return await svc.close_pr(pr_id=pr_id, actor=user.id)
+        meta = await svc.close_pr(pr_id=pr_id, actor=user.id)
+    await _review_out(svc, session, [meta])
+    return meta
 
 
 class RequestChangesRequest(_ApiModel):
@@ -6126,9 +6252,11 @@ async def request_changes_on_merge_request(
     if not can["decide"]:
         raise HTTPException(status_code=403, detail={"type": can["decideReason"] or "forbidden",
                                                      "message": "You can't send this review back."})
+    policy = await _pr_policy(svc, session, _pr)
     with _domain_errors():
         meta = await svc.request_changes(pr_id=pr_id, actor=user.id, reason=body.reason,
-                                         expected_head_commit_id=body.expected_head_commit_id)
+                                         expected_head_commit_id=body.expected_head_commit_id, rule=policy.rule)
+    await _review_out(svc, session, [meta], policy.rule)
     target = str(_pr["target_graph_id"])
     await _tell_draft_people(session, svc, "review.changes_requested", ws_id=ws_id,
                              meta=await svc.get_graph(target) or {}, graph_id=target,
@@ -6142,10 +6270,85 @@ async def withdraw_changes_request(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Withdraw a request for changes: the reviewer who made it."""
+    policy = await _pr_policy(svc, session, _pr)
     with _domain_errors():
-        return await svc.withdraw_changes_request(pr_id=pr_id, actor=user.id)
+        meta = await svc.withdraw_changes_request(pr_id=pr_id, actor=user.id, rule=policy.rule)
+    await _review_out(svc, session, [meta], policy.rule)
+    return meta
+
+
+class SubmitReviewRequest(_ApiModel):
+    verdict: Literal["approve", "request_changes", "comment"]
+    # The summary: what the reviewer thinks, beside the changes they accepted, rejected and discussed.
+    body: Optional[str] = Field(default=None, max_length=10_000)
+    # The source head the reviewer saw: 409 head_moved when the draft has moved on since.
+    expected_head_commit_id: Optional[str] = Field(default=None, alias="expectedHeadCommitId")
+
+
+_VERDICT_NEEDS = {"approve": ("approve", "approveReason"),
+                  "request_changes": ("requestChanges", "requestChangesReason"),
+                  "comment": ("comment", "commentReason")}
+
+
+@router.post("/merge-requests/{pr_id}/reviews", response_model=PrResponse)
+@router.post("/pulls/{pr_id}/reviews", response_model=PrResponse)
+async def submit_review(
+    ws_id: str, pr_id: str, body: SubmitReviewRequest,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Give your review: a verdict — ``approve``, ``request_changes`` (a draft's review goes back
+    to its author until the draft changes) or ``comment`` (feedback, with a summary) — and a summary.
+    It replaces your earlier verdict. Each verdict needs what its own action does (``viewerCan``):
+    approving, a manager who may approve it; asking for changes, whoever may decide its changes;
+    commenting, a person. Asking for changes tells the draft's people."""
+    can = await _viewer_can(svc, session, _pr, user.id, claims, ws_id)
+    allowed, reason = _VERDICT_NEEDS[body.verdict]
+    if not can[allowed]:
+        raise HTTPException(status_code=403, detail={"type": can[reason] or "forbidden",
+                                                     "message": "You can't give this verdict on this review."})
+    if body.verdict == "comment" and not (body.body or "").strip():
+        raise HTTPException(status_code=422, detail={"type": "summary_required",
+                                                     "message": "Say what your comment is."})
+    if body.verdict == "approve":
+        await _not_their_own(session, _pr, user.id)
+    policy = await _pr_policy(svc, session, _pr)
+    with _domain_errors():
+        meta = await svc.submit_review(pr_id=pr_id, actor=user.id, verdict=body.verdict, body=body.body,
+                                       expected_head_commit_id=body.expected_head_commit_id,
+                                       self_approval=policy.self_approval, rule=policy.rule)
+    if body.verdict == "request_changes":
+        target = str(_pr["target_graph_id"])
+        await _tell_draft_people(session, svc, "review.changes_requested", ws_id=ws_id,
+                                 meta=await svc.get_graph(target) or {}, graph_id=target,
+                                 branch_id=str(_pr["source_branch_id"]), actor=user.id, pr_id=pr_id)
+    await _review_out(svc, session, [meta], policy.rule)
+    _you(meta, user.id)
+    return meta
+
+
+@router.delete("/merge-requests/{pr_id}/reviews/mine", response_model=PrResponse)
+@router.delete("/pulls/{pr_id}/reviews/mine", response_model=PrResponse)
+async def withdraw_my_review(
+    ws_id: str, pr_id: str,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Take back your verdict — your approval, or your request for changes."""
+    policy = await _pr_policy(svc, session, _pr)
+    with _domain_errors():
+        meta = await svc.withdraw_review(pr_id=pr_id, actor=user.id, rule=policy.rule)
+    await _review_out(svc, session, [meta], policy.rule)
+    _you(meta, user.id)
+    return meta
 
 
 @router.post("/merge-requests/{pr_id}/discard-rejected")
@@ -6210,7 +6413,7 @@ async def merge_merge_request(
         commit_id = await svc.merge_mr(
             mr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
             containment_edge_types=cset, ontology_rules=rules, node_identity=identity,
-            self_merge=policy.self_merge, mode=body.mode,
+            self_merge=policy.self_merge, mode=body.mode, rule=policy.rule,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness

@@ -163,7 +163,10 @@ async def _story(prov: str, key: str) -> None:
             assert r.status_code == 200, r.text
             r = await c.post(f"{pr}/merge", json={"message": "ship it"}, headers=_as("pat"))
             assert r.status_code == 409, r.text
-            assert r.json()["detail"] == {"type": "approval_required", "pending": ["rita"], "stale": ["rita"]}, r.text
+            detail = r.json()["detail"]
+            assert {k: detail[k] for k in ("type", "pending", "stale")} == {
+                "type": "approval_required", "pending": ["rita"], "stale": ["rita"]}, r.text
+            assert detail["message"].endswith("1 approved an earlier version and is asked again."), r.text
             head = (await c.get(pr, headers=_as("rita"))).json()["headCommitId"]
             assert head != seen
             r = await c.post(f"{pr}/approve", json={"expectedHeadCommitId": seen}, headers=_as("rita"))

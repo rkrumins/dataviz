@@ -545,7 +545,7 @@ export function BatchImport({ steps, onBackToFile, onClose, preset }: {
           navigate(branchId ? `/views/${viewId}?branch=${branchId}` : `/views/${viewId}`)
           onClose()
         }} onOpenReview={(workspaceId, prId) => {
-          navigate(`/workspaces/${workspaceId}/reviews?pr=${prId}`)
+          navigate(`/workspaces/${workspaceId}/reviews/${prId}`)
           onClose()
         }} />
       ) : step === 'target' ? (

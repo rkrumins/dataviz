@@ -529,3 +529,117 @@ class ChangeTree:
 
 
 _STATUS_SLOT = {"added": 0, "modified": 1, "removed": 2}
+
+
+class TreeHierarchy:
+    """An origin's changes grouped as the Changes tree shows them (``DiffSummaryResponse`` and its
+    children), from its :class:`ChangeTree` — no payload. Changed entities nest under their
+    containers, up to a top-level one; a change with no container is bucketed by its type, and a
+    relationship by its type (a bucket of one shows as that entity); containment links are
+    structure, counted but not rows. A container counts the changed entities under it. The rows
+    carry no before and after: the caller reads those for the page it serves."""
+
+    def __init__(self, tree: ChangeTree):
+        self.tree = tree
+        index = tree.index
+        self.changed: Dict[str, ChangeEntry] = {e.entity_id: e for e in index.entries}
+        parent_of = tree.parent_of
+        nodes = [e.entity_id for e in index.entries if e.kind == "node"]
+        relevant: Set[str] = set(nodes)
+        for eid in nodes:
+            at, seen = parent_of.get(eid), 0
+            while at and at not in relevant and seen < 64:
+                relevant.add(at)
+                at, seen = parent_of.get(at), seen + 1
+        self.children_of: Dict[str, List[str]] = {}
+        for eid in relevant:
+            par = parent_of.get(eid)
+            if par in relevant:
+                self.children_of.setdefault(par, []).append(eid)
+        self.buckets: Dict[str, List[str]] = {}
+        roots: List[str] = []
+        for eid in relevant:
+            if parent_of.get(eid) in relevant:
+                continue
+            if eid in self.children_of:
+                roots.append(eid)
+            else:
+                self.buckets.setdefault("type:" + (self.type_of(eid) or "Other"), []).append(eid)
+        for e in index.entries:
+            if e.kind == "edge" and not e.structural:
+                self.buckets.setdefault("edge:" + (e.type or "Relationship"), []).append(e.entity_id)
+        for key in list(self.buckets):
+            if len(self.buckets[key]) == 1:
+                roots.append(self.buckets.pop(key)[0])
+        self.roots = roots
+        self._rollup: Dict[str, Dict[str, int]] = {}
+        self.impact: Dict[str, int] = {}
+        for eid in relevant:
+            t = self.type_of(eid) or "Other"
+            self.impact[t] = self.impact.get(t, 0) + 1
+
+    def type_of(self, eid: str) -> Optional[str]:
+        return self.tree.type_of(eid)
+
+    def edges(self, eids: Iterable[str]) -> List[ChangeEntry]:
+        """The relationship changes among ``eids``: what needs its ends named to be labelled."""
+        return [e for e in (self.changed.get(x) for x in eids) if e is not None and e.kind == "edge"]
+
+    def rollup(self, eid: str) -> Dict[str, int]:
+        hit = self._rollup.get(eid)
+        if hit is not None:
+            return hit
+        c = _zero()
+        stack, order = [eid], []
+        while stack:                                   # iterative: a deep tree never recurses out
+            x = stack.pop()
+            order.append(x)
+            stack.extend(self.children_of.get(x, ()))
+        for x in order:
+            e = self.changed.get(x)
+            if e is not None and e.kind == "node":
+                c[e.status] += 1
+        self._rollup[eid] = c
+        return c
+
+    def view(self, eid: str, names: Mapping[str, Optional[str]]) -> Dict[str, Any]:
+        e = self.changed.get(eid)
+        kids = self.children_of.get(eid, [])
+        single = _zero()
+        if e is not None:
+            single[e.status] += 1
+        if e is not None and e.kind == "edge":
+            label = f"{names.get(e.src or '') or e.src or '?'} → {names.get(e.tgt or '') or e.tgt or '?'}"
+        else:
+            label = self.tree.name_of(eid) or eid
+        return {"key": eid, "kind": "container" if kids else "leaf",
+                "entityKind": "edge" if e is not None and e.kind == "edge" else "node",
+                "label": label, "entityType": self.type_of(eid),
+                "status": e.status if e is not None else "unchanged",
+                "counts": self.rollup(eid) if kids else single, "childTotal": len(kids),
+                "deleted": e is not None and e.status == "removed", "before": None, "after": None}
+
+    def bucket_view(self, key: str) -> Dict[str, Any]:
+        members = self.buckets[key]
+        c = _zero()
+        for m in members:
+            c[self.changed[m].status] += 1
+        kind, _, name = key.partition(":")
+        return {"key": key, "kind": "bucket", "entityKind": "edge" if kind == "edge" else "node",
+                "label": name, "entityType": name if kind == "type" else None, "status": None,
+                "counts": c, "childTotal": len(members), "deleted": False, "before": None, "after": None}
+
+    def top(self, names: Mapping[str, Optional[str]]) -> List[Dict[str, Any]]:
+        """The top level: containers and lone changes, most-changed first, then the buckets."""
+        roots = sorted((self.view(e, names) for e in self.roots),
+                       key=lambda g: (-sum(g["counts"].values()), g["label"].lower()))
+        return roots + sorted((self.bucket_view(k) for k in self.buckets), key=lambda g: g["label"].lower())
+
+    def members(self, key: str) -> List[str]:
+        return self.children_of.get(key) or self.buckets.get(key) or []
+
+    def children(self, key: str, names: Mapping[str, Optional[str]]) -> List[Dict[str, Any]]:
+        """What sits directly in ``key`` (a container, or a bucket): containers first, by label."""
+        views = [self.view(e, names) for e in self.members(key)]
+        views.sort(key=lambda v: (0 if v["kind"] == "container" else 1, v["label"].lower(), v["key"]))
+        return views

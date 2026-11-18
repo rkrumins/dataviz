@@ -32,7 +32,7 @@ const renderButton = (behind: number) => render(
   <MemoryRouter initialEntries={['/here']}>
     <Routes>
       <Route path="/here" element={<ProposeToParentButton wsId="ws1" forkGraphId="g_f" parentDataSourceId="ds1" behind={behind} />} />
-      <Route path="/workspaces/:wsId/reviews" element={<Where />} />
+      <Route path="/workspaces/:wsId/reviews/:prId" element={<Where />} />
     </Routes>
   </MemoryRouter>,
 )
@@ -62,7 +62,7 @@ describe('ProposeToParentButton', () => {
     expect(screen.getByRole('button', { name: 'Pick Bo' })).toHaveAttribute('data-source', 'ds1')
     fireEvent.click(screen.getByRole('button', { name: 'Pick Bo' }))
     fireEvent.click(screen.getByRole('button', { name: 'Open review' }))
-    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/workspaces/ws1/reviews?pr=pr_9'))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/workspaces/ws1/reviews/pr_9'))
     expect(mutateAsync).toHaveBeenCalledWith(['ws1', 'g_f'],
       { title: 'Q3 restructure', description: 'Moves the marts', reviewers: ['u2'] })
     expect(notify).toHaveBeenCalledWith('success', 'Sent for review.')
@@ -73,7 +73,7 @@ describe('ProposeToParentButton', () => {
     renderButton(0)
     fireEvent.click(screen.getByRole('button', { name: 'Propose to parent' }))
     fireEvent.click(screen.getByRole('button', { name: 'Open review' }))
-    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/workspaces/ws1/reviews?pr=pr_old'))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/workspaces/ws1/reviews/pr_old'))
   })
 
   it('keeps the focus in the field it is in when the row around it renders again', () => {
