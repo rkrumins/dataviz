@@ -13,8 +13,9 @@ import { Check, Maximize2, PencilLine, X as XIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { FieldType } from './fieldTypes'
-import { isIsoDate } from './fieldTypes'
-import { BooleanToggle, TagInput } from './valueWidgets'
+import { isIsoDate, isUrl } from './fieldTypes'
+import { fromLocalInput, nowInstant, readerZone, toLocalInput } from './dateTime'
+import { BooleanToggle, TagInput, linkLabel } from './valueWidgets'
 import { MarkdownValueModal } from './MarkdownValueEditor'
 
 const FIELD = cn(
@@ -35,10 +36,37 @@ function parse(type: FieldType, draft: string): { value: unknown } | { error: st
     if (draft === '') return { value: '' }
     return isIsoDate(draft) ? { value: draft } : { error: 'Pick a date' }
   }
+  if (type === 'datetime') {
+    if (draft === '') return { value: '' }
+    const at = fromLocalInput(draft)
+    return at ? { value: at } : { error: 'Pick a date and a time' }
+  }
   return { value: draft }
 }
 
 const same = (a: unknown, b: unknown) => a === b || (Number.isNaN(a) && Number.isNaN(b))
+
+/** Today, as the reader's own calendar has it. */
+function today(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** What is being typed, read back the way it will show: a number grouped, a link by its site, a
+ *  moment as it is stored (in UTC). */
+function readBack(type: FieldType, draft: string): string | null {
+  const t = draft.trim()
+  if (type === 'datetime' && t) {
+    const at = fromLocalInput(t)
+    return at ? `In ${readerZone()} · stored as ${at}` : null
+  }
+  if (type === 'number' && t) {
+    const n = Number(t.replace(/,/g, ''))
+    return Number.isFinite(n) && Math.abs(n) >= 1000 ? `Reads as ${n.toLocaleString()}` : null
+  }
+  if (type === 'url' && t) return isUrl(t) ? `Opens ${linkLabel(t)}` : 'Doesn’t look like a web address yet — links start https://'
+  return null
+}
 
 export function InlineValue({ value, fieldType, fieldLabel, onCommit, readView }: {
   value: unknown
@@ -97,7 +125,8 @@ function FieldEditor({ value, fieldType, fieldLabel, onCommit, onDone }: {
   onCommit: (next: unknown) => void
   onDone: () => void
 }) {
-  const initial = value === null || value === undefined ? '' : String(value)
+  // A moment is picked in the reader's time; anything else, as written.
+  const initial = value === null || value === undefined ? '' : fieldType === 'datetime' ? toLocalInput(value) : String(value)
   const [draft, setDraft] = useState(initial)
   const [error, setError] = useState<string | null>(null)
   const [modal, setModal] = useState(false)
@@ -110,7 +139,7 @@ function FieldEditor({ value, fieldType, fieldLabel, onCommit, onDone }: {
     if (!el) return
     el.focus()
     if (multiline) el.setSelectionRange(el.value.length, el.value.length)
-    else if (fieldType !== 'date') el.select()
+    else if (fieldType !== 'date' && fieldType !== 'datetime') el.select()
   }, [multiline, fieldType])
 
   // Grows with what is typed, up to a few lines; then it scrolls.
@@ -118,7 +147,7 @@ function FieldEditor({ value, fieldType, fieldLabel, onCommit, onDone }: {
     const el = ref.current
     if (!el || !multiline) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+    el.style.height = `${Math.min(el.scrollHeight, 240)}px`
   }, [draft, multiline])
 
   const keep = (raw = draft) => {
@@ -167,10 +196,11 @@ function FieldEditor({ value, fieldType, fieldLabel, onCommit, onDone }: {
           <input
             ref={ref}
             {...common}
-            type={fieldType === 'date' ? 'date' : fieldType === 'url' ? 'url' : 'text'}
+            type={fieldType === 'date' ? 'date' : fieldType === 'datetime' ? 'datetime-local' : fieldType === 'url' ? 'url' : 'text'}
+            step={fieldType === 'datetime' ? (draft.includes('.') ? 0.001 : 1) : undefined}
             inputMode={fieldType === 'number' ? 'decimal' : undefined}
             placeholder={fieldType === 'url' ? 'https://…' : undefined}
-            className={cn(FIELD, fieldType === 'number' && 'font-mono', fieldType === 'date' && '[color-scheme:light] dark:[color-scheme:dark]',
+            className={cn(FIELD, fieldType === 'number' && 'font-mono', (fieldType === 'date' || fieldType === 'datetime') && '[color-scheme:light] dark:[color-scheme:dark]',
               error && 'border-rose-500/60 ring-rose-500/15')}
           />
         )}
@@ -199,8 +229,25 @@ function FieldEditor({ value, fieldType, fieldLabel, onCommit, onDone }: {
       </div>
       {error ? (
         <p role="alert" className="text-2xs text-rose-600 dark:text-rose-400 pl-0.5">{error}</p>
-      ) : multiline && (
+      ) : multiline ? (
         <p className="text-2xs text-ink-muted pl-0.5">Enter keeps · Shift+Enter new line · Esc cancels</p>
+      ) : fieldType === 'date' || fieldType === 'datetime' ? (
+        <div className="flex items-center gap-1 pl-0.5 min-w-0">
+          {fieldType === 'date' ? (
+            <button type="button" onMouseDown={hold} onClick={() => { setDraft(today()); keep(today()) }}
+              className="px-1.5 h-5 rounded text-2xs font-semibold text-accent-lineage hover:bg-accent-lineage/10">Today</button>
+          ) : (
+            <button type="button" onMouseDown={hold} onClick={() => { const at = toLocalInput(nowInstant()); setDraft(at); keep(at) }}
+              className="px-1.5 h-5 rounded text-2xs font-semibold text-accent-lineage hover:bg-accent-lineage/10">Now</button>
+          )}
+          <button type="button" onMouseDown={hold} onClick={() => { setDraft(''); keep('') }}
+            className="px-1.5 h-5 rounded text-2xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10">Clear</button>
+          {readBack(fieldType, draft) && (
+            <span aria-live="polite" className="text-2xs text-ink-muted truncate">{readBack(fieldType, draft)}</span>
+          )}
+        </div>
+      ) : readBack(fieldType, draft) && (
+        <p aria-live="polite" className="text-2xs text-ink-muted pl-0.5 truncate">{readBack(fieldType, draft)}</p>
       )}
       {modal && (
         <MarkdownValueModal

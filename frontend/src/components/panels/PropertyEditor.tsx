@@ -17,7 +17,8 @@
  * (with Restore).
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect, memo, createContext, useContext } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, memo, createContext, useContext, type ReactNode } from 'react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -34,11 +35,10 @@ import {
   Search,
   Maximize2,
   Copy,
-  Folder,
-  FolderOpen,
   FolderPlus,
   Undo2,
   Sparkles,
+  SlidersHorizontal,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HighlightedText } from '@/components/ui/HighlightedText'
@@ -57,18 +57,20 @@ import {
 import {
   BooleanToggle,
   DateField,
+  DateTimeField,
   UrlField,
   TagInput,
   ClampedText,
-  FormattedDate,
-  FormattedLink,
-  FormattedTags,
+  isLongText,
 } from './property/valueWidgets'
+import { RichValue, NOT_SET } from './property/RichValue'
 import { MarkdownValueModal } from './property/MarkdownValueEditor'
 import { InlineValue } from './property/InlineValue'
 import { propertyMarks, shortValue, type ChangeMark, type PropertyMarks } from './property/changeMarks'
 import { detectValue, parsePastedLines, rankSuggestions, type PastedProperty, type PropertySuggestion } from './property/composerModel'
 import { useRecentPropertyKeys } from '@/store/recentPropertyKeys'
+import { usePersonaMode } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 
 // ============================================
 // Types
@@ -79,7 +81,7 @@ type ValueKind = 'string' | 'number' | 'boolean' | 'null' | 'object' | 'array'
 /** In read-only (View) mode, whether string values render as formatted Markdown
  *  or as raw source. Irrelevant in edit mode (values are editable inputs). */
 type DisplayMode = 'formatted' | 'source'
-const DisplayModeContext = createContext<DisplayMode>('source')
+const DisplayModeContext = createContext<DisplayMode>('formatted')
 
 /** In Edit mode, whether text values are edited as rich WYSIWYG (default) or as
  *  raw Markdown source. */
@@ -117,6 +119,13 @@ export interface PropertyEditorProps {
   /** Property names worth adding — offered as one-click starts next to "Add property", and as the
    *  name is typed (with how many others of the type carry each, and an example value). */
   suggestions?: ReadonlyArray<string | PropertySuggestion>
+  /** Remember which sections are open under this name (one per kind of entity), with the
+   *  drawer's own sections. Without it, they start the same way each time. */
+  sectionsKey?: string
+  /** Properties shown at a glance: marked so, where they are listed. */
+  featuredKeys?: readonly string[]
+  /** Feature a property at a glance, or stop — offered on each row. */
+  onToggleFeatured?: (key: string) => void
 }
 
 const MAX_DEPTH = 6
@@ -159,12 +168,16 @@ export function PropertyEditor({
   published,
   startAdding,
   suggestions,
+  sectionsKey,
+  featuredKeys,
+  onToggleFeatured,
 }: PropertyEditorProps) {
   return (
     <InlineModeContext.Provider value={!!inline && !readOnly}>
       <PropertyEditorRoot value={value} onChange={onChange} readOnlyKeys={readOnlyKeys} bare={bare} readOnly={readOnly}
         searchable={searchable} groupByPath={groupByPath} original={original} published={published}
-        startAdding={startAdding} suggestions={suggestions} />
+        startAdding={startAdding} suggestions={suggestions} sectionsKey={sectionsKey}
+        featuredKeys={featuredKeys} onToggleFeatured={onToggleFeatured} />
     </InlineModeContext.Provider>
   )
 }
@@ -181,6 +194,9 @@ function PropertyEditorRoot({
   published,
   startAdding,
   suggestions,
+  sectionsKey,
+  featuredKeys,
+  onToggleFeatured,
 }: Omit<PropertyEditorProps, 'inline'>) {
   const rootKind = kindOf(value)
 
@@ -202,6 +218,9 @@ function PropertyEditorRoot({
         published={published}
         startAdding={startAdding}
         suggestions={suggestions}
+        sectionsKey={sectionsKey}
+        featuredKeys={featuredKeys}
+        onToggleFeatured={onToggleFeatured}
       />
     )
   }
@@ -240,13 +259,15 @@ function SearchBox({
   query,
   onChange,
   placeholder,
+  className,
 }: {
   query: string
   onChange: (q: string) => void
   placeholder: string
+  className?: string
 }) {
   return (
-    <div className="relative mb-2">
+    <div className={cn('relative mb-2', className)}>
       <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted pointer-events-none" />
       <input
         type="text"
@@ -261,8 +282,8 @@ function SearchBox({
       {query && (
         <button
           onClick={() => onChange('')}
+          aria-label="Clear search"
           className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 flex items-center justify-center rounded text-ink-muted hover:text-ink"
-          title="Clear search"
         >
           <XIcon className="w-3 h-3" />
         </button>
@@ -289,9 +310,12 @@ interface ObjectBodyProps {
   /** What each key's edit did (root only — see `propertyMarks`), and putting one back. */
   marks?: PropertyMarks['marks']
   onRevert?: (key: string) => void
+  /** Root only: the keys shown at a glance, and featuring one. */
+  featured?: ReadonlySet<string>
+  onToggleFeatured?: (key: string) => void
 }
 
-function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, searchable, externalQuery, marks, onRevert }: ObjectBodyProps) {
+function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, searchable, externalQuery, marks, onRevert, featured, onToggleFeatured }: ObjectBodyProps) {
   const [adding, setAdding] = useState(false)
   const [ownQuery, setOwnQuery] = useState('')
   const usesExternalQuery = externalQuery !== undefined
@@ -368,6 +392,7 @@ function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, sear
             rowKey={key}
             value={v}
             readOnly={readOnly || (depth === 0 && readOnlyKeys?.includes(key))}
+            locked={depth === 0 && readOnlyKeys?.includes(key)}
             depth={depth}
             query={isSearchRoot ? query : ''}
             onKeyChange={(nk) => updateKey(key, nk)}
@@ -377,6 +402,8 @@ function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, sear
             was={marks?.get(key)?.was}
             unsaved={marks?.get(key)?.unsaved}
             onRevert={onRevert && marks?.has(key) ? () => onRevert(key) : undefined}
+            featured={featured?.has(key)}
+            onToggleFeatured={onToggleFeatured ? () => onToggleFeatured(key) : undefined}
           />
         ))}
         {(isSearchRoot || usesExternalQuery) && query.trim() && filteredEntries.length === 0 && (
@@ -492,7 +519,7 @@ function ArrayBody({ value, onChange, depth, bare, readOnly, searchable }: Array
           {keyedItems.map((item) => (
             <Reorder.Item key={item.id} value={item} className="list-none">
               <PropertyRow
-                rowKey={`[${item.index}]`}
+                rowKey={`Item ${item.index + 1}`}
                 value={item.value}
                 depth={depth}
                 isArrayItem
@@ -507,7 +534,7 @@ function ArrayBody({ value, onChange, depth, bare, readOnly, searchable }: Array
           {visibleItems.map((item) => (
             <PropertyRow
               key={item.id}
-              rowKey={`[${item.index}]`}
+              rowKey={`Item ${item.index + 1}`}
               value={item.value}
               depth={depth}
               isArrayItem
@@ -554,6 +581,8 @@ interface PropertyRowProps {
   rowKey: string
   value: unknown
   readOnly?: boolean
+  /** A key the caller keeps as it is (`readOnlyKeys`): shown with a lock. */
+  locked?: boolean
   isArrayItem?: boolean
   depth: number
   query?: string
@@ -568,6 +597,34 @@ interface PropertyRowProps {
   unsaved?: boolean
   /** Put the row back as it was read. */
   onRevert?: () => void
+  /** Shown at a glance (marked so). */
+  featured?: boolean
+  /** Feature it at a glance, or stop. */
+  onToggleFeatured?: () => void
+}
+
+/** A key as stored. A flat key's folders (`Technical/Physical/`) read quieter than its own name;
+ *  a long key wraps to two lines, the whole of it on hover. */
+function KeyLabel({ rowKey, query, locked, tip = true }: { rowKey: string; query: string; locked?: boolean; tip?: boolean }) {
+  const cut = rowKey.lastIndexOf(PATH_SEP)
+  const folders = cut > 0 && cut < rowKey.length - 1 ? rowKey.slice(0, cut + 1) : ''
+  const own = folders ? rowKey.slice(cut + 1) : rowKey
+  const label = (
+    <span className="min-w-0 text-xs font-mono break-all line-clamp-2">
+      {folders && <span className="text-ink-muted"><HighlightedText text={folders} query={query} /></span>}
+      <span className="text-ink-secondary"><HighlightedText text={own} query={query} /></span>
+    </span>
+  )
+  return (
+    <span className="inline-flex items-center gap-1.5 min-w-0 max-w-full">
+      {locked && (
+        <HoverTip label="Kept as it is" detail="This property can't be changed here" className="inline-flex flex-shrink-0">
+          <Lock aria-label="Locked" className="w-3 h-3 text-ink-muted" />
+        </HoverTip>
+      )}
+      {tip && rowKey.length > 28 ? <HoverTip label={rowKey} className="inline-flex min-w-0">{label}</HoverTip> : label}
+    </span>
+  )
 }
 
 /** The row's left edge and badge for what its edit did. */
@@ -581,6 +638,7 @@ const PropertyRow = memo(function PropertyRow({
   rowKey,
   value,
   readOnly,
+  locked,
   isArrayItem,
   depth,
   query = '',
@@ -591,10 +649,15 @@ const PropertyRow = memo(function PropertyRow({
   was,
   unsaved = true,
   onRevert,
+  featured,
+  onToggleFeatured,
 }: PropertyRowProps) {
   const inline = useContext(InlineModeContext)
   const fieldType = inferFieldType(value)
   const isContainer = fieldType === 'group' || fieldType === 'list'
+  // Long text takes the row's whole width, under its key: a paragraph squeezed beside the key
+  // reads as a column of three words.
+  const stacked = fieldType === 'text' && typeof value === 'string' && isLongText(value)
   const [expanded, setExpanded] = useState(depth < 1)
   const [editingKey, setEditingKey] = useState(false)
   const [keyDraft, setKeyDraft] = useState(rowKey)
@@ -622,6 +685,7 @@ const PropertyRow = memo(function PropertyRow({
     <div className="group">
       <div className={cn(
         "relative flex items-start gap-1.5 py-1.5 px-1 rounded-lg",
+        stacked && "flex-wrap gap-y-0.5",
         "hover:bg-black/[0.025] dark:hover:bg-white/[0.03] transition-colors",
         mark && cn("before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full", MARK_STYLE[mark].bar,
           // Saved in the draft: the quieter, solid form; staged: full strength.
@@ -632,8 +696,9 @@ const PropertyRow = memo(function PropertyRow({
           {isContainer ? (
             <button
               onClick={() => setExpanded(e => !e)}
+              aria-label={expanded ? 'Collapse' : 'Expand'}
+              aria-expanded={expanded}
               className="w-4 h-5 flex items-center justify-center text-ink-muted hover:text-ink"
-              title={expanded ? 'Collapse' : 'Expand'}
             >
               {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
             </button>
@@ -644,15 +709,14 @@ const PropertyRow = memo(function PropertyRow({
           )}
         </div>
 
-        {/* Key column — fixed basis so rows align consistently */}
-        <div className="basis-[132px] flex-shrink-0 min-w-0 h-6 flex items-center">
+        {/* Key column — one width for every row, so values align; a long key wraps (two lines,
+            the whole of it on hover) rather than being cut off. */}
+        <div className={cn('min-h-6 py-[3px] flex flex-wrap items-center gap-x-1.5 gap-y-0.5',
+          stacked ? 'flex-1 min-w-0' : 'basis-[36%] min-w-[112px] max-w-[200px] flex-shrink-0')}>
           {isArrayItem ? (
-            <span className="text-xs font-mono text-ink-muted truncate">{rowKey}</span>
+            <span className="text-xs text-ink-muted">{rowKey}</span>
           ) : readOnly ? (
-            <span className="flex items-center gap-1.5 text-xs font-mono text-ink-muted truncate" title={rowKey}>
-              <Lock className="w-3 h-3 flex-shrink-0" />
-              <HighlightedText text={rowKey} query={query} className="truncate" />
-            </span>
+            <KeyLabel rowKey={rowKey} query={query} locked={locked} />
           ) : editingKey ? (
             <input
               autoFocus
@@ -672,13 +736,15 @@ const PropertyRow = memo(function PropertyRow({
               className="text-xs font-mono px-1.5 py-0.5 rounded bg-black/[0.06] dark:bg-white/10 border border-accent-lineage/40 outline-none min-w-0 w-full"
             />
           ) : (
-            <button
-              onClick={() => { keyCancelled.current = false; setEditingKey(true) }}
-              className="text-xs font-mono text-ink hover:text-accent-lineage truncate text-left max-w-full"
-              title={`${rowKey} — click to rename`}
-            >
-              <HighlightedText text={rowKey} query={query} />
-            </button>
+            <HoverTip label="Rename" detail={rowKey} className="inline-flex min-w-0 max-w-full">
+              <button
+                onClick={() => { keyCancelled.current = false; setEditingKey(true) }}
+                aria-label={`Rename ${rowKey}`}
+                className="min-w-0 max-w-full text-left hover:text-accent-lineage [&:hover_*]:text-accent-lineage"
+              >
+                <KeyLabel rowKey={rowKey} query={query} tip={false} />
+              </button>
+            </HoverTip>
           )}
           {mark && (
             <HoverTip
@@ -694,10 +760,17 @@ const PropertyRow = memo(function PropertyRow({
               </span>
             </HoverTip>
           )}
+          {featured && (
+            <HoverTip label="Shown at a glance" detail="At the top of the details, for every entity of this type" className="inline-flex flex-shrink-0">
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-px rounded text-[9.5px] font-semibold bg-accent-lineage/10 text-accent-lineage">
+                <Sparkles aria-hidden className="w-2.5 h-2.5" />At a glance
+              </span>
+            </HoverTip>
+          )}
         </div>
 
-        {/* Value column — flexible, consistent across all kinds */}
-        <div className="flex-1 min-w-0">
+        {/* Value column — flexible, consistent across all kinds; long text on a line of its own */}
+        <div className={cn('flex-1 min-w-0', stacked && 'order-last basis-full pl-[22px]')}>
           {isContainer ? (
             <span className="text-2xs text-ink-muted h-6 flex items-center">
               {fieldType === 'group'
@@ -750,13 +823,29 @@ const PropertyRow = memo(function PropertyRow({
           !inline && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity",
         )}>
           {isContainer && !readOnly && depth < MAX_DEPTH - 1 && (
-            <button
-              onClick={() => setRawJsonOpen(true)}
-              className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10"
-              title="Edit as raw JSON"
-            >
-              <Code className="w-3 h-3" />
-            </button>
+            <HoverTip label="Edit as raw JSON" className="inline-flex">
+              <button
+                onClick={() => setRawJsonOpen(true)}
+                aria-label="Edit as raw JSON"
+                className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10"
+              >
+                <Code className="w-3 h-3" />
+              </button>
+            </HoverTip>
+          )}
+          {onToggleFeatured && !isArrayItem && (
+            <HoverTip label={featured ? 'Stop showing at a glance' : 'Show at a glance'}
+              detail="At the top of the details, for every entity of this type — in your view" className="inline-flex">
+              <button
+                onClick={onToggleFeatured}
+                aria-pressed={!!featured}
+                aria-label={featured ? `Stop showing ${rowKey} at a glance` : `Show ${rowKey} at a glance`}
+                className={cn('w-6 h-6 flex items-center justify-center rounded hover:bg-black/[0.05] dark:hover:bg-white/10',
+                  featured ? 'text-accent-lineage' : 'text-ink-muted hover:text-ink')}
+              >
+                <Sparkles className="w-3 h-3" />
+              </button>
+            </HoverTip>
           )}
           {!readOnly && onRevert && (
             <HoverTip label={mark === 'new' ? 'Remove this new property' : 'Revert to what it was'} detail={mark === 'changed' ? `Was: ${shortValue(was)}` : undefined} className="inline-flex">
@@ -864,13 +953,15 @@ function PrimitiveValueEditor({
   }, [])
 
   const expandButton = (
-    <button
-      onClick={() => openModal(false)}
-      className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted/70 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors"
-      title={readOnly ? 'View full value' : 'Open editor (Markdown)'}
-    >
-      <Maximize2 className="w-3 h-3" />
-    </button>
+    <HoverTip label={readOnly ? 'View full value' : 'Open editor (Markdown)'} className="inline-flex flex-shrink-0">
+      <button
+        onClick={() => openModal(false)}
+        aria-label={readOnly ? 'View full value' : 'Open editor (Markdown)'}
+        className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted/70 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors"
+      >
+        <Maximize2 className="w-3 h-3" />
+      </button>
+    </HoverTip>
   )
 
   // ---------------------------------------------------------------- inline
@@ -888,46 +979,22 @@ function PrimitiveValueEditor({
   }
 
   // ---------------------------------------------------------------- read-only
+  // Drawn as what it is (property/RichValue); copy, and the full viewer for text long enough to clamp.
   if (readOnly) {
-    if (fieldType === 'none') {
-      return <span className="text-xs text-ink-muted italic h-6 flex items-center">—</span>
-    }
-    if (fieldType === 'boolean') {
-      return <div className="h-6 flex items-center"><BooleanToggle value={Boolean(value)} onChange={() => {}} readOnly /></div>
-    }
-    if (fieldType === 'number') {
-      return <span className="text-xs font-mono text-ink h-6 flex items-center"><HighlightedText text={String(value)} query={query} /></span>
-    }
-    if (fieldType === 'tags') {
-      return display === 'source'
-        ? <span className="text-xs font-mono text-ink-muted break-all">{JSON.stringify(value)}</span>
-        : <FormattedTags value={value as string[]} />
-    }
-    // text / date / url — all stored as strings
-    const s = value === null || value === undefined ? '' : String(value)
-    let body: React.ReactNode
-    if (display === 'source') {
-      body = (
-        <div className="text-xs font-mono text-ink whitespace-pre-wrap break-words">
-          {s === '' ? <span className="italic text-ink-muted">empty</span> : <HighlightedText text={s} query={query} />}
-        </div>
-      )
-    } else if (fieldType === 'date') {
-      body = <FormattedDate value={s} />
-    } else if (fieldType === 'url') {
-      body = <FormattedLink value={s} />
-    } else {
-      // formatted text — clamp; Expand grows in-drawer, Full screen → modal viewer
-      body = <ClampedText text={s} onOpen={openModal} />
-    }
+    const s = typeof value === 'string' ? value : ''
+    const long = fieldType === 'text' && display !== 'source' && isLongText(s)
     return (
       <>
-        <div className="flex items-start gap-1">
-          <div className="flex-1 min-w-0">{body}</div>
-          <div className="flex items-start">
-            {s !== '' && <CopyButton text={s} />}
-            {fieldType === 'text' && expandButton}
+        <div className="flex items-start gap-1 min-h-6">
+          <div className="flex-1 min-w-0 py-[3px]">
+            <RichValue value={value} fieldKey={fieldLabel} query={query} source={display === 'source'} onOpen={openModal} />
           </div>
+          {(s !== '' || long) && (
+            <div className="flex items-start">
+              {s !== '' && <CopyButton text={s} />}
+              {long && expandButton}
+            </div>
+          )}
         </div>
         {modalOpen && (
           <MarkdownValueModal fieldLabel={fieldLabel} value={s} readOnly initialMaximized={modalMaximized} onSave={() => setModalOpen(false)} onClose={() => setModalOpen(false)} />
@@ -938,7 +1005,7 @@ function PrimitiveValueEditor({
 
   // ---------------------------------------------------------------- editable
   if (fieldType === 'none') {
-    return <span className="text-xs text-ink-muted italic h-6 flex items-center">empty</span>
+    return <span className="text-xs text-ink-muted h-6 flex items-center">{NOT_SET}</span>
   }
   if (fieldType === 'boolean') {
     return <div className="h-6 flex items-center"><BooleanToggle value={Boolean(value)} onChange={onChange} /></div>
@@ -958,6 +1025,9 @@ function PrimitiveValueEditor({
   }
   if (fieldType === 'date') {
     return <DateField value={value === null || value === undefined ? '' : String(value)} onChange={onChange} />
+  }
+  if (fieldType === 'datetime') {
+    return <DateTimeField value={String(value ?? '')} onChange={onChange} />
   }
   if (fieldType === 'url') {
     return <UrlField value={value === null || value === undefined ? '' : String(value)} onChange={onChange} />
@@ -1014,24 +1084,10 @@ function CopyButton({ text }: { text: string }) {
           setTimeout(() => setCopied(false), 1500)
         } catch { /* clipboard unavailable */ }
       }}
+      aria-label={copied ? 'Copied' : 'Copy value'}
       className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
-      title={copied ? 'Copied!' : 'Copy value'}
     >
       {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-    </button>
-  )
-}
-
-function ModalTab({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
-        active ? "bg-black/[0.06] dark:bg-white/10 text-ink" : "text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5",
-      )}
-    >
-      {label}
     </button>
   )
 }
@@ -1097,7 +1153,7 @@ function FieldTypeChip({
           meta.tone,
           (readOnly || !onChange) ? "cursor-default" : "hover:brightness-125",
         )}
-        title={readOnly ? meta.label : 'Change type'}
+        aria-label={readOnly ? meta.label : 'Change type'}
       >
         <Icon className="w-3 h-3" />
         {showLabel && meta.label}
@@ -1368,8 +1424,9 @@ function PropertyComposer({
       {smartish && key.trim() && !isDup && (
         <div className="flex items-center gap-2 pl-1 text-xs min-w-0" aria-live="polite">
           <span className={cn('px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide shrink-0', fieldTone('added').chip)}>New</span>
-          <span className="font-mono text-ink truncate">{candidateKey}</span>
-          <span className="text-ink-secondary truncate">{shortValue(value)}</span>
+          <span className="font-mono text-ink-secondary truncate shrink-0 max-w-[40%]">{candidateKey}</span>
+          {/* Drawn as the list will draw it. */}
+          <span className="min-w-0 flex-1 truncate [&_*]:truncate"><RichValue value={value} fieldKey={candidateKey} /></span>
           {!typeChosen && text.trim() && detected.type !== 'text' && (
             <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted">read as {FIELD_TYPE_META[detected.type].label.toLowerCase()}</span>
           )}
@@ -1457,6 +1514,9 @@ function ComposerValueField({
   if (type === 'date') {
     return <DateField value={String(value ?? '')} onChange={onChange} />
   }
+  if (type === 'datetime') {
+    return <DateTimeField value={String(value ?? '')} onChange={onChange} />
+  }
   if (type === 'url') {
     return <UrlField value={String(value ?? '')} onChange={onChange} />
   }
@@ -1474,13 +1534,15 @@ function ComposerValueField({
         placeholder="Enter a value…"
         className="flex-1 min-w-0 px-2 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 text-xs focus:border-accent-lineage/50 outline-none transition-colors"
       />
-      <button
-        onClick={onExpand}
-        className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors"
-        title="Open editor (Markdown)"
-      >
-        <Maximize2 className="w-3.5 h-3.5" />
-      </button>
+      <HoverTip label="Open editor (Markdown)" className="inline-flex flex-shrink-0">
+        <button
+          onClick={onExpand}
+          aria-label="Open editor (Markdown)"
+          className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors"
+        >
+          <Maximize2 className="w-3.5 h-3.5" />
+        </button>
+      </HoverTip>
     </div>
   )
 }
@@ -1666,13 +1728,6 @@ function buildPathTree(entries: [string, unknown][]): { folders: TreeNode[]; lea
   return { folders: rootFolders, leaves: resolvedRootLeaves }
 }
 
-function countMarked(node: TreeNode, marks: PropertyMarks['marks']): number {
-  let n = node.own && marks.has(node.own.fullKey) ? 1 : 0
-  for (const l of node.leaves) if (marks.has(l.fullKey)) n++
-  for (const f of node.folders) n += countMarked(f, marks)
-  return n
-}
-
 function countLeaves(node: TreeNode): number {
   let n = (node.own ? 1 : 0) + node.leaves.length
   for (const f of node.folders) n += countLeaves(f)
@@ -1745,6 +1800,8 @@ interface FlatApi {
   existingKeys: () => string[]
   /** Put a key back as it was read (its value, or gone if it is new). */
   revert: (fullKey: string) => void
+  /** Feature it at a glance, or stop. */
+  toggleFeatured: (fullKey: string) => void
 }
 
 // ============================================
@@ -1794,6 +1851,9 @@ function GroupedObjectRoot({
   published,
   startAdding = false,
   suggestions,
+  sectionsKey,
+  featuredKeys,
+  onToggleFeatured,
 }: {
   value: Record<string, unknown>
   onChange: (next: Record<string, unknown>) => void
@@ -1804,14 +1864,19 @@ function GroupedObjectRoot({
   published?: Record<string, unknown>
   startAdding?: boolean
   suggestions?: ReadonlyArray<string | PropertySuggestion>
+  sectionsKey?: string
+  featuredKeys?: readonly string[]
+  onToggleFeatured?: (key: string) => void
 }) {
   const inline = useContext(InlineModeContext)
+  const technical = usePersonaMode() === 'technical'
   const [flat, setFlat] = useState(false)
   const [display, setDisplay] = useState<DisplayMode>('formatted')
   const [editTextMode, setEditTextMode] = useState<EditTextMode>('rich')
   const [query, setQuery] = useState('')
   // `true`, or the name a suggestion starts the form with.
   const [addingRoot, setAddingRoot] = useState<boolean | string>(startAdding)
+  const sections = useSectionsOpen(sectionsKey)
 
   const entries = Object.entries(value)
   const tree = useMemo(() => buildPathTree(entries), [value])
@@ -1828,11 +1893,12 @@ function GroupedObjectRoot({
     return { changed, added, removed: removed.length }
   }, [marks, removed])
   const anyChange = marks.size + removed.length > 0
+  const featured = useMemo(() => new Set(featuredKeys ?? []), [featuredKeys])
 
   // Keep `api` identity stable across edits (it reads the latest value/onChange
   // through a ref) so memoized rows don't all re-render when one value changes.
-  const liveRef = useRef({ value, onChange, original: published ?? original })
-  liveRef.current = { value, onChange, original: published ?? original }
+  const liveRef = useRef({ value, onChange, original: published ?? original, onToggleFeatured })
+  liveRef.current = { value, onChange, original: published ?? original, onToggleFeatured }
   const api: FlatApi = useMemo(() => ({
     updateValue: (fullKey, v) => liveRef.current.onChange(setKeyValue(liveRef.current.value, fullKey, v)),
     renameLeaf: (fullKey, parentPath, newSegment) =>
@@ -1849,7 +1915,9 @@ function GroupedObjectRoot({
       if (o && Object.prototype.hasOwnProperty.call(o, fullKey)) liveRef.current.onChange(setKeyValue(v, fullKey, o[fullKey]))
       else liveRef.current.onChange(deleteKey(v, fullKey))
     },
+    toggleFeatured: (fullKey) => liveRef.current.onToggleFeatured?.(fullKey),
   }), [])
+  const canFeature = !!onToggleFeatured
 
   const q = query.trim().toLowerCase()
   const visible = useMemo(() => {
@@ -1860,6 +1928,7 @@ function GroupedObjectRoot({
     () => (q ? removed.filter(([k, v]) => k.toLowerCase().includes(q) || searchableText(v).includes(q)) : removed),
     [removed, q],
   )
+  const removedKeys = useMemo(() => removed.map(([k]) => k), [removed])
 
   const empty = entries.length === 0
   const readsFormatted = readOnly || inline
@@ -1872,45 +1941,53 @@ function GroupedObjectRoot({
     [peers, value, readOnly],
   )
 
+  const viewMenu = (
+    <ViewMenu
+      flat={flat}
+      onFlat={setFlat}
+      // The text as stored is the Technical view's to ask for.
+      text={!technical ? undefined : readsFormatted
+        ? { value: display === 'source' ? 'source' : 'formatted', onChange: (v) => setDisplay(v === 'source' ? 'source' : 'formatted'), labels: ['Formatted', 'Markdown'] }
+        : { value: editTextMode === 'source' ? 'source' : 'formatted', onChange: (v) => setEditTextMode(v === 'source' ? 'source' : 'rich'), labels: ['Rich', 'Source'] }}
+    />
+  )
+
+  // Sections: what sits in no folder first (General), then each top-level folder.
+  const general = visible.leaves
+  const sectionCount = visible.folders.length + (general.length > 0 ? 1 : 0)
+  const generalAt = general.length > 0 ? 0 : -1
+
   return (
     <DisplayModeContext.Provider value={readsFormatted ? display : 'source'}>
     <EditTextModeContext.Provider value={editTextMode}>
     <div>
-      {/* Toolbar: search + Formatted/Source (view) or Rich/Source (edit) + Tree/Flat toggles */}
-      <div className="flex items-center gap-2 mb-2 flex-wrap">
-        {searchable && (
-          <div className="flex-1 min-w-[8rem]">
-            <SearchBox
-              query={query}
-              onChange={setQuery}
-              placeholder={`Search ${entries.length} ${entries.length === 1 ? 'property' : 'properties'}…`}
-            />
-          </div>
-        )}
-        {readsFormatted ? (
-          <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5 flex-shrink-0">
-            <ModalTab active={display === 'formatted'} onClick={() => setDisplay('formatted')} label="Formatted" />
-            <ModalTab active={display === 'source'} onClick={() => setDisplay('source')} label="Markdown" />
-          </div>
-        ) : (
-          <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5 flex-shrink-0">
-            <ModalTab active={editTextMode === 'rich'} onClick={() => setEditTextMode('rich')} label="Rich" />
-            <ModalTab active={editTextMode === 'source'} onClick={() => setEditTextMode('source')} label="Source" />
-          </div>
-        )}
-        <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5 flex-shrink-0">
-          <ModalTab active={!flat} onClick={() => setFlat(false)} label="Tree" />
-          <ModalTab active={flat} onClick={() => setFlat(true)} label="Flat" />
+      {/* Toolbar: search on its own line; Changes only and how the list is shown beside or under it */}
+      <div className="mb-2.5 space-y-1.5">
+        <div className="flex items-center gap-1.5">
+          {searchable ? (
+            <div className="flex-1 min-w-0">
+              <SearchBox
+                query={query}
+                onChange={setQuery}
+                placeholder={`Search ${entries.length} ${entries.length === 1 ? 'property' : 'properties'}…`}
+                className="mb-0"
+              />
+            </div>
+          ) : <span className="flex-1" />}
+          {!anyChange && viewMenu}
         </div>
         {anyChange && (
-          <HoverTip label={changesOnly ? 'Show every property' : 'Show only the properties that changed'} className="inline-flex">
-            <button type="button" aria-pressed={changesOnly} onClick={() => setChangesOnly((v) => !v)}
-              className={cn('inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[11px] font-semibold flex-shrink-0 transition-colors',
-                changesOnly ? 'bg-accent-lineage/10 text-accent-lineage ring-1 ring-accent-lineage/30' : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5')}>
-              Changes only
-              <FieldCountChips summary={changeCounts} />
-            </button>
-          </HoverTip>
+          <div className="flex items-center justify-between gap-1.5">
+            <HoverTip label={changesOnly ? 'Show every property' : 'Show only the properties that changed'} className="inline-flex">
+              <button type="button" aria-pressed={changesOnly} onClick={() => setChangesOnly((v) => !v)}
+                className={cn('inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[11px] font-semibold flex-shrink-0 transition-colors',
+                  changesOnly ? 'bg-accent-lineage/10 text-accent-lineage ring-1 ring-accent-lineage/30' : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5')}>
+                Changes only
+                <FieldCountChips summary={changeCounts} />
+              </button>
+            </HoverTip>
+            {viewMenu}
+          </div>
         )}
       </div>
 
@@ -1926,24 +2003,44 @@ function GroupedObjectRoot({
             externalQuery={searchable ? query : undefined}
             marks={marks}
             onRevert={api.revert}
+            featured={featured}
+            onToggleFeatured={onToggleFeatured}
           />
           <RemovedRows rows={shownRemoved} onRestore={readOnly ? undefined : api.revert} unsaved={unsavedRemoved} />
         </>
       ) : empty && shownRemoved.length === 0 ? (
         readOnly ? (
-          <div className="text-xs text-ink-muted italic px-2 py-2">No properties</div>
+          <div className="text-xs text-ink-muted px-2 py-2">No properties</div>
         ) : (
           <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} suggestions={offered} peers={peers} />
         )
       ) : (
-        <div className="space-y-1">
-          {visible.folders.map((node) => (
-            <FolderGroup key={node.path} node={node} depth={0} readOnly={readOnly} query={q} forceExpand={!!q} api={api} marks={marks} />
-          ))}
-          {visible.leaves.map((leaf) => (
-            <LeafRow key={leaf.fullKey} leaf={leaf} parentPath="" depth={0} readOnly={readOnly} query={q} api={api}
-              mark={marks.get(leaf.fullKey)?.mark} was={marks.get(leaf.fullKey)?.was} unsaved={marks.get(leaf.fullKey)?.unsaved} />
-          ))}
+        <div className="space-y-2">
+          {general.length > 0 && (
+            <SectionCard
+              name={sectionCount > 1 ? 'General' : undefined}
+              count={general.length}
+              changes={sectionCount > 1 ? changesIn(general.map((l) => l.fullKey), marks, removedKeys.filter((k) => !k.includes(PATH_SEP))) : undefined}
+              open={!!q || sections.isOpen(GENERAL, generalAt, sectionCount)}
+              onToggle={() => sections.setOpen(GENERAL, !sections.isOpen(GENERAL, generalAt, sectionCount))}
+              forceExpand={!!q}
+            >
+              {general.map((leaf) => (
+                <LeafRow key={leaf.fullKey} leaf={leaf} parentPath="" depth={0} readOnly={readOnly} query={q} api={api}
+                  mark={marks.get(leaf.fullKey)?.mark} was={marks.get(leaf.fullKey)?.was} unsaved={marks.get(leaf.fullKey)?.unsaved}
+                  featured={featured.has(leaf.fullKey)} canFeature={canFeature} />
+              ))}
+            </SectionCard>
+          )}
+          {visible.folders.map((node, i) => {
+            const at = i + (general.length > 0 ? 1 : 0)
+            const open = sections.isOpen(node.path, at, sectionCount)
+            return (
+              <FolderGroup key={node.path} node={node} depth={0} readOnly={readOnly} query={q} forceExpand={!!q} api={api}
+                marks={marks} removedKeys={removedKeys} featured={featured} canFeature={canFeature}
+                open={open} onOpenChange={(next) => sections.setOpen(node.path, next)} />
+            )
+          })}
           <RemovedRows rows={shownRemoved} onRestore={readOnly ? undefined : api.revert} unsaved={unsavedRemoved} />
           {q && visible.folders.length === 0 && visible.leaves.length === 0 && shownRemoved.length === 0 && (
             <div className="text-xs text-ink-muted px-2 py-3">No properties match “{query.trim()}”.</div>
@@ -1957,6 +2054,148 @@ function GroupedObjectRoot({
     </EditTextModeContext.Provider>
     </DisplayModeContext.Provider>
   )
+}
+
+/** The section that holds what sits in no folder. */
+const GENERAL = '\u0000general'
+
+/**
+ * Which sections of a property list are open. Remembered for the kind of entity when the list is
+ * given `rememberAs` (with the drawer's own sections), else for as long as the list is shown. A list
+ * of three sections or fewer starts with every one open; a longer one with its first two.
+ */
+function useSectionsOpen(rememberAs: string | undefined) {
+  const stored = usePreferencesStore((s) => (rememberAs ? s.drawerSectionsCollapsed : null))
+  const setStored = usePreferencesStore((s) => s.setDrawerSectionCollapsed)
+  const [local, setLocal] = useState<Record<string, boolean>>({})
+  const keyOf = (path: string) => `props:${rememberAs}:${path}`
+  const isOpen = (path: string, index: number, total: number) => {
+    const collapsed = stored ? stored[keyOf(path)] : local[path]
+    return collapsed === undefined ? total <= 3 || index < 2 : !collapsed
+  }
+  const setOpen = (path: string, open: boolean) => {
+    if (rememberAs) setStored(keyOf(path), !open)
+    else setLocal((m) => ({ ...m, [path]: !open }))
+  }
+  return { isOpen, setOpen }
+}
+
+/** What changed among `keys` (and how many under it were removed), for a section's chips. */
+function changesIn(keys: readonly string[], marks: PropertyMarks['marks'], removedUnder: readonly string[]) {
+  let changed = 0, added = 0
+  for (const k of keys) {
+    const m = marks.get(k)
+    if (m?.mark === 'new') added++
+    else if (m) changed++
+  }
+  return { changed, added, removed: removedUnder.length }
+}
+
+function leafKeys(node: TreeNode): string[] {
+  const out = node.own ? [node.own.fullKey] : []
+  for (const l of node.leaves) out.push(l.fullKey)
+  for (const f of node.folders) out.push(...leafKeys(f))
+  return out
+}
+
+/** How the list is shown: in sections or flat, and — in the Technical view — its text formatted
+ *  or as stored. One small menu, so the data keeps the room. */
+function ViewMenu({ flat, onFlat, text }: {
+  flat: boolean
+  onFlat: (flat: boolean) => void
+  text?: { value: 'formatted' | 'source'; onChange: (v: 'formatted' | 'source') => void; labels: [string, string] }
+}) {
+  const item = 'flex items-center gap-2 pl-2 pr-2.5 py-1.5 rounded-lg text-xs text-ink cursor-pointer outline-none data-[highlighted]:bg-black/[0.04] dark:data-[highlighted]:bg-white/[0.06]'
+  const check = <DropdownMenu.ItemIndicator className="ml-auto"><Check className="w-3.5 h-3.5 text-accent-lineage" /></DropdownMenu.ItemIndicator>
+  const heading = 'px-2 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-muted'
+  return (
+    <DropdownMenu.Root modal={false}>
+      <DropdownMenu.Trigger asChild>
+        <button type="button" aria-label="View options"
+          className="inline-flex items-center gap-1 h-7 px-2 rounded-lg text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 data-[state=open]:bg-black/5 dark:data-[state=open]:bg-white/5 flex-shrink-0 transition-colors">
+          <SlidersHorizontal className="w-3.5 h-3.5" aria-hidden />
+          View
+          <ChevronDown className="w-3 h-3" aria-hidden />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content align="end" sideOffset={4}
+          className="z-[9999] w-52 p-1 bg-canvas-elevated border border-glass-border rounded-xl shadow-xl">
+          <DropdownMenu.Label className={heading}>Layout</DropdownMenu.Label>
+          <DropdownMenu.RadioGroup value={flat ? 'flat' : 'sections'} onValueChange={(v) => onFlat(v === 'flat')}>
+            <DropdownMenu.RadioItem value="sections" className={item}>
+              <span><span className="block">Sections</span><span className="block text-2xs text-ink-muted">Grouped by folder</span></span>{check}
+            </DropdownMenu.RadioItem>
+            <DropdownMenu.RadioItem value="flat" className={item}>
+              <span><span className="block">Flat</span><span className="block text-2xs text-ink-muted">Every key in full</span></span>{check}
+            </DropdownMenu.RadioItem>
+          </DropdownMenu.RadioGroup>
+          {text && (
+            <>
+              <DropdownMenu.Separator className="my-1 h-px bg-black/[0.06] dark:bg-white/[0.08]" />
+              <DropdownMenu.Label className={heading}>Text</DropdownMenu.Label>
+              <DropdownMenu.RadioGroup value={text.value} onValueChange={(v) => text.onChange(v as 'formatted' | 'source')}>
+                <DropdownMenu.RadioItem value="formatted" className={item}>{text.labels[0]}{check}</DropdownMenu.RadioItem>
+                <DropdownMenu.RadioItem value="source" className={item}>{text.labels[1]}{check}</DropdownMenu.RadioItem>
+              </DropdownMenu.RadioGroup>
+            </>
+          )}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  )
+}
+
+/** A section of the list: its name, how many properties and what changed in it, and its rows
+ *  divided by hairlines. Without a name (the only section) it is just the rows. */
+function SectionCard({ name, nameSlot, count, changes, open, onToggle, forceExpand, actions, footer, children }: {
+  name?: string
+  /** In place of the name — its rename field. */
+  nameSlot?: ReactNode
+  count: number
+  changes?: { changed: number; added: number; removed: number }
+  open: boolean
+  onToggle: () => void
+  forceExpand?: boolean
+  actions?: ReactNode
+  /** Below the rows: adding one here. */
+  footer?: ReactNode
+  children: ReactNode
+}) {
+  const headed = name !== undefined
+  return (
+    <section aria-label={name ?? 'Properties'}
+      className="group/section rounded-xl border border-glass-border bg-black/[0.012] dark:bg-white/[0.02]">
+      {headed && (
+        <div className={cn('flex items-center gap-1.5 h-9 pl-1.5 pr-1.5', open && 'border-b border-black/[0.05] dark:border-white/[0.06]')}>
+          <button type="button" onClick={onToggle} disabled={forceExpand}
+            aria-label={open ? 'Collapse' : 'Expand'} aria-expanded={open}
+            className="w-6 h-6 flex items-center justify-center rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 flex-shrink-0">
+            {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          </button>
+          <div className="min-w-0 flex items-center">
+            {nameSlot ?? <span className="text-[12px] font-semibold text-ink truncate">{name}</span>}
+          </div>
+          <span className="text-2xs text-ink-muted tabular-nums flex-shrink-0">
+            {count} {count === 1 ? 'property' : 'properties'}
+          </span>
+          {changes && <FieldCountChips summary={changes} className="flex-shrink-0" />}
+          <span className="flex-1" />
+          {actions && (
+            <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 group-hover/section:opacity-100 group-focus-within/section:opacity-100 transition-opacity">
+              {actions}
+            </div>
+          )}
+        </div>
+      )}
+      {(open || !headed) && <div className="px-1.5 py-0.5"><Rows>{children}</Rows>{footer}</div>}
+    </section>
+  )
+}
+
+/** Rows divided by hairlines. */
+function Rows({ children }: { children: ReactNode }) {
+  return <div className="divide-y divide-black/[0.05] dark:divide-white/[0.06]">{children}</div>
 }
 
 function RootAdder({ api, adding, setAdding, suggestions = [], peers = [] }: {
@@ -2024,7 +2263,7 @@ function RemovedRows({ rows, onRestore, unsaved }: {
       {rows.map(([key, was]) => (
         <div key={key} className={cn('relative flex items-center gap-1.5 py-1.5 pl-5 pr-1 rounded-lg bg-rose-500/[0.04] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full before:bg-rose-500',
           unsaved && !unsaved.has(key) && 'before:opacity-60')}>
-          <span className="basis-[132px] flex-shrink-0 min-w-0 text-xs font-mono text-ink-muted line-through truncate">{key}</span>
+          <span className="basis-[36%] min-w-[112px] max-w-[200px] flex-shrink-0 text-xs font-mono text-ink-muted line-through break-all line-clamp-2">{key}</span>
           <span className="inline-flex items-center gap-1 px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide bg-rose-500/12 text-rose-700 dark:text-rose-300 flex-shrink-0">
             <span aria-hidden className={cn('w-1.5 h-1.5 rounded-full', STATE_DOT[!unsaved || unsaved.has(key) ? 'unsaved' : 'saved'])} />
             Removed
@@ -2044,10 +2283,6 @@ function RemovedRows({ rows, onRestore, unsaved }: {
   )
 }
 
-// ============================================
-// LeafRow — a single flat key rendered via PropertyRow, path-aware callbacks
-// ============================================
-
 const LeafRow = memo(function LeafRow({
   leaf,
   parentPath,
@@ -2058,6 +2293,8 @@ const LeafRow = memo(function LeafRow({
   mark,
   was,
   unsaved,
+  featured,
+  canFeature,
 }: {
   leaf: Leaf
   parentPath: string
@@ -2068,6 +2305,10 @@ const LeafRow = memo(function LeafRow({
   mark?: ChangeMark
   was?: unknown
   unsaved?: boolean
+  /** Shown at a glance. */
+  featured?: boolean
+  /** It can be featured at a glance (or stop being) from here. */
+  canFeature?: boolean
 }) {
   return (
     <PropertyRow
@@ -2083,6 +2324,8 @@ const LeafRow = memo(function LeafRow({
       was={was}
       unsaved={unsaved}
       onRevert={mark && !readOnly ? () => api.revert(leaf.fullKey) : undefined}
+      featured={featured}
+      onToggleFeatured={canFeature ? () => api.toggleFeatured(leaf.fullKey) : undefined}
     />
   )
 }, (prev, next) =>
@@ -2097,10 +2340,12 @@ const LeafRow = memo(function LeafRow({
   prev.api === next.api &&
   prev.mark === next.mark &&
   prev.was === next.was &&
-  prev.unsaved === next.unsaved)
+  prev.unsaved === next.unsaved &&
+  prev.featured === next.featured &&
+  prev.canFeature === next.canFeature)
 
 // ============================================
-// FolderGroup — expandable folder header + recursive children
+// FolderGroup — a folder: a section card at the top level, a sub-heading inside one
 // ============================================
 
 function FolderGroup({
@@ -2111,6 +2356,11 @@ function FolderGroup({
   forceExpand,
   api,
   marks,
+  removedKeys = [],
+  featured,
+  canFeature,
+  open: openProp,
+  onOpenChange,
 }: {
   node: TreeNode
   depth: number
@@ -2119,8 +2369,16 @@ function FolderGroup({
   forceExpand?: boolean
   api: FlatApi
   marks?: PropertyMarks['marks']
+  /** Every key removed (the folder counts its own). */
+  removedKeys?: readonly string[]
+  featured?: ReadonlySet<string>
+  canFeature?: boolean
+  /** Whether it is open, when the list keeps that (top-level sections). */
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
 }) {
-  const [expanded, setExpanded] = useState(depth < 1)
+  // A folder inside a section waits to be opened.
+  const [ownOpen, setOwnOpen] = useState(depth < 1)
   const [editingName, setEditingName] = useState(false)
   const [nameDraft, setNameDraft] = useState(node.name)
   const [adding, setAdding] = useState(false)
@@ -2128,11 +2386,15 @@ function FolderGroup({
 
   useEffect(() => { setNameDraft(node.name) }, [node.name])
 
-  const isOpen = forceExpand || expanded
+  const isOpen = forceExpand || (openProp ?? ownOpen)
+  const setOpen = (next: boolean) => (onOpenChange ? onOpenChange(next) : setOwnOpen(next))
   const parentPath = node.path.includes(PATH_SEP) ? node.path.slice(0, node.path.lastIndexOf(PATH_SEP)) : ''
   const count = countLeaves(node)
-  // Edited properties inside — said on the folder, so a closed one still shows its changes.
-  const edited = marks && marks.size > 0 ? countMarked(node, marks) : 0
+  // What changed inside — said on the folder, so a closed one still shows its changes.
+  const changes = useMemo(
+    () => changesIn(leafKeys(node), marks ?? new Map(), removedKeys.filter((k) => k.startsWith(node.path + PATH_SEP))),
+    [node, marks, removedKeys],
+  )
 
   const nameCancelled = useRef(false)
   const commitName = () => {
@@ -2146,137 +2408,144 @@ function FolderGroup({
     }
   }
 
-  const FolderIcon = isOpen ? FolderOpen : Folder
+  const top = depth === 0
+  const name = readOnly ? (
+    <span className={cn('truncate', top ? 'text-[12px] font-semibold text-ink' : 'text-[11.5px] font-semibold text-ink-secondary')}>
+      <HighlightedText text={node.name} query={query} />
+    </span>
+  ) : editingName ? (
+    <input
+      autoFocus
+      value={nameDraft}
+      onChange={(e) => setNameDraft(e.target.value)}
+      onBlur={commitName}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commitName()
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          e.stopPropagation()
+          nameCancelled.current = true
+          setNameDraft(node.name)
+          setEditingName(false)
+        }
+      }}
+      className="text-xs font-semibold px-1.5 py-0.5 rounded bg-black/[0.06] dark:bg-white/10 border border-accent-lineage/40 outline-none min-w-0 w-full"
+    />
+  ) : (
+    <HoverTip label="Rename folder" detail={`Renames every property in ${node.path}`} className="inline-flex min-w-0">
+      <button
+        onClick={() => { nameCancelled.current = false; setEditingName(true) }}
+        aria-label={`Rename folder ${node.name}`}
+        className={cn('truncate text-left max-w-full hover:text-accent-lineage',
+          top ? 'text-[12px] font-semibold text-ink' : 'text-[11.5px] font-semibold text-ink-secondary')}
+      >
+        <HighlightedText text={node.name} query={query} />
+      </button>
+    </HoverTip>
+  )
 
+  const btn = 'w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10'
+  const actions = readOnly ? null : (
+    <>
+      <HoverTip label="Add property in this folder" className="inline-flex">
+        <button onClick={() => { setAdding(true); setOpen(true) }} aria-label="Add property in this folder" className={btn}>
+          <FolderPlus className="w-3 h-3" />
+        </button>
+      </HoverTip>
+      {confirmDelete ? (
+        <div className="flex items-center gap-0.5">
+          <button
+            onClick={() => api.deleteFolder(node.path)}
+            className="px-1.5 h-6 flex items-center justify-center rounded text-2xs font-semibold text-red-500 bg-red-500/10 hover:bg-red-500/20"
+          >
+            Delete {count}?
+          </button>
+          <HoverTip label="Keep folder" className="inline-flex">
+            <button onClick={() => setConfirmDelete(false)} aria-label="Keep folder" className={btn}>
+              <XIcon className="w-3 h-3" />
+            </button>
+          </HoverTip>
+        </div>
+      ) : (
+        <HoverTip label="Delete folder and all its properties" className="inline-flex">
+          <button onClick={() => setConfirmDelete(true)} aria-label="Delete folder and all its properties"
+            className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10">
+            <Trash2 className="w-3 h-3" />
+          </button>
+        </HoverTip>
+      )}
+    </>
+  )
+
+  const rows = (
+    <>
+      {node.own && (
+        <LeafRow leaf={node.own} parentPath={parentPath} depth={depth + 1} readOnly={readOnly} query={query} api={api}
+          mark={marks?.get(node.own.fullKey)?.mark} was={marks?.get(node.own.fullKey)?.was} unsaved={marks?.get(node.own.fullKey)?.unsaved}
+          featured={featured?.has(node.own.fullKey)} canFeature={canFeature} />
+      )}
+      {node.folders.map((child) => (
+        <FolderGroup key={child.path} node={child} depth={depth + 1} readOnly={readOnly} query={query} forceExpand={forceExpand} api={api}
+          marks={marks} removedKeys={removedKeys} featured={featured} canFeature={canFeature} />
+      ))}
+      {node.leaves.map((leaf) => (
+        <LeafRow key={leaf.fullKey} leaf={leaf} parentPath={node.path} depth={depth + 1} readOnly={readOnly} query={query} api={api}
+          mark={marks?.get(leaf.fullKey)?.mark} was={marks?.get(leaf.fullKey)?.was} unsaved={marks?.get(leaf.fullKey)?.unsaved}
+          featured={featured?.has(leaf.fullKey)} canFeature={canFeature} />
+      ))}
+    </>
+  )
+  const adder = readOnly ? null : adding ? (
+    <PropertyComposer
+      onAdd={(name, val) => { api.addEntry(node.path, name, val); setAdding(false) }}
+      onCancel={() => setAdding(false)}
+      existingKeys={api.existingKeys()}
+      variant="object"
+      prefixLabel={node.path}
+    />
+  ) : (
+    <button
+      onClick={() => setAdding(true)}
+      className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink transition-colors my-1.5 ml-1"
+    >
+      <Plus className="w-3.5 h-3.5" />
+      Add property
+    </button>
+  )
+  const anyChange = changes.changed + changes.added + changes.removed > 0
+
+  if (top) {
+    return (
+      <SectionCard name={node.name} nameSlot={name} count={count} changes={anyChange ? changes : undefined}
+        open={isOpen} onToggle={() => setOpen(!isOpen)} forceExpand={forceExpand} actions={actions} footer={adder}>
+        {rows}
+      </SectionCard>
+    )
+  }
+
+  // Inside a section: a sub-heading, its rows indented under it.
   return (
-    <div className="group">
-      <div className="flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors">
-        <button
-          onClick={() => setExpanded((e) => !e)}
-          disabled={forceExpand}
-          className="w-5 h-5 flex items-center justify-center text-ink-muted hover:text-ink flex-shrink-0"
-          title={isOpen ? 'Collapse' : 'Expand'}
-        >
+    <div role="group" aria-label={node.name} className="group/folder">
+      <div className="flex items-center gap-1.5 h-8 pr-1">
+        <button type="button" onClick={() => setOpen(!isOpen)} disabled={forceExpand}
+          aria-label={isOpen ? 'Collapse' : 'Expand'} aria-expanded={isOpen}
+          className="w-5 h-5 flex items-center justify-center rounded text-ink-muted hover:text-ink flex-shrink-0">
           {isOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
         </button>
-        <FolderIcon className="w-4 h-4 text-amber-500 flex-shrink-0" />
-
-        {/* Folder name (inline-renamable) */}
-        <div className="basis-[140px] flex-shrink min-w-0 flex items-center">
-          {readOnly ? (
-            <span className="text-xs font-semibold text-ink truncate" title={node.path}>
-              <HighlightedText text={node.name} query={query} />
-            </span>
-          ) : editingName ? (
-            <input
-              autoFocus
-              value={nameDraft}
-              onChange={(e) => setNameDraft(e.target.value)}
-              onBlur={commitName}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') commitName()
-                if (e.key === 'Escape') {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  nameCancelled.current = true
-                  setNameDraft(node.name)
-                  setEditingName(false)
-                }
-              }}
-              className="text-xs font-semibold px-1.5 py-0.5 rounded bg-black/[0.06] dark:bg-white/10 border border-accent-lineage/40 outline-none min-w-0 w-full"
-            />
-          ) : (
-            <button
-              onClick={() => { nameCancelled.current = false; setEditingName(true) }}
-              className="text-xs font-semibold text-ink hover:text-accent-lineage truncate text-left max-w-full"
-              title={`${node.path} — click to rename folder`}
-            >
-              <HighlightedText text={node.name} query={query} />
-            </button>
-          )}
-        </div>
-
-        <span className="text-2xs text-ink-muted flex-1 flex items-center gap-1.5">
-          {count} {count === 1 ? 'item' : 'items'}
-          {edited > 0 && (
-            <span className={cn('inline-flex items-center gap-1 font-semibold', fieldTone('changed').text)}>
-              <span className={cn('w-1.5 h-1.5 rounded-full', fieldTone('changed').bar)} aria-hidden />{edited} edited
-            </span>
-          )}
-        </span>
-
-        {/* Folder actions */}
-        {!readOnly && (
-          <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
-            <button
-              onClick={() => { setAdding(true); setExpanded(true) }}
-              className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10"
-              title="Add property in this folder"
-            >
-              <FolderPlus className="w-3 h-3" />
-            </button>
-            {confirmDelete ? (
-              <div className="flex items-center gap-0.5">
-                <button
-                  onClick={() => api.deleteFolder(node.path)}
-                  className="px-1.5 h-6 flex items-center justify-center rounded text-2xs font-semibold text-red-500 bg-red-500/10 hover:bg-red-500/20"
-                  title="Confirm delete"
-                >
-                  Delete {count}?
-                </button>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10"
-                  title="Keep folder"
-                >
-                  <XIcon className="w-3 h-3" />
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setConfirmDelete(true)}
-                className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10"
-                title="Delete folder and all its properties"
-              >
-                <Trash2 className="w-3 h-3" />
-              </button>
-            )}
+        <div className="min-w-0 flex items-center">{name}</div>
+        <span className="text-2xs text-ink-muted tabular-nums flex-shrink-0">{count}</span>
+        {anyChange && <FieldCountChips summary={changes} className="flex-shrink-0" />}
+        <span className="flex-1" />
+        {actions && (
+          <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 group-hover/folder:opacity-100 group-focus-within/folder:opacity-100 transition-opacity">
+            {actions}
           </div>
         )}
       </div>
-
       {isOpen && (
-        <div className="ml-5 pl-3 border-l border-glass-border/40 space-y-1">
-          {node.own && (
-            <LeafRow leaf={node.own} parentPath={parentPath} depth={depth + 1} readOnly={readOnly} query={query} api={api}
-              mark={marks?.get(node.own.fullKey)?.mark} was={marks?.get(node.own.fullKey)?.was} unsaved={marks?.get(node.own.fullKey)?.unsaved} />
-          )}
-          {node.folders.map((child) => (
-            <FolderGroup key={child.path} node={child} depth={depth + 1} readOnly={readOnly} query={query} forceExpand={forceExpand} api={api} marks={marks} />
-          ))}
-          {node.leaves.map((leaf) => (
-            <LeafRow key={leaf.fullKey} leaf={leaf} parentPath={node.path} depth={depth + 1} readOnly={readOnly} query={query} api={api}
-              mark={marks?.get(leaf.fullKey)?.mark} was={marks?.get(leaf.fullKey)?.was} unsaved={marks?.get(leaf.fullKey)?.unsaved} />
-          ))}
-          {!readOnly && (
-            adding ? (
-              <PropertyComposer
-                onAdd={(name, val) => { api.addEntry(node.path, name, val); setAdding(false) }}
-                onCancel={() => setAdding(false)}
-                existingKeys={api.existingKeys()}
-                variant="object"
-                prefixLabel={node.path}
-              />
-            ) : (
-              <button
-                onClick={() => setAdding(true)}
-                className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink transition-colors mt-1 ml-1"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Add property
-              </button>
-            )
-          )}
+        <div className="ml-2.5 pl-2.5 border-l border-black/[0.06] dark:border-white/[0.08] mb-1">
+          <Rows>{rows}</Rows>
+          {adder}
         </div>
       )}
     </div>

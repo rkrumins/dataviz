@@ -9,7 +9,7 @@ import { DrawerFooter } from '../shell/DrawerShell'
 import { DrawerActivity } from '../shell/DrawerActivity'
 import { EntityChangeStrip, useStagedNodeEdit } from './EntityChangeStrip'
 
-export function EntityFooter({ nodeId, editing, dirty, justStaged, onCancel, summary, summaryLoading, wsId, graphId, inDraft, externalUrl }: {
+export function EntityFooter({ nodeId, editing, dirty, justStaged, onCancel, summary, summaryLoading, wsId, graphId, inDraft, externalUrl, onSeeHistory }: {
   nodeId: string
   /** The Edit tab is open, or an edit waits to be staged. */
   editing: boolean
@@ -22,6 +22,8 @@ export function EntityFooter({ nodeId, editing, dirty, justStaged, onCancel, sum
   graphId?: string | null
   inDraft: boolean
   externalUrl: string | null
+  /** Go to its history, in the drawer. */
+  onSeeHistory?: () => void
 }) {
   const staged = useStagedNodeEdit(nodeId)
   if (editing || staged) {
@@ -34,7 +36,7 @@ export function EntityFooter({ nodeId, editing, dirty, justStaged, onCancel, sum
 
   return (
     <DrawerFooter className="space-y-2">
-      <DrawerActivity summary={summary} loading={summaryLoading} wsId={wsId} graphId={graphId} inDraft={inDraft} />
+      <DrawerActivity summary={summary} loading={summaryLoading} wsId={wsId} graphId={graphId} inDraft={inDraft} onSeeHistory={onSeeHistory} />
       {externalUrl && (
         <a href={externalUrl} target="_blank" rel="noopener noreferrer"
           className="w-full flex items-center justify-center gap-1 pt-0.5 text-[11px] text-accent-lineage hover:underline focus-visible:outline-none focus-visible:underline">

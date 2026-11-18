@@ -145,6 +145,28 @@ row's `baseVersion` and import the row again. Two rows for one item, or an edge
 whose ends you changed, are refused the same way. To point an edge somewhere
 else, delete its row (set `_op` to `delete`) and add a new one.
 
+#### Dates and times
+
+Dates and times are stored one way, however they were entered. A date is
+stored as `2026-11-18`, and a date with a time in UTC as
+`2026-11-18T05:42:00Z`.
+
+- **Export:** dates and times go out in that form. In an **Excel** export
+  their cells are formatted as text, so Excel keeps whatever you type into one
+  exactly as you type it.
+- **Import:** a date written another way is the same date:
+  - another ISO form (`2026-11-18 07:42+02:00`);
+  - a time with no zone, read as UTC;
+  - an Excel date cell;
+  - a date Excel rewrote in your computer's own format when you saved a CSV
+    (`18/11/2026 05:42`).
+
+  An unchanged date is not counted as an update. A date you changed is stored
+  in the one form again.
+- **Day first or month first:** a date such as `05/03/2026` can be read either
+  way. When neither reading matches what is stored, its row is refused, with
+  the code `ambiguous_date`. Write it as `2026-03-05` and import the row again.
+
 A `urn` you give a new item is kept on it, and finds it again on the next
 import. A new row needs one: a row with only an `entity_id` you made up for the
 file is refused, because the next import couldn't find what it made and would

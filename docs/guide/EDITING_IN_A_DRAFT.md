@@ -73,7 +73,13 @@ You can also start from where you are:
 2. Change a property right where it is: click its value (or move to it and
    press `Enter`), type, and press `Enter` — or click away. `Shift-Enter` starts
    a new line; ⤢ opens the full editor for long text; a Yes/No switch is kept
-   the moment it flips. `Esc` puts the value back.
+   the moment it flips. `Esc` puts the value back. While you type, the value is
+   read back the way it will show:
+   - a date has **Today** and **Clear**; a date with a time is picked in
+     your own time, has **Now** and **Clear**, and shows the UTC value it will
+     be stored as (*stored as 2026-11-18T05:42:00Z*);
+   - a number shows grouped (*Reads as 1,250,000*);
+   - a link names its site, or says it doesn't look like a link yet.
 3. The edit is staged straight away: the row is marked **Edited**, with what it
    was underneath (*was ~~silver~~*; choose ↺ to put it back), the entity gets a
    dashed halo on the canvas, and the footer says how many changes are staged
@@ -97,8 +103,10 @@ To add a property, choose **Add property**:
 - As you type the name, the names other entities of the same type carry are
   offered — *owner · 12 others · e.g. Finance* — then names you used recently.
   `↑` / `↓` and `Enter` pick one.
-- Type the value as you'd say it: a number, *yes* / *no*, a date or a link is
-  stored as one (*read as number*); the type chip changes it.
+- Type the value as you'd say it: a number, *yes* / *no*, a date, a date with a
+  time, or a link is stored as one (*read as number*); the type chip changes it.
+  A date with a time is stored in UTC (`2026-11-18T05:42:00Z`); one typed
+  without a zone is read as UTC.
 - **Paste** several `name: value` lines (or two spreadsheet columns) to add them
   all in one step — one **Undo** takes them back. Names already there are left
   as they are.
@@ -162,8 +170,14 @@ read-only, with **Edit in a draft**. Choosing one entity's own details closes it
 
 1. Click a line on the canvas. The relationship's drawer opens: what it means,
    the two entities it joins, and its properties and history.
-2. Choose the **Edit** tab and change its properties.
-3. Choose **Stage changes**.
+2. Change a property where it is shown, as you would an entity's: click its
+   value, type, `Enter`. Each change is staged straight away. Putting a value
+   back as it was leaves nothing staged.
+3. Its properties show what your draft changed, with the same marks as an
+   entity's, **Changes only**, and the *In this draft* line at the top.
+
+The **Edit** tab still edits every property at once. Choose **Stage changes**
+when you're done there.
 
 To remove the relationship instead, choose **Delete** in its drawer. The
 deletion is staged straight away — it happens when you save, or you can discard

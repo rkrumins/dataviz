@@ -22,6 +22,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import { PropertyEditor } from './PropertyEditor'
+import { usePersonaStore } from '@/store/persona'
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -129,7 +130,7 @@ describe('PropertyEditor', () => {
     const onChange = vi.fn()
     render(<Harness initial={{ description: LONG }} onChange={onChange} />)
 
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
 
     // Modal opens in Rich mode (lazy stub) — its textarea carries the placeholder.
     const modalEditor = await screen.findByPlaceholderText(/Write here/i)
@@ -143,7 +144,7 @@ describe('PropertyEditor', () => {
   it('previews markdown in the modal (Source mode)', async () => {
     const user = userEvent.setup()
     render(<Harness initial={{ notes: LONG }} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     // Preview pane lives in Source mode; switch to it first. (The list cell also
     // renders markdown, so assert the preview ADDS a render.)
     const before = screen.queryAllByTestId('md').length
@@ -180,15 +181,16 @@ describe('PropertyEditor', () => {
   })
 
   it('readOnly hides edit affordances and renders values as text', () => {
-    render(<Harness initial={{ owner: 'analytics', notes: LONG }} readOnly />)
+    const lines = Array(8).fill('a line of content').join('\n')
+    render(<Harness initial={{ owner: 'analytics', notes: lines }} readOnly />)
     // No add / delete / rename affordances
     expect(screen.queryByText(/Add property/i)).not.toBeInTheDocument()
     expect(screen.queryByTitle('Delete')).not.toBeInTheDocument()
     // Value is plain text, not an editable control
     expect(screen.queryByDisplayValue('analytics')).not.toBeInTheDocument()
     expect(screen.getByText('analytics')).toBeInTheDocument()
-    // Read-only expand-to-view is offered on every string value
-    expect(screen.getAllByTitle('View full value').length).toBeGreaterThanOrEqual(1)
+    // The full viewer is offered where the text is clamped — not on a short value
+    expect(screen.getAllByRole('button', { name: 'View full value' })).toHaveLength(1)
   })
 
   it('adds a new property with a value via the composer', async () => {
@@ -226,7 +228,7 @@ describe('PropertyEditor', () => {
     const onChange = vi.fn()
     render(<Harness initial={{ owner: 'analytics' }} onChange={onChange} />)
 
-    await user.click(screen.getByTitle(/click to rename/i))
+    await user.click(screen.getByRole('button', { name: /^Rename / }))
     const input = screen.getByDisplayValue('owner')
     await user.clear(input)
     await user.type(input, 'maintainer{Enter}')
@@ -243,14 +245,14 @@ describe('PropertyEditor', () => {
         <Harness initial={{ owner: 'analytics' }} onChange={onChange} />
       </div>,
     )
-    await user.click(screen.getByTitle(/click to rename/i))
+    await user.click(screen.getByRole('button', { name: /^Rename / }))
     const input = screen.getByDisplayValue('owner')
     await user.clear(input)
     await user.type(input, 'maintainer{Escape}')
     expect(onChange).not.toHaveBeenCalled()
     expect(screen.getByText('owner')).toBeInTheDocument()
     // And the next rename still lands.
-    await user.click(screen.getByTitle(/click to rename/i))
+    await user.click(screen.getByRole('button', { name: /^Rename / }))
     const again = screen.getByDisplayValue('owner')
     await user.clear(again)
     await user.type(again, 'steward{Enter}')
@@ -265,8 +267,8 @@ describe('PropertyEditor', () => {
         <Harness initial={{ 'A/x': 1, 'A/y': 2, 'B/z': 3, top: 4 }} groupByPath onChange={onChange} />
       </div>,
     )
-    const folderA = screen.getByText('A').closest('.group') as HTMLElement
-    await user.click(within(folderA).getByTitle(/click to rename folder/i))
+    const folderA = screen.getByRole('region', { name: 'A' })
+    await user.click(within(folderA).getByRole('button', { name: 'Rename folder A' }))
     const input = within(folderA).getByDisplayValue('A')
     await user.clear(input)
     await user.type(input, 'Z{Escape}')
@@ -290,7 +292,7 @@ describe('PropertyEditor', () => {
     render(<Harness initial={{ owner: 'jane' }} onChange={onChange} />)
 
     // Short value still exposes the always-visible expand affordance.
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     const editor = screen.getByPlaceholderText(/Write here/i)
     await user.clear(editor)
     await user.type(editor, '# Owner')
@@ -317,16 +319,14 @@ describe('PropertyEditor', () => {
 describe('PropertyEditor — path grouping', () => {
   const PATHS = { 'A/x': 1, 'A/y': 2, 'B/z': 3, top: 4 }
 
-  it('groups slash-delimited keys into folders plus root leaves', () => {
+  it('groups slash-delimited keys into sections, what sits in no folder under General', () => {
     render(<Harness initial={PATHS} groupByPath />)
-    // Folder headers
-    expect(screen.getByText('A')).toBeInTheDocument()
-    expect(screen.getByText('B')).toBeInTheDocument()
-    // Root leaf shown directly
-    expect(screen.getByText('top')).toBeInTheDocument()
-    // Folder A reports 2 items
-    const folderA = screen.getByText('A').closest('.group') as HTMLElement
-    expect(within(folderA).getByText('2 items')).toBeInTheDocument()
+    // A section per folder, and General first
+    expect(screen.getAllByRole('region').map((r) => r.getAttribute('aria-label'))).toEqual(['General', 'A', 'B'])
+    expect(within(screen.getByRole('region', { name: 'General' })).getByText('top')).toBeInTheDocument()
+    // Section A says how many it holds
+    const folderA = screen.getByRole('region', { name: 'A' })
+    expect(within(folderA).getByText('2 properties')).toBeInTheDocument()
     // Leaves render by their last segment, expanded by default at depth 0
     expect(screen.getByText('x')).toBeInTheDocument()
     expect(screen.getByText('y')).toBeInTheDocument()
@@ -336,8 +336,8 @@ describe('PropertyEditor — path grouping', () => {
     const user = userEvent.setup()
     render(<Harness initial={PATHS} groupByPath />)
     expect(screen.getByText('x')).toBeInTheDocument()
-    const folderA = screen.getByText('A').closest('.group') as HTMLElement
-    await user.click(within(folderA).getByTitle('Collapse'))
+    const folderA = screen.getByRole('region', { name: 'A' })
+    await user.click(within(folderA).getByRole('button', { name: 'Collapse' }))
     expect(screen.queryByText('x')).not.toBeInTheDocument()
   })
 
@@ -345,8 +345,8 @@ describe('PropertyEditor — path grouping', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={PATHS} groupByPath onChange={onChange} />)
-    const folderA = screen.getByText('A').closest('.group') as HTMLElement
-    await user.click(within(folderA).getByTitle(/click to rename folder/i))
+    const folderA = screen.getByRole('region', { name: 'A' })
+    await user.click(within(folderA).getByRole('button', { name: 'Rename folder A' }))
     const input = within(folderA).getByDisplayValue('A')
     await user.clear(input)
     await user.type(input, 'A2{Enter}')
@@ -357,9 +357,9 @@ describe('PropertyEditor — path grouping', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={PATHS} groupByPath onChange={onChange} />)
-    const folderA = screen.getByText('A').closest('.group') as HTMLElement
-    await user.click(within(folderA).getByTitle(/Delete folder/i))
-    await user.click(within(folderA).getByTitle('Confirm delete'))
+    const folderA = screen.getByRole('region', { name: 'A' })
+    await user.click(within(folderA).getByRole('button', { name: /Delete folder/i }))
+    await user.click(within(folderA).getByRole('button', { name: 'Delete 2?' }))
     expect(onChange).toHaveBeenCalledWith({ 'B/z': 3, top: 4 })
   })
 
@@ -367,8 +367,8 @@ describe('PropertyEditor — path grouping', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ 'B/z': 3 }} groupByPath onChange={onChange} />)
-    const folderB = screen.getByText('B').closest('.group') as HTMLElement
-    await user.click(within(folderB).getByTitle(/Add property in this folder/i))
+    const folderB = screen.getByRole('region', { name: 'B' })
+    await user.click(within(folderB).getByRole('button', { name: 'Add property in this folder' }))
     await user.type(screen.getByPlaceholderText('Property name'), 'w')
     await user.click(screen.getByRole('button', { name: 'Add' }))
     expect(onChange).toHaveBeenCalledWith({ 'B/z': 3, 'B/w': '' })
@@ -379,7 +379,7 @@ describe('PropertyEditor — path grouping', () => {
     const onChange = vi.fn()
     render(<Harness initial={{ 'A/x': 1 }} groupByPath onChange={onChange} />)
     const leafRow = screen.getByText('x').closest('.group') as HTMLElement
-    await user.click(within(leafRow).getByTitle(/click to rename/i))
+    await user.click(within(leafRow).getByRole('button', { name: /^Rename / }))
     const input = within(leafRow).getByDisplayValue('x')
     await user.clear(input)
     await user.type(input, 'x1{Enter}')
@@ -424,12 +424,12 @@ describe('PropertyEditor — path grouping', () => {
   it('nests folders arbitrarily deep (expanding each level)', async () => {
     const user = userEvent.setup()
     render(<Harness initial={{ 'a/b/c/leaf': 1 }} groupByPath />)
-    expect(screen.getByText('a')).toBeInTheDocument() // depth 0 expanded
+    expect(screen.getByText('a')).toBeInTheDocument() // the section is open
     expect(screen.getByText('b')).toBeInTheDocument()
-    // Nested folders default to collapsed — expand to reveal deeper levels
-    await user.click(within(screen.getByText('b').closest('.group') as HTMLElement).getByTitle('Expand'))
+    // A folder inside a section waits to be opened — expand to reveal deeper levels
+    await user.click(within(screen.getByRole('group', { name: 'b' })).getByRole('button', { name: 'Expand' }))
     expect(screen.getByText('c')).toBeInTheDocument()
-    await user.click(within(screen.getByText('c').closest('.group') as HTMLElement).getByTitle('Expand'))
+    await user.click(within(screen.getByRole('group', { name: 'c' })).getByRole('button', { name: 'Expand' }))
     expect(screen.getByText('leaf')).toBeInTheDocument()
   })
 
@@ -444,14 +444,15 @@ describe('PropertyEditor — path grouping', () => {
     expect(screen.queryByText('B')).not.toBeInTheDocument()
   })
 
-  it('toggles between Tree and Flat rendering', async () => {
+  it('toggles between Sections and Flat rendering', async () => {
     const user = userEvent.setup()
     render(<Harness initial={{ 'A/x': 1 }} groupByPath searchable />)
-    // Tree: folder header present, no full-path key text
+    // Sections: folder header present, no full-path key text
     expect(screen.getByText('A')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Flat' }))
-    // Flat: the literal key is shown
-    expect(screen.getByText('A/x')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'View options' }))
+    await user.click(await screen.findByRole('menuitemradio', { name: /Flat/ }))
+    // Flat: the literal key is shown, its folder quieter than its own name
+    expect(screen.getByRole('button', { name: 'Rename A/x' })).toHaveTextContent('A/x')
   })
 
   it('preserves the original key for weird separators on delete', async () => {
@@ -459,9 +460,9 @@ describe('PropertyEditor — path grouping', () => {
     const onChange = vi.fn()
     render(<Harness initial={{ 'a//b': 1, keep: 2 }} groupByPath onChange={onChange} />)
     // 'a//b' → segments ['a','b'] → folder a, leaf b — but the stored key is intact
-    const folderA = screen.getByText('a').closest('.group') as HTMLElement
-    await user.click(within(folderA).getByTitle(/Delete folder/i))
-    await user.click(within(folderA).getByTitle('Confirm delete'))
+    const folderA = screen.getByRole('region', { name: 'a' })
+    await user.click(within(folderA).getByRole('button', { name: /Delete folder/i }))
+    await user.click(within(folderA).getByRole('button', { name: 'Delete 1?' }))
     expect(onChange).toHaveBeenCalledWith({ keep: 2 })
   })
 })
@@ -481,7 +482,7 @@ describe('PropertyEditor — business field types & formatting', () => {
     render(<Harness initial={{}} onChange={onChange} />)
     await openComposerOnEmpty(user)
     await user.type(screen.getByPlaceholderText('Property name'), 'flag')
-    await user.click(screen.getByTitle('Change type'))
+    await user.click(screen.getByLabelText('Change type'))
     await user.click(screen.getByText('Yes / No'))
     await user.click(screen.getByRole('switch')) // flip No → Yes
     await user.click(screen.getByRole('button', { name: 'Add' }))
@@ -495,7 +496,7 @@ describe('PropertyEditor — business field types & formatting', () => {
     render(<Harness initial={{}} onChange={onChange} />)
     await openComposerOnEmpty(user)
     await user.type(screen.getByPlaceholderText('Property name'), 'when')
-    await user.click(screen.getByTitle('Change type'))
+    await user.click(screen.getByLabelText('Change type'))
     await user.click(screen.getByText('Date'))
     await user.click(screen.getByRole('button', { name: 'Add' }))
     const arg = onChange.mock.calls.at(-1)![0] as Record<string, unknown>
@@ -509,7 +510,7 @@ describe('PropertyEditor — business field types & formatting', () => {
     render(<Harness initial={{}} onChange={onChange} />)
     await openComposerOnEmpty(user)
     await user.type(screen.getByPlaceholderText('Property name'), 'labels')
-    await user.click(screen.getByTitle('Change type'))
+    await user.click(screen.getByLabelText('Change type'))
     await user.click(screen.getByText('Tags'))
     const tagInput = screen.getByPlaceholderText(/Type a tag/i)
     await user.type(tagInput, 'red{Enter}blue{Enter}')
@@ -522,7 +523,7 @@ describe('PropertyEditor — business field types & formatting', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     // Switch to Source mode where the raw textarea + insert-markdown toolbar live.
     await user.click(screen.getByRole('button', { name: 'source' }))
     const ta = screen.getByPlaceholderText(/Write here/i) as HTMLTextAreaElement
@@ -534,13 +535,15 @@ describe('PropertyEditor — business field types & formatting', () => {
     expect(onChange).toHaveBeenCalledWith({ note: '**hi**' })
   })
 
-  it('View mode toggles between Formatted and Markdown source', async () => {
+  it('View mode toggles between Formatted and Markdown source — in the Technical view', async () => {
     const user = userEvent.setup()
+    usePersonaStore.setState({ mode: 'technical' })
     render(<Harness initial={{ note: '**bold**' }} readOnly searchable groupByPath />)
     // Formatted (default): rendered via markdown (mocked → data-testid="md")
     expect(screen.getAllByTestId('md').length).toBeGreaterThanOrEqual(1)
     // Switch to source: raw markdown text is shown, no markdown render
-    await user.click(screen.getByRole('button', { name: 'Markdown' }))
+    await user.click(screen.getByRole('button', { name: 'View options' }))
+    await user.click(await screen.findByRole('menuitemradio', { name: 'Markdown' }))
     expect(screen.queryByTestId('md')).not.toBeInTheDocument()
     expect(screen.getByText('**bold**')).toBeInTheDocument()
   })
@@ -551,7 +554,7 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     const ed = await screen.findByPlaceholderText(/Write here/i)
     await user.clear(ed)
     await user.type(ed, 'hello world')
@@ -563,7 +566,7 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     await screen.findByPlaceholderText(/Write here/i)
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(onChange).not.toHaveBeenCalled()
@@ -574,7 +577,7 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     const ed = await screen.findByPlaceholderText(/Write here/i)
     await user.type(ed, ' there')
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
@@ -585,13 +588,13 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
     expect(screen.queryByPlaceholderText(/Write here/i)).not.toBeInTheDocument()
   })
 
-  it('long values: Expand grows in-drawer; Full screen opens the maximized modal', async () => {
+  it('long values: Show more grows in-drawer; Full screen opens the maximized modal', async () => {
     const user = userEvent.setup()
     const big = Array(8).fill('a line of content').join('\n') // > 5 lines
     render(<Harness initial={{ note: big }} />)
-    // Expand toggles in-drawer (no modal opens)
-    await user.click(screen.getByRole('button', { name: /Expand/i }))
-    expect(screen.getByRole('button', { name: /Collapse/i })).toBeInTheDocument()
+    // Show more grows it in the drawer (no modal opens)
+    await user.click(screen.getByRole('button', { name: /Show more/i }))
+    expect(screen.getByRole('button', { name: /Show less/i })).toBeInTheDocument()
     expect(screen.queryByPlaceholderText(/Write here/i)).not.toBeInTheDocument()
     // Full screen opens the editor modal, already maximized (Restore visible)
     await user.click(screen.getByRole('button', { name: /Full screen/i }))
@@ -599,19 +602,106 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
     expect(screen.getByTitle('Restore')).toBeInTheDocument()
   })
 
-  it('short values (≤5 lines) show no Expand / Full screen controls', () => {
+  it('very long values step out: Show more, then Show all, then Show less', async () => {
+    const user = userEvent.setup()
+    const huge = Array(40).fill('a line of content').join('\n')
+    render(<Harness initial={{ note: huge }} readOnly />)
+    await user.click(screen.getByRole('button', { name: /Show more/i }))
+    await user.click(screen.getByRole('button', { name: /Show all 40 lines/i }))
+    await user.click(screen.getByRole('button', { name: /Show less/i }))
+    expect(screen.getByRole('button', { name: /Show more/i })).toBeInTheDocument()
+  })
+
+  it('short values (≤5 lines) show no Show more / Full screen controls', () => {
     render(<Harness initial={{ note: 'a short single-line value' }} />)
-    expect(screen.queryByRole('button', { name: /Expand/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Show more/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Full screen/i })).not.toBeInTheDocument()
   })
 
   it('renders the modal in a body portal (escapes the drawer containing block)', async () => {
     const user = userEvent.setup()
     const { container } = render(<Harness initial={{ note: 'hi' }} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     const editor = await screen.findByPlaceholderText(/Write here/i)
     // Found document-wide, but NOT inside the component's own container subtree.
     expect(editor).toBeInTheDocument()
     expect(container.contains(editor)).toBe(false)
+  })
+})
+
+describe('PropertyEditor — keys as stored, polished', () => {
+  it('shows no lock on a read-only row — only on a key kept as it is', () => {
+    const { unmount } = render(<PropertyEditor value={{ owner: 'ana' }} onChange={() => {}} readOnly bare />)
+    expect(screen.getByText('owner')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Locked')).not.toBeInTheDocument()
+    unmount()
+    render(<PropertyEditor value={{ id: 'x1', owner: 'ana' }} onChange={() => {}} readOnlyKeys={['id']} bare />)
+    expect(screen.getAllByLabelText('Locked')).toHaveLength(1)
+  })
+
+  it('names list items Item 1, Item 2', () => {
+    render(<PropertyEditor value={{ steps: [{ a: 1 }, { b: 2 }] }} onChange={() => {}} readOnly bare />)
+    expect(screen.getByText('Item 1')).toBeInTheDocument()
+    expect(screen.getByText('Item 2')).toBeInTheDocument()
+    expect(screen.queryByText('[0]')).not.toBeInTheDocument()
+  })
+})
+
+describe('PropertyEditor — sections and the View menu', () => {
+  it('takes its sections from the keys’ own folders, at any depth — nothing named in advance', async () => {
+    const user = userEvent.setup()
+    render(<PropertyEditor value={{ 'Technical/path': '/data/orders', 'Technical/system': 'Snowflake', 'Technical/Storage/format': 'parquet',
+      'Finance/Cost centre': 'CC-42', owner: 'ana' }} onChange={() => {}} readOnly groupByPath bare />)
+    // A section per top-level folder, in the order the keys come; what has no folder under General.
+    expect(screen.getAllByRole('region').map((r) => r.getAttribute('aria-label'))).toEqual(['General', 'Technical', 'Finance'])
+    const technical = screen.getByRole('region', { name: 'Technical' })
+    expect(within(technical).getByText('3 properties')).toBeInTheDocument()
+    expect(within(technical).getByText('path')).toBeInTheDocument()
+    expect(within(technical).getByText('system')).toBeInTheDocument()
+    // Technical/Storage is a folder inside Technical, holding format.
+    const storage = within(technical).getByRole('group', { name: 'Storage' })
+    await user.click(within(storage).getByRole('button', { name: 'Expand' }))
+    expect(within(storage).getByText('format')).toBeInTheDocument()
+    expect(within(storage).getByText('parquet')).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: 'Finance' })).getByText('Cost centre')).toBeInTheDocument()
+  })
+
+  it('offers the text as stored only in the Technical view', async () => {
+    const user = userEvent.setup()
+    usePersonaStore.setState({ mode: 'business' })
+    render(<Harness initial={{ note: '**bold**' }} readOnly searchable groupByPath />)
+    await user.click(screen.getByRole('button', { name: 'View options' }))
+    expect(await screen.findByRole('menuitemradio', { name: /Flat/ })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitemradio', { name: 'Markdown' })).not.toBeInTheDocument()
+  })
+
+  it('says what changed in each section, closed or open', () => {
+    render(<PropertyEditor value={{ 'Tech/a': 2, 'Tech/b': 1, top: 1 }} onChange={() => {}} readOnly groupByPath bare
+      published={{ 'Tech/a': 1, 'Tech/c': 3, top: 1 }} />)
+    const tech = screen.getByRole('region', { name: 'Tech' })
+    expect(within(tech).getByText('1 edited, 1 added, 1 removed')).toBeInTheDocument()
+  })
+
+  it('opens the first two of many sections, and remembers what was opened for the kind of entity', async () => {
+    const user = userEvent.setup()
+    const value = { 'A/x': 1, 'B/x': 1, 'C/x': 1, 'D/x': 1 }
+    const { unmount } = render(<PropertyEditor value={value} onChange={() => {}} readOnly groupByPath bare sectionsKey="Table" />)
+    const open = () => screen.getAllByRole('button', { name: /^(Collapse|Expand)$/ }).map((b) => b.getAttribute('aria-expanded'))
+    expect(open()).toEqual(['true', 'true', 'false', 'false'])
+    await user.click(within(screen.getByRole('region', { name: 'D' })).getByRole('button', { name: 'Expand' }))
+    unmount()
+    render(<PropertyEditor value={value} onChange={() => {}} readOnly groupByPath bare sectionsKey="Table" />)
+    expect(open()).toEqual(['true', 'true', 'false', 'true'])
+  })
+
+  it('marks what is shown at a glance, and features one from its row', async () => {
+    const user = userEvent.setup()
+    const onToggle = vi.fn()
+    render(<PropertyEditor value={{ owner: 'ana', tier: 'gold' }} onChange={() => {}} readOnly groupByPath bare
+      featuredKeys={['owner']} onToggleFeatured={onToggle} />)
+    const ownerRow = screen.getByText('owner').closest('.group') as HTMLElement
+    expect(within(ownerRow).getByText('At a glance')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Show tier at a glance' }))
+    expect(onToggle).toHaveBeenCalledWith('tier')
   })
 })

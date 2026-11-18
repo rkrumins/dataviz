@@ -23,6 +23,8 @@ const h = vi.hoisted(() => ({
   /** The relationships beneath a roll-up, as the data source answers. */
   beneath: { data: undefined, isLoading: false, isError: false } as { data?: { edges: GraphEdge[]; total: number; truncated: boolean }; isLoading: boolean; isError: boolean },
   beneathCalls: [] as unknown[][],
+  /** The draft's change-list entry for it: what is published, and what the draft saved. */
+  entry: undefined as Record<string, unknown> | undefined,
 }))
 
 vi.mock('@/hooks/useRelationshipRecord', () => ({
@@ -43,7 +45,7 @@ vi.mock('@/hooks/useRelationshipsBeneath', () => ({
 }))
 vi.mock('../useDrawerHistoryScope', () => ({ useDrawerHistoryScope: () => h.scope }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
-  useChangeEntry: () => ({ data: undefined }),
+  useChangeEntry: () => ({ data: h.entry }),
   useEntitySummary: (ws?: string, g?: string | null, id?: string | null) => ({
     data: ws && g && id ? h.summary : undefined,
     isLoading: false,
@@ -104,6 +106,7 @@ beforeEach(() => {
   h.provider = null
   h.beneath = { data: undefined, isLoading: false, isError: false }
   h.beneathCalls = []
+  h.entry = undefined
   useStagedChangesStore.setState({ changes: [], redoStack: [] })
   useFeaturesStore.setState({ values: { versioningEnabled: true, editModeEnabled: true } } as never)
 })
@@ -176,6 +179,34 @@ describe('RelationshipDrawer — a relationship', () => {
     })
     // The drawer now shows the staged bag.
     expect(screen.getByText('tier')).toBeInTheDocument()
+  })
+
+  it('edits a property where it is read: staged at once, and nothing left staged once it is put back', async () => {
+    const user = userEvent.setup()
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    await user.click(screen.getByRole('button', { name: 'Edit owner' }))
+    const field = screen.getByRole('textbox', { name: 'owner' })
+    await user.clear(field)
+    await user.type(field, 'bo{Enter}')
+    expect(useStagedChangesStore.getState().changes).toMatchObject([{
+      type: 'edit_edge', targetId: 'e1',
+      before: { properties: { owner: 'ana' }, version: 'v9' },
+      after: { properties: { owner: 'bo' } },
+    }])
+    expect(screen.getByText('Edited')).toBeInTheDocument()
+    expect(screen.getByText('1 not saved yet')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Revert owner' }))
+    expect(useStagedChangesStore.getState().changes).toEqual([])
+  })
+
+  it('says what the draft changed against what is published, saved or not yet', () => {
+    h.entry = { status: 'modified', before: { properties: { owner: 'ana', sla: '1h' } }, after: { properties: { owner: 'ana' } } }
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    expect(screen.getByText('Removed')).toBeInTheDocument()
+    expect(screen.getByText('In this draft')).toBeInTheDocument()
   })
 
   it('asks before an unsaved edit is left behind', async () => {

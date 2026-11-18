@@ -10,7 +10,7 @@
  * changed from Customize, which opens above the sections.
  */
 import { Fragment, useMemo, useState, type ReactNode } from 'react'
-import { Check, Copy, FileText, History, Info, Link, Tag } from 'lucide-react'
+import { Check, Copy, FileText, History, Info, Link, Sparkles, Tag } from 'lucide-react'
 import { useFeature } from '@/store/features'
 import { useCanvasStore } from '@/store/canvas'
 import { userProperties } from '@/lib/nodeFields'
@@ -31,7 +31,7 @@ import { PlacementSummary } from './EntityPlacement'
 import { NodeIdentityFacts } from '@/components/dataSource/NodeIdentity'
 import { EntityOverview } from './EntityOverview'
 import { CustomizeDetails } from './CustomizeDetails'
-import { featurableKeys, resolveLayout, shownSections } from './drawerLayout'
+import { defaultFeatured, featurableKeys, propertyLabel, resolveFeatured, resolveLayout, shownSections } from './drawerLayout'
 
 type Data = Record<string, unknown>
 
@@ -63,6 +63,9 @@ function peerPropertyStats(nodeId: string, typeId: string): PropertySuggestion[]
     .map(([key, st]) => ({ key, count: st.count, examples: st.examples, type: [...st.types].sort((a, b) => b[1] - a[1])[0]?.[0] }))
 }
 
+const without = (o: Data, keys: readonly string[]): Data =>
+  keys.length === 0 ? o : Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)))
+
 /** The descriptive node fields, when any has a value. */
 function DetailsList({ form }: { form: Data }) {
   const rows = ([
@@ -91,7 +94,7 @@ export function EntityViewTab({
   nodeId, form, original, urn, childCount, tagColors, userProps, copiedUrn, onCopyUrn, canEdit,
   originalProps, publishedProps, digest, onCommitProperties,
   onFocusNode, onLocateMany, onRevealPath, history, typeId = '', typeName = '', fields, identity,
-  customizing = false, onDoneCustomizing,
+  customizing = false, onDoneCustomizing, showHistory = false, onRestoreDeleted,
 }: {
   nodeId: string
   form: Data
@@ -127,11 +130,18 @@ export function EntityViewTab({
   /** The Customize panel is open above the sections. */
   customizing?: boolean
   onDoneCustomizing?: () => void
+  /** History was asked for ("See history"): shown even where the layout hides it. */
+  showHistory?: boolean
+  /** Bring it back, deleted in this draft — offered on its deletion in History. */
+  onRestoreDeleted?: () => void
 }) {
   const versioningEnabled = useFeature('versioningEnabled')
   const mode = usePersonaMode()
   const storedLayout = usePreferencesStore((s) => s.drawerLayout?.[mode] ?? null)
-  const sections = useMemo(() => shownSections(resolveLayout(storedLayout, mode)), [storedLayout, mode])
+  const sections = useMemo(() => {
+    const shown = shownSections(resolveLayout(storedLayout, mode))
+    return showHistory && !shown.includes('history') ? [...shown, 'history' as const] : shown
+  }, [storedLayout, mode, showHistory])
   const hasProps = Object.keys(userProps).length > 0
   const tags = Array.isArray(form.classifications) ? (form.classifications as string[]) : []
   const editsProps = canEdit && !!onCommitProperties
@@ -142,9 +152,32 @@ export function EntityViewTab({
   // A property removed is still listed (struck through, with Restore while editing).
   const removedSome = [originalProps, publishedProps].some((base) => !!base && Object.keys(base).some((k) => !(k in userProps)))
 
+  // Shown at a glance: marked in the list, and — read-only — left out of it (one unchanged by the
+  // draft, that is: a change is still seen where it is listed). Featured from a row too.
+  const glanceShown = sections.includes('overview')
+  const pinned = usePreferencesStore((s) => s.drawerPinnedProperties[typeId])
+  const setPinned = usePreferencesStore((s) => s.setDrawerPinnedProperties)
+  const featuredKeys = useMemo(
+    () => (glanceShown ? resolveFeatured(pinned, fields, form).map((f) => f.key).filter((k) => k in userProps) : []),
+    [glanceShown, pinned, fields, form, userProps],
+  )
+  const toggleFeatured = (key: string) => {
+    const keys = featurableKeys(fields, form, userProps)
+    const current = pinned ?? defaultFeatured(fields).filter((k) => keys.includes(k))
+    setPinned(typeId, current.includes(key) ? current.filter((k) => k !== key) : [...current, key])
+  }
+  const atGlance = useMemo(() => (editsProps ? [] : featuredKeys.filter((k) =>
+    !publishedProps || (k in publishedProps && JSON.stringify(publishedProps[k]) === JSON.stringify(userProps[k])))),
+  [editsProps, featuredKeys, publishedProps, userProps])
+  const listedProps = useMemo(() => without(userProps, atGlance), [userProps, atGlance])
+  const listedPublished = useMemo(() => publishedProps && without(publishedProps, atGlance), [publishedProps, atGlance])
+  const glanceId = `glance-${nodeId}`
+
   const render: Record<DrawerSectionId, () => ReactNode> = {
     overview: () => (
-      <EntityOverview form={form} urn={urn} identity={identity} childCount={childCount} typeId={typeId} fields={fields} />
+      <div id={glanceId}>
+        <EntityOverview form={form} urn={urn} identity={identity} childCount={childCount} typeId={typeId} fields={fields} />
+      </div>
     ),
     identifier: () => (
       <Section title="Identifier" icon={Link}>
@@ -165,9 +198,19 @@ export function EntityViewTab({
             {editsProps ? (
               <PropertyEditor key={nodeId} value={userProps} onChange={(next) => onCommitProperties!(next as Data)}
                 inline original={originalProps} published={publishedProps} startAdding={adding && !hasProps} suggestions={suggestions}
-                searchable groupByPath bare />
-            ) : (
-              <PropertyEditor value={userProps} onChange={() => {}} readOnly published={publishedProps} searchable groupByPath bare />
+                searchable groupByPath bare sectionsKey={typeId ? `entity:${typeId}` : undefined}
+                featuredKeys={featuredKeys} onToggleFeatured={glanceShown && typeId ? toggleFeatured : undefined} />
+            ) : Object.keys(listedProps).length > 0 || removedSome ? (
+              <PropertyEditor value={listedProps} onChange={() => {}} readOnly published={listedPublished} searchable groupByPath bare
+                sectionsKey={typeId ? `entity:${typeId}` : undefined}
+                featuredKeys={featuredKeys} onToggleFeatured={glanceShown && typeId ? toggleFeatured : undefined} />
+            ) : null}
+            {atGlance.length > 0 && (
+              <button type="button" onClick={() => document.getElementById(glanceId)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })}
+                className="mt-2 inline-flex items-center gap-1.5 text-2xs text-ink-muted hover:text-accent-lineage transition-colors">
+                <Sparkles aria-hidden className="w-3 h-3" />
+                {atGlance.map((k) => propertyLabel(k, fields)).join(', ')} — shown at a glance
+              </button>
             )}
           </PanelErrorBoundary>
         ) : (
@@ -192,10 +235,12 @@ export function EntityViewTab({
       <LineageNeighbors nodeId={nodeId} onFocusNode={onFocusNode} onLocateMany={onLocateMany} onRevealPath={onRevealPath} />
     ),
     history: () => versioningEnabled && history.wsId && history.graphId && (
+      <div id={`history-${nodeId}`} className="scroll-mt-2">
         <Section title="History" icon={History}>
           <EntityHistory wsId={history.wsId} graphId={history.graphId} entityId={nodeId}
-            mainBranchId={history.mainBranchId} branchId={history.branchId} kind="node" />
+            mainBranchId={history.mainBranchId} branchId={history.branchId} kind="node" onRestore={onRestoreDeleted} />
         </Section>
+      </div>
     ),
   }
 

@@ -8,6 +8,7 @@ import { ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { inferFieldType } from '@/components/panels/property/fieldTypes'
 import { FormattedDate, FormattedLink } from '@/components/panels/property/valueWidgets'
+import { DateTime } from '@/components/ui/DateTime'
 import type { FieldChange } from '../model/fieldDiff'
 import { fieldTone } from '../model/changeTone'
 
@@ -36,6 +37,8 @@ function Value({ value, gone = false }: { value: unknown; gone?: boolean }) {
     )
   }
   if (type === 'date') return <span className={cn(strike || undefined)}><FormattedDate value={String(value)} /></span>
+  // A moment, day and time — never "ago": a review compares two of them. Exact on hover.
+  if (type === 'datetime') return <span className={cn('text-xs text-ink', strike)}><DateTime at={String(value)} variant="calendar" /></span>
   if (type === 'url') return gone ? <span className={cn('text-xs break-all', strike)}>{String(value)}</span> : <FormattedLink value={String(value)} />
   if (type === 'number') return <span className={cn('text-xs font-mono text-ink tabular-nums', strike)}>{String(value)}</span>
   if (type === 'tags' || type === 'list' || type === 'group') {

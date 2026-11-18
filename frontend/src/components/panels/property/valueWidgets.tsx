@@ -10,7 +10,9 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { X as XIcon, ExternalLink, Calendar, ChevronDown, ChevronUp, Maximize2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { isIsoDate } from './fieldTypes'
+import { fromLocalInput, toLocalInput } from './dateTime'
 
 // ============================================
 // BooleanToggle — Yes / No switch
@@ -76,6 +78,39 @@ export function DateField({
       value={safe}
       readOnly={readOnly}
       onChange={(e) => onChange(e.target.value)}
+      className={cn(
+        "px-2 py-1 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 text-xs",
+        "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",
+        "[color-scheme:light] dark:[color-scheme:dark]",
+        readOnly && "cursor-default opacity-70",
+      )}
+    />
+  )
+}
+
+// ============================================
+// DateTimeField — native date-and-time picker in the reader's time; stores the moment in UTC
+// (property/dateTime)
+// ============================================
+
+export function DateTimeField({
+  value,
+  onChange,
+  readOnly,
+}: {
+  value: string
+  onChange: (v: string) => void
+  readOnly?: boolean
+}) {
+  const local = toLocalInput(value)
+  return (
+    <input
+      type="datetime-local"
+      step={local.includes('.') ? 0.001 : 1}
+      value={local}
+      readOnly={readOnly}
+      aria-label="Date and time"
+      onChange={(e) => { const next = fromLocalInput(e.target.value); if (next) onChange(next) }}
       className={cn(
         "px-2 py-1 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 text-xs",
         "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",
@@ -223,11 +258,11 @@ const liteBlock = {
 export const InlineMarkdown = memo(function InlineMarkdown({ text }: { text: string }) {
   // Fast path: plain text → render directly, no Markdown pipeline.
   if (!hasMarkdown(text)) {
-    return <span className="text-xs text-ink whitespace-pre-wrap break-words">{text}</span>
+    return <span className="text-xs text-ink whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</span>
   }
   if (text.includes('\n')) {
     return (
-      <div className="prose-synodic max-w-none text-xs leading-relaxed break-words [&_pre]:overflow-x-auto">
+      <div className="prose-synodic max-w-none text-xs leading-relaxed [overflow-wrap:anywhere] [&_pre]:overflow-x-auto">
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={liteBlock}>{text}</ReactMarkdown>
       </div>
     )
@@ -239,9 +274,22 @@ export const InlineMarkdown = memo(function InlineMarkdown({ text }: { text: str
   )
 })
 
+/** Text long enough that the list clamps it: more than five lines, or a long paragraph. */
+export function isLongText(text: string): boolean {
+  return text.split('\n').length > 5 || text.length > 280
+}
+
+/** Text that runs past "Show more" too: then "Show all" follows. */
+function isVeryLongText(text: string): boolean {
+  return text.split('\n').length > 16 || text.length > 1400
+}
+
 // ============================================
-// ClampedText — three-tier disclosure: inline (≤5 lines) → Expand (in-drawer) → Full screen (modal)
+// ClampedText — long text read in steps: a few lines → Show more (about 16) → Show all, or Full screen
 // ============================================
+
+/** How much of a long text shows: a few lines, more of it, or all of it. */
+type Reach = 'some' | 'more' | 'all'
 
 export const ClampedText = memo(function ClampedText({
   text,
@@ -257,17 +305,17 @@ export const ClampedText = memo(function ClampedText({
   /** Edit mode — clicking the cell opens the editor. */
   editable?: boolean
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [reach, setReach] = useState<Reach>('some')
   const empty = text === ''
-  const lineCount = empty ? 0 : text.split('\n').length
-  // "A few lines" (≤5) shows inline with no Expand affordance.
-  const isLong = lineCount > 5 || text.length > 280
-  const clampCollapsed = isLong && !expanded
+  // "A few lines" (≤5) shows whole, with nothing to expand.
+  const isLong = !empty && isLongText(text)
+  const veryLong = isLong && isVeryLongText(text)
+  const clipped = isLong && (reach === 'some' || (reach === 'more' && veryLong))
 
   const content = empty ? (
-    <span className="text-xs italic text-ink-muted">{editable ? 'Empty — click to add' : 'empty'}</span>
+    <span className="text-xs text-ink-muted">{editable ? 'Not set — click to add' : 'Not set'}</span>
   ) : source ? (
-    <span className="text-xs font-mono text-ink whitespace-pre-wrap break-words">{text}</span>
+    <span className="text-xs font-mono text-ink whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</span>
   ) : (
     <InlineMarkdown text={text} />
   )
@@ -275,27 +323,43 @@ export const ClampedText = memo(function ClampedText({
   const inner = (
     <div
       className={cn(
-        "relative",
-        clampCollapsed && "max-h-[7.5rem] overflow-hidden",
-        isLong && expanded && "max-h-[45vh] overflow-auto custom-scrollbar",
+        "relative [overflow-wrap:anywhere]",
+        isLong && reach === 'some' && "max-h-[7.5rem] overflow-hidden",
+        isLong && reach === 'more' && veryLong && "max-h-[20rem] overflow-hidden",
       )}
     >
       {content}
-      {clampCollapsed && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-canvas-elevated to-transparent" />
+      {clipped && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-canvas-elevated to-transparent" />
       )}
     </div>
   )
 
+  const lines = text.split('\n').length
+  const step = (e: React.MouseEvent, next: Reach) => { e.stopPropagation(); setReach(next) }
+  const linkCls = "inline-flex items-center gap-1 text-2xs font-medium text-accent-lineage hover:underline"
   const controls = isLong ? (
     <div className="flex items-center gap-3 mt-1">
-      <button
-        onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v) }}
-        className="inline-flex items-center gap-1 text-2xs font-medium text-accent-lineage hover:underline"
-      >
-        {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-        {expanded ? 'Collapse' : 'Expand'}
-      </button>
+      {reach === 'some' && (
+        <button onClick={(e) => step(e, veryLong ? 'more' : 'all')} className={linkCls}>
+          <ChevronDown className="w-3 h-3" />Show more
+        </button>
+      )}
+      {reach === 'more' && veryLong && (
+        <button onClick={(e) => step(e, 'all')} className={linkCls}>
+          <ChevronDown className="w-3 h-3" />Show all{lines > 16 ? ` ${lines.toLocaleString()} lines` : ''}
+        </button>
+      )}
+      {reach === 'all' && (
+        <button onClick={(e) => step(e, 'some')} className={linkCls}>
+          <ChevronUp className="w-3 h-3" />Show less
+        </button>
+      )}
+      {reach === 'more' && veryLong && (
+        <button onClick={(e) => step(e, 'some')} className="text-2xs font-medium text-ink-muted hover:text-ink">
+          Show less
+        </button>
+      )}
       {onOpen && (
         <button
           onClick={(e) => { e.stopPropagation(); onOpen(true) }}
@@ -311,13 +375,14 @@ export const ClampedText = memo(function ClampedText({
   if (editable) {
     return (
       <div>
-        <div
-          onClick={() => onOpen?.(false)}
-          className="cursor-text rounded-md px-2 py-1 -mx-2 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
-          title="Click to edit"
-        >
-          {inner}
-        </div>
+        <HoverTip label="Click to edit" className="block">
+          <div
+            onClick={() => onOpen?.(false)}
+            className="cursor-text rounded-md px-2 py-1 -mx-2 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
+          >
+            {inner}
+          </div>
+        </HoverTip>
         {controls}
       </div>
     )
@@ -336,7 +401,10 @@ export const ClampedText = memo(function ClampedText({
 // ============================================
 
 export function FormattedDate({ value }: { value: string }) {
-  const d = new Date(value)
+  // A calendar date is the reader's own day: parsed as UTC midnight it reads as the day before
+  // anywhere west of Greenwich.
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  const d = ymd ? new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3])) : new Date(value)
   const label = Number.isNaN(d.getTime())
     ? value
     : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
@@ -348,22 +416,37 @@ export function FormattedDate({ value }: { value: string }) {
   )
 }
 
+/** A link as a reader names it: its site, and where on it — `example.com/…/report`. */
+export function linkLabel(url: string): string {
+  try {
+    const u = new URL(url)
+    const host = u.host.replace(/^www\./, '')
+    const segs = u.pathname.split('/').filter(Boolean)
+    const path = segs.length === 0 ? '' : segs.length === 1 ? `/${segs[0]}` : `/…/${segs[segs.length - 1]}`
+    return `${host}${path}${u.search || u.hash ? '…' : ''}`
+  } catch {
+    return url
+  }
+}
+
 export function FormattedLink({ value }: { value: string }) {
   return (
-    <a
-      href={value}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="inline-flex items-center gap-1 text-xs text-accent-lineage hover:underline break-all"
-    >
-      {value}
-      <ExternalLink className="w-3 h-3 flex-shrink-0" />
-    </a>
+    <HoverTip label={value} className="inline-flex max-w-full min-w-0">
+      <a
+        href={value}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 max-w-full min-w-0 text-xs text-accent-lineage hover:underline"
+      >
+        <span className="truncate">{linkLabel(value)}</span>
+        <ExternalLink className="w-3 h-3 flex-shrink-0" aria-hidden />
+      </a>
+    </HoverTip>
   )
 }
 
 export function FormattedTags({ value }: { value: string[] }) {
-  if (value.length === 0) return <span className="text-xs text-ink-muted italic">none</span>
+  if (value.length === 0) return <span className="text-xs text-ink-muted">Not set</span>
   return (
     <div className="flex flex-wrap gap-1">
       {value.map((tag, i) => (

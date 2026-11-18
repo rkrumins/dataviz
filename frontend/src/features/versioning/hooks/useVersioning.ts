@@ -39,8 +39,10 @@ export const VERSIONING_KEYS = {
   commitLog: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'commits', ws, gid, bid ?? 'all'] as const,
   // Under 'entity' so one invalidation of an entity's key prefix covers its summary and history.
-  entityHistory: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, scope?: string) =>
-    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'history', bid ?? 'main', scope ?? 'all'] as const,
+  entityHistory: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, scope?: string, kind?: string) =>
+    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'history', bid ?? 'main', scope ?? 'all', kind ?? 'any'] as const,
+  entityRevision: (ws?: string, gid?: string | null, eid?: string | null, vid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'revision', vid, bid ?? 'main'] as const,
   entitySummary: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, withValue?: boolean) =>
     [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'summary', bid ?? 'main', withValue ? 'value' : 'meta'] as const,
   mergeRequests: (ws?: string, gid?: string | null) =>
@@ -380,7 +382,7 @@ export function useEntityHistoryPages(
 ) {
   const { branchId, scope = 'all', kind, enabled = true } = opts
   return useInfiniteQuery({
-    queryKey: VERSIONING_KEYS.entityHistory(wsId, graphId, entityId, branchId, scope),
+    queryKey: VERSIONING_KEYS.entityHistory(wsId, graphId, entityId, branchId, scope, kind),
     queryFn: ({ pageParam }) => api.getEntityHistoryPage(wsId!, graphId!, entityId!, {
       branchId, scope, kind, limit: ENTITY_HISTORY_PAGE, before: pageParam,
     }),
@@ -388,6 +390,24 @@ export function useEntityHistoryPages(
     getNextPageParam: (last) => (last.hasMore ? last.nextBefore ?? null : null),
     enabled: enabled && !!wsId && !!graphId && !!entityId,
     staleTime: 30_000,
+  })
+}
+
+/** One revision of an entity with the entity as it left it — read when asked for (a revision's
+ *  "As it was"), and kept: a revision does not change. */
+export function useEntityRevision(
+  wsId: string | undefined,
+  graphId: string | null | undefined,
+  entityId: string | null | undefined,
+  versionId: string | null | undefined,
+  opts: { branchId?: string | null; kind?: 'node' | 'edge'; enabled?: boolean } = {},
+) {
+  const { branchId, kind, enabled = true } = opts
+  return useQuery({
+    queryKey: VERSIONING_KEYS.entityRevision(wsId, graphId, entityId, versionId, branchId),
+    queryFn: () => api.getEntityRevision(wsId!, graphId!, entityId!, versionId!, { branchId, kind }),
+    enabled: enabled && !!wsId && !!graphId && !!entityId && !!versionId,
+    staleTime: Infinity,
   })
 }
 

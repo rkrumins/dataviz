@@ -7,11 +7,13 @@
  * always round-trip cleanly to the backend.
  */
 
+import { canonicalInstant, isIsoInstant, nowInstant } from './dateTime'
 import {
   Type as TypeIcon,
   Hash,
   ToggleLeft,
   Calendar,
+  CalendarClock,
   Link2,
   Tags as TagsIcon,
   Braces,
@@ -24,6 +26,7 @@ export type FieldType =
   | 'number'
   | 'boolean'
   | 'date'
+  | 'datetime'
   | 'url'
   | 'tags'
   | 'list'
@@ -48,6 +51,7 @@ export const FIELD_TYPE_META: Record<FieldType, FieldTypeMeta> = {
   number: { type: 'number', label: 'Number', hint: 'Numeric value', icon: Hash, tone: 'text-purple-500 bg-purple-500/10', jsonKind: 'number' },
   boolean: { type: 'boolean', label: 'Yes / No', hint: 'A true or false flag', icon: ToggleLeft, tone: 'text-amber-500 bg-amber-500/10', jsonKind: 'boolean' },
   date: { type: 'date', label: 'Date', hint: 'A calendar date', icon: Calendar, tone: 'text-rose-500 bg-rose-500/10', jsonKind: 'string' },
+  datetime: { type: 'datetime', label: 'Date & time', hint: 'A moment — a date and a time', icon: CalendarClock, tone: 'text-rose-500 bg-rose-500/10', jsonKind: 'string' },
   url: { type: 'url', label: 'Link', hint: 'A web address', icon: Link2, tone: 'text-sky-500 bg-sky-500/10', jsonKind: 'string' },
   tags: { type: 'tags', label: 'Tags', hint: 'A list of labels', icon: TagsIcon, tone: 'text-cyan-500 bg-cyan-500/10', jsonKind: 'array' },
   list: { type: 'list', label: 'List', hint: 'A list of values', icon: Brackets, tone: 'text-cyan-500 bg-cyan-500/10', jsonKind: 'array' },
@@ -56,7 +60,7 @@ export const FIELD_TYPE_META: Record<FieldType, FieldTypeMeta> = {
 }
 
 /** Friendly types offered up-front in menus. */
-export const COMMON_TYPES: FieldType[] = ['text', 'number', 'boolean', 'date', 'url', 'tags', 'group']
+export const COMMON_TYPES: FieldType[] = ['text', 'number', 'boolean', 'date', 'datetime', 'url', 'tags', 'group']
 /** Power-user types tucked behind an "Advanced" divider. */
 export const ADVANCED_TYPES: FieldType[] = ['list', 'none']
 
@@ -67,6 +71,11 @@ export function isIsoDate(v: string): boolean {
   if (!ISO_DATE_RE.test(v)) return false
   const d = new Date(v)
   return !Number.isNaN(d.getTime())
+}
+
+/** A day as the reader's calendar has it (`YYYY-MM-DD`) — not UTC's, which is a day off west of Greenwich. */
+function localDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 export function isUrl(v: string): boolean {
@@ -85,6 +94,7 @@ export function inferFieldType(value: unknown): FieldType {
   // string
   const s = String(value)
   if (isIsoDate(s)) return 'date'
+  if (isIsoInstant(s)) return 'datetime'
   if (isUrl(s)) return 'url'
   return 'text'
 }
@@ -96,7 +106,9 @@ export function valueForType(type: FieldType): unknown {
     case 'url':
       return ''
     case 'date':
-      return new Date().toISOString().slice(0, 10) // today, YYYY-MM-DD
+      return localDate(new Date()) // today, YYYY-MM-DD
+    case 'datetime':
+      return nowInstant()
     case 'number':
       return 0
     case 'boolean':
@@ -125,7 +137,15 @@ export function coerceToType(value: unknown, type: FieldType): unknown {
     case 'date': {
       if (typeof value === 'string' && isIsoDate(value)) return value
       const d = new Date(typeof value === 'string' || typeof value === 'number' ? value : Date.now())
-      return Number.isNaN(d.getTime()) ? valueForType('date') : d.toISOString().slice(0, 10)
+      return Number.isNaN(d.getTime()) ? valueForType('date') : localDate(d)
+    }
+    case 'datetime': {
+      if (isIsoInstant(value)) return canonicalInstant(value)
+      // A date becomes its start, in the reader's day; anything else that reads as a time, that time.
+      const d = typeof value === 'string' && isIsoDate(value)
+        ? new Date(`${value}T00:00:00`)
+        : new Date(typeof value === 'string' || typeof value === 'number' ? value : Date.now())
+      return Number.isNaN(d.getTime()) ? nowInstant() : `${d.toISOString().slice(0, 19)}Z`
     }
     case 'number': {
       const n = Number(value)

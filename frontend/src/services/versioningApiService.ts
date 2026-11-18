@@ -1955,6 +1955,43 @@ export function getEntityHistoryPage(
   )
 }
 
+/** One revision of an entity, with the entity as that revision left it. */
+export interface EntityRevisionValue {
+  id: string
+  commit_id: string
+  commit_seq: number
+  branch_id: string
+  op: 'create' | 'update' | 'delete'
+  actor?: string | null
+  change_reason?: string | null
+  created_at: string
+  commit_kind?: string | null
+  commit_message?: string | null
+  on_draft: boolean
+  /** The entity as it was (a deletion's: `deleted`). */
+  value?: EntityView | null
+  /** A deletion's: the entity just before it was deleted, when on record. */
+  last_value?: EntityView | null
+  userNames?: Record<string, string>
+}
+
+/** One revision of an entity — a history row, by its `id` — with the entity as it left it. */
+export function getEntityRevision(
+  wsId: string,
+  graphId: string,
+  entityId: string,
+  versionId: string,
+  params: { branchId?: string | null; kind?: 'node' | 'edge' } = {},
+): Promise<EntityRevisionValue> {
+  const sp = new URLSearchParams()
+  if (params.branchId) sp.set('branchId', params.branchId)
+  if (params.kind) sp.set('kind', params.kind)
+  const qs = sp.toString()
+  return vfetch<EntityRevisionValue>(
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/revisions/${encodeURIComponent(versionId)}${qs ? `?${qs}` : ''}`,
+  )
+}
+
 /** Who created an entity and who last changed it, as the line being read has it. */
 export function getEntitySummary(
   wsId: string,

@@ -3,7 +3,8 @@
 The drawers downloaded an entity's whole history to show two timestamps, and a draft's "Updated"
 read whatever row was newest on any branch — main's later edit included, which the draft does not
 have. The summary answers for the line being read; the history pages newest first across main and
-the draft being viewed, never another user's draft, each row saying what it changed.
+the draft being viewed, never another user's draft, each row saying what it changed. One revision
+reads back as it left the entity, from those same lines only.
 """
 import asyncio
 import os
@@ -11,7 +12,7 @@ import os
 import pytest
 
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.entity_audit import entity_history_page, entity_summary
+from backend.app.services.versioning.entity_audit import entity_history_page, entity_revision, entity_summary
 from backend.app.services.versioning.merkle import content_hash
 from backend.app.services.versioning.service import AccessDenied, GraphVersioningService, Viewer
 
@@ -67,6 +68,25 @@ async def _run() -> None:
     assert page["versions"][0]["commit_message"] == "cy edits A"
     assert "payload" not in page["versions"][0]
 
+    # one revision reads back as it left the entity — bo's v=1, not main's current v=2
+    cy_row, bo_row = page["versions"][0], page["versions"][2]
+    rev = await entity_revision(svc, graph_id=gid, entity_id="A", version_id=bo_row["id"])
+    assert (rev["actor"], rev["commit_message"], rev["on_draft"]) == ("bo", "bo edits A", False)
+    assert rev["value"]["kind"] == "node" and rev["value"]["node"]["properties"] == {"v": 1}
+    assert rev["value"]["version"] == content_hash(at_branch_point)
+
+    # the draft's own revision is read with the draft's branchId, never from main
+    rev = await entity_revision(svc, graph_id=gid, entity_id="A", version_id=cy_row["id"], branch_id=d)
+    assert rev["on_draft"] is True and rev["value"]["node"]["properties"] == {"v": 1, "w": 1}
+    assert await entity_revision(svc, graph_id=gid, entity_id="A", version_id=cy_row["id"]) is None
+    assert await entity_revision(svc, graph_id=gid, entity_id="A", version_id=cy_row["id"],
+                                 branch_id=main) is None
+
+    # an id that is no revision of this entity
+    assert await entity_revision(svc, graph_id=gid, entity_id="A", version_id="nv_nope", branch_id=d) is None
+    b_row = (await entity_history_page(svc, graph_id=gid, entity_id="B"))["versions"][0]
+    assert await entity_revision(svc, graph_id=gid, entity_id="A", version_id=b_row["id"]) is None
+
     assert [v["actor"] for v in (await entity_history_page(
         svc, graph_id=gid, entity_id="A", branch_id=d, scope="draft"))["versions"]] == ["cy"]
     assert [v["actor"] for v in (await entity_history_page(
@@ -77,6 +97,9 @@ async def _run() -> None:
     await svc.apply_ops(graph_id=gid, branch_id=other, actor="eve", message="eve", ops=[_set("A", eve=1)])
     assert "eve" not in [v["actor"] for v in (await entity_history_page(
         svc, graph_id=gid, entity_id="A", branch_id=d))["versions"]]
+    eve_row = (await entity_history_page(svc, graph_id=gid, entity_id="A", branch_id=other,
+                                         scope="draft"))["versions"][0]
+    assert await entity_revision(svc, graph_id=gid, entity_id="A", version_id=eve_row["id"], branch_id=d) is None
     with pytest.raises(AccessDenied):
         await svc.assert_branch_readable(graph_id=gid, branch_id=other, viewer=Viewer(actor="cy"))
 
@@ -99,6 +122,29 @@ async def _run() -> None:
         "payload": {"edgeType": "FLOWS_TO", "sourceEntityId": "A", "targetEntityId": "B", "properties": {}}}])
     e = await entity_summary(svc, graph_id=gid, entity_id="E", include_value=True)
     assert e["kind"] == "edge" and e["value"]["edge"]["sourceUrn"] == "A"
+    e_row = (await entity_history_page(svc, graph_id=gid, entity_id="E"))["versions"][0]
+    rev = await entity_revision(svc, graph_id=gid, entity_id="E", version_id=e_row["id"])
+    assert rev["value"]["kind"] == "edge" and rev["value"]["edge"]["sourceUrn"] == "A"
+
+    # a deletion's revision is the deleted view (its row stores no value)
+    await svc.apply_ops(graph_id=gid, actor="ana", message="drop edge",
+                        ops=[{"op": "delete", "entity_kind": "edge", "entity_id": "E"}])
+    e_row = (await entity_history_page(svc, graph_id=gid, entity_id="E"))["versions"][0]
+    rev = await entity_revision(svc, graph_id=gid, entity_id="E", version_id=e_row["id"])
+    assert rev["op"] == "delete" and rev["value"] == {"kind": "edge", "version": None, "deleted": True}
+    # ... and says what it removed: the relationship just before, to read or retrieve
+    assert rev["last_value"]["kind"] == "edge" and rev["last_value"]["version"]
+    assert rev["last_value"]["edge"]["id"] == "E"
+    # a deleted entity's last value carries its properties
+    await svc.apply_ops(graph_id=gid, actor="ana", message="z", ops=[_node("Z", owner="ana", tier="gold")])
+    await svc.apply_ops(graph_id=gid, actor="ana", message="drop z",
+                        ops=[{"op": "delete", "entity_kind": "node", "entity_id": "Z"}])
+    z_row = (await entity_history_page(svc, graph_id=gid, entity_id="Z"))["versions"][0]
+    rev = await entity_revision(svc, graph_id=gid, entity_id="Z", version_id=z_row["id"])
+    assert rev["value"]["deleted"] is True
+    assert rev["last_value"]["node"]["properties"] == {"owner": "ana", "tier": "gold"}
+    # a revision that deleted nothing has no last value
+    assert (await entity_revision(svc, graph_id=gid, entity_id="A", version_id=bo_row["id"]))["last_value"] is None
 
     await db.dispose_engine()
 

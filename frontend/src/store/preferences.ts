@@ -123,6 +123,8 @@ interface PreferencesState {
   // section never arrives hidden and an older stored map never hides one.
   drawerSectionsCollapsed: Record<string, boolean>
   toggleDrawerSection: (key: string) => void
+  /** Set one, when what it starts as is not simply open (a property list's later sections). */
+  setDrawerSectionCollapsed: (key: string, collapsed: boolean) => void
   // Entity drawer — whether the identifier and name properties are shown in
   // full under the URN. Unlike a section, CLOSED by default: the URN alone is
   // the identifier most readers need, and one line says the rest.
@@ -437,6 +439,9 @@ export const usePreferencesStore = create<PreferencesState>()(
           ...state.drawerSectionsCollapsed,
           [key]: !state.drawerSectionsCollapsed[key],
         },
+      })),
+      setDrawerSectionCollapsed: (key, collapsed) => set((state) => ({
+        drawerSectionsCollapsed: { ...state.drawerSectionsCollapsed, [key]: collapsed },
       })),
       drawerIdentityDetailsOpen: false,
       toggleDrawerIdentityDetails: () => set((state) => ({ drawerIdentityDetailsOpen: !state.drawerIdentityDetailsOpen })),

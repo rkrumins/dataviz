@@ -31,6 +31,9 @@ import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { useRelationshipRecord } from '@/hooks/useRelationshipRecord'
 import { edgeKind } from '@/services/ontologyPreflightService'
 import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
+import { useEntityBaseline } from '@/features/versioning/hooks/useEntityBaseline'
+import { userProperties } from '@/lib/nodeFields'
+import { EntityChangeDigest } from './entity/EntityChangeDigest'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { edgeIndexOf } from '@/lib/storeIndex'
 import { Button } from '@/components/ui/Button'
@@ -175,6 +178,18 @@ function RelationshipPanel({
     () => ((pendingEdit?.after as { properties?: Record<string, unknown> } | undefined)?.properties) ?? storedProps,
     [pendingEdit, storedProps],
   )
+  // In a draft, what is published (main where the draft began): its properties then say what the
+  // draft changed, saved or not yet — as an entity's do.
+  const baseline = useEntityBaseline(versioningEnabled ? scope : {}, unsaved ? null : entityId)
+  const publishedProps = useMemo(
+    () => (baseline ? userProperties(baseline.published.properties) : undefined), [baseline])
+  const unsavedFields = useMemo(() => {
+    if (!pendingEdit) return 0
+    const b = ((pendingEdit.before as { properties?: Record<string, unknown> } | undefined)?.properties) ?? {}
+    const a = ((pendingEdit.after as { properties?: Record<string, unknown> } | undefined)?.properties) ?? {}
+    return [...new Set([...Object.keys(b), ...Object.keys(a)])]
+      .filter((k) => JSON.stringify(b[k]) !== JSON.stringify(a[k])).length
+  }, [pendingEdit])
 
   // ── Can this relationship be changed here? ──
   const editable = kind === 'lineage' && !unsaved && !writesLocked && versioningEnabled && editModeEnabled
@@ -259,6 +274,27 @@ function RelationshipPanel({
     stagedTimer.current = setTimeout(() => setJustStaged(false), 2500)
   }
 
+  // Edited where it is read (the View tab, in a draft): each change is staged as it is made. Back
+  // to the properties as read, nothing is left staged.
+  const [addingInline, setAddingInline] = useState(false)
+  const stageInline = (next: Record<string, unknown>) => {
+    if (!record || !entityId) return
+    const store = useStagedChangesStore.getState()
+    const isThis = (c: { type: string; targetId?: string }) => c.type === 'edit_edge' && c.targetId === entityId
+    if (JSON.stringify(next) === JSON.stringify(storedProps)) {
+      const existing = store.changes.find(isThis)
+      if (existing) store.replace(existing, null)
+      return
+    }
+    store.stageOrReplace(isThis, {
+      type: 'edit_edge',
+      targetId: entityId,
+      before: { properties: storedProps, ...(baseVersion ? { version: baseVersion } : {}) },
+      after: { properties: next },
+      summary: `Edit relationship '${source.name}' → '${dest.name}'`,
+    })
+  }
+
   const canDelete = !!onDeleteEdge && kind === 'lineage' && !writesLocked && !!canvasEdge
     && canvasEdge.id === entityId && !pendingDelete
   const deleteRelationship = () => useCanvasStore.getState().requestDrawerMove(() => {
@@ -281,6 +317,9 @@ function RelationshipPanel({
   }), [entityId, target, type, confidence, shownProps])
 
   const hasProps = Object.keys(shownProps).length > 0
+  // A property the draft removed is still listed (struck through, with Restore while editing).
+  const removedSome = !!publishedProps && Object.keys(publishedProps).some((k) => !(k in shownProps))
+  const sectionsKey = `edge:${type}`
   const editing = shownMode === 'edit' || hasChanges || justStaged
 
   return (
@@ -377,6 +416,11 @@ function RelationshipPanel({
           )}
 
           <TabsContent value="view">
+            {(baseline || unsavedFields > 0) && (
+              <div className="px-5 pt-4 -mb-3">
+                <EntityChangeDigest baseline={baseline} unsavedFields={unsavedFields} kind="edge" />
+              </div>
+            )}
             <div className="divide-y divide-glass-border">
               <Section title="Details" icon={Info}>
                 <DetailList>
@@ -401,18 +445,26 @@ function RelationshipPanel({
                   <Notice tone="warn" action={{ label: 'Retry', onClick: () => { void refetch() } }}>
                     <span className="inline-flex items-center gap-2"><AlertCircle className="w-4 h-4" aria-hidden />Couldn’t load this relationship’s properties.</span>
                   </Notice>
-                ) : hasProps ? (
+                ) : hasProps || removedSome || (editable && addingInline) ? (
                   <PanelErrorBoundary resetKeys={[entityId ?? target.id]}>
-                    <PropertyEditor value={shownProps} onChange={() => {}} readOnly searchable groupByPath bare />
+                    {editable ? (
+                      <PropertyEditor key={entityId ?? target.id} value={shownProps} onChange={(next) => stageInline(next as Record<string, unknown>)}
+                        inline original={storedProps} published={publishedProps} startAdding={addingInline && !hasProps}
+                        searchable groupByPath bare sectionsKey={sectionsKey} />
+                    ) : (
+                      <PropertyEditor value={shownProps} onChange={() => {}} readOnly published={publishedProps}
+                        searchable groupByPath bare sectionsKey={sectionsKey} />
+                    )}
                   </PanelErrorBoundary>
                 ) : (
                   <EmptyState compact icon={FileText} title="No properties yet"
                     description={editable ? 'Record what this flow carries, how often, who owns it.' : undefined}
-                    action={editable ? { label: 'Add properties', onClick: startEdit } : undefined} />
+                    action={editable ? { label: 'Add properties', onClick: () => setAddingInline(true) } : undefined} />
                 )}
               </Section>
 
               {historyOn && !unsaved && entityId && (
+                <div id={`history-${entityId}`} className="scroll-mt-2">
                 <Section title="History" icon={History}>
                   <EntityHistory
                     wsId={scope.wsId!}
@@ -423,6 +475,7 @@ function RelationshipPanel({
                     kind="edge"
                   />
                 </Section>
+                </div>
               )}
             </div>
           </TabsContent>
@@ -438,9 +491,12 @@ function RelationshipPanel({
                       setHasChanges(true)
                       setJustStaged(false)
                     }}
+                    original={storedProps}
+                    published={publishedProps}
                     searchable
                     groupByPath
                     bare
+                    sectionsKey={sectionsKey}
                   />
                 </PanelErrorBoundary>
               </Section>
@@ -456,7 +512,11 @@ function RelationshipPanel({
           {editing ? (
             <StageBar dirty={hasChanges} justStaged={justStaged} onCancel={discard} onStage={stage} />
           ) : historyOn && !unsaved ? (
-            <DrawerActivity summary={summary} loading={summaryQ.isLoading} wsId={scope.wsId} graphId={scope.graphId} inDraft={!!draftId} />
+            <DrawerActivity summary={summary} loading={summaryQ.isLoading} wsId={scope.wsId} graphId={scope.graphId} inDraft={!!draftId}
+              onSeeHistory={entityId ? () => {
+                setMode('view')
+                requestAnimationFrame(() => document.getElementById(`history-${entityId}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+              } : undefined} />
           ) : (
             <p className="text-[11px] text-ink-muted text-center py-1">
               {unsaved ? 'Save your changes to start this relationship’s history.' : 'History is available with version control.'}

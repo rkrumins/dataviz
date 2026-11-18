@@ -106,6 +106,7 @@ GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/entries/{entity_id} resour
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/index resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/summary resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/history resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/revisions/{version_id} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/summary resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/plan resource

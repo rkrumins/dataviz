@@ -1,5 +1,5 @@
 /**
- * EntityChangeDigest — what a draft has done to this entity, in one line at the top of its details,
+ * EntityChangeDigest — what a draft has done to this entity (or relationship), in one line at the top of its details,
  * in the tree's colours: "In this draft · Edited owner, tier and 1 more ~2 +1", and how many fields
  * are staged but not saved yet. Saved changes come from the draft against what is published;
  * nothing shows for an entity the draft has not touched.
@@ -12,20 +12,22 @@ import { fieldsOfChange, summarizeFields } from '@/features/versioning/model/fie
 import { CHANGE_TONE, STATE_DOT } from '@/features/versioning/model/changeTone'
 import type { EntityBaseline } from '@/features/versioning/hooks/useEntityBaseline'
 
-export const EntityChangeDigest = memo(function EntityChangeDigest({ baseline, unsavedFields }: {
+export const EntityChangeDigest = memo(function EntityChangeDigest({ baseline, unsavedFields, kind = 'node' }: {
   baseline: EntityBaseline | undefined
   /** Fields staged on it, not saved yet. */
   unsavedFields: number
+  /** An entity's or a relationship's. */
+  kind?: 'node' | 'edge'
 }) {
   const status = baseline && baseline.status !== 'unchanged' ? baseline.status : null
   const summary = useMemo(() => {
     if (!baseline || !status) return null
     return summarizeFields(fieldsOfChange({
-      entityId: '', kind: 'node', status, label: '', origin: { source: 'branch', branchId: '' },
+      entityId: '', kind, status, label: '', origin: { source: 'branch', branchId: '' },
       before: status === 'added' ? undefined : baseline.published,
       after: baseline.saved ?? undefined,
     }))
-  }, [baseline, status])
+  }, [baseline, status, kind])
   if (!status && !unsavedFields) return null
   const tone = CHANGE_TONE[status ?? 'modified']
   return (

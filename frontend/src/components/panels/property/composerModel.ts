@@ -1,7 +1,7 @@
 /**
  * composerModel — what adding a property understands, kept pure so it is tested on its own:
  *
- * - `detectValue`: what a typed value is — a number, yes/no, a date, a link, or text — so the
+ * - `detectValue`: what a typed value is — a number, yes/no, a date, a moment, a link, or text — so the
  *   value is stored as what it is without anyone picking a type first;
  * - `parsePastedLines`: several properties pasted at once — `name: value`, `name = value`, or a
  *   name and a value separated by a tab (a spreadsheet's two columns) — each detected the same way;
@@ -9,6 +9,7 @@
  *   carry (most common first), then what this person added recently — never one already there.
  */
 import { isIsoDate, isUrl, type FieldType } from './fieldTypes'
+import { canonicalInstant, isIsoInstant } from './dateTime'
 
 export interface Detected {
   type: FieldType
@@ -26,6 +27,7 @@ export function detectValue(text: string): Detected {
     return { type: 'number', value: Number(s.replace(/,/g, '')) }
   }
   if (isIsoDate(s)) return { type: 'date', value: s }
+  if (isIsoInstant(s)) return { type: 'datetime', value: canonicalInstant(s) }   // stored in UTC
   if (isUrl(s)) return { type: 'url', value: s }
   return { type: 'text', value: text }
 }

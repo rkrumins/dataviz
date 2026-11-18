@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from backend.common.property_patch import apply_patch
+from backend.common.moments import as_like, locale_readings, parse as parse_moment, same_moment
 
 from ..ids import derived_entity_id, uuid_urn
 from .identifier import falls_back, property_of
@@ -43,12 +44,45 @@ _STATUS = {"create": "new", "update": "updated", "unchanged": "unchanged",
 
 def _scalar_eq(a: Any, b: Any) -> bool:
     """Type-tolerant equality so a CSV round-trip (which stringifies everything) is a no-op:
-    ``5 == "5"``, ``True == "True"``. Nested values (dict/list) compare exactly."""
+    ``5 == "5"``, ``True == "True"``, and a date or moment written another way
+    (``…T05:42:00Z`` and ``… 05:42:00+00:00``) is the same one. Nested values (dict/list) compare
+    exactly."""
     if a is None or b is None:
         return a == b
     if isinstance(a, (dict, list)) or isinstance(b, (dict, list)):
         return a == b
-    return str(a).strip() == str(b).strip()
+    return str(a).strip() == str(b).strip() or same_moment(a, b)
+
+
+def _settle_dates(payload: Dict[str, Any], cur: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """The row's properties with each date or moment that a stored one stands against read as one:
+    ISO in another form, or a spreadsheet's own writing (``18/11/2026``) — the stored value when it
+    is the same, else the new one in the stored form and kind. Returns the properties whose
+    spreadsheet date reads two ways, neither the stored one: those can't be taken."""
+    props = payload.get("properties")
+    stored = (cur or {}).get("properties") or {}
+    if not props or not stored:
+        return payload, []
+    out: Dict[str, Any] = {}
+    unclear: List[str] = []
+    for k, v in props.items():
+        was = stored.get(k)
+        if isinstance(v, str) and parse_moment(was) is not None and v != PROP_DELETE:
+            readings = locale_readings(v) or ([v] if parse_moment(v) is not None else [])
+            if any(same_moment(r, was) for r in readings):
+                v = was                                   # the same date: nothing changed
+            elif len(readings) == 1:
+                v = as_like(readings[0], was)
+            elif readings:
+                unclear.append(k)
+        out[k] = v
+    return {**payload, "properties": out}, unclear
+
+
+def _unclear_dates(keys: List[str], props: Mapping[str, Any]) -> str:
+    shown = ", ".join(f"{k} '{props.get(k)}'" for k in keys[:3]) + (" …" if len(keys) > 3 else "")
+    return (f"{shown} could be read day-first or month-first — write dates as YYYY-MM-DD "
+            "(and times as YYYY-MM-DDTHH:MM:SSZ)")
 
 
 def _changed_props(new_props: Mapping[str, Any], cur_props: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -304,6 +338,7 @@ CODES = {
     "edge_moved": "its ends or type differ from the edge its entity_id names",
     "write_refused": "the graph's write gate refused it",
     "already_gone": "a delete of what the graph doesn't hold",
+    "ambiguous_date": "a date in it reads both day-first and month-first",
 }
 
 #: What to do about a row refused for each reason (:data:`CODES`), and about a record that is
@@ -333,6 +368,8 @@ FIXES = {
                   "edge.",
     "write_refused": "Change the row to meet the rule its reason names.",
     "already_gone": "Nothing to do: the item is already deleted. Leave the row out.",
+    "ambiguous_date": "Write the date as YYYY-MM-DD (a time as YYYY-MM-DDTHH:MM:SSZ), or format the "
+                      "column as text before editing it in a spreadsheet, and import the row again.",
     "not_node_or_edge": "Give each record its kind (node or edge), or leave the record out.",
 }
 
@@ -770,6 +807,11 @@ def resolve_rows(
                     u2e.setdefault(name, matched_eid)
             if fallback and row_urn:
                 urn_hits.setdefault(row_urn, matched_eid)
+            np, unclear = _settle_dates(np, cur)
+            if unclear:
+                resolutions.append(_resolution(row, "invalid", matched_eid, code="ambiguous_date",
+                                               reasons=[_unclear_dates(unclear, np.get("properties") or {})]))
+                continue
             base = _stale(row, matched_eid, hash_of, bases)
             if base is not None:                                  # changed since it was exported
                 np, clashes = _rebase(np, base, cur)
@@ -997,6 +1039,12 @@ def resolve_rows(
             ep["edgeType"] = (edge_type_of.get(matched_eid)
                               or (current.get(matched_eid) or {}).get("edgeType") or etype)
             cur = after.get(matched_eid) or current.get(matched_eid) or {}
+            ep, unclear = _settle_dates(ep, cur)
+            if unclear:
+                resolutions.append(_resolution(row, "invalid", matched_eid, code="ambiguous_date",
+                                               reasons=[_unclear_dates(unclear, ep.get("properties") or {})],
+                                               mentions=ends))
+                continue
             base = _stale(row, matched_eid, hash_of, bases)
             if base is not None:                          # changed since it was exported
                 ep, clashes = _rebase(ep, base, cur)
