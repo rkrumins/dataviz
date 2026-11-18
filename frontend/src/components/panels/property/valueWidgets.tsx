@@ -224,11 +224,11 @@ const liteBlock = {
 export const InlineMarkdown = memo(function InlineMarkdown({ text }: { text: string }) {
   // Fast path: plain text → render directly, no Markdown pipeline.
   if (!hasMarkdown(text)) {
-    return <span className="text-xs text-ink whitespace-pre-wrap break-words">{text}</span>
+    return <span className="text-xs text-ink whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</span>
   }
   if (text.includes('\n')) {
     return (
-      <div className="prose-synodic max-w-none text-xs leading-relaxed break-words [&_pre]:overflow-x-auto">
+      <div className="prose-synodic max-w-none text-xs leading-relaxed [overflow-wrap:anywhere] [&_pre]:overflow-x-auto">
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={liteBlock}>{text}</ReactMarkdown>
       </div>
     )
@@ -245,9 +245,17 @@ export function isLongText(text: string): boolean {
   return text.split('\n').length > 5 || text.length > 280
 }
 
+/** Text that runs past "Show more" too: then "Show all" follows. */
+function isVeryLongText(text: string): boolean {
+  return text.split('\n').length > 16 || text.length > 1400
+}
+
 // ============================================
-// ClampedText — three-tier disclosure: inline (≤5 lines) → Expand (in-drawer) → Full screen (modal)
+// ClampedText — long text read in steps: a few lines → Show more (about 16) → Show all, or Full screen
 // ============================================
+
+/** How much of a long text shows: a few lines, more of it, or all of it. */
+type Reach = 'some' | 'more' | 'all'
 
 export const ClampedText = memo(function ClampedText({
   text,
@@ -263,16 +271,17 @@ export const ClampedText = memo(function ClampedText({
   /** Edit mode — clicking the cell opens the editor. */
   editable?: boolean
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [reach, setReach] = useState<Reach>('some')
   const empty = text === ''
-  // "A few lines" (≤5) shows inline with no Expand affordance.
+  // "A few lines" (≤5) shows whole, with nothing to expand.
   const isLong = !empty && isLongText(text)
-  const clampCollapsed = isLong && !expanded
+  const veryLong = isLong && isVeryLongText(text)
+  const clipped = isLong && (reach === 'some' || (reach === 'more' && veryLong))
 
   const content = empty ? (
     <span className="text-xs text-ink-muted">{editable ? 'Not set — click to add' : 'Not set'}</span>
   ) : source ? (
-    <span className="text-xs font-mono text-ink whitespace-pre-wrap break-words">{text}</span>
+    <span className="text-xs font-mono text-ink whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</span>
   ) : (
     <InlineMarkdown text={text} />
   )
@@ -280,27 +289,43 @@ export const ClampedText = memo(function ClampedText({
   const inner = (
     <div
       className={cn(
-        "relative",
-        clampCollapsed && "max-h-[7.5rem] overflow-hidden",
-        isLong && expanded && "max-h-[45vh] overflow-auto custom-scrollbar",
+        "relative [overflow-wrap:anywhere]",
+        isLong && reach === 'some' && "max-h-[7.5rem] overflow-hidden",
+        isLong && reach === 'more' && veryLong && "max-h-[20rem] overflow-hidden",
       )}
     >
       {content}
-      {clampCollapsed && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-canvas-elevated to-transparent" />
+      {clipped && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-canvas-elevated to-transparent" />
       )}
     </div>
   )
 
+  const lines = text.split('\n').length
+  const step = (e: React.MouseEvent, next: Reach) => { e.stopPropagation(); setReach(next) }
+  const linkCls = "inline-flex items-center gap-1 text-2xs font-medium text-accent-lineage hover:underline"
   const controls = isLong ? (
     <div className="flex items-center gap-3 mt-1">
-      <button
-        onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v) }}
-        className="inline-flex items-center gap-1 text-2xs font-medium text-accent-lineage hover:underline"
-      >
-        {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-        {expanded ? 'Collapse' : 'Expand'}
-      </button>
+      {reach === 'some' && (
+        <button onClick={(e) => step(e, veryLong ? 'more' : 'all')} className={linkCls}>
+          <ChevronDown className="w-3 h-3" />Show more
+        </button>
+      )}
+      {reach === 'more' && veryLong && (
+        <button onClick={(e) => step(e, 'all')} className={linkCls}>
+          <ChevronDown className="w-3 h-3" />Show all{lines > 16 ? ` ${lines.toLocaleString()} lines` : ''}
+        </button>
+      )}
+      {reach === 'all' && (
+        <button onClick={(e) => step(e, 'some')} className={linkCls}>
+          <ChevronUp className="w-3 h-3" />Show less
+        </button>
+      )}
+      {reach === 'more' && veryLong && (
+        <button onClick={(e) => step(e, 'some')} className="text-2xs font-medium text-ink-muted hover:text-ink">
+          Show less
+        </button>
+      )}
       {onOpen && (
         <button
           onClick={(e) => { e.stopPropagation(); onOpen(true) }}
@@ -316,13 +341,14 @@ export const ClampedText = memo(function ClampedText({
   if (editable) {
     return (
       <div>
-        <div
-          onClick={() => onOpen?.(false)}
-          className="cursor-text rounded-md px-2 py-1 -mx-2 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
-          title="Click to edit"
-        >
-          {inner}
-        </div>
+        <HoverTip label="Click to edit" className="block">
+          <div
+            onClick={() => onOpen?.(false)}
+            className="cursor-text rounded-md px-2 py-1 -mx-2 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
+          >
+            {inner}
+          </div>
+        </HoverTip>
         {controls}
       </div>
     )

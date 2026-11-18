@@ -654,6 +654,9 @@ const PropertyRow = memo(function PropertyRow({
   const inline = useContext(InlineModeContext)
   const fieldType = inferFieldType(value)
   const isContainer = fieldType === 'group' || fieldType === 'list'
+  // Long text takes the row's whole width, under its key: a paragraph squeezed beside the key
+  // reads as a column of three words.
+  const stacked = fieldType === 'text' && typeof value === 'string' && isLongText(value)
   const [expanded, setExpanded] = useState(depth < 1)
   const [editingKey, setEditingKey] = useState(false)
   const [keyDraft, setKeyDraft] = useState(rowKey)
@@ -681,6 +684,7 @@ const PropertyRow = memo(function PropertyRow({
     <div className="group">
       <div className={cn(
         "relative flex items-start gap-1.5 py-1.5 px-1 rounded-lg",
+        stacked && "flex-wrap gap-y-0.5",
         "hover:bg-black/[0.025] dark:hover:bg-white/[0.03] transition-colors",
         mark && cn("before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full", MARK_STYLE[mark].bar,
           // Saved in the draft: the quieter, solid form; staged: full strength.
@@ -706,7 +710,8 @@ const PropertyRow = memo(function PropertyRow({
 
         {/* Key column — one width for every row, so values align; a long key wraps (two lines,
             the whole of it on hover) rather than being cut off. */}
-        <div className="basis-[36%] min-w-[112px] max-w-[200px] flex-shrink-0 min-h-6 py-[3px] flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        <div className={cn('min-h-6 py-[3px] flex flex-wrap items-center gap-x-1.5 gap-y-0.5',
+          stacked ? 'flex-1 min-w-0' : 'basis-[36%] min-w-[112px] max-w-[200px] flex-shrink-0')}>
           {isArrayItem ? (
             <span className="text-xs text-ink-muted">{rowKey}</span>
           ) : readOnly ? (
@@ -763,8 +768,8 @@ const PropertyRow = memo(function PropertyRow({
           )}
         </div>
 
-        {/* Value column — flexible, consistent across all kinds */}
-        <div className="flex-1 min-w-0">
+        {/* Value column — flexible, consistent across all kinds; long text on a line of its own */}
+        <div className={cn('flex-1 min-w-0', stacked && 'order-last basis-full pl-[22px]')}>
           {isContainer ? (
             <span className="text-2xs text-ink-muted h-6 flex items-center">
               {fieldType === 'group'
@@ -1928,6 +1933,17 @@ function GroupedObjectRoot({
     [peers, value, readOnly],
   )
 
+  const viewMenu = (
+    <ViewMenu
+      flat={flat}
+      onFlat={setFlat}
+      // The text as stored is the Technical view's to ask for.
+      text={!technical ? undefined : readsFormatted
+        ? { value: display === 'source' ? 'source' : 'formatted', onChange: (v) => setDisplay(v === 'source' ? 'source' : 'formatted'), labels: ['Formatted', 'Markdown'] }
+        : { value: editTextMode === 'source' ? 'source' : 'formatted', onChange: (v) => setEditTextMode(v === 'source' ? 'source' : 'rich'), labels: ['Rich', 'Source'] }}
+    />
+  )
+
   // Sections: what sits in no folder first (General), then each top-level folder.
   const general = visible.leaves
   const sectionCount = visible.folders.length + (general.length > 0 ? 1 : 0)
@@ -1937,37 +1953,34 @@ function GroupedObjectRoot({
     <DisplayModeContext.Provider value={readsFormatted ? display : 'source'}>
     <EditTextModeContext.Provider value={editTextMode}>
     <div>
-      {/* Toolbar: search, Changes only, and how the list is shown */}
-      <div className="flex items-center gap-1.5 mb-2.5">
-        {searchable && (
-          <div className="flex-1 min-w-[8rem]">
-            <SearchBox
-              query={query}
-              onChange={setQuery}
-              placeholder={`Search ${entries.length} ${entries.length === 1 ? 'property' : 'properties'}…`}
-              className="mb-0"
-            />
+      {/* Toolbar: search on its own line; Changes only and how the list is shown beside or under it */}
+      <div className="mb-2.5 space-y-1.5">
+        <div className="flex items-center gap-1.5">
+          {searchable ? (
+            <div className="flex-1 min-w-0">
+              <SearchBox
+                query={query}
+                onChange={setQuery}
+                placeholder={`Search ${entries.length} ${entries.length === 1 ? 'property' : 'properties'}…`}
+                className="mb-0"
+              />
+            </div>
+          ) : <span className="flex-1" />}
+          {!anyChange && viewMenu}
+        </div>
+        {anyChange && (
+          <div className="flex items-center justify-between gap-1.5">
+            <HoverTip label={changesOnly ? 'Show every property' : 'Show only the properties that changed'} className="inline-flex">
+              <button type="button" aria-pressed={changesOnly} onClick={() => setChangesOnly((v) => !v)}
+                className={cn('inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[11px] font-semibold flex-shrink-0 transition-colors',
+                  changesOnly ? 'bg-accent-lineage/10 text-accent-lineage ring-1 ring-accent-lineage/30' : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5')}>
+                Changes only
+                <FieldCountChips summary={changeCounts} />
+              </button>
+            </HoverTip>
+            {viewMenu}
           </div>
         )}
-        {anyChange && (
-          <HoverTip label={changesOnly ? 'Show every property' : 'Show only the properties that changed'} className="inline-flex">
-            <button type="button" aria-pressed={changesOnly} onClick={() => setChangesOnly((v) => !v)}
-              className={cn('inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[11px] font-semibold flex-shrink-0 transition-colors',
-                changesOnly ? 'bg-accent-lineage/10 text-accent-lineage ring-1 ring-accent-lineage/30' : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5')}>
-              Changes only
-              <FieldCountChips summary={changeCounts} />
-            </button>
-          </HoverTip>
-        )}
-        {!searchable && <span className="flex-1" />}
-        <ViewMenu
-          flat={flat}
-          onFlat={setFlat}
-          // The text as stored is the Technical view's to ask for.
-          text={!technical ? undefined : readsFormatted
-            ? { value: display === 'source' ? 'source' : 'formatted', onChange: (v) => setDisplay(v === 'source' ? 'source' : 'formatted'), labels: ['Formatted', 'Markdown'] }
-            : { value: editTextMode === 'source' ? 'source' : 'formatted', onChange: (v) => setEditTextMode(v === 'source' ? 'source' : 'rich'), labels: ['Rich', 'Source'] }}
-        />
       </div>
 
       {flat ? (
@@ -2242,7 +2255,7 @@ function RemovedRows({ rows, onRestore, unsaved }: {
       {rows.map(([key, was]) => (
         <div key={key} className={cn('relative flex items-center gap-1.5 py-1.5 pl-5 pr-1 rounded-lg bg-rose-500/[0.04] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full before:bg-rose-500',
           unsaved && !unsaved.has(key) && 'before:opacity-60')}>
-          <span className="basis-[132px] flex-shrink-0 min-w-0 text-xs font-mono text-ink-muted line-through truncate">{key}</span>
+          <span className="basis-[36%] min-w-[112px] max-w-[200px] flex-shrink-0 text-xs font-mono text-ink-muted line-through break-all line-clamp-2">{key}</span>
           <span className="inline-flex items-center gap-1 px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide bg-rose-500/12 text-rose-700 dark:text-rose-300 flex-shrink-0">
             <span aria-hidden className={cn('w-1.5 h-1.5 rounded-full', STATE_DOT[!unsaved || unsaved.has(key) ? 'unsaved' : 'saved'])} />
             Removed

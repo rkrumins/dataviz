@@ -118,7 +118,7 @@ function FieldEditor({ value, fieldType, fieldLabel, onCommit, onDone }: {
     const el = ref.current
     if (!el || !multiline) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+    el.style.height = `${Math.min(el.scrollHeight, 240)}px`
   }, [draft, multiline])
 
   const keep = (raw = draft) => {
