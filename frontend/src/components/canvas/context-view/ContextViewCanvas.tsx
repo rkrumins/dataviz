@@ -4911,6 +4911,26 @@ export function ContextViewCanvas({
       },
     }, 8000)
   }, [narrowViewId, navigateTo, notify, setSaveAsDraft])
+  // A TRACE kept as a view: everything it reaches — these seeds, this far each
+  // way, on the sides being read — resolved by the server, so the view holds
+  // the whole answer, not only what this board could place.
+  const traceSaveAsView = useMemo(() => {
+    if (!canSaveAsView || !traceActive || canvasTrace.tracedUrns.length === 0) return undefined
+    return () => setSaveAsDraft({
+      spec: traceMembershipSpec({
+        urns: canvasTrace.tracedUrns,
+        showUpstream: traceShowUpstream, showDownstream: traceShowDownstream,
+        depthUp: traceDepthUp, depthDown: traceDepthDown,
+      }),
+      seedsLabel: tracedLabel ?? 'the traced entities',
+      seedNames: Object.fromEntries(traceSeeds.map(t => [t.urn, t.label])),
+      origin: 'trace',
+    })
+  }, [canSaveAsView, traceActive, canvasTrace.tracedUrns, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown, tracedLabel, traceSeeds])
+  const traceKeepActions = useMemo(
+    () => (traceKeep && traceSaveAsView ? { ...traceKeep, saveAsView: traceSaveAsView } : traceKeep),
+    [traceKeep, traceSaveAsView],
+  )
 
   // SUBSET VIEWS (features/search-views) — a search's matches kept as a view of
   // their own; in a subset view, its layers list them. A preview switch
@@ -7077,7 +7097,7 @@ export function ContextViewCanvas({
               seeds={traceSeeds}
               onRemoveSeed={removeTraceSeed}
               outsideView={overlay.view?.outsideView ?? 0}
-              keep={traceKeep}
+              keep={traceKeepActions}
               sinceSaved={sinceSaved}
             />
         )}

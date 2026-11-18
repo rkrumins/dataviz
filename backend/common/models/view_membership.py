@@ -209,7 +209,7 @@ OVERRIDES_MAX = 2000
 
 Mode = Literal["live", "snapshot"]
 LayoutKind = Literal["source", "template", "auto", "stages", "custom"]
-Origin = Literal["narrow", "search", "savedQuery", "wizard", "api"]
+Origin = Literal["narrow", "search", "savedQuery", "wizard", "api", "trace"]
 
 
 def _sha(value: object) -> str:

@@ -85,7 +85,7 @@ export interface MembershipRequest {
 /** `live` keeps the members in step with the data; `snapshot` keeps them as they are. */
 export type MembershipMode = 'live' | 'snapshot'
 export type LayoutKind = 'source' | 'template' | 'auto' | 'stages' | 'custom'
-export type MembershipOrigin = 'narrow' | 'search' | 'savedQuery' | 'wizard' | 'api'
+export type MembershipOrigin = 'narrow' | 'search' | 'savedQuery' | 'wizard' | 'api' | 'trace'
 
 /** One query a view's members come from — a query seed is searched in `readIn`. */
 export interface MembershipSource {

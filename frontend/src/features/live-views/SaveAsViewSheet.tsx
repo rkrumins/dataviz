@@ -86,7 +86,9 @@ export function SaveAsViewSheet({
   const sentence = describeNarrow(spec, draft.seedsLabel)
   const templatesEnabled = useLayoutTemplatesEnabled()
   const offers = layoutOffers(spec, sourceLayerCount, templatesEnabled)
-  const firstOffer = offers.find((o) => o.available)?.choice ?? 'auto'
+  // A trace is a lineage question first: its stages, where the view can have them.
+  const traceStages = draft.origin === 'trace' && offers.some((o) => o.choice === 'stages' && o.available)
+  const firstOffer = traceStages ? 'stages' : offers.find((o) => o.available)?.choice ?? 'auto'
 
   const [name, setName] = useState(() => capitalise(sentence).slice(0, 120))
   const [live, setLive] = useState(true)
@@ -120,7 +122,7 @@ export function SaveAsViewSheet({
     try {
       const out = await createFromMembers(createRequestOf({
         name, visibility, mode: live ? 'live' : 'snapshot', workspaceId, dataSourceId,
-        spec, viewId, choices: withTemplate, origin: spec.seeds.query ? 'search' : 'narrow',
+        spec, viewId, choices: withTemplate, origin: draft.origin ?? (spec.seeds.query ? 'search' : 'narrow'),
       }), idempotencyKey)
       onSaved(out.view)
     } catch (err) {
