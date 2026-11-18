@@ -69,6 +69,7 @@ from backend.app.services.layout_config import derive_entity_scope, parse_refere
 from backend.app.services.search_views import (
     boundary_hash,
     follow_placement,
+    followed_placement,
     is_subset,
     search_hash,
     shown_layers,
@@ -78,6 +79,7 @@ from backend.app.services.search_views import (
 from backend.app.services.view_placement import PlacementSpec, _num
 from backend.common.models.search import SearchScope
 from backend.common.models.search_view import read_search_definition
+from backend.common.models.view_membership import read_definition
 
 logger = logging.getLogger(__name__)
 
@@ -481,7 +483,8 @@ class ViewScopeResolver:
             requested.entity_types, allowed_entity_types,
         )
 
-        placement, layers, placement_digest = _placement_inputs(config)
+        placement, layers, placement_digest = (
+            await self._followed_placement(view, config, members_epoch) or _placement_inputs(config))
         scope_hash = _compute_scope_hash(
             view_id=view.id,
             updated_at=view.updated_at,
@@ -603,6 +606,29 @@ class ViewScopeResolver:
             unlisted_roots=unlisted,
             member_scope=member_scope,
         )
+
+    async def _followed_placement(
+        self, view: ViewORM, config: Dict[str, Any], members_epoch: Optional[int],
+    ) -> Optional[Tuple[Optional[PlacementSpec], Tuple[Tuple[str, str], ...], str]]:
+        """For a view made from a query that follows another, what a layer filter in it
+        reads (``search_views.followed_placement``): that view's placement and the layers
+        it is served, with where people put things here over it — its entries, and the
+        members they moved (``membership.overrides``), each carrying its own insides
+        when it is kept whole. None for any other view; no layers with the view it
+        follows gone (a layer filter then matches the stamp, as in a view without any)."""
+        definition = read_definition(config)
+        if definition is None or definition.layout.kind != "follow":
+            return None
+        from backend.app.services.live_views.pipeline import layout_of, source_config
+
+        base = await source_config(self._session, definition, view.workspace_id)
+        if base is None:
+            return None, (), ""
+        rows = await view_members_repo.placements(self._session, view.id, members_epoch,
+                                                  definition.overrides)
+        moved = {urn: {"layerId": o.layer_id, "inheritsChildren": rows[urn]["inheritsChildren"]}
+                 for urn, o in definition.overrides.items() if urn in rows and o.layer_id}
+        return followed_placement(base, {**moved, **layout_of(config)[1]})
 
     async def _member_roots(self, view_id: str, config: Dict[str, Any]
                             ) -> Tuple[List[str], int, Optional[int], Optional[MemberScope]]:

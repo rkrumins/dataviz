@@ -24,11 +24,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, replace
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from backend.app.services.layout_config import _resolve_raw_layout, parse_reference_layout
 from backend.app.services.view_placement import (
+    ExplicitEntry,
     LayerTarget,
     PlacementSpec,
     place_all,
@@ -332,11 +333,48 @@ def followed_reference_layout(base_config: Dict[str, Any],
     return out
 
 
+def in_followed_layers(entries: Mapping[str, Dict[str, Any]],
+                       layers: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Where people put things in a view made from a query that follows another — its
+    entries, or the members they moved — in ``layers``, the ones it is served. One in a
+    layer the view it follows has since deleted is in the fallback layer (that view's
+    own, else "Other matches"): never dropped, never in a layer the view doesn't have."""
+    from backend.app.services.live_views.ownership import _placed
+
+    ids = {layer["id"] for layer in layers}
+    fallback = next((layer["id"] for layer in layers if layer.get("showUnassigned") is True), None)
+    return {urn: _placed(dict(entry), ids, fallback) for urn, entry in entries.items() if isinstance(entry, dict)}
+
+
+def followed_placement(base_config: Dict[str, Any], entries: Mapping[str, Dict[str, Any]]
+                       ) -> Tuple[PlacementSpec, Tuple[Tuple[str, str], ...], str]:
+    """How a view made from a query that follows ``base_config`` places entities, as a
+    layer filter in it reads them: as the base's canvas places every entity (as its
+    members are placed, ``live_views.plan.source_placer``), with ``entries`` — where
+    people put things in it — over the base's own. Its layers are the ones it is
+    served, in board order, "Other matches" among them as the fallback layer: what
+    nothing places, and what people put there. Returns the placement, its layers as
+    ``(id, name)`` and a digest of what decides it."""
+    served = followed_reference_layout(base_config)["layers"]
+    spec = PlacementSpec.from_config(base_config)
+    own = {urn: ExplicitEntry(entry["layerId"], entry.get("inheritsChildren") is not False,
+                              entry.get("logicalNodeId"))
+           for urn, entry in in_followed_layers(entries, served).items()
+           if isinstance(entry.get("layerId"), str) and entry["layerId"]}
+    spec = replace(spec, scope="all", layer_ids=frozenset(layer["id"] for layer in served),
+                   explicit={**spec.explicit, **own},
+                   fallback_layer_id=next((layer["id"] for layer in served
+                                           if layer.get("showUnassigned") is True), None))
+    layers = tuple((layer["id"], layer.get("name") or layer["id"]) for layer in served)
+    return spec, layers, placement_digest(spec)
+
+
 def served_config(config: Dict[str, Any], base_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """A view's config as it is read: one that follows another (``followed_base``) gets
     that view's layers (``followed_reference_layout``), its entity styles and the
-    relationships it draws. Without a base to follow (deleted, or out of
-    reach), its layers are empty — never anything widened."""
+    relationships it draws. A view made from a query keeps its own entries, each in a
+    layer it is served (``in_followed_layers``). Without a base to follow (deleted, or
+    out of reach), its layers are empty — never anything widened."""
     if is_subset(config):
         definition = SearchViewDefinition.model_validate(config["search"])
         if definition.layout != "inherit":
@@ -350,6 +388,10 @@ def served_config(config: Dict[str, Any], base_config: Optional[Dict[str, Any]])
     layout = dict(out.get("layout") or {})
     layout["referenceLayout"] = (followed_reference_layout(base_config, hidden)
                                  if base_config is not None else {"layers": [], "assignments": {}})
+    if base_config is not None and not is_subset(config):
+        stored = _resolve_raw_layout(config).get("assignments")
+        layout["referenceLayout"]["assignments"] = in_followed_layers(
+            stored if isinstance(stored, dict) else {}, layout["referenceLayout"]["layers"])
     out["layout"] = layout
     out.pop("referenceLayout", None)
     if base_config is not None:

@@ -1921,3 +1921,69 @@ async def test_past_the_cap_a_search_that_cant_read_members_is_still_refused(
             await svc.explain(SearchQuery(predicate=TagPredicate(values=["PII"]),
                                           scope=SearchScope(view_id=plain.id)))
     assert provider.calls == []
+
+
+async def test_a_layer_filter_in_a_view_that_follows_another_reads_the_layers_it_is_served(
+    db_session: AsyncSession,
+):
+    """A view made from a query that follows another stores no layers: a layer filter in
+    it reads the ones it is served, matching what that view places there and what people
+    moved there by hand — among its own members, whatever else that view places. "Other
+    matches" holds what nothing places. Its scope changes as that view places things."""
+    from types import SimpleNamespace
+
+    from backend.app.db.repositories import view_members_repo, view_membership_repo
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.common.models.search import SearchOptions, SearchQuery
+    from backend.graph.adapters.stub_deep_search import StubDeepSearchProvider
+
+    def base_config(tables: list) -> dict:
+        return {"layoutType": "reference", "content": {"entityScope": "all"},
+                "layout": {"referenceLayout": {"assignments": {}, "layers": [
+                    {"id": "b_tbls", "name": "Tables", "order": 0, "entityTypes": tables},
+                    {"id": "b_cols", "name": "Columns", "order": 1, "entityTypes": ["column"]}]}}}
+
+    ws = await _seed_workspace(db_session)
+    base = await _seed_view(db_session, ws, view_type="reference", config=base_config(["table"]))
+    view = await _seed_view(db_session, ws, view_type="reference", config={
+        "layoutType": "reference", "content": {"entityScope": "curated"},
+        "membership": {"v": 1, "mode": "live", "sources": [{"spec": {"seeds": {"urns": ["urn:s"]}}}],
+                       "layout": {"kind": "follow", "sourceViewId": base.id},
+                       "overrides": {"urn:col2": {"layerId": "b_tbls", "at": "t0"}}},
+        "layout": {"referenceLayout": {"layers": [], "assignments": {}}},
+    })
+    members = [("urn:tbl", "b_tbls"), ("urn:col1", "b_cols"), ("urn:col2", "b_tbls"), ("urn:job", "other-matches")]
+    state = await view_membership_repo.ensure(db_session, view)
+    await view_members_repo.insert(db_session, [
+        {"view_id": view.id, "epoch": 1, "urn": urn, "layer_id": layer, "sort_key": urn, "ord": i,
+         "label": "", "label_ord": i, "whole": False, "covered": False} for i, (urn, layer) in enumerate(members)])
+    state.epoch = state.members_epoch = 1
+    state.member_count = len(members)
+    await db_session.flush()
+
+    resolver = ViewScopeResolver(db_session)
+    eff = await resolver.resolve(workspace_id=ws.id, requested=SearchScope(view_id=view.id))
+    assert eff.layers == (("b_tbls", "Tables"), ("b_cols", "Columns"), ("other-matches", "Other matches"))
+
+    stub = StubDeepSearchProvider(nodes=[
+        {"urn": "urn:tbl", "entityType": "table"}, {"urn": "urn:col1", "entityType": "column"},
+        {"urn": "urn:col2", "entityType": "column"}, {"urn": "urn:job", "entityType": "job"},
+        {"urn": "urn:elsewhere", "entityType": "table"}])
+    svc = AdvancedSearchService(SimpleNamespace(provider=stub), session=db_session, workspace_id=ws.id)
+
+    async def found(layer: str) -> list:
+        page, _ = await svc.search(SearchQuery(
+            predicate={"kind": "layer", "layerAssignment": layer}, scope=SearchScope(view_id=view.id),
+            options=SearchOptions(results="hits", pageSize=100)))
+        assert not page.scope_diagnostics.notes, page.scope_diagnostics.notes
+        return sorted(h.node.urn for h in page.hits)
+
+    assert await found("Tables") == ["urn:col2", "urn:tbl"], "placed there, and moved there by hand"
+    assert await found("b_cols") == ["urn:col1"]
+    assert await found("Other matches") == ["urn:job"]
+
+    base.config = json.dumps(base_config(["table", "job"]))
+    await db_session.flush()
+    again = await resolver.resolve(workspace_id=ws.id, requested=SearchScope(view_id=view.id))
+    assert again.scope_hash != eff.scope_hash and again.placement_digest != eff.placement_digest
+    assert await found("Tables") == ["urn:col2", "urn:job", "urn:tbl"]

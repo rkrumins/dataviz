@@ -4,7 +4,8 @@ One row per such view, created with it (or the first time anything needs it).
 Writers:
 
 * the layout paths (``view_repo``) mark a view ``pending`` when its members need
-  placing again (a layer they sat in was deleted, a design was restored);
+  placing again (a layer they sat in was deleted, a design was restored, the view it
+  follows changed how it places entities);
 * the refresh pipeline claims a row (``epoch + 1``, a lease) and records its answer
   only while the epoch is still its own — a run that lost its lease, or was
   overtaken, never writes over a newer answer. A run too large for one request
@@ -15,13 +16,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, List, Optional, Sequence
 
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import ViewMembershipStateORM, ViewORM
+from backend.app.db.models import ViewMembershipStateORM, ViewORM, view_is_live
 
 
 def now_iso() -> str:
@@ -80,6 +81,39 @@ async def mark_pending(session: AsyncSession, row: ViewORM, *, reason: str) -> N
         return
     state.status = "pending"
     state.status_detail = dumps({"reason": reason})
+
+
+async def followers(session: AsyncSession, view_id: str) -> List[str]:
+    """The views made from a query that follow ``view_id`` (``layout.kind: follow``): live
+    views among its subsets (``subset_of``)."""
+    from backend.common.models.view_membership import read_definition
+
+    out: List[str] = []
+    for follower_id, text in (await session.execute(
+            select(ViewORM.id, ViewORM.config).where(ViewORM.subset_of == view_id, view_is_live()))).all():
+        config = loads(text)
+        definition = read_definition(config) if isinstance(config, dict) else None
+        if definition is not None and definition.layout.kind == "follow":
+            out.append(follower_id)
+    return out
+
+
+async def mark_followers_pending(session: AsyncSession, view_ids: Sequence[str]) -> int:
+    """The views ``view_ids`` follow a view that changed how it places entities: each is out
+    of date (``base_changed``) until it is next opened — in one statement, however many
+    there are. A snapshot stays as it is, and one a run is working out now is left to it:
+    the run places its pages again when what it follows changes. Returns how many."""
+    if not view_ids:
+        return 0
+    state = ViewMembershipStateORM
+    result = await session.execute(
+        update(state)
+        .where(state.view_id.in_(list(view_ids)), state.status.notin_(("frozen", "updating")),
+               or_(state.lease_until.is_(None), state.lease_until < now_iso()))
+        .values(status="pending", status_detail=dumps({"reason": "base_changed"}))
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount or 0
 
 
 async def claim(session: AsyncSession, view_id: str, *, owner: str, lease_s: float) -> Optional[int]:

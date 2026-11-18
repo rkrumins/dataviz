@@ -894,6 +894,39 @@ async def _made_from_a_query(session: AsyncSession, config: dict):
     return definition
 
 
+async def _layers_placed_in(session: AsyncSession, row: ViewORM, config: dict, reference_layout: dict) -> list:
+    """The layers a layout write places things in: the ones it sends — or, for a view made
+    from a query that follows another, the ones it is served (that view's as it is now,
+    "Other matches" among them), since it stores none. With the view it follows gone, a
+    ``ValueError`` (a 422): nothing is placed in layers it can't show."""
+    from backend.common.models.view_membership import read_definition
+
+    definition = read_definition(config)
+    if definition is None or definition.layout.kind != "follow":
+        return reference_layout.get("layers", [])
+    from backend.app.services.live_views import layouts, pipeline
+
+    base = await pipeline.source_config(session, definition, row.workspace_id)
+    if base is None:
+        raise ValueError("The view it follows can't be read, so nothing can be placed in this one "
+                         "until it is back.")
+    return layouts.followed(base)
+
+
+async def tell_followers(session: AsyncSession, row: ViewORM, config: dict) -> None:
+    """Called before ``config`` is written over ``row``'s published one: when it changes how
+    the view places entities (``placement_digest`` — a rename or a recolour doesn't), every
+    view made from a query that follows it is marked out of date, to be placed again when
+    it is next opened."""
+    from backend.app.db.repositories import view_membership_repo
+    from backend.app.services.view_placement import PlacementSpec, placement_digest
+
+    followers = await view_membership_repo.followers(session, row.id)
+    if followers and (placement_digest(PlacementSpec.from_config(_load_config(row)))
+                      != placement_digest(PlacementSpec.from_config(config))):
+        await view_membership_repo.mark_followers_pending(session, followers)
+
+
 def _remember_overrides(config: dict, overrides: Dict[str, dict]) -> None:
     from backend.app.services.live_views.ownership import remember
 
@@ -917,8 +950,9 @@ async def update_view_layout(
     view's display rules (see ``_keep_display_rules``).
 
     Raises ``ValueError`` if an assignment names a ``layerId`` that isn't
-    one of the submitted layers' ids (the endpoint maps this to a 422), or
-    if ``check_layer_rules`` refuses a new or changed layer rule.
+    one of the submitted layers' ids — for a view made from a query that
+    follows another, one of the layers it is served (the endpoint maps this
+    to a 422) — or if ``check_layer_rules`` refuses a new or changed layer rule.
     """
     # populate_existing: as in update_view.
     result = await session.execute(
@@ -937,27 +971,29 @@ async def update_view_layout(
     entity_scope = req.entity_scope
     # Refused before anything is written, members' places included.
     subset = _subset_layout(config, reference_layout)
+    layers = await _layers_placed_in(session, row, config, reference_layout)
     kept = await _made_from_a_query(session, config)
     if kept is not None:
         # The members follow the data, whatever this copy of the layout says: an entry
         # for one is a move, applied to it and remembered (live_views.ownership).
         from backend.app.db.repositories import view_members_repo, view_membership_repo
         from backend.app.services.live_views.ownership import layer_ids_of, reconcile_layout_write
+        from backend.app.services.live_views.pipeline import fallback_of
 
         epoch = await view_members_repo.members_epoch(session, row.id)
         incoming = reference_layout.get("assignments") or {}
+        placed_in, fallback = layer_ids_of({"layers": layers}), fallback_of(kept, layers)
         reconciled = reconcile_layout_write(
             previous_layout.get("assignments") or {}, incoming,
             members=await view_members_repo.placements(session, row.id, epoch, incoming),
-            layer_ids=layer_ids_of(reference_layout), fallback_layer_id=kept.layout.fallback_layer_id,
+            layer_ids=placed_in, fallback_layer_id=fallback,
             record_overrides=True, now=datetime.now(timezone.utc).isoformat(),
         )
         reference_layout = {**reference_layout, "assignments": reconciled.assignments}
         entity_scope = "curated"
         _remember_overrides(config, reconciled.overrides)
         await view_members_repo.move(session, row.id, epoch, reconciled.moves)
-        if await view_members_repo.rehome(session, row.id, epoch, layer_ids_of(reference_layout),
-                                          kept.layout.fallback_layer_id):
+        if await view_members_repo.rehome(session, row.id, epoch, placed_in, fallback):
             await view_membership_repo.mark_pending(session, row, reason="layer_removed")
     if subset:
         entity_scope = "all"          # a subset holds every match of its layers' types
@@ -983,7 +1019,7 @@ async def update_view_layout(
     _keep_display_rules(layout["referenceLayout"], previous_layout)
 
     layer_ids = {
-        layer.get("id") for layer in reference_layout.get("layers", [])
+        layer.get("id") for layer in layers
         if isinstance(layer, dict)
     }
     for urn, assignment in reference_layout.get("assignments", {}).items():
@@ -993,6 +1029,7 @@ async def update_view_layout(
                 f"assignment for '{urn}' names unknown layerId '{layer_id}'"
             )
 
+    await tell_followers(session, row, config)
     row.config = json.dumps(config)
     if user_id is not None:
         row.updated_by = user_id
@@ -1375,6 +1412,7 @@ async def promote_overlay(
     content["entityScope"] = merged_scope
     config["content"] = content
 
+    await tell_followers(session, row, config)
     row.config = json.dumps(config)
     if actor is not None:
         row.updated_by = actor
@@ -1439,6 +1477,7 @@ async def _promote_staged_import(
     if carry_into_config(config_dict):
         await view_membership_repo.mark_pending(session, row, reason="design_replaced")
     await view_members_repo.rehome_view(session, row.id, config_dict)
+    await tell_followers(session, row, config_dict)
     merged_config = json.dumps(config_dict)
     row.config = merged_config
     row.name = label.get("name") or row.name
