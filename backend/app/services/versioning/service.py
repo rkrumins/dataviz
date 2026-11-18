@@ -50,7 +50,7 @@ from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
 from . import change_sets
 from .change_index import (ROOT, ChangeIndex, ChangeIndexBuilder, ChangeOrigin, ChangeTree, IndexCache,
-                           classify, compact_entries, entry_dict, restore_closure, review_closure,
+                           TreeHierarchy, classify, compact_entries, entry_dict, restore_closure, review_closure,
                            review_requirements, stat_changes)
 from .errors import (ChangesRequested, DraftMoved, AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen, ChangeListBusy,
                      ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable, DraftPruned,
@@ -7763,27 +7763,23 @@ class GraphVersioningService:
         viewer: Optional[Viewer] = None,
     ) -> Dict[str, object]:
         """Hierarchical counterpart of :meth:`diff_branch_vs_base` — the draft's changes as a
-        containment tree for the canvas Changes panel. Built on the same O(draft) change set,
-        augmented with the *unchanged* containment ancestors of the changed nodes so edits nest
-        under their real container (a column under its table) without composing full state.
+        containment tree for the canvas Changes panel, grouped from its kept change tree
+        (:meth:`_grouped_summary`): edits nest under their real container (a column under its
+        table), and only the rows served read their values.
 
         A draft past ``DIFF_TREE_MAX_CHANGES`` is counted, not laid out: the same counts and a
         per-type rollup of the changed entities, from the narrow change index, with no groups and
         ``tooLarge`` saying so."""
         async with self._session() as s:
             changed = await self._too_large_count(s, graph_id, branch_id, viewer)
-            if changed is None:
-                merged, theirs = await self._branch_diff_states(
-                    s, graph_id, branch_id, containment_edge_types, viewer=viewer)
+        origin = ChangeOrigin(branch_id=branch_id)
         if changed is not None:
             # Counted from the draft's change index — built once per version of the draft and
-            # cached, on a bounded session — not by re-reading every head per request: a 100k
+            # kept, on a bounded session — not by re-reading every head per request: a 100k
             # draft's Changes tab opens on its counts at once and lists them a page at a time.
-            index = await self._change_index(graph_id, ChangeOrigin(branch_id=branch_id),
-                                             containment_edge_types, viewer=viewer)
+            index = await self._change_index(graph_id, origin, containment_edge_types, viewer=viewer)
             return _counted_tree_summary(index, changed)
-        index = await asyncio.to_thread(_build_diff_hierarchy, merged, theirs, containment_edge_types)
-        return _hierarchy_summary_view(index, limit)
+        return await self._grouped_summary(graph_id, origin, containment_edge_types, limit, viewer)
 
     async def diff_branch_children(
         self, *, graph_id: str, branch_id: str, container_key: str, containment_edge_types,
@@ -7795,10 +7791,8 @@ class GraphVersioningService:
             changed = await self._too_large_count(s, graph_id, branch_id, viewer)
             if changed is not None:
                 raise DiffTooLarge(changed, config.DIFF_TREE_MAX_CHANGES)
-            merged, theirs = await self._branch_diff_states(
-                s, graph_id, branch_id, containment_edge_types, viewer=viewer)
-        index = await asyncio.to_thread(_build_diff_hierarchy, merged, theirs, containment_edge_types)
-        return _hierarchy_children_view(index, container_key, limit, offset)
+        return await self._grouped_children(graph_id, ChangeOrigin(branch_id=branch_id),
+                                            containment_edge_types, container_key, limit, offset, viewer)
 
     async def branch_change_count(self, *, graph_id: str, branch_id: str) -> int:
         """How many entities a draft has changed (its own heads) — one indexed count, to decide
@@ -8680,8 +8674,12 @@ class GraphVersioningService:
         global counts equal the flat ``diff_commits`` tally for the commit's window."""
         async with self._session() as s:
             big = await self._commit_too_large(s, graph_id, commit_id, viewer)
-            if big is None:
+            window = await self._commit_window(s, graph_id, commit_id) if big is None else None
+            if big is None and window is None:
                 merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types, viewer=viewer)
+        if window is not None:
+            # A revision of main: grouped from its kept change tree, its values read per row served.
+            return await self._grouped_summary(graph_id, window, containment_edge_types, limit, None)
         if big is not None:
             commit, branch, changed = big
             if branch.kind == "main":
@@ -8708,9 +8706,73 @@ class GraphVersioningService:
             big = await self._commit_too_large(s, graph_id, commit_id, viewer)
             if big is not None:
                 raise DiffTooLarge(big[2], config.DIFF_TREE_MAX_CHANGES)
-            merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types, viewer=viewer)
+            window = await self._commit_window(s, graph_id, commit_id)
+            if window is None:
+                merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types, viewer=viewer)
+        if window is not None:
+            return await self._grouped_children(graph_id, window, containment_edge_types, container_key,
+                                                limit, offset, None)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
+
+    async def _commit_window(self, s, graph_id: str, commit_id: str) -> Optional[ChangeOrigin]:
+        """A commit of ``main`` as the window of revisions it is, ``(seq - 1, seq]`` — what its
+        changes are listed and grouped from — or None for a draft's commit (or a fork's main,
+        whose window composes its parent too: listed the way it always was)."""
+        commit = await s.get(CommitORM, (graph_id, commit_id))
+        if commit is None or commit.commit_seq < 1:
+            return None
+        graph = await s.get(GraphORM, graph_id)
+        if graph is None or graph.fork_parent_graph_id or commit.branch_id != await self._main_branch_id(s, graph_id):
+            return None
+        return ChangeOrigin(from_seq=commit.commit_seq - 1, to_seq=commit.commit_seq)
+
+    async def _grouped(self, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+                       viewer: Optional[Viewer]) -> TreeHierarchy:
+        """An origin's changes grouped as the Changes tree shows them, from its kept change tree —
+        derived once per tree in this process."""
+        tree = await self._change_tree(graph_id, origin, containment_edge_types, viewer)
+        grouped = getattr(tree, "_grouped", None)
+        if grouped is None:
+            grouped = await asyncio.to_thread(TreeHierarchy, tree)
+            tree._grouped = grouped
+        return grouped
+
+    async def _with_values(self, graph_id: str, origin: ChangeOrigin, rows: List[dict],
+                           viewer: Optional[Viewer]) -> List[dict]:
+        """The served rows that are changes, with their values before and after (one read for the
+        page): what the tree's rows show when opened."""
+        ids = [r["key"] for r in rows if r["kind"] != "bucket" and r["status"] != "unchanged"]
+        if ids:
+            before, after = await self._values_either_side(graph_id, origin, ids, viewer)
+            for r in rows:
+                if r["key"] in before or r["key"] in after:
+                    r["before"], r["after"] = before.get(r["key"]), after.get(r["key"])
+        return rows
+
+    async def _grouped_summary(self, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+                               limit: int, viewer: Optional[Viewer]) -> Dict[str, object]:
+        """The Changes tree's top (``DiffSummaryResponse``): its groups, capped at ``limit``, with
+        the counts of the origin's change index."""
+        grouped = await self._grouped(graph_id, origin, containment_edge_types, viewer)
+        index = grouped.tree.index
+        edges = grouped.edges(grouped.roots)
+        names = await self._end_names(graph_id, origin, index, edges) if edges else {}
+        top = grouped.top(names)
+        groups = await self._with_values(graph_id, origin, top[:max(0, limit)], viewer)
+        return {"groups": groups, "groupTotal": len(top), "counts": dict(index.counts),
+                "entityCounts": dict(index.entity_counts or {}), "edgeCounts": dict(index.edge_counts or {}),
+                "impact": dict(grouped.impact)}
+
+    async def _grouped_children(self, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+                                key: str, limit: int, offset: int, viewer: Optional[Viewer]) -> Dict[str, object]:
+        """What sits directly in one group of the Changes tree, a page at a time."""
+        grouped = await self._grouped(graph_id, origin, containment_edge_types, viewer)
+        edges = grouped.edges(grouped.members(key))
+        names = await self._end_names(graph_id, origin, grouped.tree.index, edges) if edges else {}
+        rows = grouped.children(key, names)
+        page = await self._with_values(graph_id, origin, rows[offset:offset + max(0, limit)], viewer)
+        return {"entries": page, "total": len(rows)}
 
     async def _commit_too_large(self, s, graph_id: str, commit_id: str,
                                 viewer: Optional[Viewer]) -> Optional[Tuple[CommitORM, BranchORM, int]]:
@@ -8742,36 +8804,6 @@ class GraphVersioningService:
         if changed <= cap:
             return None
         return await self._count_changed_in_window(s, graph_id, branch_id, lo, hi)
-
-    async def _branch_diff_states(self, s, graph_id, branch_id, containment_edge_types, viewer=None):
-        """``(merged, theirs)`` for a draft restricted to its own changes PLUS the unchanged
-        containment skeleton (ancestor nodes + the containment edges linking them) of the
-        changed nodes. The skeleton is added identically to both sides, so ``net_delta`` still
-        yields exactly the draft's changes — the extra entries only give the hierarchy real
-        containers to nest under. Stays O(draft + ancestors): no full-state composition."""
-        branch = await self._get_branch(s, graph_id, branch_id)
-        await self._assert_branch_readable(s, branch, viewer)
-        self._require_changes(branch)
-        main_id = await self._main_branch_id(s, graph_id)
-        base_seq = branch.base_commit_seq or 0
-        changed: set = set()
-        for model in (NodeVersionORM, EdgeVersionORM):
-            rows = (await s.execute(
-                select(model.entity_id).where(
-                    model.graph_id == graph_id, model.branch_id == branch_id,
-                ).distinct()
-            )).scalars().all()
-            changed.update(rows)
-        if not changed:
-            return {}, {}
-        before = await self._values_at(s, graph_id, main_id, changed, base_seq)
-        after = await self._current_values(s, graph_id, branch_id, list(changed))
-        theirs: Dict[str, Optional[dict]] = {eid: before.get(eid) for eid in changed}
-        merged: Dict[str, Optional[dict]] = {eid: after.get(eid) for eid in changed}
-        cset = {t.upper() for t in (containment_edge_types or [])}
-        await self._augment_containment_skeleton(
-            s, graph_id, branch_id, changed, after, theirs, merged, cset)
-        return merged, theirs
 
     async def _augment_containment_skeleton(
         self, s, graph_id, branch_id, changed, after, theirs, merged, cset,
@@ -8827,7 +8859,7 @@ class GraphVersioningService:
         # A draft inherits unchanged entities from main: a commit that deletes/modifies a
         # base-inherited entity has NO row on the draft before ``seq``, so its 'before' is missing
         # and a delete would collapse to None→None (dropped by net_delta → empty diff despite real
-        # stats). Resolve those from main@base_commit_seq, mirroring :meth:`_branch_diff_states`.
+        # stats). Resolve those from main@base_commit_seq, as a draft's change list reads them.
         if branch.kind != "main" and branch.base_commit_seq:
             main_id = await self._main_branch_id(s, graph_id)
             inherit = {eid for eid in changed if eid not in before}
