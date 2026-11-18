@@ -235,7 +235,10 @@ def test_orphan_drop_is_routed_to_its_provider():
 
     from backend.app.api.v1.endpoints import versioning as ver_ep
 
-    src = inspect.getsource(ver_ep.project_now)
+    # project_now runs the projection (``_project_now``, where the drop is) and then keeps the
+    # newest revisions' change lists; the routing is checked where it happens.
+    assert "await _project_now(graph_id)" in inspect.getsource(ver_ep.project_now)
+    src = inspect.getsource(ver_ep._project_now)
     assert "falkor_provider" in src
     assert "drop_graph(orphan," in src
 

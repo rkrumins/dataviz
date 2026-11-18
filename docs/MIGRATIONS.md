@@ -119,6 +119,11 @@ Two rules that are not optional:
 - **Revision ids are ≤32 chars.** `alembic_version.version_num` is `VARCHAR(32)` by default.
   A longer id fails alembic's own post-migration `UPDATE` and rolls the whole chain back.
   `backend/tests/test_alembic_revision_lengths.py` enforces it.
+- **The chain ends in one head.**
+  - Two pull requests, each green on its own, can each add a revision on the same parent, and once both merge the chain has two heads. #674 and #675 did this, off `20261117_1500_gv_mr_sendback`.
+  - Join them with a merge revision that runs nothing: `alembic merge -m "merge …" <head> <head>` from `backend/`, with an id of 32 characters or fewer, like `20261119_1300_merge_member_sets`.
+  - `backend/tests/test_alembic_single_head.py` fails a pull request, or a push to `main`, that leaves two heads.
+  - The upgrade Job reaches every head regardless (`upgrade` means `heads`, and it warns when there are several), so a missed merge revision shows up as a red check, not a deployment that won't start.
 
 ## What CI checks
 
@@ -159,17 +164,39 @@ synodic-upgrade repair
   └─ something is actually missing    ──►  refuse, name it, exit 1
 ```
 
-**A revision id `alembic_version` records but this image does not have is a hard failure.** It
-means the database was migrated by newer code, or a branch this image was not built from — deploy
-the image that owns that revision. `env.py` used to "recover" by stamping back to `0001_baseline`,
-which left the schema untouched and replayed the whole chain over live data. That was the single
-most destructive line in the migration path.
+## When a database was migrated by a build this one doesn't know
+
+`alembic_version` can name a revision this image doesn't have, and Alembic then stops with *Can't locate revision identified by …*. Two things cause it:
+- **A branch's build** was deployed to the same environment, ran its own migrations, and they never reached `main`.
+- **A newer release** migrated the database, then the image was rolled back.
+
+**First choice: give `main` the revisions.** When an environment has run a branch's migrations and the branch isn't merging soon, take those migrations into `main` unchanged, with whatever ORM columns and startup steps they need, and join them with a merge revision. Alembic then knows the stamp, and nothing is guessed.
+- `20261113_1000_gv_ps_served_fill` … `20261113_1400_gv_ps_candidate` came into `main` this way, from #670.
+- `20261119_1400_merge_ps_build` joins them.
+
+**Otherwise `upgrade` rewinds the stamp** to where the two chains most likely parted, and upgrades from there:
+- **Where it rewinds to:** walking this image's chain down from its head, the first revision whose id is older than the foreign one. It walks in chain order, not by sorted id, because a revision moved onto a newer parent keeps its older id.
+- **What runs after that:**
+  - For another branch's database, those are this image's migrations it never ran.
+  - For a newer release's, the rewind lands at this image's head, so nothing runs.
+  - Only a foreign line whose ids are older than revisions it already contains causes a replay. Its DDL is guarded, as `chain-replay` requires, but its data statements run again: see the rule above.
+- **What it leaves:** the other build's tables and columns stay as they were.
+- **How it ends:** head is claimed only if `verify-schema`'s comparison finds nothing missing. Otherwise `alembic_version` goes back to what it was and the Job exits 1, naming what's missing.
+
+The guess fails when this image has migrations written while the other branch was open. In that case, name the revision both chains share:
+
+```bash
+synodic-upgrade upgrade --rewind-to <revision>
+```
+
+This is not the old recovery. `env.py` used to "recover" by stamping back to `0001_baseline`, which left the schema untouched and replayed the whole chain over live data. That was the single most destructive line in the migration path, and it stays gone.
 
 ## Commands
 
 ```bash
-synodic-upgrade upgrade                    # to head (fast path on a virgin database)
+synodic-upgrade upgrade                    # to every head (fast path on a virgin database)
 synodic-upgrade upgrade --no-fast-path     # force the chain even on a virgin database
+synodic-upgrade upgrade --rewind-to REV    # a database another build moved on: rewind to REV first
 synodic-upgrade repair                     # reconcile a pointer that trails the schema
 synodic-upgrade verify-schema              # exit 0 iff the schema structurally matches the ORM
 synodic-upgrade check --wait 60            # exit 0 iff alembic_version is at head
