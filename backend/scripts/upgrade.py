@@ -13,7 +13,9 @@ Two deployment roles:
   Alembic head. Pods fail to start otherwise.
 
 Subcommands:
-    upgrade   [--revision REV]   alembic upgrade (default: head)
+    upgrade   [--revision REV]   alembic upgrade (default: head); a database
+                                 another build moved on is rewound onto this
+                                 build's chain first (see ``_rewind_foreign``)
     downgrade  --revision REV    alembic downgrade
     repair                       reconcile a version pointer that trails the
                                  physical schema (see ``cmd_repair``)
@@ -154,6 +156,71 @@ def _install_fresh(cfg) -> None:
     log.info("Stamped to head")
 
 
+def _stamps(conn) -> list[str]:
+    """The revisions ``alembic_version`` names (none without the table)."""
+    from sqlalchemy import inspect as sa_inspect
+
+    if not sa_inspect(conn).has_table("alembic_version"):
+        return []
+    return sorted(r[0] for r in conn.execute(text("SELECT version_num FROM alembic_version")))
+
+
+def _foreign(script, stamps: list[str]) -> list[str]:
+    """The stamps this build's script directory doesn't have: a database another build moved on —
+    another branch's, deployed to the same environment, or a newer release's before a rollback.
+    Alembic can't start from them ("Can't locate revision identified by …")."""
+    known = {rev.revision for rev in script.walk_revisions()}
+    return [v for v in stamps if v not in known]
+
+
+def _parting_point(script, foreign: list[str]) -> str | None:
+    """Where this build's chain and the one that wrote ``foreign`` most likely parted: walking this
+    build's chain down from its head, the first revision whose id — which leads with when it was
+    written — is older than every foreign one. A newer release's stamp parts at this build's head:
+    nothing of ours to run. Walked in chain order, not sorted by id: a revision moved onto a newer
+    parent keeps its older id."""
+    oldest = min(foreign)
+    return next((rev.revision for rev in script.walk_revisions() if rev.revision < oldest), None)
+
+
+def _set_stamps(conn, stamps: list[str]) -> None:
+    conn.execute(text("DELETE FROM alembic_version"))
+    for v in stamps:
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": v})
+
+
+def _rewind_foreign(cfg) -> list[str] | None:
+    """Move a database another build migrated back onto this build's chain, so it can upgrade: its
+    foreign stamps become the revision where the two chains most likely parted
+    (:func:`_parting_point`). This build's migrations after that then run — those the database
+    never ran, and any it did, which change nothing: every migration is safe to run twice
+    (``schema.yml``'s chain replay holds them to it). The other build's tables and columns stay,
+    unused here, for when its migrations arrive with it. Returns the stamps as they were, to put
+    back if the upgrade doesn't bring the schema to head; None when nothing was foreign."""
+    script = ScriptDirectory.from_config(cfg)
+    engine = create_engine(_sync_url(), pool_pre_ping=True)
+    with engine.begin() as conn:
+        was = _stamps(conn)
+        foreign = _foreign(script, was)
+        if not foreign:
+            return None
+        to = _parting_point(script, foreign)
+        if to is None:
+            raise RuntimeError(f"alembic_version names {foreign}, which this build doesn't have, and none "
+                               "of this build's revisions is older: deploy the build that has them")
+        kept = [v for v in was if v not in foreign]
+        # One of ours still stamped beside a foreign one may already be past the parting point.
+        past = any(to == rev.revision for k in kept for rev in script.iterate_revisions(k, "base"))
+        log.warning(
+            "alembic_version names %s, which this build doesn't have: another build — another "
+            "branch's, or a newer release's — moved this database on. Rewinding to %s, where the "
+            "two most likely parted; this build's migrations after it run (each is safe to run "
+            "twice), and the other build's tables and columns are left as they are.",
+            foreign, to)
+        _set_stamps(conn, kept if past else sorted(set(kept) | {to}))
+    return was
+
+
 @_with_advisory_lock
 def cmd_upgrade(revision: str, fast_path: bool = True) -> int:
     cfg = _alembic_config()
@@ -167,8 +234,22 @@ def cmd_upgrade(revision: str, fast_path: bool = True) -> int:
             log.info("Upgrade complete (fresh install)")
             return 0
 
+    was = _rewind_foreign(cfg)
     log.info("Alembic upgrade -> %s", revision)
     command.upgrade(cfg, revision)
+    if was is not None and revision == "head":
+        # Rewound on a guess: head is claimed only once the schema bears it out. Otherwise the
+        # stamps go back as they were, so the next run fails as loudly rather than passing.
+        gaps, _defaults, _extras = _compare_schema(create_engine(_sync_url(), pool_pre_ping=True))
+        if gaps:
+            with create_engine(_sync_url(), pool_pre_ping=True).begin() as conn:
+                _set_stamps(conn, was)
+            log.error(
+                "After rewinding, the schema is still not at head — %d mismatch(es), first 10: %s. "
+                "The two chains parted earlier than this build could tell; alembic_version is back "
+                "to %s. Deploy a build with both chains (a merge revision), or rewind it by hand to "
+                "the last revision both share and upgrade again.", len(gaps), gaps[:10], was)
+            return 1
     log.info("Upgrade complete")
     return 0
 
@@ -388,7 +469,7 @@ def cmd_repair() -> int:
         "Marking %d revision(s) applied without running them: %s",
         len(skipped), skipped,
     )
-    command.stamp(cfg, "head")
+    command.stamp(cfg, "head", purge=bool(_foreign(script, sorted(applied))))
     log.info("Stamped to head: %s", sorted(expected))
     return 0
 
