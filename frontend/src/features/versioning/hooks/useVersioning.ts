@@ -522,6 +522,7 @@ export function usePrDiffSummary(wsId?: string, prId?: string | null, limit?: nu
     queryFn: () => api.getMergeRequestDiffSummary(wsId!, prId!, limit),
     enabled: !!wsId && !!prId,
     staleTime: 15_000,
+    ...CHANGE_LIST_RETRY,
   })
 }
 
@@ -534,6 +535,7 @@ export function useBranchDiffSummary(
     queryFn: () => api.getBranchDiffSummary(wsId!, graphId!, branchId!, limit),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
+    ...CHANGE_LIST_RETRY,
   })
 }
 
@@ -555,6 +557,7 @@ export function useCommitDiffSummary(wsId?: string, graphId?: string | null, com
     queryFn: () => api.getCommitDiffSummary(wsId!, graphId!, commitId!),
     enabled: !!wsId && !!graphId && !!commitId,
     staleTime: 60_000,   // a commit is immutable
+    ...CHANGE_LIST_RETRY,
   })
 }
 
@@ -567,6 +570,21 @@ export const changeListStale = (origin?: ChangeListOrigin | null) =>
 /** Rows a change list page holds. */
 export const CHANGE_LIST_PAGE = 100
 
+/** A change list the server is still preparing answers busy (503) or outlasts the request (504),
+ *  or the connection drops ("Failed to fetch") — and the server goes on building it, then keeps
+ *  it for every reader. So it is asked again, for up to about three minutes, rather than shown as
+ *  failed; anything else is asked once more, as every query is. */
+export function changeListRetry(failureCount: number, error: unknown): boolean {
+  const status = (error as { status?: number } | null)?.status
+  const preparing = status === 503 || status === 504 || error instanceof TypeError
+  return failureCount < (preparing ? 24 : 1)
+}
+
+export const changeListRetryDelay = (attempt: number) => Math.min(8_000, 1_000 * 2 ** attempt)
+
+/** How the change-list queries retry (:func:`changeListRetry`). */
+export const CHANGE_LIST_RETRY = { retry: changeListRetry, retryDelay: changeListRetryDelay } as const
+
 /** A change list's counts by kind, status and type (the same index its pages come from). */
 export function useChangeSummary(wsId?: string, graphId?: string | null, origin?: ChangeListOrigin | null) {
   return useQuery({
@@ -574,6 +592,7 @@ export function useChangeSummary(wsId?: string, graphId?: string | null, origin?
     queryFn: () => api.getChangeSummary(wsId!, graphId!, origin!),
     enabled: !!wsId && !!graphId && !!origin,
     staleTime: changeListStale(origin),
+    ...CHANGE_LIST_RETRY,
   })
 }
 
@@ -593,6 +612,7 @@ export function useChangeEntries(
     getNextPageParam: (last) => (last.hasMore ? last.offset + last.entries.length : undefined),
     enabled: enabled && !!wsId && !!graphId && !!origin,
     staleTime: changeListStale(origin),
+    ...CHANGE_LIST_RETRY,
   })
 }
 
@@ -615,6 +635,7 @@ export function useChangeIndex(wsId?: string, graphId?: string | null, origin?: 
     queryFn: () => api.getChangeIndex(wsId!, graphId!, origin!),
     enabled: !!wsId && !!graphId && !!origin,
     staleTime: changeListStale(origin),
+    ...CHANGE_LIST_RETRY,
   })
 }
 

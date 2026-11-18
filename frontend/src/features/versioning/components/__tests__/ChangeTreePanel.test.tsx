@@ -87,6 +87,14 @@ describe('ChangeTreePanel', () => {
     expect(screen.getByText('amount_usd')).toBeInTheDocument()
   })
 
+  it('says a large set is still being prepared while it is asked for again', () => {
+    const { rerender } = render(<ChangeTreePanel isLoading fetchChildren={vi.fn()} origin={origin} />)
+    expect(screen.getByText(/Computing changes/)).toBeInTheDocument()
+    expect(screen.queryByText(/Still preparing these changes/)).not.toBeInTheDocument()
+    rerender(<ChangeTreePanel isLoading preparing fetchChildren={vi.fn()} origin={origin} />)
+    expect(screen.getByRole('status')).toHaveTextContent(/Still preparing these changes/)
+  })
+
   it('shows the empty hint when there are no groups', () => {
     render(
       <ChangeTreePanel

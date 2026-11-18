@@ -12,7 +12,7 @@ import { useQueries, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
 import type { ChangeListOrigin, ChangeTreeItem, ChangeTreeLevel, ChangeTreePath } from '@/services/versioningApiService'
 import { DECISION_KEYS } from '@/features/reviews/decisions/useReviewDecisions'
-import { VERSIONING_KEYS, changeListStale } from './useVersioning'
+import { CHANGE_LIST_RETRY, VERSIONING_KEYS, changeListStale } from './useVersioning'
 
 /** Rows a level reads at a time. */
 export const TREE_PAGE = 100
@@ -132,6 +132,7 @@ export function useChangeTree(source: ChangeTreeSource, enabled = true) {
       queryFn: () => read(parent, offset),
       enabled: enabled && !!wsId && !!graphId,
       staleTime: changeListStale(origin),
+      ...CHANGE_LIST_RETRY,
     })),
     combine,
   })

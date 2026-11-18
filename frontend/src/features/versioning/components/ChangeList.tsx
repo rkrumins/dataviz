@@ -49,6 +49,7 @@ import {
 } from '@/services/versioningApiService'
 import { ExportMenu, type ExportDetail } from './ExportMenu'
 import { useChangeEntries, useChangeEntry, useChangeSummary, useRestoreDraftChanges } from '../hooks/useVersioning'
+import { PreparingNote } from './PreparingNote'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useViewedChanges } from '@/features/reviews/viewed/useViewedChanges'
 import { ShortcutsHint } from '@/components/ui/ShortcutsHint'
@@ -354,7 +355,12 @@ export function ChangeList({
   if (!s) {
     return summaryQ.isError
       ? <p className={cn('text-xs text-ink-muted py-3', className)}>Couldn't load these changes. Try again in a moment.</p>
-      : <div className={cn('space-y-2 py-2', className)} aria-busy><Skeleton className="h-7 w-2/3" /><SkeletonText lines={4} /></div>
+      : (
+        <div className={cn('space-y-2 py-2', className)} aria-busy>
+          {summaryQ.failureCount > 0 && <PreparingNote />}
+          <Skeleton className="h-7 w-2/3" /><SkeletonText lines={4} />
+        </div>
+      )
   }
   if (s.total === 0) {
     return <p className={cn('text-sm text-ink-muted py-8 text-center', className)}>{emptyHint}</p>

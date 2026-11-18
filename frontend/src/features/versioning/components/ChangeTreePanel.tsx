@@ -14,6 +14,7 @@ import type { ChangeOrigin } from '../model/changeModel'
 import { changeListExportUrl, type ChangeListOrigin, type DiffSummaryResponse, type DiffTreeNode } from '@/services/versioningApiService'
 import { triggerBrowserDownload } from '@/services/importExportApiService'
 import { ChangeList } from './ChangeList'
+import { PreparingNote } from './PreparingNote'
 import { ExportMenu } from './ExportMenu'
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
@@ -266,9 +267,12 @@ export function ChangeTreePanel({
   className,
   summaryFirst = false,
   list,
+  preparing = false,
 }: {
   summary?: DiffSummaryResponse
   isLoading?: boolean
+  /** The summary is being asked for again while the server prepares it: said, so a wait reads as one. */
+  preparing?: boolean
   /** The summary could not be read (a timeout, a busy server): said as such — never as "no changes". */
   error?: unknown
   onRetry?: () => void
@@ -291,8 +295,11 @@ export function ChangeTreePanel({
 
   if (isLoading && !summary) {
     return (
-      <div className="flex items-center gap-2 text-sm text-ink-muted py-8 justify-center">
-        <Loader2 className="w-4 h-4 animate-spin" /> Computing changes…
+      <div className="flex flex-col items-center gap-1.5 py-8">
+        <span className="flex items-center gap-2 text-sm text-ink-muted">
+          <Loader2 className="w-4 h-4 animate-spin" /> Computing changes…
+        </span>
+        {preparing && <PreparingNote />}
       </div>
     )
   }
