@@ -48,15 +48,17 @@ _RESOLVED_MAX = 2048
 
 async def resolve_refs(provider, scope, refs: Sequence[Any], *, run, data_version: str = "",
                        confined: bool = False, with_paths: bool = False,
-                       timeout_s: float = 5.0) -> List[Dict[str, Any]]:
+                       timeout_s: float = 5.0, members=None) -> List[Dict[str, Any]]:
     """One answer per reference: ``{"urns", "entities", "error"}``, the
     entities listing at most ``SEARCH_RESOLVE_MATCHES_SHOWN`` — each with
     its ``ancestorPath`` when ``with_paths``. ``run(cypher, params)``
-    executes one statement under the caller's admission."""
-    resolver = _Resolver(provider, scope, run, confined)
+    executes one statement under the caller's admission. ``members``: the
+    view's members, too many to list among its roots
+    (``SearchRunContext.members``)."""
+    resolver = _Resolver(provider, scope, run, confined, members)
     answers = []
     for ref in refs:
-        key = _cache_key(provider, data_version, scope, ref, confined)
+        key = _cache_key(provider, data_version, scope, ref, confined, members)
         cached = _RESOLVED.get(key) if key else None
         if cached is None:
             cached = await resolver.resolve(ref, timeout_s)
@@ -73,10 +75,12 @@ async def resolve_refs(provider, scope, refs: Sequence[Any], *, run, data_versio
     return answers
 
 
-def _cache_key(provider, data_version: str, scope, ref, confined: bool) -> Optional[Tuple]:
+def _cache_key(provider, data_version: str, scope, ref, confined: bool,
+               members=None) -> Optional[Tuple]:
     """Answers hold for one graph at one data version — never cached
-    without one."""
-    if not data_version:
+    without one, nor in a view whose members aren't listed among its roots:
+    they change without the data."""
+    if not data_version or members is not None:
         return None
     return (str(getattr(provider, "_graph_name", "") or ""), data_version,
             ref.model_dump_json(by_alias=True),
@@ -85,11 +89,12 @@ def _cache_key(provider, data_version: str, scope, ref, confined: bool) -> Optio
 
 
 class _Resolver:
-    def __init__(self, provider, scope, run, confined: bool) -> None:
+    def __init__(self, provider, scope, run, confined: bool, members=None) -> None:
         self._provider = provider
         self._scope = scope
         self._run = run
         self._confined = confined
+        self._members = members
         self._labels: Optional[List[str]] = None
         self._roots: Optional[List[int]] = None
         self._rel = _rel(_containment(provider))
@@ -191,20 +196,21 @@ class _Resolver:
     async def _in_scope(self, ids: List[int]) -> List[int]:
         """The entities inside the search's scope: below its roots, or of
         its entity types when it has none. The whole data source in
-        ``data_source`` mode — except for a share link, held to its view."""
+        ``data_source`` mode — except for a share link, held to its view.
+        In a view whose members aren't listed among its roots, its members
+        too."""
         scope = self._scope
         if not ids or (scope.scope_mode == "data_source" and not self._confined):
             return ids
+        if self._members is not None:
+            rows = await self._run("UNWIND $_ids AS _i MATCH (_n) WHERE ID(_n) = _i "
+                                   "RETURN ID(_n), _n.urn", {"_ids": ids})
+            urns = {int(r[0]): r[1] for r in rows.result_set or [] if r and r[1] is not None}
+            held = await self._members.holds(list(urns.values()))
+            under = await self._under_roots(ids) if scope.root_urns else []
+            return sorted(set(under) | {i for i, u in urns.items() if u in held})
         if scope.root_urns:
-            if self._roots is None:
-                self._roots = await _ids_of(self._run, self._labels or [], scope.root_urns)
-            if not self._roots:
-                return []
-            return await self._ids(
-                "UNWIND $_ids AS _i MATCH (_c) WHERE ID(_c) = _i "
-                f"MATCH (_c)<-[:{self._rel}*0..{int(scope.max_depth or 12)}]-(_s) "
-                "WHERE ID(_s) IN $_roots RETURN DISTINCT ID(_c)",
-                {"_ids": ids, "_roots": self._roots})
+            return await self._under_roots(ids)
         if scope.entity_types:
             wanted = [t.lower() for t in scope.entity_types]
             return await self._ids(
@@ -212,6 +218,18 @@ class _Resolver:
                 "AND toLower(labels(_c)[0]) IN $_types RETURN ID(_c)",
                 {"_ids": ids, "_types": wanted})
         return ids
+
+    async def _under_roots(self, ids: List[int]) -> List[int]:
+        scope = self._scope
+        if self._roots is None:
+            self._roots = await _ids_of(self._run, self._labels or [], scope.root_urns)
+        if not self._roots:
+            return []
+        return await self._ids(
+            "UNWIND $_ids AS _i MATCH (_c) WHERE ID(_c) = _i "
+            f"MATCH (_c)<-[:{self._rel}*0..{int(scope.max_depth or 12)}]-(_s) "
+            "WHERE ID(_s) IN $_roots RETURN DISTINCT ID(_c)",
+            {"_ids": ids, "_roots": self._roots})
 
     async def _rows(self, ids: List[int]) -> List[list]:
         if not ids:

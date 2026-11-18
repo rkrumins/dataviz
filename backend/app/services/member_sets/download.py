@@ -4,12 +4,15 @@ The file streams as it is read — ``PAGE`` rows to a short read of the set's ro
 each read in a session of its own, so a download of a million rows holds no
 connection between pages and memory stays flat. What a set knows about each member
 (its name, type, why it is in, its distances, its nearest seed) comes straight from
-its rows: no graph read. Any other ``columns`` are looked up ``LOOKUP`` members to a
-node query, each under its own admission and never held across a yield — a client
-that reads slowly holds no graph slot.
+its rows. Where each sits — its parent and its path — is the graph's containment
+chains, read ``LOOKUP`` members to a statement as the page goes out (two short
+statements a thousand rows), and so are any other ``columns``: each statement under
+its own admission and never held across a yield, so a client that reads slowly
+holds no graph slot.
 
 Formats: ``csv`` (a header, then every value as text: exact digits for an integer,
-JSON for a list or an object, nothing for a missing one — and never a formula: a
+a path as the trace dock's file writes one (``A / B``; its URNs ``a; b``), JSON for
+any other list or an object, nothing for a missing one — and never a formula: a
 text value a spreadsheet would run starts with ``'``), ``ndjson`` (an object a
 line), ``json`` (one document, ``{"meta": …, "nodes": [...], "edges": [...]}``).
 """
@@ -20,15 +23,24 @@ import csv
 import io
 import json
 from contextlib import nullcontext
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import select
 
 from backend.app.db.models import MemberSetEdgeORM, MemberSetRowORM
 from backend.common.models.graph import GraphNode, NodeQuery
 
-#: What every member row carries, first and in this order.
-BASE_COLUMNS = ("urn", "name", "type", "qualifiedName", "via", "hops", "hopsUp", "hopsDown", "nearestSeed")
+#: What every member row carries, first and in this order: what it is, why it is in,
+#: and where it sits — its parent, and every container from the top of the graph
+#: down to it (by name and by URN).
+BASE_COLUMNS = ("urn", "name", "type", "qualifiedName", "via", "hops", "hopsUp", "hopsDown", "nearestSeed",
+                "parentUrn", "parentName", "parentType", "path", "pathUrns")
+#: How a path is one CSV cell, as the trace dock's own file writes it: names read
+#: ``A / B``, URNs (which may hold a ``/``) ``a; b``. NDJSON and JSON keep lists.
+_JOINED = {"path": " / ", "pathUrns": "; "}
+#: Container names kept for one download, so each is read once however many rows
+#: sit in it; past it a name is read again rather than held.
+_NAMES_MAX = 100_000
 EDGE_COLUMNS = ("source", "target", "type")
 #: Rows per read of the set; members per node query for extra columns.
 PAGE = 5_000
@@ -61,7 +73,8 @@ def _csv(records: Sequence[Dict[str, Any]], columns: Sequence[str]) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\r\n")
     for r in records:
-        writer.writerow([_cell(r.get(c)) for c in columns])
+        writer.writerow([_cell(_JOINED[c].join(r[c]) if c in _JOINED and isinstance(r.get(c), list) else r.get(c))
+                         for c in columns])
     return buf.getvalue().encode("utf-8")
 
 
@@ -83,7 +96,8 @@ def hops_of(row) -> Optional[int]:
 def _member(row) -> Dict[str, Any]:
     return {"urn": row.urn, "name": row.name, "type": row.type, "qualifiedName": row.qualified_name,
             "via": row.via, "hops": hops_of(row), "hopsUp": row.hops_up, "hopsDown": row.hops_down,
-            "nearestSeed": row.nearest_seed}
+            "nearestSeed": row.nearest_seed,
+            "parentUrn": None, "parentName": None, "parentType": None, "path": None, "pathUrns": None}
 
 
 def _value(node: GraphNode, column: str) -> Any:
@@ -118,9 +132,48 @@ async def _fill(records: List[Dict[str, Any]], columns: Sequence[str], engine, a
                 r[c] = _value(node, c) if node is not None else None
 
 
+async def _place(records: List[Dict[str, Any]], engine, admit, known: Dict[str, Tuple[str, str]]) -> None:
+    """Where each member sits: its containment chain, ``LOOKUP`` at a time, and the
+    names of containers not seen yet — each statement admitted on its own, the same
+    chains the canvas nests members in. ``known`` carries names across a download's
+    pages (filled from the members themselves first: a container is often one).
+
+    A chain the graph could not say leaves the cells empty; an entity at the top of
+    the graph has an empty path and no parent."""
+    for r in records:
+        if len(known) < _NAMES_MAX:
+            known.setdefault(r["urn"], (r["name"] or r["urn"], r["type"] or ""))
+    for i in range(0, len(records), LOOKUP):
+        chunk = records[i:i + LOOKUP]
+        try:
+            async with (admit() if admit is not None else nullcontext()):
+                chains = await engine.get_ancestor_chains([r["urn"] for r in chunk])
+        except NotImplementedError:
+            return
+        unnamed = sorted({a for r in chunk for a in chains.get(r["urn"]) or [] if a not in known})
+        for j in range(0, len(unnamed), LOOKUP):
+            batch = unnamed[j:j + LOOKUP]
+            async with (admit() if admit is not None else nullcontext()):
+                nodes = await engine.get_nodes_query(NodeQuery(urns=batch, limit=len(batch), include_child_count=False))
+            for n in nodes:
+                if len(known) < _NAMES_MAX:
+                    known[n.urn] = (n.display_name or n.urn, n.entity_type or "")
+        for r in chunk:
+            chain = chains.get(r["urn"])
+            if chain is None:
+                continue
+            top_down = list(reversed(chain))
+            r["pathUrns"] = top_down
+            r["path"] = [known.get(a, (a, ""))[0] for a in top_down]
+            if top_down:
+                r["parentUrn"] = top_down[-1]
+                r["parentName"], r["parentType"] = known.get(top_down[-1], (top_down[-1], ""))
+
+
 async def _rows(sessions: Sessions, set_id: str, fmt: str, columns: Sequence[str], engine, admit,
                 first: bool = True) -> AsyncIterator[bytes]:
     names = list(BASE_COLUMNS) + list(columns)
+    known: Dict[str, Tuple[str, str]] = {}
     after = -1
     while True:
         rows = await _page(sessions, MemberSetRowORM, set_id, after)
@@ -128,6 +181,8 @@ async def _rows(sessions: Sessions, set_id: str, fmt: str, columns: Sequence[str
             return
         after = rows[-1].seq
         records = [_member(r) for r in rows]
+        if engine is not None:
+            await _place(records, engine, admit, known)
         if columns:
             await _fill(records, columns, engine, admit)
         yield await asyncio.to_thread(_encode, records, fmt, names, first)

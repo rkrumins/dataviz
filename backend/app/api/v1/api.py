@@ -9,7 +9,8 @@ from .revision_gate import revision_gate
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
     metrics as metrics_endpoint,
-    graph, graph_export, graph_members, graph_member_sets, graph_view_feed, canvas, assignments, providers,
+    graph, graph_export, graph_members, graph_member_sets, graph_view_feed, graph_view_members, canvas,
+    assignments, providers,
     ontologies, workspaces,
     assets, catalog, views, features, layout_templates,
     auth, users, announcements, aggregation, freshness, stats_admin,
@@ -515,6 +516,12 @@ api_router.include_router(
 # matches, page by page. Behind the same gate; the view's own search decides what matches.
 api_router.include_router(
     graph_view_feed.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
+    dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
+)
+# A view made from a query's layer feed (POST /{ws_id}/graph/view-members): its members from
+# the member table, page by page. Behind the same gate.
+api_router.include_router(
+    graph_view_members.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
     dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
 )
 api_router.include_router(

@@ -2026,9 +2026,10 @@ class ContextEngine:
         return await self.provider.get_ancestors(urn, limit=limit, offset=offset)
 
     async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
-        """See ``GraphDataProvider.get_ancestor_chains``. The draft and
-        versioned-branch readers carry no containment walk at all, and say
-        so the way their other unsupported reads do (a 501 at the route)."""
+        """See ``GraphDataProvider.get_ancestor_chains`` (the draft and
+        versioned-branch readers walk their own state). A provider with no
+        containment walk says so the way other unsupported reads do (a 501 at
+        the route)."""
         chains = getattr(self.provider, "get_ancestor_chains", None)
         if not callable(chains):
             raise NotImplementedError(

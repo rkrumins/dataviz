@@ -14,7 +14,10 @@ The view's scope is enforced here, on the server: an entity outside it
 never matches, whatever it holds. Containment scope — the view's roots, and
 a rule's own ``descendantOf`` — is checked against each entity's ancestors,
 read in the same statement: the roots' to the scope's depth, a
-``descendantOf``'s to its own ``maxDepth``. ``withinHops`` and ``path`` say
+``descendantOf``'s to its own ``maxDepth``. A view whose members are too many
+to list as roots holds a member as much as what lies under its roots: which
+of the URNs are members is one query of where the view keeps them per 1,000.
+``withinHops`` and ``path`` say
 nothing about one entity on its own, so a rule using them is refused
 (``errors``).
 
@@ -46,14 +49,15 @@ from backend.common.models.search import SearchScope
 
 async def evaluate_membership(
     provider, scope: SearchScope, items: Sequence[Tuple[str, Any]], urns: Sequence[str],
-    *, run, timeout_s: float, data_version: str = "",
+    *, run, timeout_s: float, data_version: str = "", members=None,
 ) -> Dict[str, Any]:
     """``{"matches": {item: [urn…]}, "errors": {item: why}, "elapsedMs"}``.
 
     ``scope`` is the RESOLVED scope (the service stamps it): its roots, its
     entity types, its visible URNs. ``run(cypher, params)`` executes one
     statement under the caller's admission; ``data_version`` keys whether
-    the graph keeps any property raw."""
+    the graph keeps any property raw. ``members``: the view's members, too
+    many to list among its roots (``SearchRunContext.members``)."""
     started = time.monotonic()
     matches: Dict[str, List[str]] = {item_id: [] for item_id, _ in items}
     errors: Dict[str, str] = {}
@@ -80,9 +84,10 @@ async def evaluate_membership(
         wanted = {depth} if roots else set()
         wanted.update(d or depth for sets in hoisted.values() for _, d in sets)
         depths = sorted(wanted)
+    held = await members.holds(urns) if members is not None else None
     labels = None
     allowed = None
-    if visible is None and not (roots and containment):
+    if visible is None and not (roots and containment) and held is None:
         labels = await _searchable_labels(provider, timeout_s=timeout_s)
         allowed = {lbl.lower() for lbl in _labels_in_scope(provider, labels, scope.entity_types)}
     by_label = await _labels_by_urn(provider, run, labels, urns, timeout_s)
@@ -128,7 +133,10 @@ async def evaluate_membership(
         node_labels, ancestors, values = found
         if visible is not None and urn not in visible:
             continue
-        if roots and containment and not (ancestors.get(depth, set()) & roots):
+        under = bool(ancestors.get(depth, set()) & roots) if containment else urn in roots
+        if held is not None and urn not in held and not under:
+            continue
+        if held is None and roots and containment and not under:
             continue
         if allowed is not None and not (node_labels & allowed):
             continue

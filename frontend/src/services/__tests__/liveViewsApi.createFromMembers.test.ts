@@ -26,7 +26,7 @@ describe('createFromMembers', () => {
     expect(authFetch).toHaveBeenCalledTimes(3)
     for (const [, init] of authFetch.mock.calls) {
       expect((init as { headers: Record<string, string> }).headers['Idempotency-Key']).toBe('key-1')
-      expect(JSON.parse((init as { body: string }).body).waitMs).toBe(10_000)
+      expect(JSON.parse((init as { body: string }).body)).not.toHaveProperty('waitMs')
     }
   })
 })

@@ -853,13 +853,13 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                                 typeFeedSeeds.push([subsetFeedKey(layerIds[i]), subsetFeedAfter(layerIds[i], outcome.value)])
                             })
                         }
-                    } else if (activeView?.membership && featureEnabled('viewMembershipEnabled')
-                        && provider.viewMembersPage && activeView?.id && !atRevision) {
+                    } else if (activeView?.membership && provider.viewMembersPage && activeView?.id && !atRevision) {
                         // ── A view made from a query: each layer lists its members ──
                         // Paged by the server from the view's member table, in name
                         // order — a view of a quarter of a million members opens on a
                         // page a layer, never on every URN. What people placed by hand
-                        // (Always include) is still in the layout, and loads by URN.
+                        // (Always include) is still in the layout, and loads by URN. Not
+                        // behind the preview switch: off, a view keeps the members it last had.
                         const membersPage = provider.viewMembersPage.bind(provider)
                         const viewId = activeView.id
                         const layerIds = normLayout.layers

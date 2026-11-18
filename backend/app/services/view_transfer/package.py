@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import copy
 import hashlib
 import json
 import os
@@ -39,7 +38,7 @@ from backend.app.services.versioning.import_export import uploads
 from backend.app.services.versioning.import_export.stream import TypeStats
 from backend.app.services.view_transfer import limits
 from backend.app.services.view_transfer.bundle import BundleError, parse_bundle
-from backend.app.services.view_transfer.canonical import HASH_PREFIX, _kept_up_to_date
+from backend.app.services.view_transfer.canonical import HASH_PREFIX
 
 PACKAGE_FORMAT = "view-package"
 #: The format this platform writes.
@@ -158,28 +157,14 @@ NO_PLACEMENTS = ("This view places no entities of its own, so it has no data to 
                  "the whole data source instead.")
 
 
-def _package_design(definition: Dict[str, Any], row) -> Dict[str, Any]:
-    """What a view package's data follows: the sealed version's placements, and for a view kept up
-    to date by its query, the members it holds now. Its versions leave those out — they follow the
-    graph, so they are data, not design — and without them its package would hold only what is
-    always included in it, or be refused as placing nothing."""
-    if not _kept_up_to_date(definition):
-        return definition
-    from backend.app.services.layout_config import parse_reference_layout
-    from backend.common.models.view_membership import MACHINE
-    try:
-        current = json.loads(row.config) if isinstance(row.config, str) else (row.config or {})
-    except (TypeError, ValueError):
-        current = {}
-    members = {urn: entry for urn, entry in parse_reference_layout(
-        current if isinstance(current, dict) else {}).assignments.items()
-        if entry.get("assignedBy") == MACHINE}
-    if not members:
-        return definition
-    design = copy.deepcopy(definition)
-    reference = design.setdefault("layout", {}).setdefault("referenceLayout", {})
-    reference["assignments"] = {**members, **(reference.get("assignments") or {})}
-    return design
+async def package_design(session, definition: Dict[str, Any], row) -> Dict[str, Any]:
+    """What a view package's data follows: the sealed version's placements, and for a view made
+    from a query, the members it holds now, read from its member table a batch at a time. Its
+    versions leave those out — they are data, not design — and without them its package would hold
+    only what is always included in it, or be refused as placing nothing."""
+    from backend.app.db.repositories import view_members_repo
+
+    return await view_members_repo.with_members(session, row.id, definition)
 
 
 async def build_bundle(session, options: Dict[str, Any], workspace_id: Optional[str],
@@ -190,7 +175,7 @@ async def build_bundle(session, options: Dict[str, Any], workspace_id: Optional[
     A view package's data is that sealed version's own placements, with their contained entities —
     never the view as it is now, which may have moved on since. The exception is a view kept up to
     date by its query: its members are data its versions don't hold, so they are the ones it holds
-    now (:func:`_package_design`). A version that places nothing has no data of its own, and is
+    now (:func:`package_design`). A version that places nothing has no data of its own, and is
     refused rather than packaging the whole data source in its name. A data source's package has no
     scope."""
     from backend.app.api.v1.endpoints.versioning import _live_containment_types, export_scope_of
@@ -207,7 +192,7 @@ async def build_bundle(session, options: Dict[str, Any], workspace_id: Optional[
     scope = None
     if options.get("scope") == "view":
         containment = await _live_containment_types(session, workspace_id, data_source_id)
-        design = _package_design(sealed[0].definition, requests[0][0])
+        design = await package_design(session, sealed[0].definition, requests[0][0])
         scope = await asyncio.to_thread(export_scope_of, design, containment)
         if scope is None:
             raise ValueError(NO_PLACEMENTS)

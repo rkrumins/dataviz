@@ -28,10 +28,10 @@ vi.mock('../SaveSearchAsViewSheet', () => ({
   ),
 }))
 vi.mock('@/features/live-views/SaveAsViewSheet', () => ({
-  SaveAsViewSheet: (p: { headerExtra?: React.ReactNode; viewId: string; viewName: string; draft: unknown }) => (
+  SaveAsViewSheet: (p: { headerExtra?: React.ReactNode; viewId: string; viewName: string; draft: unknown; follow?: unknown }) => (
     <div>
       <p>list sheet</p>
-      <p data-testid="list">{JSON.stringify({ viewId: p.viewId, viewName: p.viewName, draft: p.draft })}</p>
+      <p data-testid="list">{JSON.stringify({ viewId: p.viewId, viewName: p.viewName, draft: p.draft, follow: p.follow })}</p>
       {p.headerExtra}
     </div>
   ),
@@ -144,6 +144,12 @@ describe('SaveAsView', () => {
     expect(screen.getByText('list sheet')).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /Live/ })).toBeDisabled()
     expect(screen.getByText(why)).toBeInTheDocument()
+  })
+
+  it('a trace kept as a list is handed what it would follow', () => {
+    const follow = { viewId: 'base', viewName: 'Sales' }
+    renderIt({ source: narrowing({ upstream: 'all' }, { urns: ['u'] }), follow })
+    expect(JSON.parse(screen.getByTestId('list').textContent!).follow).toEqual(follow)
   })
 
   it('with live views off, a narrowing is a list', () => {

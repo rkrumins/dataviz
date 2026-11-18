@@ -75,7 +75,7 @@ describe('Export & save on a combined trace', () => {
     let panel = await openKeep()
     await choose(panel, 'save')
     await waitFor(() => expect(panel.querySelector('[data-saved-trace]')).toBeTruthy())
-    expect(panel.textContent).toMatch(/Saved ✓/)
+    await waitFor(() => expect(panel.textContent).toMatch(/Saved ✓/))
 
     const calls = h.providerCalls()
     await act(async () => {

@@ -127,6 +127,41 @@ class TestResolver:
         await db_session.flush()
         assert (await _resolve(db_session, ws, one)).scope_hash == h1
 
+    async def test_a_base_too_large_to_list_its_members_is_searched_by_them(self, db_session,
+                                                                          monkeypatch):
+        """Past the root cap a base made from a query bounds its subsets by its members,
+        where it keeps them — and a new answer of them is a new scope to scan."""
+        from backend.app.db.repositories import view_members_repo, view_membership_repo
+        from backend.app.services.deep_search import get_deep_search_settings
+        from backend.app.services.view_scope import MemberScope
+
+        ws = await _ws(db_session)
+        base = await _view(db_session, ws, {
+            **BASE_CONFIG, "membership": {"v": 1, "mode": "live",
+                                          "sources": [{"spec": {"seeds": {"urns": ["urn:s"]}}}]}})
+        state = await view_membership_repo.ensure(db_session, base)
+        for epoch in (1, 2):
+            await view_members_repo.insert(db_session, [
+                {"view_id": base.id, "epoch": epoch, "urn": f"urn:m{i}", "layer_id": "t",
+                 "sort_key": f"m{i}", "ord": i, "label": "Table", "label_ord": i,
+                 "whole": False, "covered": False} for i in range(3)])
+        state.epoch = state.members_epoch = 1
+        state.member_count = 3
+        await db_session.flush()
+        sub = await _view(db_session, ws, _subset(base.id))
+        monkeypatch.setenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", "2")
+        get_deep_search_settings.cache_clear()
+        try:
+            eff = await _resolve(db_session, ws, sub)
+            assert eff.member_scope == MemberScope(base.id, 1, 3)
+            assert sorted(eff.root_urns) == ["urn:db:A", "urn:db:B"] and not eff.holds_nothing
+            state.members_epoch = 2
+            await db_session.flush()
+            assert (await _resolve(db_session, ws, sub)).scope_hash != eff.scope_hash
+        finally:
+            monkeypatch.delenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP")
+            get_deep_search_settings.cache_clear()
+
     @pytest.mark.parametrize("trouble", ["deleted", "other_ws", "subset", "draft", "other_ds", "self"])
     async def test_without_its_base_there_is_nothing_to_look_in(self, db_session, trouble):
         ws = await _ws(db_session)

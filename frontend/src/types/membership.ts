@@ -85,7 +85,9 @@ export interface MembershipRequest {
 
 /** `live` keeps the members in step with the data; `snapshot` keeps them as they are. */
 export type MembershipMode = 'live' | 'snapshot'
-export type LayoutKind = 'source' | 'template' | 'auto' | 'stages' | 'custom'
+/** `follow`: a subset of `sourceViewId` — its layers served from that view as they change
+ *  there, each member placed where it places it. */
+export type LayoutKind = 'source' | 'template' | 'auto' | 'stages' | 'custom' | 'follow'
 export type MembershipOrigin = 'narrow' | 'search' | 'savedQuery' | 'wizard' | 'api' | 'trace'
 
 /** One query a view's members come from — a query seed is searched in `readIn`. */
@@ -131,9 +133,6 @@ export interface PlanRequest {
   layers?: Array<Record<string, unknown>>
   keep: KeepLayers
   exclude?: string[]
-  /** How long the server works the sources out before answering (they resolve
-   *  a step at a time; ask again to carry on). */
-  waitMs?: number
 }
 
 /** The server is still working out what the sources reach (202): ask again,
@@ -188,8 +187,6 @@ export interface FromMembersRequest {
   keep: KeepLayers
   exclude?: string[]
   provenance: MembershipProvenance
-  /** As `PlanRequest.waitMs`: a large set answers 202 until it is worked out. */
-  waitMs?: number
 }
 
 export type MembershipStatusKind =
@@ -205,6 +202,8 @@ export interface ReadInView {
 export interface MembershipStatus {
   mode: MembershipMode
   status: MembershipStatusKind
+  /** The view it follows (layout `follow`); its name only for a reader who can open it. */
+  follows?: ReadInView | null
   detail?: Record<string, unknown> | null
   revision: number
   definition: MembershipDefinition
