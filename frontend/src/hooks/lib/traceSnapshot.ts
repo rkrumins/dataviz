@@ -29,8 +29,11 @@ export interface TraceSnapshotRecord {
   edges: number
 }
 
+/** The columns as stored. v2 (2026-11-18) keeps where each row sits — the
+ *  whole path by name and by URN, and its parent's type; v1 records (a path
+ *  relative to the row's lane, no parent) are still read. */
 interface Columns {
-  v: 1
+  v: 1 | 2
   urns: string[]
   names: string[]
   types: [string[], number[]]
@@ -39,6 +42,8 @@ interface Columns {
   hopsDown: (number | null)[]
   layers: [string[], number[]]
   paths: [string[], number[]]
+  pathUrns?: [string[], number[]]
+  parentTypes?: [string[], number[]]
   seeds: string[]
   reached: number[]
   edges: number[]
@@ -73,7 +78,7 @@ export async function packTraceSnapshot(
   const row = new Map(rows.map((r, i) => [r.urn, i]))
   const kept = edges.filter(e => row.has(e.source) && row.has(e.target))
   const columns: Columns = {
-    v: 1,
+    v: 2,
     urns: rows.map(r => r.urn),
     names: rows.map(r => r.name),
     types: dictionary(rows.map(r => r.type)),
@@ -82,6 +87,8 @@ export async function packTraceSnapshot(
     hopsDown: rows.map(r => r.hopsDown),
     layers: dictionary(rows.map(r => r.layer)),
     paths: dictionary(rows.map(r => r.path.join(PATH_SEP))),
+    pathUrns: dictionary(rows.map(r => r.pathUrns.join(PATH_SEP))),
+    parentTypes: dictionary(rows.map(r => r.parentType ?? '')),
     seeds,
     reached: rows.map(r => r.reachedFrom.reduce((m, s) => m | (seedBit.get(s) ?? 0), 0)),
     edges: kept.flatMap(e => [row.get(e.source)!, row.get(e.target)!]),
@@ -115,18 +122,24 @@ export async function unpackTraceSnapshot(
     } else if (r.encoding !== 'none') return null
     const c = JSON.parse(new TextDecoder().decode(bytes)) as Partial<Columns>
     const n = c.urns?.length ?? -1
-    if (c.v !== 1 || !isStrings(c.urns) || !isStrings(c.names) || c.names.length !== n) return null
+    if ((c.v !== 1 && c.v !== 2) || !isStrings(c.urns) || !isStrings(c.names) || c.names.length !== n) return null
     if (!isDict(c.types, n) || !isDict(c.layers, n) || !isDict(c.paths, n) || !isStrings(c.seeds)) return null
     if (!isNumbers(c.roles) || !isNumbers(c.reached) || !isNumbers(c.edges) || !Array.isArray(c.hopsUp) || !Array.isArray(c.hopsDown)) return null
     const [types, typeAt] = c.types
     const [layers, layerAt] = c.layers
     const [paths, pathAt] = c.paths
+    // A v1 record kept no parent: its rows read none, rather than a guess.
+    const [chains, chainAt] = c.v === 2 && isDict(c.pathUrns, n) ? c.pathUrns : [[], []]
+    const [parentTypes, parentTypeAt] = c.v === 2 && isDict(c.parentTypes, n) ? c.parentTypes : [[], []]
+    const split = (s: string | undefined) => (s ? s.split(PATH_SEP) : [])
     const seeds = c.seeds
     const rows: TraceExportRow[] = c.urns.map((urn, i) => {
       const hopsUp = c.hopsUp![i] ?? null
       const hopsDown = c.hopsDown![i] ?? null
       const sides = [hopsUp, hopsDown].filter((h): h is number => typeof h === 'number')
-      const path = paths[pathAt[i]!] ?? ''
+      const path = split(paths[pathAt[i]!])
+      const pathUrns = split(chains[chainAt[i]!])
+      const parentUrn = pathUrns.at(-1) ?? null
       return {
         urn,
         name: c.names![i]!,
@@ -136,7 +149,11 @@ export async function unpackTraceSnapshot(
         hopsUp,
         hopsDown,
         layer: layers[layerAt[i]!] ?? '',
-        path: path === '' ? [] : path.split(PATH_SEP),
+        parentUrn,
+        parentName: parentUrn ? path.at(-1) ?? null : null,
+        parentType: parentUrn ? parentTypes[parentTypeAt[i]!] || null : null,
+        path,
+        pathUrns,
         reachedFrom: seeds.filter((_, b) => (c.reached![i]! & (1 << b)) !== 0),
       }
     })

@@ -19,7 +19,8 @@ const input = (urns: string[], rows = 3): SaveTraceInput => ({
   seedLabels: urns,
   rows: Array.from({ length: rows }, (_, i) => ({
     urn: `urn:${urns[0]}:${i}`, name: `n${i}`, type: 'dataset', role: i ? 'upstream' : 'seed',
-    hops: i, hopsUp: i, hopsDown: null, layer: 'L', path: [], reachedFrom: [],
+    hops: i, hopsUp: i, hopsDown: null, layer: 'L',
+    parentUrn: null, parentName: null, parentType: null, path: [], pathUrns: [], reachedFrom: [],
   })),
   edges: [],
   counts: { nodes: rows, upstream: rows - 1, downstream: 0, edges: 0 },

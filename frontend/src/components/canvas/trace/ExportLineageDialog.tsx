@@ -220,7 +220,7 @@ export function ExportLineageDialog({ viewId, spec: initial, seedsLabel, adjusta
                     Description and tags columns
                   </label>
                   <p className="text-[11px] text-ink-muted">
-                    Every row: URN, name, type, qualified name, why it is in (seed, upstream, downstream…), hops, and its nearest starting point.
+                    Every row: URN, name, type, qualified name, why it is in (seed, upstream, downstream…), hops, its nearest starting point, and where it sits — its parent and every container down to it.
                   </p>
                 </div>
                 {phase.kind === 'failed' && <p role="alert" className="text-[11.5px] text-rose-400">{phase.message}</p>}

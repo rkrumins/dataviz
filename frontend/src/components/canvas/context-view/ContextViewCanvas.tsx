@@ -3113,7 +3113,7 @@ export function ContextViewCanvas({
       if (m) seedModels.set(u, m)
     }
     const rows = traceExportRows({
-      view, seeds, showUpstream: traceShowUpstream, showDownstream: traceShowDownstream,
+      view, model: traceModel, seeds, showUpstream: traceShowUpstream, showDownstream: traceShowDownstream,
       layerName: traceLayerName, seedModels,
     })
     return {

@@ -33,6 +33,7 @@ const rowsOf = (over: Partial<TraceViewInputs> = {}) => {
   const view = viewOf(over)
   return traceExportRows({
     view,
+    model: two.model,
     seeds: SEEDS,
     showUpstream: over.showUpstream ?? true,
     showDownstream: over.showDownstream ?? true,
@@ -62,6 +63,33 @@ describe('the rows are what the trace shows', () => {
     expect(rows.get('ledger.amt')).toMatchObject({ layer: 'Warehouse', path: ['FIN', 'ledger'] })
   })
 
+  it('says where each row sits: its parent, and every container down to it, by name and URN', () => {
+    const rows = byUrn(rowsOf())
+    expect(rows.get('ledger.amt')).toMatchObject({
+      parentUrn: 'ledger', parentName: 'ledger', parentType: 'dataset',
+      path: ['FIN', 'ledger'], pathUrns: ['FIN', 'ledger'],
+    })
+    expect(rows.get('sales')).toMatchObject({ parentUrn: 'MART', parentType: 'container', pathUrns: ['MART'] })
+  })
+
+  it('the whole chain, not only what this view draws, and nothing for the top of the graph', () => {
+    const view = viewOf()
+    const deeper = {
+      ...two.model,
+      nodes: [...two.model.nodes, { urn: 'WH', displayName: 'Warehouse DB', entityType: 'database', data: {} } as never],
+      containmentEdges: [...two.model.containmentEdges, { sourceUrn: 'WH', targetUrn: 'FIN' }],
+    }
+    const rows = byUrn(traceExportRows({
+      view, model: deeper, seeds: SEEDS, showUpstream: true, showDownstream: true, layerName: id => id,
+    }))
+    expect(rows.get('ledger.amt')).toMatchObject({ path: ['Warehouse DB', 'FIN', 'ledger'], pathUrns: ['WH', 'FIN', 'ledger'] })
+    const top = traceExportRows({
+      view, model: { nodes: two.model.nodes, containmentEdges: [] }, seeds: SEEDS,
+      showUpstream: true, showDownstream: true, layerName: id => id,
+    }).find(r => r.urn === 'orders')
+    expect(top).toMatchObject({ parentUrn: null, parentName: null, parentType: null, path: [], pathUrns: [] })
+  })
+
   it('a side switched off is not in the file, and its hops are not reported', () => {
     const rows = byUrn(rowsOf({ showDownstream: false }))
     expect(rows.has('dash.amt')).toBe(false)
@@ -86,7 +114,7 @@ describe('the files', () => {
   it('CSV: a header, a line a row, and no formula a spreadsheet would run', () => {
     const rows = rowsOf()
     const lines = traceCsvLines([...rows, { ...rows[0]!, name: '=HYPERLINK("x")' }])
-    expect(lines[0]).toBe('urn,name,type,role,hops,hopsUp,hopsDown,layer,path,reachedFrom\r\n')
+    expect(lines[0]).toBe('urn,name,type,role,hops,hopsUp,hopsDown,layer,parentUrn,parentName,parentType,path,pathUrns,reachedFrom\r\n')
     expect(lines).toHaveLength(rows.length + 2)
     expect(lines.at(-1)).toContain(`"'=HYPERLINK(""x"")"`)
   })

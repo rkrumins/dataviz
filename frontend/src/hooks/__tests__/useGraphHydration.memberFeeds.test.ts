@@ -12,7 +12,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { FeedNode, ViewFeedPage, ViewFeedRequest } from '@/types/searchView'
+import type { FeedNode, ViewFeedPage } from '@/types/searchView'
 
 const { mockProvider } = vi.hoisted(() => ({
   mockProvider: {
@@ -97,7 +97,7 @@ describe('member feeds', () => {
     vi.clearAllMocks()
     useFeaturesStore.setState((s) => ({ values: { ...s.values, viewMembershipEnabled: true } }))
     useCanvasStore.getState().setGraph([], [])
-    mockProvider.getNodes.mockImplementation(async (q: { urns?: string[] }) => (q.urns ?? []).map(u => node(u)) as never)
+    mockProvider.getNodes.mockImplementation((async (q: { urns?: string[] }) => (q.urns ?? []).map(u => node(u))) as never)
     mockProvider.viewMembersPage.mockImplementation(async (_v: string, req: { layerId: string; cursor?: string }) => {
       if (req.layerId === 'up') {
         return req.cursor === 'c-1'

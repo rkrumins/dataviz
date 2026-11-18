@@ -42,14 +42,24 @@ export interface TraceExportRow {
   hopsDown: number | null
   /** The layer it is drawn in, by name. */
   layer: string
-  /** Its containers from the layer's top down, by name. */
+  /** Its direct container — null for an entity at the top of the graph. */
+  parentUrn: string | null
+  parentName: string | null
+  parentType: string | null
+  /** Every container it sits in, from the top of the graph down to its parent:
+   *  by name, and the same chain by URN. */
   path: string[]
+  pathUrns: string[]
   /** The seeds whose own walk reaches it (a combined trace only). */
   reachedFrom: string[]
 }
 
 export interface TraceExportInput {
   view: TraceView
+  /** The walk itself: every node it shipped comes with its containment chain
+   *  (`containmentEdges`), which is where a row's parent and path come from —
+   *  the whole chain, not only the part this view draws. */
+  model: Pick<LensWalkModel, 'nodes' | 'containmentEdges'>
   /** Every seed still in the trace. */
   seeds: readonly string[]
   showUpstream: boolean
@@ -61,8 +71,43 @@ export interface TraceExportInput {
 }
 
 export const TRACE_EXPORT_COLUMNS = [
-  'urn', 'name', 'type', 'role', 'hops', 'hopsUp', 'hopsDown', 'layer', 'path', 'reachedFrom',
+  'urn', 'name', 'type', 'role', 'hops', 'hopsUp', 'hopsDown', 'layer',
+  'parentUrn', 'parentName', 'parentType', 'path', 'pathUrns', 'reachedFrom',
 ] as const
+
+/** Each node's containment chain from the top down to its parent, read once per
+ *  node however many rows sit under it. A containment cycle (bad data) ends the
+ *  chain where it would repeat. */
+function chainsOf(model: TraceExportInput['model']) {
+  const parentOf = new Map<string, string>()
+  for (const e of model.containmentEdges) if (!parentOf.has(e.targetUrn)) parentOf.set(e.targetUrn, e.sourceUrn)
+  const nodeOf = new Map(model.nodes.map(n => [n.urn, n]))
+  const memo = new Map<string, string[]>()
+  const chain = (urn: string): string[] => {
+    const known = memo.get(urn)
+    if (known) return known
+    const up: string[] = []
+    const seen = new Set([urn])
+    for (let p = parentOf.get(urn); p && !seen.has(p); p = parentOf.get(p)) {
+      const above = memo.get(p)
+      if (above) { up.push(p, ...[...above].reverse()); break }
+      seen.add(p)
+      up.push(p)
+    }
+    const top = up.reverse()
+    memo.set(urn, top)
+    return top
+  }
+  const nameOf = (urn: string) => {
+    const n = nodeOf.get(urn)
+    return n?.displayName ?? (n?.data?.label as string | undefined) ?? urn
+  }
+  const typeOf = (urn: string) => {
+    const n = nodeOf.get(urn)
+    return n?.entityType ?? (n?.data?.type as string | undefined) ?? ''
+  }
+  return { chain, nameOf, typeOf }
+}
 
 function roleOf(card: TraceCard, seeds: ReadonlySet<string>, up: boolean, down: boolean): TraceExportRole | null {
   if (card.role === 'host') return null
@@ -80,24 +125,18 @@ export function traceExportRows(i: TraceExportInput): TraceExportRow[] {
   const reach = i.seedModels && i.seedModels.size > 1
     ? [...i.seedModels].map(([seed, m]) => [seed, new Set(m.nodes.map(n => n.urn))] as const)
     : null
+  const { chain, nameOf, typeOf } = chainsOf(i.model)
   const rows: TraceExportRow[] = []
   for (const lane of i.view.lanes) {
     const layer = i.layerName(lane.layerId)
-    const pathOf = (card: TraceCard): string[] => {
-      const path: string[] = []
-      const guard = new Set<string>()
-      for (let id = card.parentId; id && !guard.has(id); id = lane.cards.get(id)?.parentId ?? null) {
-        guard.add(id)
-        path.push(lane.cards.get(id)?.label ?? id)
-      }
-      return path.reverse()
-    }
     const visit = (card: TraceCard) => {
       const role = roleOf(card, seeds, i.showUpstream, i.showDownstream)
       if (role) {
         const hopsUp = i.showUpstream ? card.hopUp : null
         const hopsDown = i.showDownstream ? card.hopDown : null
         const sides = [hopsUp, hopsDown].filter((h): h is number => h !== null)
+        const pathUrns = chain(card.urn)
+        const parentUrn = pathUrns.at(-1) ?? null
         rows.push({
           urn: card.urn,
           name: card.label,
@@ -107,7 +146,11 @@ export function traceExportRows(i: TraceExportInput): TraceExportRow[] {
           hopsUp,
           hopsDown,
           layer,
-          path: pathOf(card),
+          parentUrn,
+          parentName: parentUrn ? nameOf(parentUrn) : null,
+          parentType: parentUrn ? typeOf(parentUrn) : null,
+          path: pathUrns.map(nameOf),
+          pathUrns,
           reachedFrom: reach ? reach.filter(([, held]) => held.has(card.urn)).map(([seed]) => seed) : [],
         })
       }
@@ -132,13 +175,15 @@ export function countTraceRows(view: TraceView, seeds: readonly string[], showUp
   return n
 }
 
-/** The file's lines: a header, then a row each. Paths read `A / B`, seed
- *  lists `a; b` — the cells `lib/csv` writes, formulas defused. */
+/** The file's lines: a header, then a row each. A path of names reads `A / B`;
+ *  URN lists (the path's, the seeds') `a; b`, as a URN may hold a `/` — the cells
+ *  `lib/csv` writes, formulas defused. */
 export function traceCsvLines(rows: readonly TraceExportRow[]): string[] {
   const lines = [csvLine(TRACE_EXPORT_COLUMNS)]
   for (const r of rows) {
     lines.push(csvLine([
-      r.urn, r.name, r.type, r.role, r.hops, r.hopsUp, r.hopsDown, r.layer, r.path.join(' / '), r.reachedFrom,
+      r.urn, r.name, r.type, r.role, r.hops, r.hopsUp, r.hopsDown, r.layer,
+      r.parentUrn, r.parentName, r.parentType, r.path.join(' / '), r.pathUrns, r.reachedFrom,
     ]))
   }
   return lines
