@@ -276,11 +276,8 @@ def plan_upgrade(script, *, stamped: list[str], virgin: bool, own: dict, lines: 
     out["wouldRun"] = pending
     if pending or place is not None:
         out["verdict"] = "upgrade"
-        out["reason"] = (f"{len(pending)} migration(s) to run" if pending
-                         else "nothing to run once placed; the stamps move")
-        if place is not None:
-            out["reason"] += f", after placing it at {place.stamps}, {place.how}"
-        out["reason"] += "."
+        out["reason"] = (f"{len(pending)} migration(s) to run." if pending
+                         else "Nothing to run once placed; the stamps move.")
     else:
         out["reason"] = "At this build's head: nothing to run."
     return out

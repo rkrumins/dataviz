@@ -274,6 +274,13 @@ python -m backend.scripts.other_lines
 
 It takes the same `--recover`, `--shared-database` and `--rewind-to` as `upgrade`, reads the same variables, and exits 1 when the upgrade would refuse. `--json` prints the plan for a script or a pipeline.
 
+Super-admins see the same from the app: **Admin → Infrastructure → Database schema**, read live from the database (`GET /api/v1/admin/system/schema`). It shows:
+- the applied revisions, against this server's head;
+- the build the server was made from;
+- what an upgrade with this build would do;
+- warnings, and built-in grants the database doesn't have;
+- the recent `alembic_history`: what ran or was stamped, placed and checked, changed, or seeded.
+
 ## A backup before every migration
 
 `synodic-upgrade backup --dir DIR` dumps the database (`pg_dump`, custom format) before an upgrade changes it:

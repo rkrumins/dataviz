@@ -163,7 +163,7 @@ The Postgres database that holds users, workspaces, views and settings. Per-role
 | Variable | Default | Description | Read in |
 |---|---|---|---|
 | `CREDENTIAL_ENCRYPTION_KEY` | — (secret, set your own) | Fernet key that encrypts the credentials stored for data sources and identity providers. Unset, credentials are stored unencrypted, except with `ENV=production`, where saving one fails instead. | `backend/app/db/repositories/connection_repo.py` |
-| `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:***@localhost:5432/synodic` / required / — *(differs by call site)* | Address of the management database: a Postgres URL starting with `postgresql+asyncpg://`. Unset, processes fall back to the local development database. | `backend/alembic/env.py`, `backend/app/db/engine.py`, `backend/app/services/system_status/probes.py` +4 more |
+| `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:***@localhost:5432/synodic` / required / — *(differs by call site)* | Address of the management database: a Postgres URL starting with `postgresql+asyncpg://`. Unset, processes fall back to the local development database. | `backend/alembic/env.py`, `backend/app/db/engine.py`, `backend/app/services/system_status/probes.py` +5 more |
 
 ### Internal tuning
 

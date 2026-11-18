@@ -33,7 +33,7 @@ def test_the_backup_runs_after_the_bootstrap_and_before_the_upgrade():
 def test_the_backup_never_blocks_a_deploy_for_nowhere_to_write():
     job = (TEMPLATES / "db-backup.yaml").read_text(encoding="utf-8")
     pvc = (TEMPLATES / "db-backup-pvc.yaml").read_text(encoding="utf-8")
-    claim = re.search(r"^  name: (\S+)", pvc, re.M).group(1)
+    claim = re.search(r"^  name: (\S+)", pvc, re.MULTILINE).group(1)
     assert f'lookup "v1" "PersistentVolumeClaim" .Release.Namespace "{claim}"' in job
     assert f"claimName: {claim}" in job and "emptyDir: {}" in job
     assert 'grep -q "def cmd_backup" /app/backend/scripts/upgrade.py' in job   # an image older than backups

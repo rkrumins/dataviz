@@ -90,7 +90,7 @@ def _job(url, *args, env=None):
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     return subprocess.run([sys.executable, "-m", "backend.scripts.upgrade", *args], cwd=root,
                           env={**os.environ, "MANAGEMENT_DB_URL": url, **(env or {})},
-                          capture_output=True, text=True, timeout=900)
+                          capture_output=True, text=True, timeout=900, check=False)
 
 
 def _sql(url, statement):
@@ -234,3 +234,22 @@ def test_a_backup_is_copied_to_the_bucket(tmp_path, monkeypatch):
     upgrade._upload(dump, "backups", "/synodic-db-backups/", "https://storage.googleapis.com", None)
     assert sent == {"endpoint": "https://storage.googleapis.com", "checksums": "when_required",
                     "filename": str(dump), "bucket": "backups", "key": f"synodic-db-backups/{dump.name}"}
+
+
+@E2E
+def test_the_admin_schema_status_reads_the_database_live(scratch_db, monkeypatch):
+    from backend.app.services.system_status.schema import schema_status
+
+    script = _script()
+    head = script.get_current_head()
+    assert _job(scratch_db, "upgrade").returncode == 0
+    monkeypatch.setenv("MANAGEMENT_DB_URL", scratch_db)
+    status = schema_status()
+    assert status["atHead"] and status["applied"] == [head] and status["plan"]["verdict"] == "up_to_date"
+    assert {"stamped", "ran"} & {h["kind"] for h in status["history"]}
+
+    # Another build's stamp: shown, with where the upgrade would place it and what it would run.
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261116_1200_graph_watch'")
+    status = schema_status()
+    assert not status["atHead"] and status["plan"]["placement"]["stamps"] == ["20261113_1400_gv_ps_candidate"]
+    assert status["plan"]["wouldRun"][-1] == head
