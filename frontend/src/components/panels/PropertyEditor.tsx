@@ -260,8 +260,8 @@ function SearchBox({
       {query && (
         <button
           onClick={() => onChange('')}
+          aria-label="Clear search"
           className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 flex items-center justify-center rounded text-ink-muted hover:text-ink"
-          title="Clear search"
         >
           <XIcon className="w-3 h-3" />
         </button>
@@ -367,6 +367,7 @@ function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, sear
             rowKey={key}
             value={v}
             readOnly={readOnly || (depth === 0 && readOnlyKeys?.includes(key))}
+            locked={depth === 0 && readOnlyKeys?.includes(key)}
             depth={depth}
             query={isSearchRoot ? query : ''}
             onKeyChange={(nk) => updateKey(key, nk)}
@@ -491,7 +492,7 @@ function ArrayBody({ value, onChange, depth, bare, readOnly, searchable }: Array
           {keyedItems.map((item) => (
             <Reorder.Item key={item.id} value={item} className="list-none">
               <PropertyRow
-                rowKey={`[${item.index}]`}
+                rowKey={`Item ${item.index + 1}`}
                 value={item.value}
                 depth={depth}
                 isArrayItem
@@ -506,7 +507,7 @@ function ArrayBody({ value, onChange, depth, bare, readOnly, searchable }: Array
           {visibleItems.map((item) => (
             <PropertyRow
               key={item.id}
-              rowKey={`[${item.index}]`}
+              rowKey={`Item ${item.index + 1}`}
               value={item.value}
               depth={depth}
               isArrayItem
@@ -553,6 +554,8 @@ interface PropertyRowProps {
   rowKey: string
   value: unknown
   readOnly?: boolean
+  /** A key the caller keeps as it is (`readOnlyKeys`): shown with a lock. */
+  locked?: boolean
   isArrayItem?: boolean
   depth: number
   query?: string
@@ -569,6 +572,30 @@ interface PropertyRowProps {
   onRevert?: () => void
 }
 
+/** A key as stored. A flat key's folders (`Technical/Physical/`) read quieter than its own name;
+ *  a long key wraps to two lines, the whole of it on hover. */
+function KeyLabel({ rowKey, query, locked, tip = true }: { rowKey: string; query: string; locked?: boolean; tip?: boolean }) {
+  const cut = rowKey.lastIndexOf(PATH_SEP)
+  const folders = cut > 0 && cut < rowKey.length - 1 ? rowKey.slice(0, cut + 1) : ''
+  const own = folders ? rowKey.slice(cut + 1) : rowKey
+  const label = (
+    <span className="min-w-0 text-xs font-mono break-all line-clamp-2">
+      {folders && <span className="text-ink-muted"><HighlightedText text={folders} query={query} /></span>}
+      <span className="text-ink-secondary"><HighlightedText text={own} query={query} /></span>
+    </span>
+  )
+  return (
+    <span className="inline-flex items-center gap-1.5 min-w-0 max-w-full">
+      {locked && (
+        <HoverTip label="Kept as it is" detail="This property can't be changed here" className="inline-flex flex-shrink-0">
+          <Lock aria-label="Locked" className="w-3 h-3 text-ink-muted" />
+        </HoverTip>
+      )}
+      {tip && rowKey.length > 28 ? <HoverTip label={rowKey} className="inline-flex min-w-0">{label}</HoverTip> : label}
+    </span>
+  )
+}
+
 /** The row's left edge and badge for what its edit did. */
 const MARK_STYLE: Record<ChangeMark, { bar: string; badge: string; label: string }> = {
   // The tree's colours (`changeTone`): green for new, orange for edited.
@@ -580,6 +607,7 @@ const PropertyRow = memo(function PropertyRow({
   rowKey,
   value,
   readOnly,
+  locked,
   isArrayItem,
   depth,
   query = '',
@@ -631,8 +659,9 @@ const PropertyRow = memo(function PropertyRow({
           {isContainer ? (
             <button
               onClick={() => setExpanded(e => !e)}
+              aria-label={expanded ? 'Collapse' : 'Expand'}
+              aria-expanded={expanded}
               className="w-4 h-5 flex items-center justify-center text-ink-muted hover:text-ink"
-              title={expanded ? 'Collapse' : 'Expand'}
             >
               {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
             </button>
@@ -643,15 +672,13 @@ const PropertyRow = memo(function PropertyRow({
           )}
         </div>
 
-        {/* Key column — fixed basis so rows align consistently */}
-        <div className="basis-[132px] flex-shrink-0 min-w-0 h-6 flex items-center">
+        {/* Key column — one width for every row, so values align; a long key wraps (two lines,
+            the whole of it on hover) rather than being cut off. */}
+        <div className="basis-[36%] min-w-[112px] max-w-[200px] flex-shrink-0 min-h-6 py-[3px] flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
           {isArrayItem ? (
-            <span className="text-xs font-mono text-ink-muted truncate">{rowKey}</span>
+            <span className="text-xs text-ink-muted">{rowKey}</span>
           ) : readOnly ? (
-            <span className="flex items-center gap-1.5 text-xs font-mono text-ink-muted truncate" title={rowKey}>
-              <Lock className="w-3 h-3 flex-shrink-0" />
-              <HighlightedText text={rowKey} query={query} className="truncate" />
-            </span>
+            <KeyLabel rowKey={rowKey} query={query} locked={locked} />
           ) : editingKey ? (
             <input
               autoFocus
@@ -671,13 +698,15 @@ const PropertyRow = memo(function PropertyRow({
               className="text-xs font-mono px-1.5 py-0.5 rounded bg-black/[0.06] dark:bg-white/10 border border-accent-lineage/40 outline-none min-w-0 w-full"
             />
           ) : (
-            <button
-              onClick={() => { keyCancelled.current = false; setEditingKey(true) }}
-              className="text-xs font-mono text-ink hover:text-accent-lineage truncate text-left max-w-full"
-              title={`${rowKey} — click to rename`}
-            >
-              <HighlightedText text={rowKey} query={query} />
-            </button>
+            <HoverTip label="Rename" detail={rowKey} className="inline-flex min-w-0 max-w-full">
+              <button
+                onClick={() => { keyCancelled.current = false; setEditingKey(true) }}
+                aria-label={`Rename ${rowKey}`}
+                className="min-w-0 max-w-full text-left hover:text-accent-lineage [&:hover_*]:text-accent-lineage"
+              >
+                <KeyLabel rowKey={rowKey} query={query} tip={false} />
+              </button>
+            </HoverTip>
           )}
           {mark && (
             <HoverTip
@@ -749,13 +778,15 @@ const PropertyRow = memo(function PropertyRow({
           !inline && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity",
         )}>
           {isContainer && !readOnly && depth < MAX_DEPTH - 1 && (
-            <button
-              onClick={() => setRawJsonOpen(true)}
-              className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10"
-              title="Edit as raw JSON"
-            >
-              <Code className="w-3 h-3" />
-            </button>
+            <HoverTip label="Edit as raw JSON" className="inline-flex">
+              <button
+                onClick={() => setRawJsonOpen(true)}
+                aria-label="Edit as raw JSON"
+                className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10"
+              >
+                <Code className="w-3 h-3" />
+              </button>
+            </HoverTip>
           )}
           {!readOnly && onRevert && (
             <HoverTip label={mark === 'new' ? 'Remove this new property' : 'Revert to what it was'} detail={mark === 'changed' ? `Was: ${shortValue(was)}` : undefined} className="inline-flex">
@@ -863,13 +894,15 @@ function PrimitiveValueEditor({
   }, [])
 
   const expandButton = (
-    <button
-      onClick={() => openModal(false)}
-      className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted/70 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors"
-      title={readOnly ? 'View full value' : 'Open editor (Markdown)'}
-    >
-      <Maximize2 className="w-3 h-3" />
-    </button>
+    <HoverTip label={readOnly ? 'View full value' : 'Open editor (Markdown)'} className="inline-flex flex-shrink-0">
+      <button
+        onClick={() => openModal(false)}
+        aria-label={readOnly ? 'View full value' : 'Open editor (Markdown)'}
+        className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted/70 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors"
+      >
+        <Maximize2 className="w-3 h-3" />
+      </button>
+    </HoverTip>
   )
 
   // ---------------------------------------------------------------- inline
@@ -989,8 +1022,8 @@ function CopyButton({ text }: { text: string }) {
           setTimeout(() => setCopied(false), 1500)
         } catch { /* clipboard unavailable */ }
       }}
+      aria-label={copied ? 'Copied' : 'Copy value'}
       className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
-      title={copied ? 'Copied!' : 'Copy value'}
     >
       {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
     </button>
@@ -1072,7 +1105,7 @@ function FieldTypeChip({
           meta.tone,
           (readOnly || !onChange) ? "cursor-default" : "hover:brightness-125",
         )}
-        title={readOnly ? meta.label : 'Change type'}
+        aria-label={readOnly ? meta.label : 'Change type'}
       >
         <Icon className="w-3 h-3" />
         {showLabel && meta.label}
@@ -1449,13 +1482,15 @@ function ComposerValueField({
         placeholder="Enter a value…"
         className="flex-1 min-w-0 px-2 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 text-xs focus:border-accent-lineage/50 outline-none transition-colors"
       />
-      <button
-        onClick={onExpand}
-        className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors"
-        title="Open editor (Markdown)"
-      >
-        <Maximize2 className="w-3.5 h-3.5" />
-      </button>
+      <HoverTip label="Open editor (Markdown)" className="inline-flex flex-shrink-0">
+        <button
+          onClick={onExpand}
+          aria-label="Open editor (Markdown)"
+          className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors"
+        >
+          <Maximize2 className="w-3.5 h-3.5" />
+        </button>
+      </HoverTip>
     </div>
   )
 }

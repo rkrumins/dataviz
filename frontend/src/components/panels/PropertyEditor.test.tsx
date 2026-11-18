@@ -129,7 +129,7 @@ describe('PropertyEditor', () => {
     const onChange = vi.fn()
     render(<Harness initial={{ description: LONG }} onChange={onChange} />)
 
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
 
     // Modal opens in Rich mode (lazy stub) — its textarea carries the placeholder.
     const modalEditor = await screen.findByPlaceholderText(/Write here/i)
@@ -143,7 +143,7 @@ describe('PropertyEditor', () => {
   it('previews markdown in the modal (Source mode)', async () => {
     const user = userEvent.setup()
     render(<Harness initial={{ notes: LONG }} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     // Preview pane lives in Source mode; switch to it first. (The list cell also
     // renders markdown, so assert the preview ADDS a render.)
     const before = screen.queryAllByTestId('md').length
@@ -227,7 +227,7 @@ describe('PropertyEditor', () => {
     const onChange = vi.fn()
     render(<Harness initial={{ owner: 'analytics' }} onChange={onChange} />)
 
-    await user.click(screen.getByTitle(/click to rename/i))
+    await user.click(screen.getByRole('button', { name: /^Rename / }))
     const input = screen.getByDisplayValue('owner')
     await user.clear(input)
     await user.type(input, 'maintainer{Enter}')
@@ -244,14 +244,14 @@ describe('PropertyEditor', () => {
         <Harness initial={{ owner: 'analytics' }} onChange={onChange} />
       </div>,
     )
-    await user.click(screen.getByTitle(/click to rename/i))
+    await user.click(screen.getByRole('button', { name: /^Rename / }))
     const input = screen.getByDisplayValue('owner')
     await user.clear(input)
     await user.type(input, 'maintainer{Escape}')
     expect(onChange).not.toHaveBeenCalled()
     expect(screen.getByText('owner')).toBeInTheDocument()
     // And the next rename still lands.
-    await user.click(screen.getByTitle(/click to rename/i))
+    await user.click(screen.getByRole('button', { name: /^Rename / }))
     const again = screen.getByDisplayValue('owner')
     await user.clear(again)
     await user.type(again, 'steward{Enter}')
@@ -291,7 +291,7 @@ describe('PropertyEditor', () => {
     render(<Harness initial={{ owner: 'jane' }} onChange={onChange} />)
 
     // Short value still exposes the always-visible expand affordance.
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     const editor = screen.getByPlaceholderText(/Write here/i)
     await user.clear(editor)
     await user.type(editor, '# Owner')
@@ -380,7 +380,7 @@ describe('PropertyEditor — path grouping', () => {
     const onChange = vi.fn()
     render(<Harness initial={{ 'A/x': 1 }} groupByPath onChange={onChange} />)
     const leafRow = screen.getByText('x').closest('.group') as HTMLElement
-    await user.click(within(leafRow).getByTitle(/click to rename/i))
+    await user.click(within(leafRow).getByRole('button', { name: /^Rename / }))
     const input = within(leafRow).getByDisplayValue('x')
     await user.clear(input)
     await user.type(input, 'x1{Enter}')
@@ -451,8 +451,8 @@ describe('PropertyEditor — path grouping', () => {
     // Tree: folder header present, no full-path key text
     expect(screen.getByText('A')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Flat' }))
-    // Flat: the literal key is shown
-    expect(screen.getByText('A/x')).toBeInTheDocument()
+    // Flat: the literal key is shown, its folder quieter than its own name
+    expect(screen.getByRole('button', { name: 'Rename A/x' })).toHaveTextContent('A/x')
   })
 
   it('preserves the original key for weird separators on delete', async () => {
@@ -482,7 +482,7 @@ describe('PropertyEditor — business field types & formatting', () => {
     render(<Harness initial={{}} onChange={onChange} />)
     await openComposerOnEmpty(user)
     await user.type(screen.getByPlaceholderText('Property name'), 'flag')
-    await user.click(screen.getByTitle('Change type'))
+    await user.click(screen.getByLabelText('Change type'))
     await user.click(screen.getByText('Yes / No'))
     await user.click(screen.getByRole('switch')) // flip No → Yes
     await user.click(screen.getByRole('button', { name: 'Add' }))
@@ -496,7 +496,7 @@ describe('PropertyEditor — business field types & formatting', () => {
     render(<Harness initial={{}} onChange={onChange} />)
     await openComposerOnEmpty(user)
     await user.type(screen.getByPlaceholderText('Property name'), 'when')
-    await user.click(screen.getByTitle('Change type'))
+    await user.click(screen.getByLabelText('Change type'))
     await user.click(screen.getByText('Date'))
     await user.click(screen.getByRole('button', { name: 'Add' }))
     const arg = onChange.mock.calls.at(-1)![0] as Record<string, unknown>
@@ -510,7 +510,7 @@ describe('PropertyEditor — business field types & formatting', () => {
     render(<Harness initial={{}} onChange={onChange} />)
     await openComposerOnEmpty(user)
     await user.type(screen.getByPlaceholderText('Property name'), 'labels')
-    await user.click(screen.getByTitle('Change type'))
+    await user.click(screen.getByLabelText('Change type'))
     await user.click(screen.getByText('Tags'))
     const tagInput = screen.getByPlaceholderText(/Type a tag/i)
     await user.type(tagInput, 'red{Enter}blue{Enter}')
@@ -523,7 +523,7 @@ describe('PropertyEditor — business field types & formatting', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     // Switch to Source mode where the raw textarea + insert-markdown toolbar live.
     await user.click(screen.getByRole('button', { name: 'source' }))
     const ta = screen.getByPlaceholderText(/Write here/i) as HTMLTextAreaElement
@@ -552,7 +552,7 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     const ed = await screen.findByPlaceholderText(/Write here/i)
     await user.clear(ed)
     await user.type(ed, 'hello world')
@@ -564,7 +564,7 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     await screen.findByPlaceholderText(/Write here/i)
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(onChange).not.toHaveBeenCalled()
@@ -575,7 +575,7 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     const ed = await screen.findByPlaceholderText(/Write here/i)
     await user.type(ed, ' there')
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
@@ -609,10 +609,28 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
   it('renders the modal in a body portal (escapes the drawer containing block)', async () => {
     const user = userEvent.setup()
     const { container } = render(<Harness initial={{ note: 'hi' }} />)
-    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await user.click(screen.getByLabelText('Open editor (Markdown)'))
     const editor = await screen.findByPlaceholderText(/Write here/i)
     // Found document-wide, but NOT inside the component's own container subtree.
     expect(editor).toBeInTheDocument()
     expect(container.contains(editor)).toBe(false)
+  })
+})
+
+describe('PropertyEditor — keys as stored, polished', () => {
+  it('shows no lock on a read-only row — only on a key kept as it is', () => {
+    const { unmount } = render(<PropertyEditor value={{ owner: 'ana' }} onChange={() => {}} readOnly bare />)
+    expect(screen.getByText('owner')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Locked')).not.toBeInTheDocument()
+    unmount()
+    render(<PropertyEditor value={{ id: 'x1', owner: 'ana' }} onChange={() => {}} readOnlyKeys={['id']} bare />)
+    expect(screen.getAllByLabelText('Locked')).toHaveLength(1)
+  })
+
+  it('names list items Item 1, Item 2', () => {
+    render(<PropertyEditor value={{ steps: [{ a: 1 }, { b: 2 }] }} onChange={() => {}} readOnly bare />)
+    expect(screen.getByText('Item 1')).toBeInTheDocument()
+    expect(screen.getByText('Item 2')).toBeInTheDocument()
+    expect(screen.queryByText('[0]')).not.toBeInTheDocument()
   })
 })
