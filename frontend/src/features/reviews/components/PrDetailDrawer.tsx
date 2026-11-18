@@ -15,59 +15,38 @@
  *
  * Mounted only while a PR is selected (fresh queries per prId).
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
-  GitPullRequestArrow, Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
-  Undo2, ShieldAlert, LayoutTemplate, MessageSquare, CornerUpLeft, Trash2,
+  Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
+  Undo2, LayoutTemplate, MessageSquare, CornerUpLeft, Trash2,
 } from 'lucide-react'
-import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { Badge } from '@/components/ui/Badge'
 import { timeAgo } from '@/lib/timeAgo'
-import {
-  ForkNotUpToDateError, HeadMovedError, MergeConflictError, NotUpToDateError, ReviewDecisionError, type PullReason,
-  type IncomingChanges, type ResolutionMap,
-} from '@/services/versioningApiService'
-import {
-  useMergeRequest, usePullLatestDraft, useCommitLog,
-  useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest, useUpdateMergeRequest,
-  useRequestChanges, useWithdrawChangesRequest, useDiscardRejected,
-  useBranchViewChanges, useChangeSummary, usePrDiffSummary, VERSIONING_KEYS,
-} from '../../versioning/hooks/useVersioning'
+import { useCommitLog, useBranchViewChanges } from '../../versioning/hooks/useVersioning'
 import { DraftViewChanges } from '../../versioning/components/DraftViewChanges'
-import { fromChangeCounts } from '../../versioning/model/changeAdapters'
 import { ChangeCountChips } from '../../versioning/components/ChangesPanel'
 import { ChangeList } from '../../versioning/components/ChangeList'
 import { ChangeTreePanel } from '../../versioning/components/ChangeTreePanel'
-import { getChangeEntry, getMergeRequestDiffChildren, type ChangeListOrigin } from '@/services/versioningApiService'
-import { mapWithConcurrency } from '@/lib/concurrency'
-import { isDeleteModify, normalizeConflict } from '../conflictResolution'
-import { useQueryClient } from '@tanstack/react-query'
+import { getMergeRequestDiffChildren } from '@/services/versioningApiService'
 import { CommitRow } from '../../versioning/components/CommitRow'
 import { RevertDialog } from '../../versioning/components/RollbackDialogs'
 import { IncomingChangesSheet } from '../../versioning/components/IncomingChangesSheet'
 import { ForksOffNote } from '../../versioning/components/ForkStatusBits'
 import { UpdateFromParentButton } from '../../versioning/components/UpdateFromParentButton'
 import { ownerName } from '../../versioning/model/branchVocab'
-import { isTerminalPr } from '../../versioning/model/prStatus'
-import { usePermission, useAuthStore } from '@/store/auth'
 import { useFeature } from '@/store/features'
-import { useBranchStore } from '@/store/branchStore'
-import { usePublishReceiptStore } from '@/store/publishReceiptStore'
-import { useUnsavedCountOnBranch } from '@/store/stagedChangesStore'
-import { useAppNotifications } from '@/components/ui/notifications'
 import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 import { ConflictResolver } from './ConflictResolver'
+import { ReviewActivity } from './ReviewActivity'
 import { MOTION } from '@/lib/motion'
-import { refusalCopy } from '@/features/versioning/model/provenance'
 import { ReviewDiscussion } from '../comments/ReviewDiscussion'
 import { useReviewCommentCounts } from '../comments/useReviewComments'
-import type { DiscussionAccess } from '../comments/ReviewThreads'
-import { DECISION_KEYS, useDecideChanges, useReviewDecisionSummary } from '../decisions/useReviewDecisions'
+import { useReviewActions } from '../hooks/useReviewActions'
 
 /** " by 3 changes people made" — what holds a draft's review back from main; people's changes
  *  are what make it pull, so they are what it counts when the server says. */
@@ -94,77 +73,23 @@ function Section({ icon: Icon, title, right, children }: {
   )
 }
 
-/** Why the reader may not merge a review, by the server's reason code (`viewerCan.mergeReason`). */
-const MERGE_REFUSALS: Record<string, string> = {
-  publish_required: 'Merging into main needs the publish permission on this workspace',
-  manage_required: 'Merging needs edit access to this data source',
-  self_merge: 'This data source has someone other than whoever opened a review merge it',
-}
-
-/** Why the reader may not take part in the discussion (`viewerCan.commentReason`). */
-const COMMENT_REFUSALS: Record<string, string> = {
-  person_required: 'A key can’t take part in a review’s discussion — sign in as a person to comment.',
-}
-
 export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
   wsId: string; prId: string; onClose: () => void
   /** A thread to open on (a notification's link). */
   focusThreadId?: string | null
 }) {
   const navigate = useNavigate()
-  const { pathname } = useLocation()
-  const { notify } = useAppNotifications()
-  const canManage = usePermission('workspace:datasource:manage', wsId)
-  // Merging, and reverting a merge, advance main: that needs publish as well.
-  const canPublish = usePermission('workspace:datasource:publish', wsId)
-  const user = useAuthStore((s) => s.user)
-  const switchToMain = useBranchStore((s) => s.switchToMain)
-  const setReceipt = usePublishReceiptStore((s) => s.setReceipt)
-
-  const prQ = useMergeRequest(wsId, prId)
-  const approve = useApproveMergeRequest(wsId)
-  const closePr = useCloseMergeRequest(wsId)
-  const merge = useMergeMergeRequest(wsId)
-  const update = useUpdateMergeRequest(wsId)
-  const sendBack = useRequestChanges(wsId)
-  const withdraw = useWithdrawChangesRequest(wsId)
-  const discardRejected = useDiscardRejected(wsId)
+  const {
+    prQ, pr, user, canManage, canPublish, draftReview, listOrigin, draftSummaryQ, forkSummaryQ, changeSet, changesFetching,
+    unsaved, terminal, merging, forksOn, forksOff, viewerCan, isAuthor, isOwner, showApprove, canMerge, mergeBlockedWhy,
+    discussion, deciding, decisions, accepted, rejected, mergeInPart, sentBack, canSendBack, busy,
+    needsPull, pullReason, forkBehind, clearForkBehind, discardOnMerge, setDiscardOnMerge,
+    conflicts, seeds, seedError, resolverError, cancelConflicts, resolveConflicts, incoming, closeIncoming,
+    runMerge, runPull, approve, sendBack, withdraw, discardRejected, dismiss, acceptMissing, saveDetails, pending,
+  } = useReviewActions(wsId, prId, onClose)
   /** Sending it back: the form is open, and what it says. */
   const [sendingBack, setSendingBack] = useState(false)
   const [sendBackWhy, setSendBackWhy] = useState('')
-  /** Merging what is accepted also discards what was rejected from the draft. */
-  const [discardOnMerge, setDiscardOnMerge] = useState(false)
-  const pullLatest = usePullLatestDraft(wsId, prQ.data?.graphId ?? '')
-
-  const pr = prQ.data
-  // What the review changes, read from the change index a page at a time — never the whole diff on
-  // open, which for a 100,000-change review is tens of megabytes. A draft's review: its own change
-  // list (once merged, main across its merge). A fork's: its summary (counted, and listed from the
-  // window it names, once past the tree's cap).
-  const draftReview = !!pr && isDraftMr(pr)
-  const listOrigin: ChangeListOrigin | null = !pr || !draftReview ? null
-    : pr.status === 'merged' && pr.resultingCommitSeq
-      ? { fromSeq: pr.resultingCommitSeq - 1, toSeq: pr.resultingCommitSeq }
-      : { branchId: pr.sourceBranchId }
-  const draftSummaryQ = useChangeSummary(wsId, draftReview ? pr!.graphId : null, listOrigin)
-  const forkSummaryQ = usePrDiffSummary(wsId, pr && !draftReview ? prId : null, 1000)
-  const changeCounts = draftReview ? draftSummaryQ.data?.counts : forkSummaryQ.data?.counts
-  const changeSet = useMemo(() => (changeCounts ? fromChangeCounts(changeCounts) : null), [changeCounts])
-  const changesFetching = draftSummaryQ.isFetching || forkSummaryQ.isFetching
-  // Approve sends the head the PR was read at, so the changes on screen must be of that head: when a
-  // poll brings a new one, read them again (Approve waits for it).
-  const queryClient = useQueryClient()
-  const diffHead = useRef(pr?.headCommitId)
-  useEffect(() => {
-    if (pr?.headCommitId === diffHead.current) return
-    if (diffHead.current !== undefined) {
-      if (pr && listOrigin) void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.changeList(wsId, pr.graphId, listOrigin) })
-      void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiffSummary(wsId, prId) })
-    }
-    diffHead.current = pr?.headCommitId
-  }, [pr?.headCommitId]) // eslint-disable-line react-hooks/exhaustive-deps
-  // Edits still staged on the canvas for this draft are not part of it: a merge would leave them behind.
-  const unsaved = useUnsavedCountOnBranch(pr?.sourceBranchId)
 
   // Pre-merge: the draft's individual commits (each with its author), expandable to per-commit diffs.
   // Draft MRs only — a fork PR's source branch lives on another graph (legacy), so leave it disabled.
@@ -188,243 +113,14 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
     setEditDesc(pr?.description ?? '')
     setEditing(true)
   }
-  const saveEdit = () => {
-    if (!pr) return
-    update.mutate(
-      { prId, graphId: pr.graphId, title: editTitle, description: editDesc },
-      {
-        onSuccess: () => { setEditing(false); notify('success', 'Updated.') },
-        onError: (e) => notify('error', (e as Error).message),
-      },
-    )
-  }
-  const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
-  // What each conflict resolution starts from — the conflicting entity's own value on the draft.
-  // It comes with the conflicts (a merge's 409, a pull's answer); any it left out is read on its
-  // own, a few at a time — never the review's whole diff (tens of megabytes at 100,000 changes).
-  const [givenSeeds, setGivenSeeds] = useState<Record<string, Record<string, unknown> | undefined>>({})
-  const missingSeeds = useMemo(() => {
-    if (!conflicts) return []
-    const out = new Set<string>()
-    for (const c of conflicts.map((x) => normalizeConflict(x))) {
-      if (c.entity_id && !isDeleteModify(c) && !givenSeeds[c.entity_id]) out.add(c.entity_id)
-    }
-    return [...out]
-  }, [conflicts, givenSeeds])
-  const [readSeeds, setReadSeeds] = useState<{ key: string; seeds: Record<string, Record<string, unknown> | undefined>; failed: boolean }>(
-    { key: '', seeds: {}, failed: false })
-  const missingKey = missingSeeds.join('\n')
-  useEffect(() => {
-    if (!pr || !listOrigin || missingSeeds.length === 0) return
-    let gone = false
-    void mapWithConcurrency(missingSeeds, 6, (id) => getChangeEntry(wsId, pr.graphId, listOrigin, id)).then((results) => {
-      if (gone) return
-      const out: Record<string, Record<string, unknown> | undefined> = {}
-      let failed = false
-      results.forEach((r, i) => {
-        if (r.status === 'fulfilled') out[missingSeeds[i]] = (r.value.after ?? undefined) as Record<string, unknown> | undefined
-        else failed = true
-      })
-      setReadSeeds({ key: missingKey, seeds: out, failed })
-    })
-    return () => { gone = true }
-  }, [missingKey]) // eslint-disable-line react-hooks/exhaustive-deps
-  const seeds = useMemo(
-    () => (readSeeds.key === missingKey ? { ...readSeeds.seeds, ...givenSeeds } : givenSeeds),
-    [readSeeds, missingKey, givenSeeds],
-  )
-  const seedError = readSeeds.key === missingKey && readSeeds.failed
-    ? 'Couldn’t read every conflicting entity — close this and merge again.' : null
-  const [resolverError, setResolverError] = useState<string | null>(null)
-  const [needsPull, setNeedsPull] = useState(false)
-  // Why it must pull, once a merge was refused for it (the list's `pullRequired` says only whether).
-  const [pullReason, setPullReason] = useState<PullReason | null>(null)
-  const [resolveMode, setResolveMode] = useState<'merge' | 'pull'>('merge')
-  /** What a pull brought in — reviewed, not just asserted. */
-  const [incoming, setIncoming] = useState<IncomingChanges | null>(null)
+  const saveEdit = () => saveDetails({ title: editTitle, description: editDesc }, () => setEditing(false))
   const [dismissing, setDismissing] = useState(false)
   // "Revert this merge" (merged PRs): the merge's squash commit is revertable
   // like any other main revision — the dialog owns the confirm + conflict UX.
   const versioningEnabled = useFeature('versioningEnabled')
   const [reverting, setReverting] = useState(false)
-  // A fork's review merges into its parent, the review's target graph (a draft's, into its own).
-  const forkReview = !!pr && !isDraftMr(pr)
-  const forksOn = useFeature('forksEnabled')
-  const forksOff = forkReview && !forksOn
-  // Merged by a job: nothing changes it until the job lands it or hands it back.
-  const merging = pr?.status === 'merging'
-  /** A fork behind its parent, as its merge said: how far (it merges only up to date). */
-  const [forkBehind, setForkBehind] = useState<number | null>(null)
-
-  const terminal = isTerminalPr(pr?.status)
-  // Who may approve and merge is the server's word (`viewerCan`): whoever opened a review approves
-  // or merges it where its data source's policy lets them. Without it, its author and its draft's
-  // owner are not offered Approve.
-  const viewerCan = pr?.viewerCan
-  const isAuthor = !!user && pr?.actor === user.id
-  const isOwner = !!user && pr?.sourceBranchOwner === user.id
-  const alreadyApproved = !!user && (pr?.approvedBy ?? []).includes(user.id)
-  const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
-  // Approve is asked of the requested reviewers. An approval gone stale is not in approvedBy, so
-  // its reviewer is offered Approve again.
-  const isRequested = !!user && (pr?.reviewers ?? []).includes(user.id)
-  const showApprove = canManage && !terminal && !alreadyApproved && isRequested && !forksOff
-    && (viewerCan ? viewerCan.approve : !isAuthor && !isOwner)
-  const canMerge = viewerCan ? viewerCan.merge : canPublish
-  const mergeBlockedWhy = MERGE_REFUSALS[viewerCan?.mergeReason ?? (canPublish ? '' : 'publish_required')]
-  // Whoever sees a review discusses it (a person, not a key); a manager may remove what others wrote.
-  const discussion: DiscussionAccess = {
-    canComment: viewerCan?.comment ?? true,
-    commentReason: viewerCan?.commentReason ? (COMMENT_REFUSALS[viewerCan.commentReason] ?? null) : null,
-    canModerate: viewerCan?.moderate ?? canManage,
-  }
   const openThreads = useReviewCommentCounts(wsId, prId).data?.open ?? 0
-  // A draft's review, decided change by change: Merge accepted lands what is accepted and leaves
-  // the rest on the draft; with anything rejected, it is the only merge there is.
-  const deciding = draftReview && !terminal && !merging
-  const decisions = useReviewDecisionSummary(wsId, prId, deciding).data
-  const acceptMissing = useDecideChanges(wsId, prId)
-  const accepted = decisions?.accepted ?? 0
-  const rejected = decisions?.rejected ?? 0
-  const mergeInPart = deciding && !!decisions && (rejected > 0 || (accepted > 0 && accepted < decisions.total))
-  // Sent back for changes, while that holds: it merges once the draft changes (or it is withdrawn).
-  const sentBack = draftReview && !terminal ? pr?.changesRequested ?? null : null
-  const canSendBack = draftReview && !terminal && !merging && !sentBack && !!viewerCan?.decide
-  const busy = approve.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
-    || sendBack.isPending || withdraw.isPending || discardRejected.isPending
-
-  // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
-  // banner + Pull-latest show up front (the 409 catch in runMerge is the backstop). A clean pull
-  // clears it and invalidates this PR, so pr.behind flips false and keeps it cleared.
-  // Only people's commits make a pull a must (pullRequired); automation alone is merged past.
-  const mustPull = pr?.pullRequired ?? pr?.behind
-  useEffect(() => { setNeedsPull(!terminal && !!mustPull) }, [mustPull, terminal])
-
-  const runMerge = async (resolutions?: ResolutionMap, mode: 'all' | 'accepted' = 'all') => {
-    if (!pr || unsaved > 0) return
-    try {
-      const discard = mode === 'accepted' && discardOnMerge && rejected > 0
-      const res = await merge.mutateAsync({
-        prId, graphId: pr.targetGraphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions, mode,
-        discardRejected: discard,
-      })
-      if (mode === 'accepted' && accepted < (decisions?.total ?? 0)) {
-        // Merged in part: the draft stays open with the rest, and this review reads as merged.
-        notify('success', `Merged ${accepted.toLocaleString()} accepted change${accepted === 1 ? '' : 's'} into main. `
-          + (discard ? 'The rejected ones left the draft; anything undecided stays on it.' : 'The rest stay on the draft.'))
-        void prQ.refetch()
-        return
-      }
-      setConflicts(null)
-      setResolverError(null)
-      setForkBehind(null)
-      // The receipt is the confirmation, and it survives the navigation below — a notification would not.
-      // It is the graph's the merge landed in: a fork's parent, for a fork's review.
-      setReceipt({
-        commitId: res.commitId, outcome: res.outcome, graphId: pr.targetGraphId,
-        counts: changeSet?.counts ?? { added: 0, modified: 0, removed: 0 }, via: 'review',
-      })
-      // A fork's review has no view to go back to, and its fork lives on: the drawer stays, and
-      // reads as merged once the review is read again.
-      if (forkReview) return
-      // Land on the freshly-merged main; read-your-writes serves main even before the projection
-      // catches up. The source branch is now `merged`, so useActiveBranchGuard would evict anyone
-      // sitting on it anyway — this just gets there first for the person who pressed the button.
-      switchToMain()
-      onClose()
-      // Merging from the workspace Reviews inbox used to be a dead end: the branch store was mutated
-      // with no canvas mounted and no way back to the work. Return to the view the draft came from,
-      // where the receipt banner is waiting.
-      if (pr.originatingViewId && !pathname.startsWith(`/views/${pr.originatingViewId}`)) {
-        navigate(`/views/${pr.originatingViewId}`)
-      }
-    } catch (e) {
-      // A fork's merge that ran as a job hands the review back when it is refused: read it again.
-      if (forkReview) void prQ.refetch()
-      if (e instanceof ForkNotUpToDateError) {
-        setForkBehind(e.behind ?? 0)
-        return
-      }
-      if (e instanceof NotUpToDateError) {
-        setNeedsPull(true)
-        setPullReason(e.reason ?? 'people')
-        notify('error', refusalCopy(e.reason))
-        return
-      }
-      if (e instanceof ReviewDecisionError) {
-        // Decisions moved under the merge (an edit made one stale, say): read them again.
-        void queryClient.invalidateQueries({ queryKey: DECISION_KEYS.all(wsId, prId) })
-        notify('error', e.message)
-        return
-      }
-      if (e instanceof MergeConflictError) {
-        setGivenSeeds(e.seeds)
-        setConflicts(e.conflicts)
-        setResolverError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
-        return
-      }
-      const msg = (e as Error).message
-      const friendly = /approval_required/i.test(msg)
-        ? 'This PR needs approval from its reviewers before it can be merged.'
-        : msg
-      if (resolutions) setResolverError(friendly)
-      else notify('error', friendly)
-    }
-  }
-
-  const runPull = (resolutions?: ResolutionMap) => {
-    if (!pr) return
-    pullLatest.mutate(
-      { branchId: pr.sourceBranchId, resolutions },
-      {
-        onSuccess: (res) => {
-          if (!res.clean) {
-            setResolveMode('pull')
-            setGivenSeeds(Object.fromEntries(Object.entries(res.seeds ?? {}).map(([k, v]) => [k, v ?? undefined])))
-            setConflicts(res.conflicts)
-            setResolverError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
-            return
-          }
-          setConflicts(null); setResolverError(null); setResolveMode('merge'); setNeedsPull(false)
-          // A reviewer pulling before merge is taking in work that changes what THIS PR will land —
-          // so show it. Merging blind was the thing that made "someone beat me to it" opaque.
-          if (res.incoming && res.incoming.commitCount > 0) {
-            setIncoming(res.incoming)
-          } else {
-            notify('info', 'Already up to date — you can merge now.')
-          }
-        },
-        onError: (e) => notify('error', (e as Error).message),
-      },
-    )
-  }
-
-  const events = useMemo(() => {
-    type Ev = { Icon: React.ComponentType<{ className?: string }>; text: string; time?: string; tint: string }
-    if (!pr) return [] as Ev[]
-    const evs: Ev[] = [{ Icon: GitPullRequestArrow, text: `Opened by ${ownerName(pr.actor, pr.userNames)}`, time: pr.createdAt, tint: 'bg-accent-lineage' }]
-    for (const a of pr.approvedBy ?? []) evs.push({ Icon: CheckCircle2, text: `Approved by ${ownerName(a, pr.userNames)}`, time: pr.updatedAt, tint: 'bg-emerald-500' })
-    if (pr.status === 'merged') {
-      // A `direct_publish` merge means someone published the source branch straight to Published,
-      // which lands exactly what this review proposed and so resolves it — but WITHOUT the reviewers
-      // ever seeing it. Say that, rather than presenting a bypassed review as a reviewed merge.
-      const bypassed = pr.mergedVia === 'direct_publish'
-      const who = ownerName(pr.mergedBy, pr.userNames)
-      const sha = pr.resultingCommitId ? ` · ${pr.resultingCommitId.slice(0, 8)}` : ''
-      evs.push({
-        Icon: bypassed ? ShieldAlert : GitMerge,
-        text: bypassed
-          ? `Published directly by ${who}, bypassing this review${sha}`
-          : pr.mergedVia === 'review_partial'
-            ? `What was accepted merged by ${who}${sha}; the rest stayed on the draft`
-            : `Merged by ${who}${sha}`,
-        time: pr.mergedAt ?? pr.updatedAt,
-        tint: bypassed ? 'bg-amber-500' : 'bg-violet-500',
-      })
-    }
-    if (pr.status === 'closed') evs.push({ Icon: XCircle, text: `Closed by ${ownerName(pr.closedBy, pr.userNames)}`, time: pr.closedAt ?? pr.updatedAt, tint: 'bg-ink-muted' })
-    return evs
-  }, [pr])
+  const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
 
   return createPortal(
     <>
@@ -504,10 +200,10 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
                     </button>
                     <button
                       onClick={saveEdit}
-                      disabled={update.isPending}
+                      disabled={pending.update}
                       className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
                     >
-                      {update.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                      {pending.update ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
                       Save
                     </button>
                   </div>
@@ -678,17 +374,7 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
               </Section>
 
               <Section icon={Clock} title="Activity">
-                <ol className="relative ml-1.5 border-l border-glass-border space-y-3 pl-4">
-                  {events.map((ev, i) => (
-                    <li key={i} className="relative">
-                      <span className={cn('absolute -left-[1.36rem] top-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-canvas-elevated', ev.tint)} />
-                      <p className="text-sm text-ink leading-tight flex items-center gap-1.5">
-                        <ev.Icon className="w-3.5 h-3.5 text-ink-muted" /> {ev.text}
-                      </p>
-                      {ev.time && <p className="text-[11px] text-ink-muted mt-0.5">{timeAgo(ev.time)}</p>}
-                    </li>
-                  ))}
-                </ol>
+                <ReviewActivity pr={pr} />
               </Section>
             </>
           )}
@@ -720,7 +406,7 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
               Update it from its parent first: it merges only up to date.
             </span>
             {forksOn && canPublish && (
-              <UpdateFromParentButton wsId={wsId} forkGraphId={pr.graphId} onUpdated={() => setForkBehind(null)} />
+              <UpdateFromParentButton wsId={wsId} forkGraphId={pr.graphId} onUpdated={clearForkBehind} />
             )}
           </div>
         )}
@@ -752,11 +438,10 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
                   {decisions.stale > 0 ? ' (some changed since they were decided)' : ''}.
                 </span>
                 {viewerCan?.decide && (
-                  <button type="button" disabled={acceptMissing.isPending}
-                    onClick={() => acceptMissing.mutate({ verdict: 'accepted', entityIds: decisions.missingIds, force: true, expectedHeadCommitId: pr.headCommitId },
-                      { onError: (e) => notify('error', (e as Error).message) })}
+                  <button type="button" disabled={pending.acceptMissing}
+                    onClick={acceptMissing}
                     className="inline-flex items-center gap-1 px-2 h-7 rounded-lg font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50">
-                    {acceptMissing.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}Accept {decisions.missing > decisions.missingIds.length ? `${decisions.missingIds.length} of them` : 'them too'}
+                    {pending.acceptMissing && <Loader2 className="w-3.5 h-3.5 animate-spin" />}Accept {decisions.missing > decisions.missingIds.length ? `${decisions.missingIds.length} of them` : 'them too'}
                   </button>
                 )}
               </div>
@@ -782,26 +467,17 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
             <div className="shrink-0 flex flex-col items-end gap-1">
               {(isAuthor || isOwner) && rejected > 0 && (
                 <button type="button" disabled={busy}
-                  onClick={() => {
-                    if (!window.confirm(`Discard the ${rejected.toLocaleString()} rejected change${rejected === 1 ? '' : 's'} from the draft, and what holds them together? It is one new revision of the draft — change them again to bring them back.`)) return
-                    discardRejected.mutate({ prId, graphId: pr.graphId, branchId: pr.sourceBranchId }, {
-                      onSuccess: (out) => notify('success', `Discarded ${out.restored.toLocaleString()} change${out.restored === 1 ? '' : 's'} from the draft. The review is back in your reviewers’ hands.`),
-                      onError: (e) => notify('error', (e as Error).message),
-                    })
-                  }}
+                  onClick={discardRejected}
                   className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-500/10 disabled:opacity-50">
-                  {discardRejected.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" aria-hidden />}
+                  {pending.discard ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" aria-hidden />}
                   Discard the rejected
                 </button>
               )}
               {sentBack.by === user?.id && (
                 <button type="button" disabled={busy}
-                  onClick={() => withdraw.mutate({ prId, graphId: pr.graphId }, {
-                    onSuccess: () => notify('success', 'Withdrawn: the review can merge again.'),
-                    onError: (e) => notify('error', (e as Error).message),
-                  })}
+                  onClick={withdraw}
                   className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] disabled:opacity-50">
-                  {withdraw.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}Withdraw
+                  {pending.withdraw && <Loader2 className="w-3.5 h-3.5 animate-spin" />}Withdraw
                 </button>
               )}
             </div>
@@ -823,18 +499,7 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
             {showApprove && (
               <button
-                onClick={() => approve.mutate({ prId, graphId: pr.graphId, expectedHeadCommitId: pr.headCommitId }, {
-                  onSuccess: () => notify('success', 'Approved.'),
-                  onError: (e) => {
-                    // The draft moved on since this review was loaded: load it again before approving.
-                    if (e instanceof HeadMovedError) {
-                      void prQ.refetch()
-                      if (pr && listOrigin) void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.changeList(wsId, pr.graphId, listOrigin) })
-                      void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiffSummary(wsId, prId) })
-                    }
-                    notify('error', (e as Error).message)
-                  },
-                })}
+                onClick={approve}
                 disabled={busy || changesFetching}
                 title="Sign off on these changes so they can be merged"
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-emerald-600 border border-emerald-500/30 bg-emerald-500/[0.06] hover:bg-emerald-500/10 disabled:opacity-60"
@@ -855,7 +520,7 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
                 title="This draft is behind main — pull the latest changes before it can merge"
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 shadow-sm disabled:opacity-60"
               >
-                {pullLatest.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowDownToLine className="w-4 h-4" />}
+                {pending.pull ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowDownToLine className="w-4 h-4" />}
                 Pull latest
               </button>
             ) : !forksOff && mergeInPart ? (
@@ -868,7 +533,7 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
                     : 'Apply the accepted changes to main; the rest stay on the draft'}
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
               >
-                {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
+                {pending.merge ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
                 Merge {accepted.toLocaleString()} accepted
               </button>
             ) : !forksOff && (
@@ -879,7 +544,7 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
                   : sentBack ? 'Sent back for changes: it merges once the draft changes' : 'Apply these changes to main'}
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
               >
-                {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
+                {pending.merge ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
                 Merge
               </button>
             )}
@@ -915,15 +580,9 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
             </label>
             <div className="flex items-center gap-2 mt-2.5">
               <button type="button" disabled={busy}
-                onClick={() => sendBack.mutate({ prId, graphId: pr.graphId, reason: sendBackWhy.trim() || null, expectedHeadCommitId: pr.headCommitId }, {
-                  onSuccess: () => { notify('success', `Sent back to ${ownerName(pr.actor, pr.userNames)}. They’ve been told.`); setSendingBack(false); setSendBackWhy('') },
-                  onError: (e) => {
-                    if (e instanceof HeadMovedError) void prQ.refetch()
-                    notify('error', (e as Error).message)
-                  },
-                })}
+                onClick={() => sendBack(sendBackWhy, () => { setSendingBack(false); setSendBackWhy('') })}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-rose-500 hover:bg-rose-600 shadow-sm disabled:opacity-60">
-                {sendBack.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <CornerUpLeft className="w-4 h-4" aria-hidden />} Send back
+                {pending.sendBack ? <Loader2 className="w-4 h-4 animate-spin" /> : <CornerUpLeft className="w-4 h-4" aria-hidden />} Send back
               </button>
               <button type="button" onClick={() => setSendingBack(false)} disabled={busy}
                 className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted border border-glass-border hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] disabled:opacity-60">
@@ -947,14 +606,11 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
             </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={() => closePr.mutate({ prId, graphId: pr.graphId }, {
-                  onSuccess: () => { notify('success', 'Request dismissed — no changes applied.'); onClose() },
-                  onError: (e) => { notify('error', (e as Error).message); setDismissing(false) },
-                })}
+                onClick={() => dismiss(() => setDismissing(false))}
                 disabled={busy}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-rose-500 hover:bg-rose-600 shadow-sm disabled:opacity-60"
               >
-                {closePr.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />} Dismiss request
+                {pending.dismiss ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />} Dismiss request
               </button>
               <button
                 onClick={() => setDismissing(false)}
@@ -1005,10 +661,10 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
             conflicts={conflicts}
             seeds={seeds}
             seedError={seedError}
-            busy={merge.isPending || pullLatest.isPending}
+            busy={pending.merge || pending.pull}
             error={resolverError}
-            onCancel={() => { setConflicts(null); setGivenSeeds({}); setResolverError(null); setResolveMode('merge') }}
-            onResolve={(resolutions) => (resolveMode === 'pull' ? runPull(resolutions) : runMerge(resolutions))}
+            onCancel={cancelConflicts}
+            onResolve={resolveConflicts}
           />
         )}
 
@@ -1018,7 +674,7 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
             graphId={pr.graphId}
             incoming={incoming}
             userNames={pr.userNames}
-            onClose={() => setIncoming(null)}
+            onClose={closeIncoming}
           />
         )}
       </motion.aside>
