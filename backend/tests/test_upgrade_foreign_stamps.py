@@ -9,7 +9,10 @@ newer release's before a rollback — upgrades with this one (``scripts/upgrade.
   - stamped with another branch's revision, it is rewound, upgraded to head, and passes ``check``;
   - the other branch's columns are left as they are;
   - when the schema still isn't at head after the rewind, the stamps go back as they were and the
-    job fails, so it can't pass on a later run either.
+    job fails, so it can't pass on a later run either;
+  - a side branch that parted earlier than the guess (some of this build's migrations written
+    while it was open, and never run there): the guess fails safely as above, and naming the
+    revision both share (``--rewind-to``) upgrades it.
 """
 import os
 import subprocess
@@ -116,3 +119,23 @@ def test_a_rewind_that_leaves_the_schema_short_puts_the_stamps_back(scratch_db):
     assert out.returncode == 1, out.stderr[-3000:]
     assert "still not at head" in out.stderr
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [("29991231_2359_from_the_future",)]
+
+
+@E2E
+def test_a_branch_that_parted_earlier_than_the_guess_upgrades_once_its_parting_is_named(scratch_db):
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0, out.stderr[-2000:]
+    # It parted at 20261117_1500 and never ran 20261118_1100_review_rules (one of its columns);
+    # its own revision is dated after that one, so the guess takes review_rules as run.
+    _sql(scratch_db, "ALTER TABLE workspaces DROP COLUMN review_threads_hold")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261118_1200_elsewhere'")
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 1 and "--rewind-to" in out.stderr, out.stderr[-3000:]
+    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [("20261118_1200_elsewhere",)]
+
+    out = _job(scratch_db, "upgrade", "--rewind-to", "20261117_1500_gv_mr_sendback")
+    assert out.returncode == 0, out.stderr[-3000:]
+    assert "as named (--rewind-to)" in out.stderr
+    assert _job(scratch_db, "check").returncode == 0
+    assert _sql(scratch_db, "SELECT count(*) FROM information_schema.columns "
+                            "WHERE table_name = 'workspaces' AND column_name = 'review_threads_hold'") == [(1,)]

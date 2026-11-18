@@ -14,8 +14,9 @@ Two deployment roles:
 
 Subcommands:
     upgrade   [--revision REV]   alembic upgrade (default: head); a database
-                                 another build moved on is rewound onto this
-                                 build's chain first (see ``_rewind_foreign``)
+              [--rewind-to REV]  another build moved on is rewound onto this
+                                 build's chain first (see ``_rewind_foreign``),
+                                 to REV when named
     downgrade  --revision REV    alembic downgrade
     repair                       reconcile a version pointer that trails the
                                  physical schema (see ``cmd_repair``)
@@ -189,22 +190,31 @@ def _set_stamps(conn, stamps: list[str]) -> None:
         conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": v})
 
 
-def _rewind_foreign(cfg) -> list[str] | None:
+def _rewind_foreign(cfg, to: str | None = None) -> list[str] | None:
     """Move a database another build migrated back onto this build's chain, so it can upgrade: its
     foreign stamps become the revision where the two chains most likely parted
     (:func:`_parting_point`). This build's migrations after that then run — those the database
     never ran, and any it did, which change nothing: every migration is safe to run twice
     (``schema.yml``'s chain replay holds them to it). The other build's tables and columns stay,
-    unused here, for when its migrations arrive with it. Returns the stamps as they were, to put
-    back if the upgrade doesn't bring the schema to head; None when nothing was foreign."""
+    unused here, for when its migrations arrive with it. ``to``: the revision both chains share,
+    named by an operator who knows it, in place of the guess — for a side branch whose chain the
+    guess can't place. Returns the stamps as they were, to put back if the upgrade doesn't bring
+    the schema to head; None when nothing was foreign."""
     script = ScriptDirectory.from_config(cfg)
     engine = create_engine(_sync_url(), pool_pre_ping=True)
     with engine.begin() as conn:
         was = _stamps(conn)
         foreign = _foreign(script, was)
         if not foreign:
+            if to is not None:
+                log.warning("--rewind-to %s: alembic_version names nothing this build doesn't have; "
+                            "nothing to rewind", to)
             return None
-        to = _parting_point(script, foreign)
+        if to is not None:
+            script.get_revision(to)                     # one of ours, or Alembic says it isn't
+            named = True
+        else:
+            to, named = _parting_point(script, foreign), False
         if to is None:
             raise RuntimeError(f"alembic_version names {foreign}, which this build doesn't have, and none "
                                "of this build's revisions is older: deploy the build that has them")
@@ -213,16 +223,16 @@ def _rewind_foreign(cfg) -> list[str] | None:
         past = any(to == rev.revision for k in kept for rev in script.iterate_revisions(k, "base"))
         log.warning(
             "alembic_version names %s, which this build doesn't have: another build — another "
-            "branch's, or a newer release's — moved this database on. Rewinding to %s, where the "
-            "two most likely parted; this build's migrations after it run (each is safe to run "
-            "twice), and the other build's tables and columns are left as they are.",
-            foreign, to)
+            "branch's, or a newer release's — moved this database on. Rewinding to %s, %s; this "
+            "build's migrations after it run (each is safe to run twice), and the other build's "
+            "tables and columns are left as they are.",
+            foreign, to, "as named (--rewind-to)" if named else "where the two most likely parted")
         _set_stamps(conn, kept if past else sorted(set(kept) | {to}))
     return was
 
 
 @_with_advisory_lock
-def cmd_upgrade(revision: str, fast_path: bool = True) -> int:
+def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = None) -> int:
     cfg = _alembic_config()
 
     if fast_path and revision == "head":
@@ -234,7 +244,7 @@ def cmd_upgrade(revision: str, fast_path: bool = True) -> int:
             log.info("Upgrade complete (fresh install)")
             return 0
 
-    was = _rewind_foreign(cfg)
+    was = _rewind_foreign(cfg, rewind_to)
     log.info("Alembic upgrade -> %s", revision)
     command.upgrade(cfg, revision)
     if was is not None and revision == "head":
@@ -247,8 +257,8 @@ def cmd_upgrade(revision: str, fast_path: bool = True) -> int:
             log.error(
                 "After rewinding, the schema is still not at head — %d mismatch(es), first 10: %s. "
                 "The two chains parted earlier than this build could tell; alembic_version is back "
-                "to %s. Deploy a build with both chains (a merge revision), or rewind it by hand to "
-                "the last revision both share and upgrade again.", len(gaps), gaps[:10], was)
+                "to %s. Deploy a build with both chains (a merge revision), or name the last "
+                "revision both share: `upgrade --rewind-to <revision>`.", len(gaps), gaps[:10], was)
             return 1
     log.info("Upgrade complete")
     return 0
@@ -552,6 +562,13 @@ def main() -> int:
         help="Replay the migration chain even on a virgin database "
              "(what CI uses to keep the chain itself exercised)",
     )
+    up.add_argument(
+        "--rewind-to",
+        metavar="REV",
+        help="A database another build moved on (alembic_version names revisions this build "
+             "doesn't have): rewind it to REV, the last revision both builds share, instead of "
+             "the revision this build would guess",
+    )
 
     down = sub.add_parser("downgrade", help="Run alembic downgrade")
     down.add_argument("--revision", required=True)
@@ -583,7 +600,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.cmd == "upgrade":
-        return cmd_upgrade(args.revision, fast_path=not args.no_fast_path)
+        return cmd_upgrade(args.revision, fast_path=not args.no_fast_path, rewind_to=args.rewind_to)
     if args.cmd == "downgrade":
         return cmd_downgrade(args.revision)
     if args.cmd == "repair":
