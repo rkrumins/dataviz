@@ -5034,22 +5034,30 @@ class GraphVersioningService:
             if overrides and not force:
                 raise DecisionConflict(overrides[:200], len(overrides))
             if verdict is None:
+                # The ids as one array each (``= ANY``): two IN lists of a chunk passed Postgres's
+                # 32,767 bind parameters past 16k changes, and clearing them failed.
+                ids = bindparam("ids", type_=ARRAY(Text))
                 for chunk in _chunks(chosen, _IN_LIST_MAX):
                     await s.execute(delete(ReviewDecisionORM).where(
                         ReviewDecisionORM.pr_id == pr_id,
-                        or_(ReviewDecisionORM.entity_id.in_(chunk), ReviewDecisionORM.implied_by.in_(chunk))))
+                        or_(ReviewDecisionORM.entity_id == any_(ids), ReviewDecisionORM.implied_by == any_(ids))),
+                        {"ids": list(chunk)})
                 return answer
             hashes = await self._head_hashes(s, pr.graph_id, draft.id, closure.keys())
             now, why = _now(), (reason or "").strip()[:2000] or None
             rows = [{"pr_id": pr_id, "entity_id": eid, "graph_id": pr.graph_id, "verdict": verdict,
                      "reason": why if verdict == "rejected" else None, "content_hash": hashes.get(eid),
                      "implied_by": by, "actor": actor, "decided_at": now} for eid, by in closure.items()]
-            for chunk in _chunks(rows, 1000):
-                stmt = pg_insert(ReviewDecisionORM).values(chunk)
-                await s.execute(stmt.on_conflict_do_update(
-                    index_elements=[ReviewDecisionORM.pr_id, ReviewDecisionORM.entity_id],
-                    set_={c: stmt.excluded[c] for c in ("verdict", "reason", "content_hash", "implied_by",
-                                                        "actor", "decided_at")}))
+            # One statement, compiled once and sent for many rows: building a multi-row VALUES per
+            # thousand rows spent seconds compiling its binds at 50k changes.
+            stmt = pg_insert(ReviewDecisionORM.__table__)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[ReviewDecisionORM.pr_id, ReviewDecisionORM.entity_id],
+                set_={c: stmt.excluded[c] for c in ("verdict", "reason", "content_hash", "implied_by",
+                                                    "actor", "decided_at")})
+            conn = await s.connection()
+            for chunk in _chunks(rows, 5000):
+                await conn.execute(stmt, chunk)
             return answer
 
     async def _review_tally(self, pr: MergeRequestORM, draft, index: ChangeIndex) -> Dict[str, object]:
