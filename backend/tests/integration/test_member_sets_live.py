@@ -133,6 +133,9 @@ class LiveEngine:
     async def get_descendants(self, urn, **kw):
         return await self.provider.get_descendants(urn, **kw)
 
+    async def get_ancestor_chains(self, urns):
+        return await self.provider.get_ancestor_chains(urns)
+
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def graph():
@@ -242,12 +245,19 @@ async def test_twenty_seeds_every_source_and_consumer_exactly(graph, maker):
     assert kept_edges == {(a, b) for a, b in edges if a in rows and b in rows}
 
     sessions = maker
-    text = b"".join([c async for c in download.stream(sessions, set_id, fmt="csv")]).decode("utf-8")
+    started_download = time.monotonic()
+    text = b"".join([c async for c in download.stream(sessions, set_id, fmt="csv", engine=engine)]).decode("utf-8")
+    downloaded = time.monotonic() - started_download
     listed = list(csv.DictReader(io.StringIO(text)))
     assert len(listed) == len(rows)
     assert {r["urn"] for r in listed} == set(rows)
+    # Where each sits: the domain that contains it, by URN, name and type — read from the graph.
+    for r in listed:
+        dom = nodes[r["urn"]]
+        assert (r["parentUrn"], r["parentName"], r["path"], r["pathUrns"]) == (dom, dom, dom, dom), r
+        assert r["parentType"], r
     flows = b"".join([c async for c in download.stream(sessions, set_id, fmt="csv", part="edges")]).decode("utf-8")
     assert len(flows.strip().splitlines()) - 1 == len(kept_edges)
 
     print(f"\n{len(rows):,} members, {len(kept_edges):,} flows: {requests} requests, "
-          f"{engine.closures} closure steps, {elapsed:.1f} s")
+          f"{engine.closures} closure steps, {elapsed:.1f} s; downloaded with where each sits in {downloaded:.1f} s")

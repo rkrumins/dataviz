@@ -165,3 +165,78 @@ async def test_a_view_of_fifty_thousand_members(test_client: AsyncClient, member
         assert len(names) == min(page["totalCount"], 5000)
     print(f"\n{members:,} members: {resolving} answers of 202, view ready in {elapsed:.1f} s, "
           f"{len(seen):,} listed across {pages} pages (each layer lists up to 5,000)")
+
+
+async def test_a_trace_saved_as_a_subset_that_follows_its_view(test_client: AsyncClient, membership_on, live):  # noqa: F811
+    """Save as view from a trace, as the sheet does by default: the new view follows the
+    view it was traced in — its layers served from there, live, and each member drawn
+    inside the containers that view draws in the same layer."""
+    nodes, edges = live
+    ws = await workspace(test_client)
+    base = await test_client.post("/api/v1/views/", json={
+        "name": "Lineage base", "workspaceId": ws, "viewType": "reference", "visibility": "private",
+        "config": {"layout": {"type": "reference", "referenceLayout": {"layers": [
+            {"id": "b_data", "name": "Data", "order": 0, "entityTypes": ["domain", "dataset"]},
+        ], "assignments": {}}}, "content": {"entityScope": "all"}},
+    })
+    assert base.status_code == 201, base.text
+    base_id = base.json()["id"]
+    seeds = ["urn:seed:0", "urn:seed:1"]
+    spec = {"seeds": {"urns": seeds}, "expand": {"upstream": 0, "downstream": "all"}}
+    layout = {"kind": "follow", "sourceViewId": base_id, "nest": True}
+
+    # The preview, as the sheet asks it: no wait sent, the base's layers in the answer.
+    for _ in range(100):
+        on()
+        plan = await test_client.post(f"/api/v1/{ws}/graph/members/plan", params={"viewId": base_id},
+                                      json={"sources": [{"spec": spec}], "layout": layout, "keep": "all"})
+        if plan.status_code != 202:
+            break
+    assert plan.status_code == 200, plan.text
+    assert [l["name"] for l in plan.json()["layers"]][:1] == ["Data"]
+    reached = {u for u in nodes if any(u == s or u.startswith(f"urn:d:{s[-1]}:") for s in seeds)}
+    assert plan.json()["members"] >= len(reached) - len(seeds)
+
+    body = {"name": "Two tables, downstream", "workspaceId": ws, "visibility": "private", "mode": "live",
+            "sources": [{"spec": spec}], "layout": layout, "provenance": {"origin": "trace", "viewId": base_id}}
+    for _ in range(100):
+        on()
+        made = await test_client.post("/api/v1/views/from-members", json=body, headers={"Idempotency-Key": "live-follow"})
+        if made.status_code != 202:
+            break
+    assert made.status_code == 201, made.text
+    view_id = made.json()["view"]["id"]
+    for _ in range(100):
+        on()
+        status = (await test_client.get(f"/api/v1/views/{view_id}/membership")).json()
+        if status["status"] in ("ok", "partial"):
+            break
+        await test_client.post(f"/api/v1/views/{view_id}/membership/refresh", params={"trigger": "open"})
+    assert status["status"] == "ok", status
+    assert status["follows"] == {"viewId": base_id, "name": "Lineage base", "available": True}
+
+    # Its layers are the base's, as they are there now.
+    async def layers():
+        on()
+        got = await test_client.get(f"/api/v1/views/{view_id}")
+        return [(l["id"], l["name"]) for l in got.json()["config"]["layout"]["referenceLayout"]["layers"]]
+    assert (await layers())[0] == ("b_data", "Data")
+    await test_client.put(f"/api/v1/views/{base_id}/layout", json={"referenceLayout": {"layers": [
+        {"id": "b_data", "name": "Everything they feed", "order": 0, "entityTypes": ["domain", "dataset"]},
+    ], "assignments": {}}})
+    assert (await layers())[0] == ("b_data", "Everything they feed")
+
+    # Each member sits inside its domain, drawn in the same layer.
+    on()
+    page = (await test_client.post(f"/api/v1/{ws}/graph/view-members", params={"viewId": view_id},
+                                   json={"layerId": "b_data", "limit": 500})).json()
+    assert page["nodes"], page
+    for n in page["nodes"]:
+        assert n.get("inLayer") == 1, n
+        assert [a["urn"] for a in n["ancestorPath"]] == [nodes[n["urn"]]], n
+
+    # The base lists it among its subsets.
+    on()
+    subsets = (await test_client.get(f"/api/v1/views/{base_id}/subsets")).json()
+    assert any(i["viewId"] == view_id and i["layout"] == "inherit" for i in subsets["items"]), subsets
+    print(f"\nfollowing view: {status['counts']['members']:,} members, every one inside its domain")
