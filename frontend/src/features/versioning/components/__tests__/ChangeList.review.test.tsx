@@ -68,13 +68,13 @@ describe('ChangeList — in a review', () => {
   it('counts the open threads on each change that has any', async () => {
     renderList()
     expect(await screen.findByLabelText('2 open threads')).toBeInTheDocument()
-    const sales = screen.getByRole('button', { name: /Sales/ })
+    const sales = screen.getByRole('button', { name: /^Sales/ })
     expect(within(sales).queryByLabelText(/thread/)).not.toBeInTheDocument()
   })
 
   it('opens a change with its threads, and comments on one field of it', async () => {
     renderList()
-    fireEvent.click(await screen.findByRole('button', { name: /Orders/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Orders/ }))
     // Opened: its key differences first; its discussion one step further.
     fireEvent.click(await screen.findByRole('button', { name: /on this change$/ }))
     await waitFor(() => expect(api.listReviewThreads).toHaveBeenCalledWith('ws1', 'pr_1', { entityId: 'T1' }, 0, 20))

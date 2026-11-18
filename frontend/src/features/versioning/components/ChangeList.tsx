@@ -23,12 +23,15 @@
  *
  * A draft's own saved changes (`restore`) can be discarded — one, or every change shown — each put
  * back where the draft began, with what holds it together (asked first, from a dry run).
+ *
+ * In a review, each change can be ticked Viewed (or `v`, which moves on to the next) — kept in this
+ * browser, and unticked when the change moves on ("changed since you viewed it").
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   ArrowRight, ArrowUpRight, ChevronsDownUp, ChevronsUpDown, List, ListTree, Loader2, MessageSquare, MessageSquarePlus,
-  Search, SearchX, Undo2,
+  Search, SearchX, Undo2, CheckSquare, Square,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -44,6 +47,8 @@ import {
 import { ExportMenu, type ExportDetail } from './ExportMenu'
 import { useChangeEntries, useChangeEntry, useChangeSummary, useRestoreDraftChanges } from '../hooks/useVersioning'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { useViewedChanges } from '@/features/reviews/viewed/useViewedChanges'
+import { ShortcutsHint } from '@/components/ui/ShortcutsHint'
 import type { GraphChange } from '../model/changeModel'
 import { changeListSource, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 import { EntityDiff } from './EntityDiff'
@@ -175,6 +180,7 @@ export function ChangeList({
   // Discarding saved changes: a dry run says what comes with them; asked when it is more than the
   // one chosen; then one restore commit, from the head the dry run read.
   const { notify } = useAppNotifications()
+  const viewed = useViewedChanges(review?.prId)
   const restoreM = useRestoreDraftChanges(wsId, graphId, restore?.branchId ?? '')
   const discardSaved = async (pick: { ids: string[]; label: string } | 'shown') => {
     if (!restore || restoreM.isPending) return
@@ -252,8 +258,10 @@ export function ChangeList({
   // Rejecting asks why, under its row: which row is asking (also from the `r` key).
   const [asking, setAsking] = useState<string | null>(null)
   // A change's own keys, in either layout: a accept, r reject (asks why), c its discussion, o show on canvas.
-  const changeKeys = (e: KeyboardEvent, row: ChangeListRow, setLevel: (l: RowLevel) => void, show: () => void) => {
+  const changeKeys = (e: KeyboardEvent, row: ChangeListRow, setLevel: (l: RowLevel) => void, show: () => void, next?: () => void) => {
     if (e.shiftKey) return false
+    if (e.key === '?') { document.getElementById(`${keysId}`)?.focus(); return true }
+    if (viewed.enabled && e.key === 'v') { viewed.toggle(row); if (!viewed.isViewed(row)) next?.(); return true }
     if (e.key === 'o' && canRevealRows && row.kind === 'node' && row.status !== 'removed') { show(); return true }
     if (decisions?.canDecide && e.key === 'a') { void flow.run('accepted', { entityIds: [row.entityId] }); return true }
     if (decisions?.canDecide && e.key === 'r') { setAsking(row.entityId); return true }
@@ -276,6 +284,7 @@ export function ChangeList({
       setsize={f.setsize} posinset={f.posinset} depth={f.depth} lead={f.lead} inside={f.inside}
       asking={asking === row.entityId} onAsk={(on) => setAsking(on ? row.entityId : null)} onShow={f.onShow}
       onDiscard={restore ? () => void discardSaved({ ids: [row.entityId], label: rowLabel(row) }) : undefined}
+      viewed={viewed.enabled ? { on: viewed.isViewed(row), changedSince: viewed.changedSince(row), toggle: () => viewed.toggle(row) } : undefined}
       review={review} comments={commentCounts?.[row.entityId]} decide={decideOf(row)} />
   )
   const expand = useExpandableRows(rowKeys, {
@@ -287,10 +296,29 @@ export function ChangeList({
     },
     extraKeys: (e, current) => {
       const row = current ? rowById.get(current) : undefined
-      return !!row && changeKeys(e, row, (l) => expand.setLevel(row.entityId, l), () => showOnCanvas(row))
+      return !!row && changeKeys(e, row, (l) => expand.setLevel(row.entityId, l), () => showOnCanvas(row), () => {
+        const nextRow = rows[(rowIndex.get(row.entityId) ?? -1) + 1]
+        if (!nextRow) return
+        expand.setCurrent(nextRow.entityId)
+        const at = itemAt.get(nextRow.entityId)
+        if (at !== undefined) virtualizer.scrollToIndex(at, { align: 'auto' })
+        requestAnimationFrame(() => document.getElementById(rowDomId(nextRow.entityId))?.focus())
+      })
     },
   })
   const canRevealRows = useChangeNavigatorStore((st) => st.canReveal)
+  // The keys this list answers to, as it is now: what `?` (and the keyboard button) lists.
+  const keysId = `change-keys-${graphId}`
+  const shortcuts: Array<readonly [string, string]> = [
+    ['j k', 'Next / previous change'],
+    tree ? ['→ ←', 'Open / close — step in and out'] as const : ['→ ←', 'Open / close a change'] as const,
+    ['shift+→', 'Open every change shown'],
+    ...(canRevealRows ? [['o', 'Show it on the canvas'] as const] : []),
+    ...(decisions?.canDecide ? [['a', 'Accept it'] as const, ['r', 'Reject it (asks why)'] as const] : []),
+    ...(review ? [['c', 'Its discussion'] as const] : []),
+    ...(viewed.enabled ? [['v', 'Mark it viewed, then the next'] as const] : []),
+    ...(restore ? [['⌫', 'Discard it from the draft'] as const] : []),
+  ]
   const hasMore = !!entriesQ.hasNextPage
   const virtualizer = useVirtualizer({
     count: items.length + (hasMore ? 1 : 0),
@@ -391,6 +419,7 @@ export function ChangeList({
               : narrowed || decision ? `${matching.toLocaleString()} matching${tree ? ' anywhere' : ''}`
                 : `${matching.toLocaleString()} ${activeKind ? KIND_LABEL[activeKind].toLowerCase() : 'changes'}`}
           {!showTree && rows.length < matching && !entriesQ.isLoading && ` · ${rows.length.toLocaleString()} loaded`}
+          {viewed.enabled && !showTree && rows.length > 0 && ` · ${rows.filter(viewed.isViewed).length.toLocaleString()} viewed`}
         </p>
         {!showTree && rows.length > 1 && (
           <HoverTip label={expand.allOpen ? 'Collapse every change' : 'Open every change to its key differences'}
@@ -409,6 +438,7 @@ export function ChangeList({
             Discard the {matching.toLocaleString()} shown
           </button>
         )}
+        <ShortcutsHint id={keysId} shortcuts={shortcuts} />
         {decisions?.canDecide && !showTree && matching > 0 && !entriesQ.isLoading && (
           <>
             <button type="button" disabled={flow.busy} onClick={() => void flow.all('accepted', { ...filter, decision: decision ?? undefined })}
@@ -479,6 +509,7 @@ export function ChangeList({
                       onShow={() => showOnCanvas(item.row)}
                       onShowInTree={tree ? () => showInTree(item.row.entityId) : undefined}
                       onDiscard={restore ? () => void discardSaved({ ids: [item.row.entityId], label: rowLabel(item.row) }) : undefined}
+                      viewed={viewed.enabled ? { on: viewed.isViewed(item.row), changedSince: viewed.changedSince(item.row), toggle: () => viewed.toggle(item.row) } : undefined}
                       review={review} comments={commentCounts?.[item.row.entityId]}
                       decide={decideOf(item.row)} />
                   )}
@@ -496,7 +527,7 @@ const rowDomId = (entityId: string) => `change-row-${entityId}`
 
 function Row({
   wsId, graphId, origin, row, domId, level, current, onToggle, onLevel, onFocus, setsize, posinset, asking, onAsk,
-  onShow, onShowInTree, onDiscard, review, comments, decide, depth, lead, inside,
+  onShow, onShowInTree, onDiscard, viewed, review, comments, decide, depth, lead, inside,
 }: {
   wsId: string
   graphId: string
@@ -520,6 +551,8 @@ function Row({
   onShowInTree?: () => void
   /** A draft's own saved change: put it back where the draft began. */
   onDiscard?: () => void
+  /** In a review: the reviewer's own Viewed tick. */
+  viewed?: { on: boolean; changedSince: boolean; toggle: () => void }
   /** In the tree: how deep it sits, what opens its children, and how many changes are under it. */
   depth?: number
   lead?: ReactNode
@@ -559,9 +592,22 @@ function Row({
         ? <span aria-label={`in ${row.path.join(', ')}`}>{row.path.join(' › ')}</span>
         : edge ? row.type : (row.qualifiedName && row.qualifiedName !== label ? row.qualifiedName : undefined)}
       summary={row.fields ? <ChangeSummary summary={row.fields} status={row.status} kind={row.kind} /> : undefined}
-      badges={(comments && comments.total > 0) || decide || inside ? (
+      badges={(comments && comments.total > 0) || decide || inside || viewed ? (
         <>
           {inside}
+          {viewed && (
+            <HoverTip label={viewed.on ? 'Viewed' : viewed.changedSince ? 'Changed since you viewed it' : 'Mark it viewed'}
+              detail="Only you see this" shortcut="v" className="inline-flex">
+              <button type="button" onClick={viewed.toggle} aria-pressed={viewed.on}
+                aria-label={viewed.on ? `${label} viewed` : `Mark ${label} viewed`}
+                className={cn('inline-flex items-center gap-1 px-1.5 h-5 rounded-md text-[10.5px] font-semibold transition-colors',
+                  viewed.on ? 'text-emerald-700 dark:text-emerald-300 bg-emerald-500/10'
+                    : viewed.changedSince ? 'text-amber-700 dark:text-amber-300 bg-amber-500/10' : 'text-ink-muted hover:text-ink')}>
+                {viewed.on ? <CheckSquare className="w-3 h-3" aria-hidden /> : <Square className="w-3 h-3" aria-hidden />}
+                {viewed.changedSince && !viewed.on ? 'Changed' : 'Viewed'}
+              </button>
+            </HoverTip>
+          )}
           {comments && comments.total > 0 && (
             <span
               aria-label={comments.open ? `${comments.open} open thread${comments.open === 1 ? '' : 's'}` : `${comments.total} resolved thread${comments.total === 1 ? '' : 's'}`}

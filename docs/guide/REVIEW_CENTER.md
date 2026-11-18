@@ -124,9 +124,13 @@ requests. To list only the ready or troubled ones, use the **Status** filter.
      modifies or removes, a page at a time however many there are (an import
      of 100,000 opens as fast as a small edit): switch between **Entities** and
      **Relationships**, narrow by **Added**, **Modified** or **Removed** or by
-     type, or search by name; the list loads more as you scroll. Expand a row
-     to see what changed property by property — each field and property its
-     own line, before and after (*3 changed · 1 added*). A fork's review past
+     type, or search by name; the list loads more as you scroll. Each row says
+     what it changed before you open it (*Edited owner, tier and 2 more*);
+     open it (→) for its key differences, and again for every field and
+     property, before and after. **Hierarchy** lays the same changes out under
+     their containers, a level at a time, each saying how many changes sit
+     inside — and a search lists what matches anywhere, each with where it
+     sits, with **In hierarchy** to open the way down to it. A fork's review past
      20,000 changes is counted, then listed the same way. If the draft is
      behind **main**, the list shows what the draft changes where it started;
      after **Pull latest** it is exactly what merging changes.
@@ -288,6 +292,10 @@ approve the request can:
    decided.
 4. If the author edits a change after you decided it, your decision no longer
    holds: the row says **Changed**, and it's back under **To decide**.
+5. To keep your place in a long review, tick **Viewed** on each change as you go
+   (`V` ticks it and moves to the next) — *18 viewed* counts them. The ticks are
+   yours, kept in this browser; a change edited since reads **Changed**. The
+   keyboard button lists every key the list answers to (`?`).
 
 Once anything is decided, the action bar shows where things stand (*12 accepted
 · 3 rejected · 40 to decide*) and **Merge N accepted** replaces **Merge**:
@@ -299,19 +307,32 @@ Once anything is decided, the action bar shows where things stand (*12 accepted
   the bar says so, with **Accept them too**.
 - A request with anything rejected merges only this way. Accept everything to
   merge it whole.
+- Tick **Also discard the N rejected changes from the draft** to take them off
+  the draft as you merge, so only what nobody decided yet stays on it.
 - The draft must be up to date with Published first (**Pull latest**), and at
   most 20,000 accepted changes merge at a time. A fork's review is merged
   whole.
 
 ## Ask for changes
 
-To get a request changed, reject the changes that need work with a reason, or
-comment on them — mention the author so they're told. Then:
+To get a request changed, reject the changes that need work with a reason (or
+comment on them), then choose **Send back** and say what should change:
+
+- The draft's people are told — *"Orders" was sent back for changes* — with a
+  link to the request.
+- The request shows who sent it back, when and why, and it **can't merge until
+  the draft changes**. If you change your mind, choose **Withdraw**; approving
+  it withdraws your request too.
+
+Then:
 
 1. The author opens the draft — **Browse this branch’s changes**, or **Resume**
    under **Your work** on their Dashboard — and saves the fixes with **Review &
-   Save**. Anyone who can edit the data can make small fixes too: choose
-   **Edit**, then the draft under **Continue a draft**.
+   Save**. To take the review's answer as it is, the author chooses **Discard
+   the rejected** on the request: the rejected changes (and what holds them
+   together) leave the draft in one new save. Anyone who can edit the data can
+   make small fixes too: choose **Edit**, then the draft under **Continue a
+   draft**.
 2. Open the request again. Everything saved to the draft is already part of
    it — nobody needs to submit it again. Changes the author edited show as
    **Changed**, ready to decide again.
