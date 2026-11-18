@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.graph import (
@@ -51,6 +52,7 @@ from backend.common.models.search import SearchQuery
 from backend.common.models.view_membership import (
     MembershipDefinition,
     MembershipPlan,
+    MembershipResolving,
     MembershipRequest,
     MembershipResult,
     PlanRequest,
@@ -165,7 +167,9 @@ async def resolve_members(
     response_model=MembershipPlan,
     response_model_by_alias=True,
     summary='Preview what a list view of a narrowing would hold',
-    responses=refusal_responses(403, 404, 422, 429, 503),
+    responses={202: {"description": "What the sources reach is still being worked out. Send the same request "
+                                    "again to carry on.", "model": MembershipResolving},
+               **refusal_responses(403, 404, 422, 429, 501, 503)},
     dependencies=[Depends(require_membership)],
 )
 async def plan_members(
@@ -181,11 +185,15 @@ async def plan_members(
 ) -> MembershipPlan:
     """What saving these sources as a view would make — nothing is saved.
 
-    The entries it would hold against the limit (its members, the containers drawn
-    around them, and the entities always included), and each layer it would start
-    with: its count, and whether it is kept (``keep``: ``withResults`` keeps only the
-    layers that hold something). An answer that is short of the truth (out of time,
-    part of the graph not answering) says so in ``truncated``.
+    What the sources reach is worked out in full first, a step at a time (each source's
+    member set, shared with whoever asks the same): while it is, the answer is 202
+    ``{"status": "resolving", "sets": [...]}`` after ``waitMs`` — send the same body
+    again to carry on. Then: the members it would hold against the limit (the
+    containers around them are drawn from their paths, not counted), and each layer it
+    would start with: its count, and whether it is kept (``keep``: ``withResults``
+    keeps only the layers that hold something). Above 20,000 members the counts are
+    placed from the first 5,000 and say so (``estimated``). An answer that is short of
+    the truth (part of the graph not answering) says so in ``truncated``.
     """
     from sqlalchemy import select
 
@@ -212,13 +220,17 @@ async def plan_members(
     definition = MembershipDefinition(sources=body.sources, layout=body.layout, exclude=body.exclude)
     limit = pipeline.entry_limit()
     try:
-        resolved = await pipeline.gather(
-            engine, definition.sources, definition.layout, definition.exclude,
-            workspace_id=ws_id, data_source_id=dataSourceId, budget_s=_budget_s(), limit=limit,
-            can_read_view=can_read_view,
+        found = await pipeline.resolve_sets(
+            session, engine, definition.sources, workspace_id=ws_id, data_source_id=dataSourceId,
+            wait_s=body.wait_ms / 1000.0, can_read_view=can_read_view,
         )
-        draft = pipeline.draft_view(definition, resolved, source_config=copied_from, client_layers=body.layers,
-                                    keep=body.keep, limit=limit)
+        if not found.complete:
+            sets = await pipeline.statuses(session, found)
+            return JSONResponse(status_code=202, content=MembershipResolving(
+                sets=[s.model_dump(mode="json", by_alias=True, exclude_none=True) for s in sets],
+            ).model_dump(mode="json", by_alias=True))
+        draft = await pipeline.draft_view(session, engine, found, definition, source_config=copied_from,
+                                          client_layers=body.layers, keep=body.keep, limit=limit)
     except pipeline.PipelineError as exc:
         raise HTTPException(status_code=404 if exc.kind == "source_missing" else 422,
                             detail={"reason": exc.kind, "message": str(exc)}) from exc

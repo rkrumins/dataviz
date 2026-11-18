@@ -6,9 +6,10 @@ The resolver's fake graph answers, with types (``dom`` a domain, ``tbl_*`` table
     dom ⊃ tbl_a ⊃ {col_a1, col_a2};  dom ⊃ tbl_b ⊃ col_b1
     src3 → src2 → src1 → col_a1 → rep1 → rep2
 
-The members are worked out before the view is saved; what is saved is a curated
-reference view whose entries the server owns (``assignedBy: "query"``), its
-definition beside them, and a state row saying how keeping it is going.
+What the sources reach is worked out (each source's member set) before the view is
+saved; what is saved is a curated reference view, its definition, its members — rows
+of ``view_members`` at the epoch readers see, never entries of its config — and a state
+row saying how keeping it is going.
 """
 import json
 import time
@@ -20,7 +21,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints import view_membership as routes
-from backend.app.db.models import ViewActivityLogORM, ViewMembershipStateORM, ViewORM, ViewVersionORM
+from backend.app.db.models import (
+    ViewActivityLogORM,
+    ViewMemberORM,
+    ViewMembershipStateORM,
+    ViewORM,
+    ViewVersionORM,
+)
 from backend.app.services.advanced_search_service import AdvancedSearchService
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.live_views import pipeline
@@ -143,8 +150,25 @@ def assignments_of(config: dict) -> dict:
 
 
 async def made(db_session: AsyncSession, view_id: str) -> dict:
-    row = (await db_session.execute(select(ViewORM).where(ViewORM.id == view_id))).scalar_one()
+    row = (await db_session.execute(select(ViewORM).where(ViewORM.id == view_id)
+                                    .execution_options(populate_existing=True))).scalar_one()
     return json.loads(row.config)
+
+
+async def members_of(db_session: AsyncSession, view_id: str) -> dict:
+    """A view's members as readers see them (the member table, at ``members_epoch``),
+    shaped as the server's entries."""
+    state = (await db_session.execute(
+        select(ViewMembershipStateORM).where(ViewMembershipStateORM.view_id == view_id)
+        .execution_options(populate_existing=True))).scalar_one()
+    rows = (await db_session.execute(select(ViewMemberORM).where(
+        ViewMemberORM.view_id == view_id, ViewMemberORM.epoch == state.members_epoch))).scalars().all()
+    return {r.urn: {"layerId": r.layer_id, "inheritsChildren": r.whole, "assignedBy": MACHINE} for r in rows}
+
+
+async def entries_of(db_session: AsyncSession, view_id: str) -> dict:
+    """What the view holds: its members, and the entries people placed (its config's)."""
+    return {**await members_of(db_session, view_id), **assignments_of(await made(db_session, view_id))}
 
 
 # ── Switches and checks ─────────────────────────────────────────────────────
@@ -205,7 +229,8 @@ async def test_like_the_view_it_came_from(test_client: AsyncClient, db_session, 
     assert [l["name"] for l in layers] == ["Domains", "Tables", "Columns"], "a layer that holds nothing is left"
     assert [l["linkLayerId"] for l in layers] == ["s_dom", "s_tbl", "s_col"]
     by_name = {l["linkLayerId"]: l["id"] for l in layers}
-    entries = assignments_of(config)
+    assert assignments_of(config) == {}, "its members are never entries of its config"
+    entries = await members_of(db_session, view_id)
     assert {u: e["layerId"] for u, e in entries.items()} == {
         "dom": by_name["s_dom"], "tbl_a": by_name["s_tbl"], "tbl_b": by_name["s_tbl"],
         "col_a1": by_name["s_col"], "col_a2": by_name["s_col"], "col_b1": by_name["s_col"],
@@ -240,7 +265,7 @@ async def test_all_the_layers_when_asked_and_a_layer_of_its_own_for_what_nothing
     layers = config["layout"]["referenceLayout"]["layers"]
     assert [l["name"] for l in layers] == ["Tables", "Columns", "Dashboards", "Other"]
     other = layers[-1]["id"]
-    assert assignments_of(config)["dom"]["layerId"] == other
+    assert (await members_of(db_session, resp.json()["view"]["id"]))["dom"]["layerId"] == other
     assert config["membership"]["layout"]["fallbackLayerId"] == other
 
 
@@ -253,7 +278,7 @@ async def test_by_type_and_by_lineage_stage(test_client: AsyncClient, db_session
     layers = config["layout"]["referenceLayout"]["layers"]
     assert [l["name"] for l in layers] == ["Domains", "Tables"], "a layer per top-level type, the most held first"
     domains, tables = (l["id"] for l in layers)
-    assert {u: e["layerId"] for u, e in assignments_of(config).items()} == {
+    assert {u: e["layerId"] for u, e in (await members_of(db_session, by_type.json()["view"]["id"])).items()} == {
         **{u: domains for u in ("dom", "tbl_a", "tbl_b", "col_a1", "col_a2", "col_b1")},
         "tbl_up": tables, "col_up": tables,
     }
@@ -261,8 +286,7 @@ async def test_by_type_and_by_lineage_stage(test_client: AsyncClient, db_session
     stages = await test_client.post(URL, json=body(ws, "", layout={"kind": "stages", "nest": False}, sources=[
         {"spec": {"seeds": {"urns": ["col_a1"]}, "expand": {"upstream": 2, "downstream": 1}}}]))
     assert stages.status_code == 201, stages.text
-    config = await made(db_session, stages.json()["view"]["id"])
-    entries = assignments_of(config)
+    entries = await members_of(db_session, stages.json()["view"]["id"])
     assert {u: e["layerId"] for u, e in entries.items()} == {
         "src2": "stage-up2", "src1": "stage-up1", "col_a1": "stage-seed", "rep1": "stage-down1"}
 
@@ -279,7 +303,8 @@ async def test_a_trace_kept_as_a_view_says_it_came_from_a_trace(
     assert resp.status_code == 201, resp.text
     config = await made(db_session, resp.json()["view"]["id"])
     assert config["membership"]["provenance"]["origin"] == "trace"
-    assert {"src1", "src2", "rep1"} <= set(assignments_of(config)), "the whole way up, one step down"
+    assert {"src1", "src2", "rep1"} <= set(await members_of(db_session, resp.json()["view"]["id"])), (
+        "the whole way up, one step down")
 
 
 async def test_a_snapshot_is_frozen_from_the_start(test_client: AsyncClient, db_session, graph, membership_on):
@@ -300,7 +325,7 @@ async def test_a_query_is_searched_in_the_view_it_names(
     resp = await test_client.post(URL, json=body(ws, src, sources=[
         {"spec": {"seeds": {"query": {"kind": "text", "value": "orders"}}}, "readIn": src}]))
     assert resp.status_code == 201, resp.text
-    entries = assignments_of(await made(db_session, resp.json()["view"]["id"]))
+    entries = await members_of(db_session, resp.json()["view"]["id"])
     assert {"col_a1", "col_b1"} <= set(entries)
     assert search["scopes"] and search["scopes"][0].view_id == src
     assert resp.json()["membership"]["readIn"] == [{"viewId": src, "name": "Sales overview", "available": True}]
@@ -319,7 +344,7 @@ async def test_over_the_limit_nothing_is_made(
     resp = await test_client.post(URL, json=body(ws, src))
     assert resp.status_code == 422
     detail = resp.json()["detail"]
-    assert (detail["reason"], detail["keys"], detail["limit"]) == ("over_cap", 6, 4)
+    assert (detail["reason"], detail["members"], detail["limit"]) == ("over_cap", 6, 4)
     assert "at most 4" in detail["message"]
     after = (await db_session.execute(select(func.count()).select_from(ViewORM))).scalar_one()
     assert after == before
@@ -396,7 +421,9 @@ async def test_a_preview_counts_each_layer_and_saves_nothing(
     resp = await preview(ws, src, plan_body(src))
     assert resp.status_code == 200, resp.text
     out = resp.json()
-    assert (out["keys"], out["members"], out["containers"], out["limit"], out["overCap"]) == (6, 6, 0, 5000, False)
+    assert (out["keys"], out["members"], out["containers"], out["limit"], out["overCap"]) == (
+        6, 6, 0, pipeline.LIVE_VIEW_MAX_MEMBERS, False)
+    assert pipeline.LIVE_VIEW_MAX_MEMBERS == 250_000 and out["estimated"] is False
     assert [(l["name"], l["count"], l["kept"], l["linkLayerId"]) for l in out["layers"]] == [
         ("Domains", 1, True, "s_dom"), ("Tables", 2, True, "s_tbl"),
         ("Columns", 3, True, "s_col"), ("Dashboards", 0, False, "s_dash"),
@@ -427,3 +454,71 @@ async def test_a_preview_answers_to_the_switches(test_client: AsyncClient, previ
         {"spec": {"seeds": {"urns": ["col_a1"]}, "expand": {"downstream": 1}}}]))
     assert lineage.status_code == 403
     assert lineage.json()["detail"]["feature"] == "traceEnabled"
+
+
+# ── Large sets: worked out across requests ──────────────────────────────────
+
+
+async def test_while_the_sources_resolve_nothing_is_made_and_the_key_waits_for_the_view(
+    test_client: AsyncClient, db_session, graph, membership_on,
+):
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    headers = {"Idempotency-Key": "large-1"}
+    before = (await db_session.execute(select(func.count()).select_from(ViewORM))).scalar_one()
+    asked = await test_client.post(URL, json=body(ws, src, waitMs=0), headers=headers)
+    assert asked.status_code == 202, asked.text
+    out = asked.json()
+    assert out["status"] == "resolving"
+    assert [(s["status"], s["stage"]) for s in out["sets"]] == [("running", "seeds")] and out["sets"][0]["setId"]
+    assert (await db_session.execute(select(func.count()).select_from(ViewORM))).scalar_one() == before
+    again = await test_client.post(URL, json=body(ws, src, waitMs=0), headers=headers)
+    assert again.status_code == 202 and again.json()["sets"][0]["setId"] == out["sets"][0]["setId"], (
+        "the same set, carried on")
+
+    made_ = await test_client.post(URL, json=body(ws, src), headers=headers)
+    assert made_.status_code == 201, "a 202 recorded nothing against the key"
+    replay = await test_client.post(URL, json=body(ws, src), headers=headers)
+    assert (replay.status_code, replay.json()["view"]["id"]) == (200, made_.json()["view"]["id"])
+
+
+async def test_a_view_too_large_for_one_request_is_made_updating_and_opening_finishes_it(
+    test_client: AsyncClient, db_session, graph, membership_on, monkeypatch,
+):
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    monkeypatch.setattr(routes, "_budget_s", lambda: 0.0)
+    resp = await test_client.post(URL, json=body(ws, src))
+    assert resp.status_code == 201, resp.text
+    view_id = resp.json()["view"]["id"]
+    assert resp.json()["membership"]["status"] == "updating"
+    state = (await db_session.execute(select(ViewMembershipStateORM).where(
+        ViewMembershipStateORM.view_id == view_id))).scalar_one()
+    assert state.members_epoch is None, "nothing placed yet: readers see no half answer"
+
+    monkeypatch.setattr(routes, "_budget_s", lambda: 30.0)
+    opened = await test_client.post(f"/api/v1/views/{view_id}/membership/refresh", params={"trigger": "open"})
+    assert (opened.status_code, opened.json()["outcome"]) == (200, "applied")
+    assert len(await members_of(db_session, view_id)) == 6
+    assert opened.json()["membership"]["status"] == "ok"
+
+
+async def test_a_preview_waits_on_its_sets_too(test_client: AsyncClient, membership_on, preview):
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    resp = await preview(ws, src, plan_body(src, waitMs=0))
+    assert resp.status_code == 202 and resp.json()["status"] == "resolving"
+
+
+async def test_a_preview_of_a_large_set_places_its_first_members_and_says_so(
+    test_client: AsyncClient, membership_on, preview, monkeypatch,
+):
+    monkeypatch.setattr(pipeline, "ESTIMATE_ABOVE", 2)
+    monkeypatch.setattr(pipeline, "SAMPLE", 3)
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    out = (await preview(ws, src, plan_body(src))).json()
+    assert (out["estimated"], out["members"], out["overCap"]) == (True, 6, False)
+    counts = {l["name"]: (l["count"], l["kept"]) for l in out["layers"]}
+    # The first three (dom, tbl_a, tbl_b), scaled to all six; a layer of its own for what they did not see.
+    assert counts["Domains"] == (2, True) and counts["Tables"] == (4, True) and counts["Other"][1] is True

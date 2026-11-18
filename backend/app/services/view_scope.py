@@ -62,7 +62,8 @@ from typing import Any, Awaitable, Callable, Dict, FrozenSet, Iterable, List, Li
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import ViewORM
+from backend.app.db.models import ViewMembershipStateORM, ViewORM
+from backend.app.db.repositories import view_members_repo
 from backend.app.db.repositories.view_repo import effective_view_config
 from backend.app.services.layout_config import derive_entity_scope, parse_reference_layout
 from backend.app.services.search_views import (
@@ -167,6 +168,10 @@ class EffectiveViewScope:
     """A curated view with nothing placed in it (or a subset of one): it shows
     nothing, so a search in it finds nothing. No roots here never means "no clamp"
     — that is a view of every entity of its types, which a curated view is not."""
+    unlisted_roots: int = 0
+    """Roots the view has beyond ``root_urns``: the members of a view made from a
+    query too many to list (past the search's root cap). A search bounded by its
+    roots is refused, and says how many there are."""
 
 
 # --------------------------------------------------------------------------- #
@@ -312,6 +317,7 @@ def _compute_scope_hash(
     max_depth: int,
     branch_id: Optional[str] = None,
     placement_digest: str = "",
+    members_epoch: Optional[int] = None,
 ) -> str:
     """Stable 12-char sha1 of every input + the view's ``updated_at``.
 
@@ -324,6 +330,9 @@ def _compute_scope_hash(
     scoped search (whose effective config is base ⊕ its layout overlay)
     can never share a cached scope with a published search on the same
     view — or with a different draft. Published (no branch) hashes as "".
+
+    ``members_epoch`` — a view made from a query: which answer its members are
+    (an update leaves ``updated_at`` alone). Left out of the hash for any other view.
     """
     payload = {
         "view_id": view_id,
@@ -335,6 +344,8 @@ def _compute_scope_hash(
         "max_depth": max_depth,
         "placement": placement_digest,
     }
+    if members_epoch is not None:
+        payload["members_epoch"] = members_epoch
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
 
@@ -428,8 +439,9 @@ class ViewScopeResolver:
         # Per-canvas root + entity-type + layer extraction.
         ref_roots, ref_ent_types, layer_ids = _collect_reference_roots(config)
         cnt_roots, cnt_ent_types, cnt_max_depth = _collect_content_scope(config)
+        members, unlisted, members_epoch = await self._member_roots(view.id, config)
 
-        allowed_root_urns: List[str] = sorted(set(ref_roots) | set(cnt_roots))
+        allowed_root_urns: List[str] = sorted(set(ref_roots) | set(cnt_roots) | set(members))
         # Entity-type allow-list is the union of both sources; empty
         # means "no constraint from the view".
         allowed_entity_types: FrozenSet[str] = ref_ent_types | cnt_ent_types
@@ -460,6 +472,7 @@ class ViewScopeResolver:
             layer_ids=layer_ids,
             max_depth=effective_max_depth,
             placement_digest=placement_digest,
+            members_epoch=members_epoch,
         )
 
         if dropped:
@@ -483,7 +496,8 @@ class ViewScopeResolver:
             placement=placement,
             layers=layers,
             placement_digest=placement_digest,
-            holds_nothing=derive_entity_scope(config) == "curated" and not allowed_root_urns,
+            holds_nothing=derive_entity_scope(config) == "curated" and not allowed_root_urns and not unlisted,
+            unlisted_roots=unlisted,
         )
 
     async def _resolve_subset(
@@ -509,6 +523,7 @@ class ViewScopeResolver:
         allowed_roots: List[str] = []
         allowed_types: FrozenSet[str] = frozenset()
         depth_hint = 0
+        unlisted = 0
         if definition.within == "view":
             base = await self._load_view(definition.read_in)
             base_config = _parse_view_config(base.config) if base is not None else None
@@ -519,7 +534,8 @@ class ViewScopeResolver:
                                      "This subset view's base view is no longer available.")
             ref_roots, ref_types, _layers = _collect_reference_roots(base_config)
             cnt_roots, cnt_types, depth_hint = _collect_content_scope(base_config)
-            allowed_roots = sorted(set(ref_roots) | set(cnt_roots))
+            members, unlisted, _epoch = await self._member_roots(base.id, base_config)
+            allowed_roots = sorted(set(ref_roots) | set(cnt_roots) | set(members))
             allowed_types = ref_types | cnt_types
 
         view_max_depth = depth_hint if depth_hint > 0 else _DEFAULT_MAX_DEPTH
@@ -558,9 +574,31 @@ class ViewScopeResolver:
                               and not await can_read(base)),
             subset_layers=tuple(layers),
             subset_placement=placement,
-            holds_nothing=(base_config is not None and not allowed_roots
+            holds_nothing=(base_config is not None and not allowed_roots and not unlisted
                            and derive_entity_scope(base_config) == "curated"),
+            unlisted_roots=unlisted,
         )
+
+    async def _member_roots(self, view_id: str, config: Dict[str, Any]) -> Tuple[List[str], int, Optional[int]]:
+        """A view made from a query's members as roots — ``(urns, unlisted, epoch)``:
+        listed while they fit the search's root cap; past it, only how many there are
+        (``unlisted``: a search bounded by them is refused until it can search a view
+        that large without its roots). Nothing for any other view."""
+        if not isinstance(config.get("membership"), dict):
+            return [], 0, None
+        from backend.app.services.deep_search.settings import get_deep_search_settings
+
+        state = (await self._session.execute(
+            select(ViewMembershipStateORM.members_epoch, ViewMembershipStateORM.member_count)
+            .where(ViewMembershipStateORM.view_id == view_id))).first()
+        if state is None or state.members_epoch is None:
+            return [], 0, None
+        cap = get_deep_search_settings().scope_root_urns_cap
+        urns = ([] if (state.member_count or 0) > cap
+                else await view_members_repo.urns(self._session, view_id, state.members_epoch, limit=cap + 1))
+        if (state.member_count or 0) > cap or len(urns) > cap:
+            return [], max(state.member_count or 0, len(urns)), state.members_epoch
+        return urns, 0, state.members_epoch
 
     async def _load_view(self, view_id: str) -> Optional[ViewORM]:
         """Single SELECT against ``views`` keyed by ``view_id``.

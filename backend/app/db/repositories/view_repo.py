@@ -873,14 +873,15 @@ async def check_layer_rules(
         raise ValueError("; ".join(errors))
 
 
-async def _kept_up_to_date(session: AsyncSession, config: dict):
-    """The view's membership definition when it is kept in step with its data (and
-    the preview is on), else None. With the preview off, a view made from a query
-    is frozen as it is: its entries are taken as they are written."""
+async def _made_from_a_query(session: AsyncSession, config: dict):
+    """The view's membership definition when it is made from a query (live or a
+    snapshot: either way its members are rows of ``view_members``) and the preview is
+    on, else None. With the preview off, a view made from a query is left as it is:
+    its entries are taken as they are written."""
     from backend.common.models.view_membership import read_definition
 
     definition = read_definition(config)
-    if definition is None or definition.mode != "live":
+    if definition is None:
         return None
     from backend.app.services.feature_flags import feature_flags
 
@@ -930,22 +931,27 @@ async def update_view_layout(
     previous_layout = _base_reference_layout(config)
     reference_layout = req.reference_layout
     entity_scope = req.entity_scope
-    kept = await _kept_up_to_date(session, config)
+    kept = await _made_from_a_query(session, config)
     if kept is not None:
-        # The server's entries follow the data, whatever this copy of the layout
-        # says; where people put them is remembered (live_views.ownership).
-        from backend.app.db.repositories import view_membership_repo
+        # The members follow the data, whatever this copy of the layout says: an entry
+        # for one is a move, applied to it and remembered (live_views.ownership).
+        from backend.app.db.repositories import view_members_repo, view_membership_repo
         from backend.app.services.live_views.ownership import layer_ids_of, reconcile_layout_write
 
+        epoch = await view_members_repo.members_epoch(session, row.id)
+        incoming = reference_layout.get("assignments") or {}
         reconciled = reconcile_layout_write(
-            previous_layout.get("assignments") or {}, reference_layout.get("assignments") or {},
+            previous_layout.get("assignments") or {}, incoming,
+            members=await view_members_repo.placements(session, row.id, epoch, incoming),
             layer_ids=layer_ids_of(reference_layout), fallback_layer_id=kept.layout.fallback_layer_id,
             record_overrides=True, now=datetime.now(timezone.utc).isoformat(),
         )
         reference_layout = {**reference_layout, "assignments": reconciled.assignments}
         entity_scope = "curated"
         _remember_overrides(config, reconciled.overrides)
-        if reconciled.replace_needed:
+        await view_members_repo.move(session, row.id, epoch, reconciled.moves)
+        if await view_members_repo.rehome(session, row.id, epoch, layer_ids_of(reference_layout),
+                                          kept.layout.fallback_layer_id):
             await view_membership_repo.mark_pending(session, row, reason="layer_removed")
     if _subset_layout(config, reference_layout):
         entity_scope = "all"          # a subset holds every match of its layers' types
@@ -1156,17 +1162,22 @@ async def update_overlay_layout(
     requested = req.reference_layout
     existing = await get_overlay(session, view_id, branch_id)
     config = _load_config(row)
-    kept = await _kept_up_to_date(session, config)
+    kept = await _made_from_a_query(session, config)
     if kept is not None:
-        # The draft's copy of the server's entries is what the published view had
-        # when the draft opened; a save cannot add to or drop from it. Where people
-        # put them is remembered when the draft is published, not before.
+        # The members are the published view's (the member table's); a draft's save
+        # keeps its moves of them as entries of its own, remembered when the draft is
+        # published, not before.
+        from backend.app.db.repositories import view_members_repo
         from backend.app.services.live_views.ownership import layer_ids_of, reconcile_layout_write
 
         stored = (json.loads(existing.reference_layout or "{}") if existing is not None
                   else _base_reference_layout(config))
+        incoming = requested.get("assignments") or {}
         reconciled = reconcile_layout_write(
-            stored.get("assignments") or {}, requested.get("assignments") or {},
+            stored.get("assignments") or {}, incoming,
+            members=await view_members_repo.placements(
+                session, view_id, await view_members_repo.members_epoch(session, view_id),
+                set(incoming) | set(stored.get("assignments") or {})),
             layer_ids=layer_ids_of(requested), fallback_layer_id=kept.layout.fallback_layer_id,
             record_overrides=False,
         )
@@ -1314,23 +1325,27 @@ async def promote_overlay(
         derive_entity_scope(config),
         overlay.entity_scope,
     )
-    kept = await _kept_up_to_date(session, config)
+    kept = await _made_from_a_query(session, config)
     if kept is not None:
-        # The data moved on while the draft was open: the published view's server
-        # entries are the truth, and the draft's moves of them are kept.
-        from backend.app.db.repositories import view_membership_repo
+        # The data moved on while the draft was open: the member table's members are
+        # the truth, and the draft's moves of them are kept.
+        from backend.app.db.repositories import view_members_repo, view_membership_repo
         from backend.app.services.live_views.ownership import layer_ids_of, reconcile_promote
 
+        epoch = await view_members_repo.members_epoch(session, row.id)
+        drafted = draft.get("assignments") or {}
         reconciled = reconcile_promote(
-            merged_layout.get("assignments") or {},
-            fork=fork_base.get("assignments") or {}, published=published.get("assignments") or {},
-            draft=draft.get("assignments") or {}, layer_ids=layer_ids_of(merged_layout),
-            fallback_layer_id=kept.layout.fallback_layer_id, now=datetime.now(timezone.utc).isoformat(),
+            merged_layout.get("assignments") or {}, fork=fork_base.get("assignments") or {}, draft=drafted,
+            members=await view_members_repo.placements(session, row.id, epoch, drafted),
+            layer_ids=layer_ids_of(merged_layout), fallback_layer_id=kept.layout.fallback_layer_id,
+            now=datetime.now(timezone.utc).isoformat(),
         )
         merged_layout["assignments"] = reconciled.assignments
         merged_scope = "curated"
         _remember_overrides(config, reconciled.overrides)
-        if reconciled.replace_needed:
+        await view_members_repo.move(session, row.id, epoch, reconciled.moves)
+        if await view_members_repo.rehome(session, row.id, epoch, layer_ids_of(merged_layout),
+                                          kept.layout.fallback_layer_id):
             await view_membership_repo.mark_pending(session, row, reason="layer_removed")
 
     try:
@@ -1408,18 +1423,17 @@ async def _promote_staged_import(
         merged = merge_definitions(base, published.definition, proposed)
         return merged, json.dumps(config_from_definition(merged.definition, icon=label.get("icon")))
 
-    previous_config = _load_config(row)
     merged, merged_config = await asyncio.to_thread(merge)
-    # Members are data, not design: a file holds none, so keep the view's until
-    # they are worked out again.
+    # Members are data, not design: a file holds none, and the view keeps its own
+    # until they are worked out again, in the layers it has now.
+    from backend.app.db.repositories import view_members_repo, view_membership_repo
     from backend.app.services.live_views.ownership import carry_into_config
 
     config_dict = json.loads(merged_config)
-    if carry_into_config(config_dict, previous_config):
-        from backend.app.db.repositories import view_membership_repo
-
+    if carry_into_config(config_dict):
         await view_membership_repo.mark_pending(session, row, reason="design_replaced")
-        merged_config = json.dumps(config_dict)
+    await view_members_repo.rehome_view(session, row.id, config_dict)
+    merged_config = json.dumps(config_dict)
     row.config = merged_config
     row.name = label.get("name") or row.name
     row.description = label.get("description") or None

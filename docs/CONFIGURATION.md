@@ -251,6 +251,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `GRAPH_SOURCE_HOLD_SECS` | `1.5` | how long a source keeps its reserve after its last request started or finished | `backend/app/providers/manager.py` |
 | `GRAPH_STORE_TOPOLOGY_CACHE_TTL_S` | `30` | one reading of every node serves every viewer this long | `backend/app/services/graph_store/topology.py` |
 | `GRAPH_STORE_TOPOLOGY_DEADLINE_S` | `8` | deadline per wave of 8 nodes; the sweep scales with the fleet, capped at 60s | `backend/app/services/graph_store/topology.py` |
+| `LIVE_VIEW_MAX_MEMBERS` | `250000` | Members one view made from a query may hold (the entities people place in it themselves aside). Past it the view keeps its last good members and says `over_cap`; a new one is not made. Each member is a row of `view_members` in the management database, twice while an update is worked out. | `backend/app/services/live_views/pipeline.py` |
 | `LOCAL_DEV_FALKORDB_OVERRIDE` | (empty) | Local development only: set `true` when the backend runs on your machine and FalkorDB in Docker, so `FALKORDB_HOST` and `FALKORDB_PORT` replace the host and port stored on graph data sources. | `backend/app/providers/manager.py` |
 | `MEMBER_SET_MAX_DURATION_S` | `7200` | Seconds one member set may take, from when it started, however many requests move it on. Past it the set is complete with what it has, and says `deadline`. | `backend/app/services/member_sets/stepper.py` |
 | `MEMBER_SET_MAX_EDGES` | `2000000` | Lineage relationships one member set keeps when asked for its edges. Past it the set keeps finding members, and says `edge_cap`. | `backend/app/services/member_sets/stepper.py` |
@@ -270,6 +271,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `PROVIDER_SOURCE_RESERVED` | `0` | what any one source may always take | `backend/app/providers/manager.py` |
 | `TOP_LEVEL_MATERIALIZE_LIMIT` | `1000` | nodes captured per top-level materialization (complete window => filtered serving) | `backend/app/services/top_level_cache.py` |
 | `TOP_LEVEL_SERVE_MIN_NODES` | — | node-count floor for serving materialized top-level pages | `backend/app/services/top_level_cache.py` |
+| `VIEW_MEMBERS_FEED_MAX_ROWS` | `5000` | Members one layer of a view made from a query lists on the canvas (`POST /graph/view-members`); past them its page says `capped`, and the layer is searched or exported for the rest. | `backend/app/api/v1/endpoints/graph_view_members.py` |
 
 ### Internal tuning
 
