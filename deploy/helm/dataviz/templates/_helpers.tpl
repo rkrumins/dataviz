@@ -32,7 +32,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- define "dataviz.schemaCheckInitContainer" -}}
 - name: wait-for-schema
   image: {{ include "dataviz.image" (dict "ctx" .ctx "name" "synodic-upgrade") | quote }}
-  imagePullPolicy: {{ .ctx.Values.image.pullPolicy }}
+  imagePullPolicy: {{ .ctx.Values.upgrade.pullPolicy | default .ctx.Values.image.pullPolicy }}
   args: ["check", "--wait", {{ .ctx.Values.upgrade.checkWaitSecs | default 60 | quote }}]
   envFrom:
     - configMapRef:

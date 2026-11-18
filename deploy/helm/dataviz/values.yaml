@@ -286,6 +286,10 @@ dbInit:
 #     --reuse-values
 upgrade:
   enabled: true
+  # Always, not image.pullPolicy's IfNotPresent: with the mutable `latest` tag, a node that has
+  # pulled the upgrade image once would keep running that copy, and with it an older migration
+  # chain than the one deployed.
+  pullPolicy: Always
   command: upgrade              # upgrade | downgrade
   targetRevision: ""            # empty -> "head" for upgrade; required for downgrade
   checkWaitSecs: 60             # how long each backend Pod's initContainer polls

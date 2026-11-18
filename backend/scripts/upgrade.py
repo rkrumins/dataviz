@@ -37,13 +37,16 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import time
+from pathlib import Path
 
 from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 
+from backend.app.db import alembic_lineage
 from backend.app.db.engine import _alembic_config
 
 # 'SYNO' as int — namespace for ``pg_advisory_lock`` so multiple
@@ -223,13 +226,22 @@ def _ran(script, lines: dict, revision: str, depth: int = 0) -> list[frozenset] 
     return out
 
 
+def _ancestors(script, stamps) -> set[str]:
+    """Every revision of ours a database stamped ``stamps`` (ours) has run, the stamps included."""
+    return {r.revision for stamp in stamps for r in script.iterate_revisions(stamp, "base")}
+
+
+def _maximal(script, ran: set) -> list[str]:
+    """The stamps of a database that has run exactly ``ran``: those of its revisions nothing in it
+    follows."""
+    return sorted(r for r in ran if not (script.get_revision(r).nextrev & ran))
+
+
 def _placed(script, lines: dict, foreign: list[str], kept: list[str]) -> list[str] | None:
     """Exactly where a database stamped with ``foreign`` (beside ``kept``, ours) stands on this
     chain, as the stamps of the last revisions it ran: what every recorded way each foreign stamp
     could have come about has in common. None when a foreign stamp's lineage isn't recorded."""
-    ran: set = set()
-    for revision in kept:
-        ran |= {r.revision for r in script.iterate_revisions(revision, "base")}
+    ran = _ancestors(script, kept)
     for revision in foreign:
         sets = _ran(script, lines, revision)
         if not sets:
@@ -237,7 +249,36 @@ def _placed(script, lines: dict, foreign: list[str], kept: list[str]) -> list[st
         ran |= frozenset.intersection(*sets)
     if not ran:
         return None
-    return sorted(r for r in ran if not (script.get_revision(r).nextrev & ran))
+    return _maximal(script, ran)
+
+
+_GAP = re.compile(r"^(?:missing table|missing column|type mismatch|nullability mismatch) ([\w.]+)")
+
+
+def _below_gaps(script, stamps: list[str], kept: list[str], gaps: list[str]) -> list[str] | None:
+    """Where to place a database again when, upgraded from ``stamps``, its schema still lacks
+    ``gaps``: below each revision the placement took as run (``kept``, the stamps of ours it
+    had, it trusts) whose migration names what's missing — its table, or its table and column.
+    None when some gap is named by none of them: nothing of ours run again would bring it."""
+    claimed = _ancestors(script, stamps) - _ancestors(script, kept)
+    sources: dict[str, str] = {}
+    culprits: set[str] = set()
+    for gap in gaps:
+        found = _GAP.match(gap)
+        if not found:
+            return None
+        words = found.group(1).split(".")[1:]           # the schema is no name a migration uses
+        named = set()
+        for revision in claimed:
+            if revision not in sources:
+                sources[revision] = Path(script.get_revision(revision).path).read_text(encoding="utf-8")
+            if all(re.search(rf"\b{re.escape(w)}\b", sources[revision]) for w in words):
+                named.add(revision)
+        if not named:
+            return None
+        culprits |= named
+    ran = {r for r in _ancestors(script, stamps) if not (_ancestors(script, [r]) & culprits)}
+    return _maximal(script, ran) or None
 
 
 def _set_stamps(conn, stamps: list[str]) -> None:
@@ -246,19 +287,21 @@ def _set_stamps(conn, stamps: list[str]) -> None:
         conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": v})
 
 
-def _rewind_foreign(cfg, to: str | None = None) -> list[str] | None:
+def _rewind_foreign(cfg, to: str | None = None) -> tuple[list[str], list[str], list[str]] | None:
     """Move a database another build migrated onto this build's chain, so it can upgrade in order.
 
     Its foreign stamps become the last revisions of this chain it ran, placed exactly from the
-    lineage other lines of work recorded (``alembic/other_lines.json``, :func:`_placed`); the
+    lineage the database keeps (``app/db/alembic_lineage.py``: every build since writes its chain
+    there) or other lines of work recorded (``alembic/other_lines.json``, :func:`_placed`); the
     upgrade then runs only this build's migrations it lacks, in chain order, and none of the other
     line's. A stamp nothing records falls back to where the chains most likely parted
     (:func:`_parting_point`); this build's migrations after it run, and any the database had run
     already change nothing — every migration is safe to run twice (``schema.yml``'s chain replay
     holds them to it). The other build's tables and columns stay, for when its migrations arrive
     with it. ``to``: the revision both chains share, named by an operator who knows it, in place of
-    the record and the guess. Returns the stamps as they were, to put back if the upgrade doesn't
-    bring the schema to head; None when nothing was foreign."""
+    the record and the guess. Returns the stamps as they were (to put back if the upgrade doesn't
+    bring the schema to head), as placed, and those of ours it kept; None when nothing was
+    foreign."""
     script = ScriptDirectory.from_config(cfg)
     engine = create_engine(_sync_url(), pool_pre_ping=True)
     with engine.begin() as conn:
@@ -270,9 +313,11 @@ def _rewind_foreign(cfg, to: str | None = None) -> list[str] | None:
                             "nothing to rewind", to)
             return None
         kept = [v for v in was if v not in foreign]
-        placed = None if to is not None else _placed(script, _other_lines(cfg), foreign, kept)
+        own = alembic_lineage.read(conn)
+        placed = None if to is not None else _placed(script, {**_other_lines(cfg), **own}, foreign, kept)
         if placed is not None:
-            stamps, how = placed, "exactly, from the lineage other lines recorded"
+            stamps, how = placed, ("exactly, from this database's own lineage" if all(f in own for f in foreign)
+                                   else "exactly, from the lineage other lines recorded")
         else:
             if to is not None:
                 script.get_revision(to)                 # one of ours, or Alembic says it isn't
@@ -291,7 +336,7 @@ def _rewind_foreign(cfg, to: str | None = None) -> list[str] | None:
             "build's migrations it lacks run in order, and the other build's tables and columns are "
             "left as they are.", foreign, stamps, how)
         _set_stamps(conn, stamps)
-    return was
+    return was, stamps, kept
 
 
 def _to_every_head(cfg, revision: str) -> str:
@@ -312,6 +357,9 @@ def _to_every_head(cfg, revision: str) -> str:
 @_with_advisory_lock
 def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = None) -> int:
     cfg = _alembic_config()
+    script = ScriptDirectory.from_config(cfg)
+    # First, so an image older than expected is plain from its first lines.
+    log.info("This build's migration chain ends at %s", sorted(script.get_heads()))
     revision = _to_every_head(cfg, revision)
 
     if fast_path and revision == "heads":
@@ -323,13 +371,25 @@ def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = N
             log.info("Upgrade complete (fresh install)")
             return 0
 
-    was = _rewind_foreign(cfg, rewind_to)
+    placed = _rewind_foreign(cfg, rewind_to)
     log.info("Alembic upgrade -> %s", revision)
     command.upgrade(cfg, revision)
-    if was is not None and revision == "heads":
-        # Rewound on a guess: head is claimed only once the schema bears it out. Otherwise the
-        # stamps go back as they were, so the next run fails as loudly rather than passing.
+    if placed is not None and revision == "heads":
+        # Placed by this build: head is claimed only once the schema bears it out.
+        was, stamps, kept = placed
         gaps, _defaults, _extras = _compare_schema(create_engine(_sync_url(), pool_pre_ping=True))
+        lower = _below_gaps(script, stamps, kept, gaps) if gaps and rewind_to is None else None
+        if lower is not None:
+            # Migrations of ours it was taken to have run make what's missing: it never ran them.
+            # Placed below them, they run (as does what follows them: each is safe to run twice).
+            log.warning("Placed at %s, the schema is still short of head: %s. This build's "
+                        "migrations that make it were taken as run; placing it at %s and "
+                        "upgrading again.", stamps, gaps[:10], lower)
+            with create_engine(_sync_url(), pool_pre_ping=True).begin() as conn:
+                _set_stamps(conn, lower)
+            command.upgrade(cfg, revision)
+            gaps, _defaults, _extras = _compare_schema(create_engine(_sync_url(), pool_pre_ping=True))
+        # Still short: the stamps go back as they were, so the next run fails as loudly.
         if gaps:
             with create_engine(_sync_url(), pool_pre_ping=True).begin() as conn:
                 _set_stamps(conn, was)
@@ -565,6 +625,7 @@ def cmd_repair() -> int:
         # Alembic's own stamp starts from the stamps it reads, and can't from these.
         with engine.begin() as conn:
             _set_stamps(conn, sorted(expected))
+            alembic_lineage.record(conn, script)
     else:
         command.stamp(cfg, "heads")
     log.info("Stamped to head: %s", sorted(expected))

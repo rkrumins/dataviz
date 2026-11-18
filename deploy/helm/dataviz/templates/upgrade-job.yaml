@@ -40,7 +40,7 @@ spec:
       containers:
         - name: upgrade
           image: {{ include "dataviz.image" (dict "ctx" $ "name" "synodic-upgrade") | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.upgrade.pullPolicy | default .Values.image.pullPolicy }}
           args:
             - {{ .Values.upgrade.command | default "upgrade" | quote }}
             {{- if .Values.upgrade.targetRevision }}

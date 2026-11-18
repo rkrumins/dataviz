@@ -55,10 +55,18 @@ come from that image, so they always agree with each other — and neither is ch
 repository. An out-of-date `upgrade` image therefore installs an out-of-date schema and marks it
 fully migrated, silently.
 
-`docker-compose.yml` pins `image: synodic-upgrade:local`, and `docker compose up` **reuses an
-existing tag rather than rebuilding it**. A machine with wiped volumes but stale images is
+`docker-compose.yml` pins `image: synodic-upgrade:local`, and `docker compose up` used to **reuse
+an existing tag rather than rebuild it**. A machine with wiped volumes but stale images is
 "brand new" in the only sense that matters to `_is_virgin` — so this is the normal way it happens,
-not an exotic one.
+not an exotic one. Helm did the same: the default `latest` tag with `IfNotPresent` keeps a node's
+cached copy. So the upgrade image is now always fresh:
+- **Compose** rebuilds it on every `up` (`pull_policy: build`, from cached layers).
+- **Helm** pulls it on every run (`upgrade.pullPolicy: Always`), for the upgrade Job and for each
+  pod's wait-for-schema check.
+
+The Job's first line after the lock names its chain's head
+(`This build's migration chain ends at […]`), so an old image shows itself at once. The other
+images are still only as new as the copy a machine has.
 
 It surfaces as the application failing on schema its own ORM declares —
 `column workspaces.identity_property does not exist` — or as 404s from a frontend calling routes
@@ -178,8 +186,12 @@ synodic-upgrade repair
 - **A branch's build** was deployed to the same environment, ran its own migrations, and they never reached `main`.
 - **A newer release** migrated the database, then the image was rolled back.
 
-**`upgrade` places such a database exactly, from the lineage record.** `backend/alembic/other_lines.json` lists every revision any branch, or any pull request's head, has ever had that `main`'s chain doesn't, with every set of parents it was given there. For each foreign stamp, the Job does the following:
-- **It walks the record down to this chain.** Where a branch's tip still has the revision, it takes the parents the tip has. Otherwise it takes what every recorded version shares.
+**`upgrade` places such a database exactly, from its lineage.** Two sources say what a foreign stamp's parents were:
+- **The database itself.** Every build that migrates or stamps a database writes its whole chain into `alembic_lineage`: each revision, with its parents (`backend/app/db/alembic_lineage.py`, called from `env.py`). So a database migrated by any build from now on, a branch's or one with a merge revision made by hand, says what its stamp's parents were.
+- **The lineage record**, for databases stamped before that. `backend/alembic/other_lines.json` lists every revision any branch, or any pull request's head, has ever had that `main`'s chain doesn't, with every set of parents it was given there.
+
+For each foreign stamp, the Job does the following:
+- **It walks the lineage down to this chain.** The database's own rows come first. Otherwise, where a branch's tip still has the revision, it takes the parents the tip has, and failing that, what every recorded version shares.
 - **It stamps the last of `main`'s revisions the database ran.** Then `upgrade heads` runs exactly the ones it lacks, in chain order, and none of the other line's.
 - **It leaves the other build's tables and columns as they were,** for when its migrations arrive with it.
 
@@ -189,7 +201,10 @@ synodic-upgrade repair
 - **What runs again:** any of this image's revisions the database had already run. Their DDL is guarded, as `chain-replay` requires, but their data statements run again (see the rule above).
 - **A newer release's stamp** lands at this image's head, so nothing runs.
 
-**Either way, head is claimed only once the schema bears it out.** If `verify-schema`'s comparison finds anything missing, `alembic_version` goes back to what it was and the Job exits 1, naming what's missing. Then name the revision both chains share:
+**Either way, head is claimed only once the schema bears it out.** If `verify-schema`'s comparison still finds something missing, the database never ran some migration it was taken to have run. The Job then corrects itself, once:
+- **It finds those migrations.** Among the revisions the placement took as run, they are the ones whose file names the missing table, or the missing table and column.
+- **It places the database below them** and upgrades again. They run, and so does what follows them: each is safe to run twice.
+- **If the schema is still short, or nothing of ours names what's missing,** `alembic_version` goes back to what it was and the Job exits 1, naming what's missing. For example, a column only `create_all` makes. Then name the revision both chains share:
 
 ```bash
 synodic-upgrade upgrade --rewind-to <revision>

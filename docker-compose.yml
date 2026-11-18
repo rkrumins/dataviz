@@ -182,6 +182,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile.upgrade
     image: synodic-upgrade:local
+    # Rebuilt on every `up` (from cached layers): an existing tag would otherwise be reused, and
+    # with it an older migration chain than the checkout's.
+    pull_policy: build
     command: ["upgrade"]
     environment:
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}

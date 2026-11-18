@@ -266,6 +266,17 @@ def run_migrations_online() -> None:
         )
         with context.begin_transaction():
             context.run_migrations()
+        try:
+            context.get_revision_argument()
+            migrating = True                # upgrade, downgrade, stamp
+        except KeyError:
+            migrating = False               # current: reads only
+        if migrating:
+            # This build's chain, kept in the database, so a build that doesn't have the
+            # revision it stamped can still tell what the database ran.
+            from backend.app.db import alembic_lineage
+
+            alembic_lineage.record(connection, context.script)
         # SQLAlchemy 2.0: explicit commit required when not using engine.begin().
         # Without this the alembic_version row write rolls back on close.
         connection.commit()

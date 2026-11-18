@@ -13,11 +13,13 @@ newer release's before a rollback — upgrades with this one (``scripts/upgrade.
   - placed exactly where the guess would be wrong;
   - stamped with a merge revision made by hand, which no commit has (a dev database's);
   - the other branch's columns are left as they are;
-  - when the schema still isn't at head after the rewind, the stamps go back as they were and the
-    job fails, so it can't pass on a later run either;
+  - every build that migrates a database writes its chain into it (``alembic_lineage``), and a
+    stamp only that lineage has — a merge revision made by hand, say — is placed exactly from it;
   - a side branch that parted earlier than the guess (some of this build's migrations written
-    while it was open, and never run there): the guess fails safely as above, and naming the
-    revision both share (``--rewind-to``) upgrades it;
+    while it was open, and never run there): the schema left short names them, and the job places
+    it below them and upgrades again, by itself; ``--rewind-to`` still names a place outright;
+  - when the schema still isn't at head and nothing of ours run again would bring it, the stamps go
+    back as they were and the job fails, so it can't pass on a later run either;
   - ``repair`` and ``current`` work on a database stamped with another build's revision.
 """
 import os
@@ -78,6 +80,20 @@ def test_a_recorded_stamp_is_placed_exactly():
     assert upgrade._placed(script, lines, ["20261116_1200_graph_watch"], [head]) == [head]
     # Nothing records it: no exact place.
     assert upgrade._placed(script, lines, ["20261119_1200_merge_members_set"], []) is None
+
+
+def test_a_schema_left_short_places_it_below_the_migrations_that_make_what_is_missing():
+    script = _script()
+    head = script.get_current_head()
+    gap = ["missing column public.workspaces.review_threads_hold"]      # 20261118_1100_review_rules's
+    assert upgrade._below_gaps(script, ["20261118_1100_review_rules"], [], gap) == ["20261118_1000_gv_review_records"]
+    # Below it on every line it's on, and nothing else moved.
+    assert upgrade._below_gaps(script, [head], [], gap) == [
+        "20261113_1400_gv_ps_candidate", "20261118_1000_gv_review_records", "20261118_1000_member_sets"]
+    # Ours it had stamped itself are trusted, not searched.
+    assert upgrade._below_gaps(script, [head], [head], gap) is None
+    # Made by create_all alone, by no migration: nothing of ours run again would bring it.
+    assert upgrade._below_gaps(script, [head], [], ["missing column public.announcements.cta_text"]) is None
 
 
 def test_placing_walks_the_lineage_down_to_this_chain():
@@ -159,8 +175,9 @@ def test_another_branchs_database_upgrades_with_this_build(scratch_db):
 def test_a_rewind_that_leaves_the_schema_short_puts_the_stamps_back(scratch_db):
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-2000:]
-    # A newer release's stamp parts at our head, so nothing runs — and a column of ours is missing.
-    _sql(scratch_db, "ALTER TABLE workspaces DROP COLUMN review_threads_hold")
+    # A newer release's stamp parts at our head, so nothing runs — and a column is missing that
+    # only create_all makes, so nothing of ours run again brings it back.
+    _sql(scratch_db, "ALTER TABLE announcements DROP COLUMN cta_text")
     _sql(scratch_db, "UPDATE alembic_version SET version_num = '29991231_2359_from_the_future'")
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 1, out.stderr[-3000:]
@@ -169,7 +186,8 @@ def test_a_rewind_that_leaves_the_schema_short_puts_the_stamps_back(scratch_db):
 
 
 @E2E
-def test_a_branch_that_parted_earlier_than_the_guess_upgrades_once_its_parting_is_named(scratch_db):
+def test_a_branch_that_parted_earlier_than_the_guess_upgrades_by_itself(scratch_db):
+    head = _script().get_current_head()
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-2000:]
     # It parted at 20261117_1500 and never ran 20261118_1100_review_rules (one of its columns);
@@ -177,9 +195,16 @@ def test_a_branch_that_parted_earlier_than_the_guess_upgrades_once_its_parting_i
     _sql(scratch_db, "ALTER TABLE workspaces DROP COLUMN review_threads_hold")
     _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261118_1200_elsewhere'")
     out = _job(scratch_db, "upgrade")
-    assert out.returncode == 1 and "--rewind-to" in out.stderr, out.stderr[-3000:]
-    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [("20261118_1200_elsewhere",)]
+    assert out.returncode == 0, out.stderr[-3000:]
+    assert "placing it at ['20261118_1000_gv_review_records'] and upgrading again" in out.stderr, out.stderr[-3000:]
+    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
+    assert _job(scratch_db, "check").returncode == 0
+    assert _sql(scratch_db, "SELECT count(*) FROM information_schema.columns "
+                            "WHERE table_name = 'workspaces' AND column_name = 'review_threads_hold'") == [(1,)]
 
+    # Named outright, the place is taken as given.
+    _sql(scratch_db, "ALTER TABLE workspaces DROP COLUMN review_threads_hold")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261118_1200_elsewhere'")
     out = _job(scratch_db, "upgrade", "--rewind-to", "20261117_1500_gv_mr_sendback")
     assert out.returncode == 0, out.stderr[-3000:]
     assert "as named (--rewind-to)" in out.stderr
@@ -230,4 +255,30 @@ def test_repair_and_current_work_on_another_builds_stamp(scratch_db):
     assert out.returncode == 0 and "20261119_1200_merge_members_set" in out.stderr, out.stderr[-2000:]
     out = _job(scratch_db, "repair")
     assert out.returncode == 0, out.stderr[-3000:]
+    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
+
+
+@E2E
+def test_a_database_keeps_the_lineage_of_every_build_that_migrated_it(scratch_db):
+    script = _script()
+    head = script.get_current_head()
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert f"This build's migration chain ends at ['{head}']" in out.stderr
+    rows = dict(_sql(scratch_db, "SELECT revision, parents FROM alembic_lineage"))
+    assert len(rows) == len(list(script.walk_revisions()))
+    assert rows[head] == ",".join(sorted(script.get_revision(head).down_revision))
+
+    # A build with a merge revision made by hand moved it on, and wrote its chain as it did:
+    # no file or git ref has the revision, the database does.
+    _sql(scratch_db, "INSERT INTO alembic_lineage VALUES "
+                     "('20261119_1250_hand_merge', '20261118_1000_member_sets,20261119_1100_gv_change_sets')")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261119_1250_hand_merge'")
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0, out.stderr[-3000:]
+    assert ("Placing it at ['20261118_1000_member_sets', '20261119_1100_gv_change_sets'], exactly, "
+            "from this database's own lineage") in out.stderr, out.stderr[-3000:]
+    # The guess would have taken 20261119_1200_gv_review_seen as run.
+    assert "Running upgrade 20261119_1100_gv_change_sets -> 20261119_1200_gv_review_seen" in out.stderr
+    assert "-> 20261118_1000_member_sets," not in out.stderr
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
