@@ -1,11 +1,13 @@
 /**
  * The review page: its three regions; a change or a thread opened by link (`?change=`, `?thread=` —
- * one on the review as a whole opens the Discussion); the keys that move through the changes (j / k,
+ * one on the review as a whole opens the Discussion), and Finish your review (`?finish=1`, the
+ * drawer's way here); the keys that move through the changes (j / k,
  * n / p to what still needs you, round to the start, ⇧N / ⇧P to open threads); a fork's review,
- * which is not decided change by change; and a review that isn't there.
+ * which is not decided change by change; a review that isn't there; and looking at one marks it
+ * seen, again as it changes.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import type { ChangeListRow, ChangeListSummary, PullRequest, ReviewThread } from '@/services/versioningApiService'
@@ -23,7 +25,7 @@ vi.mock('@tanstack/react-virtual', () => ({
 const api = vi.hoisted(() => ({
   getMergeRequest: vi.fn(), getChangeSummary: vi.fn(), getChangeEntries: vi.fn(), getChangeEntry: vi.fn(),
   listReviewChanges: vi.fn(), getReviewDecisionSummary: vi.fn(), getReviewCommentCounts: vi.fn(),
-  listReviewThreads: vi.fn(), getMergeRequestDiffSummary: vi.fn(),
+  listReviewThreads: vi.fn(), getMergeRequestDiffSummary: vi.fn(), markReviewSeen: vi.fn(),
 }))
 vi.mock('@/services/versioningApiService', async (orig) => ({
   ...(await orig<typeof import('@/services/versioningApiService')>()),
@@ -71,6 +73,7 @@ beforeEach(() => {
   Object.values(api).forEach((f) => f.mockReset())
   usePreferencesStore.setState({ changeListLayout: 'list' })
   api.getMergeRequest.mockResolvedValue(draftPr())
+  api.markReviewSeen.mockResolvedValue(undefined)
   api.getChangeSummary.mockResolvedValue(summary)
   const page = (entries: unknown[]) => ({ entries, total: entries.length, offset: 0, limit: 100, hasMore: false })
   api.listReviewChanges.mockResolvedValue(page([{ ...row('T1'), decision: accepted }, { ...row('T2'), decision: null }, { ...row('T3'), decision: null }]))
@@ -91,8 +94,7 @@ function Where() {
   const { search } = useLocation()
   return <div data-testid="where">{search}</div>
 }
-function renderPage(search = '') {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+function renderPage(search = '', qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[`/workspaces/ws1/reviews/pr_1${search}`]}>
@@ -124,10 +126,20 @@ describe('ReviewPage', () => {
     expect(within(pane()).getByText('Owners moved to the new teams.')).toBeInTheDocument()
     expect(within(side()).getByText('Give your verdict')).toBeInTheDocument()
     expect(within(side()).getByRole('tab', { name: 'Discussion' })).toHaveAttribute('aria-selected', 'true')
-    // A requested reviewer who hasn't approved: Approve, with Send back beside it.
+    // A requested reviewer who hasn't given their verdict: Finish your review — and, nothing
+    // rejected and only their approval awaited, Approve all & merge beside it.
     const header = screen.getByRole('banner', { name: 'This review' })
-    expect(within(header).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
-    expect(within(header).getByRole('button', { name: 'Send back' })).toBeInTheDocument()
+    expect(within(header).getByRole('button', { name: 'Finish your review' })).toBeInTheDocument()
+    expect(within(header).getByRole('button', { name: 'Approve all & merge' })).toBeInTheDocument()
+  })
+
+  it('a link with ?finish=1 opens Finish your review; closed, the address no longer asks', async () => {
+    renderPage('?finish=1')
+    const panel = await screen.findByRole('dialog', { name: 'Finish your review' })
+    expect(await within(panel).findByText('You viewed 0 of 3 · accepted 1 · rejected 0 · 2 open threads')).toBeInTheDocument()
+    fireEvent.click(within(panel).getByRole('button', { name: 'Keep reviewing' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Finish your review' })).toBeNull())
+    expect(screen.getByTestId('where')).not.toHaveTextContent('finish')
   })
 
   it('picking a change in the list opens it beside the list, and the address says which', async () => {
@@ -217,5 +229,22 @@ describe('ReviewPage', () => {
     expect(await screen.findByText('This review isn’t here')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('link', { name: /Back to reviews/ }))
     expect(await screen.findByText('The reviews')).toBeInTheDocument()
+    expect(api.markReviewSeen).not.toHaveBeenCalled()
+  })
+
+  it('marks the review seen when it opens, and again when it changes while open', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    renderPage('', qc)
+    expect(await screen.findByRole('heading', { name: 'Tidy owners' })).toBeInTheDocument()
+    await waitFor(() => expect(api.markReviewSeen).toHaveBeenCalledTimes(1))
+    expect(api.markReviewSeen).toHaveBeenCalledWith('ws1', 'pr_1')
+
+    // Read again unchanged: nothing new to mark.
+    await act(() => qc.refetchQueries({ queryKey: ['versioning', 'mr', 'ws1', 'pr_1'] }))
+    expect(api.markReviewSeen).toHaveBeenCalledTimes(1)
+
+    api.getMergeRequest.mockResolvedValue(draftPr({ updatedAt: '2026-11-02T00:00:00Z' }))
+    await act(() => qc.refetchQueries({ queryKey: ['versioning', 'mr', 'ws1', 'pr_1'] }))
+    await waitFor(() => expect(api.markReviewSeen).toHaveBeenCalledTimes(2))
   })
 })

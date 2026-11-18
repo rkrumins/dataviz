@@ -158,6 +158,33 @@ def test_review_records_and_the_rule():
         asyncio.run(db.dispose_engine())
 
 
+async def _decide_all_run() -> None:
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="alice")
+    gid = G["graph_id"]
+    d = await svc.open_draft(graph_id=gid, owner="alice")
+    n = 17_000                                         # past 16k: two IN lists of a chunk passed 32,767 binds
+    for i in range(0, n, 5000):
+        await svc.stage_changes(graph_id=gid, branch_id=d, actor="alice",
+                                ops=[_node(f"N{k}") for k in range(i, min(n, i + 5000))])
+    await svc.checkpoint(graph_id=gid, branch_id=d, actor="alice")
+    mr = await svc.open_draft_mr(graph_id=gid, branch_id=d, actor="alice", reviewers=["carol"])
+    out = await svc.decide_changes(pr_id=mr, actor="carol", verdict="accepted", containment_edge_types=[], filter={})
+    assert out["decided"] == n
+    assert (await svc.review_decision_summary(pr_id=mr, containment_edge_types=[]))["accepted"] == n
+    await svc.decide_changes(pr_id=mr, actor="carol", verdict=None, containment_edge_types=[], filter={})
+    assert (await svc.review_decision_summary(pr_id=mr, containment_edge_types=[]))["undecided"] == n
+
+
+@E2E
+def test_every_change_of_a_large_review_is_decided_and_cleared_in_one_call():
+    try:
+        asyncio.run(_decide_all_run())
+    finally:
+        asyncio.run(db.dispose_engine())
+
+
 async def _routes_run(monkeypatch) -> None:
     from httpx import ASGITransport, AsyncClient
 

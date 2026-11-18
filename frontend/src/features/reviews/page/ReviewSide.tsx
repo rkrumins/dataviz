@@ -1,28 +1,19 @@
 /**
  * ReviewSide — beside the change: what the review still needs (What's next), who was asked to
- * review it and where each stands, then its Discussion and its Activity.
+ * review it and where each stands (and, for whoever may, who is asked), then its Discussion and
+ * what happened on it (Activity).
  */
 import type { ReactNode } from 'react'
-import { CheckCircle2, Circle, Clock, MessageSquare, ShieldCheck, Users } from 'lucide-react'
+import { CheckCircle2, Circle, Clock, MessageSquare, ShieldCheck } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { Badge, type BadgeTone } from '@/components/ui/Badge'
-import { PersonChip } from '@/components/ui/PersonChip'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import type { ReviewerState } from '@/services/versioningApiService'
 import { ReviewDiscussion } from '../comments/ReviewDiscussion'
-import { ReviewActivity } from '../components/ReviewActivity'
 import type { ReviewActions } from '../hooks/useReviewActions'
-import { reviewerName, reviewerStates, type ActionKind, type ReadinessItem } from './readiness'
+import type { ActionKind, ReadinessItem } from './readiness'
+import { ReviewersEditor } from './ReviewersEditor'
+import { ReviewTimeline } from './ReviewTimeline'
 
 export type SideTab = 'discussion' | 'activity'
-
-const STATE: Record<ReviewerState['state'], { label: string; tone: BadgeTone }> = {
-  approved: { label: 'Approved', tone: 'success' },
-  approved_earlier: { label: 'Approved an earlier version', tone: 'warning' },
-  changes_requested: { label: 'Asked for changes', tone: 'danger' },
-  commented: { label: 'Commented', tone: 'neutral' },
-  waiting: { label: 'Waiting', tone: 'neutral' },
-}
 
 function Heading({ icon: Icon, children }: { icon: React.ComponentType<{ className?: string }>; children: React.ReactNode }) {
   return (
@@ -68,36 +59,12 @@ export function WhatsNextPanel({ items, onAct, busy, custom }: {
 }
 
 /** Who was asked to review it, and where each stands. */
-export function ReviewersCard({ actions }: { actions: ReviewActions }) {
-  const { pr } = actions
-  if (!pr) return null
-  const reviewers = reviewerStates(pr)
+export function ReviewersCard({ wsId, actions }: { wsId: string; actions: ReviewActions }) {
+  if (!actions.pr) return null
   return (
     <section aria-label="Reviewers">
       <Heading icon={ShieldCheck}>Reviewers</Heading>
-      {reviewers.length === 0 ? (
-        <p className="text-[12px] text-ink-muted">No one was asked to review this.</p>
-      ) : (
-        <ul className="space-y-1.5">
-          {reviewers.map((r) => {
-            const state = STATE[r.state] ?? STATE.waiting
-            const name = pr.userNames?.[r.id]
-            return (
-              <li key={`${r.type}:${r.id}`} className="flex items-center gap-2 min-w-0">
-                {r.type === 'group' ? (
-                  <span className="inline-flex items-center gap-1.5 min-w-0 text-xs font-semibold text-ink">
-                    <Users className="w-4 h-4 shrink-0 text-ink-muted" aria-hidden />
-                    <span className="truncate">{reviewerName(pr, r)}</span>
-                  </span>
-                ) : (
-                  <PersonChip id={r.id} person={name ? { name } : undefined} size="sm" className="min-w-0" />
-                )}
-                <Badge tone={state.tone} size="sm" className="ml-auto shrink-0">{state.label}</Badge>
-              </li>
-            )
-          })}
-        </ul>
-      )}
+      <ReviewersEditor wsId={wsId} actions={actions} />
     </section>
   )
 }
@@ -132,7 +99,7 @@ export function ReviewSide({ wsId, prId, actions, items, onAct, custom, tab, onT
           </label>
         )}
       </div>
-      <ReviewersCard actions={actions} />
+      <ReviewersCard wsId={wsId} actions={actions} />
       <Tabs value={tab} onValueChange={(v) => onTab(v as SideTab)}>
         <TabsList look="underline">
           <TabsTrigger value="discussion" icon={MessageSquare}>Discussion</TabsTrigger>
@@ -143,7 +110,7 @@ export function ReviewSide({ wsId, prId, actions, items, onAct, custom, tab, onT
             access={discussion} focusThreadId={focusThreadId} />
         </TabsContent>
         <TabsContent value="activity" className="pt-3">
-          <ReviewActivity pr={pr} />
+          <ReviewTimeline wsId={wsId} pr={pr} />
         </TabsContent>
       </Tabs>
     </div>

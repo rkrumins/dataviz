@@ -4,9 +4,10 @@
  * history in sync after a save / publish / merge.
  */
 import { useCallback } from 'react'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, ReviewInboxParams, StageOp, Watermark } from '@/services/versioningApiService'
+import { INBOX_QUERY_KEY } from '@/hooks/useInbox'
 import { workspaceService } from '@/services/workspaceService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
@@ -54,6 +55,9 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'forkSources', ws] as const,
   mergeRequest: (ws?: string, prId?: string | null) =>
     [...VERSIONING_KEYS.all, 'mr', ws, prId] as const,
+  // Under the review's own key, so whatever refreshes the review refreshes its history too.
+  reviewEvents: (ws?: string, prId?: string | null) =>
+    [...VERSIONING_KEYS.mergeRequest(ws, prId), 'events'] as const,
   prDiff: (ws?: string, prId?: string | null) =>
     [...VERSIONING_KEYS.all, 'prDiff', ws, prId] as const,
   prPreview: (ws?: string, prId?: string | null) =>
@@ -80,6 +84,11 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'dataSourcePrs', ws, dsId, status ?? 'all'] as const,
   viewPrCounts: (ws?: string, viewId?: string | null) =>
     [...VERSIONING_KEYS.all, 'viewPrCounts', ws, viewId] as const,
+  // A queue's pages and the counts alone, under one prefix, so whatever changes a review refreshes both.
+  reviewInbox: (ws?: string, params?: ReviewInboxParams) =>
+    [...VERSIONING_KEYS.all, 'reviewInbox', ws, params ?? {}] as const,
+  reviewInboxCounts: (ws?: string | null) =>
+    [...VERSIONING_KEYS.all, 'reviewInbox', ws, 'counts'] as const,
   viewCommitLog: (ws?: string, gid?: string | null, viewId?: string | null, graphWide?: boolean, limit?: number) =>
     [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, viewId, !!graphWide, limit ?? 'default'] as const,
   // Under 'viewCommits', so every publish, merge, revert and restore that refreshes the history
@@ -675,9 +684,53 @@ export function useDataSourcePullRequests(
       : api.listDataSourcePullRequests(wsId!, dataSourceId!, status ? { status } : {}),
     enabled: !!wsId && !!dataSourceId && enabled,
     staleTime: 15_000,
-    // A 404 is terminal (the data source has no versioned graph); the review inbox reads every
-    // data source in the workspace, versioned or not.
+    // A 404 is terminal (the data source has no versioned graph).
     retry: (n, e) => !/404|not found/i.test(String((e as Error)?.message)) && n < 1,
+  })
+}
+
+/** Reviews the review inbox reads per page. */
+export const REVIEW_INBOX_PAGE = 25
+
+/** One queue of the review inbox, page by page ("Load more"), searched and filtered on the server.
+ *  While another queue or filter loads, the last one stays on screen. */
+export function useReviewInbox(wsId: string | undefined, params: Omit<ReviewInboxParams, 'limit' | 'offset'>) {
+  return useInfiniteQuery({
+    queryKey: VERSIONING_KEYS.reviewInbox(wsId, params),
+    queryFn: ({ pageParam }) => api.getReviewInbox(wsId!, { ...params, limit: REVIEW_INBOX_PAGE, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((n, p) => n + p.items.length, 0)
+      return last.items.length > 0 && loaded < last.total ? loaded : undefined
+    },
+    enabled: !!wsId && !!params.queue,
+    placeholderData: keepPreviousData,
+    staleTime: 15_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
+/** Each review-inbox queue's count and unread count — the Reviews badge — read again every minute. */
+export function useReviewInboxCounts(wsId?: string | null, enabled = true) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.reviewInboxCounts(wsId),
+    queryFn: () => api.getReviewInboxCounts(wsId!),
+    enabled: !!wsId && enabled,
+    staleTime: 15_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
+/** The reader looked at a review: the inbox, its counts and the bell are read again. */
+export function useMarkReviewSeen(wsId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (prId: string) => api.markReviewSeen(wsId, prId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'reviewInbox'] })
+      qc.invalidateQueries({ queryKey: INBOX_QUERY_KEY })
+    },
   })
 }
 
@@ -1037,6 +1090,7 @@ function invalidatePrScopes(qc: ReturnType<typeof useQueryClient>, wsId: string,
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrCounts'] })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'reviewInbox'] })
 }
 
 export function usePublishBranch(wsId: string, graphId: string) {
@@ -1167,8 +1221,10 @@ export function useReconcileProjection(wsId: string, graphId: string) {
 export function useOpenMergeRequest(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (v: { branchId: string; title?: string; description?: string; reviewers?: string[] }) =>
-      api.openMergeRequest(wsId, graphId, v.branchId, { title: v.title, description: v.description, reviewers: v.reviewers }),
+    mutationFn: (v: { branchId: string; title?: string; description?: string; reviewers?: string[]; reviewerGroups?: string[] }) =>
+      api.openMergeRequest(wsId, graphId, v.branchId, {
+        title: v.title, description: v.description, reviewers: v.reviewers, reviewerGroups: v.reviewerGroups,
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
@@ -1255,21 +1311,53 @@ export function useCloseMergeRequest(wsId: string) {
   })
 }
 
-/** Send a draft's review back to its author, with why (it merges once the draft changes). */
-export function useRequestChanges(wsId: string) {
-  const invalidate = useInvalidatePr(wsId)
-  return useMutation({
-    mutationFn: (v: { prId: string; graphId: string; reason?: string | null; expectedHeadCommitId?: string | null }) =>
-      api.requestChanges(wsId, v.prId, { reason: v.reason, expectedHeadCommitId: v.expectedHeadCommitId }),
-    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
-  })
-}
-
 export function useWithdrawChangesRequest(wsId: string) {
   const invalidate = useInvalidatePr(wsId)
   return useMutation({
     mutationFn: (v: { prId: string; graphId: string }) => api.withdrawChangesRequest(wsId, v.prId),
     onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+// A review given, who reviews it, and what happened on it.
+
+/** Give your review — a verdict and a summary, of the head the reviewer saw. */
+export function useSubmitReview(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; verdict: api.ReviewVerdict; body?: string | null; expectedHeadCommitId?: string | null }) =>
+      api.submitReview(wsId, v.prId, { verdict: v.verdict, body: v.body, expectedHeadCommitId: v.expectedHeadCommitId }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** Who reviews it: each list given replaces its kind. */
+export function useSetReviewers(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; users?: string[]; groups?: string[] }) =>
+      api.setReviewers(wsId, v.prId, { users: v.users, groups: v.groups }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** Ask people and groups already asked to review it again. */
+export function useReRequestReviewers(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; users?: string[]; groups?: string[] }) =>
+      api.reRequestReviewers(wsId, v.prId, { users: v.users ?? [], groups: v.groups ?? [] }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** What happened on a review, oldest first. */
+export function useReviewEvents(wsId?: string, prId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.reviewEvents(wsId, prId),
+    queryFn: () => api.listReviewEvents(wsId!, prId!),
+    enabled: !!wsId && !!prId,
+    staleTime: 10_000,
   })
 }
 

@@ -28,6 +28,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { ResolutionMap } from '@/services/versioningApiService'
 import {
   type Conflict, type Side, normalizeConflict, conflictKey as ckey, groupByEntity,
@@ -448,14 +449,15 @@ function FieldConflict({ c, side, onPick }: { c: Conflict; side: Side; onPick: (
         <span className="text-ink-muted/60 shrink-0">Original</span>
         <ArrowRight className="w-3 h-3 text-ink-muted/40 shrink-0" />
         <span className="min-w-0"><ValueText value={c.base} /></span>
-        <button
-          onClick={() => onPick('base')}
-          title="Keep the original value"
-          className={cn('ml-auto shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] transition-colors',
-            side === 'base' ? 'text-ink bg-canvas-overlay font-medium' : 'text-ink-muted/50 hover:text-ink-muted')}
-        >
-          <Undo2 className="w-3 h-3" /> {side === 'base' ? 'kept' : 'revert'}
-        </button>
+        <HoverTip label="Keep the original value" className="ml-auto shrink-0 inline-flex">
+          <button
+            onClick={() => onPick('base')}
+            className={cn('inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] transition-colors',
+              side === 'base' ? 'text-ink bg-canvas-overlay font-medium' : 'text-ink-muted/50 hover:text-ink-muted')}
+          >
+            <Undo2 className="w-3 h-3" /> {side === 'base' ? 'kept' : 'revert'}
+          </button>
+        </HoverTip>
       </div>
       {/* The two choices */}
       <div className="grid grid-cols-2 gap-1.5">

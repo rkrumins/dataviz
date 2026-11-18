@@ -328,7 +328,7 @@ export const guideEntries: GuideEntry[] = [
     section: 'versioning',
     persona: 'versioning',
     title: 'The Review Center',
-    description: 'Find merge requests, check what they change, pull in the latest, and merge or dismiss them',
+    description: 'Work through the reviews waiting on you, give your verdict, choose who reviews, and merge or send them back',
     importFn: () => import('@docs/guide/REVIEW_CENTER.md?raw'),
   },
   {
@@ -523,7 +523,7 @@ export const keyJourneys: KeyJourney[] = [
   },
   {
     title: 'Review and merge a draft',
-    outcome: 'Approve, merge or dismiss a merge request — pulling in the latest changes first',
+    outcome: 'Work through what waits on you, give your verdict, and merge — or send it back',
     slug: 'review-center',
     persona: 'versioning',
     icon: GitPullRequest,

@@ -61,6 +61,7 @@ const SCOPE = [
   'components/canvas/search/studio',
   'features/versioning/components',
   'features/reviews/page',
+  'features/reviews/components',
 ]
 
 /**

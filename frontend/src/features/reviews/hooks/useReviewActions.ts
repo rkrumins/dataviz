@@ -9,20 +9,21 @@
  * shows what it brought in (`incoming`). Merged, a draft's review lands on main, with its receipt,
  * back on the view it came from; a fork's review stays where it is, and reads as merged.
  *
- * Approve, Send back and decisions are of what the reviewer saw: each sends the head the review
- * was read at, and the changes are read again when a poll brings a new head.
+ * A review given (Finish your review: Comment, Approve or Request changes, with a summary), Approve
+ * all and decisions are of what the reviewer saw: each sends the head the review was read at, and
+ * the changes are read again when a poll brings a new head.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   ForkNotUpToDateError, HeadMovedError, MergeConflictError, NotUpToDateError, ReviewDecisionError, type PullReason,
-  type IncomingChanges, type ResolutionMap, getChangeEntry, type ChangeListOrigin,
+  type IncomingChanges, type ResolutionMap, getChangeEntry, type ChangeListOrigin, type ReviewVerdict,
 } from '@/services/versioningApiService'
 import {
   useMergeRequest, usePullLatestDraft,
   useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest, useUpdateMergeRequest,
-  useRequestChanges, useWithdrawChangesRequest, useDiscardRejected,
+  useSubmitReview, useWithdrawChangesRequest, useDiscardRejected,
   useChangeSummary, usePrDiffSummary, VERSIONING_KEYS,
 } from '@/features/versioning/hooks/useVersioning'
 import { fromChangeCounts } from '@/features/versioning/model/changeAdapters'
@@ -70,7 +71,7 @@ export function useReviewActions(wsId: string, prId: string, onClose: () => void
   const closePr = useCloseMergeRequest(wsId)
   const merge = useMergeMergeRequest(wsId)
   const update = useUpdateMergeRequest(wsId)
-  const sendBackM = useRequestChanges(wsId)
+  const submitM = useSubmitReview(wsId)
   const withdrawM = useWithdrawChangesRequest(wsId)
   const discardRejectedM = useDiscardRejected(wsId)
   /** Merging what is accepted also discards what was rejected from the draft. */
@@ -168,9 +169,10 @@ export function useReviewActions(wsId: string, prId: string, onClose: () => void
   const isAuthor = !!user && pr?.actor === user.id
   const isOwner = !!user && pr?.sourceBranchOwner === user.id
   const alreadyApproved = !!user && (pr?.approvedBy ?? []).includes(user.id)
-  // Approve is asked of the requested reviewers. An approval gone stale is not in approvedBy, so
-  // its reviewer is offered Approve again.
-  const isRequested = !!user && (pr?.reviewers ?? []).includes(user.id)
+  // Approve is asked of the requested reviewers — themselves, or through a group of theirs (the
+  // server's `review.you`). An approval gone stale is not in approvedBy, so its reviewer is offered
+  // Approve again.
+  const isRequested = !!user && ((pr?.reviewers ?? []).includes(user.id) || !!pr?.review?.you?.requested)
   const showApprove = canManage && !terminal && !alreadyApproved && isRequested && !forksOff
     && (viewerCan ? viewerCan.approve : !isAuthor && !isOwner)
   const canMerge = viewerCan ? viewerCan.merge : canPublish
@@ -192,8 +194,17 @@ export function useReviewActions(wsId: string, prId: string, onClose: () => void
   // Sent back for changes, while that holds: it merges once the draft changes (or it is withdrawn).
   const sentBack = draftReview && !terminal ? pr?.changesRequested ?? null : null
   const canSendBack = draftReview && !terminal && !merging && !sentBack && !!viewerCan?.decide
+  // Finish your review: whoever is asked and may approve it, or may send it back, gives their verdict
+  // — which verdicts they may give is `viewerCan`'s word.
+  const canFinish = !forksOff && !merging && (showApprove || canSendBack)
+  // Approve all: every change still to decide accepted, the review approved and — asked for —
+  // merged, in one go. For a reviewer who decides a draft's review with nothing rejected: it never
+  // overrides a rejection (that review merges what is accepted).
+  const decideAllM = useDecideChanges(wsId, prId)
+  const toDecide = decisions ? decisions.undecided + decisions.stale : 0
+  const canApproveAll = deciding && !!decisions && !!viewerCan?.decide && showApprove && rejected === 0 && !sentBack
   const busy = approveM.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
-    || sendBackM.isPending || withdrawM.isPending || discardRejectedM.isPending
+    || submitM.isPending || withdrawM.isPending || discardRejectedM.isPending || decideAllM.isPending
 
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
   // banner + Pull-latest show up front (the 409 catch in runMerge is the backstop). A clean pull
@@ -307,32 +318,54 @@ export function useReviewActions(wsId: string, prId: string, onClose: () => void
   const cancelConflicts = () => { setConflicts(null); setGivenSeeds({}); setResolverError(null); setResolveMode('merge') }
   const resolveConflicts = (resolutions: ResolutionMap) => (resolveMode === 'pull' ? runPull(resolutions) : runMerge(resolutions))
 
-  const approve = () => {
+  /** Give your review — a verdict and its summary — of the head the review was read at; `onDone`
+   *  once it is in. The draft moved on since: it is read again, nothing is recorded, and `onMoved`. */
+  const submitReview = (verdict: ReviewVerdict, body: string, handlers: { onDone?: () => void; onMoved?: () => void } = {}) => {
     if (!pr) return
-    approveM.mutate({ prId, graphId: pr.graphId, expectedHeadCommitId: pr.headCommitId }, {
-      onSuccess: () => notify('success', 'Approved.'),
+    submitM.mutate({ prId, graphId: pr.graphId, verdict, body: body.trim() || null, expectedHeadCommitId: pr.headCommitId }, {
+      onSuccess: () => {
+        notify('success', verdict === 'approve' ? 'Approved.'
+          : verdict === 'request_changes' ? `Sent back to ${ownerName(pr.actor, pr.userNames)}. They’ve been told.`
+            : `Your review is in. ${ownerName(pr.actor, pr.userNames)} has been told.`)
+        handlers.onDone?.()
+      },
       onError: (e) => {
-        // The draft moved on since this review was loaded: load it again before approving.
         if (e instanceof HeadMovedError) {
           void prQ.refetch()
-          if (pr && listOrigin) void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.changeList(wsId, pr.graphId, listOrigin) })
+          if (listOrigin) void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.changeList(wsId, pr.graphId, listOrigin) })
           void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiffSummary(wsId, prId) })
+          if (handlers.onMoved) return handlers.onMoved()
         }
         notify('error', (e as Error).message)
       },
     })
   }
 
-  /** Send it back to its author with why; `onSent` once they have been told. */
-  const sendBack = (reason: string, onSent?: () => void) => {
-    if (!pr) return
-    sendBackM.mutate({ prId, graphId: pr.graphId, reason: reason.trim() || null, expectedHeadCommitId: pr.headCommitId }, {
-      onSuccess: () => { notify('success', `Sent back to ${ownerName(pr.actor, pr.userNames)}. They’ve been told.`); onSent?.() },
-      onError: (e) => {
-        if (e instanceof HeadMovedError) void prQ.refetch()
-        notify('error', (e as Error).message)
-      },
-    })
+  /** Accept every change still to decide, approve, and (``andMerge``) merge — asked first. A step
+   *  the server refuses stops there, saying why; what was done before it stands. */
+  const approveAll = async (andMerge: boolean) => {
+    if (!pr || !decisions || !canApproveAll) return
+    const n = decisions.total
+    const all = `${n.toLocaleString()} change${n === 1 ? '' : 's'}`
+    const ask = toDecide > 0
+      ? `Accept ${toDecide === n ? `all ${all}` : `the ${toDecide.toLocaleString()} of ${all} still to decide`}, approve${andMerge ? ', and merge into main' : ''}?`
+      : `Approve${andMerge ? ' and merge into main' : ''}? All ${all} are accepted.`
+    if (!window.confirm(ask)) return
+    try {
+      if (toDecide > 0) {
+        await decideAllM.mutateAsync({ verdict: 'accepted', filter: { decision: 'undecided' }, expectedHeadCommitId: pr.headCommitId })
+      }
+      await approveM.mutateAsync({ prId, graphId: pr.graphId, expectedHeadCommitId: pr.headCommitId })
+    } catch (e) {
+      if (e instanceof HeadMovedError) {
+        void prQ.refetch()
+        if (listOrigin) void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.changeList(wsId, pr.graphId, listOrigin) })
+      }
+      notify('error', (e as Error).message)
+      return
+    }
+    if (andMerge) await runMerge()
+    else notify('success', toDecide > 0 ? `Accepted ${toDecide.toLocaleString()} change${toDecide === 1 ? '' : 's'} and approved.` : 'Approved.')
   }
 
   const withdraw = () => {
@@ -385,15 +418,17 @@ export function useReviewActions(wsId: string, prId: string, onClose: () => void
     prQ, pr, user, canManage, canPublish,
     draftReview, forkReview, listOrigin, draftSummaryQ, forkSummaryQ, changeSet, changesFetching, unsaved,
     terminal, merging, forksOn, forksOff, viewerCan, isAuthor, isOwner, showApprove, canMerge, mergeBlockedWhy,
-    discussion, deciding, decisions, accepted, rejected, mergeInPart, sentBack, canSendBack, busy,
+    discussion, deciding, decisions, accepted, rejected, mergeInPart, sentBack, canFinish, busy,
     needsPull, pullReason, forkBehind, clearForkBehind: () => setForkBehind(null),
     discardOnMerge, setDiscardOnMerge,
     conflicts, seeds, seedError, resolverError, cancelConflicts, resolveConflicts,
     incoming, closeIncoming: () => setIncoming(null),
-    runMerge, runPull, approve, sendBack, withdraw, discardRejected, dismiss, acceptMissing, saveDetails,
+    canApproveAll, toDecide, approveAll,
+    runMerge, runPull, submitReview, withdraw, discardRejected, dismiss, acceptMissing, saveDetails,
     pending: {
-      merge: merge.isPending, pull: pullLatest.isPending, dismiss: closePr.isPending, sendBack: sendBackM.isPending,
+      merge: merge.isPending, pull: pullLatest.isPending, dismiss: closePr.isPending, submit: submitM.isPending,
       withdraw: withdrawM.isPending, discard: discardRejectedM.isPending, acceptMissing: acceptMissingM.isPending,
+      approveAll: decideAllM.isPending || approveM.isPending,
       update: update.isPending,
     },
   }
