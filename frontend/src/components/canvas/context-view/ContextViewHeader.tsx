@@ -38,6 +38,7 @@ import { HeaderSearch } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import type { ViewFileActions } from './header/ImportExportMenu'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
+import type { SavedTracesSectionProps } from '@/components/canvas/trace/SavedTracesSection'
 import { EditorActions } from './header/EditorActions'
 import { ToolbarFoldProvider, useToolbarFold } from './header/toolbarFold'
 
@@ -89,6 +90,8 @@ export interface ContextViewHeaderProps {
   onResumeTraceHistory?: (index: number) => void
   onClearTraceHistory?: () => void
   onCopyTraceHistoryLink?: (index: number) => string | null
+  /** Saved traces, listed in the same launcher. Optional. */
+  savedTraces?: SavedTracesSectionProps
   /** Open the Lineage Lens on the current selection. Optional. */
   onOpenLens?: () => void
 
@@ -187,6 +190,7 @@ export function ContextViewHeader({
   onResumeTraceHistory,
   onClearTraceHistory,
   onCopyTraceHistoryLink,
+  savedTraces,
   onOpenLens,
   isDraft,
   canManage,
@@ -273,6 +277,7 @@ export function ContextViewHeader({
     onResumeTraceHistory,
     onClearTraceHistory,
     onCopyTraceHistoryLink,
+    savedTraces,
     onOpenLens,
     onTogglePropertyManager,
     propertyManagerOpen,

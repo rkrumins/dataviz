@@ -15,6 +15,7 @@ import type { GranularityOption } from './TraceDockControls'
 import { useTraceEscStack } from './useTraceEscStack'
 import type { TraceShareSummary } from './TraceSharePopover'
 import type { TraceSeed } from './TraceSeedsPopover'
+import type { TraceKeepActions } from './TraceKeepMenu'
 
 export interface TraceBottomDockProps {
   trace: UseUnifiedTraceResult
@@ -47,6 +48,9 @@ export interface TraceBottomDockProps {
   /** A combined trace's seeds, and dropping one (see the title bar). */
   seeds?: readonly TraceSeed[]
   onRemoveSeed?: (urn: string) => void
+  /** Export, save as view, keep in this browser (see the title bar). */
+  keep?: TraceKeepActions
+  sinceSaved?: { added: number; removed: number; onExport: () => void } | null
 }
 
 const COMPACT_HEIGHT = 64
@@ -100,6 +104,8 @@ export function TraceBottomDock({
   focusLabel,
   seeds,
   onRemoveSeed,
+  keep,
+  sinceSaved,
 }: TraceBottomDockProps) {
   const [expandedHeight, setExpandedHeight] = useState(lastExpandedHeight)
   const [tab, setTab] = useState<TraceDockTab>('overview')
@@ -278,6 +284,8 @@ export function TraceBottomDock({
           seeds={seeds}
           onRemoveSeed={onRemoveSeed}
           nativeMode={nativeMode}
+          keep={keep}
+          sinceSaved={sinceSaved}
         />
 
         {/* Drill-back breadcrumb — visible whenever one or more drills are

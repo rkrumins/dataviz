@@ -9,7 +9,7 @@
  */
 import { create } from 'zustand'
 
-import type { MembershipResult, MembershipSpec } from '@/types/membership'
+import type { MembershipOrigin, MembershipResult, MembershipSpec } from '@/types/membership'
 
 import { visibilityOf, type NarrowVisibility } from './model'
 
@@ -19,6 +19,8 @@ export interface NarrowDraft {
   seedsLabel: string
   /** Names of URN seeds, for the composer's removable chips. */
   seedNames?: Record<string, string>
+  /** Where it came from, when not a narrowing or a search (a trace). */
+  origin?: MembershipOrigin
 }
 
 export interface AppliedNarrow extends NarrowDraft {

@@ -109,3 +109,58 @@ describe('Save as view from a narrowed canvas', () => {
     expect(screen.queryByRole('button', { name: /Save as view/ })).toBeNull()
   }, 40000)
 })
+
+// A TRACE kept as a view: the dock's Export & save offers it, and the view is
+// the trace's own question — these seeds, this far each way — resolved by the
+// server, laid out as lineage stages.
+describe('Save as view from a trace', () => {
+  afterEach(() => {
+    setPreview(false)
+    useAuthStore.setState({ permissions: { sid: '', global: [], ws: {} } } as never)
+    createFromMembers.mockReset()
+  })
+
+  const openFromDock = async () => {
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Export and save this trace' })) })
+    const panel = screen.getByRole('dialog', { name: 'Export and save this trace' })
+    return panel.querySelector<HTMLButtonElement>('[data-keep="view"]')
+  }
+
+  it('saves the trace’s seeds and reach, origin trace', async () => {
+    setPreview(true)
+    useAuthStore.setState({ permissions: { sid: 's', global: [], ws: { 'harness-ws': ['workspace:view:create'] } } } as never)
+    const planned: PlanRequest[] = []
+    createFromMembers.mockResolvedValue({ view: { id: 'v-new', name: 'cfo' }, membership: {} })
+    const h = await renderCanvasWithTrace(cfoEstate(), {
+      focus: 'cfo',
+      wrapProvider: (p) => ({
+        ...p,
+        planMembers: async (_v: string, r: PlanRequest) => { planned.push(r); return PLAN },
+      }) as GraphDataProvider,
+    })
+    await h.startTrace('cfo')
+    await h.setDirection('up')
+
+    const offer = await openFromDock()
+    expect(offer).toBeTruthy()
+    await act(async () => { fireEvent.click(offer!) })
+    expect(await screen.findByRole('dialog', { name: 'Save as a view' })).toBeInTheDocument()
+    await waitFor(() => expect(planned.length).toBeGreaterThan(0))
+    // Upstream only: a side switched off is no reach; the walk's ceiling is the whole way.
+    expect(planned.at(-1)).toMatchObject({
+      sources: [{ spec: { seeds: { urns: ['cfo'] }, expand: { upstream: 'all', downstream: 0, children: 0, partnerChildren: 0 } } }],
+      layout: { kind: 'stages' },
+    })
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Save view/ })) })
+    await waitFor(() => expect(createFromMembers).toHaveBeenCalledOnce())
+    expect(createFromMembers.mock.calls[0][0]).toMatchObject({ provenance: { origin: 'trace' } })
+  }, 40000)
+
+  it('is not offered to someone who may not create views here', async () => {
+    setPreview(true)
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+    expect(await openFromDock()).toBeNull()
+  }, 40000)
+})

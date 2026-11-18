@@ -115,7 +115,7 @@ export function SaveAsView({
         size="md"
         options={[
           { value: 'live', label: 'Live · any size', icon: LucideIcons.Radio, disabled: liveReason !== null },
-          { value: 'list', label: 'As a list · up to 5,000', icon: LucideIcons.ListChecks },
+          { value: 'list', label: 'As a list of its members', icon: LucideIcons.ListChecks },
         ]}
       />
       <p className="mt-1.5 text-[12px] text-ink-muted leading-snug">

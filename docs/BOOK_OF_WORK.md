@@ -93,7 +93,7 @@ Paths are under `frontend/src/components/canvas/context-view/` unless noted.
 |---|---|
 | Multi-entity trace | ⌘/Ctrl- and Shift-click build a selection; **Trace N entities** (or `T`) traces up to 25 as one picture, each partner measured from its nearest origin (`frontend/src/hooks/useCanvasTraceWalk.ts`); `F` opens the Lens on the whole selection |
 | Trace on the canvas | The trace overlay draws on the canvas without writing the canvas store (`frontend/src/hooks/useTraceOverlay.ts`); an earlier design that merged trace data into the store was reverted |
-| Share links | `?trace=` for a single-entity trace, and a Lens share code. A combined trace cannot be shared yet |
+| Share links | `?trace=` for a trace of one entity or up to 25 (a combined trace carries every seed), and a Lens share code |
 | Lens rework | A toolbar for direction, density, wires, walk and steps, and a graph view with a minimap |
 | Orphaned entities | **Display → Advanced → Orphaned entities…** lists entities missing the parent their type implies, with Reveal and, on a draft, Place in layer (`OrphansDrawer.tsx`) |
 | Relationship drawer and partner trays | Clicking a line opens its relationship; off-screen partners dock in trays above and below the column |

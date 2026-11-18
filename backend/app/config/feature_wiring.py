@@ -548,9 +548,13 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "GET /graphs/{id}/exports/{job}/download — take the file",
             "POST /graph/search/exports and GET /graph/search/exports/{id}/download — write, then "
             "take, every match of a search",
+            "POST /graph/member-sets, GET /graph/member-sets/{id}/members and /download — resolve "
+            "in full, list, then take everything a set of seeds reaches",
         ),
         ui_surfaces=("Export controls on the canvas and the context-view menu",
-                     "Export on a search's matches"),
+                     "Export on a search's matches",
+                     "Everything it reaches… on the trace dock, and a search's matches with their "
+                     "sources & consumers"),
         still_allowed=(
             "Reading, filtering and tracing every graph in the product",
             "Exports already downloaded are not recalled — this stops NEW ones",

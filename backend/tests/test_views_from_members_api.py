@@ -27,7 +27,7 @@ from backend.app.services.live_views import pipeline
 from backend.common.models.graph import GraphNode
 from backend.common.models.search import SearchHit, SearchResultPage
 from backend.common.models.view_membership import MACHINE
-from backend.tests.test_view_membership_resolver import FakeEngine
+from backend.tests.fixtures.membership_graph import FakeEngine
 
 URL = "/api/v1/views/from-members"
 TYPES = {"dom": "domain", "tbl_a": "table", "tbl_b": "table", "tbl_up": "table"}
@@ -265,6 +265,21 @@ async def test_by_type_and_by_lineage_stage(test_client: AsyncClient, db_session
     entries = assignments_of(config)
     assert {u: e["layerId"] for u, e in entries.items()} == {
         "src2": "stage-up2", "src1": "stage-up1", "col_a1": "stage-seed", "rep1": "stage-down1"}
+
+
+async def test_a_trace_kept_as_a_view_says_it_came_from_a_trace(
+    test_client: AsyncClient, db_session, graph, membership_on,
+):
+    """The dock's Save as view: the trace's seeds and reach, laid out as lineage
+    stages, and its provenance names the trace it was made from."""
+    ws = await workspace(test_client)
+    resp = await test_client.post(URL, json=body(
+        ws, "", layout={"kind": "stages"}, provenance={"origin": "trace"},
+        sources=[{"spec": {"seeds": {"urns": ["col_a1"]}, "expand": {"upstream": "all", "downstream": 1}}}]))
+    assert resp.status_code == 201, resp.text
+    config = await made(db_session, resp.json()["view"]["id"])
+    assert config["membership"]["provenance"]["origin"] == "trace"
+    assert {"src1", "src2", "rep1"} <= set(assignments_of(config)), "the whole way up, one step down"
 
 
 async def test_a_snapshot_is_frozen_from_the_start(test_client: AsyncClient, db_session, graph, membership_on):

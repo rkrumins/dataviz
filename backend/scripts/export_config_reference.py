@@ -106,6 +106,29 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "asking the same question. Off, every Narrow resolves again.",
         None,
     ),
+    # ── Member sets: a scope resolved in full, then listed and downloaded ───────
+    "MEMBER_SET_MAX_MEMBERS": (
+        "Members one member set (`POST /graph/member-sets`) may hold. Past it the set is complete "
+        "and says `member_cap`. Each member is a row in the management database while the set is "
+        "kept.",
+        None,
+    ),
+    "MEMBER_SET_MAX_EDGES": (
+        "Lineage relationships one member set keeps when asked for its edges. Past it the set "
+        "keeps finding members, and says `edge_cap`.",
+        None,
+    ),
+    "MEMBER_SET_MAX_DURATION_S": (
+        "Seconds one member set may take, from when it started, however many requests move it on. "
+        "Past it the set is complete with what it has, and says `deadline`.",
+        None,
+    ),
+    "MEMBER_SET_TTL_HOURS": (
+        "Hours a complete member set is kept to be listed and downloaded. Then it is expired and "
+        "its rows deleted in batches; asking again resolves it afresh. A set nobody moves on is "
+        "let go after 15 minutes.",
+        None,
+    ),
     "FAIR_SHARE_VIEW_FEED_RATE": (
         "With `FAIR_SHARE_ENABLED`: subset-view layer scans a workspace may start per second, "
         "across the fleet. A request answered from a cached or last page takes none.",
@@ -635,6 +658,7 @@ RULES = (
     ("backend/app/services/graph_store/", "graph"),
     ("backend/app/services/top_level_cache.py", "graph"),
     ("backend/app/services/context_engine.py", "graph"),
+    ("backend/app/services/member_sets/", "graph"),
     ("backend/app/services/deep_search/", "graph"),
     ("backend/app/services/native_query/", "graph"),
     ("backend/app/api/v1/endpoints/graph.py", "graph"),
