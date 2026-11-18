@@ -124,3 +124,53 @@ def test_the_plan_is_what_the_job_then_does(scratch_db):
     out = _job(scratch_db, "plan")
     assert out.returncode == 1 and "Nothing was changed" in out.stdout, out.stdout[-2000:]
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [("29991231_2359_nowhere",)]
+
+
+def _grants(url, role):
+    return {p for (p,) in _sql(url, f"SELECT permission_id FROM role_permissions WHERE role_name = '{role}'")}
+
+
+@E2E
+def test_a_fresh_install_records_every_built_in_entry_as_applied(scratch_db):
+    from backend.app.config.rbac_seed import PERMISSIONS, ROLE_GRANTS, SYSTEM_ROLES
+
+    assert _job(scratch_db, "upgrade").returncode == 0
+    counts = dict(_sql(scratch_db, "SELECT kind, count(*) FROM reference_data_applied GROUP BY kind"))
+    assert counts == {"permission": len(PERMISSIONS), "role": len(SYSTEM_ROLES), "grant": len(ROLE_GRANTS)}
+    assert _sql(scratch_db, "SELECT count(*) FROM alembic_history WHERE kind = 'seeded'") == [(0,)]
+
+
+@E2E
+def test_built_in_entries_reach_an_existing_database_once_and_an_admins_removal_stays(scratch_db):
+    assert _job(scratch_db, "upgrade").returncode == 0
+    # A database from before the record: no record, a built-in permission it never had (with its
+    # grants), and a grant an admin removed from a built-in role.
+    _sql(scratch_db, "DROP TABLE reference_data_applied")
+    _sql(scratch_db, "DELETE FROM permissions WHERE id = 'workspace:native-query:read'")     # cascades
+    _sql(scratch_db, "DELETE FROM role_permissions WHERE role_name = 'org_auditor' "
+                     "AND permission_id = 'system:audit:read'")
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0, out.stderr[-3000:]
+    # The permission it never had, and its grants: new in this run, so added.
+    assert "workspace:native-query:read" in _grants(scratch_db, "workspace_viewer")
+    # The removed grant can't be told from one never made: left out, and reported.
+    assert "system:audit:read" not in _grants(scratch_db, "org_auditor")
+    assert "org_auditor:system:audit:read" in out.stderr
+    [(detail,)] = _sql(scratch_db, "SELECT detail FROM alembic_history WHERE kind = 'seeded'")
+    report = json.loads(detail)
+    assert report["first"] and report["added"]["permissions"] == ["workspace:native-query:read"]
+    assert report["notGranted"] == ["org_auditor:system:audit:read"]
+
+    # A built-in grant added to the code after that (unrecorded here, and missing): added once.
+    _sql(scratch_db, "DELETE FROM reference_data_applied WHERE key = 'workspace_viewer:workspace:native-query:read'")
+    _sql(scratch_db, "DELETE FROM role_permissions WHERE role_name = 'workspace_viewer' "
+                     "AND permission_id = 'workspace:native-query:read'")
+    assert _job(scratch_db, "upgrade").returncode == 0
+    assert "workspace:native-query:read" in _grants(scratch_db, "workspace_viewer")
+
+    # An admin removes it again: recorded, so it stays removed, upgrade after upgrade.
+    _sql(scratch_db, "DELETE FROM role_permissions WHERE role_name = 'workspace_viewer' "
+                     "AND permission_id = 'workspace:native-query:read'")
+    for _ in range(2):
+        assert _job(scratch_db, "upgrade").returncode == 0
+    assert "workspace:native-query:read" not in _grants(scratch_db, "workspace_viewer")

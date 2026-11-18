@@ -148,11 +148,15 @@ def _install_fresh(cfg) -> None:
     # RBAC rows have only ever existed as INSERTs inside the migrations
     # we just skipped, and a database with no permissions and no roles
     # cannot authorise anybody.
-    from backend.app.db.seed_reference_data import seed_reference_data
+    from backend.app.db.seed_reference_data import (
+        reconcile_reference_data,
+        seed_reference_data,
+    )
 
     engine = create_engine(_sync_url(), pool_pre_ping=True)
     with engine.begin() as conn:
         written = seed_reference_data(conn)
+        reconcile_reference_data(conn)          # records every entry as applied
     log.info("Seeded reference data: %s", written)
 
     command.stamp(cfg, "heads")
@@ -331,8 +335,22 @@ def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = N
             return 1
         with create_engine(_sync_url(), pool_pre_ping=True).begin() as conn:
             migration_records.record_step(conn, min(script.get_heads()), "verified", None)
+    if revision == "heads":
+        _reconcile_reference_data(script)
     log.info("Upgrade complete")
     return 0
+
+
+def _reconcile_reference_data(script) -> None:
+    """Built-in permissions, roles and grants this database hasn't had yet, added once
+    (:func:`reconcile_reference_data`); anything it did is in ``alembic_history`` as ``seeded``."""
+    from backend.app.db.seed_reference_data import reconcile_reference_data
+
+    with create_engine(_sync_url(), pool_pre_ping=True).begin() as conn:
+        report = reconcile_reference_data(conn)
+        if any(report["added"].values()) or report["notGranted"] or report["skipped"]:
+            migration_records.ensure(conn)
+            migration_records.record_step(conn, min(script.get_heads()), "seeded", None, report)
 
 
 def cmd_plan(as_json: bool = False, recover: bool = False, shared_database: bool = False,

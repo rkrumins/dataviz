@@ -92,11 +92,19 @@ Verified on 2026-08-18: a database installed by an image nine days stale (stampe
 `20260802_1000_open_publish`, missing `providers` / `workspaces.identity_property`) took six
 revisions to head under a current image and came out `verify-schema`-clean.
 
-One thing re-running does **not** restore: `seed_reference_data` runs only on the virgin install,
-and nothing re-seeds afterwards. Permissions, system roles and grants added to
-`backend/app/config/rbac_seed.py` after a database was created never reach it, and no migration
-inserts them either. The function is idempotent (`ON CONFLICT DO NOTHING`) and reports rows
-actually written, so it is safe to call on every upgrade — it simply is not called today.
+Built-in reference data reaches existing databases too. `seed_reference_data` writes the RBAC rows
+on the virgin install. After every upgrade, `reconcile_reference_data` adds the permissions, system
+roles and grants from `backend/app/config/rbac_seed.py` that the database hasn't had yet, and
+records each in `reference_data_applied`, so it is added once:
+- **An admin's removal stays.** An admin can remove a grant from a built-in role (Admin →
+  Permissions). Once recorded, an entry is never added again, so the removal survives every upgrade.
+  Re-running the seeder instead would put it back.
+- **The first run on an existing database** can't tell a grant that was never made from one an admin
+  removed. It adds a missing grant only when its role or permission is new in that same run, and
+  reports the rest. Admin → Permissions → Reset to default restores a role's built-in grants.
+- **A built-in role whose name a custom role already has** gets none of its grants, with a warning.
+
+Anything it adds or reports is logged, and recorded in `alembic_history` as `seeded`.
 
 ## Writing a migration
 
