@@ -2177,7 +2177,7 @@ async def _tell_draft_people(session: AsyncSession, svc: GraphVersioningService,
         recipients -= set(skip)
         view = people["originating_view_id"]
         if pr_id:
-            link = f"/workspaces/{ws_id}/reviews?pr={pr_id}"
+            link = f"/workspaces/{ws_id}/reviews/{pr_id}"
         elif kind == "draft.made_private":
             link = None                                  # nowhere they can go
         elif view:
@@ -6950,7 +6950,7 @@ async def post_review_comment(
                                      path=body.path, thread_id=body.thread_id,
                                      mentions=mention_candidates_filter(body.mentions, allowed))
     title = pr.get("title") or "a review"
-    link = f"/workspaces/{ws_id}/reviews?pr={pr_id}&thread={posted.comment['threadId']}"
+    link = f"/workspaces/{ws_id}/reviews/{pr_id}?thread={posted.comment['threadId']}"
     excerpt = posted.comment["body"][:240]
     try:
         if posted.mentioned:
