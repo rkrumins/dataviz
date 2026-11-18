@@ -60,10 +60,9 @@ import {
   UrlField,
   TagInput,
   ClampedText,
-  FormattedDate,
-  FormattedLink,
-  FormattedTags,
+  isLongText,
 } from './property/valueWidgets'
+import { RichValue, NOT_SET } from './property/RichValue'
 import { MarkdownValueModal } from './property/MarkdownValueEditor'
 import { InlineValue } from './property/InlineValue'
 import { propertyMarks, shortValue, type ChangeMark, type PropertyMarks } from './property/changeMarks'
@@ -79,7 +78,7 @@ type ValueKind = 'string' | 'number' | 'boolean' | 'null' | 'object' | 'array'
 /** In read-only (View) mode, whether string values render as formatted Markdown
  *  or as raw source. Irrelevant in edit mode (values are editable inputs). */
 type DisplayMode = 'formatted' | 'source'
-const DisplayModeContext = createContext<DisplayMode>('source')
+const DisplayModeContext = createContext<DisplayMode>('formatted')
 
 /** In Edit mode, whether text values are edited as rich WYSIWYG (default) or as
  *  raw Markdown source. */
@@ -888,46 +887,22 @@ function PrimitiveValueEditor({
   }
 
   // ---------------------------------------------------------------- read-only
+  // Drawn as what it is (property/RichValue); copy, and the full viewer for text long enough to clamp.
   if (readOnly) {
-    if (fieldType === 'none') {
-      return <span className="text-xs text-ink-muted italic h-6 flex items-center">—</span>
-    }
-    if (fieldType === 'boolean') {
-      return <div className="h-6 flex items-center"><BooleanToggle value={Boolean(value)} onChange={() => {}} readOnly /></div>
-    }
-    if (fieldType === 'number') {
-      return <span className="text-xs font-mono text-ink h-6 flex items-center"><HighlightedText text={String(value)} query={query} /></span>
-    }
-    if (fieldType === 'tags') {
-      return display === 'source'
-        ? <span className="text-xs font-mono text-ink-muted break-all">{JSON.stringify(value)}</span>
-        : <FormattedTags value={value as string[]} />
-    }
-    // text / date / url — all stored as strings
-    const s = value === null || value === undefined ? '' : String(value)
-    let body: React.ReactNode
-    if (display === 'source') {
-      body = (
-        <div className="text-xs font-mono text-ink whitespace-pre-wrap break-words">
-          {s === '' ? <span className="italic text-ink-muted">empty</span> : <HighlightedText text={s} query={query} />}
-        </div>
-      )
-    } else if (fieldType === 'date') {
-      body = <FormattedDate value={s} />
-    } else if (fieldType === 'url') {
-      body = <FormattedLink value={s} />
-    } else {
-      // formatted text — clamp; Expand grows in-drawer, Full screen → modal viewer
-      body = <ClampedText text={s} onOpen={openModal} />
-    }
+    const s = typeof value === 'string' ? value : ''
+    const long = fieldType === 'text' && display !== 'source' && isLongText(s)
     return (
       <>
-        <div className="flex items-start gap-1">
-          <div className="flex-1 min-w-0">{body}</div>
-          <div className="flex items-start">
-            {s !== '' && <CopyButton text={s} />}
-            {fieldType === 'text' && expandButton}
+        <div className="flex items-start gap-1 min-h-6">
+          <div className="flex-1 min-w-0 py-[3px]">
+            <RichValue value={value} fieldKey={fieldLabel} query={query} source={display === 'source'} onOpen={openModal} />
           </div>
+          {(s !== '' || long) && (
+            <div className="flex items-start">
+              {s !== '' && <CopyButton text={s} />}
+              {long && expandButton}
+            </div>
+          )}
         </div>
         {modalOpen && (
           <MarkdownValueModal fieldLabel={fieldLabel} value={s} readOnly initialMaximized={modalMaximized} onSave={() => setModalOpen(false)} onClose={() => setModalOpen(false)} />
@@ -938,7 +913,7 @@ function PrimitiveValueEditor({
 
   // ---------------------------------------------------------------- editable
   if (fieldType === 'none') {
-    return <span className="text-xs text-ink-muted italic h-6 flex items-center">empty</span>
+    return <span className="text-xs text-ink-muted h-6 flex items-center">{NOT_SET}</span>
   }
   if (fieldType === 'boolean') {
     return <div className="h-6 flex items-center"><BooleanToggle value={Boolean(value)} onChange={onChange} /></div>

@@ -10,6 +10,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { X as XIcon, ExternalLink, Calendar, ChevronDown, ChevronUp, Maximize2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { isIsoDate } from './fieldTypes'
 
 // ============================================
@@ -239,6 +240,11 @@ export const InlineMarkdown = memo(function InlineMarkdown({ text }: { text: str
   )
 })
 
+/** Text long enough that the list clamps it: more than five lines, or a long paragraph. */
+export function isLongText(text: string): boolean {
+  return text.split('\n').length > 5 || text.length > 280
+}
+
 // ============================================
 // ClampedText — three-tier disclosure: inline (≤5 lines) → Expand (in-drawer) → Full screen (modal)
 // ============================================
@@ -259,13 +265,12 @@ export const ClampedText = memo(function ClampedText({
 }) {
   const [expanded, setExpanded] = useState(false)
   const empty = text === ''
-  const lineCount = empty ? 0 : text.split('\n').length
   // "A few lines" (≤5) shows inline with no Expand affordance.
-  const isLong = lineCount > 5 || text.length > 280
+  const isLong = !empty && isLongText(text)
   const clampCollapsed = isLong && !expanded
 
   const content = empty ? (
-    <span className="text-xs italic text-ink-muted">{editable ? 'Empty — click to add' : 'empty'}</span>
+    <span className="text-xs text-ink-muted">{editable ? 'Not set — click to add' : 'Not set'}</span>
   ) : source ? (
     <span className="text-xs font-mono text-ink whitespace-pre-wrap break-words">{text}</span>
   ) : (
@@ -336,7 +341,10 @@ export const ClampedText = memo(function ClampedText({
 // ============================================
 
 export function FormattedDate({ value }: { value: string }) {
-  const d = new Date(value)
+  // A calendar date is the reader's own day: parsed as UTC midnight it reads as the day before
+  // anywhere west of Greenwich.
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  const d = ymd ? new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3])) : new Date(value)
   const label = Number.isNaN(d.getTime())
     ? value
     : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
@@ -348,22 +356,37 @@ export function FormattedDate({ value }: { value: string }) {
   )
 }
 
+/** A link as a reader names it: its site, and where on it — `example.com/…/report`. */
+export function linkLabel(url: string): string {
+  try {
+    const u = new URL(url)
+    const host = u.host.replace(/^www\./, '')
+    const segs = u.pathname.split('/').filter(Boolean)
+    const path = segs.length === 0 ? '' : segs.length === 1 ? `/${segs[0]}` : `/…/${segs[segs.length - 1]}`
+    return `${host}${path}${u.search || u.hash ? '…' : ''}`
+  } catch {
+    return url
+  }
+}
+
 export function FormattedLink({ value }: { value: string }) {
   return (
-    <a
-      href={value}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="inline-flex items-center gap-1 text-xs text-accent-lineage hover:underline break-all"
-    >
-      {value}
-      <ExternalLink className="w-3 h-3 flex-shrink-0" />
-    </a>
+    <HoverTip label={value} className="inline-flex max-w-full min-w-0">
+      <a
+        href={value}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 max-w-full min-w-0 text-xs text-accent-lineage hover:underline"
+      >
+        <span className="truncate">{linkLabel(value)}</span>
+        <ExternalLink className="w-3 h-3 flex-shrink-0" aria-hidden />
+      </a>
+    </HoverTip>
   )
 }
 
 export function FormattedTags({ value }: { value: string[] }) {
-  if (value.length === 0) return <span className="text-xs text-ink-muted italic">none</span>
+  if (value.length === 0) return <span className="text-xs text-ink-muted">Not set</span>
   return (
     <div className="flex flex-wrap gap-1">
       {value.map((tag, i) => (

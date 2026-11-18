@@ -180,15 +180,16 @@ describe('PropertyEditor', () => {
   })
 
   it('readOnly hides edit affordances and renders values as text', () => {
-    render(<Harness initial={{ owner: 'analytics', notes: LONG }} readOnly />)
+    const lines = Array(8).fill('a line of content').join('\n')
+    render(<Harness initial={{ owner: 'analytics', notes: lines }} readOnly />)
     // No add / delete / rename affordances
     expect(screen.queryByText(/Add property/i)).not.toBeInTheDocument()
     expect(screen.queryByTitle('Delete')).not.toBeInTheDocument()
     // Value is plain text, not an editable control
     expect(screen.queryByDisplayValue('analytics')).not.toBeInTheDocument()
     expect(screen.getByText('analytics')).toBeInTheDocument()
-    // Read-only expand-to-view is offered on every string value
-    expect(screen.getAllByTitle('View full value').length).toBeGreaterThanOrEqual(1)
+    // The full viewer is offered where the text is clamped — not on a short value
+    expect(screen.getAllByRole('button', { name: 'View full value' })).toHaveLength(1)
   })
 
   it('adds a new property with a value via the composer', async () => {
