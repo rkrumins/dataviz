@@ -123,9 +123,9 @@ held the graph's publish lock, and how much Postgres and FalkorDB grew.
 | **Full re-projection** | `O(N + E)` reads; a page of each side at a time above `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE` | §4.2 |
 | Schema counts of `main` read from Postgres | counted in Postgres, once per commit | `schema_counts` |
 | Reconcile (drift scan) | `O(N)` streamed, bounded memory | operator tool |
-| A change list (a draft's changes, one revision's, two revisions compared) | `O(changed)` index-only reads to build — no payload — kept per process; a page `O(page)`; one entity's before and after, two point reads | counted, not listed, past `GRAPHVER_CHANGE_LIST_MAX` (250,000) |
+| A change list (a draft's changes, one revision's, two revisions compared) | built once, from `O(changed)` index-only reads — one probe per entity, no payload — and kept for every process in `graphver.change_sets` (callers asking at once wait for the one build); built ahead after an import, a publish or a merge; two revisions compared, and the canvas's rewind to an old revision, composed in memory from each revision's kept changes; a page `O(page)`; one entity's before and after, two point reads | counted, not listed, past `GRAPHVER_CHANGE_LIST_MAX` (250,000) |
 | History calendar (`/history/months`) | one grouped read of `main`'s commits, kept per head | |
-| One commit's or a draft review's tree | `O(changed)` payloads; counted from the change list past `GRAPHVER_DIFF_TREE_MAX_CHANGES` (20,000) | the review's merge is not run for it |
+| One commit's or a draft review's tree | a draft's and a revision of `main`'s: grouped from their kept change tree, values read only for the rows served; a draft's own commit, a fork's and a review's merge preview: `O(changed)` payloads; counted from the change list past `GRAPHVER_DIFF_TREE_MAX_CHANGES` (20,000) | the review's merge is not run for it |
 
 ## 4. The sharp edges (`O(graph)` hotspots)
 
