@@ -153,7 +153,7 @@ def _install_fresh(cfg) -> None:
         written = seed_reference_data(conn)
     log.info("Seeded reference data: %s", written)
 
-    command.stamp(cfg, "head")
+    command.stamp(cfg, "heads")
     log.info("Stamped to head")
 
 
@@ -231,11 +231,27 @@ def _rewind_foreign(cfg, to: str | None = None) -> list[str] | None:
     return was
 
 
+def _to_every_head(cfg, revision: str) -> str:
+    """``head`` as every head (``heads``): two PRs green on their own can each add a revision on
+    one parent, and merged the chain has two heads until a merge revision joins them. Alembic
+    refuses ``head`` then ("Multiple heads are present"), and every deploy would stop there;
+    ``heads`` brings a database to each of them. CI's single-head guard
+    (``tests/test_alembic_single_head.py``) says the merge revision is due."""
+    if revision not in ("head", "heads"):
+        return revision
+    heads = ScriptDirectory.from_config(cfg).get_heads()
+    if len(heads) > 1:
+        log.warning("The migration chain has %d heads: %s. Upgrading to each; a merge revision "
+                    "should join them.", len(heads), sorted(heads))
+    return "heads"
+
+
 @_with_advisory_lock
 def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = None) -> int:
     cfg = _alembic_config()
+    revision = _to_every_head(cfg, revision)
 
-    if fast_path and revision == "head":
+    if fast_path and revision == "heads":
         engine = create_engine(_sync_url(), pool_pre_ping=True)
         with engine.connect() as conn:
             virgin = _is_virgin(conn)
@@ -247,7 +263,7 @@ def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = N
     was = _rewind_foreign(cfg, rewind_to)
     log.info("Alembic upgrade -> %s", revision)
     command.upgrade(cfg, revision)
-    if was is not None and revision == "head":
+    if was is not None and revision == "heads":
         # Rewound on a guess: head is claimed only once the schema bears it out. Otherwise the
         # stamps go back as they were, so the next run fails as loudly rather than passing.
         gaps, _defaults, _extras = _compare_schema(create_engine(_sync_url(), pool_pre_ping=True))
@@ -479,7 +495,7 @@ def cmd_repair() -> int:
         "Marking %d revision(s) applied without running them: %s",
         len(skipped), skipped,
     )
-    command.stamp(cfg, "head", purge=bool(_foreign(script, sorted(applied))))
+    command.stamp(cfg, "heads", purge=bool(_foreign(script, sorted(applied))))
     log.info("Stamped to head: %s", sorted(expected))
     return 0
 

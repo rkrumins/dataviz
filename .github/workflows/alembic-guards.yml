@@ -55,6 +55,12 @@ jobs:
       - name: Every revision id fits the 32-char version_num column
         run: python -m pytest backend/tests/test_alembic_revision_lengths.py -q --noconftest
 
+      # Two PRs green on their own can each add a revision on one parent: merged, the chain has
+      # two heads, and until the upgrade Job learned to reach every head, every deploy of main
+      # stopped there (#674 and #675). A merge revision joins them; this says when one is due.
+      - name: The migration chain ends in one head
+        run: python -m pytest backend/tests/test_alembic_single_head.py -q --noconftest
+
       # 3. THE ADDITIVE MIRROR. `init_aggregation_db` and the alembic chain are
       #    two halves of one contract, and the comments in each said "mirrored"
       #    while nothing checked it. `observed_cell_ratio` shipped with a
