@@ -7707,18 +7707,34 @@ class GraphVersioningService:
                 ids = await self._changed_in_window(s, graph_id, main_id, prev["head"], head_seq)
                 window = await self._rewound(s, graph_id, main_id, ids, as_of_seq, head_seq)
                 return {**await asyncio.to_thread(_extended_patch, extend, window, ids), "since": since}
-            ids = await self._changed_in_window(s, graph_id, main_id, as_of_seq, head_seq)
-            patch = await self._rewound(s, graph_id, main_id, ids, as_of_seq, head_seq)
+            cap = config.REVISION_REWIND_MAX
+            own = await self._own_change_count(s, graph_id, main_id, as_of_seq, head_seq, cap)
+            pairs = await self._composed_window(s, graph_id, main_id, as_of_seq, head_seq, own) \
+                if own <= cap else None
+            if pairs is not None:
+                # Composed from each revision's kept changes: no window of history read again.
+                ids = sorted(eid for eid, _b, _a in pairs)
+                patch = await self._rewound(
+                    s, graph_id, main_id, ids, as_of_seq, head_seq,
+                    known=({e: b for e, b, _a in pairs if b is not None}, {e: a for e, _b, a in pairs if a is not None}))
+            else:
+                ids = sorted(await self._changed_in_window(s, graph_id, main_id, as_of_seq, head_seq))
+                patch = await self._rewound(s, graph_id, main_id, ids, as_of_seq, head_seq)
         return {**patch, "since": since}
 
     async def _rewound(self, s, graph_id: str, main_id: str, ids, at_seq: int,
-                       head_seq: int) -> Dict[str, list]:
+                       head_seq: int, known: Optional[Tuple[dict, dict]] = None) -> Dict[str, list]:
         """``ids`` as ``main`` held them at ``at_seq``, as a patch set over ``main`` at ``head_seq``
         (:func:`_fork_patch`): what main made since is removed, what it deleted is back, and what
         it changed is named — told from content hashes and version-row columns alone. A read loads
-        the values it serves: a revision's at ``at_seq``, a draft's at its branch point."""
-        ours = await self._hashes_at(s, graph_id, main_id, ids, at_seq)
-        theirs = await self._hashes_at(s, graph_id, main_id, ids, head_seq)
+        the values it serves: a revision's at ``at_seq``, a draft's at its branch point. ``known``:
+        each side's states already in hand (composed from kept revisions), as :meth:`_hashes_at`
+        gives them."""
+        if known is not None:
+            ours, theirs = known
+        else:
+            ours = await self._hashes_at(s, graph_id, main_id, ids, at_seq)
+            theirs = await self._hashes_at(s, graph_id, main_id, ids, head_seq)
         # Edge ends by urn, as main named them at each side's seq.
         our_urns = await self._current_urns(s, graph_id, main_id, _ends(ours), as_of_seq=at_seq,
                                             known=ours)

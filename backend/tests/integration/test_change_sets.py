@@ -3,7 +3,8 @@
 * **Composed, not read again:** every pair of revisions compared from the revisions' own kept
   changes lists exactly what reading the window's version rows directly does — counts, types,
   names (a removed entity's as it was), the order — with an entity changed and changed back, a
-  delete and a relationship among them; and composing reads no window of version rows.
+  delete and a relationship among them; the canvas's rewind to an old revision is the same too;
+  and composing reads no window of version rows.
 * **Kept for every process:** a list asked for again after this process forgot it is read back,
   not built.
 * **A draft's newer version replaces its older** in the store.
@@ -83,10 +84,11 @@ async def _run(monkeypatch) -> None:
     # Read directly: nothing kept, and nothing built ahead.
     monkeypatch.setattr(config, "REVISION_SETS_INLINE_FACTOR", -1.0)
     monkeypatch.setattr(service_mod.GraphVersioningService, "_keep_revisions_later", lambda *a, **k: None)
-    direct = {}
+    direct, rewound = {}, {}
     for lo, hi in pairs:
         await forget()
         direct[(lo, hi)] = await _listing(svc, gid, ChangeOrigin(from_seq=lo, to_seq=hi))
+        rewound[(lo, hi)] = await svc.revision_overlay_delta(graph_id=gid, as_of_seq=lo, head_seq=hi)
     # Revision 1 made the graph; 2 the seed, 3 renamed T1 and removed T2, 4 put T1 back.
     assert "T1" not in {e["entityId"] for e in direct[(2, 4)][1]}      # changed and changed back
     assert {e["entityId"]: e["status"] for e in direct[(2, 3)][1]}["T2"] == "removed"
@@ -107,6 +109,8 @@ async def _run(monkeypatch) -> None:
     for lo, hi in pairs:
         await forget()
         assert await _listing(svc, gid, ChangeOrigin(from_seq=lo, to_seq=hi)) == direct[(lo, hi)], (lo, hi)
+        # The canvas opening revision lo with main at hi: the same rewind, composed.
+        assert await svc.revision_overlay_delta(graph_id=gid, as_of_seq=lo, head_seq=hi) == rewound[(lo, hi)], (lo, hi)
     assert read_window == []                            # no window's version rows read again
 
     # Kept for every process: forgotten here, read back — not built.
