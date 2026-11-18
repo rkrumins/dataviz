@@ -15,11 +15,19 @@ newer release's before a rollback — upgrades with this one (``scripts/upgrade.
   - the other branch's columns are left as they are;
   - every build that migrates a database writes its chain into it (``alembic_lineage``), and a
     stamp only that lineage has — a merge revision made by hand, say — is placed exactly from it;
-  - a side branch that parted earlier than the guess (some of this build's migrations written
-    while it was open, and never run there): the schema left short names them, and the job places
-    it below them and upgrades again, by itself; ``--rewind-to`` still names a place outright;
+  - a stamp no lineage places is refused, with nothing changed, unless ``--recover`` (dev); then a
+    side branch that parted earlier than the guess (some of this build's migrations written while
+    it was open, and never run there) is placed below what the schema left short names, and
+    upgraded again; ``--rewind-to`` still names a place outright;
   - when the schema still isn't at head and nothing of ours run again would bring it, the stamps go
     back as they were and the job fails, so it can't pass on a later run either;
+  - a job stopped between placing a database and checking its schema leaves the placement open in
+    ``alembic_history``, and the next one checks it;
+  - each migration that runs is recorded with a checksum of its file, and a file changed since it
+    ran is reported once;
+  - a migration that gives up waiting for a lock is tried again, and the upgrade completes;
+  - on a shared database, a build recorded as not from main is refused unless there's nothing to
+    run, and one that records nothing is let through with a warning;
   - ``repair`` and ``current`` work on a database stamped with another build's revision.
 """
 import os
@@ -78,8 +86,11 @@ def test_a_recorded_stamp_is_placed_exactly():
     assert upgrade._parting_point(script, ["20261018_1200_change_check_secs"]) == "20261018_1100_gv_ps_retired"
     # One of ours stamped beside it that already ran past it stays the place.
     assert upgrade._placed(script, lines, ["20261116_1200_graph_watch"], [head]) == [head]
+    # Dev's, recorded by hand both ways it can have come about: what both ran.
+    assert upgrade._placed(script, lines, ["20261119_1200_merge_members_set"], []) == [
+        "20261118_1000_member_sets", "20261119_1100_gv_change_sets"]
     # Nothing records it: no exact place.
-    assert upgrade._placed(script, lines, ["20261119_1200_merge_members_set"], []) is None
+    assert upgrade._placed(script, lines, ["20261119_1250_nowhere"], []) is None
 
 
 def test_a_schema_left_short_places_it_below_the_migrations_that_make_what_is_missing():
@@ -133,10 +144,11 @@ def scratch_db():
         admin.close()
 
 
-def _job(url, *args):
+def _job(url, *args, env=None):
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     return subprocess.run([sys.executable, "-m", "backend.scripts.upgrade", *args], cwd=root,
-                          env={**os.environ, "MANAGEMENT_DB_URL": url}, capture_output=True, text=True, timeout=900)
+                          env={**os.environ, "MANAGEMENT_DB_URL": url, **(env or {})},
+                          capture_output=True, text=True, timeout=900)
 
 
 def _sql(url, statement):
@@ -179,14 +191,18 @@ def test_a_rewind_that_leaves_the_schema_short_puts_the_stamps_back(scratch_db):
     # only create_all makes, so nothing of ours run again brings it back.
     _sql(scratch_db, "ALTER TABLE announcements DROP COLUMN cta_text")
     _sql(scratch_db, "UPDATE alembic_version SET version_num = '29991231_2359_from_the_future'")
+    # No lineage places it: refused, with nothing changed.
     out = _job(scratch_db, "upgrade")
+    assert out.returncode == 1 and "Nothing was changed" in out.stderr, out.stderr[-3000:]
+    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [("29991231_2359_from_the_future",)]
+    out = _job(scratch_db, "upgrade", env={"SYNODIC_UPGRADE_RECOVER": "true"})
     assert out.returncode == 1, out.stderr[-3000:]
     assert "still not at head" in out.stderr
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [("29991231_2359_from_the_future",)]
 
 
 @E2E
-def test_a_branch_that_parted_earlier_than_the_guess_upgrades_by_itself(scratch_db):
+def test_a_branch_that_parted_earlier_than_the_guess_recovers(scratch_db):
     head = _script().get_current_head()
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-2000:]
@@ -194,7 +210,7 @@ def test_a_branch_that_parted_earlier_than_the_guess_upgrades_by_itself(scratch_
     # its own revision is dated after that one, so the guess takes review_rules as run.
     _sql(scratch_db, "ALTER TABLE workspaces DROP COLUMN review_threads_hold")
     _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261118_1200_elsewhere'")
-    out = _job(scratch_db, "upgrade")
+    out = _job(scratch_db, "upgrade", "--recover")
     assert out.returncode == 0, out.stderr[-3000:]
     assert "placing it at ['20261118_1000_gv_review_records'] and upgrading again" in out.stderr, out.stderr[-3000:]
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
@@ -239,7 +255,9 @@ def test_a_hand_made_merge_revision_upgrades(scratch_db):
     _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261119_1200_merge_members_set'")
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-3000:]
-    assert "Placing it at ['20261119_1100_gv_change_sets']" in out.stderr, out.stderr[-3000:]
+    # Recorded by hand both ways it can have come about: placed at what both ran, by default.
+    assert ("Placing it at ['20261118_1000_member_sets', '20261119_1100_gv_change_sets'], exactly"
+            in out.stderr), out.stderr[-3000:]
     assert "Running upgrade 20261119_1100_gv_change_sets -> 20261119_1200_gv_review_seen" in out.stderr
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
     assert _job(scratch_db, "check").returncode == 0
@@ -264,7 +282,7 @@ def test_a_database_keeps_the_lineage_of_every_build_that_migrated_it(scratch_db
     head = script.get_current_head()
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-2000:]
-    assert f"This build's migration chain ends at ['{head}']" in out.stderr
+    assert f"its migration chain ends at ['{head}']" in out.stderr
     rows = dict(_sql(scratch_db, "SELECT revision, parents FROM alembic_lineage"))
     assert len(rows) == len(list(script.walk_revisions()))
     assert rows[head] == ",".join(sorted(script.get_revision(head).down_revision))
@@ -282,3 +300,132 @@ def test_a_database_keeps_the_lineage_of_every_build_that_migrated_it(scratch_db
     assert "Running upgrade 20261119_1100_gv_change_sets -> 20261119_1200_gv_review_seen" in out.stderr
     assert "-> 20261118_1000_member_sets," not in out.stderr
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
+
+
+@E2E
+def test_a_placement_a_stopped_job_left_unchecked_is_checked_by_the_next(scratch_db):
+    head = _script().get_current_head()
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0, out.stderr[-2000:]
+    # A Job placed a database #670's build stamped, then was stopped before the check: the stamps
+    # are the place, the history says it's open — and a column the place can't explain is gone.
+    _sql(scratch_db, "ALTER TABLE announcements DROP COLUMN cta_text")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261113_1400_gv_ps_candidate'")
+    _sql(scratch_db, "INSERT INTO alembic_history (revision, kind, detail) VALUES ('20261116_1200_graph_watch', "
+                     "'placed', '{\"was\": [\"20261116_1200_graph_watch\"], "
+                     "\"stamps\": [\"20261113_1400_gv_ps_candidate\"], \"kept\": []}')")
+    out = _job(scratch_db, "upgrade")
+    assert "stopped before its schema was checked: this one checks it" in out.stderr, out.stderr[-3000:]
+    assert out.returncode == 1 and "still not at head" in out.stderr, out.stderr[-3000:]
+    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [("20261116_1200_graph_watch",)]
+    assert _sql(scratch_db, "SELECT kind FROM alembic_history ORDER BY id DESC LIMIT 1") == [("restored",)]
+
+    # With the column back, the place is borne out, and closed.
+    _sql(scratch_db, "ALTER TABLE announcements ADD COLUMN cta_text text")
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0, out.stderr[-3000:]
+    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
+    assert _sql(scratch_db, "SELECT kind FROM alembic_history WHERE kind IN ('placed', 'verified', "
+                            "'restored') ORDER BY id DESC LIMIT 1") == [("verified",)]
+
+
+@E2E
+def test_each_migration_is_recorded_with_a_checksum_and_a_changed_file_is_reported_once(scratch_db):
+    from backend.app.db import migration_records
+
+    script = _script()
+    head = script.get_current_head()
+    out = _job(scratch_db, "upgrade", "--no-fast-path")
+    assert out.returncode == 0, out.stderr[-2000:]
+    ran = dict(_sql(scratch_db, "SELECT revision, checksum FROM alembic_history WHERE kind = 'ran'"))
+    assert set(ran) == {r.revision for r in script.walk_revisions()}
+    assert ran[head] == migration_records.checksum(script.get_revision(head).path)
+
+    # It ran here as a file this build's isn't any more.
+    _sql(scratch_db, f"UPDATE alembic_history SET checksum = repeat('0', 64) WHERE revision = '{head}'")
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0 and f"Migration {head} has changed since it ran" in out.stderr, out.stderr[-3000:]
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0 and "has changed since it ran" not in out.stderr, out.stderr[-3000:]
+
+
+@E2E
+def test_a_migration_kept_waiting_for_a_lock_is_tried_again(scratch_db):
+    import threading
+    import time
+
+    import psycopg2
+
+    head = _script().get_current_head()
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0, out.stderr[-2000:]
+    # 20261118_1100_review_rules has to add its column back, so it needs workspaces' lock, and a
+    # read holds a lock on workspaces for longer than the migration waits (its own 5s).
+    _sql(scratch_db, "ALTER TABLE workspaces DROP COLUMN review_threads_hold")
+    _sql(scratch_db, "DELETE FROM alembic_version")
+    _sql(scratch_db, "INSERT INTO alembic_version VALUES ('20261118_1000_gv_review_records'), "
+                     "('20261118_1000_member_sets'), ('20261113_1400_gv_ps_candidate')")
+    reader = psycopg2.connect(scratch_db.replace("postgresql+asyncpg://", "postgresql://"))
+    reader.cursor().execute("SELECT count(*) FROM workspaces")              # holds ACCESS SHARE
+
+    def release():
+        time.sleep(8)
+        reader.rollback()
+        reader.close()
+
+    threading.Thread(target=release, daemon=True).start()
+    out = _job(scratch_db, "upgrade", env={"MIGRATION_LOCK_TIMEOUT": "1s"})
+    assert out.returncode == 0, out.stderr[-3000:]
+    assert "gave up waiting for a lock (try 1)" in out.stderr, out.stderr[-3000:]
+    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
+    assert _sql(scratch_db, "SELECT count(*) FROM information_schema.columns "
+                            "WHERE table_name = 'workspaces' AND column_name = 'review_threads_hold'") == [(1,)]
+
+
+@E2E
+def test_only_builds_from_main_migrate_a_shared_database(scratch_db):
+    script = _script()
+    head = script.get_current_head()
+    branch = {"SYNODIC_SHARED_DATABASE": "true", "SYNODIC_BUILD_SHA": "abc123",
+              "SYNODIC_BUILD_REF": "claude/some-feature", "SYNODIC_BUILD_ON_MAIN": "false"}
+    out = _job(scratch_db, "upgrade", env=branch)
+    assert out.returncode == 1 and "only builds from main migrate a shared database" in out.stderr, out.stderr[-2000:]
+    assert _sql(scratch_db, "SELECT count(*) FROM information_schema.tables WHERE table_name = 'users'") == [(0,)]
+
+    # Built the way images were before builds recorded it: let through, with a warning.
+    out = _job(scratch_db, "upgrade", "--shared-database")
+    assert out.returncode == 0 and "doesn't record the commit it was built from" in out.stderr, out.stderr[-2000:]
+    # At its head already: nothing to run, so nothing to refuse.
+    out = _job(scratch_db, "upgrade", env=branch)
+    assert out.returncode == 0 and "nothing to run" in out.stderr, out.stderr[-2000:]
+    # Behind its head, a build from main moves it on.
+    _sql(scratch_db, f"UPDATE alembic_version SET version_num = '{min(script.get_revision(head).down_revision)}'")
+    _sql(scratch_db, "INSERT INTO alembic_version SELECT '20261119_1300_merge_member_sets' "
+                     "WHERE NOT EXISTS (SELECT 1 FROM alembic_version WHERE version_num = '20261119_1300_merge_member_sets')")
+    out = _job(scratch_db, "upgrade", env={**branch, "SYNODIC_BUILD_ON_MAIN": "true", "SYNODIC_BUILD_REF": "main"})
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
+
+
+def test_the_job_waits_for_a_database_that_is_not_taking_connections_yet(monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    refused = OperationalError("connect", {}, Exception("connection refused\nis the server running?"))
+    tries, slept = [], []
+
+    class Starting:
+        def connect(self):
+            tries.append(1)
+            if len(tries) < 3:
+                raise refused
+            return "connected"
+
+    class Down:
+        def connect(self):
+            raise refused
+
+    monkeypatch.setattr(upgrade.time, "sleep", slept.append)
+    assert upgrade._connect(Starting(), wait_secs=60) == "connected"
+    assert len(tries) == 3 and slept == [1, 2]
+    with pytest.raises(OperationalError):
+        upgrade._connect(Down(), wait_secs=0)

@@ -15,7 +15,12 @@ gone, and its build deployed), then run from the repository root::
     python -m backend.scripts.other_lines
 
 ``--check`` exits 1, naming them, when the file lacks a revision git has, a set of parents git
-has for it, or the parents a branch's tip has for it (``schema.yml`` runs it on every pull request into ``main``).
+has for it, or the parents a branch's tip has for it.
+
+The file is frozen. A database migrated since each database kept its own lineage
+(``app/db/migration_records.py``) is placed from that, and only builds from ``main`` migrate a
+shared database. Regenerate it only to place a database an older build of a branch stamped.
+Entries marked ``by_hand`` (a stamp no commit has, worked out from an environment) are kept.
 """
 from __future__ import annotations
 
@@ -111,9 +116,12 @@ def collect() -> dict:
     for entry in lines.values():
         for k in ("parents", "on", "at_tips"):
             entry[k].sort()
-    return {"about": "Migration revisions this chain doesn't have, with their parents, for the "
-                     "upgrade Job to place a database another build stamped. Written by "
-                     "`python -m backend.scripts.other_lines`; never run.",
+    # Kept: what's known of a stamp no commit has (a merge made by hand in an environment).
+    previous = json.loads(OUT.read_text()) if OUT.exists() else {}
+    lines.update({rev: entry for rev, entry in previous.get("revisions", {}).items()
+                  if entry.get("by_hand") and rev not in lines and rev not in here})
+    return {"about": previous.get("about", "Migration revisions main's chain doesn't have, with "
+                                           "their parents. Never run."),
             "revisions": dict(sorted(lines.items()))}
 
 

@@ -188,6 +188,9 @@ services:
     command: ["upgrade"]
     environment:
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      # A database of your own, moved between branches: place a stamp no lineage knows by
+      # estimate, checked against the schema (docs/MIGRATIONS.md).
+      SYNODIC_UPGRADE_RECOVER: "true"
     depends_on:
       postgres:
         condition: service_healthy

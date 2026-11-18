@@ -1,5 +1,5 @@
 {
-  "about": "Migration revisions this chain doesn't have, with their parents, for the upgrade Job to place a database another build stamped. Written by `python -m backend.scripts.other_lines`; never run.",
+  "about": "Migration revisions main's chain doesn't have, with their parents: what databases other builds stamped before each database kept its own lineage (alembic_lineage), for the upgrade Job to place them exactly. Frozen: written by `python -m backend.scripts.other_lines`, which keeps the entries made by hand (`by_hand`). Never run.",
   "revisions": {
     "0002_revoked_refresh_jti": {
       "parents": [
@@ -660,6 +660,21 @@
           "20261118_1000_member_sets"
         ]
       ]
+    },
+    "20261119_1200_merge_members_set": {
+      "by_hand": "dev's alembic_version on 2026-11-18: a merge revision made in the environment, in no commit. Main's two heads from 13:29 to 14:12 that day were 20261119_1100_gv_change_sets and 20261118_1000_member_sets; a build that also had 20261119_1200_gv_review_seen could have joined that and member_sets instead. Both are recorded, so the Job takes only what both ran.",
+      "parents": [
+        [
+          "20261118_1000_member_sets",
+          "20261119_1100_gv_change_sets"
+        ],
+        [
+          "20261118_1000_member_sets",
+          "20261119_1200_gv_review_seen"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
     }
   }
 }

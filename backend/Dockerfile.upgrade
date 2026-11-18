@@ -25,6 +25,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 # from backend.app.db.models and backend.app.services.aggregation.models)
 COPY backend/ /app/backend/
 
+# Where this image was built from, for the upgrade Job to hold a shared database to main's
+# migrations (backend/scripts/upgrade.py). deploy/build-images.sh passes them; built any other
+# way they stay empty, and the Job treats the commit as unrecorded.
+ARG SYNODIC_BUILD_SHA=""
+ARG SYNODIC_BUILD_REF=""
+ARG SYNODIC_BUILD_ON_MAIN=""
+ENV SYNODIC_BUILD_SHA=$SYNODIC_BUILD_SHA \
+    SYNODIC_BUILD_REF=$SYNODIC_BUILD_REF \
+    SYNODIC_BUILD_ON_MAIN=$SYNODIC_BUILD_ON_MAIN
+LABEL org.opencontainers.image.revision=$SYNODIC_BUILD_SHA \
+      org.opencontainers.image.ref.name=$SYNODIC_BUILD_REF
+
 # Non-root user for security
 RUN addgroup --system synodic && adduser --system --ingroup synodic synodic
 USER synodic

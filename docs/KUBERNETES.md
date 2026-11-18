@@ -84,7 +84,11 @@ It builds `viz-service`, `aggregation-controlplane`, `aggregation-worker`, `stat
 has demo data built in.
 
 **Helm** — the chart pulls `<registry>/<org>/<name>:<tag>` and needs six images, including
-the schema-upgrade image `synodic-upgrade`. Build them from the repository root:
+the schema-upgrade image `synodic-upgrade`. Build them from the repository root with
+`REGISTRY=<registry> ORG=<org> TAG=<tag> sh deploy/build-images.sh` (it also builds `seed`), or
+the `build-images` workflow. Each records the commit it was built from, which the upgrade Job
+uses to hold a shared database to `main`'s migrations (`upgrade.sharedDatabase`, on by default;
+see [Database Migrations](/docs/migrations)). The same loop by hand, without that record:
 
 ```bash
 REGISTRY=<registry> ORG=<org> TAG=<tag>
@@ -104,8 +108,8 @@ done
 
 Add `seed:backend/Dockerfile.seed` to the list if you set `seed.enabled=true`.
 
-> **Note:** `deploy/build-images.sh` is out of date — it stops at an image for a retired
-> service and doesn't build `synodic-upgrade`. Use the loop above.
+> **Note:** An image built without the record (the loop above, or any built before it existed)
+> is let through to a shared database with a warning, not refused.
 
 ## Deploy with kustomize (GKE)
 
@@ -193,6 +197,9 @@ schema. It uses the `viz-service` image, which contains the upgrade command.
                    secretKeyRef:
                      name: db-credentials
                      key: MANAGEMENT_DB_URL
+               # Migrate only from an image built from main (Database Migrations explains it).
+               - name: SYNODIC_SHARED_DATABASE
+                 value: "true"
    ```
 
 2. On `dev` and `staging`, wait for the in-cluster Postgres first:

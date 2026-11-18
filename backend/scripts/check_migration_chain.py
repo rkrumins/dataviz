@@ -10,7 +10,11 @@ every place a database can be stamped at meaning what it meant. Against the base
   same way. Re-parenting a pushed revision means a new id: the old one stays in
   ``alembic/other_lines.json``, where the Job finds what a database stamped with it ran.
 
-The chain ending in one head is ``tests/test_alembic_single_head.py``'s. ``schema.yml`` runs this
+It warns, without failing, when a migration the base has is changed here: databases that ran it
+never run the change (the upgrade Job says so too, from the checksums it keeps). A change that
+matters belongs in a new migration; one that only guards DDL already applied, say, needn't be.
+
+The chain ending in one head is ``tests/test_alembic_single_head.py``'s. Guards (``alembic-guards.yml``) runs this
 on every pull request into ``main``, and on every push to it, from the merged checkout, with every
 branch fetched::
 
@@ -25,14 +29,25 @@ from pathlib import Path
 from backend.scripts.other_lines import VERSIONS, _revision_and_parents, every_version
 
 
-def chain(root: Path) -> dict[str, list[str]]:
-    """The revisions under ``root``'s ``backend/alembic/versions``, each with its parents."""
+def files(root: Path) -> dict[str, Path]:
+    """The revisions under ``root``'s ``backend/alembic/versions``, each with its file."""
     out = {}
     for path in (root / VERSIONS).glob("*.py"):
         found = _revision_and_parents(path.read_text(encoding="utf-8"))
         if found:
-            out[found[0]] = found[1]
+            out[found[0]] = path
     return out
+
+
+def chain(root: Path) -> dict[str, list[str]]:
+    """The revisions under ``root``'s ``backend/alembic/versions``, each with its parents."""
+    return {revision: _revision_and_parents(path.read_text(encoding="utf-8"))[1]
+            for revision, path in files(root).items()}
+
+
+def edited(base: dict[str, Path], here: dict[str, Path]) -> list[str]:
+    """The revisions both have whose files differ."""
+    return sorted(r for r in set(base) & set(here) if base[r].read_bytes() != here[r].read_bytes())
 
 
 def problems(base: dict, here: dict, pushed: dict) -> list[str]:
@@ -64,6 +79,9 @@ def main() -> int:
     args = parser.parse_args()
     here = chain(Path(__file__).resolve().parents[2])
     found = problems(chain(args.base), here, every_version())
+    for revision in edited(files(args.base), files(Path(__file__).resolve().parents[2])):
+        print(f"::warning title=Migration changed::{revision} is changed here. Databases that ran it "
+              "never run the change; if it matters, it belongs in a new migration.")
     for line in found:
         print(f"::error title=Migration chain::{line}")
     if found:

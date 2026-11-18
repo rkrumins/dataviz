@@ -46,7 +46,7 @@ from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 
-from backend.app.db import alembic_lineage
+from backend.app.db import migration_records
 from backend.app.db.engine import _alembic_config
 
 # 'SYNO' as int — namespace for ``pg_advisory_lock`` so multiple
@@ -66,6 +66,25 @@ def _sync_url() -> str:
     return os.environ["MANAGEMENT_DB_URL"].replace("+asyncpg", "+psycopg2")
 
 
+def _connect(engine, wait_secs: int = 120):
+    """A connection, waiting up to ``wait_secs`` for a database that isn't taking them yet:
+    starting, failing over, or behind a proxy sidecar still coming up. Compose runs the Job once,
+    so it can't count on a retry from outside."""
+    from sqlalchemy.exc import OperationalError
+
+    deadline, pause = time.monotonic() + wait_secs, 1
+    while True:
+        try:
+            return engine.connect()
+        except OperationalError as error:
+            if time.monotonic() + pause > deadline:
+                raise
+            log.warning("The database isn't taking connections yet (%s); trying again in %ds.",
+                        str(error.orig).strip().splitlines()[0], pause)
+            time.sleep(pause)
+            pause = min(pause * 2, 15)
+
+
 def _with_advisory_lock(fn):
     """Wrap a command so it executes while holding ``pg_advisory_lock``.
 
@@ -79,7 +98,7 @@ def _with_advisory_lock(fn):
         engine = create_engine(
             _sync_url(), isolation_level="AUTOCOMMIT", pool_pre_ping=True
         )
-        with engine.connect() as conn:
+        with _connect(engine) as conn:
             # The aggregation schema must exist before Alembic ``env.py``
             # imports models that reference it. The Helm db-init-job
             # already creates it; this keeps the script self-sufficient
@@ -287,19 +306,25 @@ def _set_stamps(conn, stamps: list[str]) -> None:
         conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": v})
 
 
-def _rewind_foreign(cfg, to: str | None = None) -> tuple[list[str], list[str], list[str]] | None:
+class Refused(Exception):
+    """The Job won't go on, and has changed nothing: the message says why, and what to do."""
+
+
+def _rewind_foreign(cfg, to: str | None = None,
+                    recover: bool = False) -> tuple[list[str], list[str], list[str]] | None:
     """Move a database another build migrated onto this build's chain, so it can upgrade in order.
 
     Its foreign stamps become the last revisions of this chain it ran, placed exactly from the
     lineage the database keeps (``app/db/alembic_lineage.py``: every build since writes its chain
     there) or other lines of work recorded (``alembic/other_lines.json``, :func:`_placed`); the
     upgrade then runs only this build's migrations it lacks, in chain order, and none of the other
-    line's. A stamp nothing records falls back to where the chains most likely parted
-    (:func:`_parting_point`); this build's migrations after it run, and any the database had run
-    already change nothing — every migration is safe to run twice (``schema.yml``'s chain replay
-    holds them to it). The other build's tables and columns stay, for when its migrations arrive
-    with it. ``to``: the revision both chains share, named by an operator who knows it, in place of
-    the record and the guess. Returns the stamps as they were (to put back if the upgrade doesn't
+    line's. The other build's tables and columns stay, for when its migrations arrive with it.
+
+    A stamp nothing records is refused (:class:`Refused`), with nothing changed, unless
+    ``recover``: then it goes where the chains most likely parted (:func:`_parting_point`), and this
+    build's migrations after it run, any the database had run already changing nothing — every
+    migration is safe to run twice (``schema.yml``'s chain replay holds them to it). ``to``: the
+    revision both chains share, named by an operator who knows it, in place of the lineage. Returns the stamps as they were (to put back if the upgrade doesn't
     bring the schema to head), as placed, and those of ours it kept; None when nothing was
     foreign."""
     script = ScriptDirectory.from_config(cfg)
@@ -313,7 +338,7 @@ def _rewind_foreign(cfg, to: str | None = None) -> tuple[list[str], list[str], l
                             "nothing to rewind", to)
             return None
         kept = [v for v in was if v not in foreign]
-        own = alembic_lineage.read(conn)
+        own = migration_records.read_chain(conn)
         placed = None if to is not None else _placed(script, {**_other_lines(cfg), **own}, foreign, kept)
         if placed is not None:
             stamps, how = placed, ("exactly, from this database's own lineage" if all(f in own for f in foreign)
@@ -322,8 +347,16 @@ def _rewind_foreign(cfg, to: str | None = None) -> tuple[list[str], list[str], l
             if to is not None:
                 script.get_revision(to)                 # one of ours, or Alembic says it isn't
                 how = "as named (--rewind-to)"
+            elif recover:
+                to, how = _parting_point(script, foreign), "where the two most likely parted (--recover)"
             else:
-                to, how = _parting_point(script, foreign), "where the two most likely parted (no lineage recorded)"
+                raise Refused(
+                    f"alembic_version names {foreign}, which this build doesn't have, and no lineage "
+                    "(this database's own, or alembic/other_lines.json) says what it ran. Nothing "
+                    "was changed. Name the last revision of this build's that it ran: "
+                    "`upgrade --rewind-to <revision>`; or let this build estimate it, checked "
+                    "against the schema: `upgrade --recover` (Helm: upgrade.recoverForeignStamps). "
+                    f"Its estimate would be {_parting_point(script, foreign)}.")
             if to is None:
                 raise RuntimeError(f"alembic_version names {foreign}, which this build doesn't have, and "
                                    "none of this build's revisions is older: deploy the build that has them")
@@ -336,7 +369,31 @@ def _rewind_foreign(cfg, to: str | None = None) -> tuple[list[str], list[str], l
             "build's migrations it lacks run in order, and the other build's tables and columns are "
             "left as they are.", foreign, stamps, how)
         _set_stamps(conn, stamps)
+        # With the stamps, in one transaction: a Job stopped before the schema is checked leaves
+        # this open, and the next one checks it.
+        migration_records.ensure(conn)
+        migration_records.record_step(conn, foreign[0], "placed", None,
+                                      {"was": was, "stamps": stamps, "kept": kept})
     return was, stamps, kept
+
+
+def _upgrade(cfg, revision: str) -> None:
+    """``alembic upgrade``, again when a migration gives up waiting for a lock (``lock_timeout``,
+    set in ``alembic/env.py``): that one rolled back, the ones before it stand, and the traffic it
+    would have held up got through. Six tries, 5s to 60s apart; any other error is raised."""
+    from psycopg2.errors import LockNotAvailable
+    from sqlalchemy.exc import OperationalError
+
+    for attempt, pause in enumerate((5, 10, 20, 40, 60, None), start=1):
+        try:
+            command.upgrade(cfg, revision)
+            return
+        except OperationalError as error:
+            if not isinstance(error.orig, LockNotAvailable) or pause is None:
+                raise
+            log.warning("A migration gave up waiting for a lock (try %d): %s. Trying again in %ds.",
+                        attempt, str(error.orig).strip().splitlines()[0], pause)
+            time.sleep(pause)
 
 
 def _to_every_head(cfg, revision: str) -> str:
@@ -354,16 +411,51 @@ def _to_every_head(cfg, revision: str) -> str:
     return "heads"
 
 
+def _built_from() -> tuple[str, bool | None]:
+    """Where this upgrade image was built from, and whether that commit is on ``main``: True, False,
+    or None when the image doesn't say — ``deploy/build-images.sh`` records it
+    (``SYNODIC_BUILD_*``, baked in by ``Dockerfile.upgrade``); an image built any other way,
+    every one built before it did, doesn't."""
+    sha, ref = os.getenv("SYNODIC_BUILD_SHA"), os.getenv("SYNODIC_BUILD_REF")
+    if not sha:
+        return "an unrecorded commit", None
+    return f"{ref or '?'} at {sha}", os.getenv("SYNODIC_BUILD_ON_MAIN") == "true"
+
+
 @_with_advisory_lock
-def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = None) -> int:
+def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = None,
+                recover: bool = False, shared_database: bool = False) -> int:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
+    where, on_main = _built_from()
     # First, so an image older than expected is plain from its first lines.
-    log.info("This build's migration chain ends at %s", sorted(script.get_heads()))
+    log.info("This build: %s (%s); its migration chain ends at %s", where,
+             {True: "on main", False: "not on main", None: "on main or not, unrecorded"}[on_main],
+             sorted(script.get_heads()))
     revision = _to_every_head(cfg, revision)
+    engine = create_engine(_sync_url(), pool_pre_ping=True)
+
+    if shared_database and on_main is None:
+        # Every image built before builds recorded it: refusing would stop deployments that work.
+        log.warning("This database is shared (--shared-database), and this image doesn't record "
+                    "the commit it was built from, so it can't be held to main's: build it with "
+                    "deploy/build-images.sh.")
+    if shared_database and on_main is False:
+        # Only main's migrations reach a database others use: a branch's would stamp it with
+        # revisions main may never have, as main's builds would then find.
+        with engine.connect() as conn:
+            stamps = _stamps(conn)
+        if stamps != sorted(script.get_heads()):
+            log.error("This database is shared (--shared-database), and this build is from %s, not "
+                      "a commit on main: only builds from main migrate a shared database. Nothing "
+                      "was changed. Deploy a build from main (deploy/build-images.sh records where "
+                      "an image was built from), or give this build a database of its own.", where)
+            return 1
+        log.info("Shared database, a build not from main: the database is at its head already, "
+                 "so there is nothing to run.")
+        return 0
 
     if fast_path and revision == "heads":
-        engine = create_engine(_sync_url(), pool_pre_ping=True)
         with engine.connect() as conn:
             virgin = _is_virgin(conn)
         if virgin:
@@ -371,14 +463,32 @@ def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = N
             log.info("Upgrade complete (fresh install)")
             return 0
 
-    placed = _rewind_foreign(cfg, rewind_to)
+    with engine.begin() as conn:
+        for changed, path in migration_records.changed(conn, script):
+            # It ran here before its file changed: the change won't reach this database.
+            log.warning("Migration %s has changed since it ran on this database; the change won't "
+                        "reach it. A change that matters belongs in a new migration.", changed)
+            migration_records.record_step(conn, changed, "changed", path)
+
+    with engine.connect() as conn:
+        left_open, foreign_now = migration_records.open_placement(conn), _foreign(script, _stamps(conn))
+    if left_open is not None and not foreign_now:
+        placed = left_open["was"], left_open["stamps"], left_open["kept"]
+        log.warning("An upgrade placed this database at %s (it was stamped %s) and stopped before its "
+                    "schema was checked: this one checks it.", placed[1], placed[0])
+    else:
+        try:
+            placed = _rewind_foreign(cfg, rewind_to, recover)
+        except Refused as refused:
+            log.error("%s", refused)
+            return 1
     log.info("Alembic upgrade -> %s", revision)
-    command.upgrade(cfg, revision)
+    _upgrade(cfg, revision)
     if placed is not None and revision == "heads":
         # Placed by this build: head is claimed only once the schema bears it out.
         was, stamps, kept = placed
         gaps, _defaults, _extras = _compare_schema(create_engine(_sync_url(), pool_pre_ping=True))
-        lower = _below_gaps(script, stamps, kept, gaps) if gaps and rewind_to is None else None
+        lower = _below_gaps(script, stamps, kept, gaps) if gaps and recover and rewind_to is None else None
         if lower is not None:
             # Migrations of ours it was taken to have run make what's missing: it never ran them.
             # Placed below them, they run (as does what follows them: each is safe to run twice).
@@ -387,18 +497,22 @@ def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = N
                         "upgrading again.", stamps, gaps[:10], lower)
             with create_engine(_sync_url(), pool_pre_ping=True).begin() as conn:
                 _set_stamps(conn, lower)
-            command.upgrade(cfg, revision)
+            _upgrade(cfg, revision)
             gaps, _defaults, _extras = _compare_schema(create_engine(_sync_url(), pool_pre_ping=True))
         # Still short: the stamps go back as they were, so the next run fails as loudly.
         if gaps:
             with create_engine(_sync_url(), pool_pre_ping=True).begin() as conn:
                 _set_stamps(conn, was)
+                migration_records.record_step(conn, was[0], "restored", None, {"gaps": gaps[:10]})
             log.error(
-                "After rewinding, the schema is still not at head — %d mismatch(es), first 10: %s. "
-                "The two chains parted earlier than this build could tell; alembic_version is back "
-                "to %s. Deploy a build with both chains (a merge revision), or name the last "
-                "revision both share: `upgrade --rewind-to <revision>`.", len(gaps), gaps[:10], was)
+                "Placed at %s, the schema is still not at head — %d mismatch(es), first 10: %s. "
+                "alembic_version is back to %s. Name the last revision of this build's the database "
+                "ran: `upgrade --rewind-to <revision>`%s.", stamps, len(gaps), gaps[:10], was,
+                "" if recover or rewind_to else "; or let this build correct the place from what's "
+                "missing: `upgrade --recover`")
             return 1
+        with create_engine(_sync_url(), pool_pre_ping=True).begin() as conn:
+            migration_records.record_step(conn, min(script.get_heads()), "verified", None)
     log.info("Upgrade complete")
     return 0
 
@@ -625,7 +739,7 @@ def cmd_repair() -> int:
         # Alembic's own stamp starts from the stamps it reads, and can't from these.
         with engine.begin() as conn:
             _set_stamps(conn, sorted(expected))
-            alembic_lineage.record(conn, script)
+            migration_records.record_chain(conn, script)
     else:
         command.stamp(cfg, "heads")
     log.info("Stamped to head: %s", sorted(expected))
@@ -723,8 +837,21 @@ def main() -> int:
         "--rewind-to",
         metavar="REV",
         help="A database another build moved on (alembic_version names revisions this build "
-             "doesn't have): rewind it to REV, the last revision both builds share, instead of "
-             "the revision this build would guess",
+             "doesn't have): place it at REV, the last revision of this build's it ran",
+    )
+    up.add_argument(
+        "--recover",
+        action="store_true",
+        help="A database another build moved on, which no lineage places: estimate where it "
+             "stands, and correct the estimate from what the schema lacks. For dev and local "
+             "databases; production fails instead, with nothing changed. "
+             "Or SYNODIC_UPGRADE_RECOVER=true",
+    )
+    up.add_argument(
+        "--shared-database",
+        action="store_true",
+        help="Others use this database: migrate it only from a build of a commit on main. "
+             "Or SYNODIC_SHARED_DATABASE=true",
     )
 
     down = sub.add_parser("downgrade", help="Run alembic downgrade")
@@ -757,7 +884,11 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.cmd == "upgrade":
-        return cmd_upgrade(args.revision, fast_path=not args.no_fast_path, rewind_to=args.rewind_to)
+        # Also as variables: a chart newer than its image passes them without breaking it.
+        return cmd_upgrade(args.revision, fast_path=not args.no_fast_path, rewind_to=args.rewind_to,
+                           recover=args.recover or os.getenv("SYNODIC_UPGRADE_RECOVER") == "true",
+                           shared_database=args.shared_database
+                           or os.getenv("SYNODIC_SHARED_DATABASE") == "true")
     if args.cmd == "downgrade":
         return cmd_downgrade(args.revision)
     if args.cmd == "repair":

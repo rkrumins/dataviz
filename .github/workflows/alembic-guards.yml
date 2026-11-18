@@ -19,7 +19,7 @@ name: Guards
 #    reference operators configure deployments from cannot drift from the code.
 #
 # 4. MERGE CHAIN. `merge-chain` fails a merge that would leave a database stamped somewhere
-#    upgrading out of order, or a lineage record that doesn't know another branch's revisions.
+#    upgrading out of order.
 #
 # All four jobs run on EVERY pull request. They used to be filtered to `backend/alembic/**`, which
 # reads as thrift and behaves as a hole: these guards exist precisely to catch the change made
@@ -83,8 +83,8 @@ jobs:
   # A database stamped at a revision is taken to have run everything below it. A merge that drops
   # or re-parents a revision main has, or re-parents one a branch already pushed (and may have
   # deployed), leaves databases stamped there with migrations skipped or stranded — #556's
-  # `20260815_1200_announce_poll_60s` was pushed with seven different parents. And a database a
-  # branch's build moved on is placed exactly only while the lineage record knows that branch.
+  # `20260815_1200_announce_poll_60s` was pushed with seven different parents. A migration main
+  # has whose file this changes is flagged too: databases that ran it never run the change.
   merge-chain:
     name: A merge keeps every database's place in the migration chain
     runs-on: ubuntu-latest
@@ -107,12 +107,6 @@ jobs:
         working-directory: pr
         run: python -m backend.scripts.check_migration_chain ../base
 
-      # On pull requests only: a branch pushed since is the next pull request's to record, not a
-      # reason for main to go red after a merge.
-      - name: The lineage record knows every other branch's revisions
-        if: github.event_name == 'pull_request'
-        working-directory: pr
-        run: python -m backend.scripts.other_lines --check
 
   feature-wiring:
     name: Every feature flag is really wired
