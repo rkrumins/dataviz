@@ -37,8 +37,9 @@ versioned and unversioned graphs alike.
 - **Search inside a list view of more than 5,000 members** reads its members in bands from
   `view_members` instead of refusing (FalkorDB).
 - **A view that follows another** (`layout.kind: "follow"`): a list view that is a subset of the
-  view it follows, served that view's layers live and placed as it places them. **Save as view…**
-  on a trace chooses it.
+  view it follows, served that view's layers live and placed as it places them, with members people
+  move or Always include kept on top; searched by its layers; **Waiting to update** when the view
+  it follows changes how it places things. **Save as view…** on a trace chooses it.
 - **Where each entity sits, in every export**: `parentUrn`, `parentName`, `parentType`, `path`
   and `pathUrns` in the dock's CSV and JSON, saved traces and member-set downloads.
 - **List views' members nest in their containers** (`inLayer` on the member feed).
@@ -72,8 +73,8 @@ versioned and unversioned graphs alike.
 - The canvas's own Narrow still starts from a search's first 5,000 matches; a view saved from it
   starts from every match. A layer lists 5,000 members on the canvas.
 - Saved traces stay in one browser; member sets are not on the API-key surface yet.
-- A view that follows another offers no Always include, and a layer filter searched inside it
-  matches nothing.
+- A view that follows another re-places its members on its next open after the view it follows
+  changes how it places things, and can't have members moved in it on a draft yet.
 
 ---
 

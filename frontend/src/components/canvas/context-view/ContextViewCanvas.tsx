@@ -8221,8 +8221,9 @@ export function ContextViewCanvas({
                 onSearchInLayer={subsetView ? searchInLayer : undefined}
                 onScroll={handleLayerScroll}
                 // A subset of a search's matches is placed by the search alone; in a view that
-                // follows another, people may put a member in another of its layers.
-                onAssignToLayer={subsetView ? undefined : handleAssignToLayer}
+                // follows another, people may put a member in another of its layers — on the
+                // published view: a draft's layout of one keeps no placements yet.
+                onAssignToLayer={subsetView || (followsBase && isDraft) ? undefined : handleAssignToLayer}
                 // Draft-only layer management (create lives in AddLayerColumn; these are per-column).
                 // A subset that follows its base takes its layers from there.
                 onRenameLayer={isDraft && !subsetFollows ? renameLayer : undefined}

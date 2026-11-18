@@ -1015,8 +1015,12 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
      member is placed where that view places it. `GET /views/{id}/membership` names it in
      `follows: {viewId, name, available}` (`name` is null for a reader who can't open it), and
      `GET /views/{sourceViewId}/subsets` lists it with `"layout": "inherit"`. A layout write that
-     sends layers to it answers `422`. If that view is deleted, the view keeps its members and
-     its status is `source_missing` with `detail.reason: base_missing`. The view it follows
+     sends layers to it answers `422`; to place members in it, send
+     `PUT /views/{id}/layout` with `"layers": []` and the `assignments`, each naming a layer it is
+     served (`other-matches` included), and `include[].layerId` likewise. When `sourceViewId`
+     changes how it places entities, the view's status is `pending` with
+     `detail.reason: base_changed` until it is next opened. If that view is deleted, the view keeps
+     its members and its status is `source_missing` with `detail.reason: base_missing`. The view it follows
      must be an ordinary one: `422`, `reason: base_is_subset` for a subset (or a view that
      follows one) — follow its base instead — and `reason: base_is_list` for a view made from
      a query;

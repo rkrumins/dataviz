@@ -180,8 +180,21 @@ gains a kind that borrows the subset's machinery:
   things (a type moved, a rule, a layer removed) places the members again on the next open.
 * **It is a subset.** `subset_of` is set; it is listed under the base's **Subsets** (now shown when
   either `searchViewsEnabled` or `viewMembershipEnabled` is on); its chip reads *Subset of X ·
-  Auto-updating · N*. Nothing in it is placed by hand: assigning, reordering, groups, layer edits
-  and Always include are not offered, and a layout write carrying layers answers 422.
+  Auto-updating · N*. Layer edits, groups and a custom order are not offered, and a layout write
+  carrying layers answers 422.
+* **People place members on top of it.** A move to another served layer, and Always include, are
+  kept on the view (`membership.overrides`, its own assignments) and win over the followed view's
+  placement on every run. The client saves them with `layers: []`; entries are checked against
+  the layers the view is served (`other-matches` included), and one whose layer the followed view
+  deletes is placed, and served, in the fallback layer. Not yet on a draft (its overlay is still
+  checked against stored layers), so the canvas offers no moves there.
+* **In-view search reads its layers.** A layer filter resolves against the followed view's
+  placement, opened to every entity, with the view's own entries and moves over it; "Other matches"
+  is its fallback layer. The scope hash changes when the followed view's placement does.
+* **It says when it is out of date.** A published layout write that changes a view's placement
+  digest (layout save, draft promote, staged import, version restore, import over it) marks its
+  follow views `pending` (`{"reason": "base_changed"}`) in one statement — not snapshots, not one a
+  run holds. A rename marks nothing. The next open re-places them.
 * **Refusals.** A subset (or a view that follows one) can't be followed — follow its base:
   `422 base_is_subset`. A view made from a query can't be: `422 base_is_list`. Saving from inside a
   subset follows the subset's base, which also fixes "This view has no layers to copy".
@@ -276,10 +289,11 @@ a view and snapshots of up to 500,000 rows.
 * **URN seeds stay at 5,000 per spec** (a trace has at most 25); only query seeds are unlimited.
 * **Member sets are not on the API-key surface yet**, so scripts using an API key can't reach them.
 * **Edges inside a container seed** are kept only when both ends are members.
-* **A view that follows another** can't keep an entity with **Always include** (it has no layers of
-  its own to keep it in), and a layer filter in a search inside it matches nothing. A change to the
-  followed view's layers reaches its members on the next open; until then a member of a deleted
-  layer isn't shown. Following a view made from a query is refused for now.
+* **A view that follows another** re-places its members on its next open after the followed view
+  changes how it places things (it says **Waiting to update** meanwhile). Members can't be moved in
+  it on a draft yet. A layer filter in it counts the followed view's hand placements and its own
+  moves towards the 1,000 a layer filter follows. Following a view made from a query is refused
+  for now.
 * **`in_layer` in a stages layout** depends on which members share a page, so it can differ by
   page size there (any other layout gives the same rows at any page size).
 * `tests/test_data_source_transfers.py::test_a_move_refused_for_a_job_names_every_kind_of_job_in_words`

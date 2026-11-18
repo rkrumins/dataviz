@@ -328,14 +328,22 @@ Auto-updating · 6*, and the chip says **Follows Sales overview**.
   this view, so the layer menus offer no renaming, adding or deleting.
 - **Each member is where that view places it**, including what someone placed
   there by hand: an entity moved to another layer, or one whose contents go with
-  it, sits there in this view too. When that view changes how it
-  places things — a type moved to another layer, a rule changed, a layer
-  removed — the members are placed again the next time this view is opened.
-  What that view places nowhere is in **Other matches**, unless it has a layer
-  of its own for that.
-- **Nothing in it is placed by hand**: no moving to another layer, grouping or
-  reordering, and no **Always include** (there are no layers of its own to keep
-  an entity in). **Keep out of this view** still works.
+  it, sits there in this view too. What that view places nowhere is in
+  **Other matches**, unless it has a layer of its own for that.
+- **You can place members yourself, on top of that.** If you can edit the view,
+  drag a member to another of its layers, or right-click one → **Always
+  include**; **Keep out of this view** works too. What you place stays through
+  every update and every change to the view it follows. If that view deletes the
+  layer you put something in, it moves to **Other matches**. Adding entities,
+  groups and a custom order aren't offered, and on a draft members can't be
+  moved yet.
+- **When that view changes how it places things** — a type moved to another
+  layer, a rule changed, a layer removed — the chip says **Waiting to update**:
+  *The view it follows changed where it places things.* The members move to
+  match the next time the view is opened, or choose **Refresh now**. A rename
+  shows straight away and needs no update.
+- **Search in it** by layer: a layer filter finds what is drawn in that layer —
+  where the view it follows places it, or where you put it.
 - **Show where they sit** (in **Display**) draws each member inside the
   containers drawn in its layer.
 - It is listed under **Subsets** on the view it follows, beside subset views
