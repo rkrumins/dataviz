@@ -16,7 +16,7 @@ import { Disclosure } from '@/components/ui/Disclosure'
 import { ShortcutsHint } from '@/components/ui/ShortcutsHint'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import type { ChangeListEntry, ChangeListRow, ReviewChangeRow } from '@/services/versioningApiService'
-import { useChangeEntry } from '@/features/versioning/hooks/useVersioning'
+import { useChangeEntry, useMarkReviewSeen } from '@/features/versioning/hooks/useVersioning'
 import { UpdateFromParentButton } from '@/features/versioning/components/UpdateFromParentButton'
 import { ConflictResolver } from '../components/ConflictResolver'
 import { IncomingChangesSheet } from '@/features/versioning/components/IncomingChangesSheet'
@@ -83,6 +83,11 @@ export function ReviewPage({ wsId, prId }: { wsId: string; prId: string }) {
   const viewedCount = viewed.count(order.rows)
   const threadCounts = useReviewCommentCounts(wsId, prId).data
   const openThreads = threadCounts?.open ?? 0
+  // Looking at a review reads what others did on it (the inbox's unread, and its notices): when it
+  // opens, and again whenever it changes while open.
+  const markSeen = useMarkReviewSeen(wsId).mutate
+  const activity = pr ? `${pr.updatedAt}|${pr.lastActivityAt ?? ''}|${pr.review?.threads.open ?? ''}` : null
+  useEffect(() => { if (activity) markSeen(prId) }, [prId, activity, markSeen])
   const flow = useDecisionFlow(wsId, prId, pr?.headCommitId)
   const [asking, setAsking] = useState(false)
   const [picked, setPicked] = useState<ChangeListRow | null>(null)

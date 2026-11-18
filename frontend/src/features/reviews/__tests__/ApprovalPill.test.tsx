@@ -19,10 +19,10 @@ describe('ApprovalPill', () => {
   })
 
   it('counts everyone asked under the built-in rule, and reads done once satisfied', () => {
-    const { container } = render(<ApprovalPill pr={pr({ reviewers: ['a', 'b'], approvedBy: ['a', 'b'],
+    render(<ApprovalPill pr={pr({ reviewers: ['a', 'b'], approvedBy: ['a', 'b'],
       review: review(0, { required: 2, have: 2, satisfied: true }) })} />)
     expect(screen.getByText('2/2')).toBeInTheDocument()
-    expect(container.firstElementChild?.className).toMatch(/emerald/)
+    expect(screen.getByText('2/2').className).toMatch(/emerald/)
   })
 
   it('falls back to the reviewers approved, and hides when nothing is needed', () => {

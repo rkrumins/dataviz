@@ -177,6 +177,18 @@ def test_sidebar_workspace_legs_are_enforced():
         )
 
 
+def test_sidebar_reviews_is_the_review_inbox_gate():
+    """Reviews shows for whoever the review inbox it opens (and its badge
+    counts) would serve — no one is shown a section that then refuses them."""
+    section = get_catalogue().sidebar["reviews"]
+    assert section.spec.kind == "workspaceAny"
+    enforced = _perms_under(("/review-inbox",))
+    assert section.spec.perm in enforced, (
+        f"Sidebar 'reviews' needs {section.spec.perm!r}, but the review inbox "
+        f"enforces {sorted(enforced)}."
+    )
+
+
 def test_every_admin_section_is_reachable_through_the_parent_gate():
     """``/admin`` is a nested route: its sidebar spec is checked before any
     section's. A section whose permission the parent does not accept is
