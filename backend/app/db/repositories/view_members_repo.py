@@ -16,7 +16,8 @@ inside Postgres's in production.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+import asyncio
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.dialects import postgresql, sqlite
@@ -115,12 +116,16 @@ async def page(session: AsyncSession, view_id: str, epoch: int, layer_id: str,
     return list((await session.execute(query.order_by(_ROWS.c.sort_key, _ROWS.c.urn).limit(limit))).all())
 
 
-async def urns(session: AsyncSession, view_id: str, epoch: Optional[int], limit: Optional[int] = None) -> List[str]:
-    """An epoch's member URNs, in the order they were found."""
+async def urns(session: AsyncSession, view_id: str, epoch: Optional[int], limit: Optional[int] = None,
+               *, whole: bool = False) -> List[str]:
+    """An epoch's member URNs, in the order they were found — only those kept whole, with
+    ``whole``."""
     if epoch is None:
         return []
     query = (select(_ROWS.c.urn).where(_ROWS.c.view_id == view_id, _ROWS.c.epoch == epoch)
              .order_by(_ROWS.c.ord))
+    if whole:
+        query = query.where(_ROWS.c.whole.is_(True))
     if limit is not None:
         query = query.limit(limit)
     return list((await session.execute(query)).scalars().all())
@@ -259,6 +264,50 @@ async def members_epoch(session: AsyncSession, view_id: str) -> Optional[int]:
     return (await session.execute(
         select(ViewMembershipStateORM.members_epoch).where(ViewMembershipStateORM.view_id == view_id)
     )).scalar_one_or_none()
+
+
+#: URNs asked about per statement when a search checks which are members.
+HOLDS_BATCH = 1_000
+
+
+class SearchMembers:
+    """One epoch's members as a search reads them when they are too many to list as its
+    roots (``deep_search.ViewMembers``). A search runs its units side by side and a
+    database session answers one statement at a time, so its reads take turns."""
+
+    def __init__(self, session: AsyncSession, view_id: str, epoch: int, count: int) -> None:
+        self._session, self._view_id, self._epoch, self.count = session, view_id, epoch, count
+        self._turn = asyncio.Lock()
+
+    def _searched(self) -> tuple:
+        """The members a search reads itself: a whole one is a root, and one inside a
+        whole one (``covered``) is read under it."""
+        return (_ROWS.c.view_id == self._view_id, _ROWS.c.epoch == self._epoch,
+                _ROWS.c.whole.is_(False), _ROWS.c.covered.is_(False))
+
+    async def counts(self) -> Dict[str, Tuple[int, int]]:
+        async with self._turn:
+            rows = (await self._session.execute(
+                select(_ROWS.c.label, func.count(), func.max(_ROWS.c.label_ord))
+                .where(*self._searched()).group_by(_ROWS.c.label))).all()
+        return {label: (int(n), int(last) + 1) for label, n, last in rows}
+
+    async def read(self, label: str, lo: int, hi: int) -> List[str]:
+        """One index range (``idx_vm_label``)."""
+        async with self._turn:
+            return list((await self._session.execute(
+                select(_ROWS.c.urn).where(*self._searched(), _ROWS.c.label == label,
+                                          _ROWS.c.label_ord >= lo, _ROWS.c.label_ord < hi)
+                .order_by(_ROWS.c.label_ord))).scalars().all())
+
+    async def holds(self, urns: Sequence[str]) -> Set[str]:
+        found: Set[str] = set()
+        async with self._turn:
+            for chunk in _chunks(sorted(set(urns)), min(HOLDS_BATCH, _params(self._session) - 2)):
+                found.update((await self._session.execute(
+                    select(_ROWS.c.urn).where(_ROWS.c.view_id == self._view_id, _ROWS.c.epoch == self._epoch,
+                                              _ROWS.c.urn.in_(list(chunk))))).scalars().all())
+        return found
 
 
 async def rehome_view(session: AsyncSession, view_id: str, config: dict) -> int:

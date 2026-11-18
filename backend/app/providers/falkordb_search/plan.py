@@ -18,6 +18,10 @@ are in docs/search-engine/S0_FINDINGS.md.
 ``ids``     Entities by ID: those a lineage relationship's walk out from
             the entities it names reaches (``reach_plan``), already checked
             against the scope.
+``members`` One label, a band of a view's members (``label_ord`` from ``lo``
+            to ``hi``) when they are too many to list as its roots: their
+            URNs are read where the view keeps them as the unit runs, and
+            looked up as ``visible``'s are (``_member_plan``).
 
 A node carrying two labels in scope is read under the first only
 (``NOT n:Earlier``), so it is counted once.
@@ -84,13 +88,16 @@ REACH_MAX = 500_000
 REACH_ANCHORS_MAX = 200_000
 #: Anchors one walk statement starts from, so each stays short.
 REACH_STEP = 20_000
+#: Members a ``members`` unit reads: one range of ``label_ord`` in the database,
+#: one ``n.urn IN`` list in the graph — a lookup each in the label's urn index.
+MEMBER_CHUNK = 2_000
 
 Run = Callable[[str, Dict[str, Any]], Awaitable[Any]]
 
 
 @dataclass
 class Unit:
-    kind: str                          # "range" | "visible" | "walk" | "ids"
+    kind: str                          # "range" | "visible" | "walk" | "ids" | "members"
     label: Optional[str] = None
     lo: Optional[int] = None           # None = from the first ID
     hi: Optional[int] = None           # None = open-ended
@@ -111,8 +118,17 @@ class Unit:
     ehi: Optional[int] = None
     espan: int = 0
     # visible: the URNs this unit reads (None: every one on the canvas,
-    # ``Context.visible``) — set once a unit is cut in halves.
+    # ``Context.visible``) — set once a unit is cut in halves. members: read
+    # as the unit runs, never kept (``read_members``).
     urns: Optional[List[str]] = None
+    # The session's clamps that hold this unit, by index (None: every one),
+    # and the one it lies outside: a view's members are in it by being
+    # members, and what lies under its roots is read under them.
+    clamps: Optional[List[int]] = None
+    outside: Optional[int] = None
+    # members: the label the view keeps them under, when it is not ``label``
+    # ("": their type was not read, so each label looks for them).
+    bucket: Optional[str] = None
     # A unit that can't be cut further gets one last try at the longest
     # budget a request allows (``engine._hop``).
     last_try: bool = False
@@ -149,7 +165,7 @@ class Unit:
         return self.espan > 0 or self.elo is not None or self.ehi is not None
 
     def _split_nodes(self) -> Optional[List["Unit"]]:
-        if self.kind == "range":
+        if self.kind in ("range", "members"):
             lo = self.lo or 0
             # An open-ended range is cut where its nodes likely end; its
             # upper half stays open-ended, so nothing past the guess is lost.
@@ -240,6 +256,9 @@ class Context:
     # The session's ``clamp_depths``: how far below its roots each clamp
     # reaches — a descendantOf's own maxDepth (none given: ``max_depth``).
     clamp_depths: Tuple[int, ...] = ()
+    # A view's members too many to list as roots (``SearchRunContext.members``):
+    # where a ``members`` unit reads its URNs.
+    members: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -260,9 +279,10 @@ def unit_width(width: int, predicate) -> int:
 
 
 async def make_plan(provider, query, compiler, *, run: Run, width: int,
-                    walk_max: int, timeout_s: float) -> Plan:
+                    walk_max: int, timeout_s: float, members=None) -> Plan:
     """The units ``query`` reads. ``run(cypher, params)`` executes one
-    statement under the caller's admission and budget."""
+    statement under the caller's admission and budget. ``members``: a view
+    whose members are too many to list as its roots (``_member_plan``)."""
     width = unit_width(width, query.predicate)
     labels = await _searchable_labels(provider, timeout_s=timeout_s)
     containment = _containment(provider)
@@ -273,11 +293,11 @@ async def make_plan(provider, query, compiler, *, run: Run, width: int,
     # A traced relationship's walk is its whole test: only its plan reads it.
     if compiler.hoisted_trace is None:
         named = await named_plan(run, provider, query, compiler, labels, containment,
-                                 width=width, notes=notes)
+                                 width=width, notes=notes, members=members)
         if named is not None:
             return named
     reach = await reach_plan(run, provider, query, compiler, labels, containment,
-                             width=width, notes=notes)
+                             width=width, notes=notes, members=members)
     if reach is not None:
         return reach
     stats = await _label_stats(run, labels)
@@ -293,6 +313,9 @@ async def make_plan(provider, query, compiler, *, run: Run, width: int,
                  for i, label in enumerate(in_scope)]
         return Plan(units, clamps, notes, depths if clamps else [])
 
+    if members is not None:
+        return await _member_plan(run, members, query, root_sets, depths, stats, labels,
+                                  containment, width=width, walk_max=walk_max, notes=notes)
     if root_sets and containment:
         clamps = await _resolve_clamps(run, labels, root_sets, containment, notes)
         if clamps is None:
@@ -451,13 +474,58 @@ async def _rooted_plan(run: Run, clamps: List[List[int]], depths: List[int], sta
                 others, notes, other_depths)
 
 
+async def _member_plan(run: Run, members, query, root_sets: List[List[str]], depths: List[int],
+                       stats, labels: Sequence[str], containment: Tuple[str, ...], *,
+                       width: int, walk_max: int, notes: List[str]) -> Plan:
+    """A view whose members are too many to list as its roots: the members,
+    ``MEMBER_CHUNK`` at a time where the view keeps them (``members`` units),
+    and its listed roots — the entries people placed and the members kept
+    whole — read as any view's roots are. What lies under those roots is
+    theirs to read (``Unit.outside``), so nothing is read twice; the query's
+    own "inside" sets hold both (``Unit.clamps``)."""
+    listed = bool(query.scope.root_urns)          # then the first set is the view's roots
+    own, own_depths = (root_sets[1:], depths[1:]) if listed else (root_sets, depths)
+    clamps = await _resolve_clamps(run, labels, own, containment, notes)
+    if clamps is None:
+        return Plan([], notes=notes)
+    roots = await _ids_of(run, labels, root_sets[0]) if listed else []
+    if roots and containment:
+        plan = await _rooted_plan(run, [roots, *clamps], [depths[0], *own_depths], stats,
+                                  labels, containment, width=width, walk_max=walk_max,
+                                  notes=notes)
+    else:
+        # Nothing contains anything: the roots are only the entities they name.
+        plan = Plan([Unit("ids", roots=roots, size=len(roots))] if roots else [], notes=notes)
+    first = len(plan.clamps)
+    under = roots if containment else []
+    plan.units = [replace(u, clamps=list(range(first))) for u in plan.units]
+    plan.clamps = [*plan.clamps, *clamps, *([under] if under else [])]
+    plan.clamp_depths = [*plan.clamp_depths, *own_depths, *([depths[0]] if under else [])]
+    held = list(range(first, first + len(clamps)))
+    outside = first + len(clamps) if under else None
+    for bucket, (count, end) in sorted((await members.counts()).items()):
+        # Members whose type was not read (an answer restored or imported, until
+        # its next update) are looked for under every label, as the canvas's are.
+        each = [bucket] if bucket in labels else [] if bucket else sorted(labels)
+        for i, label in enumerate(each):
+            plan.units += [
+                Unit("members", label, lo, min(end, lo + MEMBER_CHUNK),
+                     exclude=() if bucket else tuple(each[:i]),
+                     size=max(1, count * (min(end, lo + MEMBER_CHUNK) - lo) // end // len(each)),
+                     clamps=held, outside=outside, bucket=None if bucket else "")
+                for lo in range(0, end, MEMBER_CHUNK)]
+    notes.append(f"This view has {members.count:,} members: the search reads the members "
+                 "themselves, and everything inside the ones kept whole.")
+    return plan
+
+
 def _rel(containment: Sequence[str]) -> str:
     return "|".join(_sanitize_label(t) for t in containment)
 
 
 async def reach_plan(run: Run, provider, query, compiler, labels: Sequence[str],
                      containment: Tuple[str, ...], *, width: int,
-                     notes: List[str]) -> Optional[Plan]:
+                     notes: List[str], members=None) -> Optional[Plan]:
     """Read only what the first hoisted lineage walk reaches.
 
     "What X feeds" asked of a view of millions means, read the usual way,
@@ -473,7 +541,7 @@ async def reach_plan(run: Run, provider, query, compiler, labels: Sequence[str],
     end plans the search instead (``trace_plan``)."""
     if compiler.hoisted_trace is not None:
         return await trace_plan(run, provider, query, compiler, labels, containment,
-                                width=width, notes=notes)
+                                width=width, notes=notes, members=members)
     entries = compiler.hoisted_within_hops
     if not entries or not entries[0]["edge_types"]:
         return None
@@ -489,7 +557,8 @@ async def reach_plan(run: Run, provider, query, compiler, labels: Sequence[str],
         reached = await _reached_ids(run, anchors, entry, compiler.params)
         if reached is None:
             return None
-        ids = await _in_scope(run, provider, query, compiler, labels, containment, reached)
+        ids = await _in_scope(run, provider, query, compiler, labels, containment, reached,
+                              members)
     except Exception as exc:                                  # noqa: BLE001
         if not _timed_out(exc):
             raise
@@ -501,7 +570,7 @@ async def reach_plan(run: Run, provider, query, compiler, labels: Sequence[str],
 
 async def trace_plan(run: Run, provider, query, compiler, labels: Sequence[str],
                      containment: Tuple[str, ...], *, width: int,
-                     notes: List[str]) -> Plan:
+                     notes: List[str], members=None) -> Plan:
     """Read only what the relationship traced from its far end reaches.
 
     Past the hops a candidate tests itself, "fed within ten hops by an
@@ -527,7 +596,8 @@ async def trace_plan(run: Run, provider, query, compiler, labels: Sequence[str],
                 f"Following more than {hops} hops from what this search's far end matches "
                 f"reaches more than {REACH_MAX:,} entities — narrow what it matches, or "
                 f"follow fewer hops.")
-        ids = await _in_scope(run, provider, query, compiler, labels, containment, reached)
+        ids = await _in_scope(run, provider, query, compiler, labels, containment, reached,
+                              members)
     except Exception as exc:                                  # noqa: BLE001
         if not _timed_out(exc):
             raise
@@ -621,7 +691,7 @@ def _walked(m) -> bool:
 
 async def named_plan(run: Run, provider, query, compiler, labels: Sequence[str],
                      containment: Tuple[str, ...], *, width: int,
-                     notes: List[str]) -> Optional[Plan]:
+                     notes: List[str], members=None) -> Optional[Plan]:
     """The entities a condition in the query's top-level AND names — an
     ``is``, above one (its parent, its ancestors), or an OR of those and
     "inside one" (``anchor_groups``) — as ``ids`` units: found from them,
@@ -643,7 +713,7 @@ async def named_plan(run: Run, provider, query, compiler, labels: Sequence[str],
         ids = await _anchor_ids(run, labels, entry)
         if ids is None:
             return None
-        ids = await _in_scope(run, provider, query, compiler, labels, containment, ids)
+        ids = await _in_scope(run, provider, query, compiler, labels, containment, ids, members)
     except Exception as exc:                                  # noqa: BLE001
         if not _timed_out(exc):
             raise
@@ -680,23 +750,26 @@ def _collected(res) -> set:
 
 
 async def _in_scope(run: Run, provider, query, compiler, labels: Sequence[str],
-                    containment: Tuple[str, ...], ids: List[int]) -> List[int]:
+                    containment: Tuple[str, ...], ids: List[int], members=None) -> List[int]:
     """Which of ``ids`` the scope holds — what the scope's own units would
     read: a searchable label (one the view's entity types name, when the
     scope has no roots), on the canvas in ``visible`` mode, and inside each
-    root set within its depth."""
+    root set within its depth. ``members`` (a view whose members are too many
+    to list as roots): a member is in the view as much as what lies under
+    its roots — the first set, when it lists any."""
     root_sets, depths = _scope_urn_sets_with_depths(query, compiler)
+    listed = members is not None and bool(query.scope.root_urns)
     visible = (set(query.scope.visible_urns or ())
                if query.scope.scope_mode == "visible" and query.scope.visible_urns else None)
     clamps: List[set] = []
     if root_sets and containment:
-        for urns in root_sets:
+        for i, urns in enumerate(root_sets):
             found = await _ids_of(run, labels, urns)
-            if not found:
+            if not found and not (listed and i == 0):
                 return []                    # nothing is inside roots that aren't there
             clamps.append(set(found))
         allowed = set(labels)
-    elif visible is not None:
+    elif visible is not None or members is not None:
         allowed = set(labels)
     else:
         allowed = set(_labels_in_scope(provider, labels, query.scope.entity_types))
@@ -705,18 +778,28 @@ async def _in_scope(run: Run, provider, query, compiler, labels: Sequence[str],
     up = (f"OPTIONAL MATCH _sp = (n)<-[:{rel}*0..{int(deepest)}]-(_r) "
           "RETURN ID(n), n.urn, labels(n), collect([ID(_r), length(_sp)])"
           if clamps else "RETURN ID(n), n.urn, labels(n), []")
+    roots = set(query.scope.root_urns or ()) if members is not None else set()
     kept: List[int] = []
     step = 5_000
     for i in range(0, len(ids), step):
         res = await run(f"UNWIND $_ids AS _ii MATCH (n) WHERE ID(n) = _ii {up}",
                         {"_ids": ids[i:i + step]})
-        for nid, urn, node_labels, ancestors in res.result_set or []:
+        rows = res.result_set or []
+        held = (await members.holds([r[1] for r in rows if r[1] is not None])
+                if members is not None else set())
+        for nid, urn, node_labels, ancestors in rows:
             if urn is None or not allowed.intersection(node_labels or ()):
                 continue
             if visible is not None and urn not in visible:
                 continue
-            if all(any(a and a[0] in clamp and a[1] <= depth for a in ancestors or ())
-                   for clamp, depth in zip(clamps, depths)):
+            inside = [any(a and a[0] in clamp and a[1] <= depth for a in ancestors or ())
+                      for clamp, depth in zip(clamps, depths)]
+            if members is not None:
+                # Under (or one of) the view's roots, or a member of it.
+                under = inside.pop(0) if listed and clamps else urn in roots
+                if not (under or urn in held):
+                    continue
+            if all(inside):
                 kept.append(int(nid))
     return sorted(kept)
 
@@ -747,6 +830,16 @@ async def _outermost(run: Run, ids: List[int], rel: str, max_depth: int) -> List
     roots = set(ids)
     return sorted(int(r[0]) for r in (res.result_set or [])
                   if not any(a in roots for a in (r[1] or []) if a is not None))
+
+
+async def read_members(unit: Unit, ctx: Context) -> Unit:
+    """A ``members`` unit with its URNs, read now from where the view keeps
+    them (``Context.members``): a session holds the band it reads, never the
+    URNs. Any other unit as it is."""
+    if unit.kind != "members":
+        return unit
+    label = unit.label if unit.bucket is None else unit.bucket
+    return replace(unit, urns=await ctx.members.read(label or "", unit.lo or 0, unit.hi or 0))
 
 
 async def expand_unit(unit: Unit, ctx: Context, run, timeout_s: float
@@ -832,7 +925,7 @@ def match_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
                 + " AND ".join(["n.urn IS NOT NULL"] + where))
     else:
         conds: List[str] = []
-        if unit.kind == "visible":
+        if unit.kind in ("visible", "members"):
             conds.append("n.urn IN $_visible")
             params["_visible"] = list(unit.urns if unit.urns is not None else ctx.visible or [])
         else:
@@ -851,8 +944,16 @@ def match_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
     parts = [head]
     for i, ids in enumerate(clamps):
         depth = ctx.clamp_depths[i] if i < len(ctx.clamp_depths) else ctx.max_depth
-        parts.append(f"WITH n MATCH (n)<-[:{rel}*0..{int(depth)}]-(_r{i}) "
-                     f"WHERE ID(_r{i}) IN $_roots{i} WITH DISTINCT n")
+        if i == unit.outside:
+            # Projected first: FalkorDB can't read a pattern comprehension in a
+            # WITH's own WHERE.
+            parts.append(f"WITH n, [(n)<-[:{rel}*0..{int(depth)}]-(_q{i}) | ID(_q{i})] AS _a{i} "
+                         f"WHERE NOT ANY(_o{i} IN _a{i} WHERE _o{i} IN $_roots{i})")
+        elif unit.clamps is None or i in unit.clamps:
+            parts.append(f"WITH n MATCH (n)<-[:{rel}*0..{int(depth)}]-(_r{i}) "
+                         f"WHERE ID(_r{i}) IN $_roots{i} WITH DISTINCT n")
+        else:
+            continue
         params[f"_roots{i}"] = list(ids)
     if ctx.hop_parts:
         parts.extend(p for i, p in enumerate(ctx.hop_parts) if i != unit.satisfies)

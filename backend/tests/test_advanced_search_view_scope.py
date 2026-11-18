@@ -1779,3 +1779,145 @@ async def test_a_view_made_from_a_query_is_bounded_by_the_members_readers_see(
                                                   "limit of 2"):
             await svc.search(SearchQuery(predicate=TagPredicate(values=["PII"]),
                                          scope=SearchScope(view_id=view.id)))
+
+
+class _MemberSearchingProvider:
+    """A provider that searches a view's members where they are kept, as
+    FalkorDB does: records what each search, count and rule check is handed."""
+
+    supports_search_sessions = True
+    supports_member_scope = True
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    async def deep_search_session(self, query, *, context):
+        from backend.common.models.search import SearchResultPage
+        self.calls.append(("search", query.scope, context))
+        return SearchResultPage(aggregates=None, hits=[], cursor=None, truncated=False,
+                                candidate_count=0, deadline_exceeded=False, elapsed_ms=1,
+                                cache_hit=False)
+
+    async def deep_search_count(self, query, *, context, advance=True):
+        self.calls.append(("count", query.scope, context))
+        return {"count": 0, "status": "complete", "sessionId": None, "progress": None}
+
+    async def deep_search_membership(self, scope, items, urns, *, context):
+        self.calls.append(("membership", scope, context))
+        return {"matches": {i: [] for i, _ in items}, "errors": {}, "elapsedMs": 1}
+
+
+async def _members_view(db_session: AsyncSession, ws, rows, *, entries=None):
+    """A view made from a query with ``rows`` (``(urn, whole, covered)``, all
+    ``Table``) as its members at epoch 1."""
+    from backend.app.db.repositories import view_members_repo, view_membership_repo
+
+    view = await _seed_view(db_session, ws, view_type="reference", config={
+        "layoutType": "reference", "content": {"entityScope": "curated"},
+        "membership": {"v": 1, "mode": "live", "sources": [{"spec": {"seeds": {"urns": ["urn:s"]}}}]},
+        "layout": {"referenceLayout": {"layers": [{"id": "L1"}],
+                                       "assignments": {u: {"layerId": "L1"} for u in entries or []}}},
+    })
+    state = await view_membership_repo.ensure(db_session, view)
+    await view_members_repo.insert(db_session, [
+        {"view_id": view.id, "epoch": 1, "urn": urn, "layer_id": "L1", "sort_key": urn, "ord": i,
+         "label": "Table", "label_ord": i, "whole": whole, "covered": covered}
+        for i, (urn, whole, covered) in enumerate(rows)])
+    state.epoch = state.members_epoch = 1
+    state.member_count = len(rows)
+    await db_session.flush()
+    return view
+
+
+async def test_a_view_made_from_a_query_past_the_cap_searches_its_members_where_they_are_kept(
+    db_session: AsyncSession, monkeypatch,
+):
+    """Past the root cap a search no longer refuses: the entries people placed and
+    the members kept whole are its roots, and the rest are read where the view keeps
+    them — the uncapped engine is handed what reads them, at the epoch readers see.
+    Counts and rule checks are bounded the same way."""
+    from types import SimpleNamespace
+
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.app.services.view_scope import MemberScope
+    from backend.common.models.search import (
+        SearchCountsRequest, SearchMembershipRequest, SearchOptions, SearchQuery, TagPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _members_view(db_session, ws, [
+        ("urn:m0", True, False), ("urn:m1", False, True), ("urn:m2", False, False),
+        ("urn:m3", False, False)], entries=["urn:mine"])
+    resolver = ViewScopeResolver(db_session)
+    below = await resolver.resolve(workspace_id=ws.id, requested=SearchScope(view_id=view.id))
+    assert below.member_scope is None and len(below.root_urns) == 5, "below the cap: listed"
+
+    with _root_urns_cap(monkeypatch, "2"):
+        eff = await resolver.resolve(workspace_id=ws.id, requested=SearchScope(view_id=view.id))
+        assert eff.member_scope == MemberScope(view.id, 1, 4)
+        assert set(eff.root_urns) == {"urn:mine", "urn:m0"} and eff.unlisted_roots == 3
+        provider = _MemberSearchingProvider()
+        svc = AdvancedSearchService(SimpleNamespace(provider=provider), session=db_session,
+                                    workspace_id=ws.id)
+        page, _ = await svc.search(SearchQuery(predicate=TagPredicate(values=["PII"]),
+                                               scope=SearchScope(view_id=view.id),
+                                               options=SearchOptions(results="hits")),
+                                   run_context=SearchRunContext())
+        assert not any("entire data source" in n for n in page.scope_diagnostics.notes)
+        [(_, scope, context)] = provider.calls
+        assert set(scope.root_urns) == {"urn:mine", "urn:m0"}
+        members = context.members
+        assert members.count == 4
+        # What a search reads itself: neither the whole one (a root) nor the one inside it.
+        assert await members.counts() == {"Table": (2, 4)}
+        assert await members.read("Table", 0, 4) == ["urn:m2", "urn:m3"]
+        assert await members.read("Table", 3, 4) == ["urn:m3"]
+        assert await members.holds(["urn:m1", "urn:m0", "urn:elsewhere"]) == {"urn:m0", "urn:m1"}
+
+        counted = await svc.counts(SearchCountsRequest.model_validate({
+            "scope": {"viewId": view.id}, "purpose": "search", "items": [
+                {"id": "r", "predicate": {"kind": "tag", "values": ["PII"]}},
+                {"id": "e", "predicate": {"kind": "edges", "edgeTypes": ["FEEDS"]}}]}))
+        await svc.membership(SearchMembershipRequest.model_validate({
+            "scope": {"viewId": view.id}, "urns": ["urn:m2"],
+            "items": [{"id": "r", "predicate": {"kind": "all"}}]}))
+        assert [(kind, ctx.members is not None) for kind, _, ctx in provider.calls[1:]] == [
+            ("count", True), ("membership", True)]
+        # A Connections count checks its far end against the roots alone: said so.
+        assert counted.counts["e"].error and counted.counts["r"].error is None
+
+
+async def test_past_the_cap_a_search_that_cant_read_members_is_still_refused(
+    db_session: AsyncSession, monkeypatch,
+):
+    """Members kept whole past the cap themselves, a narrowing hint naming roots of its
+    own, a statement to explain: each still refused, never a search wider than the view."""
+    from types import SimpleNamespace
+
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.common.models.search import SearchOptions, SearchQuery, TagPredicate
+
+    ws = await _seed_workspace(db_session)
+    whole = await _members_view(db_session, ws, [(f"urn:w{i}", True, False) for i in range(3)])
+    plain = await _members_view(db_session, ws, [(f"urn:m{i}", False, False) for i in range(3)])
+    provider = _MemberSearchingProvider()
+    svc = AdvancedSearchService(SimpleNamespace(provider=provider), session=db_session,
+                                workspace_id=ws.id)
+    with _root_urns_cap(monkeypatch, "2"):
+        eff = await ViewScopeResolver(db_session).resolve(
+            workspace_id=ws.id, requested=SearchScope(view_id=whole.id))
+        assert eff.member_scope is None and eff.root_urns == () and eff.unlisted_roots == 3
+        for scope in (SearchScope(view_id=whole.id),
+                      SearchScope(view_id=plain.id, root_urns=["urn:elsewhere"])):
+            with pytest.raises(ValidationError, match="top-level containers, above the search"):
+                await svc.search(SearchQuery(predicate=TagPredicate(values=["PII"]), scope=scope,
+                                             options=SearchOptions(results="hits")),
+                                 run_context=SearchRunContext())
+        with pytest.raises(ValidationError, match="top-level containers, above the search"):
+            await svc.explain(SearchQuery(predicate=TagPredicate(values=["PII"]),
+                                          scope=SearchScope(view_id=plain.id)))
+    assert provider.calls == []

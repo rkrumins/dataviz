@@ -36,7 +36,10 @@ the same symbol.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, AsyncContextManager, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import (
+    Any, AsyncContextManager, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple,
+    runtime_checkable,
+)
 
 from backend.common.adapters.circuit import register_logical_exception
 from backend.common.models.search import SearchQuery, SearchResultPage
@@ -90,6 +93,27 @@ class NothingReusable(LookupError):
 register_logical_exception(NothingReusable)
 
 
+class ViewMembers(Protocol):
+    """The members of a view made from a query, when they are too many to list as a
+    search's roots (``EffectiveViewScope.member_scope``): read from where the view keeps
+    them, a band at a time, so a search session holds bands — never the members.
+
+    * ``count`` — how many members the view has;
+    * ``counts()`` — per graph label, how many members a search reads itself (not the
+      whole ones, which are its roots, nor those inside one) and where their
+      ``label_ord`` ends;
+    * ``read(label, lo, hi)`` — those members' URNs, ``lo <= label_ord < hi``;
+    * ``holds(urns)`` — which of ``urns`` are members at all.
+    """
+    count: int
+
+    async def counts(self) -> Dict[str, Tuple[int, int]]: ...
+
+    async def read(self, label: str, lo: int, hi: int) -> List[str]: ...
+
+    async def holds(self, urns: Sequence[str]) -> Set[str]: ...
+
+
 @dataclass(frozen=True)
 class SearchRunContext:
     """What the uncapped engine needs from the request around it.
@@ -114,7 +138,10 @@ class SearchRunContext:
       was free. A request waiting on another's scan takes none, and one that
       finds none free gives the lease straight back and answers with the scan
       as it stands — so readers of a scan in flight never hold the slots that
-      scans need.
+      scans need;
+    * ``members`` — a view whose members are too many to list as roots: they
+      bound the search beside its roots (``ViewMembers``), read per request
+      from the request's database session.
     """
     data_version: str = ""
     scope_hash: str = ""
@@ -122,6 +149,7 @@ class SearchRunContext:
     reuse_s: float = 0.0
     scan: bool = True
     slot: Optional[Callable[[], AsyncContextManager[bool]]] = None
+    members: Optional[ViewMembers] = None
 
 
 @runtime_checkable
