@@ -4,30 +4,34 @@
 
 The Review Center is where submitted drafts wait before their changes reach
 **Published**, the version of the graph everyone sees. This page shows you how
-to find the requests waiting for you, check exactly what each one changes,
-bring it up to date, and merge or dismiss it.
+to find the reviews waiting on you, work through one, give your verdict, and
+merge it — or send it back.
 
 > **Before you start:**
 > - **Version control** must be on for your deployment. If it's off, the
 >   workspace has no **Reviews** tab and the page says *Reviews are turned off*.
-> - To merge, dismiss or update a request, you need permission to manage the
->   workspace's data sources — the **Workspace member**, **Data engineer** and
->   **Workspace admin** roles have it. Without it, you see only the requests
->   you raised or are named on, and you can't act on them.
+> - To approve, merge, dismiss or change who reviews, you need permission to
+>   manage the workspace's data sources — the **Workspace member**, **Data
+>   engineer** and **Workspace admin** roles have it. Without it, you see the
+>   reviews you raised, those you're asked to review, and those of drafts you
+>   can read.
 
-## How a request moves
+## How a review moves
 
-A **review request** (the screens also say *merge request*) is a draft someone
-has submitted for review. It starts as **Ready to merge** or **Conflicts**, and
-ends **Merged** or **Closed**.
+A **review** (the screens also say *merge request*) is a draft someone has
+submitted. It starts **Ready to merge** or with **Conflicts**, and ends
+**Merged** or **Closed**.
 
 ```mermaid
 stateDiagram-v2
   state "Ready to merge" as Ready
+  state "Sent back" as SentBack
   state "Closed (dismissed)" as Closed
   [*] --> Ready : Submit for review
   [*] --> Conflicts : Submit for review
-  Ready --> Approved : every named reviewer approves
+  Ready --> Approved : the approvals it needs
+  Ready --> SentBack : a reviewer asks for changes
+  SentBack --> Ready : the draft changes
   Ready --> Merged : Merge
   Approved --> Merged : Merge
   Conflicts --> Merged : Merge with resolutions
@@ -38,245 +42,122 @@ stateDiagram-v2
 
 | Status | Means | What you do |
 | --- | --- | --- |
-| **Ready to merge** | Nothing in it clashed with Published when it was submitted | Check it, then **Merge** |
+| **Ready to merge** | Nothing in it clashed with Published when it was submitted | Review it, then **Merge** once it has its approvals |
 | **Conflicts** | Published changed some of the same things after the draft was started | **Merge**, and choose which values to keep |
-| **Approved** | Every reviewer named on the request has approved | **Merge** |
+| **Approved** | It has the approvals its data source asks for (see [How many approvals a review needs](#how-many-approvals-a-review-needs)) | **Merge** |
+| **Sent back** | A reviewer asked for changes, and the draft hasn't changed since | Its author changes the draft |
 | **Merged** | Its changes are in Published | Nothing — or **Revert this merge** if it was a mistake |
-| **Closed** | Dismissed without merging (the **Status** filter calls it *Dismissed / closed*) | Nothing. The draft is kept |
+| **Closed** | Dismissed without merging, or its draft was abandoned | Nothing. A dismissed review's draft is kept |
 
 ## Open the Review Center
 
-1. In the sidebar, choose **Workspaces**, then choose the workspace.
-2. Choose the **Reviews** tab. The requests across every data source in the
-   workspace that has version control are listed, newest first, with **Open**
-   selected.
+- **Reviews** in the sidebar opens the reviews of the workspace you're in. Its
+  badge counts what waits on you: reviews you're asked to review, and yours
+  sent back to you.
+- In a workspace, the **Reviews** tab opens the same page.
+- Every notice about a review in your **Inbox** opens that review — on the
+  thread, for a comment.
+- **After you submit a draft**, the review you opened is shown. Its address
+  opens it directly, if you want to send it to someone.
+- **From a View**, choose **Reviews** in its header, then the **Pull
+  Requests** tab of **Changes & Reviews**; **From this view** and **Whole data
+  source** switch between them.
 
-You'll also land here from other places:
+## Your queues
 
-- **After you submit a draft.** **Submit for review** opens the **Review
-  Center** page on your new request. The page's address opens that request
-  directly — send it to whoever should review it.
-- **From a View.** In the View's header, choose **Reviews**, then the **Pull
-  Requests** tab of the **Changes & Reviews** panel. Switch between **From
-  this view** and **Whole data source**; **Active only** hides merged and
-  closed requests. When requests are open, a chip in the header — *2 from this
-  view · 5 on data source* — opens the same tab.
-- **From a data source.** On its **Versioning** tab, **Merge requests** shows
-  the open ones; **View all** opens the Review Center.
+The reviews are sorted into queues by who they wait on. Each queue says how
+many it holds, and a dot marks one with something you haven't seen.
 
-> **Note:** {brand} doesn't notify anyone when a request is submitted. Send
-> your reviewer the link.
-
-![The workspace Reviews tab: the four count cards (Open requests, Ready to merge, Needs attention, Raised by you), the Open / Raised by you / All switch with search and filters, and several requests with status badges, a 'behind 2' chip and change counts](/docs-assets/guide/review-center-list.png)
-
-## Find the requests that need you
-
-### The four counts
-
-| Card | Counts |
+| Queue | Holds |
 | --- | --- |
-| **Open requests** | Requests not yet merged or dismissed |
-| **Ready to merge** | Requests marked **Ready to merge** or **Approved** |
-| **Needs attention** | Requests with conflicts, or whose draft has fallen behind Published |
-| **Raised by you** | Requests you submitted |
+| **Needs your review** | Reviews you're asked to review — yourself, or through a group of yours that no one has answered for yet — and haven't reviewed as they are now |
+| **Waiting on reviewers** | Yours, still waiting for approvals |
+| **Sent back to you** | Yours, where a reviewer asked for changes |
+| **Ready to merge** | Yours, with the approvals they need and nothing holding them |
+| **Everything open** | Every open review you can see |
+| **Merged & closed** | Reviews that are done, newest first |
 
-**Open requests** and **Raised by you** also switch the list to those
-requests. To list only the ready or troubled ones, use the **Status** filter.
+A review comes back to **Needs your review** when its draft changes after you
+approved it, or when someone asks you again.
 
-### Search and filter
+Each row shows who raised it and its title, its status, the draft it comes
+from, its approvals (for example **1/2**), open threads, and when anyone last
+did anything on it. **Updated since you reviewed** means the draft changed
+after your last review. A review is marked unread while someone else has done
+something on it you haven't looked at — opening it marks it read, and so are
+your Inbox notices about it.
 
-- Switch between **Open**, **Raised by you** and **All**.
-- Type in **Search by title, branch, or author…** — it matches data source
-  names too.
-- Narrow by **Status**, **Author** or **Source** (data source). Each appears
-  when there is more than one to choose from, and a **Status** you pick
-  overrides the **Open** switch.
-- **Clear** resets the filters and the search. The number on the right says
-  how many requests match; **Show more** lists the next 20.
+- Search titles and descriptions, and narrow by **Data source** or **Author**.
+  **Order** switches between **Last activity** and **Opened**; **Clear** resets
+  the filters.
+- **Load more** lists the next reviews.
+- **J** and **K** move between rows, and **Enter** opens one.
 
-### What each row tells you
+If more than 1,000 reviews are open in a workspace, the queues leave out the
+oldest and say so — search or filter to find one.
 
-- **Who raised it** and its **title** — or *Publish draft by* and their name
-  when they didn't give one.
-- Its **status**, plus an amber **behind** chip (for example **behind 2**) when
-  Published has moved on since the draft was last brought up to date.
-- The **draft's name → main**. *main* is Published.
-- The **data source**, the **number of changes** (added, modified, removed),
-  and **when** it was raised.
-- **Reviewers**, as avatars, when the request names any.
-- **Dismiss**, to reject it from the list. See
-  [Dismiss a request](#dismiss-a-request).
+[screenshot-pending]: # "review-center-list — the workspace's reviews: the queues with their counts and unread dots, search and filters, and rows with approvals, open threads, last activity and an Updated since you reviewed chip"
 
-## Check what a request changes
+## The review page
 
-1. Select a request. Its drawer opens with the title and status — and, when
-   reviewers are named, how many have approved (for example **1/2**).
-2. Read it from the top:
-   - **Description** — the author's context, if they gave any.
-   - **Overview** — the draft and its target (**main**), who opened it and
-     when, the draft's owner, and any reviewers (✓ marks those who've
-     approved).
-   - **Changes** — each edit recorded in the draft, with who made it. Expand
-     one to see what it changed.
-   - **Views** — Views the draft creates or changes (**New view**,
-     **Imported**, **Layers edited**). They *go live when this merges*.
-   - **Files changed** — every entity and relationship the request adds,
-     modifies or removes, a page at a time however many there are (an import
-     of 100,000 opens as fast as a small edit): switch between **Entities** and
-     **Relationships**, narrow by **Added**, **Modified** or **Removed** or by
-     type, or search by name; the list loads more as you scroll. Each row says
-     what it changed before you open it (*Edited owner, tier and 2 more*);
-     open it (→) for its key differences, and again for every field and
-     property, before and after. **Hierarchy** lays the same changes out under
-     their containers, a level at a time, each saying how many changes sit
-     inside — and a search lists what matches anywhere, each with where it
-     sits, with **In hierarchy** to open the way down to it. A fork's review past
-     20,000 changes is counted, then listed the same way. If the draft is
-     behind **main**, the list shows what the draft changes where it started;
-     after **Pull latest** it is exactly what merging changes.
-   - **Discussion** — the conversation about the request: comments on the
-     request as a whole, and every thread on one of its changes, open ones
-     first. A thread on a change names it — choose the name to see what changed.
-   - **Activity** — when it was opened, approved, merged or closed, and by
-     whom.
-3. To see the changes on the canvas, choose **Browse this branch’s changes**
-   (shown when the draft was started from a View). That View opens on the
-   draft, with its changes marked.
+Opening a review shows it on a page of its own, in three columns (two, or one,
+on a narrower screen):
 
-![A request's drawer: status badge and Overview with Browse this branch's changes, the Changes and Files changed sections, and the action bar with Merge and Dismiss](/docs-assets/guide/review-center-drawer.png)
+- **Changes**, on the left — every entity and relationship it adds, modifies
+  or removes, a page at a time however many there are. Above them, how many
+  you've viewed and decided, and how many threads are open. **Hierarchy** lays
+  the changes out under their containers, a level at a time.
+- **The change open**, in the middle — what you picked, before and after,
+  field by field, with its threads and your decision. **Previous change** and
+  **Next change** step through them. Before you pick one, it shows the review's
+  description.
+- **Where it stands**, on the right — **What's next**, the **Reviewers**, and
+  the **Discussion** and **Activity** tabs.
 
-People who can manage the workspace's data sources can fix a request's title
-or description: choose the pencil (**Edit title & description**), make the
-change and choose **Save**.
+The header has the way back to **Reviews**, the review's title (a manager can
+rename it), its status and approvals, the one thing to do next, and **More
+for this review** for the rest.
 
-## Merge a request
+[screenshot-pending]: # "review-center-page — a review's page: the changes with viewed and decided progress, one change open before and after, and What's next with the Reviewers card beside it"
 
-1. Open the request.
-2. If the drawer says *This draft is behind **main** by N commits*, choose
-   **Pull latest** — it takes the place of **Merge** until the draft is up to
-   date. Then:
-   - *Already up to date — you can merge now.* means nothing new came in.
-   - **You’re up to date — here’s what came in** lists the changes published
-     since the draft started, and who made them. The draft's own edits are
-     kept on top. Choose **Got it**.
-   - If incoming changes clash with the draft, **Review changes from main**
-     opens — see [Resolve conflicts](#resolve-conflicts). Here, **Merge with
-     resolutions** only brings Published's changes into the draft; you still
-     merge in the next step.
-3. Choose **Merge**.
-4. If the draft and Published changed the same things, **Review changes from
-   main** opens. Resolve the conflicts, then choose **Merge with resolutions**.
-5. The drawer closes. If the draft was started from a View, {brand} opens that
-   View on Published, where a banner says *Merged — your changes are now
-   live*, with **View in history**.
+### What's next
 
-> **If you see "This PR needs approval from its reviewers before it can be
-> merged":** the request names reviewers, and not all of them have approved
-> yet. See [Approve a request](#approve-a-request).
+**What's next** is a checklist of what stands between the review and Published,
+each with the action that moves it along:
 
-### A fork's review
+- **For a reviewer:** **Look through the changes** (**Next to look at**),
+  **Decide each change** (**Next to decide**), **Resolve** the open threads
+  (**Next thread**), and give your verdict.
+- **For its author, and whoever merges:** its approvals (*1 of 2 approvals*),
+  who asked for changes and whether the draft changed since, being up to date
+  with main (**Pull the latest**), conflicts (**Resolve conflicts**), rejected
+  changes (**Merge N accepted** or **Discard the rejected**), unsaved edits on
+  the draft, and whether you may merge it.
 
-A review proposed from a [fork](/guide/versioning-change-control#work-in-a-fork)
-merges the fork's changes into the data source it came from.
+The button in the header is the first step not done yet.
 
-- If the drawer says *This fork is behind its parent*, choose
-  **Update from parent** — the fork takes its parent's changes, resolving any
-  clashes as above — then choose **Merge**.
-- A large one merges in the background. It shows **Merging**, and the drawer
-  says it is *Merging in the background* and offers nothing until it is done.
-- Once it merges, the drawer stays open and shows it **Merged**. The fork lives
-  on; **Revert this merge** undoes the merge in the data source it came from.
-- While forks are turned off, a fork's review can be dismissed, but not
-  approved or merged.
+### Keys
 
-### Resolve conflicts
+| Key | Does |
+| --- | --- |
+| **J** / **K** | Next / previous change |
+| **N** / **P** | Next / previous change that still needs you |
+| **Shift+N** / **Shift+P** | Next / previous change with open threads |
+| **V** | Mark it viewed, then the next |
+| **A** / **R** | Accept / reject it (rejecting asks why) |
+| **C** | Comment on it |
+| **⌘↵** (Ctrl+Enter) | The review's next step — the action in the header |
+| **?** | These shortcuts |
 
-A conflict means the draft and Published both changed the same field of the
-same entity. **Review changes from main** says how many changes need your
-decision. *Everything else merges automatically* — only real clashes are
-listed.
+The **Viewed** ticks are yours, kept in this browser. A change edited since you
+viewed it reads **Changed**.
 
-1. For each field, compare the **Original** value with the two versions:
-   **Your version** (the draft's value, even when you're reviewing someone
-   else's draft) and **Incoming** (Published's value). Choose one, or choose
-   **revert** to keep the original.
-2. Where one side deleted an entity that the other changed — *Deleted on main,
-   but you edited it.* or *You deleted this, but main changed it.* — choose
-   **Keep it** or **Accept deletion**.
-3. Choose **Merge with resolutions**.
+## Decide the changes one by one
 
-**Keep all mine** and **Take all incoming** decide every field at once, and
-**Filter entities…** shortens a long list. **Delete instead** deletes an
-entity on merge rather than keeping either version. If anything still clashes,
-the dialog says *Some fields still conflict — adjust and retry.* **Cancel**
-leaves the request as it was.
+For a draft's review, whoever may approve it can decide each change on its own:
 
-## Approve a request
-
-**Approve** appears only on a request that names reviewers. Requests submitted
-in {brand} — from the **Publish your draft** dialog, or after importing a View
-— don't name any, so they need no approval: anyone who can manage the
-workspace's data sources can merge them. Requests created by an integration
-can name reviewers.
-
-When a request names reviewers:
-
-1. Open it. **Overview** lists the reviewers, and the pill beside the status
-   says how many have approved.
-2. Choose **Approve**. *Approved.* confirms it, and ✓ appears beside your name.
-3. When every named reviewer has approved, the status becomes **Approved** and
-   **Merge** goes through.
-
-You never see **Approve** on a request you raised yourself.
-
-## Dismiss a request
-
-Dismissing rejects a request: nothing is applied to Published. The draft
-itself is kept, so its author can carry on editing, submit it again, or
-discard it.
-
-1. Open the request and choose **Dismiss**. *Dismiss this merge request?*
-   explains what will happen.
-2. Choose **Dismiss request**, or **Keep reviewing** to go back.
-3. *Request dismissed — no changes applied.* confirms it. The request is now
-   **Closed**.
-
-In the list, a row's **Dismiss** does the same: it asks *Dismiss?* — choose
-the tick to confirm, or the cross to cancel.
-
-## Discuss a request
-
-Comment where the question is:
-
-- **On one change** — expand its row in **Files changed** and write under what
-  changed (*Comment on this change…*).
-- **On one field or property of it** — point at that line of the change and
-  choose the speech-bubble. The comment names the field (*on Description*).
-- **On the request as a whole** — at the bottom of **Discussion**.
-
-Type **@** to mention someone in the workspace: pick them from the list, and
-they're told in their Inbox. The author of the request, and everyone already in
-a thread, hear about replies. **⌘↵** (Ctrl+Enter) posts. A comment shows at
-once while it's sent; if it can't be sent it stays, with **Retry** and **Edit**,
-so nothing you wrote is lost.
-
-Each thread has **Reply** and **Resolve**. A resolved thread folds to one line
-(**Show** opens it; **Reopen** brings it back). A thread whose change the author
-edited since is marked *Outdated · changed since*. Rows with open threads show
-a count, so you can see at a glance where the conversation is. You can edit or
-delete your own comments; someone who manages the data source can delete
-anyone's. A deleted comment keeps its place, marked deleted.
-
-Following a mention or reply from your Inbox opens the request on that thread.
-
-## Accept or reject changes one by one
-
-For a draft's request, you can decide each change on its own — whoever may
-approve the request can:
-
-1. In **Files changed**, choose ✓ to **accept** a change, or ✗ to **reject**
-   it. Rejecting asks why (optional) — the author sees your reason under the
-   change.
+1. Choose ✓ to **accept** a change, or ✗ to **reject** it. Rejecting asks why
+   (optional) — the author sees your reason under the change.
 2. Some changes only make sense together, so deciding one decides what it needs
    too — and you're told (*Accepted 1 change, and 2 it needs.*, with **Undo**):
    - a new relationship needs the new entities it joins;
@@ -292,84 +173,238 @@ approve the request can:
    decided.
 4. If the author edits a change after you decided it, your decision no longer
    holds: the row says **Changed**, and it's back under **To decide**.
-5. To keep your place in a long review, tick **Viewed** on each change as you go
-   (`V` ticks it and moves to the next) — *18 viewed* counts them. The ticks are
-   yours, kept in this browser; a change edited since reads **Changed**. The
-   keyboard button lists every key the list answers to (`?`).
 
-Once anything is decided, the action bar shows where things stand (*12 accepted
-· 3 rejected · 40 to decide*) and **Merge N accepted** replaces **Merge**:
+A fork's review is merged whole, so it has no decisions.
+
+## Discuss a review
+
+Comment where the question is:
+
+- **On one change** — under what changed (*Comment on this change…*).
+- **On one field or property of it** — point at that line of the change and
+  choose the speech-bubble. The comment names the field (*on Description*).
+- **On the review as a whole** — in **Discussion**.
+
+Type **@** to mention someone in the workspace: pick them from the list, and
+they're told in their Inbox. The review's author, and everyone already in a
+thread, hear about replies. **⌘↵** (Ctrl+Enter) posts. A comment that can't be
+sent stays, with **Retry** and **Edit**, so nothing you wrote is lost.
+
+Each thread has **Reply** and **Resolve**. A resolved thread folds to one line
+(**Show** opens it; **Reopen** brings it back). A thread whose change the author
+edited since is marked *Outdated · changed since*. You can edit or delete your
+own comments; someone who manages the data source can delete anyone's.
+
+## Finish your review
+
+When you've been through the changes, give your verdict once, with a summary:
+
+- **Comment** — feedback, with no verdict. It needs a summary.
+- **Approve** — the review can merge as far as you're concerned.
+- **Request changes** — it goes back to its author and can't merge until the
+  draft changes. Say what should change — if you rejected nothing, a summary is
+  required.
+
+What you did comes with it: how many changes you viewed, accepted and
+rejected, and the threads you started. A new verdict replaces your earlier
+one — approving takes back your request for changes, and asking for changes
+takes back your approval. If the draft changed while you were reviewing, you're
+told, and shown what's new before you give it.
+
+A fork's review can't be sent back: close it instead.
+
+### Approve all & merge
+
+When nothing is rejected, **Approve all** accepts every change still to decide
+and approves the review in one step — and **Approve all & merge** merges it
+too, where you may merge. You're asked first, with how many changes it
+accepts. If a step is refused, it stops there and says why; what it did before
+stands.
+
+## Who reviews
+
+**Reviewers** on the review page lists everyone asked, and where each stands:
+
+| State | Means |
+| --- | --- |
+| **Approved** | They approved the draft as it is now |
+| **Approved an earlier version** | They approved, but the draft changed since — their approval no longer counts |
+| **Asked for changes** | They sent it back, and the draft hasn't changed since |
+| **Commented** | They gave feedback with no verdict |
+| **Waiting** | They haven't reviewed it yet |
+
+A group asked to review is **Approved** once any of its members approves —
+it says who.
+
+People who can manage the workspace's data sources can change who reviews:
+
+- **Add** people or groups. The groups offered are those bound to the
+  workspace with a role that manages its data, each with how many people are in
+  it.
+- **Remove** someone, or a group, who no longer needs to review.
+- **Ask again** — the review goes back into their **Needs your review**, even
+  if they reviewed it already. Asking again doesn't take back an approval.
+
+Everyone newly asked, or asked again, is told — for a group, each of its
+members (up to 200).
+
+### How many approvals a review needs
+
+Each data source says how many approvals its reviews need, under **Drafts and
+reviews** (a workspace sets it for all its data sources, and a data source can
+choose its own):
+
+| **Approvals a review needs** | Means |
+| --- | --- |
+| **Everyone asked** (the default) | Every person and group asked must approve. A review that asks no one needs no approval |
+| **1 approval** … **10 approvals** | That many approvals that still stand, from anyone who may approve — asked or not |
+
+An approval stands until the draft changes after it. **Open threads hold the
+merge** set to **Yes** means a review merges only once every thread on it is
+resolved. **Whoever opens a review may approve it** set to **No** means its
+author's approval never counts — not even for a group they're in. A fork follows
+its parent's rules.
+
+## Merge a review
+
+1. Open the review.
+2. If **What's next** says it's **Behind main**, choose **Pull the latest**.
+   - *Already up to date — you can merge now.* means nothing new came in.
+   - **You’re up to date — here’s what came in** lists the changes published
+     since the draft started, and who made them. The draft's own edits stay on
+     top. Choose **Got it**.
+   - If incoming changes clash with the draft, see
+     [Resolve conflicts](#resolve-conflicts). Here, resolving only brings
+     Published's changes into the draft; you still merge next.
+3. Choose **Merge**.
+4. If the draft and Published changed the same things, resolve the conflicts,
+   then choose **Merge with resolutions**.
+5. If the draft was started from a View, {brand} opens that View on Published,
+   where a banner says *Merged — your changes are now live*, with **View in
+   history**.
+
+If something holds the merge, it says what: the approvals it still needs and
+who is asked, a request for changes that still holds, or open threads where the
+data source says they hold it.
+
+### Merge only what's accepted
+
+Once anything is rejected, **Merge N accepted** replaces **Merge**:
 
 - Only the accepted changes land on Published, as one revision. Rejected and
   undecided changes **stay on the draft**, which stays open — its author can
-  fix them and open another request for the rest. Its people are told.
-- If an accepted change needs one that isn't accepted (say it changed since),
-  the bar says so, with **Accept them too**.
-- A request with anything rejected merges only this way. Accept everything to
-  merge it whole.
+  fix them and open another review for the rest.
+- If an accepted change needs one that isn't accepted, **What's next** says
+  so, with **Accept them too**.
 - Tick **Also discard the N rejected changes from the draft** to take them off
-  the draft as you merge, so only what nobody decided yet stays on it.
-- The draft must be up to date with Published first (**Pull latest**), and at
-  most 20,000 accepted changes merge at a time. A fork's review is merged
-  whole.
+  the draft as you merge.
+- The draft must be up to date with Published first, and at most 20,000
+  accepted changes merge at a time.
 
-## Ask for changes
+### A fork's review
 
-To get a request changed, reject the changes that need work with a reason (or
-comment on them), then choose **Send back** and say what should change:
+A review proposed from a [fork](/guide/versioning-change-control#work-in-a-fork)
+merges the fork's changes into the data source it came from.
 
-- The draft's people are told — *"Orders" was sent back for changes* — with a
-  link to the request.
-- The request shows who sent it back, when and why, and it **can't merge until
-  the draft changes**. If you change your mind, choose **Withdraw**; approving
-  it withdraws your request too.
+- If it's **Behind its parent**, choose **Update from parent** — the fork
+  takes its parent's changes, resolving any clashes as below — then **Merge**.
+- A large one merges in the background: it shows **Merging**, and offers
+  nothing until it's done.
+- Once merged, the fork lives on; **Revert this merge** undoes the merge in the
+  data source it came from.
+- While forks are turned off, a fork's review can be dismissed, but not
+  approved or merged.
 
-Then:
+### Resolve conflicts
+
+A conflict means the draft and Published both changed the same field of the
+same entity. Only real clashes are listed — everything else merges
+automatically.
+
+1. For each field, compare the **Original** value with **Your version** (the
+   draft's value, even when you're reviewing someone else's draft) and
+   **Incoming** (Published's). Choose one, or **revert** to keep the original.
+2. Where one side deleted an entity the other changed, choose **Keep it** or
+   **Accept deletion**.
+3. Choose **Merge with resolutions**.
+
+**Keep all mine** and **Take all incoming** decide every field at once, and
+**Filter entities…** shortens a long list. If anything still clashes, you're
+told *Some fields still conflict — adjust and retry.* **Cancel** leaves the
+review as it was.
+
+## When a review is sent back
+
+A review sent back shows who asked for changes, when and why, and it **can't
+merge until the draft changes**. The reviewer who sent it back can take that
+back with **Withdraw sending it back** under **More for this review** —
+approving it does too.
 
 1. The author opens the draft — **Browse this branch’s changes**, or **Resume**
    under **Your work** on their Dashboard — and saves the fixes with **Review &
    Save**. To take the review's answer as it is, the author chooses **Discard
-   the rejected** on the request: the rejected changes (and what holds them
-   together) leave the draft in one new save. Anyone who can edit the data can
-   make small fixes too: choose **Edit**, then the draft under **Continue a
-   draft**.
-2. Open the request again. Everything saved to the draft is already part of
-   it — nobody needs to submit it again. Changes the author edited show as
-   **Changed**, ready to decide again.
+   the rejected**: the rejected changes (and what holds them together) leave
+   the draft in one new save.
+2. Everything saved to the draft is already part of the review — nobody needs
+   to submit it again. The changes edited show as **Changed**, ready to decide
+   again, and the reviewer sees it back in **Needs your review**.
 
 See [Editing in a Draft](/guide/editing-in-a-draft) for the editing itself.
+
+## Dismiss a review
+
+Dismissing rejects a review: nothing is applied to Published. The draft itself
+is kept, so its author can carry on editing, submit it again, or discard it.
+
+1. Under **More for this review**, choose **Dismiss without merging**.
+   *Dismiss this review?* explains what will happen.
+2. Choose **Dismiss**, or **Keep reviewing** to go back. The review is now
+   **Closed**, and its reviewers are told.
+
+Abandoning a draft closes its open review too.
+
+## Who is told
+
+| When | Who hears, in their Inbox |
+| --- | --- |
+| You're asked to review, or asked again | You — or every member of the group asked |
+| A reviewer approves or comments | The review's author and the draft's owner |
+| A reviewer asks for changes | The draft's people |
+| Someone mentions you, or replies in your thread | You |
+| It's merged or closed | Everyone on the review |
+
+Nobody is told twice about the same thing while the first notice is unread,
+and opening the review marks its notices read.
 
 ## What merging does
 
 - The draft's changes land on Published as **one new revision** in the
   history.
-- The draft closes as merged, so it no longer appears among the open drafts.
-  (Merging only what's accepted leaves it open with the rest — see
-  [Accept or reject changes one by one](#accept-or-reject-changes-one-by-one).)
+- The draft closes as merged. (Merging only what's accepted leaves it open with
+  the rest.)
 - Views the draft created or changed go live with it.
 - The graph that Views read catches up within moments — see
   [After you publish: is it live yet?](/guide/editing-in-a-draft#after-you-publish-is-it-live-yet)
 
-Merged the wrong thing? Open the merged request and choose **Revert this
-merge**. It adds a new revision that undoes the merge, and the history is
-kept. See
+Merged the wrong thing? Open the merged review and choose **Revert this
+merge** under **More for this review**. It adds a new revision that undoes the
+merge, and the history is kept. See
 [Undo vs. Restore](/guide/versioning-change-control#undo-vs-restore--the-distinction-that-matters).
 
 If someone sends the draft straight to Published with **Publish now** while its
-request is open, {brand} first warns them that this skips the open review. The
-request then closes as merged, and its **Activity** says *Published directly
-by …, bypassing this review*.
+review is open, {brand} first warns them that this skips the review. The review
+then closes as merged, and its **Activity** says *Published directly by …,
+bypassing this review*.
 
 ## Who can do what
 
 | Action | Who |
 | --- | --- |
-| See every request in the workspace | People who can manage the workspace's data sources — the **Workspace member**, **Data engineer** and **Workspace admin** roles |
-| See a request | Also its author, and anyone it names as a reviewer |
-| **Merge**, **Pull latest**, **Dismiss**, edit the title and description, **Revert this merge** | People who can manage the workspace's data sources |
-| **Approve** | The same people — except the request's author. Only the named reviewers' approvals count towards **Approved** |
-| **Accept** and **reject** changes one by one | Whoever may **Approve** it, on a draft's request |
-| Comment, reply, resolve, mention | Anyone who can see the request (a person, not an API key). Deleting someone else's comment: people who can manage the data source |
+| See every review in the workspace | People who can manage the workspace's data sources |
+| See a review | Also its author, the people and groups asked to review it, and anyone who can read its draft |
+| **Merge**, **Pull the latest**, **Dismiss**, rename it, change who reviews, **Ask again**, **Revert this merge** | People who can manage the workspace's data sources (merging into main also needs publish) |
+| **Approve**, **Request changes**, **Accept** and **reject** changes | The same people — except its author where the data source says someone else approves |
+| **Comment**, reply, resolve, mention | Anyone who can see the review (a person, not an API key). Deleting someone else's comment: people who can manage the data source |
 
 Organisation-wide admin roles can do all of these in every workspace. People
 who open an Enterprise View from outside its workspace don't see **Reviews**.

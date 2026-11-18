@@ -171,7 +171,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/08-import-export.md"
   },
   "versioning-scale-and-roadmap": {
-    "updated": "2026-11-12",
+    "updated": "2026-11-18",
     "path": "docs/versioning/09-scale-limits-and-roadmap.md"
   },
   "versioning-authoritative-sources": {
@@ -275,7 +275,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "deploy/k8s/overlays/production-cluster/README.md"
   },
   "configuration": {
-    "updated": "2026-11-12",
+    "updated": "2026-11-18",
     "path": "docs/CONFIGURATION.md"
   },
   "observability": {
