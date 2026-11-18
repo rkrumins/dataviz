@@ -17,7 +17,7 @@ from backend.app.services.feature_flags import feature_flags
 from backend.common.models.graph import GraphNode
 from backend.common.models.search import SearchHit, SearchResultPage
 from backend.common.models.view_membership import MemberEntry, MembershipResult
-from backend.tests.test_view_membership_resolver import FakeEngine
+from backend.tests.fixtures.membership_graph import FakeEngine
 
 URL = "/api/v1/test-ws/graph/members?viewId=v1"
 QUERY = {"kind": "text", "value": "orders"}

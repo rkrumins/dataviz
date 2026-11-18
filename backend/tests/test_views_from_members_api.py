@@ -27,7 +27,7 @@ from backend.app.services.live_views import pipeline
 from backend.common.models.graph import GraphNode
 from backend.common.models.search import SearchHit, SearchResultPage
 from backend.common.models.view_membership import MACHINE
-from backend.tests.test_view_membership_resolver import FakeEngine
+from backend.tests.fixtures.membership_graph import FakeEngine
 
 URL = "/api/v1/views/from-members"
 TYPES = {"dom": "domain", "tbl_a": "table", "tbl_b": "table", "tbl_up": "table"}

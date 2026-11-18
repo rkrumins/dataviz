@@ -146,10 +146,12 @@ class MembershipTruncation(_Base):
     """Where a limit stopped the resolution — said, never silent. ``seen`` is how
     many it had when it stopped (at least), ``limit`` the limit it hit.
 
-    A cap (``seed_cap``, ``member_cap``, ``trace_cap``, ``chains_cap``) gives the same
+    A cap (``seed_cap``, ``member_cap``, ``trace_cap``, ``chains_cap``, and a member set's
+    ``edge_cap``: its lineage stopped being kept, its members did not) gives the same
     answer every time it is asked. ``deadline`` (the resolution's time ran out) and
     ``incomplete`` (a graph read inside it gave up) may not: asking again may answer more."""
-    reason: Literal["seed_cap", "member_cap", "trace_cap", "deadline", "incomplete", "chains_cap"]
+    reason: Literal["seed_cap", "member_cap", "trace_cap", "deadline", "incomplete", "chains_cap",
+                    "edge_cap"]
     seen: int
     limit: int
 

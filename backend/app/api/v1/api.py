@@ -9,7 +9,8 @@ from .revision_gate import revision_gate
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
     metrics as metrics_endpoint,
-    graph, graph_export, graph_members, graph_view_feed, canvas, assignments, providers, ontologies, workspaces,
+    graph, graph_export, graph_members, graph_member_sets, graph_view_feed, canvas, assignments, providers,
+    ontologies, workspaces,
     assets, catalog, views, features, layout_templates,
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
@@ -502,6 +503,12 @@ api_router.include_router(
 # same data-source-or-view gate as every graph read.
 api_router.include_router(
     graph_members.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
+    dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
+)
+# Member sets (/{ws_id}/graph/member-sets): a scope resolved in full, a step at a time, then
+# listed and downloaded. Behind the same gate as the membership it completes.
+api_router.include_router(
+    graph_member_sets.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
     dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
 )
 # A subset view's layer feed (POST /{ws_id}/graph/search/view-feed): its stored search's
