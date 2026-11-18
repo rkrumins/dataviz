@@ -173,6 +173,10 @@ def upgrade() -> None:
     op.create_index("idx_vm_ord", "view_members", ["view_id", "epoch", "ord"], if_not_exists=True)
     op.create_index("idx_vm_label", "view_members", ["view_id", "epoch", "label", "label_ord"],
                     if_not_exists=True)
+    # The members kept whole are a search's roots, read on every search inside the view:
+    # a few of a quarter of a million rows, so an index of only them.
+    op.create_index("idx_vm_whole", "view_members", ["view_id", "epoch", "ord"], if_not_exists=True,
+                    postgresql_where=sa.text("whole"), sqlite_where=sa.text("whole"))
 
     have = {c["name"] for c in inspector.get_columns("view_membership_state")}
     if "members_epoch" not in have:
@@ -224,7 +228,7 @@ def downgrade() -> None:
                     f"{_CONFIG_MAX:,}. Make it smaller (or delete it) before downgrading.")
         for view_id, epoch in held:
             _move_back(bind, view_id, epoch)
-        for name in ("idx_vm_label", "idx_vm_ord", "idx_vm_feed"):
+        for name in ("idx_vm_whole", "idx_vm_label", "idx_vm_ord", "idx_vm_feed"):
             op.drop_index(name, table_name="view_members", if_exists=True)
         op.drop_table("view_members", if_exists=True)
     have = {c["name"] for c in inspector.get_columns("view_membership_state")}

@@ -146,7 +146,18 @@ every layer paged in name order with exact counts.
 fed by, as far as you choose (1–25 hops or the whole way) and optionally with what is inside those —
 through a member set, so neither the matches nor what they reach is capped at 5,000.
 
-<!-- §5.1 in-view search above the root cap: filled in when that lands. -->
+### 5.1 Searching inside a view of more members than a search lists as roots
+
+A search inside a list view reads its members as roots while there are no more than
+`DEEP_SEARCH_SCOPE_ROOT_URNS_CAP` (5,000) of them, as before. Above that it used to refuse; now its
+roots are what people placed by hand and the members kept whole, and every other member is read
+from `view_members` in bands of about 2,000 under its graph label — the engine's URN-list statement,
+run per band, split when a band runs out of time. A session keeps the bands, never the URNs, so it
+does not grow with the view. Nothing is counted twice: a band leaves out whatever sits under the
+roots. Counts, progressive results, search exports, a subset view made on such a view, Narrow's
+query seeds and display rules all read the same scope, and the answer says so: *This view has N
+members: the search reads the members themselves, and everything inside the ones kept whole.*
+FalkorDB (and its drafts) only; other providers keep the honest refusal.
 
 ## 6. Rollout
 
@@ -192,6 +203,9 @@ a view and snapshots of up to 500,000 rows.
 * **The canvas's own Narrow still starts from a search's first 5,000 matches** and holds 50,000
   members; a view saved from it, and an export, start from every match.
 * **A layer lists 5,000 members on the canvas**; search the view, or export it, for the rest.
+* **Inside a view of more than 5,000 members**, a search reads the members themselves (and inside
+  the ones kept whole), not inside every member. Facets other than "inside", Connections searches,
+  the property catalog, explain and aggregate-only searches still refuse there, and say why.
 * **Saved traces are in one browser.** They do not follow a person between machines.
 * **URN seeds stay at 5,000 per spec** (a trace has at most 25); only query seeds are unlimited.
 * **Member sets are not on the API-key surface yet**, so scripts using an API key can't reach them.

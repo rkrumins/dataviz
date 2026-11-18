@@ -34,6 +34,8 @@ versioned and unversioned graphs alike.
   as CSV, NDJSON or JSON.
 - **Advanced Search → Export → With their sources & consumers…**, uncapped.
 - **`POST /{ws}/graph/view-members`**: a list view's members, one layer a page at a time.
+- **Search inside a list view of more than 5,000 members** reads its members in bands from
+  `view_members` instead of refusing (FalkorDB).
 
 ### Changed
 

@@ -1574,6 +1574,9 @@ class ViewMemberORM(Base):
         Index("idx_vm_feed", "view_id", "epoch", "layer_id", "sort_key", "urn"),
         Index("idx_vm_ord", "view_id", "epoch", "ord"),
         Index("idx_vm_label", "view_id", "epoch", "label", "label_ord"),
+        # A search's roots in the view: the few members kept whole.
+        Index("idx_vm_whole", "view_id", "epoch", "ord",
+              postgresql_where=text("whole"), sqlite_where=text("whole")),
     )
 
 
