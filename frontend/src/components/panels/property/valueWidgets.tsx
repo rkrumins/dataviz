@@ -12,6 +12,7 @@ import { X as XIcon, ExternalLink, Calendar, ChevronDown, ChevronUp, Maximize2 }
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { isIsoDate } from './fieldTypes'
+import { fromLocalInput, toLocalInput } from './dateTime'
 
 // ============================================
 // BooleanToggle — Yes / No switch
@@ -77,6 +78,39 @@ export function DateField({
       value={safe}
       readOnly={readOnly}
       onChange={(e) => onChange(e.target.value)}
+      className={cn(
+        "px-2 py-1 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 text-xs",
+        "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",
+        "[color-scheme:light] dark:[color-scheme:dark]",
+        readOnly && "cursor-default opacity-70",
+      )}
+    />
+  )
+}
+
+// ============================================
+// DateTimeField — native date-and-time picker in the reader's time; stores the moment in UTC
+// (property/dateTime)
+// ============================================
+
+export function DateTimeField({
+  value,
+  onChange,
+  readOnly,
+}: {
+  value: string
+  onChange: (v: string) => void
+  readOnly?: boolean
+}) {
+  const local = toLocalInput(value)
+  return (
+    <input
+      type="datetime-local"
+      step={local.includes('.') ? 0.001 : 1}
+      value={local}
+      readOnly={readOnly}
+      aria-label="Date and time"
+      onChange={(e) => { const next = fromLocalInput(e.target.value); if (next) onChange(next) }}
       className={cn(
         "px-2 py-1 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 text-xs",
         "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",

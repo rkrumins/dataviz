@@ -43,6 +43,7 @@ export function RichValue({ value, fieldKey = '', query = '', source = false, on
     return <div className="text-xs font-mono text-ink whitespace-pre-wrap break-words"><HighlightedText text={s} query={query} /></div>
   }
   if (fieldType === 'date') return <FormattedDate value={s} />
+  if (fieldType === 'datetime') return <span className="text-xs"><ValueView value={s} keyHint={fieldKey} /></span>
   if (fieldType === 'url') return <FormattedLink value={s} />
   if (drawsAsRecord(s, fieldKey)) return <span className="text-xs"><ValueView value={s} keyHint={fieldKey} /></span>
   return <ClampedText text={s} onOpen={onOpen} />

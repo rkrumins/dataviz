@@ -57,6 +57,7 @@ import {
 import {
   BooleanToggle,
   DateField,
+  DateTimeField,
   UrlField,
   TagInput,
   ClampedText,
@@ -1025,6 +1026,9 @@ function PrimitiveValueEditor({
   if (fieldType === 'date') {
     return <DateField value={value === null || value === undefined ? '' : String(value)} onChange={onChange} />
   }
+  if (fieldType === 'datetime') {
+    return <DateTimeField value={String(value ?? '')} onChange={onChange} />
+  }
   if (fieldType === 'url') {
     return <UrlField value={value === null || value === undefined ? '' : String(value)} onChange={onChange} />
   }
@@ -1509,6 +1513,9 @@ function ComposerValueField({
   }
   if (type === 'date') {
     return <DateField value={String(value ?? '')} onChange={onChange} />
+  }
+  if (type === 'datetime') {
+    return <DateTimeField value={String(value ?? '')} onChange={onChange} />
   }
   if (type === 'url') {
     return <UrlField value={String(value ?? '')} onChange={onChange} />
