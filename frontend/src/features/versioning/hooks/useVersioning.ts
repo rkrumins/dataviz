@@ -4,9 +4,10 @@
  * history in sync after a save / publish / merge.
  */
 import { useCallback } from 'react'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, ReviewInboxParams, StageOp, Watermark } from '@/services/versioningApiService'
+import { INBOX_QUERY_KEY } from '@/hooks/useInbox'
 import { workspaceService } from '@/services/workspaceService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
@@ -83,6 +84,11 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'dataSourcePrs', ws, dsId, status ?? 'all'] as const,
   viewPrCounts: (ws?: string, viewId?: string | null) =>
     [...VERSIONING_KEYS.all, 'viewPrCounts', ws, viewId] as const,
+  // A queue's pages and the counts alone, under one prefix, so whatever changes a review refreshes both.
+  reviewInbox: (ws?: string, params?: ReviewInboxParams) =>
+    [...VERSIONING_KEYS.all, 'reviewInbox', ws, params ?? {}] as const,
+  reviewInboxCounts: (ws?: string | null) =>
+    [...VERSIONING_KEYS.all, 'reviewInbox', ws, 'counts'] as const,
   viewCommitLog: (ws?: string, gid?: string | null, viewId?: string | null, graphWide?: boolean, limit?: number) =>
     [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, viewId, !!graphWide, limit ?? 'default'] as const,
   // Under 'viewCommits', so every publish, merge, revert and restore that refreshes the history
@@ -678,9 +684,53 @@ export function useDataSourcePullRequests(
       : api.listDataSourcePullRequests(wsId!, dataSourceId!, status ? { status } : {}),
     enabled: !!wsId && !!dataSourceId && enabled,
     staleTime: 15_000,
-    // A 404 is terminal (the data source has no versioned graph); the review inbox reads every
-    // data source in the workspace, versioned or not.
+    // A 404 is terminal (the data source has no versioned graph).
     retry: (n, e) => !/404|not found/i.test(String((e as Error)?.message)) && n < 1,
+  })
+}
+
+/** Reviews the review inbox reads per page. */
+export const REVIEW_INBOX_PAGE = 25
+
+/** One queue of the review inbox, page by page ("Load more"), searched and filtered on the server.
+ *  While another queue or filter loads, the last one stays on screen. */
+export function useReviewInbox(wsId: string | undefined, params: Omit<ReviewInboxParams, 'limit' | 'offset'>) {
+  return useInfiniteQuery({
+    queryKey: VERSIONING_KEYS.reviewInbox(wsId, params),
+    queryFn: ({ pageParam }) => api.getReviewInbox(wsId!, { ...params, limit: REVIEW_INBOX_PAGE, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((n, p) => n + p.items.length, 0)
+      return last.items.length > 0 && loaded < last.total ? loaded : undefined
+    },
+    enabled: !!wsId && !!params.queue,
+    placeholderData: keepPreviousData,
+    staleTime: 15_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
+/** Each review-inbox queue's count and unread count — the Reviews badge — read again every minute. */
+export function useReviewInboxCounts(wsId?: string | null, enabled = true) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.reviewInboxCounts(wsId),
+    queryFn: () => api.getReviewInboxCounts(wsId!),
+    enabled: !!wsId && enabled,
+    staleTime: 15_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
+/** The reader looked at a review: the inbox, its counts and the bell are read again. */
+export function useMarkReviewSeen(wsId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (prId: string) => api.markReviewSeen(wsId, prId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'reviewInbox'] })
+      qc.invalidateQueries({ queryKey: INBOX_QUERY_KEY })
+    },
   })
 }
 
@@ -1040,6 +1090,7 @@ function invalidatePrScopes(qc: ReturnType<typeof useQueryClient>, wsId: string,
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrCounts'] })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'reviewInbox'] })
 }
 
 export function usePublishBranch(wsId: string, graphId: string) {

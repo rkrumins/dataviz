@@ -6,6 +6,7 @@
  */
 import { GitMerge, CircleDot, CheckCircle2, XCircle, AlertTriangle, GitPullRequestArrow, GitFork } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { PullRequest } from '@/services/versioningApiService'
 import { ownerName } from '../../versioning/model/branchVocab'
 
@@ -42,17 +43,19 @@ export function ApprovalPill({ pr, className }: { pr: PullRequest; className?: s
   const complete = counted ? counted.satisfied : pr.approvalStatus === 'approved'
   const asked = pr.review ? pr.review.requiredApprovals === 0 : true
   return (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium tabular-nums shrink-0',
-        complete ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600',
-        className,
-      )}
-      title={asked ? `${done} of ${total} reviewer(s) approved` : `${done} of ${total} approvals needed`}
-    >
-      <CheckCircle2 className="w-3 h-3" />
-      {done}/{total}
-    </span>
+    <HoverTip label={asked ? `${done} of ${total} reviewer(s) approved` : `${done} of ${total} approvals needed`}
+      className="inline-flex shrink-0">
+      <span
+        className={cn(
+          'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium tabular-nums shrink-0',
+          complete ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600',
+          className,
+        )}
+      >
+        <CheckCircle2 className="w-3 h-3" />
+        {done}/{total}
+      </span>
+    </HoverTip>
   )
 }
 
