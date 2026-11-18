@@ -14,7 +14,7 @@
  * J / K move between revisions, → / ← open and close, Shift+→ opens every revision shown.
  */
 import { useCallback, useMemo, useState, type ComponentType, type ReactNode } from 'react'
-import { ChevronRight, Loader2, Plus, Pencil, Trash2, GitBranch, RefreshCw } from 'lucide-react'
+import { Check, ChevronRight, Copy, Loader2, Plus, Pencil, RotateCcw, Trash2, GitBranch, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { PersonChip } from '@/components/ui/PersonChip'
@@ -101,24 +101,67 @@ function Failed({ what, retry }: { what: string; retry: () => void }) {
   )
 }
 
-/** The entity as this revision left it: its named fields, then its properties, read-only. */
-function AsItWas({ entityId, v, line, userNames }: { entityId: string; v: EntityRevision; line: Line; userNames?: Record<string, string> }) {
+/** Copy what a deleted entity held, to paste or keep. */
+function CopyValues({ entity }: { entity: Record<string, unknown> }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button type="button" onClick={async () => {
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(entity, null, 2))
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      } catch { /* clipboard unavailable */ }
+    }}
+      className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-semibold text-ink-secondary border border-glass-border hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+      {copied ? <Check className="w-3 h-3 text-emerald-500" aria-hidden /> : <Copy className="w-3 h-3" aria-hidden />}
+      {copied ? 'Copied' : 'Copy values'}
+    </button>
+  )
+}
+
+/** The entity as this revision left it: its named fields, then its properties, read-only. A deletion
+ *  shows what it removed — the entity just before — to copy, or bring back where that is possible. */
+function AsItWas({ entityId, v, line, userNames, onRestore }: {
+  entityId: string
+  v: EntityRevision
+  line: Line
+  userNames?: Record<string, string>
+  onRestore?: () => void
+}) {
   const q = useEntityRevision(line.wsId, line.graphId, entityId, v.id, { branchId: line.branchId, kind: line.kind })
   if (q.isLoading) return <Pending what="this revision" />
   if (q.isError || !q.data) return <Failed what="this revision" retry={() => { void q.refetch() }} />
-  const entity = entityOf(q.data.value)
+  const left = entityOf(q.data.value)
+  const removed = left ? null : entityOf(q.data.last_value)
+  const entity = left ?? removed
   const head = (
     <p className="text-[11px] text-ink-muted mb-2">
       As of <span className="text-ink-secondary font-medium">{formatUtc(v.created_at)}</span>
       {' · '}{actorName(v.actor ?? undefined, { ...userNames, ...q.data.userNames })}
     </p>
   )
-  if (!entity) return <>{head}<p className="text-[11px] text-ink-muted italic">Deleted in this revision.</p></>
+  if (!entity) return <>{head}<p className="text-[11px] text-ink-muted italic">Deleted in this revision — what it held is no longer on record.</p></>
   const fields = namedFields(entity, line.kind)
   const props = userProperties(entity.properties)
   return (
     <div>
       {head}
+      {removed && (
+        <div role="note" className="mb-2.5 flex items-center gap-2 flex-wrap rounded-xl border border-rose-500/25 bg-rose-500/[0.05] px-3 py-2">
+          <Trash2 className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 shrink-0" aria-hidden />
+          <span className="text-[11.5px] text-ink flex-1 min-w-[10rem]">
+            Deleted in this revision. This is what it held just before.
+          </span>
+          <CopyValues entity={removed} />
+          {onRestore && (
+            <button type="button" onClick={onRestore}
+              className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-semibold text-white bg-accent-lineage hover:bg-accent-lineage/90">
+              <RotateCcw className="w-3 h-3" aria-hidden />
+              Restore it
+            </button>
+          )}
+        </div>
+      )}
       {fields.length > 0 && (
         <dl className="mb-2.5 divide-y divide-black/[0.05] dark:divide-white/[0.06] rounded-xl border border-glass-border bg-black/[0.012] dark:bg-white/[0.02] px-2.5">
           {fields.map((f) => (
@@ -164,13 +207,14 @@ function ComparedWithNow({ entityId, v, line }: { entityId: string; v: EntityRev
   )
 }
 
-function Revision({ entityId, v, dotCls, userNames, rows, line }: {
+function Revision({ entityId, v, dotCls, userNames, rows, line, onRestore }: {
   entityId: string
   v: EntityRevision
   dotCls: string
   userNames?: Record<string, string>
   rows: ExpandableRows<string>
   line?: Line
+  onRestore?: () => void
 }) {
   const op = OP_META[v.op] ?? OP_META.update
   const tone = CHANGE_TONE[op.status]
@@ -228,7 +272,7 @@ function Revision({ entityId, v, dotCls, userNames, rows, line }: {
             <Segmented label="Show this revision" options={VIEWS} value={view} onChange={setView} />
           )}
           {view === 'then' && line ? (
-            <AsItWas entityId={entityId} v={v} line={line} userNames={userNames} />
+            <AsItWas entityId={entityId} v={v} line={line} userNames={userNames} onRestore={v.op === 'delete' ? onRestore : undefined} />
           ) : view === 'now' && line ? (
             <ComparedWithNow entityId={entityId} v={v} line={line} />
           ) : v.changes === null ? (
@@ -243,13 +287,14 @@ function Revision({ entityId, v, dotCls, userNames, rows, line }: {
   )
 }
 
-function Timeline({ entityId, rows, dotCls, userNames, expand, line }: {
+function Timeline({ entityId, rows, dotCls, userNames, expand, line, onRestore }: {
   entityId: string
   rows: EntityRevision[]
   dotCls: string
   userNames?: Record<string, string>
   expand: ExpandableRows<string>
   line?: Line
+  onRestore?: () => void
 }) {
   // A heading wherever the day changes.
   const items: ReactNode[] = []
@@ -262,7 +307,9 @@ function Timeline({ entityId, rows, dotCls, userNames, expand, line }: {
         <li key={`day-${v.id}`} aria-hidden className="-ml-4 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-ink-muted/80">{d}</li>,
       )
     }
-    items.push(<Revision key={v.id} entityId={entityId} v={v} dotCls={dotCls} userNames={userNames} rows={expand} line={line} />)
+    // Only the latest deletion is brought back: an earlier one was undone already.
+    items.push(<Revision key={v.id} entityId={entityId} v={v} dotCls={dotCls} userNames={userNames} rows={expand} line={line}
+      onRestore={v === rows[0] ? onRestore : undefined} />)
   }
   return <ol className="relative ml-1.5 border-l border-glass-border space-y-2.5 pl-4">{items}</ol>
 }
@@ -274,6 +321,7 @@ export function EntityHistory({
   mainBranchId,
   branchId,
   kind,
+  onRestore,
 }: {
   wsId: string
   graphId: string
@@ -282,6 +330,8 @@ export function EntityHistory({
   /** Active draft branch — its unmerged revisions for this entity are shown above the published ones. */
   branchId?: string | null
   kind?: Kind
+  /** Bring a deleted entity back (in a draft, where the canvas can): offered on its deletion. */
+  onRestore?: () => void
 }) {
   const draftId = branchId && branchId !== mainBranchId ? branchId : null
   const q = useEntityHistoryPages(wsId, graphId, entityId, { branchId: draftId, kind })
@@ -342,7 +392,7 @@ export function EntityHistory({
             <GitBranch className="w-3 h-3" />
             In this draft · not merged yet
           </div>
-          <Timeline entityId={entityId} rows={draftRows} dotCls="bg-amber-500" userNames={userNames} expand={expand} line={line} />
+          <Timeline entityId={entityId} rows={draftRows} dotCls="bg-amber-500" userNames={userNames} expand={expand} line={line} onRestore={onRestore} />
         </div>
       )}
       {publishedRows.length > 0 && (
@@ -350,7 +400,8 @@ export function EntityHistory({
           {draftRows.length > 0 && (
             <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Published</div>
           )}
-          <Timeline entityId={entityId} rows={publishedRows} dotCls="bg-accent-lineage" userNames={userNames} expand={expand} line={line} />
+          <Timeline entityId={entityId} rows={publishedRows} dotCls="bg-accent-lineage" userNames={userNames} expand={expand} line={line}
+            onRestore={draftRows.length === 0 ? onRestore : undefined} />
         </div>
       )}
       {q.hasNextPage && (

@@ -1970,6 +1970,8 @@ export interface EntityRevisionValue {
   on_draft: boolean
   /** The entity as it was (a deletion's: `deleted`). */
   value?: EntityView | null
+  /** A deletion's: the entity just before it was deleted, when on record. */
+  last_value?: EntityView | null
   userNames?: Record<string, string>
 }
 

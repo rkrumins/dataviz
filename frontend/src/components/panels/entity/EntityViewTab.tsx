@@ -94,7 +94,7 @@ export function EntityViewTab({
   nodeId, form, original, urn, childCount, tagColors, userProps, copiedUrn, onCopyUrn, canEdit,
   originalProps, publishedProps, digest, onCommitProperties,
   onFocusNode, onLocateMany, onRevealPath, history, typeId = '', typeName = '', fields, identity,
-  customizing = false, onDoneCustomizing, showHistory = false,
+  customizing = false, onDoneCustomizing, showHistory = false, onRestoreDeleted,
 }: {
   nodeId: string
   form: Data
@@ -132,6 +132,8 @@ export function EntityViewTab({
   onDoneCustomizing?: () => void
   /** History was asked for ("See history"): shown even where the layout hides it. */
   showHistory?: boolean
+  /** Bring it back, deleted in this draft — offered on its deletion in History. */
+  onRestoreDeleted?: () => void
 }) {
   const versioningEnabled = useFeature('versioningEnabled')
   const mode = usePersonaMode()
@@ -236,7 +238,7 @@ export function EntityViewTab({
       <div id={`history-${nodeId}`} className="scroll-mt-2">
         <Section title="History" icon={History}>
           <EntityHistory wsId={history.wsId} graphId={history.graphId} entityId={nodeId}
-            mainBranchId={history.mainBranchId} branchId={history.branchId} kind="node" />
+            mainBranchId={history.mainBranchId} branchId={history.branchId} kind="node" onRestore={onRestoreDeleted} />
         </Section>
       </div>
     ),

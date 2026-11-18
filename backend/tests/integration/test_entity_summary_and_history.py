@@ -132,6 +132,19 @@ async def _run() -> None:
     e_row = (await entity_history_page(svc, graph_id=gid, entity_id="E"))["versions"][0]
     rev = await entity_revision(svc, graph_id=gid, entity_id="E", version_id=e_row["id"])
     assert rev["op"] == "delete" and rev["value"] == {"kind": "edge", "version": None, "deleted": True}
+    # ... and says what it removed: the relationship just before, to read or retrieve
+    assert rev["last_value"]["kind"] == "edge" and rev["last_value"]["version"]
+    assert rev["last_value"]["edge"]["id"] == "E"
+    # a deleted entity's last value carries its properties
+    await svc.apply_ops(graph_id=gid, actor="ana", message="z", ops=[_node("Z", owner="ana", tier="gold")])
+    await svc.apply_ops(graph_id=gid, actor="ana", message="drop z",
+                        ops=[{"op": "delete", "entity_kind": "node", "entity_id": "Z"}])
+    z_row = (await entity_history_page(svc, graph_id=gid, entity_id="Z"))["versions"][0]
+    rev = await entity_revision(svc, graph_id=gid, entity_id="Z", version_id=z_row["id"])
+    assert rev["value"]["deleted"] is True
+    assert rev["last_value"]["node"]["properties"] == {"owner": "ana", "tier": "gold"}
+    # a revision that deleted nothing has no last value
+    assert (await entity_revision(svc, graph_id=gid, entity_id="A", version_id=bo_row["id"]))["last_value"] is None
 
     await db.dispose_engine()
 

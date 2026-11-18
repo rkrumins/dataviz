@@ -182,4 +182,36 @@ describe('EntityHistory — each revision, richer', () => {
     await userEvent.click(screen.getByRole('button', { name: /Try again/ }))
     expect(refetch).toHaveBeenCalled()
   })
+
+  it('a deletion shows what it removed — to copy, or restore where the drawer can', async () => {
+    const onRestore = vi.fn()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    h.pages = [{ versions: [
+      rev({ commit_id: 'x2', op: 'delete', actor: 'system', created_at: '2024-03-06T10:00:00Z',
+        changes: [{ path: ['properties', 'owner'], kind: 'removed', before: 'ana', after: null }] }),
+      rev({ commit_id: 'x1', op: 'create', actor: 'system', created_at: '2024-03-05T10:00:00Z', changes: [] }),
+    ], hasMore: false }]
+    h.revision = { data: { id: 'x2', value: { kind: 'node', version: null, deleted: true }, last_value: node({ owner: 'ana', tier: 'gold' }) },
+      isLoading: false, isError: false, refetch: vi.fn() }
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} onRestore={onRestore} />)
+    await userEvent.click(screen.getAllByRole('button', { expanded: false })[0])
+    await userEvent.click(screen.getByRole('radio', { name: 'As it was' }))
+    expect(screen.getByText(/Deleted in this revision\. This is what it held just before/)).toBeInTheDocument()
+    expect(screen.getByText('gold')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Copy values' }))
+    expect(JSON.parse(writeText.mock.calls[0][0])).toMatchObject({ displayName: 'Orders', properties: { owner: 'ana', tier: 'gold' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Restore it' }))
+    expect(onRestore).toHaveBeenCalled()
+  })
+
+  it('offers no Restore without a way back, and says when what was deleted is no longer on record', async () => {
+    h.pages = [{ versions: [rev({ commit_id: 'x2', op: 'delete', actor: 'system', created_at: '2024-03-06T10:00:00Z', changes: [] })], hasMore: false }]
+    h.revision = { data: { id: 'x2', value: { kind: 'node', version: null, deleted: true }, last_value: null },
+      isLoading: false, isError: false, refetch: vi.fn() }
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
+    await userEvent.click(screen.getByRole('radio', { name: 'As it was' }))
+    expect(screen.getByText(/no longer on record/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Restore it' })).not.toBeInTheDocument()
+  })
 })

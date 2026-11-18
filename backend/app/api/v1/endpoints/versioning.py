@@ -1254,6 +1254,8 @@ class EntityRevisionResponse(_ApiModel):
     on_draft: bool = False
     # {kind, version, node|edge}, as the summary's `value`; a deletion's is {kind, version: null, deleted: true}.
     value: Optional[Dict[str, Any]] = None
+    # A deletion's: the entity just before it was deleted (same shape as `value`), when on record.
+    last_value: Optional[Dict[str, Any]] = None
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
@@ -3071,8 +3073,9 @@ async def get_entity_revision(
     session: AsyncSession = Depends(get_db_session),
 ):
     """One revision of an entity — a row of its history, by its ``id`` — with the entity as that
-    revision left it, in the shape the summary's ``include=value`` has. **404** for a revision
-    that isn't this entity's on ``main`` or the draft being viewed."""
+    revision left it, in the shape the summary's ``include=value`` has; a deletion also carries what
+    it removed (``last_value``). **404** for a revision that isn't this entity's on ``main`` or the
+    draft being viewed."""
     await _assert_line_readable(svc, graph_id, branch_id, viewer)
     with _domain_errors():
         revision = await entity_revision(svc, graph_id=graph_id, entity_id=entity_id,

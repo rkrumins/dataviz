@@ -265,6 +265,7 @@ function OpenEntityDrawer({
                 customizing={customizing}
                 onDoneCustomizing={() => setCustomizing(false)}
                 showHistory={historyFor === node.id}
+                onRestoreDeleted={isGhost ? () => restoreGhost((data.urn as string | undefined) || node.id) : undefined}
               />
             </TabsContent>
             {editable && (
