@@ -129,6 +129,20 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "let go after 15 minutes.",
         None,
     ),
+    # ── Views made from a query: their members, a table of their own ───────────
+    "LIVE_VIEW_MAX_MEMBERS": (
+        "Members one view made from a query may hold (the entities people place in it themselves "
+        "aside). Past it the view keeps its last good members and says `over_cap`; a new one is "
+        "not made. Each member is a row of `view_members` in the management database, twice while "
+        "an update is worked out.",
+        None,
+    ),
+    "VIEW_MEMBERS_FEED_MAX_ROWS": (
+        "Members one layer of a view made from a query lists on the canvas "
+        "(`POST /graph/view-members`); past them its page says `capped`, and the layer is searched "
+        "or exported for the rest.",
+        None,
+    ),
     "FAIR_SHARE_VIEW_FEED_RATE": (
         "With `FAIR_SHARE_ENABLED`: subset-view layer scans a workspace may start per second, "
         "across the fleet. A request answered from a cached or last page takes none.",
@@ -659,6 +673,8 @@ RULES = (
     ("backend/app/services/top_level_cache.py", "graph"),
     ("backend/app/services/context_engine.py", "graph"),
     ("backend/app/services/member_sets/", "graph"),
+    ("backend/app/services/live_views/", "graph"),
+    ("backend/app/api/v1/endpoints/graph_view_members.py", "graph"),
     ("backend/app/services/deep_search/", "graph"),
     ("backend/app/services/native_query/", "graph"),
     ("backend/app/api/v1/endpoints/graph.py", "graph"),

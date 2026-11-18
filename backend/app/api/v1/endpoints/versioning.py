@@ -3830,8 +3830,12 @@ async def _view_export_scope(workspace_id, data_source_id, view_id, branch_id=No
         if view is None:
             return None
         # Branch-effective export scope: a draft export scopes to the draft's
-        # own layer assignments (base ⊕ overlay); no branch/overlay → base.
-        config = await effective_view_config(session, view, branch_id)
+        # own layer assignments (base ⊕ overlay); no branch/overlay → base. A view
+        # made from a query places its members too, kept in a table of their own.
+        from backend.app.db.repositories import view_members_repo
+
+        config = await view_members_repo.with_members(
+            session, view.id, await effective_view_config(session, view, branch_id))
         cont = await _live_containment_types(session, workspace_id, data_source_id)
     return export_scope_of(config, cont)
 

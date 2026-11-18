@@ -7,7 +7,9 @@ Writers:
   placing again (a layer they sat in was deleted, a design was restored);
 * the refresh pipeline claims a row (``epoch + 1``, a lease) and records its answer
   only while the epoch is still its own — a run that lost its lease, or was
-  overtaken, never writes over a newer answer.
+  overtaken, never writes over a newer answer. A run too large for one request
+  keeps how far it got in ``materialize``; the next request takes it over at the
+  same epoch once its lease is free (``take_over``).
 """
 from __future__ import annotations
 
@@ -104,6 +106,45 @@ async def claim(session: AsyncSession, view_id: str, *, owner: str, lease_s: flo
     state = await get(session, view_id)
     await session.refresh(state)
     return state.epoch if state is not None else None
+
+
+def in_progress(state: Optional[ViewMembershipStateORM], resolution_hash: str) -> Optional[dict]:
+    """How far the run at the row's epoch has got, while it is still working out
+    ``resolution_hash`` — else None (no run, or one for a question nobody asks now)."""
+    progress = loads(state.materialize) if state is not None else None
+    if (isinstance(progress, dict) and progress.get("epoch") == state.epoch
+            and progress.get("hash") == resolution_hash):
+        return progress
+    return None
+
+
+async def take_over(session: AsyncSession, view_id: str, *, owner: str, epoch: int, lease_s: float) -> bool:
+    """Carry on the run at ``epoch`` — no new epoch: its pages so far stand — when
+    nobody holds its lease, or its holder's ran out."""
+    now = now_iso()
+    result = await session.execute(
+        update(ViewMembershipStateORM)
+        .where(
+            ViewMembershipStateORM.view_id == view_id, ViewMembershipStateORM.epoch == epoch,
+            or_(ViewMembershipStateORM.lease_until.is_(None), ViewMembershipStateORM.lease_until < now),
+        )
+        .values(lease_owner=owner, lease_until=later_iso(lease_s), status="updating")
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount == 1
+
+
+async def update_mine(session: AsyncSession, view_id: str, *, owner: str, epoch: int, **values: Any) -> bool:
+    """Record ``values`` only while the claim is still this run's: the fence a page of
+    members writes through. False: overtaken — the caller rolls its page back."""
+    result = await session.execute(
+        update(ViewMembershipStateORM)
+        .where(ViewMembershipStateORM.view_id == view_id, ViewMembershipStateORM.epoch == epoch,
+               ViewMembershipStateORM.lease_owner == owner)
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount == 1
 
 
 async def locked_if_mine(

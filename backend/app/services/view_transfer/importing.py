@@ -24,9 +24,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ViewORM
-from backend.app.db.repositories import view_activity_repo, view_membership_repo, view_repo, view_version_repo
-from backend.app.services.live_views.ownership import carry_into_config
-from backend.app.services.layout_config import sanitize_node_ordering
+from backend.app.db.repositories import (
+    view_activity_repo, view_members_repo, view_membership_repo, view_repo, view_version_repo,
+)
+from backend.app.services.live_views.ownership import carry_into_config, is_machine
+from backend.app.services.layout_config import parse_reference_layout, sanitize_node_ordering
 from backend.app.services.view_transfer.canonical import (
     config_from_definition, content_hash, portable_definition, split_definition,
 )
@@ -89,6 +91,18 @@ async def _policy(session: AsyncSession, view_type: str) -> Policy:
         allowed = False
     sorting = await feature_flags.is_enabled("nodeSortingEnabled", session, default=True)
     return Policy(view_type_allowed=allowed, node_sorting_enabled=sorting)
+
+
+def _snapshot_members(raw: Any) -> Dict[str, dict]:
+    """A snapshot's members, as a file from before members had a table of their own carries
+    them: its entries marked as the server's. Its definition — canonical — holds none, and a
+    live view's are worked out again here anyway."""
+    if not isinstance(raw, dict):
+        return {}
+    definition = read_definition(raw)
+    if definition is None or definition.mode == "live":
+        return {}
+    return {u: e for u, e in parse_reference_layout(raw).assignments.items() if is_machine(e)}
 
 
 def _canonical(definition: Any, view_type: str) -> Tuple[dict, str]:
@@ -495,10 +509,15 @@ async def import_item(
         if forked_from:
             item.provenance = {**item.provenance, "forkedFrom": forked_from}
         arrived = read_definition(json.loads(row.config or "{}"))
+        carried = _snapshot_members(item.definition)
         if arrived is not None and arrived.mode == "live":
             # A view made from a query arrives with no members (they are data, not
             # design): it works them out against the data here.
             await view_membership_repo.mark_pending(session, row, reason="imported")
+        elif arrived is not None and carried:
+            # A snapshot whose file carries its members: they are its members here.
+            state = await view_membership_repo.ensure(session, row, status="frozen")
+            await view_members_repo.replace(session, state, row.id, carried)
     else:
         row = await _locked_target(session, item)
         _same_kind(row, definition)
@@ -506,9 +525,15 @@ async def import_item(
         await view_version_repo.snapshot_if_dirty(session, row, actor=actor,
                                                   message="Saved automatically before importing")
         imported = await asyncio.to_thread(config_from_definition, definition, icon=item.metadata.get("icon"))
-        # A view kept up to date keeps its members until they are worked out again.
-        if carry_into_config(imported, json.loads(row.config or "{}")):
+        # A view kept up to date keeps its members until they are worked out again; a
+        # snapshot keeps its own, unless the file carries the ones to keep instead.
+        carried = _snapshot_members(item.definition)
+        if carry_into_config(imported):
             await view_membership_repo.mark_pending(session, row, reason="design_replaced")
+        elif carried and read_definition(imported) is not None:
+            await view_members_repo.replace(session, await view_membership_repo.ensure(session, row),
+                                            row.id, carried)
+        await view_members_repo.rehome_view(session, row.id, imported)
         row.config = await asyncio.to_thread(json.dumps, imported)
         row.name = item.metadata["name"]
         row.description = item.metadata.get("description")

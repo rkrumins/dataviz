@@ -1477,13 +1477,15 @@ class ViewMembershipStateORM(Base):
 
     RUNTIME state, never design: it is not exported, not versioned and not part of
     the view's content hash — the definition is ``config.membership``, and the
-    members themselves are the view's ``assignedBy: "query"`` entries. One row per
-    such view, gone with the view.
+    members themselves are rows of ``view_members`` (``members_epoch`` names the
+    ones readers see). One row per such view, gone with the view.
 
     The refresh is fenced: a run claims the row (``lease_owner``/``lease_until``,
     ``epoch + 1``) and may apply only while the epoch is still its own, so a run
     that lost its lease — or was overtaken by an edit — can never write over a
-    newer answer. Timestamps are ISO text, as everywhere in this schema.
+    newer answer. A run too large for one request records how far it got in
+    ``materialize``, and the next request carries it on at the same epoch.
+    Timestamps are ISO text, as everywhere in this schema.
     """
     __tablename__ = "view_membership_state"
 
@@ -1514,6 +1516,10 @@ class ViewMembershipStateORM(Base):
     last_applied_at = Column(Text, nullable=True)
     last_read_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
+    # The epoch of ``view_members`` readers see (None until the first answer is applied),
+    # and how far the run at ``epoch`` has got (JSON: its member sets, its place in them).
+    members_epoch = Column(Integer, nullable=True)
+    materialize = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -1527,6 +1533,48 @@ class ViewMembershipStateORM(Base):
 
     def __repr__(self) -> str:
         return f"<ViewMembershipState view_id={self.view_id!r} {self.status} r{self.revision}>"
+
+
+class ViewMemberORM(Base):
+    """One member of a view made from a query, at one epoch of its answer.
+
+    The members are data, not design, and a view holds up to a quarter of a million,
+    so they live here rather than in ``views.config`` (which every list of views
+    reads). A run writes the members it works out at its own epoch, a page at a time;
+    readers see ``view_membership_state.members_epoch`` until the run swaps it, so
+    they never see half an answer. ``sort_key`` (lower name, then URN) orders a
+    layer's members by name for the canvas's pages; ``ord`` numbers an epoch's
+    members densely in the order they were found, ``label_ord`` within their graph
+    label. ``whole``: everything inside it is in the view too; ``covered``: it sits
+    inside such a member placed in another layer. Placement (``layer_id``,
+    ``order_key``, ``logical_node_id``) is the canvas's, as an assignment entry's.
+    """
+    __tablename__ = "view_members"
+
+    view_id = Column(Text, ForeignKey("views.id", ondelete="CASCADE"), primary_key=True)
+    epoch = Column(Integer, primary_key=True)
+    urn = Column(Text, primary_key=True)
+    layer_id = Column(Text, nullable=False)
+    # Byte order on Postgres, so the keyset and its index agree whatever the locale.
+    sort_key = Column(Text().with_variant(Text(collation="C"), "postgresql"), nullable=False)
+    ord = Column(Integer, nullable=False)
+    label = Column(Text, nullable=False, default="")
+    label_ord = Column(Integer, nullable=False)
+    via = Column(Text, nullable=True)
+    hops = Column(Integer, nullable=True)
+    whole = Column(Boolean, nullable=False, default=False)
+    covered = Column(Boolean, nullable=False, default=False)
+    name = Column(Text, nullable=True)
+    type = Column(Text, nullable=True)
+    assigned_at = Column(Text, nullable=True)
+    order_key = Column(Text, nullable=True)
+    logical_node_id = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_vm_feed", "view_id", "epoch", "layer_id", "sort_key", "urn"),
+        Index("idx_vm_ord", "view_id", "epoch", "ord"),
+        Index("idx_vm_label", "view_id", "epoch", "label", "label_ord"),
+    )
 
 
 # ------------------------------------------------------------------ #

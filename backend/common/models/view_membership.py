@@ -194,14 +194,16 @@ class MembershipResult(_Base):
 # A view made from a query — its definition (``config.membership``) and the
 # routes that create it, read its state and change it.
 #
-# The view is an ordinary curated view: its members are assignment entries the
-# server writes (``assignedBy: "query"``) and keeps in step with the data, beside
-# the entries people place themselves ("Always include"). The definition is the
-# portable part — it travels in view files and versions; the members do not
-# (they are data, not design: see ``view_transfer.canonical``).
+# The view is an ordinary curated view: its members are rows the server writes
+# (``view_members``, up to ``LIVE_VIEW_MAX_MEMBERS``) and keeps in step with the
+# data, beside the entries people place themselves ("Always include"), which are
+# its config's assignments. The definition is the portable part — it travels in
+# view files and versions; the members do not (they are data, not design: see
+# ``view_transfer.canonical``).
 # ═══════════════════════════════════════════════════════════════════════════
 
-#: The assignment marker of an entry the server owns.
+#: The assignment marker of an entry the server owns: a member, where one is written as an
+#: entry (a draft's move of one, a file from before members had a table of their own).
 MACHINE = "query"
 #: Sources one view may be made from: the main query, plus whole layers.
 SOURCES_MAX = 8
@@ -326,6 +328,7 @@ class FromMembersRequest(_Base):
     provenance: MembershipProvenance = Field(default_factory=MembershipProvenance)
     context_model_id: Optional[str] = Field(None, alias="contextModelId")
     context_model_version: Optional[int] = Field(None, alias="contextModelVersion")
+    wait_ms: int = Field(10_000, alias="waitMs", ge=0, le=30_000)
 
 
 class PlanRequest(_Base):
@@ -335,6 +338,15 @@ class PlanRequest(_Base):
     layers: Optional[List[Dict[str, Any]]] = None
     keep: Literal["withResults", "all"] = "withResults"
     exclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)
+    wait_ms: int = Field(10_000, alias="waitMs", ge=0, le=30_000)
+
+
+class MembershipResolving(_Base):
+    """202 from ``POST /views/from-members`` and ``POST /graph/members/plan``: the sources'
+    member sets (``common/models/member_set.py``) are still being worked out, and nothing
+    was made. Send the same body again — the same ``Idempotency-Key`` too — to carry on."""
+    status: Literal["resolving"] = "resolving"
+    sets: List[Any] = Field(default_factory=list)
 
 
 class PlanLayer(_Base):
@@ -347,14 +359,17 @@ class PlanLayer(_Base):
 
 
 class MembershipPlan(_Base):
-    """What a view made from these sources would hold: entries against the limit
-    (members + the containers drawn around them + always-included), per layer."""
+    """What a view made from these sources would hold: its members against the limit
+    (the containers around them are drawn from their paths, and are not counted;
+    ``containers`` is 0), per layer. ``estimated``: the set is large, so each layer's
+    count is placed from its first members, scaled to them all."""
     keys: int
     members: int
     containers: int
     included: int = 0
     limit: int
     over_cap: bool = Field(False, alias="overCap")
+    estimated: bool = False
     layers: List[PlanLayer] = Field(default_factory=list)
     fallback: int = 0
     truncated: List[MembershipTruncation] = Field(default_factory=list)
@@ -415,8 +430,8 @@ class MemberOps(_Base):
     uninclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)
 
 
-RefreshOutcome = Literal["applied", "unchanged", "current", "held", "over_cap", "deferred", "busy",
-                         "fenced", "source_missing", "failed"]
+RefreshOutcome = Literal["applied", "unchanged", "current", "running", "held", "over_cap", "deferred",
+                         "busy", "fenced", "source_missing", "failed"]
 
 
 class RefreshResult(_Base):
@@ -424,8 +439,9 @@ class RefreshResult(_Base):
     keeping the view up to date stands after it. ``held``: a large removal waits
     for ``?confirmRemovals=true``; ``deferred``: the graph answered short, so the
     view kept its members; ``busy``: another update is working on it;
-    ``current``: opened, and nothing to do (``detail.reason``: ``up_to_date``,
-    ``recent``, ``held`` or ``snapshot``)."""
+    ``running``: a large view, worked out a step at a time — ask again (opened, too)
+    to carry it on; ``current``: opened, and nothing to do (``detail.reason``:
+    ``up_to_date``, ``recent``, ``held`` or ``snapshot``)."""
     outcome: RefreshOutcome
     detail: Dict[str, Any] = Field(default_factory=dict)
     diff: Optional[Dict[str, Any]] = None

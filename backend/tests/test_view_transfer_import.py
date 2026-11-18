@@ -230,6 +230,41 @@ async def test_export_import_export_import_loses_nothing(test_client, graph):
     assert rl["layers"][1]["logicalNodes"][0]["name"] == "Curated"
 
 
+async def test_a_view_made_from_a_query_arrives_without_members_in_its_config(test_client, db_session, graph):
+    """Its members are data, kept in a table of their own: an auto-updating view arrives with
+    none and works them out against the data here; a snapshot's, carried as entries by a file
+    from before members had a table, become its members here — never entries of its config."""
+    import json
+
+    from backend.app.db.models import ViewMemberORM, ViewMembershipStateORM
+
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    inspected = await _file(test_client, await _view(test_client, dev))
+    membership = {"v": 1, "sources": [{"spec": {"seeds": {"urns": ["urn:a"]}}}]}
+
+    async def arrived(mode: str):
+        definition = {**inspected["views"][0]["definition"], "membership": {**membership, "mode": mode}}
+        rl = definition["layout"]["referenceLayout"]
+        definition["layout"] = {**definition["layout"], "referenceLayout": {**rl, "assignments": {
+            **rl["assignments"], "urn:x": {"layerId": "l2", "inheritsChildren": False, "assignedBy": "query"}}}}
+        resp = await _import(test_client, inspected, {"workspaceId": uat}, action="copy", definition=definition,
+                             name=f"From a query ({mode})")
+        assert resp.status_code == 200, resp.text
+        view_id = resp.json()["viewId"]
+        row = (await db_session.execute(select(ViewORM).where(ViewORM.id == view_id))).scalar_one()
+        state = (await db_session.execute(select(ViewMembershipStateORM).where(
+            ViewMembershipStateORM.view_id == view_id))).scalar_one()
+        members = (await db_session.execute(select(ViewMemberORM.urn, ViewMemberORM.layer_id).where(
+            ViewMemberORM.view_id == view_id, ViewMemberORM.epoch == state.members_epoch))).all()
+        assert "urn:x" not in json.loads(row.config)["layout"]["referenceLayout"]["assignments"]
+        return state, members
+
+    state, members = await arrived("live")
+    assert (state.status, state.members_epoch, members) == ("pending", None, [])
+    state, members = await arrived("snapshot")
+    assert (state.status, members) == ("frozen", [("urn:x", "l2")])
+
+
 async def test_a_copy_gets_its_own_identity(test_client, graph):
     dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
     inspected = await _file(test_client, await _view(test_client, dev))

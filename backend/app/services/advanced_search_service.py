@@ -816,14 +816,16 @@ def _stamp_resolved_scope(
     client input) and had to be dropped rather than stamped.
     """
     root_urns = None
-    if query.scope.scope_mode == "view" and eff_scope.root_urns:
+    # A view made from a query past the cap does not list its members (``unlisted_roots``).
+    roots = len(eff_scope.root_urns) + eff_scope.unlisted_roots
+    if query.scope.scope_mode == "view" and roots:
         # ``SearchScope`` raises a pydantic error above the cap, which
         # would escape as a 500. Check first and raise the service's
         # own caller-facing error instead.
         cap = get_deep_search_settings().scope_root_urns_cap
-        if len(eff_scope.root_urns) > cap:
+        if roots > cap:
             raise ValidationError(
-                f"This view has {len(eff_scope.root_urns)} top-level "
+                f"This view has {roots} top-level "
                 f"containers, above the search limit of {cap}. Search "
                 f"from a view with fewer top-level containers, or ask "
                 f"an administrator to raise the limit."

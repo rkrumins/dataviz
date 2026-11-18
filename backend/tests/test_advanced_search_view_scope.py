@@ -1731,3 +1731,51 @@ async def test_resolver_reports_the_views_own_data_source(
     )
     assert eff.view_data_source_id == "ds_view_owns"
     assert eff.data_source_id == "ds_the_caller_asked_for"
+
+
+async def test_a_view_made_from_a_query_is_bounded_by_the_members_readers_see(
+    db_session: AsyncSession, monkeypatch,
+):
+    """Its members are rows of ``view_members``, never entries of its config: they are
+    its roots while they fit the search's root cap — at the epoch readers see, which its
+    scope hash names — and past the cap a search bounded by them is refused, saying how
+    many there are. A view with members, listed or not, does not hold nothing."""
+    from backend.app.db.repositories import view_members_repo, view_membership_repo
+    from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
+    from backend.common.models.search import SearchQuery, TagPredicate
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(db_session, ws, view_type="reference", config={
+        "layoutType": "reference", "content": {"entityScope": "curated"},
+        "membership": {"v": 1, "mode": "live", "sources": [{"spec": {"seeds": {"urns": ["urn:s"]}}}]},
+        "layout": {"referenceLayout": {"layers": [{"id": "L1"}],
+                                       "assignments": {"urn:mine": {"layerId": "L1"}}}},
+    })
+    resolver = ViewScopeResolver(db_session)
+    first = await resolver.resolve(workspace_id=ws.id, requested=SearchScope(view_id=view.id))
+    assert first.root_urns == ("urn:mine",), "not worked out yet: what people placed"
+
+    state = await view_membership_repo.ensure(db_session, view)
+    for epoch in (1, 2):
+        await view_members_repo.insert(db_session, [
+            {"view_id": view.id, "epoch": epoch, "urn": f"urn:m{i}", "layer_id": "L1", "sort_key": f"m{i}",
+             "ord": i, "label": "", "label_ord": i, "whole": False, "covered": False} for i in range(3)])
+    state.epoch = state.members_epoch = 1
+    state.member_count = 3
+    await db_session.flush()
+    eff = await resolver.resolve(workspace_id=ws.id, requested=SearchScope(view_id=view.id))
+    assert set(eff.root_urns) == {"urn:mine", "urn:m0", "urn:m1", "urn:m2"} and not eff.holds_nothing
+    state.members_epoch = 2
+    await db_session.flush()
+    again = await resolver.resolve(workspace_id=ws.id, requested=SearchScope(view_id=view.id))
+    assert again.root_urns == eff.root_urns and again.scope_hash != eff.scope_hash, "a new answer, a new scope"
+
+    with _root_urns_cap(monkeypatch, "2"):
+        over = await resolver.resolve(workspace_id=ws.id, requested=SearchScope(view_id=view.id))
+        assert (over.root_urns, over.unlisted_roots, over.holds_nothing) == (("urn:mine",), 3, False)
+        svc = AdvancedSearchService(_FakeEngine(raise_on_provider_call=True), session=db_session,
+                                    workspace_id=ws.id)
+        with pytest.raises(ValidationError, match="This view has 4 top-level containers, above the search "
+                                                  "limit of 2"):
+            await svc.search(SearchQuery(predicate=TagPredicate(values=["PII"]),
+                                         scope=SearchScope(view_id=view.id)))
