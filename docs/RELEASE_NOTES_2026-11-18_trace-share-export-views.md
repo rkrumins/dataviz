@@ -169,7 +169,13 @@ gains a kind that borrows the subset's machinery:
   followed view's layers live (`search_views.served_config`, keyed by the new `followed_base()`),
   plus *Other matches* unless that view has a `showUnassigned` layer. Renames, new layers and a new
   order show at once.
-* **Placed by the followed view** (`source_placer` with identity links), re-placed on every run.
+* **What the trace shows.** The trace's spec keeps each seed whole (`children: "all"`): the trace
+  draws a seed with everything inside it, and a seed of 10,000 columns is still one member. Its
+  file (**Everything it reaches…**) lists what is inside the seeds, two levels down, so the server's
+  rows hold every row of the dock's own CSV.
+* **Placed by the followed view** (`source_placer` with identity links, the shared placement engine
+  the canvas conformance cases pin): its rules, its scope and what people placed in it by hand —
+  an entity's contents going with it — re-placed on every run.
   The applied answer records the followed view's placement digest, so a change to how it places
   things (a type moved, a rule, a layer removed) places the members again on the next open.
 * **It is a subset.** `subset_of` is set; it is listed under the base's **Subsets** (now shown when

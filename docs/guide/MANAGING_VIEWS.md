@@ -326,7 +326,9 @@ Auto-updating · 6*, and the chip says **Follows Sales overview**.
 - **Its layers are that view's**, as they change there: rename, add or reorder a
   layer in the view it follows and this one shows it. They are not changed in
   this view, so the layer menus offer no renaming, adding or deleting.
-- **Each member is where that view places it.** When that view changes how it
+- **Each member is where that view places it**, including what someone placed
+  there by hand: an entity moved to another layer, or one whose contents go with
+  it, sits there in this view too. When that view changes how it
   places things — a type moved to another layer, a rule changed, a layer
   removed — the members are placed again the next time this view is opened.
   What that view places nowhere is in **Other matches**, unless it has a layer

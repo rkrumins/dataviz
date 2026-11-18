@@ -10,7 +10,7 @@
         "choices": {"choice": "follow", "keep": "all", "nest": true}
       },
       "body": {
-        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": 0, "upstream": "all", "downstream": 3, "partnerChildren": 0}}}],
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": "all", "upstream": "all", "downstream": 3, "partnerChildren": 0}}}],
         "layout": {"kind": "follow", "sourceViewId": "view_base", "nest": true},
         "keep": "all"
       }
@@ -24,7 +24,7 @@
         "choices": {"choice": "follow", "keep": "all", "nest": true, "layoutViewId": "view_base"}
       },
       "body": {
-        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": 0, "upstream": "all", "downstream": 3, "partnerChildren": 0}}}],
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": "all", "upstream": "all", "downstream": 3, "partnerChildren": 0}}}],
         "layout": {"kind": "follow", "sourceViewId": "view_base", "nest": true},
         "keep": "all"
       }
@@ -38,7 +38,7 @@
         "choices": {"choice": "stages", "keep": "withResults", "nest": true}
       },
       "body": {
-        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": 0, "upstream": "all", "downstream": 3, "partnerChildren": 0}}}],
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": "all", "upstream": "all", "downstream": 3, "partnerChildren": 0}}}],
         "layout": {"kind": "stages", "nest": true},
         "keep": "withResults"
       }
@@ -98,7 +98,7 @@
       },
       "body": {
         "name": "Revenue feed", "visibility": "workspace", "workspaceId": "ws_1", "dataSourceId": "ds_1", "mode": "live",
-        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders"]}, "within": "view", "expand": {"children": 0, "upstream": 0, "downstream": "all", "partnerChildren": 0}}}],
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders"]}, "within": "view", "expand": {"children": "all", "upstream": 0, "downstream": "all", "partnerChildren": 0}}}],
         "layout": {"kind": "stages", "nest": true},
         "keep": "withResults",
         "provenance": {"origin": "trace", "viewId": "view_base"}

@@ -600,6 +600,28 @@ async def test_a_view_that_follows_another_is_served_its_layers_as_they_are_now(
     assert [l["name"] for l in await served(test_client, view_id)][:3] == ["Domains", "Every table", "Columns"]
 
 
+async def test_each_member_is_where_the_view_it_follows_places_it_by_hand_too(
+    test_client: AsyncClient, db_session, graph, membership_on,
+):
+    """What people placed by hand in the view it follows — one entity in another layer
+    than its type's, one with everything inside it — is where the follower draws it."""
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    hand = {"tbl_b": {"layerId": "s_dash", "assignedBy": "user"},
+            "tbl_a": {"layerId": "s_dom", "inheritsChildren": True, "assignedBy": "user"}}
+    assert (await test_client.put(f"/api/v1/views/{src}/layout", json={
+        "referenceLayout": {"layers": SOURCE_LAYERS, "assignments": hand}})).status_code == 200
+    view_id = await following(test_client, ws, src)
+    assert {u: e["layerId"] for u, e in (await members_of(db_session, view_id)).items()} == {
+        "dom": "s_dom", "tbl_a": "s_dom", "col_a1": "s_dom", "col_a2": "s_dom",
+        # A column of a table placed by hand goes with it, past its own type's layer — as
+        # the canvas draws it (placement conformance: hand-chain-beats-own-rule-and-stamp).
+        "tbl_b": "s_dash", "col_b1": "s_dash",
+    }
+    assert (await made(db_session, view_id))["layout"]["referenceLayout"]["assignments"] == {}, (
+        "placed by the view it follows, never copied into this one")
+
+
 async def test_where_the_view_it_follows_places_things_is_followed_when_it_is_next_opened(
     test_client: AsyncClient, db_session, graph, membership_on, data,
 ):

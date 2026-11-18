@@ -150,7 +150,7 @@ describe('Save as view from a trace', () => {
     // Upstream only: a side switched off is no reach; the walk's ceiling is the whole way. It
     // follows the view it was traced in, as a subset of it.
     expect(planned.at(-1)).toMatchObject({
-      sources: [{ spec: { seeds: { urns: ['cfo'] }, expand: { upstream: 'all', downstream: 0, children: 0, partnerChildren: 0 } } }],
+      sources: [{ spec: { seeds: { urns: ['cfo'] }, expand: { upstream: 'all', downstream: 0, children: 'all', partnerChildren: 0 } } }],
       layout: { kind: 'follow', sourceViewId: askedIn.at(-1), nest: true },
     })
 

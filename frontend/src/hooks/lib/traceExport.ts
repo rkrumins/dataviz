@@ -230,21 +230,29 @@ export interface TraceExportMeta {
   outsideView: number
 }
 
-/** The trace as the membership contract states it: these seeds, this far each
- *  way, nothing inside them. A side switched off is 0 hops; a depth at the
- *  walk's ceiling is the whole way. What a view made from the trace, and the
- *  complete server export, resolve — and what a script can post back. */
+/** The trace as the membership contract states it: these seeds with everything
+ *  inside them, as the trace shows them, and this far each way. A side switched
+ *  off is 0 hops; a depth at the walk's ceiling is the whole way. What a view made
+ *  from the trace, and the complete server export, resolve — and what a script can
+ *  post back. A view keeps each seed whole (`'all'`: one member, however much is
+ *  inside it); a file asks for what is inside to be listed (`listInside`), two
+ *  levels down, the most the server lists row by row. */
 export function traceMembershipSpec(t: {
   urns: readonly string[]
   showUpstream: boolean
   showDownstream: boolean
   depthUp: number
   depthDown: number
+  listInside?: boolean
 }): MembershipSpec {
   const hops = (on: boolean, depth: number) => (!on ? 0 : depth >= UNLIMITED_DEPTH ? 'all' as const : depth)
   return specFor(
     { urns: [...new Set(t.urns)] },
-    { upstream: hops(t.showUpstream, t.depthUp), downstream: hops(t.showDownstream, t.depthDown) },
+    {
+      children: t.listInside ? 2 : 'all',
+      upstream: hops(t.showUpstream, t.depthUp),
+      downstream: hops(t.showDownstream, t.depthDown),
+    },
   )
 }
 

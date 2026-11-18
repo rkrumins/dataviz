@@ -4925,8 +4925,8 @@ export function ContextViewCanvas({
       },
     }, 8000)
   }, [narrowViewId, navigateTo, notify, setSaveAsDraft])
-  // A TRACE kept as a view: everything it reaches — these seeds, this far each
-  // way, on the sides being read — resolved by the server, so the view holds
+  // A TRACE kept as a view: everything it reaches — these seeds with everything
+  // inside them, this far each way, on the sides being read — resolved by the server, so the view holds
   // the whole answer, not only what this board could place.
   const traceSaveAsView = useMemo(() => {
     if (!canSaveAsView || !traceActive || canvasTrace.tracedUrns.length === 0) return undefined
@@ -4949,10 +4949,11 @@ export function ContextViewCanvas({
   const traceExportEverything = useMemo(() => {
     if (!graphExportEnabled || !(provider instanceof RemoteGraphProvider) || !traceActive) return undefined
     return () => setLineageExport({
+      // A file lists what is inside the seeds, row by row, as the dock's own does.
       spec: traceMembershipSpec({
         urns: canvasTrace.tracedUrns,
         showUpstream: traceShowUpstream, showDownstream: traceShowDownstream,
-        depthUp: traceDepthUp, depthDown: traceDepthDown,
+        depthUp: traceDepthUp, depthDown: traceDepthDown, listInside: true,
       }),
       seedsLabel: tracedLabel ?? 'the traced entities',
     })

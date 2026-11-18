@@ -133,7 +133,8 @@ describe('the files', () => {
     expect(doc.nodes).toHaveLength(rows.length)
     // Only flows between rows of the file, and never a rollup.
     expect(doc.edges).toEqual([{ source: 'ledger.amt', target: 'orders.amt', type: 'TRANSFORMS' }, { source: 'sales.amt', target: 'dash.amt', type: 'TRANSFORMS' }])
-    expect(doc.spec.expand).toEqual({ children: 0, upstream: 1, downstream: 'all', partnerChildren: 0 })
+    // The seeds with everything inside them, as the trace shows them.
+    expect(doc.spec.expand).toEqual({ children: 'all', upstream: 1, downstream: 'all', partnerChildren: 0 })
   })
 
   it('an empty trace is still a valid document', () => {
@@ -141,6 +142,12 @@ describe('the files', () => {
       urns: ['x'], showUpstream: false, showDownstream: true, depthUp: 3, depthDown: 3,
     }), [], []).join(''))
     expect(doc).toMatchObject({ nodes: [], edges: [], spec: { expand: { upstream: 0, downstream: 3 } } })
+  })
+
+  it('a view keeps each seed whole; a file lists what is inside, as far as the server lists', () => {
+    const t = { urns: ['x'], showUpstream: true, showDownstream: true, depthUp: 25, depthDown: 25 }
+    expect(traceMembershipSpec(t).expand.children).toBe('all')
+    expect(traceMembershipSpec({ ...t, listInside: true }).expand.children).toBe(2)
   })
 
   it('names the file for what it holds', () => {
