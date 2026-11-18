@@ -320,7 +320,7 @@ top:
   Offered when the narrowing starts from a search, keeps everything inside the
   matches or nothing inside them, and follows lineage one step at most either
   way.
-- **As a list · up to 5,000**: the view keeps a list of its members. Chosen
+- **As a list of its members**: the view keeps a list of its members. Chosen
   entities, a number of levels inside, two or more lineage steps, and what is
   inside the sources and consumers are kept this way. When **Live** isn't
   offered, the panel says why.
@@ -341,26 +341,32 @@ Kept as a list, the panel offers:
      Impact. Offered when the narrowing reaches sources or consumers.
 
    **Show where they sit** draws each entity inside the containers it lives in.
-4. **Preview** shows each layer the view would start with and how many entries
-   land in it, against the most a view can hold (5,000).
+4. **Preview** shows each layer the view would start with and how many
+   members land in it, against the most a view can hold (250,000 unless your
+   administrator changed it). A large set is worked out on the server first:
+   the preview says *Working out everything it reaches — N entities so far…*
+   until it is done. Above 20,000 members the layer counts are estimated from
+   the first 5,000.
 5. **Who can see it**: only you, or the workspace. To share it with everyone,
    publish it from the view once it's saved.
 
 Press **Save view** (or `⌘`/`Ctrl` + `Enter`). The new view opens, and
 **Undo** on the message deletes it again.
 
-**The limit.** A view keeps up to 5,000 entries: the entities, the containers
-drawn around them, and anything you always include. It is a limit on what the
-view lists, not on how big the graph is. A starting point with **everything
-inside** it is one entry, however much is inside. Over the limit, the panel
-says by how much and what would help, and nothing is saved. It might suggest:
-- turning off **Show where they sit**;
-- choosing **everything inside** instead of a number of levels;
-- narrowing the search.
+**The limit.** A view keeps up to 250,000 members (your administrator can
+change it with `LIVE_VIEW_MAX_MEMBERS`). Only the members count: the containers
+drawn around them by **Show where they sit** don't. A starting point with
+**everything inside** it is one member, however much is inside. Over the limit,
+the panel says by how much and what would help, and nothing is saved.
 
-A narrowing that starts from a search uses the search's first 5,000 matches,
-and the panel says so before you save. Looking after the view once it exists
-is in [Managing Views](/guide/managing-views#views-made-from-a-query).
+Saving waits while a large set is worked out — **Save view** says how far it
+has got — and the view opens once its members are in. On the canvas each layer
+lists its members a page at a time as you scroll, up to 5,000 a layer; search
+in the view, or export it, for the rest.
+
+The narrowing on your canvas starts from a search's first 5,000 matches; a view
+saved from it starts from every match. Looking after the view once it exists is
+in [Managing Views](/guide/managing-views#views-made-from-a-query).
 
 ## Change how lines are drawn
 

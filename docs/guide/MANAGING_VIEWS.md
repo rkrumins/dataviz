@@ -277,7 +277,7 @@ Choose the chip to see:
 
 - what the view is made from, and the view its search runs in (**Searches
   in**). Readers who can't open that view see that it exists, not its name;
-- how many entities and containers it holds, against the 5,000 it can;
+- how many members it holds, against the 250,000 it can;
 - when it last updated, and what that changed: **3 new, 1 left**;
 - how keeping it up to date is going, and what to do about it.
 
@@ -311,7 +311,7 @@ What the chip can say:
 | **Up to date, within limits** | The last update reached a limit; what it reached is shown |
 | **Waiting to update** | A change waits to be worked out, or the graph didn't answer in full last time. **Refresh now** |
 | **An update is waiting for you** | An update would remove a lot, and waits for an editor to **Apply** it or **Keep as is** |
-| **Too many to keep** | The query now reaches more than 5,000 entries. The view keeps its last members until the query is narrowed |
+| **Too many to keep** | The query now reaches more than 250,000 members. The view keeps its last members until the query is narrowed |
 | **Couldn't update** | The graph couldn't be read. The view keeps its last members |
 | **Can't search** | The view its search runs in has gone. The view keeps its last members |
 | **Snapshot** | Its members stay as they are |
@@ -441,7 +441,7 @@ can open it.
   most 1,000 entities placed by hand, and rules that compare properties up to
   about thirty. Past that it places its matches by type, and the sheet and the
   chip say why. The sheet then offers **Keep their places as a list**: a list
-  of members, up to 5,000, each placed where the base places it.
+  of members, up to 250,000, each placed where the base places it.
 - Its own layout, and a subset of the whole data source, place matches by type.
 - A subset places its matches by the shared placement rule. The base's canvas
   uses it too only with **One placement rule for every view surface** on. With it
@@ -544,7 +544,7 @@ See [Ways of Working](/guide/ways-of-working) for conventions and cadence.
 | A subset view says **Subset views are turned off** | The preview is off | Ask your administrator: **Administration → Features → Subset views: a search's matches as a view** |
 | A view made from a query says **Updates paused** | Views that keep themselves up to date are turned off | Nothing to do: it keeps its last members, and catches up once your administrator turns **Narrow: chosen entities and what they reach** back on |
 | "Someone changed this view's search. Review it and try again." | Another editor changed the view after you opened its chip | The chip now shows their change. Check it, then try again |
-| The **Save as a view** panel says it's more than a view can hold | Kept as a list, a view holds at most 5,000 entries | Narrow the query, reach everything inside rather than a number of levels, or turn off **Show where they sit**. A subset view (**Live · any size**) has no limit. See [Troubleshooting](/guide/troubleshooting#save-as-view-says-more-than-a-view-can-hold) |
+| The **Save as a view** panel says it's more than a view can hold | Kept as a list, a view holds at most 250,000 members | Narrow the query, or reach everything inside rather than a number of levels. A subset view (**Live · any size**) has no limit. See [Troubleshooting](/guide/troubleshooting#save-as-view-says-more-than-a-view-can-hold) |
 
 More in [Troubleshooting](/guide/troubleshooting).
 
