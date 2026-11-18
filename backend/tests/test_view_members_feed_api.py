@@ -127,6 +127,29 @@ async def test_a_layer_pages_its_members_in_name_order_with_an_exact_count(on, v
     assert [n["urn"] for n in other["nodes"]] == ["urn:9"] and other["totalCount"] == 1
 
 
+async def test_a_member_says_how_many_of_its_containers_it_is_drawn_inside(on, views, post, db_session):
+    """``inLayer`` counts from the nearest end of ``ancestorPath``, so the path keeps every
+    container — one whose name wasn't found too — or it would point at the wrong one."""
+    from sqlalchemy import update
+
+    from backend.app.db.models import ViewMemberORM
+
+    class Deeper(MembersEngine):
+        async def get_ancestor_chains(self, urns):
+            return {u: ["urn:unnamed", "urn:db"] for u in urns}
+
+    ws, view, _ = await views()
+    await db_session.execute(update(ViewMemberORM).where(ViewMemberORM.urn == "urn:1").values(in_layer=1))
+    await db_session.commit()
+    page = (await post(ws, view.id, {"layerId": "L1"}, Deeper())).json()
+    by_urn = {n["urn"]: n for n in page["nodes"]}
+    assert by_urn["urn:1"]["inLayer"] == 1 and "inLayer" not in by_urn["urn:2"], "shipped when it is inside one"
+    assert by_urn["urn:1"]["ancestorPath"] == [
+        {"urn": "urn:db", "displayName": "db", "entityType": "database"},
+        {"urn": "urn:unnamed", "displayName": "", "entityType": ""},
+    ]
+
+
 async def test_one_page_is_one_read_of_the_table_and_three_graph_statements(on, views, post):
     ws, view, _ = await views()
     engine = MembersEngine()

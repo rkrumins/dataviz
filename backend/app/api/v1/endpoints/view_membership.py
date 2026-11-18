@@ -155,12 +155,13 @@ async def _check_views(
     self_id: Optional[str] = None,
 ) -> Optional[dict]:
     """Every view the definition names — the ones its queries are searched in, and
-    the one whose layers it copies — readable by the caller, in the same workspace
-    and data source, and none of them the view itself. Returns the config of the
-    view whose layers are copied."""
+    the one whose layers it copies or follows — readable by the caller, in the same
+    workspace and data source, none of them the view itself, and a followed one a view
+    that can be followed (``pipeline.follow_refusal``). Returns the config of the view
+    whose layers are copied or followed."""
     names: Set[str] = {s.read_in for s in definition.sources if s.read_in}
     layout = definition.layout
-    if layout.kind == "source":
+    if layout.kind in ("source", "follow"):
         if not layout.source_view_id:
             raise refused(422, "source_view_required", "Name the view whose layers to copy (sourceViewId).")
         names.add(layout.source_view_id)
@@ -181,6 +182,9 @@ async def _check_views(
             raise refused(422, "view_other_data_source", "That view shows a different data source.")
         if view_id == layout.source_view_id:
             copied = pipeline.config_of(other)
+            refusal = pipeline.follow_refusal(copied) if layout.kind == "follow" else None
+            if refusal:
+                raise refused(422, *refusal)
     return copied
 
 
@@ -188,8 +192,8 @@ async def membership_status(
     session: AsyncSession, row: ViewORM, definition: MembershipDefinition,
     ctx: Optional[view_access.ViewerContext] = None,
 ) -> MembershipStatus:
-    """How keeping ``row`` up to date stands. The name of a view searched in is shown
-    only to someone who can open it."""
+    """How keeping ``row`` up to date stands. The name of a view searched in, or
+    followed, is shown only to someone who can open it."""
     state = await view_membership_repo.get(session, row.id)
     _, assignments = pipeline.layout_of(pipeline.config_of(row))
     people = sorted(u for u, e in assignments.items() if e.get("assignedBy") != MACHINE)
@@ -199,6 +203,16 @@ async def membership_status(
                                          or await view_access.can_read_view(session, ctx, other))
         read_in.append(ReadInView(view_id=view_id, name=other.name if visible else None,
                                   available=other is not None))
+    follows: Optional[ReadInView] = None
+    if definition.layout.kind == "follow":
+        base = (await session.execute(select(ViewORM).where(
+            ViewORM.id == definition.layout.source_view_id, view_is_live()))).scalar_one_or_none()
+        if base is not None and base.workspace_id != row.workspace_id:
+            base = None
+        visible = base is not None and (ctx is None or not rbac_flag("RBAC_ENFORCE_VIEWS")
+                                        or await view_access.can_read_view(session, ctx, base))
+        follows = ReadInView(view_id=definition.layout.source_view_id, name=base.name if visible else None,
+                             available=base is not None)
     if definition.mode != "live" and _running(state, definition) is None:
         status = "frozen"
     else:
@@ -218,6 +232,7 @@ async def membership_status(
         last_diff=loads(state.last_diff) if state is not None else None,
         truncated=(loads(state.truncated) or []) if state is not None else [],
         read_in=read_in,
+        follows=follows,
         always_included=people,
         excluded=list(definition.exclude),
     )
@@ -323,7 +338,11 @@ async def create_view_from_members(
     are arranged: like the view they came from (``source``: its layers, kept only
     where they hold something unless ``keep`` is ``all``), by a template's rules or
     the client's own layers (``template``, ``custom``: send ``layers``), by
-    top-level type (``auto``) or by lineage distance (``stages``).
+    top-level type (``auto``), by lineage distance (``stages``), or in the layers of
+    a view it follows (``follow``: that view's as it has them now, each member where
+    it places it — a subset of that view, listed among its subsets; a view that is a
+    subset itself, or made from a query, can't be followed: 422 ``base_is_subset``,
+    ``base_is_list``).
 
     ``mode`` ``live`` (the default) keeps the members in step with the data;
     ``snapshot`` keeps them as they are now. What the sources reach is worked out in
@@ -386,7 +405,7 @@ async def create_view_from_members(
                 })
             draft = await pipeline.draft_view(
                 session, engine, found, definition, source_config=copied_from, client_layers=body.layers,
-                keep=body.keep, limit=limit, place_sample=body.layout.kind not in ("template", "custom"))
+                keep=body.keep, limit=limit, place_sample=body.layout.kind not in ("template", "custom", "follow"))
     except PipelineError as exc:
         raise _refused(exc) from exc
     except NotImplementedError as exc:
@@ -418,6 +437,8 @@ async def create_view_from_members(
     ), ontology_digest=await _compute_ontology_digest(session, body.workspace_id, body.data_source_id),
         user_id=actor)
     row = (await session.execute(select(ViewORM).where(ViewORM.id == view.id))).scalar_one()
+    if body.layout.kind == "follow":
+        row.subset_of = body.layout.source_view_id      # among that view's subsets, served its layers
     version, created = await view_version_repo.checkpoint(
         session, row, source="create", actor=actor, request_id=request_id,
         provenance={"madeFrom": draft.definition.provenance.model_dump(by_alias=True, exclude_none=True)},

@@ -16,6 +16,7 @@ from backend.app.db.models import ViewActivityLogORM, ViewORM, ViewVersionORM
 from backend.app.services import view_access
 from backend.app.services.feature_flags import feature_flags
 from backend.common.models.search_view import REST_LAYER_ID
+from backend.tests.test_views_from_members_api import graph  # noqa: F401 — the list views' graph
 
 URL = "/api/v1/views/from-search"
 P = {"kind": "tag", "values": ["pii"]}
@@ -441,3 +442,39 @@ class TestSubsets:
         listed = (await test_client.get(f"/api/v1/views/{base}/subsets")).json()
         assert listed["count"] == 2 and {i["viewId"] for i in listed["items"]} == {one, two}
         assert (await test_client.get(f"/api/v1/views/{one}/subsets")).json()["count"] == 0
+
+
+class TestFollowedByAViewMadeFromAQuery:
+    """A view made from a query that follows a view's layers (``layout.kind: follow``) is one
+    of that view's subsets, and no base for one."""
+
+    @pytest.fixture()
+    def lists(self, graph):
+        flags(viewMembershipEnabled=True)
+        yield
+        flags(viewMembershipEnabled=False)
+
+    async def follower(self, client: AsyncClient, ws: str, base: str) -> str:
+        from backend.tests.test_views_from_members_api import body as from_members
+        resp = await client.post("/api/v1/views/from-members", json=from_members(
+            ws, base, layout={"kind": "follow", "sourceViewId": base}))
+        assert resp.status_code == 201, resp.text
+        return resp.json()["view"]["id"]
+
+    async def test_it_is_listed_among_the_subsets_with_either_preview_on(self, test_client, lists):
+        ws = await workspace(test_client)
+        base = await base_view(test_client, ws)
+        mine = await self.follower(test_client, ws, base)
+        listed = await test_client.get(f"/api/v1/views/{base}/subsets")
+        assert listed.status_code == 200, "lists made from a query on, subsets off"
+        assert listed.json()["count"] == 1
+        assert [(i["viewId"], i["layout"]) for i in listed.json()["items"]] == [(mine, "inherit")]
+        flags(viewMembershipEnabled=False)
+        off = await test_client.get(f"/api/v1/views/{base}/subsets")
+        assert off.status_code == 403 and off.json()["detail"]["feature"] == "searchViewsEnabled"
+
+    async def test_it_is_no_base_for_a_subset(self, test_client, on, lists):
+        ws = await workspace(test_client)
+        mine = await self.follower(test_client, ws, await base_view(test_client, ws))
+        resp = await test_client.post(URL, json=body(ws, mine))
+        assert (resp.status_code, resp.json()["detail"]["reason"]) == (422, "base_is_subset")

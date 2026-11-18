@@ -1547,7 +1547,9 @@ class ViewMemberORM(Base):
     members densely in the order they were found, ``label_ord`` within their graph
     label. ``whole``: everything inside it is in the view too; ``covered``: it sits
     inside such a member placed in another layer. Placement (``layer_id``,
-    ``order_key``, ``logical_node_id``) is the canvas's, as an assignment entry's.
+    ``order_key``, ``logical_node_id``) is the canvas's, as an assignment entry's;
+    ``in_layer``, how many of its nearest containers are drawn in its layer too (the
+    canvas draws it inside them).
     """
     __tablename__ = "view_members"
 
@@ -1569,6 +1571,7 @@ class ViewMemberORM(Base):
     assigned_at = Column(Text, nullable=True)
     order_key = Column(Text, nullable=True)
     logical_node_id = Column(Text, nullable=True)
+    in_layer = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
         Index("idx_vm_feed", "view_id", "epoch", "layer_id", "sort_key", "urn"),

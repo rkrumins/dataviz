@@ -15,7 +15,9 @@ base view as it is now, and places its matches as the base's canvas does
 rules, each layer a search for what the base places there and "Other matches"
 for what it places nowhere. A base past what a search can follow (too many
 entities placed by hand, or rules too costly to read) is followed by type, and
-the subset says why.
+the subset says why. A view made from a query can follow a view's layers the
+same way (``membership.layout.kind: follow``): it is served them as a subset is
+(``followed_base``, ``served_config``), and places its own members.
 """
 from __future__ import annotations
 
@@ -49,6 +51,7 @@ from backend.common.models.search_view import (
     REST_LAYER_NAME,
     SearchViewDefinition,
     SubsetLayer,
+    read_search_definition,
 )
 from backend.common.search_semantics import fold_case
 
@@ -71,6 +74,21 @@ class SubsetError(Exception):
 
 def is_subset(config: Optional[Dict[str, Any]]) -> bool:
     return isinstance(config, dict) and isinstance(config.get("search"), dict)
+
+
+def followed_base(config: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The view whose layers ``config`` is served with, or None: a subset's base when it
+    follows it (``layout: inherit``), or the view a view made from a query follows
+    (``membership.layout.kind: follow``) — read from the raw config, as cheap as a list
+    of views needs."""
+    if is_subset(config):
+        definition = read_search_definition(config)
+        return definition.read_in if definition is not None and definition.layout == "inherit" else None
+    membership = config.get("membership") if isinstance(config, dict) else None
+    layout = membership.get("layout") if isinstance(membership, dict) else None
+    if isinstance(layout, dict) and layout.get("kind") == "follow" and isinstance(layout.get("sourceViewId"), str):
+        return layout["sourceViewId"] or None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -315,16 +333,22 @@ def followed_reference_layout(base_config: Dict[str, Any],
 
 
 def served_config(config: Dict[str, Any], base_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """A subset view's config as it is read: one that follows its base gets the
-    base's layers (``followed_reference_layout``), its entity styles and the
+    """A view's config as it is read: one that follows another (``followed_base``) gets
+    that view's layers (``followed_reference_layout``), its entity styles and the
     relationships it draws. Without a base to follow (deleted, or out of
     reach), its layers are empty — never anything widened."""
-    definition = SearchViewDefinition.model_validate(config["search"])
-    if definition.layout != "inherit":
+    if is_subset(config):
+        definition = SearchViewDefinition.model_validate(config["search"])
+        if definition.layout != "inherit":
+            return config
+        hidden = definition.hidden_layers
+    elif followed_base(config) is None:
         return config
+    else:
+        hidden = []                 # a view made from a query shows every layer it follows
     out = dict(config)
     layout = dict(out.get("layout") or {})
-    layout["referenceLayout"] = (followed_reference_layout(base_config, definition.hidden_layers)
+    layout["referenceLayout"] = (followed_reference_layout(base_config, hidden)
                                  if base_config is not None else {"layers": [], "assignments": {}})
     out["layout"] = layout
     out.pop("referenceLayout", None)

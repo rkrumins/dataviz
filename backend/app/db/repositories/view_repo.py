@@ -818,9 +818,13 @@ def _keep_config_layout(new_config: Any, stored_config: dict) -> None:
 def _subset_layout(config: dict, reference_layout: dict) -> bool:
     """Whether ``config`` is a subset view's — and if so, refuse a layout it can't
     hold (``ValueError``, a 422): one that follows its base stores no layers, an
-    own one only layers of types (``search_views.layout_problems``)."""
-    from backend.app.services.search_views import is_subset, layout_problems
+    own one only layers of types (``search_views.layout_problems``). A view made from
+    a query that follows a view is no subset here (it holds members of its own), but
+    stores no layers either: they are that view's."""
+    from backend.app.services.search_views import followed_base, is_subset, layout_problems
     if not is_subset(config):
+        if followed_base(config) and reference_layout.get("layers"):
+            raise ValueError("Its layers come from the view it follows: change them there.")
         return False
     candidate = {**config, "layout": {**(config.get("layout") if isinstance(config.get("layout"), dict)
                                          else {}), "referenceLayout": reference_layout}}
@@ -931,6 +935,8 @@ async def update_view_layout(
     previous_layout = _base_reference_layout(config)
     reference_layout = req.reference_layout
     entity_scope = req.entity_scope
+    # Refused before anything is written, members' places included.
+    subset = _subset_layout(config, reference_layout)
     kept = await _made_from_a_query(session, config)
     if kept is not None:
         # The members follow the data, whatever this copy of the layout says: an entry
@@ -953,7 +959,7 @@ async def update_view_layout(
         if await view_members_repo.rehome(session, row.id, epoch, layer_ids_of(reference_layout),
                                           kept.layout.fallback_layer_id):
             await view_membership_repo.mark_pending(session, row, reason="layer_removed")
-    if _subset_layout(config, reference_layout):
+    if subset:
         entity_scope = "all"          # a subset holds every match of its layers' types
     await check_layer_rules(session, reference_layout, previous_layout)
     layout = config.get("layout")
@@ -1034,26 +1040,26 @@ def _load_config(row: ViewORM) -> dict:
 async def followed_configs(
     session: AsyncSession, rows: Sequence[ViewORM], configs: Optional[Dict[str, dict]] = None,
 ) -> Dict[str, dict]:
-    """Each subset view in ``rows`` that follows its base (``config.search`` with
-    ``layout: inherit``), with its config as it is read: the base's layers, entity
-    styles and drawn relationships composed in (``search_views.served_config``). Its
-    layers are never stored, so a subset is always its base's as the base is now.
+    """Each view in ``rows`` that follows another (``search_views.followed_base``: a
+    subset that follows its base, or a view made from a query that follows a view), with
+    its config as it is read: the base's layers, entity styles and drawn relationships
+    composed in (``search_views.served_config``). Its layers are never stored, so it is
+    always its base's as the base is now.
 
     The bases are read in one query, as the system: a subset's readers see the layers
     it shows, not the base. A base gone, or out of the subset's workspace, leaves the
     subset no layers — never anyone else's. ``configs`` gives a row's config where it
     is not the stored one (a draft's)."""
-    from backend.app.services.search_views import served_config
-    from backend.common.models.search_view import read_search_definition
+    from backend.app.services.search_views import followed_base, served_config
 
     wanted: Dict[str, tuple] = {}
     for row in rows:
         if not getattr(row, "subset_of", None):
             continue
         config = (configs or {}).get(row.id) or _load_config(row)
-        definition = read_search_definition(config)
-        if definition is not None and definition.layout == "inherit" and definition.read_in:
-            wanted[row.id] = (row, config, definition.read_in)
+        base_id = followed_base(config)
+        if base_id:
+            wanted[row.id] = (row, config, base_id)
     if not wanted:
         return {}
     base_ids = {base_id for _, _, base_id in wanted.values()}

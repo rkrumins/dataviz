@@ -167,6 +167,29 @@ async def test_nothing_changed_keeps_the_epoch_and_lets_the_new_rows_go(
     assert await at(db_session, view_id, state.epoch) == 0
 
 
+async def test_what_a_member_is_drawn_inside_is_a_change_of_its_own(
+    test_client: AsyncClient, db_session: AsyncSession, graph,
+):
+    """Members placed before what they sit inside was counted (or as it was then): the
+    next answer changes nothing else, and is swapped in all the same."""
+    view_id = await make(test_client, layout={"kind": "auto"})
+    first = (await state_of(db_session, view_id)).members_epoch
+
+    async def drawn_inside(epoch: int) -> dict:
+        return dict((await db_session.execute(select(ViewMemberORM.urn, ViewMemberORM.in_layer).where(
+            ViewMemberORM.view_id == view_id, ViewMemberORM.epoch == epoch))).all())
+
+    counted = await drawn_inside(first)
+    assert (counted["dom"], counted["tbl_a"], counted["col_a1"]) == (0, 1, 2), "inside its table and its domain"
+    await db_session.execute(update(ViewMemberORM).where(ViewMemberORM.view_id == view_id).values(in_layer=0))
+    await db_session.commit()
+    out = await run(db_session, view_id)
+    assert out.outcome == "applied"
+    assert (out.diff["added"], out.diff["removed"], out.diff["moved"]) == (0, 0, 0)
+    state = await state_of(db_session, view_id)
+    assert state.members_epoch == first + 1 and await drawn_inside(state.members_epoch) == counted
+
+
 async def test_over_the_limit_is_known_before_anything_is_placed(
     test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
 ):

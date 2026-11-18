@@ -359,10 +359,12 @@ def _same_kind(row: ViewORM, definition: dict) -> None:
 
 
 def _subset_of(definition: dict) -> Optional[str]:
-    """The base a subset view's definition names, if any."""
+    """The base a subset view's definition names, or the view a view made from a query
+    follows, if any."""
+    from backend.app.services.search_views import followed_base
     from backend.common.models.search_view import read_search_definition
     found = read_search_definition(definition)
-    return found.read_in if found is not None else None
+    return found.read_in if found is not None else followed_base(definition)
 
 
 async def _locked_target(session: AsyncSession, item: ImportItem) -> ViewORM:

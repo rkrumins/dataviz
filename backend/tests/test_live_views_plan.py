@@ -7,7 +7,7 @@
 Containers are never rows (the canvas draws them from each member's path); a member's row
 depends on nothing but itself and its path, so any page size gives the same rows.
 """
-from backend.app.services.live_views import layouts
+from backend.app.services.live_views import layouts, pipeline
 from backend.app.services.live_views.plan import (
     Candidate,
     auto_placer,
@@ -18,7 +18,8 @@ from backend.app.services.live_views.plan import (
     top_type_counts,
 )
 from backend.app.services.view_placement import NodeFacts
-from backend.common.models.view_membership import MembershipSource
+from backend.common.models.search_view import REST_LAYER_ID
+from backend.common.models.view_membership import MembershipDefinition, MembershipSource
 
 TYPES = {
     "db": "database", "sch": "schema", "tbl_a": "table", "tbl_b": "table",
@@ -241,3 +242,88 @@ def test_by_top_level_type():
 def test_auto_layers_past_the_limit_share_other():
     mine = layouts.auto_layers({f"t{i}": 20 - i for i in range(14)})
     assert len(mine) == layouts.AUTO_LAYERS_MAX + 1 and mine[-1]["name"] == layouts.OTHER
+
+
+# ── What a row is drawn inside ──────────────────────────────────────────────
+
+TWO = [{"id": "T", "name": "Tables", "order": 0, "entityTypes": ["table", "column"]},
+       {"id": "D", "name": "Databases", "order": 1, "entityTypes": ["database", "schema"]}]
+
+
+def test_a_row_counts_its_nearest_containers_in_its_layer_up_to_one_in_another():
+    members = [member("col_a1"), member("sch", "inside")]
+    kw = dict(placer=rules_placer(TWO, FACTS), layer_ids=["T", "D"])
+    rows, _ = placed(members, nest=True, **kw)
+    assert {u: (r.layer_id, r.in_layer) for u, r in rows.items()} == {"col_a1": ("T", 1), "sch": ("D", 1)}, (
+        "its table, then a schema in another layer: drawn inside the table alone")
+    kept_out, _ = placed(members, nest=True, exclude={"tbl_a"}, **kw)
+    assert kept_out["col_a1"].in_layer == 0, "a container kept out draws nothing around it"
+    flat, _ = placed(members, **kw)
+    assert {r.in_layer for r in flat.values()} == {0}, "without nest, inside nothing"
+
+
+def test_in_stages_a_partner_sits_inside_its_source_and_a_member_inside_its_stage_containers():
+    partner = member("src_tbl", "upstream", 3)
+    members = [member("col_a1"), member("src_col", "upstream", 1), partner,
+               member("col_b1", "partnerInside", chain=("src_tbl",))]
+    stages = layouts.stage_layers(SOURCE.spec.expand.model_copy(update={"upstream": "all"}))
+    rows, _ = placed(members, context=around(members, partner), placer=stage_placer(),
+                     layer_ids=[l["id"] for l in stages], restage=True, place_containers=False, nest=True)
+    assert {u: r.in_layer for u, r in rows.items()} == {
+        "col_a1": 3,        # its table, schema and database: nothing else of the page under them
+        "src_col": 0,       # its table is a source two stages up
+        "src_tbl": 0,       # its database holds members of two stages
+        "col_b1": 1,        # inside the source it was found in, in that source's stage
+    }
+
+
+def test_what_a_row_is_drawn_inside_is_the_same_on_any_page():
+    whole = member("tbl_a", whole=True)
+    members = [whole, member("col_a1", "inside"), member("col_b1"), member("sch", "inside"),
+               member("src_col", "upstream", 1)]
+    kw = dict(context=around(members, whole, member("sch", "inside")), placer=rules_placer(TWO, FACTS),
+              layer_ids=["T", "D"], nest=True)
+    everything, _ = placed(members, **kw)
+    pieces = {}
+    for c in members:
+        pieces.update(placed([c], **kw)[0])
+    assert pieces == everything
+    assert {u: r.in_layer for u, r in everything.items()} == {"tbl_a": 0, "col_b1": 1, "sch": 1, "src_col": 1}
+
+
+# ── Following a view ────────────────────────────────────────────────────────
+
+FOLLOWED = {
+    "layout": {"referenceLayout": {
+        "layers": [{"id": "b_tbls", "name": "Tables", "order": 0, "entityTypes": ["table"]},
+                   {"id": "b_cols", "name": "Columns", "order": 1, "entityTypes": ["column"]}],
+        "assignments": {"col_a2": {"layerId": "b_tbls", "inheritsChildren": False}}}},
+    "content": {"entityScope": "all"},
+}
+
+
+def _following():
+    """A view made from a query that follows ``FOLLOWED``, as a run places its pages."""
+    definition = MembershipDefinition.model_validate(
+        {"sources": [SOURCE.model_dump(by_alias=True)], "layout": {"kind": "follow", "sourceViewId": "base"}})
+    return pipeline.inputs_of({}, definition, FOLLOWED)
+
+
+def _page(members, previous=None):
+    return pipeline.Page(members=members, context=around(members), previous=previous or {}, facts=FACTS,
+                         info={}, last_seq=0, read=len(members))
+
+
+def test_following_a_view_places_as_it_does_in_its_own_layers():
+    inputs = _following()
+    assert layouts.layer_ids(inputs.layers) == ["b_tbls", "b_cols", REST_LAYER_ID], (
+        "its layers, and Other matches for what it places nowhere")
+    rows, waiting = pipeline.place(_page([member("col_a1"), member("col_a2"), member("db")]), inputs, now="t0")
+    assert {r.urn: r.layer_id for r in rows} == {"col_a1": "b_cols", "col_a2": "b_tbls", "db": REST_LAYER_ID}
+    assert waiting == 1, "what it places nowhere waits in Other matches"
+
+
+def test_following_a_view_never_keeps_a_member_where_it_sat():
+    page = _page([member("col_a1")], previous={"col_a1": {"layerId": "b_tbls", "orderKey": "k"}})
+    [row], _ = pipeline.place(page, _following(), now="t0")
+    assert (row.layer_id, row.order_key) == ("b_cols", None), "where the view it follows places it now"

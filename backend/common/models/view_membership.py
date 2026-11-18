@@ -212,7 +212,7 @@ EXCLUDE_MAX = 2000
 OVERRIDES_MAX = 2000
 
 Mode = Literal["live", "snapshot"]
-LayoutKind = Literal["source", "template", "auto", "stages", "custom"]
+LayoutKind = Literal["source", "template", "auto", "stages", "custom", "follow"]
 Origin = Literal["narrow", "search", "savedQuery", "wizard", "api", "trace"]
 
 
@@ -242,7 +242,9 @@ class MembershipSource(_Base):
 class MembershipLayout(_Base):
     """How members are arranged: like the view it was made from (``source``), by a
     template's rules, by top-level type (``auto``), by lineage distance
-    (``stages``), or in layers the client sent (``custom``). ``nest`` draws each
+    (``stages``), in layers the client sent (``custom``), or in the layers of the view
+    ``sourceViewId`` as that view has them now, each member where that view places it
+    (``follow``: a subset of that view, its layers never its own). ``nest`` draws each
     member inside its containers."""
     kind: LayoutKind = "source"
     nest: bool = True
@@ -250,6 +252,12 @@ class MembershipLayout(_Base):
     template_id: Optional[str] = Field(None, alias="templateId")
     fallback_layer_id: Optional[str] = Field(None, alias="fallbackLayerId")
     link: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _follows_a_view(self) -> "MembershipLayout":
+        if self.kind == "follow" and not self.source_view_id:
+            raise ValueError("a follow layout names the view it follows (sourceViewId)")
+        return self
 
 
 class MembershipOverride(_Base):
@@ -388,7 +396,9 @@ class ReadInView(_Base):
 
 
 class MembershipStatus(_Base):
-    """``GET /views/{id}/membership`` — the definition, and how keeping it is going."""
+    """``GET /views/{id}/membership`` — the definition, and how keeping it is going.
+    ``follows``: the view a ``follow`` layout follows (named only to someone who can open
+    it; ``available`` false once it is gone)."""
     mode: Mode
     status: Status
     detail: Optional[Dict[str, Any]] = None
@@ -402,6 +412,7 @@ class MembershipStatus(_Base):
     last_diff: Optional[Dict[str, Any]] = Field(None, alias="lastDiff")
     truncated: List[MembershipTruncation] = Field(default_factory=list)
     read_in: List[ReadInView] = Field(default_factory=list, alias="readIn")
+    follows: Optional[ReadInView] = None
     always_included: List[str] = Field(default_factory=list, alias="alwaysIncluded")
     excluded: List[str] = Field(default_factory=list)
 

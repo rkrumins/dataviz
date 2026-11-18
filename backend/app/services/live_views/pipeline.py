@@ -60,8 +60,9 @@ from backend.app.services.live_views.plan import (
 )
 from backend.app.services.member_sets import stepper
 from backend.app.services.member_sets import store as sets
+from backend.app.services.search_views import followed_base, is_subset
 from backend.app.services.view_membership_search import make_seed_pages, seed_query_for
-from backend.app.services.view_placement import NodeFacts, facts_from_graph_node
+from backend.app.services.view_placement import NodeFacts, PlacementSpec, facts_from_graph_node, placement_digest
 from backend.common.adapters import ProviderUnavailable
 from backend.common.models.graph import NodeQuery
 from backend.common.models.member_set import MemberSetProgress, MemberSetStatus
@@ -325,7 +326,7 @@ async def read_facts(engine: Any, urns: Sequence[str], *, admit: Any = None) -> 
 
 async def read_chains(engine: Any, urns: Sequence[str], *, admit: Any = None) -> Dict[str, List[str]]:
     """Each entity's containers, parent first, in one statement. A reader with no
-    containment walk (a draft's, a past revision's) places members without their paths."""
+    containment walk places members without their paths."""
     if not urns:
         return {}
     try:
@@ -413,8 +414,43 @@ def make_placer(
         return auto_placer(layouts.type_layer_map(layers), facts)
     if kind == "source" and source_config is not None:
         return source_placer(source_config, layouts.link_map(layers), facts)
+    if kind == "follow" and source_config is not None:
+        # The view it follows places each entity, in that view's own layers.
+        return source_placer(source_config, {i: i for i in layouts.layer_ids(layers)}, facts)
     # template / custom — and a source view that is gone: this view's own layer rules.
     return rules_placer(layers, facts)
+
+
+def follow_refusal(base_config: dict) -> Optional[Tuple[str, str]]:
+    """Why a view made from a query can't follow the view ``base_config`` is — ``(reason,
+    message)`` — or None. A view showing another's layers already (a subset, or one that
+    follows a view) is followed by following that one; a view made from a query keeps its
+    members' places in its member table, past the config a follower places by."""
+    if is_subset(base_config) or followed_base(base_config) is not None:
+        return "base_is_subset", ("That view is a subset of another view: make this one follow that "
+                                  "view instead.")
+    if isinstance(base_config.get("membership"), dict):
+        return "base_is_list", ("That view is made from a query, so where its members sit can't be "
+                                "followed. Arrange the new view by type or by lineage stage instead.")
+    return None
+
+
+def fallback_of(definition: MembershipDefinition, layers: List[dict]) -> Optional[str]:
+    """The layer members nothing places wait in: the definition's — or, following a view,
+    the one that view keeps for what it places nowhere (its own, or "Other matches")."""
+    if definition.layout.kind == "follow":
+        return next((layer["id"] for layer in layers if layer.get("showUnassigned") is True), None)
+    return definition.layout.fallback_layer_id
+
+
+def answered(definition: MembershipDefinition, followed: Optional[dict]) -> str:
+    """What an applied answer answers: what the sources resolve to — and, following a
+    view, how that view places entities, so a change to that (a type moved to another
+    layer, a rule, a layer gone) places the members again the next time it is opened. A
+    rename needs nothing: its layers are served from that view on every read."""
+    if definition.layout.kind != "follow":
+        return definition.resolution_hash()
+    return _sha([definition.resolution_hash(), placement_digest(PlacementSpec.from_config(followed))])
 
 
 @dataclass
@@ -435,26 +471,38 @@ class Inputs:
     def digest(self) -> str:
         """What a placed page depends on: when it changes under a run, its pages so far
         answer another question. Where people put members is not in it — a move made
-        meanwhile is applied as the run finishes."""
-        return _sha([self.definition.layout.model_dump(mode="json", by_alias=True),
-                     layouts.layer_ids(self.layers), sorted(set(self.definition.exclude)), sorted(self.user)])
+        meanwhile is applied as the run finishes. Following a view, how that view places
+        entities is."""
+        parts = [self.definition.layout.model_dump(mode="json", by_alias=True),
+                 layouts.layer_ids(self.layers), sorted(set(self.definition.exclude)), sorted(self.user)]
+        if self.definition.layout.kind == "follow":
+            parts.append(placement_digest(PlacementSpec.from_config(self.source_config)))
+        return _sha(parts)
 
 
 def inputs_of(config: dict, definition: MembershipDefinition, source_config: Optional[dict]) -> Inputs:
+    """Following a view, its layers are that view's as it is now (it stores none)."""
     layers, assignments = layout_of(config)
+    if definition.layout.kind == "follow":
+        if source_config is None:
+            raise PipelineError("source_missing", "The view it follows can't be read.")
+        layers = layouts.followed(source_config)
     return Inputs(definition=definition, layers=layers, source_config=source_config,
                   user={u: e for u, e in assignments.items() if e.get("assignedBy") != MACHINE})
 
 
 def place(page: Page, inputs: Inputs, *, now: str) -> Tuple[List[Placed], int]:
+    """A page's rows. A layout whose placement moves with what is outside the view (lineage
+    distances; a followed view's layers) re-places the members it holds, never keeping one
+    in a layer only because it sat there."""
     d = inputs.definition
     return plan_page(
         page.members, context=page.context, previous=page.previous, user=inputs.user,
         layer_ids=layouts.layer_ids(inputs.layers), overrides=inputs.overrides,
         placer=make_placer(d, layers=inputs.layers, source_config=inputs.source_config, facts=page.facts),
-        fallback_layer_id=d.layout.fallback_layer_id, exclude=d.exclude,
-        restage=d.layout.kind == "stages", place_containers=d.layout.nest and d.layout.kind != "stages",
-        now=now,
+        fallback_layer_id=fallback_of(d, inputs.layers), exclude=d.exclude,
+        restage=d.layout.kind in ("stages", "follow"),
+        place_containers=d.layout.nest and d.layout.kind != "stages", nest=d.layout.nest, now=now,
     )
 
 
@@ -476,7 +524,7 @@ def _rows(view_id: str, epoch: int, page: Page, placed: Sequence[Placed], placin
             "sort_key": view_members_repo.sort_key(name, p.urn), "ord": placing["ord"], "label": label,
             "label_ord": int(labels.get(label, 0)), "via": c.via, "hops": c.hops, "whole": p.whole,
             "covered": p.covered, "name": name, "type": kind, "assigned_at": p.assigned_at,
-            "order_key": p.order_key, "logical_node_id": p.logical_node_id,
+            "order_key": p.order_key, "logical_node_id": p.logical_node_id, "in_layer": p.in_layer,
         })
         placing["ord"] += 1
         labels[label] = int(labels.get(label, 0)) + 1
@@ -503,6 +551,10 @@ def initial_layers(
         raw = (source_config.get("layout") or {}).get("referenceLayout") or {}
         rules = raw.get("displayRules") if isinstance(raw, dict) else None
         return layers, list(rules) if isinstance(rules, list) else []
+    if kind == "follow":
+        if source_config is None:
+            raise PipelineError("source_missing", "The view to follow can't be read.")
+        return layouts.followed(source_config), []
     if kind == "stages":
         return layouts.stage_layers(definition.sources[0].spec.expand), []
     if kind == "auto":
@@ -586,7 +638,8 @@ async def draft_view(
               if place_sample or kind == "auto" else None)
     layers, display_rules = initial_layers(definition, sample, source_config=source_config,
                                            client_layers=client_layers)
-    others = kind not in ("template", "custom")
+    # Layers someone chose — or a followed view's, every one of them — are kept as they are.
+    others = kind not in ("template", "custom", "follow")
 
     def planned(layers: List[dict], d: MembershipDefinition) -> Tuple[List[Placed], int]:
         if sample is None:
@@ -594,8 +647,8 @@ async def draft_view(
         return plan_page(
             sample.members, context=sample.context, previous={}, user={}, layer_ids=layouts.layer_ids(layers),
             overrides={}, placer=make_placer(d, layers=layers, source_config=source_config, facts=sample.facts),
-            fallback_layer_id=d.layout.fallback_layer_id, exclude=d.exclude, restage=kind == "stages",
-            place_containers=d.layout.nest and kind != "stages")
+            fallback_layer_id=fallback_of(d, layers), exclude=d.exclude, restage=kind == "stages",
+            place_containers=d.layout.nest and kind != "stages", nest=d.layout.nest)
 
     placed, fallback = planned(layers, definition)
     if others and (fallback or (estimated and sample is not None)):
@@ -646,8 +699,10 @@ def plan_answer(draft: Draft) -> MembershipPlan:
 def view_config(draft: Draft, *, icon: Optional[str] = None) -> dict:
     """The new view's config — shaped as the wizard shapes one (so every screen
     treats it as any other view): a curated reference view, its definition beside it.
-    Its members are rows of ``view_members``, never entries here."""
-    layout: Dict[str, Any] = {"layers": draft.layers, "assignments": {}}
+    Its members are rows of ``view_members``, never entries here. One that follows a view
+    stores no layers: it is served that view's (``search_views.served_config``)."""
+    follows = draft.definition.layout.kind == "follow"
+    layout: Dict[str, Any] = {"layers": [] if follows else draft.layers, "assignments": {}}
     if draft.display_rules:
         layout["displayRules"] = draft.display_rules
     return {
@@ -662,13 +717,13 @@ def view_config(draft: Draft, *, icon: Optional[str] = None) -> dict:
 
 
 def applied_values(definition: MembershipDefinition, found: Sets, *, members: int, included: int,
-                   per_layer: Dict[str, int], fallback: int, status: str) -> Dict[str, Any]:
-    """The state row's record of an applied answer."""
+                   per_layer: Dict[str, int], fallback: int, status: str, answered: str) -> Dict[str, Any]:
+    """The state row's record of an applied answer, and what it answers (``answered()``)."""
     return dict(
         status=status,
         status_detail=None,
         resolution_hash=definition.resolution_hash(),
-        applied_resolution_hash=definition.resolution_hash(),
+        applied_resolution_hash=answered,
         data_version=found.data_version,
         member_count=members,
         key_count=members + included,
@@ -701,9 +756,10 @@ def config_of(row: ViewORM) -> dict:
 
 async def source_config(session: AsyncSession, definition: MembershipDefinition,
                         workspace_id: str) -> Optional[dict]:
-    """The config of the view a ``source`` layout copies placements from, while it exists."""
+    """The config of the view a ``source`` layout copies placements from, or a ``follow``
+    layout follows, while it exists."""
     sid = definition.layout.source_view_id
-    if definition.layout.kind != "source" or not sid:
+    if definition.layout.kind not in ("source", "follow") or not sid:
         return None
     source = (await session.execute(select(ViewORM).where(ViewORM.id == sid, view_is_live()))).scalar_one_or_none()
     if source is None or source.workspace_id != workspace_id:
@@ -809,12 +865,22 @@ async def refresh(
         state.materialize = None
         await session.commit()
         return Outcome("source_missing", "source_missing")
+    followed = (await source_config(session, definition, row.workspace_id)
+                if definition.layout.kind == "follow" else None)
+    if definition.layout.kind == "follow" and followed is None:
+        # The view it follows is gone, or out of reach: its members stay as they are,
+        # and it shows no layers until that view is back.
+        state.status = "source_missing"
+        state.status_detail = dumps({"reason": "base_missing"})
+        state.materialize = None
+        await session.commit()
+        return Outcome("source_missing", "source_missing")
     workspace_id, data_source_id = row.workspace_id, row.data_source_id
     if only_if_changed:
         if state.status == "held":
             return Outcome("current", "held", {"reason": "held"})
         if (progress is None and state.status in ("ok", "partial") and state.data_version
-                and state.applied_resolution_hash == definition.resolution_hash()):
+                and state.applied_resolution_hash == answered(definition, followed)):
             async with engine_scope(workspace_id, data_source_id, actor) as engine:
                 version = await search_data_version(engine)
             if version and version == state.data_version:
@@ -1009,7 +1075,7 @@ class _Run:
                 await self.release(status="updating", status_detail=dumps(self.detail(found)),
                                    materialize=dumps(progress))
                 return Outcome("running", "updating", self.detail(found))
-            outcome = await self._apply(found, confirm_removals=confirm_removals)
+            outcome = await self._apply(found, confirm_removals=confirm_removals, copied_from=copied_from)
             if outcome is not None:
                 return outcome
             await self.renumber()       # the view changed under the last page: place it again
@@ -1039,7 +1105,8 @@ class _Run:
             await self._save()
         return True
 
-    async def _apply(self, found: Sets, *, confirm_removals: bool) -> Optional[Outcome]:
+    async def _apply(self, found: Sets, *, confirm_removals: bool,
+                     copied_from: Optional[dict]) -> Optional[Outcome]:
         """Phase C — the view's row first, then its state: the order every layout write
         takes them in. None: the view changed under the last page, so it is placed again."""
         session = self.session
@@ -1059,7 +1126,7 @@ class _Run:
             frozen = current is not None and current.mode != "live"
             await self.release(status="frozen" if frozen else "pending", materialize=None)
             return Outcome("fenced", "frozen" if frozen else "pending")
-        inputs = inputs_of(config, current, None)
+        inputs = inputs_of(config, current, copied_from)
         placing = self.progress["placing"]
         if inputs.digest != placing.get("digest"):
             await session.commit()
@@ -1095,7 +1162,8 @@ class _Run:
         status = "frozen" if current.mode != "live" else "partial" if found.truncated() else "ok"
         changed = bool(diff["added"] or diff["removed"] or diff["moved"] or diff["touched"])
         values = applied_values(current, found, members=members, included=len(inputs.user), per_layer=per_layer,
-                                fallback=placing["fallback"], status=status)
+                                fallback=placing["fallback"], status=status,
+                                answered=answered(current, copied_from))
         public = {k: diff[k] for k in ("added", "removed", "moved", "addedSample", "removedSample")}
         now = now_iso()
         if changed:
