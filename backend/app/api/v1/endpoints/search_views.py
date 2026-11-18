@@ -13,8 +13,8 @@ all, whatever the search finds.
   (an ETag, so a poll costs a 304).
 * ``PUT /views/{id}/search`` — change the search, or where its layers come from,
   against the definition hash it was read at; recorded as a version.
-* ``GET /views/{id}/subsets`` — the subset views made from a view: what changing
-  or deleting it reaches.
+* ``GET /views/{id}/subsets`` — the subset views made from a view (and the views
+  made from a query that follow it): what changing or deleting it reaches.
 
 Authoring a search needs read access to the data source: it decides what every
 reader of the view sees there, and a reader of a subset needs no access to its
@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.view_membership import _view
 from backend.app.api.v1.endpoints.views import _compute_ontology_digest, _user_id, authorize_view_create
-from backend.app.api.v1.feature_gate import ensure_view_mode_allowed, require_feature
+from backend.app.api.v1.feature_gate import ensure_view_mode_allowed, feature_disabled, require_feature
 from backend.app.api.v1.refusal import refusal_responses, refused
 from backend.app.api.v1.view_read_scope import viewer_context
 from backend.app.auth.dependencies import get_optional_user, get_permission_claims, rbac_flag
@@ -43,12 +43,14 @@ from backend.app.db.models import ViewORM, view_is_live
 from backend.app.db.repositories import view_activity_repo, view_repo, view_version_repo
 from backend.app.db.repositories.view_membership_repo import now_iso
 from backend.app.services import view_access
+from backend.app.services.feature_flags import feature_flags
 from backend.app.services.live_views.pipeline import config_of, effective_data_source
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.search_views import (
     SubsetError,
     check_predicate,
     follow_placement,
+    followed_base,
     hidden_layer_problems,
     is_subset,
     layers_of,
@@ -75,6 +77,15 @@ router = APIRouter()
 
 #: A preview: it ships off, and a flag that cannot be read means off.
 require_search_views = require_feature("searchViewsEnabled", default=False)
+
+
+async def require_subsets() -> None:
+    """A view's subsets are made from a search (``searchViewsEnabled``) or from a query
+    laid out to follow it (``viewMembershipEnabled``): either preview lists them."""
+    for key in ("searchViewsEnabled", "viewMembershipEnabled"):
+        if await feature_flags.is_enabled_self_session(key, default=False):
+            return
+    raise feature_disabled("searchViewsEnabled")
 
 
 class ViewWithSearch(BaseModel):
@@ -115,7 +126,8 @@ async def _base_for(session: AsyncSession, ctx: view_access.ViewerContext, base_
                     self_id: Optional[str] = None) -> ViewORM:
     """The base a subset is made from: a live view the caller can read, in the same
     workspace and data source, not the subset itself, and not a subset (a subset
-    of a subset is its base's, with both searches — edit the search instead)."""
+    of a subset is its base's, with both searches — edit the search instead), nor a
+    view that follows another's layers."""
     if not base_id:
         raise refused(422, "read_in_required", "Name the view the subset is made from (readIn).")
     if base_id == self_id:
@@ -127,7 +139,7 @@ async def _base_for(session: AsyncSession, ctx: view_access.ViewerContext, base_
         raise refused(404, "base_not_found", f"View '{base_id}' not found")
     if base.workspace_id != workspace_id:
         raise refused(422, "base_other_workspace", "That view is in another workspace.")
-    if is_subset(config_of(base)):
+    if is_subset(config_of(base)) or followed_base(config_of(base)):
         raise refused(422, "base_is_subset", (
             "That view is a subset view already: narrow it further by editing its search, or make "
             "the subset from its base."))
@@ -530,7 +542,7 @@ async def update_view_search(
     "/{view_id}/subsets", response_model=SubsetList, response_model_by_alias=True,
     summary='List the subset views made from a view',
     responses=refusal_responses(403, 404),
-    dependencies=[Depends(require_search_views)],
+    dependencies=[Depends(require_subsets)],
 )
 async def list_view_subsets(
     view_id: str = Path(...),
@@ -538,9 +550,10 @@ async def list_view_subsets(
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> SubsetList:
-    """The subset views made from this view: ``count`` counts every one — what a
-    change to its layers, or its deletion, reaches — and ``items`` lists those the
-    caller can open."""
+    """The subset views made from this view — and the views made from a query that
+    follow it (``layout`` ``inherit``, as a subset that follows it): ``count`` counts
+    every one — what a change to its layers, or its deletion, reaches — and ``items``
+    lists those the caller can open."""
     _row, ctx = await _view(session, view_id, user, claims, edit=False)
     rows = (await session.execute(
         select(ViewORM).where(ViewORM.subset_of == view_id, view_is_live()).order_by(ViewORM.name)
@@ -549,8 +562,7 @@ async def list_view_subsets(
     for other in rows:
         if rbac_flag("RBAC_ENFORCE_VIEWS") and not await view_access.can_read_view(session, ctx, other):
             continue
-        definition = read_search_definition(config_of(other))
         items.append(SubsetSummary(view_id=other.id, name=other.name,
-                                   layout=definition.layout if definition else "own",
+                                   layout="inherit" if followed_base(config_of(other)) else "own",
                                    visibility=other.visibility or "private", updated_at=other.updated_at))
     return SubsetList(count=len(rows), items=items)

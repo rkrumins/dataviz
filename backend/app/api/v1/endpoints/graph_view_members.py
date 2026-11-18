@@ -11,8 +11,9 @@ every graph read is; a share link reads its own view only.
 One page is one keyset read of the member table (``idx_vm_feed``: layer, then name), its
 count (kept in this process per view, answer and layer), then three graph statements, each
 admitted on its own: the members' nodes, where they sit (their containers, the canvas draws
-around them), and those containers' names. A page is cached under the view, the answer it
-reads, the layer, the cursor and the data's version.
+around them — as many of the nearest as ``inLayer`` says), and those containers' names. A
+page is cached under the view, the answer it reads, the layer, the cursor and the data's
+version.
 """
 from __future__ import annotations
 
@@ -120,10 +121,12 @@ async def _read(admit, call):
 
 
 async def _nodes(engine: ContextEngine, rows: List[Any], admit) -> List[Dict[str, Any]]:
-    """The page's members as the canvas draws them: each node, and where it sits
-    (``ancestorPath``, root first). A reader with no containment walk (a draft's, a past
-    revision's) ships them without it. A member the graph no longer holds is drawn from
-    what the member table knows of it, until the next update takes it out."""
+    """The page's members as the canvas draws them: each node, where it sits
+    (``ancestorPath``, root first: every container, a name not found ``""``, so
+    ``inLayer`` counts the right ones) and how many of its nearest containers sit in its
+    layer too (``inLayer``), which the canvas draws it inside. A reader with no
+    containment walk ships them without a path. A member the graph no longer holds is
+    drawn from what the member table knows of it, until the next update takes it out."""
     urns = [r.urn for r in rows]
     if not urns:
         return []
@@ -147,9 +150,12 @@ async def _nodes(engine: ContextEngine, rows: List[Any], admit) -> List[Dict[str
         shaped = node.model_dump(mode="json", by_alias=True)
         if chains is not None:
             shaped["ancestorPath"] = [
-                {"urn": a, "displayName": names[a].display_name, "entityType": names[a].entity_type}
-                for a in reversed(chains.get(r.urn) or []) if a in names
+                {"urn": a, "displayName": names[a].display_name if a in names else "",
+                 "entityType": names[a].entity_type if a in names else ""}
+                for a in reversed(chains.get(r.urn) or [])
             ]
+        if r.in_layer:
+            shaped["inLayer"] = r.in_layer
         out.append(shaped)
     return out
 

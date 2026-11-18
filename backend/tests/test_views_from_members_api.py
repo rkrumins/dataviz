@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints import view_membership as routes
@@ -522,3 +522,193 @@ async def test_a_preview_of_a_large_set_places_its_first_members_and_says_so(
     counts = {l["name"]: (l["count"], l["kept"]) for l in out["layers"]}
     # The first three (dom, tbl_a, tbl_b), scaled to all six; a layer of its own for what they did not see.
     assert counts["Domains"] == (2, True) and counts["Tables"] == (4, True) and counts["Other"][1] is True
+
+
+# ── Following a view: a subset of it, in its layers as it has them now ─────
+
+
+def follow(src: str) -> dict:
+    return {"kind": "follow", "sourceViewId": src}
+
+
+@pytest.fixture()
+def data(monkeypatch):
+    """A data version the graph says (one it can't say is never taken as unchanged)."""
+    async def version(engine):
+        return "v1"
+
+    monkeypatch.setattr(pipeline, "search_data_version", version)
+
+
+async def following(client: AsyncClient, ws: str, src: str) -> str:
+    resp = await client.post(URL, json=body(ws, src, layout=follow(src)))
+    assert resp.status_code == 201, resp.text
+    return resp.json()["view"]["id"]
+
+
+async def opened(client: AsyncClient, db_session: AsyncSession, view_id: str) -> dict:
+    """The view opened, past the 30 seconds an open after an update answers ``recent``."""
+    await db_session.execute(update(ViewMembershipStateORM).where(ViewMembershipStateORM.view_id == view_id)
+                             .values(last_started_at="2000-01-01T00:00:00+00:00"))
+    await db_session.commit()
+    resp = await client.post(f"/api/v1/views/{view_id}/membership/refresh", params={"trigger": "open"})
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+async def served(client: AsyncClient, view_id: str) -> list:
+    resp = await client.get(f"/api/v1/views/{view_id}")
+    assert resp.status_code == 200, resp.text
+    return resp.json()["config"]["layout"]["referenceLayout"]["layers"]
+
+
+async def test_a_preview_that_follows_a_view_offers_every_layer_it_has(
+    test_client: AsyncClient, membership_on, preview,
+):
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    resp = await preview(ws, src, plan_body(src, layout=follow(src)))
+    assert resp.status_code == 200, resp.text
+    assert [(l["id"], l["name"], l["count"], l["kept"]) for l in resp.json()["layers"]] == [
+        ("s_dom", "Domains", 1, True), ("s_tbl", "Tables", 2, True), ("s_col", "Columns", 3, True),
+        ("s_dash", "Dashboards", 0, True), ("other-matches", "Other matches", 0, True),
+    ], "its layers, every one kept, and Other matches for what it places nowhere"
+
+
+async def test_a_view_that_follows_another_is_served_its_layers_as_they_are_now(
+    test_client: AsyncClient, db_session, graph, membership_on,
+):
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    resp = await test_client.post(URL, json=body(ws, src, layout=follow(src)))
+    assert resp.status_code == 201, resp.text
+    view_id = resp.json()["view"]["id"]
+    assert resp.json()["membership"]["follows"] == {"viewId": src, "name": "Sales overview", "available": True}
+    config = await made(db_session, view_id)
+    assert config["layout"]["referenceLayout"]["layers"] == [], "never stored"
+    row = (await db_session.execute(select(ViewORM).where(ViewORM.id == view_id))).scalar_one()
+    assert row.subset_of == src, "among its subsets"
+    assert {u: e["layerId"] for u, e in (await members_of(db_session, view_id)).items()} == {
+        "dom": "s_dom", "tbl_a": "s_tbl", "tbl_b": "s_tbl", "col_a1": "s_col", "col_a2": "s_col", "col_b1": "s_col",
+    }, "in its layers, where it places them"
+    assert [l["id"] for l in await served(test_client, view_id)] == [
+        "s_dom", "s_tbl", "s_col", "s_dash", "other-matches"]
+
+    renamed = [{**l, "name": "Every table"} if l["id"] == "s_tbl" else l for l in SOURCE_LAYERS]
+    assert (await test_client.put(f"/api/v1/views/{src}/layout", json={
+        "referenceLayout": {"layers": renamed, "assignments": {}}})).status_code == 200
+    assert [l["name"] for l in await served(test_client, view_id)][:3] == ["Domains", "Every table", "Columns"]
+
+
+async def test_where_the_view_it_follows_places_things_is_followed_when_it_is_next_opened(
+    test_client: AsyncClient, db_session, graph, membership_on, data,
+):
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    view_id = await following(test_client, ws, src)
+    assert (await opened(test_client, db_session, view_id))["detail"] == {"reason": "up_to_date"}
+
+    renamed = [{**l, "name": "Every table"} if l["id"] == "s_tbl" else l for l in SOURCE_LAYERS]
+    await test_client.put(f"/api/v1/views/{src}/layout", json={"referenceLayout": {"layers": renamed,
+                                                                                    "assignments": {}}})
+    assert (await opened(test_client, db_session, view_id))["detail"] == {"reason": "up_to_date"}, (
+        "a rename needs nothing")
+
+    moved = [{**l, "entityTypes": ["domain", "table"]} if l["id"] == "s_dom"
+             else {**l, "entityTypes": []} if l["id"] == "s_tbl" else l for l in SOURCE_LAYERS]
+    await test_client.put(f"/api/v1/views/{src}/layout", json={"referenceLayout": {"layers": moved,
+                                                                                    "assignments": {}}})
+    out = await opened(test_client, db_session, view_id)
+    assert (out["outcome"], out["diff"]["moved"], out["diff"]["added"]) == ("applied", 2, 0)
+    entries = await members_of(db_session, view_id)
+    assert (entries["tbl_a"]["layerId"], entries["tbl_b"]["layerId"]) == ("s_dom", "s_dom")
+    assert (await opened(test_client, db_session, view_id))["detail"] == {"reason": "up_to_date"}
+
+
+async def test_with_the_view_it_follows_gone_it_keeps_its_members_and_shows_no_layers(
+    test_client: AsyncClient, db_session, graph, membership_on,
+):
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    view_id = await following(test_client, ws, src)
+    assert (await test_client.delete(f"/api/v1/views/{src}")).status_code in (200, 204)
+    out = await opened(test_client, db_session, view_id)
+    membership = out["membership"]
+    assert (out["outcome"], membership["status"], membership["detail"]) == (
+        "source_missing", "source_missing", {"reason": "base_missing"})
+    assert membership["follows"] == {"viewId": src, "name": None, "available": False}
+    assert len(await members_of(db_session, view_id)) == 6, "its members kept"
+    assert await served(test_client, view_id) == [], "the canvas says its base is gone"
+
+
+async def test_a_subset_or_a_view_made_from_a_query_can_not_be_followed(
+    test_client: AsyncClient, graph, membership_on, preview,
+):
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    follower = await following(test_client, ws, src)
+    listed = (await test_client.post(URL, json=body(ws, src))).json()["view"]["id"]
+    for base, reason in ((follower, "base_is_subset"), (listed, "base_is_list")):
+        resp = await test_client.post(URL, json=body(ws, base, layout=follow(base)))
+        assert (resp.status_code, resp.json()["detail"]["reason"]) == (422, reason), resp.text
+        assert resp.json()["detail"]["message"]
+        previewed = await preview(ws, base, plan_body(base, layout=follow(base)))
+        assert (previewed.status_code, previewed.json()["detail"]["reason"]) == (422, reason), previewed.text
+    unnamed = await test_client.post(URL, json=body(ws, src, layout={"kind": "follow"}))
+    assert unnamed.status_code == 422, "a follow layout names the view it follows"
+
+
+async def test_its_layers_are_changed_in_the_view_it_follows(
+    test_client: AsyncClient, db_session, graph, membership_on,
+):
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    view_id = await following(test_client, ws, src)
+    before = await members_of(db_session, view_id)
+    resp = await test_client.put(f"/api/v1/views/{view_id}/layout", json={
+        "referenceLayout": {"layers": SOURCE_LAYERS[:1], "assignments": {}}})
+    assert resp.status_code == 422 and "the view it follows" in resp.json()["detail"]
+    assert (await made(db_session, view_id))["layout"]["referenceLayout"]["layers"] == []
+    assert await members_of(db_session, view_id) == before, "nothing written"
+
+    status = (await test_client.get(f"/api/v1/views/{view_id}/membership")).json()
+    changed = await test_client.put(f"/api/v1/views/{view_id}/membership", json={
+        "ifDefinitionHash": status["definitionHash"], "layout": {"kind": "auto"}})
+    assert (changed.status_code, changed.json()["detail"]["reason"]) == (422, "layout_fixed")
+
+
+async def test_a_reader_who_can_not_open_the_view_it_follows_reads_it_all_the_same(
+    test_client: AsyncClient, db_session, graph, membership_on, monkeypatch,
+):
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+    from backend.app.main import app
+    from backend.app.services import view_access
+
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    view_id = await following(test_client, ws, src)
+    monkeypatch.setenv("RBAC_ENFORCE_VIEWS", "1")
+    real = view_access.can_read_view
+
+    async def not_the_base(session, ctx, view):
+        return view.id != src and await real(session, ctx, view)
+
+    monkeypatch.setattr(view_access, "can_read_view", not_the_base)
+    assert (await test_client.get(f"/api/v1/views/{src}")).status_code in (403, 404)
+    out = await opened(test_client, db_session, view_id)
+    assert out["membership"]["follows"] == {"viewId": src, "name": None, "available": True}
+    assert [l["id"] for l in await served(test_client, view_id)][:3] == ["s_dom", "s_tbl", "s_col"]
+
+    engine = TypedEngine()
+    engine._db_session = db_session
+
+    async def _engine():
+        return engine
+
+    app.dependency_overrides[get_context_engine] = _engine
+    try:
+        page = await test_client.post(f"/api/v1/{ws}/graph/view-members?viewId={view_id}", json={"layerId": "s_col"})
+    finally:
+        app.dependency_overrides.pop(get_context_engine, None)
+    assert page.status_code == 200, page.text
+    assert page.json()["totalCount"] == 3

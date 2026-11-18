@@ -5,11 +5,13 @@
   new id and ``linkLayerId`` naming the layer it was copied from;
 * ``stages``   — one layer per lineage distance the query reaches;
 * ``auto``     — one layer per top-level type of what it holds;
-* ``template`` / ``custom`` — the layers the client sent.
+* ``template`` / ``custom`` — the layers the client sent;
+* ``follow``   — the layers of the view it follows, as that view has them now: never
+  the view's own, so a rename, a new layer or a new order there is this view's too.
 
-After creation the layers are the view's own, like any view's: people rename,
-reorder, recolour and delete them, and the planner places members in whatever
-layers there are.
+After creation the layers are the view's own, like any view's (a ``follow`` view's
+aside): people rename, reorder, recolour and delete them, and the planner places
+members in whatever layers there are.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ import uuid
 from typing import Dict, Iterable, List, Mapping, Optional
 
 from backend.app.services.layout_config import strip_placements
+from backend.app.services.search_views import followed_reference_layout
 from backend.common.models.view_membership import MembershipExpand
 
 #: The frontend's layer palette (``ViewWizard/layerColors.ts``), so a new view's
@@ -50,6 +53,13 @@ def layers_like(source_layers: Iterable[dict]) -> List[dict]:
         if isinstance(layer, dict) and isinstance(layer.get("id"), str) and layer["id"]:
             out.append({**layer, "id": _id(), "linkLayerId": layer["id"]})
     return out
+
+
+def followed(source_config: dict) -> List[dict]:
+    """For a ``follow`` layout: the followed view's layers as a view that follows it is
+    served them (``search_views.followed_reference_layout``) — and "Other matches",
+    unless that view has a layer for what it places nowhere."""
+    return followed_reference_layout(source_config)["layers"]
 
 
 def stage_layers(expand: MembershipExpand) -> List[dict]:

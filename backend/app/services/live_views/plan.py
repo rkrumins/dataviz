@@ -15,12 +15,15 @@ with ``nest`` — a container the layout places), then the fallback layer. The
 fallback layer is a waiting room: a member there (one whose layer was deleted, or
 that nothing could place) is offered to the placer again at every update. A member
 inside a whole member (``inheritsChildren``) in its layer comes with it, and is
-not a row; inside one in another layer it is, and is ``covered``.
+not a row; inside one in another layer it is, and is ``covered``. With ``nest``, a
+row says how many of its nearest containers are drawn in its layer too
+(``in_layer``): the canvas draws it inside them.
 
 Pure and deterministic, and a member's row depends on nothing but itself and its
 path: any page size gives the same rows, and planning again over its own answer
-changes nothing. Entries people placed themselves ("Always include") are never
-members.
+changes nothing — but for ``in_layer`` in a stages layout, where a container is in a
+stage only while everything on the page inside it is. Entries people placed
+themselves ("Always include") are never members.
 """
 from __future__ import annotations
 
@@ -156,6 +159,7 @@ class Placed:
     assigned_at: str
     order_key: Optional[str] = None
     logical_node_id: Optional[str] = None
+    in_layer: int = 0
 
 
 def _valid(layer_id: Optional[str], layers: Set[str]) -> Optional[str]:
@@ -175,6 +179,7 @@ def plan_page(
     exclude: Iterable[str] = (),
     restage: bool = False,
     place_containers: bool = True,
+    nest: bool = False,
     now: str = "",
 ) -> Tuple[List[Placed], int]:
     """The rows of a page of members, in their order, and how many of them wait in
@@ -184,7 +189,10 @@ def plan_page(
     ``assignedAt``, ``orderKey``, ``logicalNodeId``). ``restage`` re-places members the
     view already holds (a stages layout, whose distances move with the data);
     ``place_containers`` lets a container the layout places draw its members in
-    (``nest``, outside a stages layout, whose containers follow what is inside)."""
+    (``nest``, outside a stages layout, whose containers follow what is inside).
+    ``nest`` counts each row's ``in_layer``: its containers, nearest first, drawn in
+    its layer — a person's entry, a member, or one the layout places (in a stages
+    layout too, whose containers draw nothing in) — up to the first that isn't."""
     layers = set(layer_ids)
     left_out = set(exclude)
     fallback_layer = _valid(fallback_layer_id, layers) or (layer_ids[0] if layer_ids else None)
@@ -215,6 +223,16 @@ def plan_page(
             return layer_of(c)[0]
         return _valid(placed.get(urn), layers) if place_containers else None
 
+    def sits(urn: str) -> Optional[str]:
+        """The layer a container on a path is drawn in, as the canvas draws a member
+        inside it: as ``drawn``, and where the layout's containers draw nothing in (a
+        stages layout), where the layout places it all the same."""
+        layer = drawn(urn)
+        c = cands.get(urn)
+        if layer is None and c is not None and not c.member and urn not in left_out and urn not in user:
+            layer = _valid(placed.get(urn), layers)
+        return layer
+
     def layer_of(c: Candidate) -> Tuple[Optional[str], bool]:
         """A member's layer, and whether it is the fallback's for want of another."""
         if c.urn not in known:
@@ -241,11 +259,17 @@ def plan_page(
         order_key = logical = None
         if prev is not None and prev.get("layerId") == layer:
             order_key, logical = prev.get("orderKey"), prev.get("logicalNodeId")
+        in_layer = 0
+        if nest:
+            for a in c.chain:
+                if sits(a) != layer:
+                    break
+                in_layer += 1
         rows.append(Placed(
             urn=c.urn, layer_id=layer, whole=c.whole, covered=bool(around),
             assigned_at=(prev.get("assignedAt") or now) if prev is not None else now,
             order_key=override.get("orderKey") or order_key,
-            logical_node_id=override.get("logicalNodeId") or logical,
+            logical_node_id=override.get("logicalNodeId") or logical, in_layer=in_layer,
         ))
     return rows, fallback
 

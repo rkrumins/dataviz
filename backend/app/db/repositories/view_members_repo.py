@@ -180,8 +180,8 @@ async def diff(session: AsyncSession, view_id: str, old: Optional[int], new: int
                sample: int = 50) -> Dict[str, Any]:
     """What changed from epoch ``old`` to ``new``, measured in SQL: how many members
     joined, left and moved layer, how many changed otherwise (``touched``: a name, how
-    much of them is in, where in a layer), how many there were (``before``), and a
-    sample of who joined and left."""
+    much of them is in, where in a layer, what it is drawn inside), how many there were
+    (``before``), and a sample of who joined and left."""
     new_rows = select(_ROWS).where(_ROWS.c.view_id == view_id, _ROWS.c.epoch == new).subquery()
     if old is None:
         added = int((await session.execute(select(func.count()).select_from(new_rows))).scalar() or 0)
@@ -203,7 +203,7 @@ async def diff(session: AsyncSession, view_id: str, old: Optional[int], new: int
     touched_on = [a.whole != b.whole, a.covered != b.covered, a.sort_key != b.sort_key,
                   a.label != b.label, a.via.is_distinct_from(b.via), a.hops.is_distinct_from(b.hops),
                   a.order_key.is_distinct_from(b.order_key),
-                  a.logical_node_id.is_distinct_from(b.logical_node_id)]
+                  a.logical_node_id.is_distinct_from(b.logical_node_id), a.in_layer != b.in_layer]
     return {
         "added": await n(only_in(new, old)),
         "removed": await n(only_in(old, new)),

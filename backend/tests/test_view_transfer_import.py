@@ -265,6 +265,23 @@ async def test_a_view_made_from_a_query_arrives_without_members_in_its_config(te
     assert (state.status, members) == ("frozen", [("urn:x", "l2")])
 
 
+async def test_a_view_that_follows_another_arrives_among_its_subsets(test_client, db_session, graph):
+    """A view made from a query laid out to follow a view stores no layers (they are that
+    view's), and is listed among that view's subsets — imported as made."""
+    dev = await _workspace(test_client, "Dev")
+    base = await _view(test_client, dev, name="Base")
+    inspected = await _file(test_client, await _view(test_client, dev))
+    definition = {**inspected["views"][0]["definition"], "membership": {
+        "v": 1, "sources": [{"spec": {"seeds": {"urns": ["urn:a"]}}}],
+        "layout": {"kind": "follow", "sourceViewId": base}}}
+    definition["layout"] = {**definition["layout"], "referenceLayout": {"layers": [], "assignments": {}}}
+    resp = await _import(test_client, inspected, {"workspaceId": dev}, action="copy", definition=definition,
+                         name="Follows the base")
+    assert resp.status_code == 200, resp.text
+    row = (await db_session.execute(select(ViewORM).where(ViewORM.id == resp.json()["viewId"]))).scalar_one()
+    assert row.subset_of == base
+
+
 async def test_a_copy_gets_its_own_identity(test_client, graph):
     dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
     inspected = await _file(test_client, await _view(test_client, dev))

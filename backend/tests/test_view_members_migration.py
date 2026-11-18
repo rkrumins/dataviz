@@ -116,6 +116,28 @@ def test_the_upgrade_moves_the_members_out_and_marks_the_view_to_be_worked_out_a
     assert read(db)[2] == rows
 
 
+def test_a_database_that_ran_it_before_members_said_what_they_sit_inside_gains_the_column(db):
+    """The revision is unreleased, and gained ``in_layer`` after some development
+    databases ran it: there, the upgrade adds the column, its rows inside nothing until
+    the view is worked out again."""
+    with db.begin() as conn:
+        conn.execute(sa.text(
+            "CREATE TABLE view_members (view_id TEXT NOT NULL, epoch INTEGER NOT NULL, urn TEXT NOT NULL, "
+            "layer_id TEXT NOT NULL, sort_key TEXT NOT NULL, ord INTEGER NOT NULL, label TEXT NOT NULL, "
+            "label_ord INTEGER NOT NULL, via TEXT, hops INTEGER, whole BOOLEAN NOT NULL, covered BOOLEAN NOT NULL, "
+            "name TEXT, type TEXT, assigned_at TEXT, order_key TEXT, logical_node_id TEXT, "
+            "PRIMARY KEY (view_id, epoch, urn))"))
+        conn.execute(sa.text(
+            "INSERT INTO view_members (view_id, epoch, urn, layer_id, sort_key, ord, label, label_ord, whole, "
+            "covered) VALUES ('live', 1, 'earlier', 'l1', 'earlier', 0, '', 0, 0, 0)"))
+    run(db, "upgrade")
+    _, _, rows = read(db)
+    assert {(r.urn, r.in_layer) for r in rows} == {("earlier", 0), ("a", 0), ("b", 0), ("f", 0)}
+    run(db, "upgrade")      # again: guarded
+    with db.connect() as conn:
+        assert [c["name"] for c in sa.inspect(conn).get_columns("view_members")].count("in_layer") == 1
+
+
 def test_the_downgrade_writes_the_members_back(db):
     run(db, "upgrade")
     run(db, "downgrade")

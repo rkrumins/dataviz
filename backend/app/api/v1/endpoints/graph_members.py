@@ -208,12 +208,15 @@ async def plan_members(
         if source.spec.seeds.query is not None:
             _guard_capability_scope(request, seed_query_for(source.spec, source.read_in))
     copied_from = None
-    if body.layout.kind == "source":
+    if body.layout.kind in ("source", "follow"):
         source_view = (await session.execute(select(ViewORM).where(
             ViewORM.id == (body.layout.source_view_id or viewId), view_is_live()))).scalar_one_or_none()
         if source_view is None or source_view.workspace_id != ws_id or not await can_read_view(source_view):
             raise refused(404, "view_not_found", "View not found")
         copied_from = pipeline.config_of(source_view)
+        refusal = pipeline.follow_refusal(copied_from) if body.layout.kind == "follow" else None
+        if refusal:
+            raise refused(422, *refusal)
 
     await _enforce_fair_share(engine, ENDPOINT_TRACE_CLOSURE)
     response.headers["X-Provider-Health"] = _provider_health_header(engine)

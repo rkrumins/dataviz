@@ -1,7 +1,8 @@
 """Views made from a query: their members out of the view's config, into a table of their own.
 
-``view_members``: each member of such a view at one epoch of its answer — where it is placed,
-why it is in, its name for a page in name order. ``view_membership_state`` gains
+``view_members``: each member of such a view at one epoch of its answer — where it is placed
+(and how many of its containers it is drawn inside, ``in_layer``), why it is in, its name for a
+page in name order. ``view_membership_state`` gains
 ``members_epoch`` (the epoch readers see) and ``materialize`` (how far a run that outlasts one
 request has got). A view of a quarter of a million members cannot keep them in
 ``views.config``, which every list of views reads.
@@ -15,7 +16,8 @@ view holding more than the 5,000 entries a config held.
 
 New tables and two nullable columns, so the lock on ``view_membership_state`` is brief; the
 wait for it is bounded all the same, and the foreign key locks ``views``. Guarded DDL (a
-``create_all`` baseline already has all of it).
+``create_all`` baseline already has all of it; a database that ran this revision before
+``in_layer`` was added to it gains that column, a constant default, so no rewrite).
 Revision id is kept <=32 chars (alembic_version.version_num is VARCHAR(32)).
 
 Revision ID: 20261118_1100_view_members
@@ -147,7 +149,10 @@ def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
 
-    if not inspector.has_table("view_members"):
+    if inspector.has_table("view_members"):
+        if "in_layer" not in {c["name"] for c in inspector.get_columns("view_members")}:
+            op.add_column("view_members", sa.Column("in_layer", sa.Integer(), nullable=False, server_default="0"))
+    else:
         op.create_table(
             "view_members",
             sa.Column("view_id", sa.Text(), sa.ForeignKey("views.id", ondelete="CASCADE"), primary_key=True),
@@ -167,6 +172,7 @@ def upgrade() -> None:
             sa.Column("assigned_at", sa.Text(), nullable=True),
             sa.Column("order_key", sa.Text(), nullable=True),
             sa.Column("logical_node_id", sa.Text(), nullable=True),
+            sa.Column("in_layer", sa.Integer(), nullable=False, server_default="0"),
         )
     op.create_index("idx_vm_feed", "view_members", ["view_id", "epoch", "layer_id", "sort_key", "urn"],
                     if_not_exists=True)
