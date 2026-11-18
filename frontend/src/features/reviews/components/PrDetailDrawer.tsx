@@ -13,11 +13,12 @@
  * changes, its author told, and the author can take the review's answer in one step — Discard the
  * rejected changes. Merging what is accepted can discard what was rejected too.
  *
- * Mounted only while a PR is selected (fresh queries per prId).
+ * Mounted only while a PR is selected (fresh queries per prId). What it lets the reader do comes
+ * from `useReviewActions`, which the review page shares; Open review goes to that page.
  */
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
@@ -26,6 +27,7 @@ import {
 } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { Badge } from '@/components/ui/Badge'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
 import { useCommitLog, useBranchViewChanges } from '../../versioning/hooks/useVersioning'
 import { DraftViewChanges } from '../../versioning/components/DraftViewChanges'
@@ -149,9 +151,17 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
               )}
             </div>
           </div>
-          <button onClick={onClose} className="p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] shrink-0">
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            <HoverTip label="Open this review on a page of its own" detail="Each change beside the list, and keys to move through them" className="inline-flex">
+              <Link to={`/workspaces/${wsId}/reviews/${prId}`} onClick={onClose}
+                className="inline-flex items-center gap-1 px-2.5 h-8 rounded-xl text-[12px] font-semibold text-accent-lineage hover:bg-accent-lineage/10">
+                Open review <ArrowUpRight className="w-3.5 h-3.5" aria-hidden />
+              </Link>
+            </HoverTip>
+            <button onClick={onClose} className="p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] shrink-0">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Body */}
