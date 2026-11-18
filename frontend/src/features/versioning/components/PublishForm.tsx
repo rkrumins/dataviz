@@ -116,7 +116,7 @@ export function usePublishFlow({
 
   const goToReview = (prId: string) => {
     onClose()
-    navigate(`/workspaces/${workspaceId}/reviews?pr=${prId}`)
+    navigate(`/workspaces/${workspaceId}/reviews/${prId}`)
     onLeave?.()
   }
 
