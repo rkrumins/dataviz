@@ -84,6 +84,17 @@ describe('LiveViewChip', () => {
     expect(screen.getByText('kept')).toBeInTheDocument()
   })
 
+  it('a view that follows another is a subset of it: the chip says which, and the panel says what it follows', async () => {
+    api.getMembershipStatus.mockResolvedValue(status({
+      follows: { viewId: 'v1', name: 'Lineage base', available: true }, readIn: [], counts: { members: 6 },
+    }))
+    renderChip()
+    const chip = await screen.findByRole('button', { name: /Subset of Lineage base · Auto-updating · 6/ })
+    fireEvent.click(chip)
+    const line = await screen.findByText(/each member where it places it/)
+    expect(line).toHaveTextContent('Follows Lineage base — its layers, each member where it places it')
+  })
+
   it('renders nothing for a view not made from a query', () => {
     const client = new QueryClient()
     const { container } = render(

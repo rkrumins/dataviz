@@ -46,6 +46,8 @@ export interface SaveAsViewProps {
   canKeepList: boolean
   /** From a search: more reach than a live view keeps — narrow first, then save from there. */
   onNarrowInstead?: () => void
+  /** Kept as a list: the view it can follow as a subset, or why not (SaveAsViewSheet). */
+  follow?: { viewId: string; viewName: string } | { reason: string }
   onClose: () => void
   onSaved: (view: View) => void
 }
@@ -92,7 +94,7 @@ const joined = (words: string[], last: string) =>
 
 export function SaveAsView({
   source, viewId, viewName, workspaceId, dataSourceId, boardLayers, boardConfig, subset, typeLabel,
-  canKeepLive, canKeepList, onNarrowInstead, onClose, onSaved,
+  canKeepLive, canKeepList, onNarrowInstead, follow, onClose, onSaved,
 }: SaveAsViewProps) {
   const live = source.kind === 'narrowing' ? liveFromNarrowing(source.draft.spec) : null
   const liveReason = !canKeepLive ? 'Live views are turned off here.'
@@ -171,6 +173,7 @@ export function SaveAsView({
       draft={list.draft}
       sourceLayerCount={boardLayers.length}
       headerExtra={switcher}
+      follow={source.kind === 'narrowing' ? follow : undefined}
       onClose={onClose}
       onSaved={onSaved}
     />

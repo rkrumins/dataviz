@@ -136,4 +136,38 @@ describe('SaveAsViewSheet', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('This would hold 9,000 entries.')
     expect(createFromMembers.mock.calls[0][0].mode).toBe('snapshot')
   })
+
+  const traceDraft = {
+    spec: specFor({ urns: ['orders', 'sales'] }, { upstream: 'all', downstream: 2 }),
+    seedsLabel: '2 entities', origin: 'trace' as const,
+  }
+
+  it('a trace starts as a subset that follows the view it was traced in, and saves as one', async () => {
+    createFromMembers.mockResolvedValue({ view: { id: 'v2', name: 'Orders trace' }, membership: {} })
+    renderSheet({ draft: traceDraft, follow: { viewId: 'v1', viewName: 'Sales overview' } })
+    await screen.findAllByText('6 entities of 5,000')
+    expect(screen.getByRole('radio', { name: /Follow “Sales overview”/ })).toBeChecked()
+    expect(planMembers.mock.calls.at(-1)![1].layout).toEqual({ kind: 'follow', sourceViewId: 'v1', nest: true })
+    fireEvent.change(screen.getByRole('textbox', { name: 'View name' }), { target: { value: 'Orders trace' } })
+    fireEvent.click(screen.getByRole('button', { name: /Save view/ }))
+    await waitFor(() => expect(createFromMembers).toHaveBeenCalled())
+    expect(createFromMembers.mock.calls[0][0].layout).toEqual({ kind: 'follow', sourceViewId: 'v1', nest: true })
+  })
+
+  it('in a subset, it follows that subset’s base, and "Like" copies the base’s layers — the ones it shows', async () => {
+    renderSheet({ viewId: 'sub1', viewName: 'Orders subset', draft: traceDraft, follow: { viewId: 'base', viewName: 'Sales overview' } })
+    await screen.findAllByText('6 entities of 5,000')
+    expect(planMembers.mock.calls.at(-1)![0]).toBe('sub1')
+    expect(planMembers.mock.calls.at(-1)![1].layout).toEqual({ kind: 'follow', sourceViewId: 'base', nest: true })
+    fireEvent.click(screen.getByRole('radio', { name: /Like “Sales overview”/ }))
+    await waitFor(() => expect(planMembers.mock.calls.at(-1)![1].layout).toEqual({ kind: 'source', sourceViewId: 'base', nest: true }))
+  })
+
+  it('when there is nothing to follow, says why and starts a trace with its lineage stages', async () => {
+    renderSheet({ draft: traceDraft, follow: { reason: 'This view is made from a query' } })
+    await screen.findAllByText('6 entities of 5,000')
+    expect(screen.getByRole('radio', { name: /Follow/ })).toBeDisabled()
+    expect(screen.getByText('This view is made from a query')).toBeInTheDocument()
+    expect(planMembers.mock.calls.at(-1)![1].layout.kind).toBe('stages')
+  })
 })

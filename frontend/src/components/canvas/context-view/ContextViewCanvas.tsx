@@ -54,7 +54,7 @@ import { UpdateSubsetSearchDialog } from '@/features/search-views/UpdateSubsetSe
 import { getSearchStatus, putSearch, SEARCH_VIEW_QUERY_KEY } from '@/services/searchViewsApi'
 import type { SearchViewStatus } from '@/types/searchView'
 import { memberActionsFor } from '@/features/live-views/model'
-import { memberOps } from '@/services/liveViewsApi'
+import { getMembershipStatus, memberOps, MEMBERSHIP_QUERY_KEY } from '@/services/liveViewsApi'
 import type { MemberOps, MembershipExpand, MembershipSpec } from '@/types/membership'
 import type { Predicate, SearchQuery } from '@/types/search'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -2222,6 +2222,11 @@ export function ContextViewCanvas({
   // Whatever the preview switch says: switched off, a list view keeps the members it last had.
   const membersFed = !!activeView?.membership && !atRevision
   const fedView = subsetView || membersFed
+  // A view made from a query that FOLLOWS another (layout `follow`): a subset of it, its
+  // layers that view's as they change there, each member where that view places it. Like a
+  // subset view, nothing in it is placed, grouped or reordered by hand.
+  const followsBase = activeView?.membership?.layout?.kind === 'follow'
+  const serverPlaced = subsetView || followsBase
   // Its matches drawn inside the containers its base draws them in: the reader's choice.
   const showWhereTheySit = usePreferencesStore((s) => s.showWhereTheySit) ?? true
   const feedPlacements = useMemo(() => {
@@ -4964,7 +4969,9 @@ export function ContextViewCanvas({
   // placed by hand, grouped or reordered in it, and while it follows its base its
   // layers are the base's, changed there.
   const searchViewsOn = useFeature('searchViewsEnabled')
-  const subsetFollows = activeView?.search?.layout === 'inherit'
+  // Its layers are another view's, changed there: a subset following its base, or a view
+  // made from a query that follows one.
+  const subsetFollows = activeView?.search?.layout === 'inherit' || followsBase
   const subsetIssue = useCanvasStore((s) => s.subsetIssue)
   const canSaveSearchAsView = searchViewsOn && canCreateViews && !!narrowViewId && !!scopeWsId
   const { data: subsetStatus } = useQuery({
@@ -4973,6 +4980,31 @@ export function ContextViewCanvas({
     enabled: searchViewsOn && subsetView && !!narrowViewId,
     staleTime: 15_000,
   })
+  // A view made from a query that follows another: what it follows (its chip reads the same).
+  const membershipOn = useFeature('viewMembershipEnabled')
+  const { data: followStatus } = useQuery({
+    queryKey: [MEMBERSHIP_QUERY_KEY, narrowViewId],
+    queryFn: () => getMembershipStatus(narrowViewId!),
+    enabled: membershipOn && followsBase && !!narrowViewId,
+    staleTime: 15_000,
+  })
+  // WHAT A VIEW SAVED FROM HERE WOULD FOLLOW, as a subset: this view; or, in a view that
+  // follows one already, the view it follows — never a chain. A view with a layout of its
+  // own made from a search or a query has none to follow.
+  const followTarget = useMemo((): { viewId: string; viewName: string } | { reason: string } | undefined => {
+    if (!activeView || !narrowViewId) return undefined
+    const follows = activeView.membership?.layout
+    if (follows?.kind === 'follow' && follows.sourceViewId) {
+      return { viewId: follows.sourceViewId, viewName: followStatus?.follows?.name ?? 'the view it follows' }
+    }
+    const search = activeView.search
+    if (search?.layout === 'inherit' && search.readIn) {
+      return { viewId: search.readIn, viewName: subsetStatus?.base?.name ?? 'the view it follows' }
+    }
+    if (search) return { reason: 'This subset has layers of its own, so there are none to follow' }
+    if (activeView.membership) return { reason: 'This view is made from a query, so there are no layers of its own to follow' }
+    return { viewId: narrowViewId, viewName: activeView.name ?? 'this view' }
+  }, [activeView, narrowViewId, followStatus, subsetStatus])
   const [saveSearch, setSaveSearch] = useState<{ query: SearchQuery } | null>(null)
   const searchInLayer = useCallback((layerId: string) => {
     // In a subset view the server reads a layer filter as the layer's types, inside the view's search.
@@ -5042,7 +5074,10 @@ export function ContextViewCanvas({
     const target = interactions.state.contextMenu.target
     if (!membersEditable || !target || target.type !== 'node') return []
     const urn = (displayMap.get(target.id)?.data?.urn as string | undefined) ?? target.id
-    const entry = currentLayout().assignments[urn]
+    // What people placed is in the layout; a member the query found is a row of the
+    // member feed, in the layer the server placed it in.
+    const feedLayer = displayMap.get(target.id)?.data?.feedLayerId as string | undefined
+    const entry = currentLayout().assignments[urn] ?? (feedLayer ? { assignedBy: 'query', layerId: feedLayer } : undefined)
     if (!entry) return []
     const name = canvasDisplayName(urn)
     const run = (ops: MemberOps, done: string, undo: MemberOps) => () => {
@@ -5055,7 +5090,8 @@ export function ContextViewCanvas({
         }, 8000)
       })
     }
-    const actions = memberActionsFor(entry).map((action): ContextMenuAction => {
+    // A view that follows another keeps no layers of its own to pin a member in.
+    const actions = memberActionsFor(entry).filter(a => !(followsBase && a === 'include')).map((action): ContextMenuAction => {
       if (action === 'exclude') {
         return { id: 'member-exclude', label: 'Keep out of this view', icon: 'EyeOff',
           onClick: run({ exclude: [urn] }, `“${name}” is kept out of this view, whatever its query finds`, { unexclude: [urn] }) }
@@ -5070,7 +5106,7 @@ export function ContextViewCanvas({
     if (actions.length) actions[actions.length - 1] = { ...actions[actions.length - 1], dividerAfter: true }
     return actions
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interactions.state.contextMenu.target, membersEditable, displayMap, applyMemberOps, notify])
+  }, [interactions.state.contextMenu.target, membersEditable, displayMap, applyMemberOps, notify, followsBase])
   const nodeCustomActions = useMemo(() => [...memberMenuActions, ...reorderMenuActions], [memberMenuActions, reorderMenuActions])
   // Right-click → Narrow to this: one entry per reach, applied at once; or
   // choose in the composer. The selection the entity is part of narrows together.
@@ -5966,9 +6002,9 @@ export function ContextViewCanvas({
       onOpenSettings: () => takeRail(() => { setBulkEditFor(null); setLayerSettingsFor(layer.id) }),
       // The Business view's header keeps to the essentials; its own actions are here.
       ...(personaMode !== 'technical' && {
-        onAddEntity: canEditGraph && !subsetView ? () => openBuilderForLayer(layer.id) : undefined,
-        onNewGroup: isDraft && !traceActive && !subsetView ? () => requestNewGroup(layer.id) : undefined,
-        onBuild: canEditGraph && !subsetView ? () => openBuildForLayer(layer.id) : undefined,
+        onAddEntity: canEditGraph && !serverPlaced ? () => openBuilderForLayer(layer.id) : undefined,
+        onNewGroup: isDraft && !traceActive && !serverPlaced ? () => requestNewGroup(layer.id) : undefined,
+        onBuild: canEditGraph && !serverPlaced ? () => openBuildForLayer(layer.id) : undefined,
       }),
       // Everything the view places in this layer, found as search's Layer filter finds it.
       onNarrow: narrowEnabled
@@ -7938,7 +7974,9 @@ export function ContextViewCanvas({
 
 
         {/* A subset view whose matches can't be listed says why, above its columns. */}
-        <SubsetIssueBanner issue={subsetView ? (searchViewsOn ? subsetIssue : 'off') : null} />
+        <SubsetIssueBanner issue={subsetView ? (searchViewsOn ? subsetIssue : 'off')
+          // A view that follows another shows that view's layers: none at all means it is gone.
+          : followsBase && sortedLayers.length === 0 ? 'base_missing' : null} />
 
         {/* Layer Columns. The wrapper exists so the edge fades can be
             anchored to the SCROLLER's box rather than to canvas-body,
@@ -8131,9 +8169,9 @@ export function ContextViewCanvas({
                 onDoubleClick={handleDoubleClick}
                 // Create affordances render only in draft (edit) mode —
                 // Published shows zero mutation entry points for anyone.
-                onAddChild={canvasWritable && !subsetView ? handleAddChildEntity : undefined}
-                onAddToLayer={canEditGraph && !subsetView ? openBuilderForLayer : undefined}
-                onBuildToLayer={canEditGraph && !subsetView ? openBuildForLayer : undefined}
+                onAddChild={canvasWritable && !serverPlaced ? handleAddChildEntity : undefined}
+                onAddToLayer={canEditGraph && !serverPlaced ? openBuilderForLayer : undefined}
+                onBuildToLayer={canEditGraph && !serverPlaced ? openBuildForLayer : undefined}
                 onBeginConnect={canvasWritable ? edgeConnect.beginDrag : undefined}
                 onLayerContextMenu={handleLayerContextMenuOpen}
                 traceFocusId={traceActive && canvasTrace.tracedUrn
@@ -8159,21 +8197,21 @@ export function ContextViewCanvas({
                 placedOut={placedOut}
                 onRevealPlacement={revealPlacementParent}
                 onReturnPlacement={returnToParent}
-                onCreateGroup={isDraft && !traceActive && !subsetView ? createGroup : undefined}
-                onRenameGroup={isDraft && !traceActive && !subsetView ? renameGroupInLayer : undefined}
-                onDeleteGroup={isDraft && !traceActive && !subsetView ? deleteGroupInLayer : undefined}
-                onPlaceInGroup={isDraft && !traceActive && !subsetView ? placeInGroup : undefined}
-                onMoveGroup={isDraft && !traceActive && !subsetView ? moveGroupInLayer : undefined}
+                onCreateGroup={isDraft && !traceActive && !serverPlaced ? createGroup : undefined}
+                onRenameGroup={isDraft && !traceActive && !serverPlaced ? renameGroupInLayer : undefined}
+                onDeleteGroup={isDraft && !traceActive && !serverPlaced ? deleteGroupInLayer : undefined}
+                onPlaceInGroup={isDraft && !traceActive && !serverPlaced ? placeInGroup : undefined}
+                onMoveGroup={isDraft && !traceActive && !serverPlaced ? moveGroupInLayer : undefined}
                 groupDestinations={groupDestinations}
-                onMoveGroupContents={isDraft && !traceActive && !subsetView ? moveGroupContentsInLayer : undefined}
-                onUngroup={isDraft && !traceActive && !subsetView ? ungroupInLayer : undefined}
+                onMoveGroupContents={isDraft && !traceActive && !serverPlaced ? moveGroupContentsInLayer : undefined}
+                onUngroup={isDraft && !traceActive && !serverPlaced ? ungroupInLayer : undefined}
                 feedMore={feedMoreByLayer.get(layer.id)}
                 onFeedMore={onFeedMore}
                 subsetFeed={subsetFeedByLayer.get(layer.id)}
                 emptyText={subsetView ? 'No matches' : undefined}
                 onSearchInLayer={subsetView ? searchInLayer : undefined}
                 onScroll={handleLayerScroll}
-                onAssignToLayer={subsetView ? undefined : handleAssignToLayer}
+                onAssignToLayer={serverPlaced ? undefined : handleAssignToLayer}
                 // Draft-only layer management (create lives in AddLayerColumn; these are per-column).
                 // A subset that follows its base takes its layers from there.
                 onRenameLayer={isDraft && !subsetFollows ? renameLayer : undefined}
@@ -8200,7 +8238,7 @@ export function ContextViewCanvas({
                 // auto-adopts custom order, so the user never has to switch
                 // sort mode first. Off during trace (the tree is filtered there,
                 // so neighbor keys wouldn't match what's shown).
-                reorderEnabled={nodeSortingEnabled && isDraft && !traceActive && !subsetView}
+                reorderEnabled={nodeSortingEnabled && isDraft && !traceActive && !serverPlaced}
                 onReorderDrop={handleReorderNode}
                 onReorderNudge={nudgeReorder}
                 isHydratingInitial={isHydratingInitial}
@@ -8546,6 +8584,7 @@ export function ContextViewCanvas({
           dataSourceId={dataSourceId}
           boardLayers={sortedLayers}
           boardConfig={activeView ? { layout: activeView.layout } : null}
+          follow={followTarget}
           canKeepLive={searchViewsOn}
           canKeepList
           onClose={() => setSaveAsDraft(null)}

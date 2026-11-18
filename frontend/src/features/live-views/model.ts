@@ -21,7 +21,7 @@ import type {
 
 // ── The request a narrowing becomes ────────────────────────────────────────
 
-export type LayoutChoice = 'source' | 'template' | 'auto' | 'stages'
+export type LayoutChoice = 'follow' | 'source' | 'template' | 'auto' | 'stages'
 
 export interface SaveChoices {
   choice: LayoutChoice
@@ -30,6 +30,9 @@ export interface SaveChoices {
   /** Draw each member inside its containers. */
   nest: boolean
   templateId?: string
+  /** The view a `follow` or `source` layout is taken from, when not the one it is
+   *  made in — made from inside a subset, its base: a subset has no layers of its own. */
+  layoutViewId?: string
   /** The template's layers, fitted to this data source. */
   templateLayers?: Array<Record<string, unknown>>
 }
@@ -43,7 +46,8 @@ export function sourceOf(spec: MembershipSpec, viewId: string): MembershipSource
 export function layoutOf(choices: SaveChoices, sourceViewId: string): MembershipLayout {
   const nest = choices.nest
   switch (choices.choice) {
-    case 'source': return { kind: 'source', sourceViewId, nest }
+    case 'follow': return { kind: 'follow', sourceViewId: choices.layoutViewId ?? sourceViewId, nest }
+    case 'source': return { kind: 'source', sourceViewId: choices.layoutViewId ?? sourceViewId, nest }
     case 'template': return { kind: 'template', templateId: choices.templateId, nest }
     case 'auto': return { kind: 'auto', nest }
     case 'stages': return { kind: 'stages', nest }
@@ -94,9 +98,14 @@ export interface LayoutOffer {
   reason?: string
 }
 
-/** Which layouts fit this narrowing, and why the others don't. */
-export function layoutOffers(spec: MembershipSpec, sourceLayers: number, templatesEnabled: boolean): LayoutOffer[] {
+/** Which layouts fit this narrowing, and why the others don't. `follow`: the view
+ *  it can follow (a subset of it), or why it can't — absent, not offered at all. */
+export function layoutOffers(
+  spec: MembershipSpec, sourceLayers: number, templatesEnabled: boolean,
+  follow?: { available: boolean; reason?: string },
+): LayoutOffer[] {
   return [
+    ...(follow ? [{ choice: 'follow' as const, available: follow.available, reason: follow.available ? undefined : follow.reason }] : []),
     { choice: 'source', available: sourceLayers > 0, reason: sourceLayers > 0 ? undefined : 'This view has no layers to copy.' },
     { choice: 'template', available: templatesEnabled, reason: templatesEnabled ? undefined : 'Layout templates are turned off for this deployment.' },
     { choice: 'auto', available: true },
@@ -197,14 +206,24 @@ export function statusWords(status: MembershipStatus): StatusWords {
     case 'failed':
       return { label: 'Couldn’t update', tone: 'problem', detail: 'The graph couldn’t be read. The view keeps its last members. Try again.' }
     case 'source_missing':
-      return { label: 'Can’t search', tone: 'problem', detail: 'The view its query is searched in is gone. The view keeps its last members.' }
+      return status.follows
+        ? { label: 'Its view is gone', tone: 'problem', detail: 'The view it follows can’t be read, so it has no layers to show. It keeps its members, and comes back when that view does.' }
+        : { label: 'Can’t search', tone: 'problem', detail: 'The view its query is searched in is gone. The view keeps its last members.' }
     case 'frozen':
       return { label: 'Snapshot', tone: 'quiet', detail: 'Its members stay as they are. Resume updates to keep it in step with the data.' }
   }
 }
 
-/** The header chip: "Auto-updating · 1,234", or "Snapshot · 3 Nov". */
+/** The header chip: "Auto-updating · 1,234", or "Snapshot · 3 Nov" — led, for a
+ *  view that follows another, by "Subset of X · ". */
 export function chipText(status: MembershipStatus, now: Date = new Date()): string {
+  const of = status.follows
+    ? (!status.follows.available ? 'Subset · its view is gone · ' : status.follows.name ? `Subset of ${status.follows.name} · ` : 'Subset · ')
+    : ''
+  return of + keptText(status, now)
+}
+
+function keptText(status: MembershipStatus, now: Date): string {
   const members = status.counts?.members ?? status.keys
   if (status.mode !== 'live') {
     const at = status.lastAppliedAt ? new Date(status.lastAppliedAt) : null
