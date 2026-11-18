@@ -142,37 +142,22 @@ jobs:
       # migration finds its column already present and no-ops. A green "upgrade head on an empty
       # database" proves the chain doesn't crash — not that any migration in it does anything.
       #
-      # This step tolerates failure ON PURPOSE, and only for one transitional reason: a base
-      # commit that predates the virgin fast path cannot build a database at all — that is the
-      # bug this workflow exists to prevent, and failing here would report the bug against the
-      # commit that fixes it. Once the base branch contains the fix the step succeeds, and any
-      # later failure of the PR-side upgrade below is a hard failure.
+      # Every step is required. The base build used to be allowed to fail, while main predated the
+      # virgin fast path; it has had it since August, so a base that can't build a database is
+      # now a broken main, and a PR that can't move one forward doesn't merge.
       - name: Build a database at the base branch's head
-        id: base_install
-        continue-on-error: true
         working-directory: base
         run: python -m backend.scripts.upgrade upgrade
 
-      - name: Base branch could not build a database
-        if: steps.base_install.outcome == 'failure'
-        run: |
-          echo "::warning title=Base ref cannot build a database::The base commit's migration \
-          chain failed against an empty Postgres, so the forward-migration test has nothing to \
-          migrate from. This is the condition this workflow exists to catch; it is expected only \
-          while the base branch predates the fix."
-
       - name: Apply this PR's migrations to it
-        if: steps.base_install.outcome == 'success'
         working-directory: pr
         run: python -m backend.scripts.upgrade upgrade
 
       - name: Schema is at head
-        if: steps.base_install.outcome == 'success'
         working-directory: pr
         run: python -m backend.scripts.upgrade check
 
       - name: Schema matches the ORM
-        if: steps.base_install.outcome == 'success'
         working-directory: pr
         run: python -m backend.scripts.upgrade verify-schema
 

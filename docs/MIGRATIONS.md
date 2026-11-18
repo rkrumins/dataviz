@@ -124,6 +124,14 @@ Two rules that are not optional:
   - Join them with a merge revision that runs nothing: `alembic merge -m "merge …" <head> <head>` from `backend/`, with an id of 32 characters or fewer, like `20261119_1300_merge_member_sets`.
   - `backend/tests/test_alembic_single_head.py` fails a pull request, or a push to `main`, that leaves two heads.
   - The upgrade Job reaches every head regardless (`upgrade` means `heads`, and it warns when there are several), so a missed merge revision shows up as a red check, not a deployment that won't start.
+  - Commit the merge revision. One made by hand in an environment, and never committed, leaves that database stamped with a revision no build has. Dev's `20261119_1200_merge_members_set` came about that way.
+- **A revision keeps its parents once it is pushed.** A database stamped at a revision is taken to have run everything below it. So moving a revision onto new parents, after a branch's build may have run it, has the Job skip whatever the new parents bring.
+  - To put a branch's line on `main`'s newer head, join the two with a merge revision.
+  - If a revision really must move, give it a new id. The old id stays in the lineage record, where the Job finds it (see below).
+  - #556's `20260815_1200_announce_poll_60s` was pushed with seven different parents.
+- **A revision `main` has stays, with its parents.** Dropping one strands every database stamped there.
+
+`.github/workflows/alembic-guards.yml`'s `merge-chain` job (`backend/scripts/check_migration_chain.py`) fails a pull request, or a push to `main`, that breaks either of the last two rules.
 
 ## What CI checks
 
@@ -132,7 +140,7 @@ Two rules that are not optional:
 | Job | What it does | What it catches |
 |---|---|---|
 | `fresh-install` | Virgin fast path on an empty Postgres | A new deployment that cannot be built, or comes up with no reference data |
-| `forward-migrate` | Builds a database at the base branch's head, then applies this PR | A migration that is broken against a database that predates it. **The real gate** |
+| `forward-migrate` | Builds a database at the base branch's head, then applies this PR. Every step is required | A migration that is broken against a database that predates it. **The real gate** |
 | `chain-replay` | `upgrade --no-fast-path` from empty | A migration that cannot tolerate the state `create_all` left behind — the legacy route live databases are still on |
 
 All three then run `verify-schema`, which fails when the ORM declares a table or column the
@@ -170,24 +178,37 @@ synodic-upgrade repair
 - **A branch's build** was deployed to the same environment, ran its own migrations, and they never reached `main`.
 - **A newer release** migrated the database, then the image was rolled back.
 
-**First choice: give `main` the revisions.** When an environment has run a branch's migrations and the branch isn't merging soon, take those migrations into `main` unchanged, with whatever ORM columns and startup steps they need, and join them with a merge revision. Alembic then knows the stamp, and nothing is guessed.
-- `20261113_1000_gv_ps_served_fill` … `20261113_1400_gv_ps_candidate` came into `main` this way, from #670.
-- `20261119_1400_merge_ps_build` joins them.
+**`upgrade` places such a database exactly, from the lineage record.** `backend/alembic/other_lines.json` lists every revision any branch, or any pull request's head, has ever had that `main`'s chain doesn't, with every set of parents it was given there. For each foreign stamp, the Job does the following:
+- **It walks the record down to this chain.** Where a branch's tip still has the revision, it takes the parents the tip has. Otherwise it takes what every recorded version shares.
+- **It stamps the last of `main`'s revisions the database ran.** Then `upgrade heads` runs exactly the ones it lacks, in chain order, and none of the other line's.
+- **It leaves the other build's tables and columns as they were,** for when its migrations arrive with it.
 
-**Otherwise `upgrade` rewinds the stamp** to where the two chains most likely parted, and upgrades from there:
-- **Where it rewinds to:** walking this image's chain down from its head, the first revision whose id is older than the foreign one. It walks in chain order, not by sorted id, because a revision moved onto a newer parent keeps its older id.
-- **What runs after that:**
-  - For another branch's database, those are this image's migrations it never ran.
-  - For a newer release's, the rewind lands at this image's head, so nothing runs.
-  - Only a foreign line whose ids are older than revisions it already contains causes a replay. Its DDL is guarded, as `chain-replay` requires, but its data statements run again: see the rule above.
-- **What it leaves:** the other build's tables and columns stay as they were.
-- **How it ends:** head is claimed only if `verify-schema`'s comparison finds nothing missing. Otherwise `alembic_version` goes back to what it was and the Job exits 1, naming what's missing.
+**A stamp nothing records falls back to a guess**, for example a merge revision made by hand in an environment:
+- **Where it lands:** walking this image's chain down from its head, the first revision whose id is from an earlier minute. An id leads with when it was written, `YYYYMMDD_HHMM`. One from the same minute may be newer or older, so it counts as not run.
+- **Why chain order:** a revision moved onto a newer parent keeps its older id, so sorting by id would misplace it.
+- **What runs again:** any of this image's revisions the database had already run. Their DDL is guarded, as `chain-replay` requires, but their data statements run again (see the rule above).
+- **A newer release's stamp** lands at this image's head, so nothing runs.
 
-The guess fails when this image has migrations written while the other branch was open. In that case, name the revision both chains share:
+**Either way, head is claimed only once the schema bears it out.** If `verify-schema`'s comparison finds anything missing, `alembic_version` goes back to what it was and the Job exits 1, naming what's missing. Then name the revision both chains share:
 
 ```bash
 synodic-upgrade upgrade --rewind-to <revision>
 ```
+
+`repair` (when the schema is already whole) and `current` work on a foreign stamp too. A bare `alembic` command can't: `env.py` refuses, and points to `synodic-upgrade upgrade`.
+
+**Keeping the record current.** Regenerate it when a branch adds or moves a migration:
+
+```bash
+git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' '+refs/pull/*/head:refs/remotes/pull/*'
+python -m backend.scripts.other_lines
+```
+
+Guards' `merge-chain` job runs `other_lines --check` on every pull request into `main`, and fails while the record lacks a revision, or a set of parents, that git has. It also fails while a branch's tip has a revision with parents the record lacks.
+
+**Or give `main` the revisions.** When an environment has run a branch's migrations and the branch isn't merging soon, its migrations can come into `main` unchanged, with whatever ORM columns and startup steps they need, joined by a merge revision.
+- `20261113_1000_gv_ps_served_fill` … `20261113_1400_gv_ps_candidate` came into `main` this way, from #670.
+- `20261119_1400_merge_ps_build` joins them.
 
 This is not the old recovery. `env.py` used to "recover" by stamping back to `0001_baseline`, which left the schema untouched and replayed the whole chain over live data. That was the single most destructive line in the migration path, and it stays gone.
 
@@ -196,7 +217,7 @@ This is not the old recovery. `env.py` used to "recover" by stamping back to `00
 ```bash
 synodic-upgrade upgrade                    # to every head (fast path on a virgin database)
 synodic-upgrade upgrade --no-fast-path     # force the chain even on a virgin database
-synodic-upgrade upgrade --rewind-to REV    # a database another build moved on: rewind to REV first
+synodic-upgrade upgrade --rewind-to REV    # a database another build moved on: place it at REV first
 synodic-upgrade repair                     # reconcile a pointer that trails the schema
 synodic-upgrade verify-schema              # exit 0 iff the schema structurally matches the ORM
 synodic-upgrade check --wait 60            # exit 0 iff alembic_version is at head

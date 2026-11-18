@@ -1,0 +1,665 @@
+{
+  "about": "Migration revisions this chain doesn't have, with their parents, for the upgrade Job to place a database another build stamped. Written by `python -m backend.scripts.other_lines`; never run.",
+  "revisions": {
+    "0002_revoked_refresh_jti": {
+      "parents": [
+        [
+          "0001_baseline"
+        ]
+      ],
+      "on": [
+        "origin/feature/de-coupling-of-services-into-workers",
+        "origin/feature/schema-optimization"
+      ],
+      "at_tips": [
+        [
+          "0001_baseline"
+        ]
+      ]
+    },
+    "0003_extraction_readiness": {
+      "parents": [
+        [
+          "0002_revoked_refresh_jti"
+        ]
+      ],
+      "on": [
+        "origin/feature/de-coupling-of-services-into-workers",
+        "origin/feature/schema-optimization"
+      ],
+      "at_tips": [
+        [
+          "0002_revoked_refresh_jti"
+        ]
+      ]
+    },
+    "0004_aggregation_idempotency": {
+      "parents": [
+        [
+          "0003_extraction_readiness"
+        ]
+      ],
+      "on": [
+        "origin/feature/de-coupling-of-services-into-workers",
+        "origin/feature/schema-optimization"
+      ],
+      "at_tips": [
+        [
+          "0003_extraction_readiness"
+        ]
+      ]
+    },
+    "0005_rm_primary_conn": {
+      "parents": [
+        [
+          "0004_aggregation_idempotency"
+        ]
+      ],
+      "on": [
+        "origin/feature/de-coupling-of-services-into-workers",
+        "origin/feature/schema-optimization"
+      ],
+      "at_tips": [
+        [
+          "0004_aggregation_idempotency"
+        ]
+      ]
+    },
+    "0006_view_visibility_enterprise": {
+      "parents": [
+        [
+          "0005_rm_primary_conn"
+        ]
+      ],
+      "on": [
+        "origin/feature/de-coupling-of-services-into-workers",
+        "origin/feature/schema-optimization"
+      ],
+      "at_tips": [
+        [
+          "0005_rm_primary_conn"
+        ]
+      ]
+    },
+    "0007_purge_trigger_source": {
+      "parents": [
+        [
+          "0006_view_visibility_enterprise"
+        ]
+      ],
+      "on": [
+        "origin/feature/de-coupling-of-services-into-workers",
+        "origin/feature/schema-optimization"
+      ],
+      "at_tips": [
+        [
+          "0006_view_visibility_enterprise"
+        ]
+      ]
+    },
+    "20260428_1700_spanner_check": {
+      "parents": [
+        [
+          "20260426_1600_job_event_log"
+        ]
+      ],
+      "on": [
+        "origin/feature/adding-spanner-support"
+      ],
+      "at_tips": [
+        [
+          "20260426_1600_job_event_log"
+        ]
+      ]
+    },
+    "20260516_1200_graph_permissions": {
+      "parents": [
+        [
+          "20260512_1100_jobs_current_phase"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260521_1200_basic_lineage_ontology": {
+      "parents": [
+        [
+          "20260516_1200_graph_permissions"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260522_1200_view_binding": {
+      "parents": [
+        [
+          "20260521_1200_basic_lineage_ontology"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260524_1200_context_template_metadata": {
+      "parents": [
+        [
+          "20260512_1100_jobs_current_phase"
+        ]
+      ],
+      "on": [
+        "origin/claude/contextviewcanvas-template-ui-KKcIx"
+      ],
+      "at_tips": [
+        [
+          "20260512_1100_jobs_current_phase"
+        ]
+      ]
+    },
+    "20260527_1200_user_provenance_and_config": {
+      "parents": [
+        [
+          "20260524_1100_sso_phase3"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260528_authored_falkor_provider": {
+      "parents": [
+        [
+          "20260522_1200_view_binding"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260530_1200_context_models_display_rules": {
+      "parents": [
+        [
+          "20260512_1100_jobs_current_phase"
+        ],
+        [
+          "20260527_1200_user_provenance_and_config"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260605_1200_phase18_workspace_reads": {
+      "parents": [
+        [
+          "20260603_1100_rbac_uplift"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260704_1200_projection_progress": {
+      "parents": [
+        [
+          "20260703_1200_graph_kind_blank"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260707_1400_view_layout_overlays": {
+      "parents": [
+        [
+          "20260707_1200_view_layout_merge"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260712_1730_view_activity_data_changed": {
+      "parents": [
+        [
+          "20260712_1600_view_activity_log"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260713_1100_visit_count": {
+      "parents": [
+        [
+          "20260713_1000_view_visits"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260719_1200_rebrand_default_branding": {
+      "parents": [
+        [
+          "20260714_1600_feature_changes"
+        ]
+      ],
+      "on": [
+        "origin/claude/canvas-book-of-work-wave2",
+        "origin/claude/canvas-node-ordering-y8wtbb",
+        "origin/claude/docs-audit-refresh-bt2vq5",
+        "origin/claude/fast-read-layer-corruption-lis6x9",
+        "origin/claude/release-notes-july-16-euop60",
+        "origin/claude/session-f6irz5",
+        "origin/dependabot/npm_and_yarn/frontend/tailwindcss-4.3.3",
+        "origin/dependabot/npm_and_yarn/frontend/typescript-7.0.2",
+        "origin/dependabot/npm_and_yarn/landing/tailwindcss-4.3.3"
+      ],
+      "at_tips": [
+        [
+          "20260714_1600_feature_changes"
+        ]
+      ]
+    },
+    "20260721_1200_ds_identity_property": {
+      "parents": [
+        [
+          "20260719_1400_product_events"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260727_1200_view_public_tier": {
+      "parents": [
+        [
+          "20260722_0900_merge_jobvis"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260727_1300_grant_expiry": {
+      "parents": [
+        [
+          "20260727_1200_view_public_tier"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260727_1400_invite_token_version": {
+      "parents": [
+        [
+          "20260727_1200_invites"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260728_0900_merge_vw_inv": {
+      "parents": [
+        [
+          "20260727_1300_grant_expiry",
+          "20260727_1400_invite_tokenver"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260728_1200_account_fields": {
+      "parents": [
+        [
+          "20260727_1400_invite_tokenver"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260728_1700_view_public_tier": {
+      "parents": [
+        [
+          "20260728_1600_account_fields"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260728_1800_grant_expiry": {
+      "parents": [
+        [
+          "20260728_1700_view_public_tier"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260730_1300_view_public_tier": {
+      "parents": [
+        [
+          "20260730_1200_refresh_records"
+        ]
+      ],
+      "on": [
+        "origin/claude/explorer-view-privacy-xxh37j"
+      ],
+      "at_tips": [
+        [
+          "20260730_1200_refresh_records"
+        ]
+      ]
+    },
+    "20260730_1400_grant_expiry": {
+      "parents": [
+        [
+          "20260730_1300_view_public_tier"
+        ]
+      ],
+      "on": [
+        "origin/claude/explorer-view-privacy-xxh37j"
+      ],
+      "at_tips": [
+        [
+          "20260730_1300_view_public_tier"
+        ]
+      ]
+    },
+    "20260731_1200_prop_align_kind": {
+      "parents": [
+        [
+          "20260719_1200_agg_cadence"
+        ]
+      ],
+      "on": [
+        "origin/claude/falkordb-nested-properties-migration-bt4mu6"
+      ],
+      "at_tips": [
+        [
+          "20260719_1200_agg_cadence"
+        ]
+      ]
+    },
+    "20260815_1200_announce_poll_60s": {
+      "parents": [
+        [
+          "20260802_1000_open_publish"
+        ],
+        [
+          "20260817_1400_recon_pause"
+        ],
+        [
+          "20261008_1200_import_rows_idx"
+        ],
+        [
+          "20261014_1200_aal_api_key"
+        ],
+        [
+          "20261018_1300_tpl_lifecycle"
+        ],
+        [
+          "20261020_1000_ds_transfers"
+        ]
+      ],
+      "on": [
+        "origin/claude/frontend-polling-optimization-oct0c4"
+      ],
+      "at_tips": [
+        [
+          "20261020_1000_ds_transfers"
+        ]
+      ]
+    },
+    "20260820_1200_count_history": {
+      "parents": [
+        [
+          "20260817_1400_recon_pause"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260821_1200_count_alerts": {
+      "parents": [
+        [
+          "20260820_1200_count_history"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260821_1500_alert_identity": {
+      "parents": [
+        [
+          "20260821_1200_count_alerts"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260823_1200_merge_counts_evt": {
+      "parents": [
+        [
+          "20260821_1200_event_subject",
+          "20260821_1500_alert_identity"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260908_1000_discovery_attempt": {
+      "parents": [
+        [
+          "20260902_1000_derived_artifacts"
+        ]
+      ],
+      "on": [
+        "origin/claude/falkordb-graphs-metrics-refresh-03kdwd"
+      ],
+      "at_tips": [
+        [
+          "20260902_1000_derived_artifacts"
+        ]
+      ]
+    },
+    "20260908_1100_check_unavailable": {
+      "parents": [
+        [
+          "20260908_1000_discovery_attempt"
+        ]
+      ],
+      "on": [
+        "origin/claude/falkordb-graphs-metrics-refresh-03kdwd"
+      ],
+      "at_tips": [
+        [
+          "20260908_1000_discovery_attempt"
+        ]
+      ]
+    },
+    "20260908_1200_check_events": {
+      "parents": [
+        [
+          "20260902_1000_derived_artifacts"
+        ]
+      ],
+      "on": [
+        "origin/claude/falkordb-graphs-metrics-refresh-i35w2p"
+      ],
+      "at_tips": [
+        [
+          "20260902_1000_derived_artifacts"
+        ]
+      ]
+    },
+    "20260913_1100_invalidated_fingerprint": {
+      "parents": [
+        [
+          "20260913_1000_job_scan_indexes"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260924_1000_view_derived_from": {
+      "parents": [
+        [
+          "20260920_1200_view_entity_scope"
+        ],
+        [
+          "20260928_1000_jobs_publish"
+        ]
+      ],
+      "on": [
+        "origin/claude/view-subset-lineage-y3u0pj"
+      ],
+      "at_tips": [
+        [
+          "20260928_1000_jobs_publish"
+        ]
+      ]
+    },
+    "20260928_1000_user_activity": {
+      "parents": [
+        [
+          "20260927_1000_import_indexes"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20260929_1000_jobs_propop": {
+      "parents": [
+        [
+          "20260928_1000_jobs_publish"
+        ]
+      ],
+      "on": [
+        "origin/claude/bulk-property-ops"
+      ],
+      "at_tips": [
+        [
+          "20260928_1000_jobs_publish"
+        ]
+      ]
+    },
+    "20261018_1200_change_check_secs": {
+      "parents": [
+        [
+          "20260815_1200_announce_poll_60s"
+        ]
+      ],
+      "on": [
+        "origin/claude/frontend-polling-optimization-oct0c4"
+      ],
+      "at_tips": [
+        [
+          "20260815_1200_announce_poll_60s"
+        ]
+      ]
+    },
+    "20261019_1400_ds_transfers": {
+      "parents": [
+        [
+          "20261019_1000_ws_access"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20261027_1200_projection_drift": {
+      "parents": [
+        [
+          "20261024_1000_native_query"
+        ]
+      ],
+      "on": [
+        "origin/claude/versioning-external-graph-safety"
+      ],
+      "at_tips": [
+        [
+          "20261024_1000_native_query"
+        ]
+      ]
+    },
+    "20261105_1000_import_results": {
+      "parents": [
+        [
+          "20261103_1200_subset_views"
+        ]
+      ],
+      "on": [
+        "origin/claude/bulk-imports",
+        "origin/claude/bulk-parallel",
+        "origin/claude/connector-gb-imports",
+        "origin/claude/faster-imports"
+      ],
+      "at_tips": [
+        [
+          "20261103_1200_subset_views"
+        ]
+      ]
+    },
+    "20261112_1700_gv_ps_served": {
+      "parents": [
+        [
+          "20261112_1600_import_settings"
+        ]
+      ],
+      "on": [],
+      "at_tips": []
+    },
+    "20261116_1000_setting_values": {
+      "parents": [
+        [
+          "20261113_1400_gv_ps_candidate"
+        ]
+      ],
+      "on": [
+        "origin/claude/large-uploads-versioning-graphs-s80s9j",
+        "origin/claude/versioned-graphs-digest-progress-s80s9j"
+      ],
+      "at_tips": [
+        [
+          "20261113_1400_gv_ps_candidate"
+        ]
+      ]
+    },
+    "20261116_1100_settings_import": {
+      "parents": [
+        [
+          "20261116_1000_setting_values"
+        ]
+      ],
+      "on": [
+        "origin/claude/large-uploads-versioning-graphs-s80s9j",
+        "origin/claude/versioned-graphs-digest-progress-s80s9j"
+      ],
+      "at_tips": [
+        [
+          "20261116_1000_setting_values"
+        ]
+      ]
+    },
+    "20261116_1200_graph_watch": {
+      "parents": [
+        [
+          "20261116_1100_settings_import"
+        ]
+      ],
+      "on": [
+        "origin/claude/versioned-graphs-digest-progress-s80s9j"
+      ],
+      "at_tips": [
+        [
+          "20261116_1100_settings_import"
+        ]
+      ]
+    },
+    "20261118_1100_view_members": {
+      "parents": [
+        [
+          "20261118_1000_member_sets"
+        ]
+      ],
+      "on": [
+        "origin/claude/trace-sharing-export-wetv0p"
+      ],
+      "at_tips": [
+        [
+          "20261118_1000_member_sets"
+        ]
+      ]
+    }
+  }
+}

@@ -177,11 +177,67 @@ def _foreign(script, stamps: list[str]) -> list[str]:
 def _parting_point(script, foreign: list[str]) -> str | None:
     """Where this build's chain and the one that wrote ``foreign`` most likely parted: walking this
     build's chain down from its head, the first revision whose id — which leads with when it was
-    written — is older than every foreign one. A newer release's stamp parts at this build's head:
-    nothing of ours to run. Walked in chain order, not sorted by id: a revision moved onto a newer
-    parent keeps its older id."""
-    oldest = min(foreign)
-    return next((rev.revision for rev in script.walk_revisions() if rev.revision < oldest), None)
+    written, to the minute — is from an earlier minute than every foreign one. One from the same
+    minute may be newer or older, so it counts as not run. A newer release's stamp parts at this
+    build's head: nothing of ours to run. Walked in chain order, not sorted by id: a revision moved
+    onto a newer parent keeps its older id."""
+    oldest = min(foreign)[:13]                  # YYYYMMDD_HHMM
+    return next((rev.revision for rev in script.walk_revisions() if rev.revision[:13] < oldest), None)
+
+
+def _other_lines(cfg) -> dict[str, list[list[str]]]:
+    """``alembic/other_lines.json`` (``scripts/other_lines.py``): each revision another line of work
+    has and this chain doesn't, with the parents to walk — those it has at a branch's tip where it
+    is on one, else every set it was ever given. Empty when the file is missing or unreadable."""
+    import json
+    from pathlib import Path
+
+    try:
+        recorded = json.loads((Path(cfg.get_main_option("script_location")) / "other_lines.json")
+                              .read_text(encoding="utf-8"))["revisions"]
+        return {rev: entry.get("at_tips") or entry["parents"] for rev, entry in recorded.items()}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def _ran(script, lines: dict, revision: str, depth: int = 0) -> list[frozenset] | None:
+    """The revisions of this chain a database stamped ``revision`` has run: one set for each way
+    its recorded parents could have been. None when its lineage reaches a revision nothing records."""
+    try:
+        ours = script.get_revision(revision) is not None
+    except Exception:  # noqa: BLE001 — not one of ours: look it up
+        ours = False
+    if ours:
+        return [frozenset(r.revision for r in script.iterate_revisions(revision, "base"))]
+    if revision not in lines or depth > 500:
+        return None
+    out: list[frozenset] = []
+    for parents in lines[revision]:
+        sets = [frozenset()]
+        for parent in parents:
+            below = _ran(script, lines, parent, depth + 1)
+            if below is None:
+                return None
+            sets = [a | b for a in sets for b in below]
+        out.extend(sets)
+    return out
+
+
+def _placed(script, lines: dict, foreign: list[str], kept: list[str]) -> list[str] | None:
+    """Exactly where a database stamped with ``foreign`` (beside ``kept``, ours) stands on this
+    chain, as the stamps of the last revisions it ran: what every recorded way each foreign stamp
+    could have come about has in common. None when a foreign stamp's lineage isn't recorded."""
+    ran: set = set()
+    for revision in kept:
+        ran |= {r.revision for r in script.iterate_revisions(revision, "base")}
+    for revision in foreign:
+        sets = _ran(script, lines, revision)
+        if not sets:
+            return None
+        ran |= frozenset.intersection(*sets)
+    if not ran:
+        return None
+    return sorted(r for r in ran if not (script.get_revision(r).nextrev & ran))
 
 
 def _set_stamps(conn, stamps: list[str]) -> None:
@@ -191,15 +247,18 @@ def _set_stamps(conn, stamps: list[str]) -> None:
 
 
 def _rewind_foreign(cfg, to: str | None = None) -> list[str] | None:
-    """Move a database another build migrated back onto this build's chain, so it can upgrade: its
-    foreign stamps become the revision where the two chains most likely parted
-    (:func:`_parting_point`). This build's migrations after that then run — those the database
-    never ran, and any it did, which change nothing: every migration is safe to run twice
-    (``schema.yml``'s chain replay holds them to it). The other build's tables and columns stay,
-    unused here, for when its migrations arrive with it. ``to``: the revision both chains share,
-    named by an operator who knows it, in place of the guess — for a side branch whose chain the
-    guess can't place. Returns the stamps as they were, to put back if the upgrade doesn't bring
-    the schema to head; None when nothing was foreign."""
+    """Move a database another build migrated onto this build's chain, so it can upgrade in order.
+
+    Its foreign stamps become the last revisions of this chain it ran, placed exactly from the
+    lineage other lines of work recorded (``alembic/other_lines.json``, :func:`_placed`); the
+    upgrade then runs only this build's migrations it lacks, in chain order, and none of the other
+    line's. A stamp nothing records falls back to where the chains most likely parted
+    (:func:`_parting_point`); this build's migrations after it run, and any the database had run
+    already change nothing — every migration is safe to run twice (``schema.yml``'s chain replay
+    holds them to it). The other build's tables and columns stay, for when its migrations arrive
+    with it. ``to``: the revision both chains share, named by an operator who knows it, in place of
+    the record and the guess. Returns the stamps as they were, to put back if the upgrade doesn't
+    bring the schema to head; None when nothing was foreign."""
     script = ScriptDirectory.from_config(cfg)
     engine = create_engine(_sync_url(), pool_pre_ping=True)
     with engine.begin() as conn:
@@ -210,24 +269,28 @@ def _rewind_foreign(cfg, to: str | None = None) -> list[str] | None:
                 log.warning("--rewind-to %s: alembic_version names nothing this build doesn't have; "
                             "nothing to rewind", to)
             return None
-        if to is not None:
-            script.get_revision(to)                     # one of ours, or Alembic says it isn't
-            named = True
-        else:
-            to, named = _parting_point(script, foreign), False
-        if to is None:
-            raise RuntimeError(f"alembic_version names {foreign}, which this build doesn't have, and none "
-                               "of this build's revisions is older: deploy the build that has them")
         kept = [v for v in was if v not in foreign]
-        # One of ours still stamped beside a foreign one may already be past the parting point.
-        past = any(to == rev.revision for k in kept for rev in script.iterate_revisions(k, "base"))
+        placed = None if to is not None else _placed(script, _other_lines(cfg), foreign, kept)
+        if placed is not None:
+            stamps, how = placed, "exactly, from the lineage other lines recorded"
+        else:
+            if to is not None:
+                script.get_revision(to)                 # one of ours, or Alembic says it isn't
+                how = "as named (--rewind-to)"
+            else:
+                to, how = _parting_point(script, foreign), "where the two most likely parted (no lineage recorded)"
+            if to is None:
+                raise RuntimeError(f"alembic_version names {foreign}, which this build doesn't have, and "
+                                   "none of this build's revisions is older: deploy the build that has them")
+            # One of ours still stamped beside a foreign one may already be past the parting point.
+            past = any(to == rev.revision for k in kept for rev in script.iterate_revisions(k, "base"))
+            stamps = kept if past else sorted(set(kept) | {to})
         log.warning(
             "alembic_version names %s, which this build doesn't have: another build — another "
-            "branch's, or a newer release's — moved this database on. Rewinding to %s, %s; this "
-            "build's migrations after it run (each is safe to run twice), and the other build's "
-            "tables and columns are left as they are.",
-            foreign, to, "as named (--rewind-to)" if named else "where the two most likely parted")
-        _set_stamps(conn, kept if past else sorted(set(kept) | {to}))
+            "branch's, or a newer release's — moved this database on. Placing it at %s, %s; this "
+            "build's migrations it lacks run in order, and the other build's tables and columns are "
+            "left as they are.", foreign, stamps, how)
+        _set_stamps(conn, stamps)
     return was
 
 
@@ -487,15 +550,23 @@ def cmd_repair() -> int:
         return 1
 
     # Tuple, not ``applied.pop()`` — a multi-head database has several
-    # pointers and popping one would silently mis-report the rest.
-    lower = tuple(applied) if applied else "base"
+    # pointers and popping one would silently mis-report the rest. A stamp
+    # another build wrote isn't in this chain to walk from.
+    foreign = _foreign(script, sorted(applied))
+    known = [v for v in applied if v not in foreign]
+    lower = tuple(known) if known else "base"
     skipped = [rev.revision for rev in script.iterate_revisions("heads", lower)]
     log.warning(
         "Schema already satisfies head but alembic_version does not. "
         "Marking %d revision(s) applied without running them: %s",
         len(skipped), skipped,
     )
-    command.stamp(cfg, "heads", purge=bool(_foreign(script, sorted(applied))))
+    if foreign:
+        # Alembic's own stamp starts from the stamps it reads, and can't from these.
+        with engine.begin() as conn:
+            _set_stamps(conn, sorted(expected))
+    else:
+        command.stamp(cfg, "heads")
     log.info("Stamped to head: %s", sorted(expected))
     return 0
 
@@ -509,7 +580,16 @@ def cmd_downgrade(revision: str) -> int:
 
 
 def cmd_current() -> int:
-    command.current(_alembic_config(), verbose=True)
+    cfg = _alembic_config()
+    with create_engine(_sync_url(), pool_pre_ping=True).connect() as conn:
+        stamps = _stamps(conn)
+    foreign = _foreign(ScriptDirectory.from_config(cfg), stamps)
+    if foreign:
+        # Alembic's own report can't resolve them, and stops.
+        log.warning("alembic_version names %s; this build doesn't have %s. `upgrade` places the "
+                    "database on this build's chain first.", stamps, foreign)
+        return 0
+    command.current(cfg, verbose=True)
     return 0
 
 
