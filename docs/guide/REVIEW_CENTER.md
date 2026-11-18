@@ -57,6 +57,9 @@ stateDiagram-v2
 - In a workspace, the **Reviews** tab opens the same page.
 - Every notice about a review in your **Inbox** opens that review — on the
   thread, for a comment.
+- **From a View or a data source**, a review opens as a quick peek: its
+  status, description, **What's next** and, once it can, **Merge**. **Open
+  review** opens it on its page for everything else.
 - **After you submit a draft**, the review you opened is shown. Its address
   opens it directly, if you want to send it to someone.
 - **From a View**, choose **Reviews** in its header, then the **Pull
@@ -112,7 +115,10 @@ on a narrower screen):
   **Next change** step through them. Before you pick one, it shows the review's
   description.
 - **Where it stands**, on the right — **What's next**, the **Reviewers**, and
-  the **Discussion** and **Activity** tabs.
+  the **Discussion** and **Activity** tabs. **Activity** is the review's
+  history beside the draft's saves: who was asked (and asked again), each
+  review given with its verdict, summary and what the reviewer did, and when it
+  was merged or closed.
 
 The header has the way back to **Reviews**, the review's title (a manager can
 rename it), its status and approvals, the one thing to do next, and **More
@@ -197,7 +203,11 @@ own comments; someone who manages the data source can delete anyone's.
 
 ## Finish your review
 
-When you've been through the changes, give your verdict once, with a summary:
+When you've been through the changes, give your verdict once, with a summary.
+If you're asked to review — yourself, or through a group of yours — **Finish
+your review** is the button in the header (**⌘↵** opens it too). It says where
+you are — *You viewed 12 of 40 · accepted 10 · rejected 2 · 3 open threads* —
+and offers three verdicts:
 
 - **Comment** — feedback, with no verdict. It needs a summary.
 - **Approve** — the review can merge as far as you're concerned.
@@ -205,11 +215,15 @@ When you've been through the changes, give your verdict once, with a summary:
   draft changes. Say what should change — if you rejected nothing, a summary is
   required.
 
-What you did comes with it: how many changes you viewed, accepted and
-rejected, and the threads you started. A new verdict replaces your earlier
-one — approving takes back your request for changes, and asking for changes
-takes back your approval. If the draft changed while you were reviewing, you're
-told, and shown what's new before you give it.
+A verdict you can't give is greyed out, with why. Choose **Submit review**
+(**⌘↵** sends it), or **Keep reviewing** to go back to the changes. The review's
+author is told, and what you did is recorded with it: the changes you
+accepted and rejected, and the threads you started.
+
+A new verdict replaces your earlier one — approving takes back your request for
+changes, and asking for changes takes back your approval. If the draft changed
+while you were reviewing, nothing is recorded: *The draft changed while you
+reviewed — see what's new* takes you back to the changes.
 
 A fork's review can't be sent back: close it instead.
 
@@ -236,14 +250,19 @@ stands.
 A group asked to review is **Approved** once any of its members approves —
 it says who.
 
-People who can manage the workspace's data sources can change who reviews:
+People who can manage the workspace's data sources can change who reviews,
+from the same card:
 
-- **Add** people or groups. The groups offered are those bound to the
-  workspace with a role that manages its data, each with how many people are in
-  it.
-- **Remove** someone, or a group, who no longer needs to review.
-- **Ask again** — the review goes back into their **Needs your review**, even
-  if they reviewed it already. Asking again doesn't take back an approval.
+- **Add reviewers** — search for people and groups. The groups offered are
+  those bound to the workspace with a role that manages its data, each with how
+  many people are in it.
+- **Ask again** (the circular arrow beside someone) — the review goes back into
+  their **Needs your review**, even if they reviewed it already. Asking again
+  doesn't take back an approval.
+- **Remove** (the cross) — stop asking someone, or a group.
+
+You can ask groups when you submit a draft for review, too: **Add reviewers**
+in the publish dialog offers them the same way.
 
 Everyone newly asked, or asked again, is told — for a group, each of its
 members (up to 200).
