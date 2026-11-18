@@ -596,6 +596,12 @@ export interface PullRequest {
   /** The single-PR read: where its review stands — approvals, each reviewer, changes asked for,
    *  open threads, and the reader's own part in it. Absent from servers that predate it. */
   review?: ReviewState | null
+  /** The review inbox's rows only: something someone else did on it is unread to the reader. */
+  unread?: boolean
+  /** The review inbox's rows only: when anything last happened on it. */
+  lastActivityAt?: string
+  /** The review inbox's rows only: the data source it merges into. */
+  targetDataSourceId?: string
 }
 
 /** Where a review stands, as the server counts it. */
@@ -2980,6 +2986,64 @@ export function openForkPullRequest(
  *  unified ChangesPanel. Counts match {@link previewMergeRequest}. */
 export function getMergeRequestDiff(wsId: string, prId: string): Promise<DiffVsMainResponse> {
   return vfetch<DiffVsMainResponse>(`${base(wsId)}/merge-requests/${prId}/diff`)
+}
+
+// ============================================
+// The review inbox — a workspace's reviews in the queues the reader works by
+// ============================================
+
+/** `needs_review`: asked of the reader (or a group of theirs) and not reviewed as it is now; the
+ *  reader's own — `waiting`, `sent_back`, `ready`; `open`: every live review they may see; `done`:
+ *  merged or closed. */
+export type ReviewInboxQueue = 'needs_review' | 'waiting' | 'sent_back' | 'ready' | 'open' | 'done'
+
+/** Each queue's count, and how many in it are unread (`done`'s unread is always 0). `capped`: more
+ *  than 1,000 live reviews, the oldest left out. */
+export interface ReviewInboxCounts {
+  counts: Record<ReviewInboxQueue, number>
+  unread: Record<ReviewInboxQueue, number>
+  capped: boolean
+}
+
+/** A page of one queue, with every queue's counts (filtered as the page is). */
+export interface ReviewInboxPage extends ReviewInboxCounts {
+  queue: ReviewInboxQueue
+  items: PullRequest[]
+  total: number
+}
+
+export interface ReviewInboxParams {
+  queue?: ReviewInboxQueue
+  /** Searches the title, the description and the id. */
+  q?: string
+  dataSourceId?: string | null
+  author?: string | null
+  sort?: 'activity' | 'created'
+  limit?: number
+  offset?: number
+}
+
+export function getReviewInbox(wsId: string, params: ReviewInboxParams = {}): Promise<ReviewInboxPage> {
+  const sp = new URLSearchParams()
+  if (params.queue) sp.set('queue', params.queue)
+  if (params.q?.trim()) sp.set('q', params.q.trim())
+  if (params.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
+  if (params.author) sp.set('author', params.author)
+  if (params.sort) sp.set('sort', params.sort)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return vfetch<ReviewInboxPage>(`${base(wsId)}/review-inbox${qs ? `?${qs}` : ''}`)
+}
+
+/** Each queue's count and unread count, no rows: what the Reviews badge shows. */
+export function getReviewInboxCounts(wsId: string): Promise<ReviewInboxCounts> {
+  return vfetch<ReviewInboxCounts>(`${base(wsId)}/review-inbox/counts`)
+}
+
+/** The reader looked at a review: it stops being unread, and their notifications of it are read. */
+export function markReviewSeen(wsId: string, prId: string): Promise<void> {
+  return vfetch<void>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/seen`, jsonBody({}))
 }
 
 // ============================================
