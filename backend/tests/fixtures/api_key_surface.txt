@@ -39,6 +39,9 @@ GET /api/v1/views/{view_id}/activity resource
 GET /api/v1/views/{view_id}/library resource
 GET /api/v1/views/{view_id}/library/export resource
 GET /api/v1/views/{view_id}/membership resource
+GET /api/v1/views/{view_id}/narrowings resource
+GET /api/v1/views/{view_id}/narrowings/{narrowing_id} resource
+GET /api/v1/views/{view_id}/narrowings/{narrowing_id}/held resource
 GET /api/v1/views/{view_id}/search resource
 GET /api/v1/views/{view_id}/subsets resource
 GET /api/v1/views/{view_id}/versions resource
@@ -56,6 +59,8 @@ GET /api/v1/{ws_id}/graph/export/stream data_source
 GET /api/v1/{ws_id}/graph/introspection resource
 GET /api/v1/{ws_id}/graph/introspection/refresh/{job_id} resource
 GET /api/v1/{ws_id}/graph/map/{urn} resource
+GET /api/v1/{ws_id}/graph/member-sets/{set_id}/download resource
+GET /api/v1/{ws_id}/graph/member-sets/{set_id}/members resource
 GET /api/v1/{ws_id}/graph/metadata/distinct/{property} resource
 GET /api/v1/{ws_id}/graph/metadata/entity-types resource
 GET /api/v1/{ws_id}/graph/metadata/ontology resource
@@ -80,6 +85,7 @@ GET /api/v1/{ws_id}/graph/search/schema resource
 GET /api/v1/{ws_id}/graph/search/values resource
 GET /api/v1/{ws_id}/graph/stats resource
 GET /api/v1/{ws_id}/graph/sync-status resource
+GET /api/v1/{ws_id}/graph/view-members/download filtered
 GET /api/v1/{ws_id}/graph/vocab-alignment resource
 GET /api/v1/{ws_id}/versioning/data-sources/{data_source_id}/pull-requests resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id} resource
@@ -175,6 +181,7 @@ POST /api/v1/{ws_id}/graph/edges/beneath resource reads-only
 POST /api/v1/{ws_id}/graph/edges/between resource reads-only
 POST /api/v1/{ws_id}/graph/edges/query resource reads-only
 POST /api/v1/{ws_id}/graph/introspection/refresh resource
+POST /api/v1/{ws_id}/graph/member-sets resource reads-only
 POST /api/v1/{ws_id}/graph/members resource reads-only
 POST /api/v1/{ws_id}/graph/members/plan resource reads-only
 POST /api/v1/{ws_id}/graph/nodes/ancestor-chains resource reads-only
@@ -198,6 +205,9 @@ POST /api/v1/{ws_id}/graph/trace/closure resource reads-only
 POST /api/v1/{ws_id}/graph/trace/expand resource reads-only
 POST /api/v1/{ws_id}/graph/trace/expand-batch resource reads-only
 POST /api/v1/{ws_id}/graph/trace/v2 resource reads-only
+POST /api/v1/{ws_id}/graph/view-members resource reads-only
+POST /api/v1/{ws_id}/graph/view-members/export resource reads-only
+POST /api/v1/{ws_id}/graph/view-placements resource reads-only
 POST /api/v1/{ws_id}/graph/vocab-alignment/confirm resource
 POST /api/v1/{ws_id}/versioning/graphs resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches resource
