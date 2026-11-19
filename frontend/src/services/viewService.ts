@@ -9,6 +9,7 @@ import type { ViewVisibility } from '@/lib/viewVisibility'
 import type { ViewConfiguration, ViewLayerConfig, FieldFilter } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
 import * as viewApi from './viewApiService'
+import { duplicateRefusal, duplicateView as requestDuplicate, type DuplicateViewRequest } from './viewDuplicateApi'
 
 // ============================================
 // Types
@@ -257,29 +258,17 @@ class ViewServiceImpl {
     }
 
     /**
-     * Duplicate a view.
+     * Duplicate a view. The server makes the copy (see viewDuplicateApi), so a view made
+     * from a query, or a subset, is copied whole rather than rebuilt here from its layers.
      */
-    async duplicateView(id: string, workspaceId: string, dataSourceId?: string): Promise<ViewServiceResult<ViewConfiguration>> {
+    async duplicateView(id: string, request: DuplicateViewRequest = {}): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
-            const getResult = await this.getView(id)
-            if (!getResult.success || !getResult.data) {
-                return { success: false, error: 'View not found' }
-            }
-
-            const sourceView = getResult.data
-            return this.createView({
-                name: `${sourceView.name} (Copy)`,
-                description: sourceView.description,
-                icon: sourceView.icon,
-                layoutType: sourceView.layout.type as 'graph' | 'hierarchy' | 'reference',
-                layers: sourceView.layout.referenceLayout?.layers,
-                visibleEntityTypes: sourceView.content.visibleEntityTypes,
-                visibleRelationshipTypes: sourceView.content.visibleRelationshipTypes,
-                workspaceId,
-                dataSourceId,
-            })
+            const { view } = await requestDuplicate(id, request)
+            const viewConfig = viewApi.viewToViewConfig(view)
+            useSchemaStore.getState().addView(viewConfig)
+            return { success: true, data: viewConfig }
         } catch (error) {
-            return { success: false, error: (error as Error).message }
+            return { success: false, error: duplicateRefusal(error) }
         }
     }
 }

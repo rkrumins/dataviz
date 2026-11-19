@@ -260,6 +260,7 @@ export function ExplorerViewCard({
   const overflowCount = tags.length - visibleTags.length
   const healthInfo = healthStatus ? HEALTH_INDICATOR[healthStatus] : null
   const hasPreview = view.viewType === 'hierarchy' || view.viewType === 'reference' || view.viewType === 'graph' || view.viewType === 'layered-lineage'
+  const madeFrom = madeFromOf(view.config)
 
   return (
     <div
@@ -450,6 +451,7 @@ export function ExplorerViewCard({
             onDelete={() => onDelete?.()}
             onShare={onManageSharing ?? onShare}
             templateLayers={view.viewType === 'reference' ? layersOfViewConfig(view.config) : undefined}
+            madeFrom={madeFrom}
           />
             </>
           )}
@@ -514,7 +516,7 @@ export function ExplorerViewCard({
             <SourceKindBadge kind={view.sourceKind} compact={compact} />
             {/* Made from a query, or a subset of another view: from its config, which the
                 list carries — a card asks for no counts. */}
-            <ViewMadeFromBadge madeFrom={madeFromOf(view.config)} compact={compact} />
+            <ViewMadeFromBadge madeFrom={madeFrom} compact={compact} />
             {healthInfo && (
               <span
                 className={cn(
