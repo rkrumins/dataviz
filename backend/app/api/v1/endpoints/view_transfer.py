@@ -70,7 +70,7 @@ from backend.app.services.view_transfer.inspect import identity_matches, target_
 from backend.app.services.view_transfer.references import Rewrite, reference_layout
 from backend.app.services.view_transfer.sources import effective_data_source, ontology_match
 from backend.app.services.versioning.service import GraphVersioningService
-from backend.common.models.view_transfer import HistoryEntry, Manifest
+from backend.common.models.view_transfer import HistoryEntry, Manifest, ViewMembers
 
 logger = logging.getLogger(__name__)
 # The whole feature is a preview behind one switch (Admin → Features); each route below also
@@ -1282,6 +1282,9 @@ class ImportRequest(BaseModel):
     #: Import into a draft of the (version-controlled) data source rather than live: the view
     #: changes, or appears, when the draft is published or its review merges.
     stage: bool = False
+    #: A snapshot's members as its file carries them (the view's ``members``, as /inspect gives
+    #: it): they become its members here. Without them, it works them out here once.
+    members: Optional[ViewMembers] = None
 
 
 _DRAFT_PERMISSION = "workspace:datasource:manage"
@@ -1358,7 +1361,8 @@ async def import_view_file(
         _checked_definition(req.definition)
         if req.originDefinition is not None:
             _checked_definition(req.originDefinition)
-        if _assignment_count(req.definition) > limits.MAX_ASSIGNMENTS_PER_BUNDLE:
+        carried = len(req.members.rows) if req.members is not None else 0
+        if _assignment_count(req.definition) + carried > limits.MAX_ASSIGNMENTS_PER_BUNDLE:
             raise HTTPException(status_code=422, detail=(
                 f"This view holds more than {limits.MAX_ASSIGNMENTS_PER_BUNDLE:,} assignments."))
         return _exported(req.manifest)
@@ -1388,6 +1392,7 @@ async def import_view_file(
         expected_target_hash=req.expectedTargetHash,
         request_id=req.requestId, batch_id=req.batchId, strategy=req.strategy,
         origin_definition=req.originDefinition,
+        members=req.members.model_dump(mode="json") if req.members is not None else None,
     )
     graph = await _draft_graph(svc, target, claims) if req.stage else None
 

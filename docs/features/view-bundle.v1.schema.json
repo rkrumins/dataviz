@@ -27,6 +27,17 @@
         "manifest": {
           "$ref": "#/$defs/Manifest"
         },
+        "members": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ViewMembers"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "metadata": {
           "$ref": "#/$defs/ViewMetadata"
         },
@@ -468,6 +479,41 @@
         }
       },
       "title": "SourceDescriptor",
+      "type": "object"
+    },
+    "ViewMembers": {
+      "description": "A snapshot's members, as its file carries them: data, not design, so beside the\ndefinition and never hashed. ``rows``, one per member in name order, each holding\n``columns`` in order — read by the columns' names, so ones this reads nothing of are\nignored; ``urn`` and ``layerId`` it can't do without.",
+      "properties": {
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Columns",
+          "type": "array"
+        },
+        "count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "format": {
+          "const": "rows-v1",
+          "default": "rows-v1",
+          "title": "Format",
+          "type": "string"
+        },
+        "rows": {
+          "items": {
+            "items": {},
+            "type": "array"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "title": "ViewMembers",
       "type": "object"
     },
     "ViewMetadata": {

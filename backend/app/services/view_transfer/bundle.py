@@ -1,10 +1,10 @@
 """Build and parse View Bundle files (``*.view.json``).
 
 Parsing treats the file as untrusted input: size, nesting depth, view count and assignment
-count are all capped (``limits``), the shape is validated by the models in
-``backend.common.models.view_transfer``, and every view's integrity is checked by re-hashing its
-definition. A file edited by hand after export still imports; it is flagged ``modified`` so the
-person importing it knows the file is no longer exactly what was exported.
+count (a snapshot's members among them) are all capped (``limits``), the shape is validated by
+the models in ``backend.common.models.view_transfer``, and every view's integrity is checked by
+re-hashing its definition. A file edited by hand after export still imports; it is flagged
+``modified`` so the person importing it knows the file is no longer exactly what was exported.
 """
 from __future__ import annotations
 
@@ -150,6 +150,8 @@ def parse_bundle(raw: bytes) -> ParsedBundle:
         rl = reference_layout(definition) or {}
         assignments = rl.get("assignments")
         total_assignments += len(assignments) if isinstance(assignments, dict) else 0
+        # A snapshot's members are placements too, carried beside the definition.
+        total_assignments += len(view.members.rows) if view.members is not None else 0
         actual = content_hash(definition)
         integrity = INTEGRITY_VERIFIED if actual == view.definitionHash else INTEGRITY_MODIFIED
         all_verified = all_verified and integrity == INTEGRITY_VERIFIED

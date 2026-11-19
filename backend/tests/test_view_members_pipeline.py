@@ -7,6 +7,7 @@ mid-page — its request gone — is carried on by the next request at the same 
 run overtaken writes nothing more. What is tested here is the member table across those
 steps: what readers see, what each epoch holds, and that the page size changes nothing.
 """
+import asyncio
 import json
 from contextlib import asynccontextmanager
 
@@ -16,9 +17,12 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints import view_membership as routes
-from backend.app.db.models import ViewMemberORM, ViewMembershipStateORM
+from backend.app.db.models import ViewMemberORM, ViewMembershipStateORM, ViewORM
+from backend.app.db.repositories import view_membership_repo
 from backend.app.services.live_views import pipeline
 from backend.app.services.member_sets import sweeper
+from backend.common.adapters import ProviderUnavailable
+from backend.common.models.view_membership import read_definition
 from backend.tests.test_views_from_members_api import (  # noqa: F401 — fixtures
     TypedEngine,
     body,
@@ -427,3 +431,226 @@ async def test_the_sweeper_deletes_epochs_nobody_reads_or_works_on(
     while await sweeper.sweep_once(db_session):
         await db_session.commit()
     assert await at(db_session, view_id, current + 5) == 0, "a run that left its rows behind"
+
+
+# ── Laid out from a sample, a copied layer is never proved empty ───────────
+
+
+async def test_a_save_that_places_a_sample_keeps_every_layer_it_copied(
+    test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
+):
+    """Saved without a preview, a view of more members than a sample places only the first
+    ``SAMPLE`` to choose its layers: a copied layer they don't reach may hold the rest, so
+    every one stays — and "Other", for what nothing places. By type, "Other" stays too."""
+    monkeypatch.setattr(pipeline, "SAMPLE", 3)
+
+    async def layers(view_id: str) -> dict:
+        config = (await test_client.get(f"/api/v1/views/{view_id}")).json()["config"]
+        return {l["id"]: l["name"] for l in config["layout"]["referenceLayout"]["layers"]}
+
+    copied = await make(test_client)
+    names = await layers(copied)
+    assert list(names.values()) == ["Domains", "Tables", "Columns", "Dashboards", "Other"]
+    placed = {urn: names[e["layerId"]] for urn, e in (await members_of(db_session, copied)).items()}
+    assert placed["col_a1"] == placed["col_b1"] == "Columns", "what the sample didn't see, where it belongs"
+
+    by_type = await make(test_client, layout={"kind": "auto"})
+    assert list((await layers(by_type)).values()) == ["Domains", "Other"]
+
+
+# ── A busy graph ────────────────────────────────────────────────────────────
+
+
+async def test_a_busy_graph_on_a_new_views_first_turn_reads_as_filling_in(
+    test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
+):
+    """With no members yet, a view the graph was too busy to work out is still filling in
+    (``updating``, ``graph_busy``), its run left for the next request; one that has members
+    keeps them and is due again (``pending``)."""
+    real = pipeline._Run._work
+
+    async def busy(self, engine, **kwargs):
+        raise ProviderUnavailable("graph", "busy")
+
+    monkeypatch.setattr(pipeline._Run, "_work", busy)
+    ws = await workspace(test_client)
+    resp = await test_client.post("/api/v1/views/from-members", json=body(ws, await source_view(test_client, ws)))
+    assert resp.status_code == 201, resp.text
+    membership = resp.json()["membership"]
+    assert (membership["status"], membership["detail"]) == ("updating", {"reason": "graph_busy"})
+    view_id = resp.json()["view"]["id"]
+    state = await state_of(db_session, view_id)
+    assert (state.lease_owner, state.members_epoch) == (None, None) and state.materialize, (
+        "let go, its run kept for the next request to carry on")
+
+    monkeypatch.setattr(pipeline._Run, "_work", real)
+    assert (await run(db_session, view_id)).outcome == "applied"
+    monkeypatch.setattr(pipeline._Run, "_work", busy)
+    with pytest.raises(ProviderUnavailable):
+        await run(db_session, view_id)
+    state = await state_of(db_session, view_id)
+    assert (state.status, json.loads(state.status_detail)) == ("pending", {"reason": "graph_busy"})
+    assert len(await members_of(db_session, view_id)) == 6
+
+
+# ── Cut off: the lease is let go at once ───────────────────────────────────
+
+
+def letting_go(monkeypatch) -> list:
+    """What a turn cut off hands over to be let go (``_let_go``), recorded."""
+    handed = []
+    monkeypatch.setattr(pipeline, "_let_go", lambda view_id, *, owner, epoch: handed.append((view_id, owner, epoch)))
+    return handed
+
+
+async def freed(db_session: AsyncSession, handed: list) -> None:
+    """What was handed over, let go of — as ``_let_go``'s own session does."""
+    for view_id, owner, epoch in handed:
+        await view_membership_repo.update_mine(db_session, view_id, owner=owner, epoch=epoch,
+                                               lease_owner=None, lease_until=None)
+    await db_session.commit()
+
+
+def cut_off(monkeypatch, db_session: AsyncSession, *, landed: bool) -> dict:
+    """The request is cut off at the next commit once ``armed`` — after the commit lands
+    (``landed``), or before."""
+    real = db_session.commit
+    armed = {}
+
+    async def commit():
+        if armed.pop("now", False):
+            if landed:
+                await real()
+            raise asyncio.CancelledError()
+        await real()
+
+    monkeypatch.setattr(db_session, "commit", commit)
+    return armed
+
+
+async def test_cut_off_once_its_claim_lands_a_refresh_lets_go_at_once(
+    test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
+):
+    view_id = await make(test_client)
+    handed = letting_go(monkeypatch)
+    armed = cut_off(monkeypatch, db_session, landed=True)
+    real = view_membership_repo.claim
+
+    async def claim(*args, **kwargs):
+        armed["now"] = True
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(view_membership_repo, "claim", claim)
+    with pytest.raises(asyncio.CancelledError):
+        await run(db_session, view_id)
+    state = await state_of(db_session, view_id)
+    assert state.lease_owner == "test", "its claim landed"
+    assert handed == [(view_id, "test", state.epoch)]
+    await freed(db_session, handed)
+    assert (await state_of(db_session, view_id)).lease_owner is None
+
+
+async def test_cut_off_releasing_after_a_failure_the_turn_lets_go_all_the_same(
+    test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
+):
+    view_id = await make(test_client)
+    handed = letting_go(monkeypatch)
+
+    async def busy(engine):
+        raise ProviderUnavailable("graph", "busy")
+
+    monkeypatch.setattr(pipeline, "search_data_version", busy)
+    armed = cut_off(monkeypatch, db_session, landed=False)
+    real = view_membership_repo.release
+
+    async def release(*args, **kwargs):
+        armed["now"] = True
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(view_membership_repo, "release", release)
+    with pytest.raises(asyncio.CancelledError):
+        await run(db_session, view_id)
+    await db_session.rollback()
+    state = await state_of(db_session, view_id)
+    assert state.lease_owner == "test", "its release never landed"
+    assert handed == [(view_id, "test", state.epoch)]
+    await freed(db_session, handed)
+    assert (await state_of(db_session, view_id)).lease_owner is None
+
+
+async def test_cut_off_saving_a_new_epoch_both_its_epochs_are_let_go(
+    test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
+):
+    """A run whose view changed under it places again at a new epoch; cut off saving it —
+    which may never land — the claim at the epoch before is let go of too."""
+    view_id = await make(test_client)
+    restore = crash_after(monkeypatch, 1)
+    with pytest.raises(Crash):
+        await run(db_session, view_id, page_size=2)
+    await db_session.rollback()
+    restore()
+    await let_go(db_session, view_id)
+    mid = (await state_of(db_session, view_id)).epoch
+    row = (await db_session.execute(select(ViewORM).where(ViewORM.id == view_id))).scalar_one()
+    config = json.loads(row.config)
+    config["layout"]["referenceLayout"]["layers"].append({"id": "l-new", "name": "New", "order": 9,
+                                                         "entityTypes": []})
+    row.config = json.dumps(config)
+    await db_session.commit()
+
+    handed = letting_go(monkeypatch)
+    armed = cut_off(monkeypatch, db_session, landed=False)
+    real = pipeline._Run.renumber
+
+    async def renumber(self):
+        armed["now"] = True
+        return await real(self)
+
+    monkeypatch.setattr(pipeline._Run, "renumber", renumber)
+    with pytest.raises(asyncio.CancelledError):
+        await run(db_session, view_id, page_size=2)
+    await db_session.rollback()
+    state = await state_of(db_session, view_id)
+    assert (state.epoch, state.lease_owner) == (mid, "test"), "the new epoch never landed"
+    assert sorted(handed) == [(view_id, "test", mid), (view_id, "test", mid + 1)]
+    await freed(db_session, handed)
+    assert (await state_of(db_session, view_id)).lease_owner is None
+
+
+# ── What a view-scoped import pins in a list view ──────────────────────────
+
+
+async def test_a_view_scoped_import_pins_the_roots_it_made_in_a_list_view_as_entries(
+    test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
+):
+    """The roots a view-scoped import made are pinned in the draft's copy of a list view as
+    entries (``assignedBy: "import"``), as in any view: drawn where they are put, never
+    members — its query decides those."""
+    from backend.app.api.v1.endpoints import versioning as versioning_ep
+    from backend.app.db.repositories import view_repo
+
+    @asynccontextmanager
+    async def same_session():
+        yield db_session
+
+    async def containment(*args):
+        return ["CONTAINS"]
+
+    async def directions(*args):
+        return {"CONTAINS": False}
+
+    monkeypatch.setattr("backend.app.db.engine.get_async_session", same_session)
+    monkeypatch.setattr(versioning_ep, "_live_containment_types", containment)
+    monkeypatch.setattr(versioning_ep, "_live_containment_map", directions)
+    view_id = await make(test_client)
+    created = [{"eid": "r", "urn": "urn:new-root", "layer_signal": None},
+               {"eid": "c", "urn": "urn:new-child", "layer_signal": None}]
+    out = await versioning_ep._write_view_import_assignments("ws", "ds", view_id, "br1", created,
+                                                             [("r", "c", "CONTAINS")])
+    assert out == {"added": 1}
+    config = await view_repo.effective_view_config(db_session, view_id, "br1")
+    entry = config["layout"]["referenceLayout"]["assignments"]["urn:new-root"]
+    assert entry["assignedBy"] == "import"
+    inputs = pipeline.inputs_of(config, read_definition(config), None)
+    assert inputs.user["urn:new-root"] == entry, "a person's entry, as the run reads it: never a member"
+    assert "urn:new-root" not in await members_of(db_session, view_id)

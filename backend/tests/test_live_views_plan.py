@@ -7,11 +7,17 @@
 Containers are never rows (the canvas draws them from each member's path); a member's row
 depends on nothing but itself and its path, so any page size gives the same rows.
 """
+from httpx import AsyncClient
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.db.models import ViewMemberORM
 from backend.app.services.live_views import layouts, pipeline
 from backend.app.services.live_views.plan import (
     Candidate,
     auto_placer,
     plan_page,
+    prepared_placer,
     rules_placer,
     source_placer,
     stage_placer,
@@ -20,6 +26,17 @@ from backend.app.services.live_views.plan import (
 from backend.app.services.view_placement import NodeFacts
 from backend.common.models.search_view import REST_LAYER_ID
 from backend.common.models.view_membership import MembershipDefinition, MembershipSource
+from backend.tests.test_views_from_members_api import (  # noqa: F401 — fixtures
+    URL,
+    body,
+    graph,
+    members_of,
+    membership_on,
+    plan_body,
+    preview,
+    source_view,
+    workspace,
+)
 
 TYPES = {
     "db": "database", "sch": "schema", "tbl_a": "table", "tbl_b": "table",
@@ -203,6 +220,67 @@ def test_like_the_view_it_was_made_from():
     tables, cols = mine[0]["id"], mine[1]["id"]
     # In the view, a column sits with its table (inherited by hand); outside it, the rules decide.
     assert layer_of(rows) == {"col_a1": tables, "src_col": cols}
+
+
+def test_like_a_view_made_from_a_query_each_entity_where_its_rows_have_it():
+    """Its config holds none of its members — they are rows of its member table — so where
+    it has each one is read before the page is planned, never left to its layer rules."""
+    mine = [{"id": "m_tbls", "name": "Tables", "order": 0, "entityTypes": ["table"], "linkLayerId": "a_tables"},
+            {"id": "m_cols", "name": "Columns", "order": 1, "entityTypes": ["column"], "linkLayerId": "a_cols"},
+            {"id": "m_other", "name": "Other", "order": 2, "entityTypes": []}]
+    # There, col_a1 was moved in with the tables and tbl_b is a member; col_a2 it has nowhere.
+    there = {"col_a1": "a_tables", "tbl_b": "a_tables", "col_a2": None}
+    rows, waiting = placed([member("col_a1"), member("col_a2"), member("col_b1"), member("src_col", "upstream", 1)],
+                           placer=prepared_placer(there, layouts.link_map(mine)),
+                           layer_ids=layouts.layer_ids(mine), fallback="m_other")
+    assert layer_of(rows) == {"col_a1": "m_tbls", "col_a2": "m_other", "col_b1": "m_tbls", "src_col": "m_other"}
+    assert waiting == 2, "what it has nowhere waits to be placed, as ever"
+
+    definition = MembershipDefinition.model_validate({
+        "sources": [SOURCE.model_dump(by_alias=True)], "layout": {"kind": "source", "sourceViewId": "list"}})
+    by_type = {"layout": {"referenceLayout": {"layers": [
+        {"id": "a_tables", "name": "Tables", "order": 0, "entityTypes": ["table"]},
+        {"id": "a_cols", "name": "Columns", "order": 1, "entityTypes": ["column"]}]}},
+        "content": {"entityScope": "all"}, "membership": definition.model_dump(by_alias=True)}
+    cands = {"col_a1": member("col_a1")}
+    assert pipeline.make_placer(definition, layers=mine, source_config=by_type, facts=FACTS,
+                                source_placed=there)(cands) == {"col_a1": "m_tbls"}
+    assert pipeline.make_placer(definition, layers=mine, source_config=by_type, facts=FACTS)(cands) == {
+        "col_a1": "m_cols"}, "its config alone places by its rules"
+
+
+async def test_a_view_like_a_view_made_from_a_query_places_its_members_where_that_views_rows_have_them(
+    test_client: AsyncClient, db_session: AsyncSession, graph, membership_on, preview,
+):
+    """Made like a view made from a query (a ``source`` layout naming it), a view's members
+    sit where that view's rows have them — moved by hand there, too — in its preview and
+    in what it holds."""
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    made = await test_client.post(URL, json=body(ws, src))
+    assert made.status_code == 201, made.text
+    listed = made.json()["view"]["id"]
+    layers = (await test_client.get(f"/api/v1/views/{listed}")).json()["config"]["layout"]["referenceLayout"]["layers"]
+    tables = next(l["id"] for l in layers if l["name"] == "Tables")
+    await db_session.execute(update(ViewMemberORM).where(ViewMemberORM.view_id == listed,
+                                                         ViewMemberORM.urn == "col_a1").values(layer_id=tables))
+    await db_session.commit()
+
+    planned = await preview(ws, listed, plan_body(listed))
+    assert planned.status_code == 200, planned.text
+    counts = {l["name"]: l["count"] for l in planned.json()["layers"]}
+    assert (counts["Domains"], counts["Tables"], counts["Columns"]) == (1, 3, 2)
+
+    like = await test_client.post(URL, json=body(ws, listed, name="Like the list",
+                                                 provenance={"origin": "narrow", "viewId": listed}))
+    assert like.status_code == 201, like.text
+    view_id = like.json()["view"]["id"]
+    mine = (await test_client.get(f"/api/v1/views/{view_id}")).json()["config"]["layout"]["referenceLayout"]["layers"]
+    name_of = {l["id"]: l["name"] for l in mine}
+    assert {l["linkLayerId"] for l in mine if l["name"] == "Tables"} == {tables}
+    members = {urn: name_of[entry["layerId"]] for urn, entry in (await members_of(db_session, view_id)).items()}
+    assert members == {"dom": "Domains", "tbl_a": "Tables", "tbl_b": "Tables", "col_a1": "Tables",
+                       "col_a2": "Columns", "col_b1": "Columns"}
 
 
 def test_lineage_stages():

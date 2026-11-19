@@ -40,10 +40,10 @@ import uuid
 from collections import OrderedDict
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pydantic import BaseModel
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import MemberSetORM, MemberSetRowORM, ViewMembershipStateORM, ViewORM, view_is_live
@@ -64,6 +64,7 @@ from backend.app.services.live_views.plan import (
     Placer,
     auto_placer,
     plan_page,
+    prepared_placer,
     rules_placer,
     source_placer,
     stage_placer,
@@ -449,13 +450,17 @@ async def read_page(
 
 def make_placer(
     definition: MembershipDefinition, *, layers: List[dict], source_config: Optional[dict],
-    facts: Dict[str, NodeFacts],
+    facts: Dict[str, NodeFacts], source_placed: Optional[Mapping[str, Optional[str]]] = None,
 ) -> Placer:
+    """``source_placed``: where the view made from a query a ``source`` layout copies has
+    each candidate (``placed_in_source``) — its member rows, which its config holds none of."""
     kind = definition.layout.kind
     if kind == "stages":
         return stage_placer()
     if kind == "auto":
         return auto_placer(layouts.type_layer_map(layers), facts)
+    if kind == "source" and source_placed is not None:
+        return prepared_placer(source_placed, layouts.link_map(layers))
     if kind == "source" and source_config is not None:
         return source_placer(source_config, layouts.link_map(layers), facts)
     if kind == "follow" and source_config is not None:
@@ -526,7 +531,10 @@ class Inputs:
 
 def inputs_of(config: dict, definition: MembershipDefinition, source_config: Optional[dict]) -> Inputs:
     """Following a view, its layers are that view's as it is now (it stores none), and
-    what people put in a layer that view has since deleted is in its fallback layer."""
+    what people put in a layer that view has since deleted is in its fallback layer.
+    Every entry of its config that is not the server's is a person's (``user``): one they
+    placed themselves, or a root a view-scoped import pinned in it (``assignedBy:
+    "import"``) — drawn where it is put, never a member."""
     layers, assignments = layout_of(config)
     if definition.layout.kind == "follow":
         if source_config is None:
@@ -540,15 +548,17 @@ def inputs_of(config: dict, definition: MembershipDefinition, source_config: Opt
     return inputs
 
 
-def place(page: Page, inputs: Inputs, *, now: str) -> Tuple[List[Placed], int]:
+def place(page: Page, inputs: Inputs, *, now: str,
+          source_placed: Optional[Mapping[str, Optional[str]]] = None) -> Tuple[List[Placed], int]:
     """A page's rows. A layout whose placement moves with what is outside the view (lineage
     distances; a followed view's layers) re-places the members it holds, never keeping one
-    in a layer only because it sat there."""
+    in a layer only because it sat there. ``source_placed``: see ``make_placer``."""
     d = inputs.definition
     return plan_page(
         page.members, context=page.context, previous=page.previous, user=inputs.user,
         layer_ids=layouts.layer_ids(inputs.layers), overrides=inputs.overrides,
-        placer=make_placer(d, layers=inputs.layers, source_config=inputs.source_config, facts=page.facts),
+        placer=make_placer(d, layers=inputs.layers, source_config=inputs.source_config, facts=page.facts,
+                           source_placed=source_placed),
         fallback_layer_id=fallback_of(d, inputs.layers), exclude=d.exclude,
         restage=d.layout.kind in ("stages", "follow"),
         place_containers=d.layout.nest and d.layout.kind != "stages", nest=d.layout.nest, now=now,
@@ -680,7 +690,8 @@ async def draft_view(
     Placed before anything is written, so the view's design — and its first version — is
     never rewritten after it is made: up to ``estimate_above`` (``ESTIMATE_ABOVE``) members
     every one is placed and the answer is exact; above, the first ``SAMPLE`` are, and it is
-    ``estimated`` (and keeps a fallback layer for what the sample did not see)."""
+    ``estimated`` (and keeps a fallback layer for what the sample did not see — and, its
+    layers copied from a view, every one of them: a sample can't show one holds nothing)."""
     members = await member_count(session, found, definition.exclude)
     kind = definition.layout.kind
     estimated = members > (ESTIMATE_ABOVE if estimate_above is None else estimate_above)
@@ -690,13 +701,20 @@ async def draft_view(
                                            client_layers=client_layers)
     # Layers someone chose — or a followed view's, every one of them — are kept as they are.
     others = kind not in ("template", "custom", "follow")
+    source = await source_list(session, definition, source_config) if sample is not None else None
+    source_placed = None
+    if source is not None:
+        source_placed = await placed_in_source(session, engine, source,
+                                               [*(c.urn for c in sample.members), *sample.context],
+                                               admit=statement_admission(engine))
 
     def planned(layers: List[dict], d: MembershipDefinition) -> Tuple[List[Placed], int]:
         if sample is None:
             return [], 0
         return plan_page(
             sample.members, context=sample.context, previous={}, user={}, layer_ids=layouts.layer_ids(layers),
-            overrides={}, placer=make_placer(d, layers=layers, source_config=source_config, facts=sample.facts),
+            overrides={}, placer=make_placer(d, layers=layers, source_config=source_config, facts=sample.facts,
+                                             source_placed=source_placed),
             fallback_layer_id=fallback_of(d, layers), exclude=d.exclude, restage=kind == "stages",
             place_containers=d.layout.nest and kind != "stages", nest=d.layout.nest)
 
@@ -716,10 +734,11 @@ async def draft_view(
         per_layer = {k: max(1, round(v * scale)) for k, v in per_layer.items()}
         fallback = round(fallback * scale)
     offered = layers
-    if keep == "withResults" and others and sample is not None:
+    if keep == "withResults" and others and sample is not None and not (estimated and kind == "source"):
         # The layers someone chose themselves stay; the ones copied or made for them
         # are kept only when they hold something (an estimate's fallback layer always:
-        # it is where what the sample did not see waits).
+        # it is where what the sample did not see waits). Estimated, copied layers all
+        # stay: what the sample did not see may be in any of them.
         waiting_room = definition.layout.fallback_layer_id if estimated else None
         held = [layer for layer in layers if per_layer.get(layer["id"]) or layer["id"] == waiting_room]
         layers = held or layers[:1]
@@ -779,6 +798,16 @@ async def draft_cached(
     return Draft(layers=kept.layers, all_layers=kept.all_layers, display_rules=kept.display_rules,
                  definition=definition, found=found, members=kept.members, limit=limit,
                  per_layer=kept.per_layer, fallback=kept.fallback, estimated=kept.estimated)
+
+
+async def draft_copy(session: AsyncSession, found: Sets, definition: MembershipDefinition, config: dict, *,
+                     limit: int) -> Draft:
+    """A copy of a view made from a query (a duplicate): its layers as that view has them now,
+    nothing placed beforehand — its members are worked out afresh, as any new view's — and
+    what it would hold, against the limit."""
+    layers, _ = layout_of(config)
+    return Draft(layers=layers, all_layers=layers, display_rules=[], definition=definition, found=found,
+                 members=await member_count(session, found, definition.exclude), limit=limit)
 
 
 def plan_answer(draft: Draft) -> MembershipPlan:
@@ -874,6 +903,53 @@ async def source_config(session: AsyncSession, definition: MembershipDefinition,
     return (await followed_configs(session, [source])).get(source.id) or config_of(source)
 
 
+@dataclass
+class SourceList:
+    """The view made from a query a ``source`` layout copies placements from, as
+    ``where.place_in_list`` reads it: its config holds none of its members, so where it has
+    each entity is read from its member rows, a page at a time."""
+    view_id: str
+    view: Any               # where.ListView
+
+
+async def source_list(session: AsyncSession, definition: MembershipDefinition,
+                      copied: Optional[dict]) -> Optional[SourceList]:
+    """For a ``source`` layout whose view (``copied``: its config, as ``source_config`` reads
+    it) is made from a query, that view, to place by its rows. None for any other view — its
+    config places entities (``source_placer``) — or for one following a view no longer there."""
+    from backend.app.services.live_views import where     # it reads this module
+
+    sid = definition.layout.source_view_id
+    if (definition.layout.kind != "source" or not sid or copied is None
+            or not isinstance(copied.get("membership"), dict)):
+        return None
+    row = await _live_row(session, sid)
+    config = config_of(row) if row is not None else {}
+    theirs = read_definition(config)
+    if theirs is None:
+        return None
+    try:
+        return SourceList(view_id=row.id, view=await where.list_view(session, row, config, theirs))
+    except where.BaseMissing:
+        return None
+
+
+async def placed_in_source(session: AsyncSession, engine: Any, source: SourceList, urns: Sequence[str], *,
+                           admit: Any = None) -> Dict[str, Optional[str]]:
+    """Where ``source`` has each of ``urns`` — a member where its row puts it, an entry, what
+    is inside one, or where its layout places the rest — ``PAGE`` at a time; None where it
+    has one only waiting to be placed (its fallback layer), or nowhere."""
+    from backend.app.services.live_views import where
+
+    wanted = sorted(set(urns))
+    out: Dict[str, Optional[str]] = {}
+    for i in range(0, len(wanted), PAGE):
+        found = await where.place_in_list(session, engine, source.view_id, source.view, wanted[i:i + PAGE],
+                                          admit=admit)
+        out.update({u: w[0] if w[1] not in ("fallback", "none") else None for u, w in found.items()})
+    return out
+
+
 async def effective_data_source(session: AsyncSession, workspace_id: str,
                                 data_source_id: Optional[str]) -> Optional[str]:
     """The data source a view reads: its own, else its workspace's primary."""
@@ -966,7 +1042,9 @@ async def refresh(
         raise PipelineError("invalid", "This view isn't made from a query.")
     state = await view_membership_repo.ensure(session, row)
     progress = view_membership_repo.in_progress(state, definition.resolution_hash())
-    if definition.mode != "live" and progress is None:
+    if definition.mode != "live" and progress is None and state.members_epoch is not None:
+        # A snapshot never answered (one imported without its members) works out its
+        # first answer once: then it is frozen like any other.
         raise PipelineError("frozen", "This view is a snapshot: its members stay as they are until "
                                       "updates are resumed.")
     if not await _read_in_available(session, definition, row):
@@ -998,22 +1076,30 @@ async def refresh(
                     version = await search_data_version(engine)
             if version and version == state.data_version:
                 return Outcome("current", state.status, {"reason": "up_to_date"})
-    if progress is not None:
-        if not await view_membership_repo.take_over(session, view_id, owner=owner, epoch=state.epoch,
-                                                    lease_s=LEASE_SECS):
-            # Another request is carrying the run on now: ask again, as while it runs.
-            await session.commit()
-            return Outcome("running", "updating", {"reason": "busy"})
-        epoch = state.epoch
-    else:
-        epoch = await view_membership_repo.claim(session, view_id, owner=owner, lease_s=LEASE_SECS)
-        if epoch is None:
-            await session.commit()
-            return Outcome("busy", "updating")
-        progress = {"epoch": epoch, "hash": definition.resolution_hash(), "sets": []}
-        await view_membership_repo.update_mine(session, view_id, owner=owner, epoch=epoch,
-                                               materialize=dumps(progress), status_detail=dumps(run_detail(progress)))
-    await session.commit()
+    epoch: Optional[int] = None
+    try:
+        if progress is not None:
+            if not await view_membership_repo.take_over(session, view_id, owner=owner, epoch=state.epoch,
+                                                        lease_s=LEASE_SECS):
+                # Another request is carrying the run on now: ask again, as while it runs.
+                await session.commit()
+                return Outcome("running", "updating", {"reason": "busy"})
+            epoch = state.epoch
+        else:
+            epoch = await view_membership_repo.claim(session, view_id, owner=owner, lease_s=LEASE_SECS)
+            if epoch is None:
+                await session.commit()
+                return Outcome("busy", "updating")
+            progress = {"epoch": epoch, "hash": definition.resolution_hash(), "sets": []}
+            await view_membership_repo.update_mine(session, view_id, owner=owner, epoch=epoch,
+                                                   materialize=dumps(progress),
+                                                   status_detail=dumps(run_detail(progress)))
+        await session.commit()
+    except asyncio.CancelledError:
+        # Cut off holding the view — its claim may have landed: let go at once, as a turn does.
+        if epoch is not None:
+            _let_go(view_id, owner=owner, epoch=epoch)
+        raise
     return await _Run(session, view_id, owner=owner, epoch=epoch, progress=progress, definition=definition,
                       workspace_id=workspace_id, data_source_id=data_source_id, actor=actor,
                       manager=manager).go(engine_scope, deadline=deadline, confirm_removals=confirm_removals,
@@ -1024,14 +1110,20 @@ async def start(session: AsyncSession, row: ViewORM, definition: MembershipDefin
                 owner: str, members: int) -> int:
     """Claim a new view for its first answer, its sets already resolved and its ``members``
     counted: the run ``carry_on`` then places (or the next request, when it outlasts this
-    one)."""
+    one). Cut off once it holds the view, it lets go at once — the caller's transaction
+    may still land — as a turn does; so does the caller, cut off as it commits."""
     await view_membership_repo.ensure(session, row)
     epoch = await view_membership_repo.claim(session, row.id, owner=owner, lease_s=LEASE_SECS)
     assert epoch is not None, "a view nobody else has seen yet is free to claim"
-    progress = {"epoch": epoch, "hash": definition.resolution_hash(), "sets": found.ids,
-                "dataVersion": found.data_version, "placing": _placing(members)}
-    await view_membership_repo.update_mine(session, row.id, owner=owner, epoch=epoch, materialize=dumps(progress),
-                                           status_detail=dumps(run_detail(progress, found)))
+    try:
+        progress = {"epoch": epoch, "hash": definition.resolution_hash(), "sets": found.ids,
+                    "dataVersion": found.data_version, "placing": _placing(members)}
+        await view_membership_repo.update_mine(session, row.id, owner=owner, epoch=epoch,
+                                               materialize=dumps(progress),
+                                               status_detail=dumps(run_detail(progress, found)))
+    except asyncio.CancelledError:
+        _let_go(row.id, owner=owner, epoch=epoch)
+        raise
     return epoch
 
 
@@ -1125,11 +1217,22 @@ class _Run:
         self.deadline = self.apply_by = 0.0
         #: The facts of the containers this turn has read.
         self.known: "OrderedDict[str, NodeFacts]" = OrderedDict()
+        #: A ``source`` layout's view, when it is made from a query: placed by its rows.
+        self.source_list: Optional[SourceList] = None
 
     async def release(self, **values: Any) -> None:
         await view_membership_repo.release(self.session, self.view_id, owner=self.owner, epoch=self.epoch,
                                            **values)
         await self.session.commit()
+
+    async def _release_or_let_go(self, **values: Any) -> None:
+        """``release``, from a handler of ``go``: cut off while it releases, the turn lets go
+        at once all the same (outside ``go``'s own guard)."""
+        try:
+            await self.release(**values)
+        except asyncio.CancelledError:
+            _let_go(self.view_id, owner=self.owner, epoch=self.epoch)
+            raise
 
     def detail(self, found: Sets) -> Dict[str, Any]:
         """How far the run has got, for whoever asks while it runs."""
@@ -1152,7 +1255,13 @@ class _Run:
             self.progress["placing"] = _placing(self.progress["placing"]["members"])
         self.progress.pop("held", None)
         self.progress.pop("applying", None)
-        await self._save()
+        try:
+            await self._save()
+        except asyncio.CancelledError:
+            # Cut off saving the new epoch, which may never have landed: the claim at the one
+            # before is let go of too (the turn lets go of the new one).
+            _let_go(self.view_id, owner=self.owner, epoch=self.epoch - 1)
+            raise
 
     async def _save(self) -> None:
         values: Dict[str, Any] = dict(materialize=dumps(self.progress), lease_until=later_iso(LEASE_SECS))
@@ -1186,20 +1295,23 @@ class _Run:
             return Outcome("fenced", "updating")
         except PipelineError as exc:
             status = "source_missing" if exc.kind == "source_missing" else "failed"
-            await self.release(status=status, status_detail=dumps({"reason": str(exc)}), last_error=str(exc)[:500],
-                               materialize=None)
+            await self._release_or_let_go(status=status, status_detail=dumps({"reason": str(exc)}),
+                                          last_error=str(exc)[:500], materialize=None)
             return Outcome(exc.kind, status, {"reason": str(exc)})
         except ProviderUnavailable:
             # Busy, failing over or down: nothing about this view. It keeps its members
             # and its run so far, is due again shortly, and it is not counted against it.
+            # One with no members yet (a new view's first turn) is still filling in.
             await self.session.rollback()
-            await self.release(status="pending", status_detail=dumps({"reason": "graph_busy"}))
+            first = ViewMembershipStateORM.members_epoch.is_(None)
+            await self._release_or_let_go(status=case((first, "updating"), else_="pending"),
+                                          status_detail=dumps({"reason": "graph_busy"}))
             raise
         except Exception as exc:  # noqa: BLE001 — a failed run keeps the last good members
             logger.warning("live view %s: refresh failed: %s", self.view_id, exc, exc_info=True)
             await self.session.rollback()
-            await self.release(status="failed", last_error=str(exc)[:500],
-                               attempts=ViewMembershipStateORM.attempts + 1)
+            await self._release_or_let_go(status="failed", last_error=str(exc)[:500],
+                                          attempts=ViewMembershipStateORM.attempts + 1)
             return Outcome("failed", "failed", {"reason": "The graph couldn't be read. Try again in a moment."})
 
     async def _work(self, engine: Any, *, confirm_removals: bool, page_size: int) -> Outcome:
@@ -1230,6 +1342,7 @@ class _Run:
                 return Outcome("over_cap", "over_cap", detail)
             progress["placing"] = _placing(members)
         copied_from = await source_config(session, self.definition, self.workspace_id)
+        self.source_list = await source_list(session, self.definition, copied_from)
         admit = statement_admission(engine, self.manager)
         while True:
             read_at = now_iso()
@@ -1274,7 +1387,10 @@ class _Run:
                                    exclude=inputs.definition.exclude, view_id=self.view_id,
                                    members_epoch=members_epoch, facts=inputs.definition.layout.kind != "stages",
                                    admit=admit, known=self.known)
-            placed, fallback = place(page, inputs, now=now_iso())
+            source_placed = (await placed_in_source(self.session, engine, self.source_list,
+                                                    [*(c.urn for c in page.members), *page.context], admit=admit)
+                             if self.source_list is not None else None)
+            placed, fallback = place(page, inputs, now=now_iso(), source_placed=source_placed)
             await view_members_repo.insert(self.session, _rows(self.view_id, self.epoch, page, placed, placing))
             placing["placed"] += len(placed)
             placing["fallback"] += fallback
@@ -1392,6 +1508,9 @@ class _Run:
             )
             values.update(members_epoch=self.epoch, revision=ViewMembershipStateORM.revision + 1,
                           last_diff=dumps({**public, "at": now}))
+        elif applying["old"] is None:
+            # A first answer holding nothing is an answer all the same: a snapshot has its one.
+            values.update(members_epoch=self.epoch)
         # Readers have the new epoch (or kept the old): the sweeper deletes the other.
         await self.release(materialize=None, **values)
         return Outcome("applied" if changed else "unchanged", status, diff=public)

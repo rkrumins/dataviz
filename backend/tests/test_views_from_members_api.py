@@ -627,6 +627,41 @@ async def test_a_turn_cut_off_lets_go_of_the_view_at_once_and_the_next_carries_i
     assert set(await members_of(db_session, view_id)) == {"dom", "tbl_a", "tbl_b", "col_a1", "col_a2"}
 
 
+async def test_cut_off_as_it_is_saved_a_new_view_lets_go_of_itself_at_once(
+    test_client: AsyncClient, db_session, db_engine, graph, membership_on, monkeypatch,
+):
+    """Cut off as the transaction that makes it commits — which may land all the same — a new
+    view's claim is let go at once: the next request carries its first answer on, never
+    waiting the lease out."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    monkeypatch.setattr(pipeline, "_own_session", async_sessionmaker(bind=db_engine, expire_on_commit=False))
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    real_commit, real_record, armed = db_session.commit, routes.view_activity_repo.record_view_activity, {}
+
+    async def record(*args, **kwargs):
+        armed["now"] = True
+        return await real_record(*args, **kwargs)
+
+    async def commit():
+        await real_commit()
+        if armed.pop("now", False):
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(routes.view_activity_repo, "record_view_activity", record)
+    monkeypatch.setattr(db_session, "commit", commit)
+    cut = await test_client.post(URL, json=body(ws, src))
+    assert cut.status_code >= 500, "cut off: it never answered"
+    monkeypatch.setattr(db_session, "commit", real_commit)
+    await asyncio.gather(*pipeline._letting_go)
+    view_id = (await db_session.execute(select(ViewORM.id).where(ViewORM.name == "Orders tables"))).scalar_one()
+    state = (await db_session.execute(select(ViewMembershipStateORM).where(
+        ViewMembershipStateORM.view_id == view_id).execution_options(populate_existing=True))).scalar_one()
+    assert (state.lease_owner, state.lease_until, state.status) == (None, None, "updating")
+    assert json.loads(state.materialize)["placing"]["placed"] == 0, "its run kept, for the next request"
+
+
 def app_engine_scope():
     from backend.app.main import app
 

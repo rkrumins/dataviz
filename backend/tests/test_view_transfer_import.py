@@ -17,6 +17,8 @@ from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.view_transfer import importing, limits
 from backend.app.services.view_transfer.canonical import canonical_json
 from backend.auth_service.interface import User
+from backend.tests.test_views_from_members_api import graph as members_graph  # noqa: F401 — a fixture
+from backend.tests.test_views_from_members_api import membership_on  # noqa: F401 — a fixture
 
 pytestmark = pytest.mark.usefixtures("view_portability_enabled")  # the preview ships off
 
@@ -149,10 +151,11 @@ async def _reconcile(client: AsyncClient, view: dict, target: dict, *, action="c
 
 async def _import(client: AsyncClient, inspected: dict, target: dict, *, action="create",
                   definition=None, strategy="replace", expected=None, request_id=None,
-                  originDefinition=None, **metadata):
+                  originDefinition=None, members=None, **metadata):
     view = inspected["views"][0]
     bundle = inspected["bundle"]
     return await client.post("/api/v1/views/transfer/import", json={
+        **({"members": members} if members is not None else {}),
         "originDefinition": originDefinition,
         "action": action, "strategy": strategy, "target": target,
         "metadata": {**view["metadata"], **metadata},
@@ -263,6 +266,102 @@ async def test_a_view_made_from_a_query_arrives_without_members_in_its_config(te
     assert (state.status, state.members_epoch, members) == ("pending", None, [])
     state, members = await arrived("snapshot")
     assert (state.status, members) == ("frozen", [("urn:x", "l2")])
+
+
+COLUMNS = ["urn", "layerId", "whole", "name", "type", "orderKey", "logicalNodeId"]
+SNAPSHOT = {"v": 1, "mode": "snapshot", "sources": [{"spec": {"seeds": {"urns": ["dom"]}, "expand": {"children": 2}}}]}
+
+
+def _snapshot_of(inspected: dict) -> dict:
+    """The file's view as a snapshot made from a query, no one's entries in it."""
+    definition = {**inspected["views"][0]["definition"], "membership": SNAPSHOT}
+    rl = definition["layout"]["referenceLayout"]
+    definition["layout"] = {**definition["layout"], "referenceLayout": {**rl, "assignments": {}}}
+    return definition
+
+
+async def _held(db_session, view_id: str):
+    from backend.app.db.models import ViewMemberORM, ViewMembershipStateORM
+
+    state = (await db_session.execute(select(ViewMembershipStateORM).where(
+        ViewMembershipStateORM.view_id == view_id).execution_options(populate_existing=True))).scalar_one()
+    rows = (await db_session.execute(select(ViewMemberORM).where(
+        ViewMemberORM.view_id == view_id, ViewMemberORM.epoch == state.members_epoch)
+        .order_by(ViewMemberORM.ord))).scalars().all()
+    return state, rows
+
+
+async def test_a_snapshot_arrives_with_the_members_its_file_carries(test_client, db_session, graph, membership_on):
+    """Its members are its answer here, frozen as it was — in name order, placed as its file
+    says — and a file carrying others replaces them when it is imported over it."""
+    import inspect
+    import json
+
+    from backend.app.db.repositories import view_members_repo
+
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    inspected = await _file(test_client, await _view(test_client, dev))
+    members = {"format": "rows-v1", "count": 3, "columns": COLUMNS, "rows": [
+        ["urn:b", "l2", False, "apple", "dataset", None, "ln1"],
+        ["urn:x", "l2", False, "mango", "dataset", None, None],
+        ["urn:a", "l1", True, "zebra", "dataset", "a0", None]]}
+    resp = await _import(test_client, inspected, {"workspaceId": uat}, action="copy",
+                         definition=_snapshot_of(inspected), members=members, name="Frozen")
+    assert resp.status_code == 200, resp.text
+    view_id = resp.json()["viewId"]
+    state, rows = await _held(db_session, view_id)
+    named = "names" in inspect.signature(view_members_repo.replace).parameters
+    # In name order where the member table takes their names (``replace(names=)``); else URN order.
+    order = ["urn:b", "urn:x", "urn:a"] if named else ["urn:a", "urn:b", "urn:x"]
+    assert [r.urn for r in rows] == order
+    placed = {r.urn: (r.layer_id, r.whole, r.order_key, r.logical_node_id) for r in rows}
+    assert placed == {"urn:a": ("l1", True, "a0", None), "urn:b": ("l2", False, None, "ln1"),
+                      "urn:x": ("l2", False, None, None)}
+    assert (state.status, state.member_count, json.loads(state.counts)["perLayer"]) == ("frozen", 3, {"l1": 1, "l2": 2})
+    status = (await test_client.get(f"/api/v1/views/{view_id}/membership")).json()
+    assert (status["status"], status["keys"]) == ("frozen", 3)
+    opened = await test_client.post(f"/api/v1/views/{view_id}/membership/refresh", params={"trigger": "open"})
+    assert (opened.json()["outcome"], opened.json()["detail"]) == ("current", {"reason": "snapshot"}), \
+        "answered: nothing works it out again"
+
+    first = state.members_epoch
+    others = {"format": "rows-v1", "count": 1, "columns": COLUMNS,
+              "rows": [["urn:y", "l1", False, "yew", "dataset", None, None]]}
+    again = await _import(test_client, inspected, {"viewId": view_id}, action="overwrite",
+                          definition=_snapshot_of(inspected), members=others)
+    assert again.status_code == 200, again.text
+    after, rows = await _held(db_session, view_id)
+    assert [(r.urn, r.layer_id) for r in rows] == [("urn:y", "l1")]
+    assert after.members_epoch > first and after.status == "frozen"
+
+
+async def test_a_snapshot_whose_file_carries_no_members_works_its_first_answer_out_once(
+    test_client, db_session, graph, members_graph, membership_on,
+):
+    """Without its members it waits to be worked out (``imported``) — and, frozen as it is,
+    works its first answer out once, when it is opened; then it keeps it."""
+    import json
+
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    inspected = await _file(test_client, await _view(test_client, dev))
+    resp = await _import(test_client, inspected, {"workspaceId": uat}, action="copy",
+                         definition=_snapshot_of(inspected), name="Frozen, without its members")
+    assert resp.status_code == 200, resp.text
+    view_id = resp.json()["viewId"]
+    state, rows = await _held(db_session, view_id)
+    assert (state.status, json.loads(state.status_detail), state.members_epoch, rows) == (
+        "pending", {"reason": "imported"}, None, [])
+    assert (await test_client.get(f"/api/v1/views/{view_id}/membership")).json()["status"] == "pending"
+
+    url = f"/api/v1/views/{view_id}/membership/refresh"
+    opened = await test_client.post(url, params={"trigger": "open"})
+    assert opened.status_code == 200, opened.text
+    assert (opened.json()["outcome"], opened.json()["membership"]["status"]) == ("applied", "frozen")
+    state, rows = await _held(db_session, view_id)
+    assert {r.urn for r in rows} == {"dom", "tbl_a", "tbl_b", "col_a1", "col_a2", "col_b1"}
+    again = await test_client.post(url, params={"trigger": "open"})
+    assert (again.json()["outcome"], again.json()["detail"]) == ("current", {"reason": "snapshot"})
+    assert (await test_client.post(url)).status_code == 409, "a snapshot that has its answer stays as it is"
 
 
 async def test_a_view_that_follows_another_arrives_among_its_subsets(test_client, db_session, graph):
