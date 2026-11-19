@@ -12,10 +12,14 @@ so every member joins for the same first reason (``via``):
 * **inside** / **partnerInside** — what is inside the seeds (then the sources and
   consumers found): up to ``ROOTS_PER_STEP`` members a step, one page of
   ``DESCENDANTS_PAGE`` each, ``DESCENDANTS_CONCURRENCY`` at once; a member with more
-  continues on the next step. "Everything inside" is never listed (``whole``).
+  continues on the next step. A member the graph counts nothing inside is never read
+  (one count per ``READ_BATCH`` members, a step of its own). "Everything inside" is
+  never listed (``whole``).
 * **upstream** / **downstream** — the lineage walk (``walk``), a closure step a step:
   a hub's page and a container seed's page of contents are each a step of their own,
-  so a set has no page caps (a Narrow's ``HUB_PAGES_MAX`` / ``SEED_PAGES_MAX``).
+  so a set has no page caps (a Narrow's ``HUB_PAGES_MAX`` / ``SEED_PAGES_MAX``). With
+  ``partnerHosts``, the tables the partners sit in join as partners too (and, with
+  ``partnerLineage``, are walked).
 
 Each step is at most one graph call (a stage's few pages in one batch) and one short
 transaction, committed through the fence (``store.commit_step``). Limits are said,
@@ -307,16 +311,20 @@ async def _partner_inside(step: _Step) -> None:
 
 async def _descendants(step: _Step, roots_via: List[str], depth: int, via: str) -> bool:
     """One page of what is inside up to ``ROOTS_PER_STEP`` members. True when there
-    is nothing left to read."""
+    is nothing left to read. Members are taken ``READ_BATCH`` at a time, and those
+    the graph counts nothing inside (a trace's columns) are never read: that count
+    is a step of its own."""
     progress = step.state.setdefault("desc", {"after": -1, "open": []})
     open_roots: List[list] = progress["open"]
     if len(open_roots) < ROOTS_PER_STEP:
-        more = await step.store.roots(roots_via, progress["after"], ROOTS_PER_STEP - len(open_roots))
-        open_roots += [[urn, 0, origin] for urn, _seq, origin in more]
+        more = await step.store.roots(roots_via, progress["after"], READ_BATCH)
         if more:
             progress["after"] = more[-1][1]
+            open_roots += await _holding(step, more)
+            return False
     if not open_roots:
         return True
+    reading, rest = open_roots[:ROOTS_PER_STEP], open_roots[ROOTS_PER_STEP:]
     await step.unhold()
     gate = asyncio.Semaphore(DESCENDANTS_CONCURRENCY)
 
@@ -327,12 +335,12 @@ async def _descendants(step: _Step, roots_via: List[str], depth: int, via: str) 
                                                          offset=offset)
 
     # Every read settles before an error is raised: none is left running unobserved.
-    pages = await asyncio.gather(*(page(r, o) for r, o, _ in open_roots), return_exceptions=True)
+    pages = await asyncio.gather(*(page(r, o) for r, o, _ in reading), return_exceptions=True)
     for got in pages:
         if isinstance(got, BaseException):
             raise got
     found, still = [], []
-    for (root, offset, origin), nodes in zip(open_roots, pages):
+    for (root, offset, origin), nodes in zip(reading, pages):
         found += [(n.urn, origin or root, n) for n in nodes]
         if len(nodes) >= DESCENDANTS_PAGE:
             still.append([root, offset + DESCENDANTS_PAGE, origin])
@@ -341,8 +349,19 @@ async def _descendants(step: _Step, roots_via: List[str], depth: int, via: str) 
         step.counts.inside = (step.counts.inside or 0) + joined
     else:
         step.counts.partner_inside = (step.counts.partner_inside or 0) + joined
-    progress["open"] = still
+    progress["open"] = still + rest
     return False
+
+
+async def _holding(step: _Step, roots: List[tuple]) -> List[list]:
+    """Of ``roots`` (``(urn, seq, origin)``), as open roots, those the graph does not
+    count empty: a count of 0 is skipped, no count is read anyway."""
+    await step.unhold()
+    async with step.slot():
+        nodes = await step.engine.get_nodes_query(
+            NodeQuery(urns=[u for u, _, _ in roots], limit=len(roots), include_child_count=True))
+    empty = {n.urn for n in nodes if n.child_count == 0}
+    return [[urn, 0, origin] for urn, _seq, origin in roots if urn not in empty]
 
 
 def _lineage(direction: str):
@@ -357,13 +376,16 @@ def _lineage(direction: str):
             step.state["walk"] = walk.new_state()
             return
         target = walk.ALL if depth == "all" else int(depth)
+        expand = step.spec.expand
+        is_leaf = await walk.leaf_rule(step.engine) if expand.partner_hosts else None
 
         async def call(request):
             await step.unhold()
             async with step.slot():
                 return await step.engine.trace_closure(request)
 
-        stepped = await walk.step(step.store, state, direction, target, call, edges=step.store.include_edges)
+        stepped = await walk.step(step.store, state, direction, target, call, edges=step.store.include_edges,
+                                  is_leaf=is_leaf, walk_hosts=bool(expand.partner_lineage))
         if stepped is None:
             step.next_stage()
             return

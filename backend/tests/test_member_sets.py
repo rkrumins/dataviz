@@ -120,6 +120,38 @@ async def test_a_set_holds_what_a_narrow_answers(maker, step_max, scope_spec):
     assert sorted(r.seq for r in rows.values()) == list(range(len(rows)))
 
 
+HOST_SPECS = [
+    spec(["rpt_c"], upstream="all", downstream="all", partnerHosts=True, partnerLineage=True, partnerChildren=1),
+    spec(["sales"], children=1, upstream="all", downstream="all", partnerHosts=True, partnerLineage=True),
+    spec(["ord_amt", "rpt_c"], upstream=1, downstream="all", partnerHosts=True, partnerChildren="all"),
+]
+
+
+@pytest.mark.parametrize("step_max", [1, 3, 25])
+@pytest.mark.parametrize("scope_spec", HOST_SPECS, ids=lambda s: s.spec_hash()[:8])
+async def test_a_set_holds_the_tables_its_partners_sit_in_as_a_narrow_does(maker, step_max, scope_spec):
+    expected = await resolve_membership(FakeEngine(step_max=step_max, seed_page=1, containment=True), scope_spec)
+    set_id = await new_set(maker, scope_spec)
+    ms = await run_to_end(maker, set_id, FakeEngine(step_max=step_max, seed_page=1, containment=True))
+
+    rows = await rows_of(maker, set_id)
+    assert ms.status == "complete" and json.loads(ms.truncated) == []
+    assert {"orders", "rpt"} & set(rows), "a table a partner sits in"
+    assert as_members(rows) == {m.urn: (m.via, m.hops) for m in expected.members}
+    assert sorted(u for u, r in rows.items() if r.whole) == expected.whole_subtree
+    assert json.loads(ms.counts) == expected.counts.model_dump(by_alias=True)
+
+
+async def test_what_is_inside_a_column_is_never_read(maker):
+    engine = FakeEngine(containment=True)
+    set_id = await new_set(maker, spec(["rpt_c"], upstream="all", partnerHosts=True, partnerLineage=True,
+                                       partnerChildren=1))
+    await run_to_end(maker, set_id, engine)
+    assert sorted(engine.descendant_calls) == [("orders", 1), ("payments", 1)]
+    assert {u for u, r in (await rows_of(maker, set_id)).items() if r.via == "partnerInside"} == {
+        "ord_amt", "ord_note"}
+
+
 async def test_each_member_knows_the_seed_it_is_nearest(maker):
     set_id = await new_set(maker, spec(["col_a1", "col_a2"], upstream="all"))
     await run_to_end(maker, set_id, FakeEngine(step_max=1))

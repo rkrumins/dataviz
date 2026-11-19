@@ -292,6 +292,25 @@ async def test_by_type_and_by_lineage_stage(test_client: AsyncClient, db_session
         "src2": "stage-up2", "src1": "stage-up1", "col_a1": "stage-seed", "rep1": "stage-down1"}
 
 
+async def test_a_trace_kept_with_its_tables_places_each_table_and_its_columns_at_its_stage(
+    test_client: AsyncClient, db_session, graph, membership_on,
+):
+    """A column-grain trace kept with the tables its sources sit in, and what is inside
+    them: each table at its column's stage, its columns with it."""
+    graph.engine = FakeEngine(containment=True)
+    ws = await workspace(test_client)
+    resp = await test_client.post(URL, json=body(ws, "", layout={"kind": "stages"}, sources=[{"spec": {
+        "seeds": {"urns": ["rpt_c"]},
+        "expand": {"upstream": "all", "partnerHosts": True, "partnerLineage": True, "partnerChildren": 1}}}]))
+    assert resp.status_code == 201, resp.text
+    entries = await members_of(db_session, resp.json()["view"]["id"])
+    assert {u: e["layerId"] for u, e in entries.items()} == {
+        "rpt_c": "stage-seed",
+        **dict.fromkeys(["orders", "ord_id", "ord_amt", "ord_note"], "stage-up1"),
+        **dict.fromkeys(["payments", "pay_amt"], "stage-up2"),
+    }
+
+
 async def test_a_trace_kept_as_a_view_says_it_came_from_a_trace(
     test_client: AsyncClient, db_session, graph, membership_on,
 ):

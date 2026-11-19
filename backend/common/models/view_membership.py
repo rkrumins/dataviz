@@ -24,7 +24,7 @@ import hashlib
 import json
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from backend.common.models.search import Predicate
 
@@ -56,6 +56,10 @@ class MembershipSeeds(_Base):
         return self
 
 
+#: Expand keys left out of a dump when unset (by field name and by alias).
+_ABSENT_WHEN_NONE = frozenset({"partner_hosts", "partnerHosts", "partner_lineage", "partnerLineage"})
+
+
 class MembershipExpand(_Base):
     """What the seeds pull in.
 
@@ -66,11 +70,29 @@ class MembershipExpand(_Base):
     sources and consumers found: 0, 1 level, or "all". Lineage is walked as the
     trace walks it: raw lineage at the finest grain, a container seed through
     the entities inside it that carry lineage, never a rollup or containment.
+
+    ``partnerHosts`` — a source or consumer whose type holds nothing (a column)
+    brings in the entity it sits in (its table), at the same distance, and
+    ``partnerChildren`` then reads inside those. ``partnerLineage`` — those
+    tables' lineage is walked too, as a container seed's is, one hop further.
+    Both are left out when false, so a spec without them keeps its hash.
     """
     children: Depth = 0
     upstream: Depth = 0
     downstream: Depth = 0
     partner_children: Depth = Field(0, alias="partnerChildren")
+    partner_hosts: Optional[bool] = Field(None, alias="partnerHosts")
+    partner_lineage: Optional[bool] = Field(None, alias="partnerLineage")
+
+    @field_validator("partner_hosts", "partner_lineage")
+    @classmethod
+    def _false_is_absent(cls, value: Optional[bool]) -> Optional[bool]:
+        return value or None
+
+    @model_serializer(mode="wrap")
+    def _without_absent(self, handler):
+        # Every dump, with or without exclude_none, reads as it did before these existed.
+        return {k: v for k, v in handler(self).items() if v is not None or k not in _ABSENT_WHEN_NONE}
 
     @model_validator(mode="after")
     def _ranges(self) -> "MembershipExpand":
@@ -84,6 +106,9 @@ class MembershipExpand(_Base):
                 continue
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= top:
                 raise ValueError(f"expand.{name} is 0 to {top}, or 'all'")
+        if self.partner_lineage and not self.partner_hosts:
+            raise ValueError("expand.partnerLineage walks the tables the sources and consumers sit in: "
+                             "it needs partnerHosts")
         return self
 
 
