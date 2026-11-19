@@ -1,9 +1,10 @@
 """``POST /{ws_id}/graph/view-members`` — a page of one layer of a view made from a query.
 
 Its members come from the member table, at the epoch readers see, in name order: a keyset
-page at a time, with exactly how many the layer holds, the nodes the canvas draws and where
-each sits (root first). Its cursor is signed; a share link reads its own view only; a view
-whose members are not worked out yet holds none.
+page at a time, for as long as the layer has members (an operator may set a ceiling), with
+exactly how many the layer holds — what people placed in it themselves too — the nodes the
+canvas draws and where each sits (root first). Its cursor is signed; a share link reads its
+own view only; a view whose members are not worked out yet holds none.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from backend.app.db.models import ViewORM
 from backend.app.db.repositories import view_members_repo, view_membership_repo
 from backend.app.services.feature_flags import feature_flags
 from backend.common.models.graph import GraphNode
+from backend.tests.test_views_from_members_api import graph, membership_on  # noqa: F401 — fixtures
 
 LAYERS = [{"id": "L1", "name": "One", "order": 0, "entityTypes": []},
           {"id": "L2", "name": "Two", "order": 1, "entityTypes": []}]
@@ -235,11 +237,95 @@ async def test_a_cursor_is_signed(on, views, post):
     assert other_layer.status_code == 400, "a cursor is good for its own layer only"
 
 
-async def test_a_layer_lists_at_most_its_cap(on, views, post, monkeypatch):
+async def test_a_layer_pages_past_five_thousand_to_its_last_member(on, views, post, db_session):
+    """No ceiling by default: a page of up to 1,000, the cursor on while members remain,
+    every member once, in name order, and never ``capped``."""
+    ws, view, _ = await views()
+    more = [f"urn:m{i:05d}" for i in range(5_100)]
+    await view_members_repo.insert(db_session, [{
+        "view_id": view.id, "epoch": 2, "urn": u, "layer_id": "L1", "name": f"m{i:05d}", "type": "table",
+        "sort_key": view_members_repo.sort_key(f"m{i:05d}", u), "ord": 10 + i, "label": "table",
+        "label_ord": 10 + i, "whole": False, "covered": False} for i, u in enumerate(more)])
+    await db_session.commit()
+    seen, cursor, pages = [], None, []
+    while True:
+        page = (await post(ws, view.id, {"layerId": "L1", "limit": 1000, **({"cursor": cursor} if cursor else {})})).json()
+        pages.append(page)
+        seen += [n["urn"] for n in page["nodes"]]
+        cursor = page["cursor"]
+        if not cursor:
+            break
+    assert [len(p["nodes"]) for p in pages] == [1000] * 5 + [104]
+    assert seen == ["urn:2", "urn:4", "urn:1", "urn:3", *more], "alpha, alpha, beta, gamma, then m00000…"
+    assert {(p["totalCount"], p["capped"]) for p in pages} == {(5_104, False)}
+    assert pages[-1]["delivered"] == 5_104
+    assert next(n for n in pages[-1]["nodes"] if n["urn"] == more[-1])["displayName"] == "m05099", \
+        "a member the graph doesn't answer for is drawn from its row"
+
+
+async def test_an_operators_ceiling_caps_a_layer(on, views, post, monkeypatch):
     monkeypatch.setattr(feed, "VIEW_MEMBERS_FEED_MAX_ROWS", 2)
     ws, view, _ = await views()
     page = (await post(ws, view.id, {"layerId": "L1"})).json()
     assert (len(page["nodes"]), page["capped"], page["cursor"], page["totalCount"]) == (2, True, None, 4)
+    monkeypatch.setattr(feed, "VIEW_MEMBERS_FEED_MAX_ROWS", 4)
+    page = (await post(ws, view.id, {"layerId": "L1"})).json()
+    assert (len(page["nodes"]), page["capped"], page["cursor"]) == (4, False, None), "every member listed"
+    monkeypatch.setattr(feed, "VIEW_MEMBERS_FEED_MAX_ROWS", 3)
+    first = (await post(ws, view.id, {"layerId": "L1", "limit": 2})).json()
+    assert (first["capped"], bool(first["cursor"])) == (False, True)
+    rest = (await post(ws, view.id, {"layerId": "L1", "limit": 2, "cursor": first["cursor"]})).json()
+    assert (len(rest["nodes"]), rest["capped"], rest["cursor"], rest["delivered"]) == (1, True, None, 3)
+
+
+async def pin(db_session, view_id: str, entries: dict, **extra) -> None:
+    """Place ``entries`` (urn → layer) in the view by hand: "Always include"."""
+    from sqlalchemy import select
+
+    row = (await db_session.execute(select(ViewORM).where(ViewORM.id == view_id))).scalar_one()
+    config = json.loads(row.config)
+    ref = config.setdefault("layout", {}).setdefault("referenceLayout", {})
+    ref["assignments"] = {**{u: {"layerId": layer, "assignedBy": "user", "inheritsChildren": True}
+                             for u, layer in entries.items()}, **extra}
+    row.config = json.dumps(config)
+    await db_session.commit()
+
+
+async def test_what_people_placed_in_a_layer_is_in_its_count(on, views, post, db_session):
+    """"Always include" entries are never members: the canvas loads them from the layout,
+    and the layer's count holds them. The server's own entries are not counted."""
+    ws, view, _ = await views()
+    await pin(db_session, view.id, {"urn:pinned": "L1", "urn:elsewhere": "L2"},
+              **{"urn:stale": {"layerId": "L1", "assignedBy": "query"}})
+    page = (await post(ws, view.id, {"layerId": "L1"})).json()
+    assert (page["totalCount"], page["delivered"], len(page["nodes"])) == (5, 4, 4)
+    assert "urn:pinned" not in {n["urn"] for n in page["nodes"]}
+    assert (await post(ws, view.id, {"layerId": "L2"})).json()["totalCount"] == 2
+
+
+async def test_a_view_that_follows_another_counts_its_entries_in_the_layers_it_is_served(
+    test_client, membership_on, graph, db_session,  # noqa: F811
+):
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+    from backend.app.main import app
+    from backend.tests.test_views_from_members_api import following, source_view, workspace
+
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    view_id = await following(test_client, ws, src)
+    # One in a layer it is served, one in a layer the view it follows has since deleted:
+    # that one waits in "Other matches".
+    await pin(db_session, view_id, {"tbl_up": "s_tbl", "col_up": "s_gone"})
+    app.dependency_overrides[get_context_engine] = lambda: graph.engine
+    try:
+        counts = {}
+        for layer in ("s_tbl", "other-matches"):
+            page = await test_client.post(f"/api/v1/{ws}/graph/view-members?viewId={view_id}", json={"layerId": layer})
+            assert page.status_code == 200, page.text
+            counts[layer] = (page.json()["totalCount"], page.json()["delivered"])
+    finally:
+        app.dependency_overrides.pop(get_context_engine, None)
+    assert counts == {"s_tbl": (3, 2), "other-matches": (1, 0)}
 
 
 async def test_a_share_link_reads_its_own_view_only(on, views, post):
@@ -292,6 +378,7 @@ async def test_refusals(views, post):
         not_one = await post(ws, plain.id, {"layerId": "L1"})
         assert not_one.status_code == 404 and not_one.json()["detail"]["reason"] == "not_made_from_a_query"
         assert (await post(ws, "view-nowhere", {"layerId": "L1"})).status_code == 404
-        assert (await post(ws, view.id, {"layerId": "L1", "limit": 501})).status_code == 422
+        assert (await post(ws, view.id, {"layerId": "L1", "limit": 1000})).status_code == 200
+        assert (await post(ws, view.id, {"layerId": "L1", "limit": 1001})).status_code == 422
     finally:
         _flags(viewMembershipEnabled=False)

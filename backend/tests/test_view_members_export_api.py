@@ -1,11 +1,13 @@
 """One layer of a view made from a query, as a file: ``POST /{ws_id}/graph/view-members/export``
 then ``GET /{ws_id}/graph/view-members/download``.
 
-The export answers with how many rows the layer holds, the answer they are read at and a
-token for them (this layer, that answer, this caller, ten minutes); the download streams
-them in name order, a keyset page a read, each with its parent and path from the graph,
-CSV cells defused. A file asked for after the view's members were worked out again is
-still the answer the token names while it is kept, else 410.
+The export answers with how many rows the layer holds — its members, and what people placed
+in it themselves — the answer they are read at and a token for them (this layer, that
+answer, this caller, ten minutes); the download checks the caller again and streams them in
+name order, a keyset page a read, then the entries, each with its parent and path from the
+graph, CSV cells defused. A file asked for after the view's members were worked out again
+is still the answer the token names while it is kept, else the answer readers see now
+(``X-Members-Epoch`` says which).
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ from backend.app.api.v1.endpoints import graph_view_members_export as route
 from backend.app.db.models import ViewMemberORM, ViewMembershipStateORM
 from backend.app.db.repositories import view_members_repo
 from backend.app.services.search_downloads import MEMBER_SET, VIEW_MEMBERS, mint_download_token
-from backend.tests.test_view_members_feed_api import _flags, MembersEngine, views  # noqa: F401 — fixtures
+from backend.tests.test_view_members_feed_api import _flags, MembersEngine, pin, views  # noqa: F401 — fixtures
 from backend.tests.test_views_from_members_api import following, graph, source_view, workspace  # noqa: F401
 
 COLUMNS = ["urn", "name", "type", "layer", "via", "hops", "whole",
@@ -157,15 +159,80 @@ async def test_the_answer_a_token_names_is_read_while_it_is_kept(on, views, clie
     await db_session.execute(update(ViewMembershipStateORM).where(ViewMembershipStateORM.view_id == view.id)
                              .values(epoch=3, members_epoch=3))
     await db_session.commit()
-    kept = table((await download(client, ws, token)).text)
-    assert [r[0] for r in kept[1:]] == ["urn:2", "urn:4", "urn:1", "urn:3"], "the answer the token names"
+    kept = await download(client, ws, token)
+    assert [r[0] for r in table(kept.text)[1:]] == ["urn:2", "urn:4", "urn:1", "urn:3"], "the answer the token names"
+    assert kept.headers["x-members-epoch"] == "2"
 
     await db_session.execute(delete(ViewMemberORM).where(ViewMemberORM.view_id == view.id, ViewMemberORM.epoch == 2))
     await db_session.commit()
     gone = await download(client, ws, token)
-    assert (gone.status_code, gone.json()["detail"]["reason"]) == (410, "epoch_gone")
+    assert gone.status_code == 200, gone.text
+    assert [r[0] for r in table(gone.text)[1:]] == ["urn:new"], "no longer kept: the answer readers see now"
+    assert gone.headers["x-members-epoch"] == "3"
     fresh = (await export(client, ws, view.id)).json()
     assert (fresh["rows"], fresh["epoch"]) == (1, 3)
+
+
+async def test_what_people_placed_in_the_layer_follows_its_members(on, views, client, db_session, monkeypatch):
+    """"Always include" entries are in the file, after the members, counted in its rows:
+    named from the graph, placed as members are, ``via`` ``entry``."""
+    from backend.tests import test_view_members_feed_api as feed_tests
+
+    ws, view, _ = await views()
+    monkeypatch.setitem(feed_tests.NAMES, "urn:e2", "zeta")
+    monkeypatch.setitem(feed_tests.NAMES, "urn:e1", "Epsilon")
+    await pin(db_session, view.id, {"urn:e2": "L1", "urn:e1": "L1", "urn:e9": "L2"},
+              **{"urn:e3": {"layerId": "L1", "assignedBy": "user", "inheritsChildren": False}})
+    ready = (await export(client, ws, view.id)).json()
+    assert ready["rows"] == 4 + 3
+    rows = [dict(zip(COLUMNS, r)) for r in table((await download(client, ws, ready["downloadToken"])).text)[1:]]
+    assert [r["urn"] for r in rows] == ["urn:2", "urn:4", "urn:1", "urn:3", "urn:e1", "urn:e3", "urn:e2"], \
+        "members by name, then entries by name (one the graph doesn't hold by its URN)"
+    assert rows[4] == {"urn": "urn:e1", "name": "Epsilon", "type": "table", "layer": "One", "via": "entry", "hops": "",
+                       "whole": "true", "parentUrn": "urn:db", "parentName": "db", "parentType": "database",
+                       "path": "db", "pathUrns": "urn:db"}
+    assert (rows[5]["name"], rows[5]["type"], rows[5]["whole"]) == ("", "", "false")
+
+    # A view not worked out yet: its file is its entries.
+    await db_session.execute(update(ViewMembershipStateORM).where(ViewMembershipStateORM.view_id == view.id)
+                             .values(members_epoch=None))
+    await db_session.commit()
+    ready = (await export(client, ws, view.id)).json()
+    assert (ready["rows"], ready["epoch"]) == (3, None)
+    got = await download(client, ws, ready["downloadToken"])
+    assert [r[0] for r in table(got.text)[1:]] == ["urn:e1", "urn:e3", "urn:e2"]
+    assert "x-members-epoch" not in got.headers
+
+
+async def test_the_download_checks_the_caller_reaches_the_view(on, views, client):
+    """The token names the view: an API key whose selection doesn't reach it reads
+    nothing, though the token is the key owner's own."""
+    from backend.app.auth.dependencies import get_permission_claims
+    from backend.app.main import app
+    from backend.app.services.permission_service import PermissionClaims
+
+    class ElsewhereKey:
+        """A key over the workspace's data, but not over this view."""
+        org_perms = ()
+        read_only = True
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: True
+
+        def admits_view(self, view_id, workspace_id, permission):
+            return False
+
+    ws, view, _ = await views()
+    token = (await export(client, ws, view.id)).json()["downloadToken"]
+    saved = app.dependency_overrides[get_permission_claims]
+    app.dependency_overrides[get_permission_claims] = lambda: PermissionClaims(
+        sid="sess_test", global_perms=("system:admin",), ws_perms={}, key_scope=ElsewhereKey())
+    try:
+        refused = await download(client, ws, token)
+    finally:
+        app.dependency_overrides[get_permission_claims] = saved
+    assert (refused.status_code, refused.json()["detail"]["reason"]) == (404, "view_not_found"), refused.text
+    assert (await download(client, ws, token)).status_code == 200
 
 
 async def test_refusals(on, views, client):

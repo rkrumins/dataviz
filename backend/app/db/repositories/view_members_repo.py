@@ -53,8 +53,9 @@ def _chunks(items: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
 
 
 def placement_of(row: Any) -> dict:
-    """A member's placement, shaped as an assignment entry is."""
-    entry = {"layerId": row.layer_id, "inheritsChildren": bool(row.whole)}
+    """A member's placement, shaped as an assignment entry is — and how many of its nearest
+    containers are drawn in its layer too (``inLayer``)."""
+    entry = {"layerId": row.layer_id, "inheritsChildren": bool(row.whole), "inLayer": int(row.in_layer or 0)}
     for key, value in (("assignedAt", row.assigned_at), ("orderKey", row.order_key),
                        ("logicalNodeId", row.logical_node_id)):
         if value is not None:
@@ -351,22 +352,29 @@ async def delete_epoch(session: AsyncSession, view_id: str, epoch: int, *, batch
 
 
 async def replace(session: AsyncSession, state: ViewMembershipStateORM, view_id: str,
-                  entries: Mapping[str, dict]) -> None:
+                  entries: Mapping[str, dict], *, names: Mapping[str, Tuple[str, str]] = {}) -> None:
     """A snapshot's members as a file (or an older version) carried them: they become its
-    members at a new epoch, in URN order until it is worked out again."""
+    members at a new epoch — in name order where ``names`` (urn → (name, type)) has them,
+    else in URN order, until it is worked out again."""
     epoch = int(state.epoch or 0) + 1
     rows = []
+    labels: Dict[str, int] = {}
     for urn in sorted(entries):
         entry = entries[urn]
         if not isinstance(entry, Mapping) or not isinstance(entry.get("layerId"), str):
             continue
+        name, kind = names.get(urn) or (None, None)
+        label = kind or ""
         rows.append({
             "view_id": view_id, "epoch": epoch, "urn": urn, "layer_id": entry["layerId"],
-            "sort_key": sort_key(None, urn), "ord": len(rows), "label": "", "label_ord": len(rows),
-            "whole": entry.get("inheritsChildren") is True, "covered": False,
+            "sort_key": sort_key(name, urn), "ord": len(rows), "label": label,
+            "label_ord": labels.get(label, 0),
+            "whole": entry.get("inheritsChildren") is True, "covered": False, "name": name, "type": kind,
             "assigned_at": entry.get("assignedAt"), "order_key": entry.get("orderKey"),
             "logical_node_id": entry.get("logicalNodeId"),
+            "in_layer": entry["inLayer"] if isinstance(entry.get("inLayer"), int) and entry["inLayer"] > 0 else 0,
         })
+        labels[label] = labels.get(label, 0) + 1
     await insert(session, rows)
     previous = state.members_epoch
     state.epoch, state.members_epoch, state.member_count = epoch, epoch, len(rows)
