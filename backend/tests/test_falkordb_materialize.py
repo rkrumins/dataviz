@@ -3731,7 +3731,11 @@ def test_is_attribute_limit_error_walks_the_cause_chain():
 
 
 def _with_node_timeout(monkeypatch, seconds):
+    """A cluster whose env mirror says ``seconds`` (none at all for 0), and no node's
+    reading left over from an earlier test: the observed window is process-wide."""
     monkeypatch.setattr(mat_provider, "_CLUSTER_NODE_TIMEOUT_S", float(seconds))
+    monkeypatch.setattr(mat_provider, "_OBSERVED_NODE_TIMEOUT_S", None)
+    monkeypatch.setenv("FALKORDB_MODE", "cluster" if seconds else "")
 
 
 def test_no_cluster_window_means_no_clamp(monkeypatch):
@@ -4032,6 +4036,62 @@ def test_the_window_is_asked_of_the_SERVER_not_the_graph_module(monkeypatch):
     # THE assertion: the underlying connection, not the graph-module facade.
     assert seen["conn"] is connection
     assert seen["conn"] is not facade
+    assert mat_provider._OBSERVED_NODE_TIMEOUT_S == 15.0
+
+
+@pytest.mark.parametrize("mode", ["standalone", "sentinel"])
+def test_a_node_that_is_not_clustered_is_never_asked_for_a_window(monkeypatch, mode):
+    """A standalone or sentinel node answers ``CONFIG GET cluster-node-timeout``
+    too — with Redis's 15000 ms default, a window no failure detector of its
+    runs on. Recorded, it clamped every search (45 s to 10 s) and write in the
+    process as if it were clustered. So only a cluster connection asks."""
+    import asyncio as _asyncio
+    import types as _types
+
+    asked = []
+
+    async def _fake_config_get(conn, node, name):
+        asked.append(name)
+        return {name: "15000"}
+
+    async def _fake_read_shard_memory(db, **kw):
+        return _types.SimpleNamespace(
+            endpoint="10.0.0.1:6379", timeout_max_ms=None, query_mem_capacity=None,
+            thread_count=None, timeout_default_ms=None,
+        )
+
+    from backend.app.providers import shard_capacity as _sc
+    monkeypatch.setattr(_sc, "_config_get", _fake_config_get)
+    monkeypatch.setattr(_sc, "read_shard_memory", _fake_read_shard_memory)
+    _reset_window(monkeypatch, mode="")
+
+    p = object.__new__(mat_provider.FalkorDBProvider)
+    p._server_limits_seeded = False
+    p._db = _types.SimpleNamespace(connection=object())
+    p._conn_cfg = _types.SimpleNamespace(mode=mode)
+    p._graph_name = "g1"
+    p._host, p._port = "10.0.0.1", 6379
+    p.note_server_limits = lambda *a, **k: None
+
+    async def _drive():
+        p._seed_server_limits()
+        await p._server_limits_task
+
+    _asyncio.run(_drive())
+    assert asked == [] and mat_provider._OBSERVED_NODE_TIMEOUT_S is None
+    assert mat_provider.cluster_write_ceiling_s() is None
+    assert mat_provider.search_replica_ceiling_s() is None
+
+
+def test_an_env_mirror_alone_does_not_make_a_deployment_clustered(monkeypatch):
+    """The mirror says how long a cluster's window is, not that there is one: a
+    standalone deployment that carries it (a ConfigMap copied from the cluster
+    overlay) runs unclamped. A cluster reads it until a node answers."""
+    _reset_window(monkeypatch, env_s=15.0, mode="standalone")
+    assert mat_provider.cluster_write_ceiling_s() is None
+    assert mat_provider.search_replica_ceiling_s() is None
+    _reset_window(monkeypatch, env_s=15.0, mode="cluster")
+    assert mat_provider.cluster_write_ceiling_s() == 15.0 * 0.4
 
 
 def test_an_unreadable_cube_size_counts_as_large(monkeypatch):
