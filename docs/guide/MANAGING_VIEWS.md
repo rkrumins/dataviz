@@ -273,6 +273,33 @@ Opening it when nothing changed costs nothing, and when many people open it at o
 one of them brings it up to date for everyone. A view nobody opens catches up the next
 time it is opened.
 
+**A large one is worked out a step at a time.** Each request works on it for up to
+20 seconds and keeps where it got to, and the page asks again until it is done —
+backing off while the server is busy, waiting while the tab is hidden, and never
+giving up on a server that was slow or briefly away. A view just saved opens straight
+away saying *Working out its members… N of M* until its first answer is in. When the
+members change, each layer's page is swapped in place: what is drawn stays drawn
+until its replacement arrives.
+
+**Everything works inside it**, as in any view:
+
+- **Trace** draws every entity it reaches where this view draws it: a member where
+  its row places it, anything else where the view's layout — or the view it follows
+  — would put it. The dock says **Placing N…** while it asks, and only an entity the
+  view places nowhere counts as outside it.
+- **Search**, and **Search in this layer** on a layer's menu or its *first 5,000*
+  note, find that layer's members.
+- **Export** on a layer that holds more than the canvas lists downloads every member
+  it holds, with its parent and path, as CSV.
+- **Narrow**, and **Save search as view**: a view saved from one made from a query
+  can't follow it (where its members sit can't be followed) — choose **By type** or
+  **Lineage stages** instead; saved from one that follows another view, it follows
+  that view.
+
+A past revision of the view shows only what was placed in it by hand, and says
+so: its members are worked out from the graph as it is now, apart from its
+revisions.
+
 Choose the chip to see:
 
 - what the view is made from, and the view its search runs in (**Searches
@@ -344,6 +371,8 @@ Auto-updating · 6*, and the chip says **Follows Sales overview**.
   shows straight away and needs no update.
 - **Search in it** by layer: a layer filter finds what is drawn in that layer —
   where the view it follows places it, or where you put it.
+- **Its display rules are that view's**, shown read-only under **Display rules**
+  with *From Sales overview*: change them there. Saved queries stay its own.
 - **Show where they sit** (in **Display**) draws each member inside the
   containers drawn in its layer.
 - It is listed under **Subsets** on the view it follows, beside subset views
@@ -583,6 +612,8 @@ See [Ways of Working](/guide/ways-of-working) for conventions and cadence.
 | A subset view says **Subset views are turned off** | The preview is off | Ask your administrator: **Administration → Features → Subset views: a search's matches as a view** |
 | A view made from a query says **Updates paused** | Views that keep themselves up to date are turned off | Nothing to do: it keeps its last members, and catches up once your administrator turns **Narrow: chosen entities and what they reach** back on |
 | "Someone changed this view's search. Review it and try again." | Another editor changed the view after you opened its chip | The chip now shows their change. Check it, then try again |
+| A view made from a query opens saying *Working out its members… N of M* | It was just saved, and is larger than one request places | Nothing to do: it fills in as you watch, and carries on the next time it is opened if you leave. See [Troubleshooting](/guide/troubleshooting#a-view-says-working-out-its-members) |
+| **Export** of a subset view's data offers **Export its matches** | A subset view's data is its search's matches | Choose **Export its matches**: every match, from search |
 | The **Save as a view** panel says it's more than a view can hold | Kept as a list, a view holds at most 250,000 members | Narrow the query, or reach everything inside rather than a number of levels. A subset view (**Live · any size**) has no limit. See [Troubleshooting](/guide/troubleshooting#save-as-view-says-more-than-a-view-can-hold) |
 
 More in [Troubleshooting](/guide/troubleshooting).

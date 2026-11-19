@@ -18,7 +18,9 @@ in the browser with what it found; anything large — the complete trace, a sear
 their lineage, a view of up to 250,000 members — is worked out on the server a step at a time, on
 versioned and unversioned graphs alike.
 
-**Full detail:** `docs/RELEASE_NOTES_2026-11-18_trace-share-export-views.md`.
+**Full detail:** `docs/RELEASE_NOTES_2026-11-18_trace-share-export-views.md`, and for saved
+narrowings, every function inside list and subset views, and saving that never gives up,
+`docs/RELEASE_NOTES_2026-11-19_subset-views-and-saved-narrowings.md`.
 
 ### Added
 
@@ -49,6 +51,15 @@ versioned and unversioned graphs alike.
   export can bring in every column of the tables a trace reaches, or each table whole, and trace
   from them too.
 - **List views' members nest in their containers** (`inLayer` on the member feed).
+- **Saved narrowings** (`/views/{id}/narrowings`): a narrowing kept with its view for everyone who
+  can read it, under a short link (`?narrowSaved=`), with what it held — opening it says what is new
+  and gone since. Listed in the header; exported from the Narrowed bar; its saver keeps a copy of
+  its results in the browser.
+- **Trace inside list, follow and subset views** places every entity where the view draws it
+  (`POST /{ws}/graph/view-placements`); the dock says **Placing N…**.
+- **A capped layer of a list view**: **Search in this layer**, and **Export** of every member it
+  holds (`POST /{ws}/graph/view-members/export`, `GET …/view-members/download`).
+- A view that follows another shows that view's display rules, read-only (`rulesFrom`).
 
 ### Changed
 
@@ -60,6 +71,13 @@ versioned and unversioned graphs alike.
   shortest distance when it is found again nearer.
 - The base view's **Subsets** list shows when either `searchViewsEnabled` or
   `viewMembershipEnabled` is on, and lists views that follow it.
+- **A list view's turn fits its request**: `LIVE_VIEW_TURN_SECS` (20 s, under the 30 s views tier).
+  Saving answers `201` as soon as the view exists (`status: updating` while it fills in), and the
+  browser retries a slow or busy save with the same key; opening keeps asking until it is done; an
+  update swaps each layer's page in place; old epochs go after `LIVE_VIEW_EPOCH_GRACE_SECS`.
+- `?narrow=` links keep the reach into the tables found, carry the seeds' names, and are withheld
+  past 7,000 characters.
+- A layer filter in a plain list view finds that layer's members.
 
 ### Fixed
 
@@ -67,18 +85,27 @@ versioned and unversioned graphs alike.
   older than the browser. The browser no longer sends `waitMs`; a cross-tier fixture pins every
   request body it builds.
 - Saving a view from inside a subset view no longer fails with "This view has no layers to copy".
+- A save cut off by the request tier no longer says "That took too long" for a view it made; a
+  cut-off turn no longer holds its lease for 300 seconds.
+- **Save search as view** inside a view that follows another no longer fails; **Like** a following
+  view copies the layers it is served.
+- A subset view's data export is refused (`422 subset_matches_export`) instead of silently covering
+  the whole data source; the dialog offers its matches.
+- A past revision of a list view says it shows only what was placed by hand.
 
 ### Upgrading
 
 - Migrations `20261118_1000_member_sets` and `20261118_1100_view_members`. The second moves list
   views' members out of their layouts and marks each to be worked out again on its next open.
+- Migration `20261120_1000_saved_narrowings`: a new, empty table.
 
 ### Known limitations
 
 - Neo4j and Spanner have no closure walk: member sets answer 501 there.
 - The canvas's own Narrow still starts from a search's first 5,000 matches; a view saved from it
   starts from every match. A layer lists 5,000 members on the canvas.
-- Saved traces stay in one browser; member sets are not on the API-key surface yet.
+- Saved traces, and a saved narrowing's copy of its results, stay in one browser; member sets,
+  view placements and the layer export are not on the API-key surface yet.
 - A view that follows another re-places its members on its next open after the view it follows
   changes how it places things, and can't have members moved in it on a draft yet.
 

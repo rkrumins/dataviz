@@ -261,9 +261,10 @@ the whole screen. Full walkthrough:
 
 **Narrow** keeps the canvas to the entities you choose and as much of their
 surroundings as you ask for. Everything else is set aside until you bring it
-back. It changes nothing in the view, and nothing is saved. Use it to read one
-corner of a large view: a table and everything inside it, or a dashboard and
-everything that feeds it.
+back. It changes nothing in the view. Use it to read one corner of a large
+view: a table and everything inside it, or a dashboard and everything that
+feeds it. A narrowing worth keeping can be saved with the view, for everyone
+who can open it (see [Save a narrowing with the view](#save-a-narrowing-with-the-view)).
 
 > **Note:** Narrow is a preview your administrator turns on, as
 > **Narrow: chosen entities and what they reach** in **Administration →
@@ -313,9 +314,14 @@ While the canvas is narrowed:
 - A trace still traces the whole view; the narrowing is back when the trace
   ends.
 - **Edit** changes the narrowing and **Link** copies a link that opens the view
-  narrowed the same way. A narrowing that starts from a search travels as the
-  search, so any number of matches can be shared. One started from chosen
-  entities can be shared with up to 200 of them.
+  narrowed the same way, with the names of the entities it starts from. A
+  narrowing that starts from a search travels as the search, so any number of
+  matches can be shared. One started from chosen entities can be shared with up
+  to 200 of them, in a link of up to 7,000 characters: past that the names are
+  left out, and past that again **Link** is greyed out. **Save** it instead for
+  a short link.
+- **Save** keeps it with the view, and **Export** (the download icon) writes
+  everything it shows to a file. See below.
 - **Show everything** puts the narrowing away. So does leaving the view.
 
 The answer is worked out on the server, and everyone asking the same question
@@ -323,12 +329,40 @@ shares it. When something stopped it short, the bar says so, for example *It
 reaches more than 50,000 entities — the first 50,000 are shown*, and offers
 **Try again** where asking again could reach more.
 
+### Save a narrowing with the view
+
+**Save** on the **Narrowed to N entities** bar keeps the narrowing with the view
+under a name you give it. Everyone who can open the view can open it, by a
+short link, and it stays with the view however the view is renamed. You need to
+be signed in; you don't need to be able to edit the view.
+
+- **Opening it** asks its question again, against the data as it is now. The
+  bar then says what changed since it was saved: *“Orders upstream” · +3 new ·
+  −1 gone since 3 Nov*. Where it was cut short then or now, it says *about*.
+- **The header** shows a **Saved narrowings** button, with how many, while the
+  view has any. Each row opens it, copies its short link, and exports what it
+  shows now. Whoever saved it, and anyone who can edit the view, can rename it
+  or remove it — for everyone.
+- **Its saver** also keeps, in this browser, what it showed when it was saved:
+  the download icon with the archive on its row downloads those files without
+  asking again. Larger than 500,000 rows, or with the browser out of space, no
+  copy is kept and the oldest copies give way first.
+
+A view keeps up to 200 saved narrowings, and one person up to 50 on a view.
+Saved narrowings are kept with the view, not with its versions: restoring a
+version or importing a package leaves them as they are, and deleting the view
+deletes them.
+
+**Export** writes everything the narrowing shows — each entity with its parent
+and path, and the flows between them if you choose — as CSV, NDJSON or JSON,
+worked out on the server however many there are (see
+[Take a trace with you](#take-a-trace-with-you)).
+
 ### Keep a narrowing as a view
 
-A narrowing is yours, for as long as you keep it. To share it, or come back to
-it, keep it as a view of its own: **Save as view** on the **Narrowed to N
-entities** bar, or **Save as view…** in the Narrow window. You need permission
-to create views in the workspace.
+To give a narrowing layers of its own, keep it as a view: **Save as view** on
+the **Narrowed to N entities** bar, or **Save as view…** in the Narrow window.
+You need permission to create views in the workspace.
 
 The **Save as a view** panel keeps it one of two ways, under **Keep it** at its
 top:
@@ -364,8 +398,10 @@ Kept as a list, the panel offers:
      layers are that view's, as they change there — a rename, a new layer or
      a new order shows in it too — and each entity is placed where that view
      places it. Chosen for a trace. In a subset view, it follows that view's
-     base. Not offered in a view that is itself made from a query, or in a
-     subset with layers of its own; the panel says why.
+     base, and in a view that follows another, the view it follows. Not
+     offered in a view made from a query of its own — where its members sit
+     can't be followed — or in a subset with layers of its own; the panel says
+     why.
    - **Like** the view you are in: a copy of its layers, each entity placed
      where that view places it, yours to change from then on. **With
      results** keeps only the layers something lands in; **All** keeps every
@@ -396,10 +432,16 @@ drawn around them by **Show where they sit** don't. A starting point with
 **everything inside** it is one member, however much is inside. Over the limit,
 the panel says by how much and what would help, and nothing is saved.
 
-Saving waits while a large set is worked out — **Save view** says how far it
-has got — and the view opens once its members are in. On the canvas each layer
-lists its members a page at a time as you scroll, up to 5,000 a layer; search
-in the view, or export it, for the rest.
+Saving waits while the narrowing's set is worked out — **Save view** says how
+far it has got — then the view is saved and opens straight away. A large one
+opens saying *Working out its members… N of M* over its columns and fills in
+as they are placed, without clearing what is already drawn. A server that was
+slow, busy or briefly away is asked again by itself — **Save view** reads
+*Still saving — trying again in N s*, and **Cancel** stops — and asking again
+never makes a second view. On the canvas each layer lists its members a page at
+a time as you scroll, up to 5,000 a layer. For the rest, a layer that holds more
+offers **Search in this layer** and **Export**, which downloads every member it
+holds with its parent and path.
 
 The narrowing on your canvas starts from a search's first 5,000 matches; a view
 saved from it starts from every match. Looking after the view once it exists is

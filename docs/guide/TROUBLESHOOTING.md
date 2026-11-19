@@ -151,6 +151,11 @@ and the **Save as a view** panel, say what went wrong in the server's own words.
 | "This view was just updated. Try again in 20 seconds." | **Refresh now** works at most once every 30 seconds for each view. | Wait as long as it says, then try again. |
 | "The graph is busy right now. Try again in a moment." | The graph is answering too many requests, and the server asked your browser to wait. | Wait. The canvas, **Narrow** and the **Save as a view** preview ask again by themselves when the server allows, and a subset layer still counting **so far** carries on by itself. |
 | **More than a view can hold, so it can’t be saved as it is.** (or "This would hold 260,000 members…") | A list holds at most 250,000 members, and this one is over. Nothing was saved. | See [Save as view says "More than a view can hold"](#save-as-view-says-more-than-a-view-can-hold). |
+| **Still saving — trying again in 12 s** (on **Save view**) | The server was slow, busy or briefly away while the view was being saved. | Nothing to do: it asks again by itself, and asking again never makes a second view. **Cancel** stops asking; a view already saved stays saved. |
+| *Working out its members… 26,000 of 51,101* (over a view's columns) | The view was just saved and is still being filled in. | See [A view says "Working out its members…"](#a-view-says-working-out-its-members). |
+| **This revision shows only what was placed by hand** | A past revision of a view made from a query. Its members are worked out from the graph as it is now, apart from its revisions. | Go back to **Published** to see them. |
+| "These rules are “Sales overview”’s: this view follows it — change them there." | A view that follows another shows that view's display rules. | Open the view it follows and change them there. |
+| **That saved narrowing is gone — or it was saved with a view you can’t open.** | Its link was opened after the narrowing was removed, or by someone who can't open the view. | Ask whoever sent it to save it again, or for access to the view. |
 
 ---
 
@@ -386,6 +391,18 @@ sooner at busy times.
 2. If this view is slow every time, split it into focused views that each answer
    one question. See [Creating Views](/guide/creating-views).
 3. If every view is slow at busy times, tell your administrator.
+
+### A view says "Working out its members…"
+
+**Likely cause:** the view was just saved, and holds more than one request
+places (each works for up to 20 seconds). The view exists and is shared as you
+chose; its first answer is still being worked out.
+
+It fills in as you watch: the page keeps asking, backs off while the server is
+busy and waits while the tab is hidden. Leave and it carries on the next time
+anyone opens it. Nothing to do — unless it stays at the same count for minutes,
+when the chip says why (**Couldn't update**: the graph couldn't be read; try
+**Refresh now** later).
 
 ### Save as view says "More than a view can hold"
 

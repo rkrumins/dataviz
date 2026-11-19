@@ -991,6 +991,31 @@ trace**. With a key, **Data: read** is enough.
 | `partnerHosts` | `true`, or leave it out: the sources and consumers found include the tables they sit in. An entity whose type can contain nothing (a column) sits in its container, its table; `partnerChildren` then reads inside those tables |
 | `partnerLineage` | `true`, or leave it out; needs `partnerHosts`: those tables are traced too, from everything inside them that carries lineage, within the same steps. A much wider walk |
 
+### Keep a narrowing with its view, and share it
+
+A members question can be saved with the view it is asked in, for everyone who can read the
+view, under an id the client makes (`[A-Za-z0-9_-]{8,32}`) — so a save that is retried saves
+once. The link a person shares is `/views/{viewId}?narrowSaved={id}`.
+
+| Route | Does |
+|---|---|
+| `GET /api/v1/views/{id}/narrowings` | `{items, canEdit, limits: {perView: 200, perUser: 50}}`, newest first. Each item: `id, name, spec, seedsLabel, seedNames, counts, truncated, dataVersion, held: {count, complete, kept}, createdBy, createdAt, updatedAt, canChange` |
+| `GET /api/v1/views/{id}/narrowings/{nid}` | One of them |
+| `GET /api/v1/views/{id}/narrowings/{nid}/held` | The URNs it held when saved, sorted, one a line, gzipped, with an `ETag` (`If-None-Match` gets `304`); `204` when it kept none |
+| `PUT /api/v1/views/{id}/narrowings/{nid}` | Save it: `{name, spec, seedsLabel?, seedNames?, counts?, truncated?, dataVersion?, held?: {count, complete, urnsGzip}}` (`urnsGzip` is base64 of the gzipped URNs, one a line; at most 60,000 of them and 2 MiB). `201` new, `200` replaced. Left out, `held` keeps the URNs already kept while the spec is the same |
+| `DELETE /api/v1/views/{id}/narrowings/{nid}` | `204`, also when it is already gone |
+
+Anyone who can read the view lists, opens and reads them; anyone signed in who can read it
+saves one; its saver, or an editor of the view, changes or removes it (`403 not_yours`
+otherwise). Refused: `409 id_taken` (the id is another view's), `422 invalid_spec`, `too_many`,
+`held_too_large`, `invalid_held`. A reader who can't open the view gets `404`. They are part of
+the **Narrow** preview (`403 feature_disabled` with it off), are kept with the view rather than
+its versions, and go when the view is deleted.
+
+To say what changed since, ask its `spec` again (`POST /graph/members`) and compare the answer's
+members and `wholeSubtree` with what `…/held` returns; `held.complete: false` (or a truncated
+answer now) makes the difference approximate.
+
 ### Save what a set of entities reaches as a view of its own
 
 **Needs:** what [Find everything a set of entities reaches](#find-everything-a-set-of-entities-reaches)
@@ -1036,8 +1061,9 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
    many of its nearest containers are drawn in its layer too (`inLayer`), and its
    `ancestorPath` lists every container up to the top.
 
-   Send no `waitMs` unless every server you call accepts it: the server waits 10 seconds for a
-   large set by default, then answers `202` with its progress — ask again with the same body.
+   Send no `waitMs` unless every server you call accepts it: the server works on a large set
+   for up to one turn (`LIVE_VIEW_TURN_SECS`, 20 seconds by default — always inside the
+   request's own time limit), then answers `202` with its progress. Ask again with the same body.
 
    A view holds at most `limit` members (250,000 unless `LIVE_VIEW_MAX_MEMBERS` is set). The
    containers drawn around them and anything always included don't count. A starting point whose whole inside is in scope
@@ -1061,9 +1087,12 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
 
    | Answer | Meaning |
    |---|---|
-   | `201` | Saved: `{view, membership}`. A replay of the same key answers `200` |
+   | `202`, `status: resolving` | Its sources are still being worked out: nothing is saved yet. Ask again with the same body and key |
+   | `201` | Saved: `{view, membership}`. A small view is ready (`membership.status: ok`). A larger one answers as soon as it exists, after a first turn of at most `LIVE_VIEW_CREATE_TURN_SECS` (5 s): `status: updating`, with `detail: {reason: placing, placed, members, sets}`. It fills in as it is opened (`refresh?trigger=open`) |
+   | `200` | A replay of the same key: the view the first attempt made, as it is now — possibly still `updating` |
    | `422`, `reason: over_cap` | More entries than a view holds: `keys`, `members`, `containers` and `limit` say by how much. Nothing is saved |
    | `503` + `Retry-After` | The graph couldn't answer in full in time. Nothing is saved |
+   | `408`, `429`, `502`, `504`, or no answer | Slow, busy or briefly away. Send it again, the same body and key, after its `Retry-After` or a growing pause: never a second view |
    | `404`, `reason: view_not_found` | A view it names doesn't exist, or you can't read it |
    | `409`, `reason: request_id_taken` | The `Idempotency-Key` was used for another request: send a new key |
 
@@ -1074,7 +1103,7 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
    | `GET /api/v1/views/{id}/membership` | The definition and how keeping it is going: `status`, `counts`, `lastDiff`, `excluded`, `alwaysIncluded`. Sends an `ETag`; a matching `If-None-Match` gets `304` |
    | `PUT /api/v1/views/{id}/membership` | Change the queries, or freeze and resume (`mode`), sent with `ifDefinitionHash`. A stale hash gets `409` with the current definition |
    | `POST /api/v1/views/{id}/membership/members` | `exclude`, `unexclude`, `include: [{urn, layerId}]`, `uninclude` |
-   | `POST /api/v1/views/{id}/membership/refresh` | Work the members out again now: at most once every 30 seconds per view. With `?trigger=open`, bring it up to date the way opening it does: anyone who can read the view may, and nothing is read from the graph unless its data or query changed |
+   | `POST /api/v1/views/{id}/membership/refresh` | Work the members out again now: at most once every 30 seconds per view. With `?trigger=open`, bring it up to date the way opening it does: anyone who can read the view may, and nothing is read from the graph unless its data or query changed. A large view is worked out a turn at a time: while `outcome` is `running` or `busy`, ask again (backing off) — `membership.detail` says how far it has got |
 
    A refresh answers an `outcome`:
    - `applied`: with its `diff`;
@@ -1092,6 +1121,23 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
 
    An update stamps the view's data freshness, not its "last edited". It writes no version: for
    an auto-updating view, the members are data, not design.
+
+4. Read it. Its layers page its members through `POST /api/v1/{ws}/graph/view-members`
+   (up to 5,000 a layer). Beside them:
+
+   | Route | Answers |
+   |---|---|
+   | `POST /api/v1/{ws}/graph/view-placements?viewId=` with `{"urns": [...]}` (1–2,000) | Where the view draws each entity: `{placements: {urn: {layerId, source}}, epoch, dataVersion, digest}`. `source` is `member` (its row), `entry` (placed by hand), `whole` (inside a member kept whole), `layout` (where the view's layout — or the view it follows — puts it), `fallback`, or `none` (`layerId: null`: drawn nowhere). Also for subset views. `422 not_served_view` for any other view; `409 base_missing` when the view it follows is gone |
+   | `POST /api/v1/{ws}/graph/view-members/export?viewId=&layerId=` | One layer, ready to download: `{downloadToken, rows, epoch}`. The token is the caller's, for ten minutes |
+   | `GET /api/v1/{ws}/graph/view-members/download?token=&format=csv\|ndjson` | That layer's members, streamed: `urn, name, type, layer, via, hops, whole, parentUrn, parentName, parentType, path, pathUrns`. `403 link_expired` for a token that isn't the caller's or has expired; `410 epoch_gone` when the view has moved on — export again |
+
+   A layer filter (`{"kind": "layer", "layerAssignment": "<layer id>"}`) in a search of the
+   view finds that layer's members. Inside `or`/`not`, or in a rule, it is a list of at most
+   1,000 of them, else `400`.
+
+   For a view that follows another, `GET /api/v1/views/{id}/library` answers the followed
+   view's `displayRules` with `rulesFrom: {viewId, name}`, and changing a rule answers
+   `409 rules_followed`.
 
 ### Make a view of a search's matches inside another view
 
@@ -1203,8 +1249,8 @@ see the matches, and the base's name only if they can open it.
 
    A subset view's search is written only through these routes. `POST /api/v1/views` drops a
    `search` sent with it, a settings save keeps the stored one, and a layout save holds a
-   subset's layers to type layers. A data export of a subset view is refused: export its matches
-   from its search instead.
+   subset's layers to type layers. A data export of a subset view is refused (`422`,
+   `reason: subset_matches_export`): export its matches from its search instead.
 
 ### Integrate single sign-on over a back channel
 
