@@ -133,21 +133,27 @@ async def advance(session: AsyncSession, set_id: str, engine, *, owner: str, wai
                   admit: Admit = None, seed_pages: Optional[SeedPages] = None) -> str:
     """Take the set's next steps until ``wait_s`` is spent: ``done`` (it is no longer
     running), ``spent``, ``held`` (another request holds it) or ``lost`` (another
-    took it over mid-step: that step was rolled back)."""
+    took it over mid-step: that step was rolled back). A step is started only while
+    one as long as they have taken, and half again, still fits: the request answers
+    inside its wait, not a step past it."""
     deadline = time.monotonic() + wait_s
     if not await sets.take_lease(session, set_id, owner):
         ms = await sets.get(session, set_id)
         await session.commit()
         return "done" if ms is None or ms.status != "running" else "held"
+    took = 0.0
     try:
         while True:
             ms = await sets.get(session, set_id)
             if ms is None or ms.status != "running":
                 return "done"
-            if time.monotonic() >= deadline:
+            started = time.monotonic()
+            if started + 1.5 * took >= deadline:
                 return "spent"
             if not await _one_step(session, ms, engine, owner, admit, seed_pages):
                 return "lost"
+            step_s = time.monotonic() - started
+            took = step_s if not took else 0.7 * took + 0.3 * step_s
     finally:
         await sets.release_lease(session, set_id, owner)
 

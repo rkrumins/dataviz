@@ -137,6 +137,25 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "an update is worked out.",
         None,
     ),
+    "LIVE_VIEW_TURN_SECS": (
+        "Seconds one request works on a view made from a query (saving it, opening it, *Refresh "
+        "now*) before it answers how far it got; the next request carries the rest on. Always at "
+        "least 8 s inside `HTTP_TIMEOUT_DEFAULT_SECS`, the tier that cuts every `/views` request "
+        "off.",
+        None,
+    ),
+    "LIVE_VIEW_CREATE_TURN_SECS": (
+        "Seconds saving a view made from a query places its members before it answers `201`: a "
+        "small view is ready, a larger one says `updating` with how far it got, and opening it "
+        "carries it on.",
+        None,
+    ),
+    "LIVE_VIEW_EPOCH_GRACE_SECS": (
+        "Seconds a view made from a query keeps its last answer's members after a new one is "
+        "swapped in, so a reader paging through them pages on. Then the member-set sweeper "
+        "deletes them.",
+        None,
+    ),
     "VIEW_MEMBERS_FEED_MAX_ROWS": (
         "Members one layer of a view made from a query lists on the canvas "
         "(`POST /graph/view-members`); past them its page says `capped`, and the layer is searched "

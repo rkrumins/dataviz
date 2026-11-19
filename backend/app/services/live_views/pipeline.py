@@ -4,7 +4,9 @@ Saving a view, *Refresh now*, opening a view whose data changed and a definition
 through here. A view holds up to ``LIVE_VIEW_MAX_MEMBERS`` members (``view_members``) — more
 than one request can work out — so a run is a series of short steps, and whichever request
 comes next carries it on at the same epoch (the frontend asks again while it hears
-``running``). No database transaction is held across a graph call:
+``running``). A request's turn (``TURN_SECS``) ends inside the tier that would cut it off; one
+cut off all the same lets go of its lease at once. No database transaction is held across a
+graph call:
 
 1. **Claim** — read the view and its definition; claim it (``epoch + 1``, a lease), or take
    over the run already at that epoch once nobody holds its lease (``materialize`` says how
@@ -17,34 +19,43 @@ comes next carries it on at the same epoch (the frontend asks again while it hea
    read of the page and of where its members sat at the last answer, then where they sit in
    the graph and what placing reads of them (a statement each); the rows written at the run's
    epoch, each page fenced on the claim and renewing its lease.
-4. **Apply** — the view's row then its state, locked: the definition still the one resolved,
-   the change from the last answer measured in SQL, a large removal held to be confirmed, and
+4. **Apply** — a step of its own: the change from the last answer measured in SQL holding
+   nothing, and kept with the run (a large removal held there to be confirmed); then the
+   view's row and its state locked briefly — the definition still the one resolved — and
    ``members_epoch`` swapped to the new epoch in one commit. Readers see the old members until
-   then; the old epoch's rows are deleted after it.
+   then; the sweeper deletes the old epoch's rows a while after.
 
 A short answer (part of the graph not answering) is never applied — the view keeps its last
 good members, and says so. Over the limit, likewise.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from pydantic import BaseModel
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import MemberSetORM, MemberSetRowORM, ViewMembershipStateORM, ViewORM, view_is_live
 from backend.app.db.repositories import data_source_repo, view_members_repo, view_membership_repo
 from backend.app.db.repositories.view_membership_repo import dumps, later_iso, now_iso
-from backend.app.services.graph_cache import CacheScope
-from backend.app.services.graph_reads import cache_scope, search_data_version, statement_admission
+from backend.app.services.graph_cache import ENDPOINT_MEMBERS_DRAFT, CacheScope, get_graph_cache
+from backend.app.services.graph_reads import (
+    cache_scope,
+    known_data_version,
+    search_data_version,
+    statement_admission,
+)
 from backend.app.services.layout_config import parse_reference_layout
 from backend.app.services.live_views import layouts
 from backend.app.services.live_views.plan import (
@@ -85,8 +96,23 @@ LIVE_VIEW_MAX_MEMBERS: int = int(os.getenv("LIVE_VIEW_MAX_MEMBERS", "250000"))
 #: A removal at least this large (share of the members, and count) waits to be confirmed.
 MASS_REMOVAL_RATIO = 0.5
 MASS_REMOVAL_MIN = 50
-#: Lease on a view while one request works on it; every page renews it.
+#: Lease on a view while one request works on it; every page renews it. A turn cut off lets
+#: go of it at once: this is for a process that died.
 LEASE_SECS = 300.0
+#: One request's turn at a run, in seconds; the routes keep it inside the tier that would cut
+#: the request off.
+TURN_SECS: float = float(os.getenv("LIVE_VIEW_TURN_SECS", "20"))
+#: A new view's first turn: short, so saving answers at once.
+CREATE_TURN_SECS: float = float(os.getenv("LIVE_VIEW_CREATE_TURN_SECS", "5"))
+#: What applying an answer needs of a turn: with less left once every page is placed, it is
+#: the next turn's first step.
+APPLY_RESERVE_S = 6.0
+#: How long a turn cut off has to let go of its lease.
+LET_GO_S = 3.0
+#: Containers whose facts one turn keeps, so a page reads only those it has not met.
+FACTS_KEPT = 20_000
+#: A preview's draft is kept this long, for the save that follows it.
+DRAFT_TTL_S = 15 * 60
 #: How long a caller is asked to wait when the graph was too busy to answer.
 RETRY_SECS = 30.0
 #: Members placed per page: one transaction, and a statement each for their paths and facts.
@@ -174,9 +200,10 @@ async def open_sets(
 ) -> Sets:
     """Each source's set on ``data_version``: the one ``ids`` names while it is still that
     question and kept, else found or started (``store.open_set``). A query source runs the
-    search panel's own search in the view it is read in; ``can_read_view`` holds that view
-    to a caller, None reads as the system (a refresh: the view was checked when the
-    definition was written).
+    search panel's own search in the view it is read in — the set ``ids`` names is taken as
+    it is, its scope resolved when the run began; ``can_read_view`` holds that view to a
+    caller, None reads as the system (a refresh: the view was checked when the definition
+    was written).
 
     ``fresh`` (a new refresh): on data whose version is unknown, a complete set is never
     taken as the answer — nothing says the data has not moved since — so it is let go and
@@ -188,6 +215,7 @@ async def open_sets(
     found = Sets(sources=list(sources), data_version=data_version)
     for i, source in enumerate(sources):
         spec = source.spec.canonical()
+        ms = await sets.get(session, ids[i]) if i < len(ids) and ids[i] else None
         read_in, boundary, pages = None, "", None
         if spec.seeds.query is not None:
             svc = AdvancedSearchService(
@@ -195,16 +223,20 @@ async def open_sets(
                 data_source_id=data_source_id, can_read_view=can_read_view,
             )
             query = seed_query_for(spec, source.read_in)
+            read_in = source.read_in
+            pages = make_seed_pages(svc, query, data_version=data_version, admit=admit)
+            if (ms is not None and ms.status in ("running", "complete") and ms.spec_hash == spec.spec_hash()
+                    and ms.read_in == read_in and ms.data_version == data_version and not ms.include_edges):
+                found.rows.append(ms)
+                found.pages.append(pages)
+                continue
             try:
                 boundary = (await svc.resolve_scope(query.scope)).scope_hash
             except ValidationError as exc:
                 raise PipelineError("source_missing", "The view its query is searched in can't be read.",
                                     reason=str(exc)) from exc
-            read_in = source.read_in
-            pages = make_seed_pages(svc, query, data_version=data_version, admit=admit)
         key = sets.set_key(scope, spec.spec_hash(), read_in=read_in, boundary=boundary,
                            data_version=data_version, include_edges=False)
-        ms = await sets.get(session, ids[i]) if i < len(ids) and ids[i] else None
         if fresh and not data_version:
             stale = await sets.by_key(session, key)
             if stale is not None and stale.status == "complete":
@@ -351,10 +383,12 @@ class Page:
 async def read_page(
     session: AsyncSession, engine: Any, found: Sets, src: int, after: int, *, size: int,
     exclude: Sequence[str], view_id: Optional[str], members_epoch: Optional[int], facts: bool, admit: Any,
+    known: Optional["OrderedDict[str, NodeFacts]"] = None,
 ) -> Page:
     """Up to ``size`` of set ``src``'s rows after ``after``: those an earlier source does
     not name, less what is kept out, as members — whole when any source says so — and
-    the containers on their paths, a member among them as a member."""
+    the containers on their paths, a member among them as a member. ``known``: the facts
+    of containers read before, so only the rest are read (and kept there, ``FACTS_KEPT``)."""
     r = MemberSetRowORM
     columns = (r.set_id, r.urn, r.seq, r.via, r.hops_up, r.hops_down, r.whole, r.name, r.type)
     rows = (await session.execute(
@@ -374,7 +408,17 @@ async def read_page(
     previous = (await view_members_repo.placements(session, view_id, members_epoch, every)
                 if view_id is not None else {})
     await session.commit()
-    read = await read_facts(engine, every, admit=admit) if facts else {}
+    read: Dict[str, NodeFacts] = {}
+    if facts:
+        kept = known if known is not None else OrderedDict()
+        read = await read_facts(engine, [u for u in every if u not in kept], admit=admit)
+        for u in every:
+            if u in kept:
+                read[u] = kept[u]
+                kept.move_to_end(u)
+        kept.update((a, read[a]) for u in urns for a in chains.get(u, ()) if a in read)
+        while len(kept) > FACTS_KEPT:
+            kept.popitem(last=False)
 
     left_out = set(exclude)
 
@@ -589,12 +633,13 @@ async def read_sample(session: AsyncSession, engine: Any, found: Sets, definitio
                       *, size: int) -> Sample:
     admit = statement_admission(engine)
     sample = Sample()
+    known: "OrderedDict[str, NodeFacts]" = OrderedDict()
     for src in range(len(found.rows)):
         after = -1
         while len(sample.members) < size:
             page = await read_page(session, engine, found, src, after, size=PAGE, exclude=definition.exclude,
                                    view_id=None, members_epoch=None,
-                                   facts=definition.layout.kind != "stages", admit=admit)
+                                   facts=definition.layout.kind != "stages", admit=admit, known=known)
             sample.members += page.members[:size - len(sample.members)]
             sample.context.update(page.context)
             sample.facts.update(page.facts)
@@ -628,17 +673,17 @@ class Draft:
 async def draft_view(
     session: AsyncSession, engine: Any, found: Sets, definition: MembershipDefinition, *,
     source_config: Optional[dict], client_layers: Optional[List[dict]], keep: str, limit: int,
-    place_sample: bool = True,
+    place_sample: bool = True, estimate_above: Optional[int] = None,
 ) -> Draft:
     """The layers a view made from these sets would start with, and what each would hold.
 
     Placed before anything is written, so the view's design — and its first version — is
-    never rewritten after it is made: up to ``ESTIMATE_ABOVE`` members every one is placed
-    and the answer is exact; above, the first ``SAMPLE`` are, and it is ``estimated`` (and
-    keeps a fallback layer for what the sample did not see)."""
+    never rewritten after it is made: up to ``estimate_above`` (``ESTIMATE_ABOVE``) members
+    every one is placed and the answer is exact; above, the first ``SAMPLE`` are, and it is
+    ``estimated`` (and keeps a fallback layer for what the sample did not see)."""
     members = await member_count(session, found, definition.exclude)
     kind = definition.layout.kind
-    estimated = members > ESTIMATE_ABOVE
+    estimated = members > (ESTIMATE_ABOVE if estimate_above is None else estimate_above)
     sample = (await read_sample(session, engine, found, definition, size=SAMPLE if estimated else members)
               if place_sample or kind == "auto" else None)
     layers, display_rules = initial_layers(definition, sample, source_config=source_config,
@@ -681,6 +726,59 @@ async def draft_view(
     return Draft(layers=layers, all_layers=offered, display_rules=display_rules, definition=definition,
                  found=found, members=members, limit=limit, per_layer=per_layer, fallback=fallback,
                  estimated=estimated)
+
+
+class _DraftKept(BaseModel):
+    """A draft as the graph cache keeps it: what ``draft_view`` worked out, less the sets
+    and the definition the caller already holds."""
+    layers: List[dict]
+    all_layers: List[dict]
+    display_rules: List[dict]
+    fallback_layer_id: Optional[str] = None
+    members: int
+    per_layer: Dict[str, int] = {}
+    fallback: int = 0
+    estimated: bool = False
+
+
+async def draft_cached(
+    session: AsyncSession, engine: Any, found: Sets, definition: MembershipDefinition, *,
+    source_config: Optional[dict], client_layers: Optional[List[dict]], keep: str, limit: int,
+    place_sample: bool = True, bounded: bool = False,
+) -> Draft:
+    """``draft_view``, kept in the graph cache for ``DRAFT_TTL_S``: a preview and the save
+    that follows it work one draft out, so the view is made with the layers the preview
+    showed. Keyed by the sets, the data they were resolved on, and all that placing reads
+    (the layout, what is kept, the client's layers, what is kept out, the view whose layers
+    are copied or followed as it is now). ``bounded`` (a save): on a miss only the first
+    ``SAMPLE`` members are placed, so saving takes no longer however many the view holds."""
+
+    async def compute() -> _DraftKept:
+        draft = await draft_view(session, engine, found, definition, source_config=source_config,
+                                 client_layers=client_layers, keep=keep, limit=limit, place_sample=place_sample,
+                                 estimate_above=SAMPLE if bounded else None)
+        return _DraftKept(layers=draft.layers, all_layers=draft.all_layers, display_rules=draft.display_rules,
+                          fallback_layer_id=draft.definition.layout.fallback_layer_id, members=draft.members,
+                          per_layer=draft.per_layer, fallback=draft.fallback, estimated=draft.estimated)
+
+    scope = cache_scope(engine)
+    if scope is None:
+        kept = await compute()
+    else:
+        kept = await get_graph_cache().get_or_compute(
+            scope=scope, endpoint=ENDPOINT_MEMBERS_DRAFT, compute=compute, model_cls=_DraftKept,
+            ttl_seconds=DRAFT_TTL_S, params={
+                "sets": found.ids, "data": found.data_version, "sources": definition.resolution_hash(),
+                "layout": definition.layout.model_dump(mode="json", by_alias=True), "keep": keep,
+                "layers": client_layers, "exclude": sorted(set(definition.exclude)),
+                "source": _sha(source_config) if source_config is not None else None, "sampled": place_sample,
+            })
+    if kept.fallback_layer_id != definition.layout.fallback_layer_id:
+        definition = definition.model_copy(update={
+            "layout": definition.layout.model_copy(update={"fallback_layer_id": kept.fallback_layer_id})})
+    return Draft(layers=kept.layers, all_layers=kept.all_layers, display_rules=kept.display_rules,
+                 definition=definition, found=found, members=kept.members, limit=limit,
+                 per_layer=kept.per_layer, fallback=kept.fallback, estimated=kept.estimated)
 
 
 def plan_answer(draft: Draft) -> MembershipPlan:
@@ -848,6 +946,9 @@ async def refresh(
     out unless the data or what the view is made of changed since it last was, and a
     held removal stays held — told from its state and the data's version, before
     anything is claimed (a claim shows the view as updating to everyone looking at it).
+    The data's version is read without an engine while this process knows the graph
+    behind it (``known_data_version``): opening a view that is up to date takes no
+    admission, connection or fair-share token.
 
     Raises ``PipelineError`` for a view that is not one to refresh, and lets
     ``ProviderUnavailable`` (busy, failing over, down) through once the view is
@@ -886,8 +987,11 @@ async def refresh(
             return Outcome("current", "held", {"reason": "held"})
         if (progress is None and state.status in ("ok", "partial") and state.data_version
                 and state.applied_resolution_hash == answered(definition, followed)):
-            async with engine_scope(workspace_id, data_source_id, actor) as engine:
-                version = await search_data_version(engine)
+            version = await known_data_version(
+                workspace_id, await effective_data_source(session, workspace_id, data_source_id))
+            if version != state.data_version:
+                async with engine_scope(workspace_id, data_source_id, actor) as engine:
+                    version = await search_data_version(engine)
             if version and version == state.data_version:
                 return Outcome("current", state.status, {"reason": "up_to_date"})
     if progress is not None:
@@ -904,7 +1008,7 @@ async def refresh(
             return Outcome("busy", "updating")
         progress = {"epoch": epoch, "hash": definition.resolution_hash(), "sets": []}
         await view_membership_repo.update_mine(session, view_id, owner=owner, epoch=epoch,
-                                               materialize=dumps(progress))
+                                               materialize=dumps(progress), status_detail=dumps(run_detail(progress)))
     await session.commit()
     return await _Run(session, view_id, owner=owner, epoch=epoch, progress=progress, definition=definition,
                       workspace_id=workspace_id, data_source_id=data_source_id, actor=actor,
@@ -913,22 +1017,25 @@ async def refresh(
 
 
 async def start(session: AsyncSession, row: ViewORM, definition: MembershipDefinition, found: Sets, *,
-                owner: str) -> int:
-    """Claim a new view for its first answer, its sets already resolved: the run
-    ``carry_on`` then works out (or the next request, when it outlasts this one)."""
+                owner: str, members: int) -> int:
+    """Claim a new view for its first answer, its sets already resolved and its ``members``
+    counted: the run ``carry_on`` then places (or the next request, when it outlasts this
+    one)."""
     await view_membership_repo.ensure(session, row)
     epoch = await view_membership_repo.claim(session, row.id, owner=owner, lease_s=LEASE_SECS)
     assert epoch is not None, "a view nobody else has seen yet is free to claim"
     progress = {"epoch": epoch, "hash": definition.resolution_hash(), "sets": found.ids,
-                "dataVersion": found.data_version}
-    await view_membership_repo.update_mine(session, row.id, owner=owner, epoch=epoch, materialize=dumps(progress))
+                "dataVersion": found.data_version, "placing": _placing(members)}
+    await view_membership_repo.update_mine(session, row.id, owner=owner, epoch=epoch, materialize=dumps(progress),
+                                           status_detail=dumps(run_detail(progress, found)))
     return epoch
 
 
 async def carry_on(view_id: str, *, session: AsyncSession, engine_scope: EngineScope, owner: str,
-                   budget_s: float, actor: Optional[str] = None) -> Outcome:
-    """Work out, within ``budget_s``, the run this request holds (``start``)."""
-    deadline = time.monotonic() + budget_s
+                   budget_s: float, apply_budget_s: Optional[float] = None, actor: Optional[str] = None) -> Outcome:
+    """Work out, within ``budget_s``, the run this request holds (``start``) — and apply
+    it while ``apply_budget_s`` (the request's own budget, when longer) has room."""
+    now = time.monotonic()
     row = await _live_row(session, view_id)
     definition = read_definition(config_of(row)) if row is not None else None
     state = await view_membership_repo.get(session, view_id)
@@ -939,7 +1046,56 @@ async def carry_on(view_id: str, *, session: AsyncSession, engine_scope: EngineS
     await session.commit()
     return await _Run(session, view_id, owner=owner, epoch=state.epoch, progress=progress, definition=definition,
                       workspace_id=row.workspace_id, data_source_id=row.data_source_id,
-                      actor=actor).go(engine_scope, deadline=deadline)
+                      actor=actor).go(engine_scope, deadline=now + budget_s,
+                                      apply_by=None if apply_budget_s is None else now + apply_budget_s)
+
+
+def run_detail(progress: dict, found: Optional[Sets] = None) -> Dict[str, Any]:
+    """How far a run has got, for whoever asks while it runs: placing (``placed`` of
+    ``members``), or still resolving its sets."""
+    placing = progress.get("placing")
+    out: Dict[str, Any] = {
+        "reason": "placing" if placing else "resolving",
+        "sets": [{"setId": ms.id, "status": ms.status, "stage": ms.stage, "members": ms.member_count}
+                 for ms in (found.rows if found is not None else [])],
+    }
+    if placing:
+        out.update(placed=placing["placed"], members=placing["members"])
+    return out
+
+
+def _own_session():
+    """A session of its own, from the web pool: what a turn cut off lets go of its lease
+    through."""
+    from backend.app.db.engine import get_async_session
+
+    return get_async_session()
+
+
+#: Turns cut off, letting go of their leases: held here until done (nobody awaits them).
+_letting_go: set = set()
+
+
+def _let_go(view_id: str, *, owner: str, epoch: int) -> None:
+    """Free a turn's lease — its status and progress kept: its pages so far stand — in a
+    task of its own, on a session of its own (the turn's may be mid-statement), within
+    ``LET_GO_S``. When it can't, the lease runs out (``LEASE_SECS``)."""
+    async def free() -> None:
+        async with asyncio.timeout(LET_GO_S):
+            async with _own_session() as session:
+                await view_membership_repo.update_mine(session, view_id, owner=owner, epoch=epoch,
+                                                       lease_owner=None, lease_until=None)
+                await session.commit()
+
+    def done(task: "asyncio.Task") -> None:
+        _letting_go.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("live view %s: a turn cut off left its lease to run out: %s", view_id,
+                           task.exception())
+
+    task = asyncio.ensure_future(free())
+    _letting_go.add(task)
+    task.add_done_callback(done)
 
 
 class _Run:
@@ -960,6 +1116,11 @@ class _Run:
         self.data_source_id = data_source_id
         self.actor = actor
         self.manager = manager
+        self.found: Optional[Sets] = None
+        #: Pages are started until ``deadline``; the answer is applied while ``apply_by`` has room.
+        self.deadline = self.apply_by = 0.0
+        #: The facts of the containers this turn has read.
+        self.known: "OrderedDict[str, NodeFacts]" = OrderedDict()
 
     async def release(self, **values: Any) -> None:
         await view_membership_repo.release(self.session, self.view_id, owner=self.owner, epoch=self.epoch,
@@ -968,15 +1129,7 @@ class _Run:
 
     def detail(self, found: Sets) -> Dict[str, Any]:
         """How far the run has got, for whoever asks while it runs."""
-        placing = self.progress.get("placing")
-        out: Dict[str, Any] = {
-            "reason": "placing" if placing else "resolving",
-            "sets": [{"setId": ms.id, "status": ms.status, "stage": ms.stage, "members": ms.member_count}
-                     for ms in found.rows],
-        }
-        if placing:
-            out.update(placed=placing["placed"], members=placing["members"])
-        return out
+        return run_detail(self.progress, found)
 
     async def renumber(self) -> None:
         """Start placing again at a new epoch: the pages so far answered a view that has
@@ -994,22 +1147,37 @@ class _Run:
         if self.progress.get("placing"):
             self.progress["placing"] = _placing(self.progress["placing"]["members"])
         self.progress.pop("held", None)
+        self.progress.pop("applying", None)
         await self._save()
 
     async def _save(self) -> None:
-        if not await view_membership_repo.update_mine(
-                self.session, self.view_id, owner=self.owner, epoch=self.epoch,
-                materialize=dumps(self.progress), lease_until=later_iso(LEASE_SECS)):
+        values: Dict[str, Any] = dict(materialize=dumps(self.progress), lease_until=later_iso(LEASE_SECS))
+        if self.found is not None:
+            values["status_detail"] = dumps(self.detail(self.found))
+        if not await view_membership_repo.update_mine(self.session, self.view_id, owner=self.owner,
+                                                      epoch=self.epoch, **values):
             await self.session.rollback()
             raise _Overtaken()
         await self.session.commit()
 
-    async def go(self, engine_scope: EngineScope, *, deadline: float, confirm_removals: bool = False,
-                 page_size: Optional[int] = None) -> Outcome:
+    async def _running(self, found: Sets) -> Outcome:
+        """This turn is spent: the run is left for the next request to carry on."""
+        await self.release(status="updating", status_detail=dumps(self.detail(found)),
+                           materialize=dumps(self.progress))
+        return Outcome("running", "updating", self.detail(found))
+
+    async def go(self, engine_scope: EngineScope, *, deadline: float, apply_by: Optional[float] = None,
+                 confirm_removals: bool = False, page_size: Optional[int] = None) -> Outcome:
+        self.deadline = deadline
+        self.apply_by = deadline if apply_by is None else apply_by
         try:
             async with engine_scope(self.workspace_id, self.data_source_id, self.actor) as engine:
-                return await self._work(engine, deadline=deadline, confirm_removals=confirm_removals,
-                                        page_size=page_size or PAGE)
+                return await self._work(engine, confirm_removals=confirm_removals, page_size=page_size or PAGE)
+        except asyncio.CancelledError:
+            # Cut off — the request's tier, or its client gone: let go at once, so the next
+            # request carries the run on rather than wait out the lease.
+            _let_go(self.view_id, owner=self.owner, epoch=self.epoch)
+            raise
         except _Overtaken:
             return Outcome("fenced", "updating")
         except PipelineError as exc:
@@ -1030,23 +1198,21 @@ class _Run:
                                attempts=ViewMembershipStateORM.attempts + 1)
             return Outcome("failed", "failed", {"reason": "The graph couldn't be read. Try again in a moment."})
 
-    async def _work(self, engine: Any, *, deadline: float, confirm_removals: bool, page_size: int) -> Outcome:
+    async def _work(self, engine: Any, *, confirm_removals: bool, page_size: int) -> Outcome:
         session, progress = self.session, self.progress
         data_version = progress.get("dataVersion") or await search_data_version(engine)
-        found = await open_sets(session, engine, self.definition.sources, workspace_id=self.workspace_id,
-                                data_source_id=self.data_source_id, data_version=data_version,
-                                ids=progress.get("sets") or (), manager=self.manager,
-                                fresh=not progress.get("sets"))
+        found = self.found = await open_sets(
+            session, engine, self.definition.sources, workspace_id=self.workspace_id,
+            data_source_id=self.data_source_id, data_version=data_version, ids=progress.get("sets") or (),
+            manager=self.manager, fresh=not progress.get("sets"))
         progress.update(sets=found.ids, dataVersion=data_version)
         if progress.get("placing") and not found.complete:
             await self.renumber()       # a set it was placing is no longer kept: resolve it again
             progress.pop("placing", None)
         if not progress.get("placing"):
-            await advance(session, found, engine, owner=self.owner, deadline=deadline, manager=self.manager)
+            await advance(session, found, engine, owner=self.owner, deadline=self.deadline, manager=self.manager)
             if not found.complete:
-                await self.release(status="updating", status_detail=dumps(self.detail(found)),
-                                   materialize=dumps(progress))
-                return Outcome("running", "updating", self.detail(found))
+                return await self._running(found)
             if found.retryable:
                 await retire_short(session, found)
                 await self.release(status="pending", status_detail=dumps(
@@ -1062,6 +1228,7 @@ class _Run:
         copied_from = await source_config(session, self.definition, self.workspace_id)
         admit = statement_admission(engine, self.manager)
         while True:
+            read_at = now_iso()
             row = await _live_row(session, self.view_id)
             config = config_of(row) if row is not None else {}
             current = read_definition(config)
@@ -1076,29 +1243,33 @@ class _Run:
                 await self.renumber()
                 placing = progress["placing"]
             placing["digest"] = inputs.digest
-            if not await self._place(engine, found, inputs, deadline=deadline, size=page_size, admit=admit):
-                await self.release(status="updating", status_detail=dumps(self.detail(found)),
-                                   materialize=dumps(progress))
-                return Outcome("running", "updating", self.detail(found))
-            outcome = await self._apply(found, confirm_removals=confirm_removals, copied_from=copied_from)
+            if not await self._place(engine, found, inputs, size=page_size, admit=admit):
+                return await self._running(found)
+            if self.apply_by - time.monotonic() < APPLY_RESERVE_S:
+                # Every page is placed, too late in the turn to apply them: the next turn's first step.
+                return await self._running(found)
+            outcome = await self._apply(found, inputs, read_at=read_at, confirm_removals=confirm_removals,
+                                        copied_from=copied_from)
             if outcome is not None:
                 return outcome
             await self.renumber()       # the view changed under the last page: place it again
 
-    async def _place(self, engine: Any, found: Sets, inputs: Inputs, *, deadline: float,
-                     size: int, admit: Any) -> bool:
-        """Place pages until every set's are (True) or the time is spent (False)."""
+    async def _place(self, engine: Any, found: Sets, inputs: Inputs, *, size: int, admit: Any) -> bool:
+        """Place pages until every set's are (True) or the turn has no room for another
+        (False): a page is started only while one as long as they have taken, and half
+        again, still fits before the deadline."""
         placing = self.progress["placing"]
         state = await view_membership_repo.get(self.session, self.view_id)
         members_epoch = state.members_epoch if state is not None else None
         await self.session.commit()
         while placing["src"] < len(found.rows):
-            if time.monotonic() >= deadline:
+            started = time.monotonic()
+            if started + 1.5 * float(placing.get("pageS") or 0.0) >= self.deadline:
                 return False
             page = await read_page(self.session, engine, found, placing["src"], placing["after"], size=size,
                                    exclude=inputs.definition.exclude, view_id=self.view_id,
                                    members_epoch=members_epoch, facts=inputs.definition.layout.kind != "stages",
-                                   admit=admit)
+                                   admit=admit, known=self.known)
             placed, fallback = place(page, inputs, now=now_iso())
             await view_members_repo.insert(self.session, _rows(self.view_id, self.epoch, page, placed, placing))
             placing["placed"] += len(placed)
@@ -1107,13 +1278,69 @@ class _Run:
                 placing["src"], placing["after"] = placing["src"] + 1, -1
             else:
                 placing["after"] = page.last_seq
+            took = time.monotonic() - started
+            placing["pageS"] = took if not placing.get("pageS") else 0.7 * placing["pageS"] + 0.3 * took
             await self._save()
         return True
 
-    async def _apply(self, found: Sets, *, confirm_removals: bool,
+    async def _apply(self, found: Sets, inputs: Inputs, *, read_at: str, confirm_removals: bool,
                      copied_from: Optional[dict]) -> Optional[Outcome]:
-        """Phase C — the view's row first, then its state: the order every layout write
-        takes them in. None: the view changed under the last page, so it is placed again."""
+        """Phase C, a step of its own: the answer measured holding nothing, and kept with
+        the run (``applying``) — a turn out of time leaves the swap to the next — then
+        swapped in (``_swap``). A large removal waits there to be confirmed. None: the view
+        changed under the last page, so it is placed again."""
+        applying = self.progress.get("applying")
+        if applying is None:
+            applying = await self._measure(inputs, since=self.progress["placing"].get("at") or "", at=read_at)
+            if time.monotonic() >= self.apply_by:
+                return await self._running(found)
+        diff, old = applying["diff"], applying["old"]
+        if (not confirm_removals and old is not None and diff["removed"] >= MASS_REMOVAL_MIN
+                and diff["removed"] >= MASS_REMOVAL_RATIO * diff["before"]):
+            # Its rows stay unswapped, kept with the run: confirming applies them as they are.
+            held = {"removed": diff["removed"], "of": diff["before"], "added": diff["added"],
+                    "sample": diff["removedSample"][:20], "at": now_iso()}
+            self.progress["held"] = True
+            await self.release(status="held", held=dumps(held), status_detail=dumps(held),
+                               materialize=dumps(self.progress))
+            return Outcome("held", "held", held)
+        return await self._swap(found, applying, copied_from=copied_from)
+
+    async def _measure(self, inputs: Inputs, *, since: str, at: str) -> dict:
+        """Where people put members while the run placed them, then each layer's count and
+        the change from the last answer — measured in SQL, no lock taken — kept with the
+        run. ``at``: when the definition they were measured against was read; a move made
+        since is placed as the answer is swapped in."""
+        session = self.session
+        await self._move(inputs, since)
+        state = await view_membership_repo.get(session, self.view_id)
+        old = state.members_epoch if state is not None else None
+        applying = {"at": at, "old": old,
+                    "perLayer": await view_members_repo.per_layer(session, self.view_id, self.epoch),
+                    "diff": await view_members_repo.diff(session, self.view_id, old, self.epoch)}
+        self.progress["applying"] = applying
+        await self._save()
+        return applying
+
+    async def _move(self, inputs: Inputs, since: str) -> bool:
+        """Place the members people put somewhere at ``since`` or after where they put
+        them. True when any was."""
+        moved = {u: o for u, o in inputs.overrides.items() if (o.get("at") or "") >= since}
+        if not moved:
+            return False
+        known = await view_members_repo.placements(self.session, self.view_id, self.epoch, moved)
+        ids = set(layouts.layer_ids(inputs.layers))
+        moves = {u: {**known[u], **{k: v for k, v in o.items() if k in ("orderKey", "logicalNodeId")},
+                     "layerId": o["layerId"] if o.get("layerId") in ids else known[u]["layerId"]}
+                 for u, o in moved.items() if u in known}
+        await view_members_repo.move(self.session, self.view_id, self.epoch, moves)
+        return bool(moves)
+
+    async def _swap(self, found: Sets, applying: dict, *, copied_from: Optional[dict]) -> Optional[Outcome]:
+        """The view's row first, then its state — the order every layout write takes them
+        in — locked only to check the run is still the view's and answers its definition,
+        place what people moved since it was measured, and swap ``members_epoch`` in one
+        commit."""
         session = self.session
         row = (await session.execute(
             select(ViewORM).where(ViewORM.id == self.view_id).with_for_update()
@@ -1136,34 +1363,14 @@ class _Run:
         if inputs.digest != placing.get("digest"):
             await session.commit()
             return None
-        # Where people put members since this run began (the pages before it placed them as
-        # they were).
-        since = placing.get("at") or ""
-        moved = {u: o for u, o in inputs.overrides.items() if (o.get("at") or "") >= since}
-        if moved:
-            known = await view_members_repo.placements(session, self.view_id, self.epoch, moved)
-            ids = set(layouts.layer_ids(inputs.layers))
-            await view_members_repo.move(session, self.view_id, self.epoch, {
-                u: {**known[u], **{k: v for k, v in o.items() if k in ("orderKey", "logicalNodeId")},
-                    "layerId": o["layerId"] if o.get("layerId") in ids else known[u]["layerId"]}
-                for u, o in moved.items() if u in known})
-        per_layer = await view_members_repo.per_layer(session, self.view_id, self.epoch)
+        per_layer: Dict[str, int] = dict(applying["perLayer"])
+        if await self._move(inputs, applying["at"]):
+            per_layer = await view_members_repo.per_layer(session, self.view_id, self.epoch)
         members = sum(per_layer.values())
         for entry in inputs.user.values():
             if isinstance(entry.get("layerId"), str):
                 per_layer[entry["layerId"]] = per_layer.get(entry["layerId"], 0) + 1
-        old = mine.members_epoch
-        diff = await view_members_repo.diff(session, self.view_id, old, self.epoch)
-        if (not confirm_removals and old is not None and diff["removed"] >= MASS_REMOVAL_MIN
-                and diff["removed"] >= MASS_REMOVAL_RATIO * diff["before"]):
-            # Its rows stay unswapped, kept with the run: confirming applies them as they are.
-            held = {"removed": diff["removed"], "of": diff["before"], "added": diff["added"],
-                    "sample": diff["removedSample"][:20], "at": now_iso()}
-            self.progress["held"] = True
-            await self.release(status="held", held=dumps(held), status_detail=dumps(held),
-                               materialize=dumps(self.progress))
-            return Outcome("held", "held", held)
-
+        diff = applying["diff"]
         status = "frozen" if current.mode != "live" else "partial" if found.truncated() else "ok"
         changed = bool(diff["added"] or diff["removed"] or diff["moved"] or diff["touched"])
         values = applied_values(current, found, members=members, included=len(inputs.user), per_layer=per_layer,
@@ -1181,9 +1388,8 @@ class _Run:
             )
             values.update(members_epoch=self.epoch, revision=ViewMembershipStateORM.revision + 1,
                           last_diff=dumps({**public, "at": now}))
+        # Readers have the new epoch (or kept the old): the sweeper deletes the other.
         await self.release(materialize=None, **values)
-        # Readers have the new epoch (or kept the old): the other is let go.
-        await _drop_quietly(session, self.view_id, old if changed else self.epoch)
         return Outcome("applied" if changed else "unchanged", status, diff=public)
 
 
@@ -1196,17 +1402,3 @@ def _placing(members: int) -> dict:
 def _changed(current: MembershipDefinition, resolved: MembershipDefinition) -> bool:
     return (current.mode != resolved.mode or current.resolution_hash() != resolved.resolution_hash()
             or current.layout != resolved.layout)
-
-
-async def _drop_quietly(session: AsyncSession, view_id: str, epoch: Optional[int]) -> None:
-    """Delete an epoch nobody reads any more, a batch per transaction. Best effort: what
-    is left, the sweeper deletes."""
-    if epoch is None:
-        return
-    try:
-        while await view_members_repo.delete_epoch(session, view_id, epoch):
-            await session.commit()
-        await session.commit()
-    except Exception:  # noqa: BLE001 — never fails the answer it follows
-        logger.warning("live view %s: epoch %s left for the sweeper", view_id, epoch, exc_info=True)
-        await session.rollback()

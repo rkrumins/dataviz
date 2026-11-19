@@ -17,6 +17,7 @@ version.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -75,6 +76,11 @@ async def _count(session: AsyncSession, view: ViewORM, epoch: int, layer_id: str
     return count
 
 
+#: Container names kept in this process: (physical graph, data version, URN) → (name, type).
+_NAMES: "OrderedDict[Tuple[str, str, str], Tuple[str, str]]" = OrderedDict()
+_NAMES_MAX = 50_000
+
+
 def _tag(payload: str, binding: str, key: str) -> str:
     return hmac.new(key.encode(), f"view-members.{binding}.{payload}".encode(), hashlib.sha256).hexdigest()[:32]
 
@@ -120,38 +126,61 @@ async def _read(admit, call):
         return await call()
 
 
-async def _nodes(engine: ContextEngine, rows: List[Any], admit) -> List[Dict[str, Any]]:
+async def _nodes(engine: ContextEngine, rows: List[Any], admit, *, graph_ns: str = "",
+                 data_version: str = "") -> List[Dict[str, Any]]:
     """The page's members as the canvas draws them: each node, where it sits
     (``ancestorPath``, root first: every container, a name not found ``""``, so
     ``inLayer`` counts the right ones) and how many of its nearest containers sit in its
     layer too (``inLayer``), which the canvas draws it inside. A reader with no
     containment walk ships them without a path. A member the graph no longer holds is
-    drawn from what the member table knows of it, until the next update takes it out."""
+    drawn from what the member table knows of it, until the next update takes it out.
+
+    The nodes and their paths are read side by side, each statement admitted on its own;
+    then the names of the containers neither on the page nor named on this data before
+    (``_NAMES``)."""
     urns = [r.urn for r in rows]
     if not urns:
         return []
-    found = await _read(admit, lambda: engine.get_nodes_query(
-        NodeQuery(urns=urns, limit=len(urns), include_child_count=False)))
+
+    async def paths() -> Optional[Dict[str, List[str]]]:
+        try:
+            return await _read(admit, lambda: engine.get_ancestor_chains(urns))
+        except NotImplementedError:
+            return None
+
+    # Both settle before an error is raised: neither is left running unobserved.
+    found, chains = await asyncio.gather(
+        _read(admit, lambda: engine.get_nodes_query(NodeQuery(urns=urns, limit=len(urns), include_child_count=False))),
+        paths(), return_exceptions=True)
+    for got in (found, chains):
+        if isinstance(got, BaseException):
+            raise got
     by_urn = {n.urn: n for n in found}
-    chains: Optional[Dict[str, List[str]]] = None
-    try:
-        chains = await _read(admit, lambda: engine.get_ancestor_chains(urns))
-    except NotImplementedError:
-        chains = None
-    names: Dict[str, GraphNode] = {}
-    above = sorted({a for chain in (chains or {}).values() for a in chain})
+    drawn = {r.urn: by_urn.get(r.urn) or GraphNode(urn=r.urn, entityType=r.type or r.label or "",
+                                                   displayName=r.name or r.urn) for r in rows}
+    names: Dict[str, Tuple[str, str]] = {u: (n.display_name, n.entity_type) for u, n in drawn.items()}
+    above = sorted({a for chain in (chains or {}).values() for a in chain} - set(names))
+    if data_version:
+        for a in above:
+            if (graph_ns, data_version, a) in _NAMES:
+                _NAMES.move_to_end((graph_ns, data_version, a))
+                names[a] = _NAMES[(graph_ns, data_version, a)]
+        above = [a for a in above if a not in names]
     if above:
-        names = {n.urn: n for n in await _read(admit, lambda: engine.get_nodes_query(
-            NodeQuery(urns=above, limit=len(above), include_child_count=False)))}
+        for n in await _read(admit, lambda: engine.get_nodes_query(
+                NodeQuery(urns=above, limit=len(above), include_child_count=False))):
+            names[n.urn] = (n.display_name, n.entity_type)
+            if data_version:
+                _NAMES[(graph_ns, data_version, n.urn)] = names[n.urn]
+        while len(_NAMES) > _NAMES_MAX:
+            _NAMES.popitem(last=False)
     out = []
     for r in rows:
-        node = by_urn.get(r.urn) or GraphNode(urn=r.urn, entityType=r.type or r.label or "",
-                                               displayName=r.name or r.urn)
-        shaped = node.model_dump(mode="json", by_alias=True)
+        shaped = drawn[r.urn].model_dump(mode="json", by_alias=True)
         if chains is not None:
             shaped["ancestorPath"] = [
-                {"urn": a, "displayName": names[a].display_name if a in names else "",
-                 "entityType": names[a].entity_type if a in names else ""}
+                {"urn": a, "displayName": names[a][0] if a in names else "",
+                 "entityType": names[a][1] if a in names else ""}
                 for a in reversed(chains.get(r.urn) or [])
             ]
         if r.in_layer:
@@ -216,7 +245,8 @@ async def view_members(
         await session.commit()                 # nothing held while the graph answers
         more = len(rows) > take
         rows = rows[:take]
-        nodes = await _nodes(engine, rows, admit)
+        nodes = await _nodes(engine, rows, admit, graph_ns=scope.graph_ns if scope is not None else "",
+                             data_version=data_version)
         delivered += len(rows)
         return ViewFeedPage(
             layer_id=body.layer_id, nodes=nodes,

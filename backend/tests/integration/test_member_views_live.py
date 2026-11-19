@@ -3,9 +3,11 @@ made, opened and paged through the app's own routes.
 
 The member-set test (``test_member_sets_live.py``) pins the resolution; this pins
 what a person gets from it: Save as view answers 202 while the set is worked out
-and makes the view once it is, the view's own record stays small however many
-members it has (they are in their own table, never its layout), and each layer of
-it pages its members in name order, every one exactly once, with exact counts.
+and makes the view once it is, after a short first turn; every answer, and each turn
+that carries the view on, comes well inside the tier a request is cut off at; the
+view holds every member exactly once, its own record stays small however many members
+it has (they are in their own table, never its layout), and each layer of it pages
+its members in name order, every one exactly once, with exact counts.
 
 Run:  RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
       python -m pytest tests/integration/test_member_views_live.py -q
@@ -94,7 +96,13 @@ async def live(db_session):
         await p._graph.delete()
 
 
-async def test_a_view_of_fifty_thousand_members(test_client: AsyncClient, membership_on, live):  # noqa: F811
+async def test_a_view_of_fifty_thousand_members(
+    test_client: AsyncClient, db_session, membership_on, live,  # noqa: F811
+):
+    from sqlalchemy import select
+
+    from backend.app.db.models import ViewMemberORM, ViewMembershipStateORM
+
     nodes, edges = live
     up, down = _expected(nodes, edges)
     members = SEEDS + len(up) + len(down)
@@ -108,12 +116,15 @@ async def test_a_view_of_fifty_thousand_members(test_client: AsyncClient, member
     }
 
     # Save as view: 202 with progress until the set is worked out, then the view.
-    started, asks, resolving = time.monotonic(), 0, 0
+    started, asks, resolving, answers = time.monotonic(), 0, 0, []
     while True:
         asks += 1
         assert asks < 200
         on()
+        asked = time.monotonic()
         resp = await test_client.post("/api/v1/views/from-members", json=body, headers={"Idempotency-Key": "live-1"})
+        answers.append(time.monotonic() - asked)
+        assert answers[-1] < 25, "every answer well inside the 30 s a /views request is cut off at"
         if resp.status_code == 202:
             resolving += 1
             assert resp.json()["status"] == "resolving"
@@ -122,8 +133,20 @@ async def test_a_view_of_fifty_thousand_members(test_client: AsyncClient, member
     assert resp.status_code == 201, resp.text
     made = resp.json()
     view_id = made["view"]["id"]
+    assert made["membership"]["status"] == "updating", "fifty thousand members are more than one short turn"
+    first = made["membership"]["detail"]
+    assert (first["reason"], first["members"]) == ("placing", members) and 0 < first["placed"] < members
 
-    # Placing members may outlast the request: opening the view carries it on.
+    # Saved again (its sets resolved, shared): the answer is a short first turn's.
+    on()
+    asked = time.monotonic()
+    again = await test_client.post("/api/v1/views/from-members", json=body, headers={"Idempotency-Key": "live-2"})
+    saved_in = time.monotonic() - asked
+    assert again.status_code == 201, again.text
+    assert saved_in < 8, f"saving took {saved_in:.1f} s"
+
+    # Placing members outlasts the request: opening the view carries it on, a turn at a time.
+    turns = []
     for _ in range(200):
         on()
         got = await test_client.get(f"/api/v1/views/{view_id}/membership")
@@ -131,11 +154,22 @@ async def test_a_view_of_fifty_thousand_members(test_client: AsyncClient, member
         status = got.json()
         if status["status"] in ("ok", "partial"):
             break
+        asked = time.monotonic()
         out = await test_client.post(f"/api/v1/views/{view_id}/membership/refresh", params={"trigger": "open"})
+        turns.append(time.monotonic() - asked)
         assert out.status_code in (200, 202), out.text
+        assert turns[-1] < 25, f"a turn took {turns[-1]:.1f} s"
     assert status["status"] == "ok", status
     assert status["counts"]["members"] == members
     elapsed = time.monotonic() - started
+    epoch = (await db_session.execute(select(ViewMembershipStateORM.members_epoch).where(
+        ViewMembershipStateORM.view_id == view_id))).scalar_one()
+    placed = (await db_session.execute(select(ViewMemberORM.urn).where(
+        ViewMemberORM.view_id == view_id, ViewMemberORM.epoch == epoch))).scalars().all()
+    assert len(placed) == members and set(placed) == set(seeds) | set(up) | set(down), "every member, once"
+    print(f"\nanswers to Save as view: {', '.join(f'{t:.1f}' for t in answers)} s (the last made it: "
+          f"{first['placed']:,} of {members:,} placed); saved again in {saved_in:.1f} s; "
+          f"turns to finish: {', '.join(f'{t:.1f}' for t in turns)} s")
 
     # The view's own record stays small: its members are not in its layout.
     view = await test_client.get(f"/api/v1/views/{view_id}")

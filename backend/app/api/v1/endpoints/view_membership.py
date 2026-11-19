@@ -104,9 +104,10 @@ class ViewWithMembership(BaseModel):
 
 
 def _budget_s() -> float:
-    """One resolution's wall clock on the web tier: the trace's own budget, so the
-    answer arrives before the client stops waiting."""
-    return max(5.0, resilience.TRACE_TIMEOUT_SECS - resilience.TRACE_ENGINE_HEADROOM_SECS)
+    """One request's turn on the web tier: ``LIVE_VIEW_TURN_SECS``, and always 8 s inside
+    the tier every ``/views`` request is cut off at (``HTTP_TIMEOUT_DEFAULT_SECS``), so a
+    turn answers — saying how far it got — before it is cut off."""
+    return max(5.0, min(pipeline.TURN_SECS, resilience.HTTP_TIMEOUT_DEFAULT_SECS - 8))
 
 
 def get_engine_scope() -> EngineScope:
@@ -348,19 +349,23 @@ async def create_view_from_members(
     ``snapshot`` keeps them as they are now. What the sources reach is worked out in
     full before anything is saved, a step at a time: while it is, the answer is 202
     ``{"status": "resolving", "sets": [...]}`` (each source's member set, as
-    ``POST /graph/member-sets`` answers it) after ``waitMs``, and nothing is made —
-    send the same request again to carry on. Past the limit (``limit``: members; the
-    containers around them are drawn from their paths) nothing is made and the 422
-    says by how much; when the graph cannot answer in full, nothing is made and the
-    503 says when to retry. The view is made (201) once that is known; a view of
-    more members than one request can place says ``updating``, and opening it — or
-    *Refresh now* — carries its first answer on.
+    ``POST /graph/member-sets`` answers it) after ``waitMs`` (at most one turn), and
+    nothing is made — send the same request again to carry on. Past the limit
+    (``limit``: members; the containers around them are drawn from their paths) nothing
+    is made and the 422 says by how much; when the graph cannot answer in full, nothing
+    is made and the 503 says when to retry. The view is made (201) once that is known,
+    and a first short turn (``LIVE_VIEW_CREATE_TURN_SECS``) places what it can: a small
+    view is ``ok``; a larger one says ``updating``, with how far it got (``detail``:
+    ``reason`` ``placing``, ``placed`` of ``members``) — opening it, or *Refresh now*,
+    carries it on. Its layers are the preview's (``POST /graph/members/plan``) when one
+    was asked for the same sources and layout.
 
     ``Idempotency-Key`` makes a retry safe: the same caller sending the same key
-    gets the view the first attempt made (200), never a second one. A 202 records
-    nothing against it.
+    gets the view the first attempt made (200, its status as it is now — maybe still
+    ``updating``), never a second one. A 202 records nothing against it.
     """
     started = time.monotonic()
+    budget = _budget_s()
     actor = _user_id(user)
     request_id = f"fm:{actor}:{idempotency_key}" if idempotency_key else None
     if request_id:
@@ -393,7 +398,8 @@ async def create_view_from_members(
         async with engine_scope(body.workspace_id, body.data_source_id, actor) as engine:
             found = await pipeline.resolve_sets(
                 session, engine, definition.sources, workspace_id=body.workspace_id,
-                data_source_id=body.data_source_id, wait_s=body.wait_ms / 1000.0,
+                data_source_id=body.data_source_id,
+                wait_s=min(body.wait_ms / 1000.0, max(0.0, budget - (time.monotonic() - started))),
             )
             if not found.complete:
                 return _resolving(await pipeline.statuses(session, found))
@@ -403,9 +409,10 @@ async def create_view_from_members(
                     "reason": "short_answer", "truncated": found.retryable,
                     "message": "The graph couldn't answer in full, so nothing was saved. Try again in a moment.",
                 })
-            draft = await pipeline.draft_view(
+            draft = await pipeline.draft_cached(
                 session, engine, found, definition, source_config=copied_from, client_layers=body.layers,
-                keep=body.keep, limit=limit, place_sample=body.layout.kind not in ("template", "custom", "follow"))
+                keep=body.keep, limit=limit, place_sample=body.layout.kind not in ("template", "custom", "follow"),
+                bounded=True)
     except PipelineError as exc:
         raise _refused(exc) from exc
     except NotImplementedError as exc:
@@ -452,16 +459,17 @@ async def create_view_from_members(
             raise refused(409, "made_by_another_request", "This view was just made by another request.")
         return replayed
     owner = f"web:{uuid.uuid4().hex[:12]}"
-    await pipeline.start(session, row, draft.definition, found, owner=owner)
+    await pipeline.start(session, row, draft.definition, found, owner=owner, members=draft.members)
     await view_activity_repo.record_view_activity(
         session, view_id=row.id, workspace_id=row.workspace_id, action="created", actor=actor,
         summary=f'Created "{row.name}" from a query',
     )
     await session.commit()                 # made: its members are placed after, a page at a time
 
+    left = max(0.0, budget - (time.monotonic() - started))
     try:
         await pipeline.carry_on(row.id, session=session, engine_scope=engine_scope, owner=owner,
-                                budget_s=max(0.0, _budget_s() - (time.monotonic() - started)), actor=actor)
+                                budget_s=min(pipeline.CREATE_TURN_SECS, left), apply_budget_s=left, actor=actor)
     except (PipelineError, ProviderUnavailable):
         # Made all the same: its members are worked out when it is next opened.
         await session.rollback()
