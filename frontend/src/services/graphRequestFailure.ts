@@ -117,7 +117,7 @@ function extractCode(bodyText: string): string | undefined {
   return undefined
 }
 
-function parseRetryAfterMs(header: string | null): number | null {
+export function parseRetryAfterMs(header: string | null): number | null {
   if (!header) return null
   const seconds = Number(header.trim())
   if (Number.isFinite(seconds) && seconds >= 0) return Math.floor(seconds * 1000)
@@ -213,6 +213,25 @@ export function retryDelayMs(err: unknown, attempt: number): number {
   return base + Math.floor(Math.random() * 250)
 }
 
+/** A write that is safe to send again as it was (it carries an `Idempotency-Key`, or only
+ *  carries a run on): a server that couldn't answer in time, was busy or briefly away, or a
+ *  connection that dropped. A refusal — a 4xx other than 408/429 — is final. */
+export function isTransientFailure(err: unknown): boolean {
+  if (isApiStatusError(err)) return [408, 429, 502, 503, 504].includes(err.status)
+  return isClientTimeout(err) || isNetworkError(err)
+}
+
+const PATIENT_CAP_MS = 30_000
+
+/** How long to wait before asking again after a transient failure, attempt `n` (0-based):
+ *  the server's `Retry-After` (at most 30 s), else 1 s doubling to 30 s — jittered ±25 %, so
+ *  a fleet of tabs doesn't ask in step. For work that should carry on however long it takes. */
+export function patientDelayMs(err: unknown, attempt: number): number {
+  const hinted = isApiStatusError(err) ? err.retryAfterMs : undefined
+  const base = hinted !== undefined ? Math.min(PATIENT_CAP_MS, hinted) : Math.min(PATIENT_CAP_MS, 1_000 * 2 ** attempt)
+  return Math.round(base * (0.75 + Math.random() * 0.5))
+}
+
 /** Read-only POST endpoints under `/graph`. A POST that queries (nodes,
  *  edges, search, trace, assignments) is safe to replay; a POST that creates
  *  or mutates is not, whatever the failure. Matched on the path after the
@@ -232,6 +251,9 @@ const READ_ONLY_POST_PATHS = [
   /^\/search(\/advanced|\/explain|\/membership|\/counts|\/ancestor-counts|\/catalog|\/exports|\/view-feed)?$/,
   // Narrow's resolution and Save as view's preview resolve, and save nothing.
   /^\/members(\/plan)?$/,
+  // A list view's layer page, and where a view draws a batch of entities: reads.
+  /^\/view-members$/,
+  /^\/view-placements$/,
   /^\/trace(\/v2|\/closure|\/expand|\/expand-batch)?$/,
   /^\/assignments\/compute$/,
 ]

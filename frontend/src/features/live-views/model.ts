@@ -174,6 +174,23 @@ function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
+/** How far working out its members has got, while it is: "Placing its members… 1,200 of
+ *  50,000", or "…41,020 so far" while what it reaches is still being found. Null when the
+ *  server said nothing countable. */
+export function workingText(status: MembershipStatus): string | null {
+  if (status.status !== 'updating') return null
+  const d = status.detail ?? {}
+  const placed = num(d.placed)
+  const members = num(d.members)
+  if (d.reason === 'placing' && placed !== null && members !== null && members > 0) {
+    return `Placing its members… ${placed.toLocaleString()} of ${members.toLocaleString()}`
+  }
+  const sets = Array.isArray(d.sets) ? d.sets as Array<{ counts?: { total?: unknown } }> : []
+  const found = sets.reduce((n, s) => n + (num(s.counts?.total) ?? 0), 0)
+  if (found > 0) return `Working out what it reaches… ${found.toLocaleString()} so far`
+  return members !== null && members > 0 ? `Placing its members… ${(placed ?? 0).toLocaleString()} of ${members.toLocaleString()}` : null
+}
+
 export function statusWords(status: MembershipStatus): StatusWords {
   const d = status.detail ?? {}
   switch (status.status) {
@@ -189,7 +206,10 @@ export function statusWords(status: MembershipStatus): StatusWords {
         ? { label: 'Waiting to update', tone: 'attention', detail: 'The graph didn’t answer in full last time, so the view kept its members. Refresh again in a moment.' }
         : { label: 'Waiting to update', tone: 'attention', detail: 'A change is waiting to be worked out. Refresh now to see it.' }
     case 'updating':
-      return { label: 'Updating…', tone: 'busy', detail: 'Working out its members again.' }
+      return {
+        label: 'Updating…', tone: 'busy',
+        detail: workingText(status) ?? (status.revision === 0 ? 'Working out its members.' : 'Working out its members again.'),
+      }
     case 'over_cap': {
       const keys = num(d.keys)
       const limit = num(d.limit) ?? status.limit

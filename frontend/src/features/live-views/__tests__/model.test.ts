@@ -14,6 +14,7 @@ import {
   seedCapNote,
   sourceOf,
   statusWords,
+  workingText,
   type SaveChoices,
 } from '../model'
 
@@ -136,6 +137,16 @@ describe('how keeping it is going', () => {
     const gone = statusWords(status({ status: 'source_missing', follows: { ...base, available: false } }))
     expect(gone).toMatchObject({ label: 'Its view is gone', tone: 'problem' })
     expect(gone.detail).toMatch(/keeps its members/)
+  })
+
+  it('says how far working out its members has got, while it is', () => {
+    expect(workingText(status({ status: 'updating', revision: 0, detail: { reason: 'placing', placed: 1200, members: 50_000 } })))
+      .toBe('Placing its members… 1,200 of 50,000')
+    expect(workingText(status({ status: 'updating', detail: { reason: 'resolving', sets: [{ counts: { total: 41_020 } }] } })))
+      .toBe('Working out what it reaches… 41,020 so far')
+    expect(workingText(status({ status: 'updating', detail: {} }))).toBeNull()
+    expect(workingText(status())).toBeNull()
+    expect(statusWords(status({ status: 'updating', revision: 0, detail: {} })).detail).toBe('Working out its members.')
   })
 
   it('says what an update changed', () => {

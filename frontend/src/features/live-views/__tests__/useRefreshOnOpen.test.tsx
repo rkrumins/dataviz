@@ -1,7 +1,9 @@
 /**
- * Opening an auto-updating view brings it up to date: one ask as it opens, and
- * the view is read again only when its members moved. Never for a snapshot, a
- * draft, an ordinary view, or with the preview off.
+ * Opening a view made from a query brings it up to date: one ask as it opens, and
+ * the view is read again only when its members moved. It keeps asking while the
+ * server is still working, and through a server that was slow or busy; it stops on
+ * a refusal, and waits while the tab is hidden. Never for a draft, an ordinary
+ * view, or with the preview off.
  */
 import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -71,8 +73,56 @@ describe('useRefreshOnOpen', () => {
     expect(notify).not.toHaveBeenCalled()
   })
 
+  it('a snapshot is asked too: its first answer, still being worked out, carries on', async () => {
+    refreshMembership.mockResolvedValue({ outcome: 'current', detail: { reason: 'snapshot' }, membership: {} })
+    renderHook(() => useRefreshOnOpen(view({ v: 1, mode: 'snapshot' })))
+    await waitFor(() => expect(refreshMembership).toHaveBeenCalledWith('v1', false, 'open'))
+  })
+
+  it('waits on someone else’s run, and shows what it found when it lands', async () => {
+    refreshMembership
+      .mockResolvedValueOnce({ outcome: 'busy', detail: {}, membership: { revision: 3 } })
+      .mockResolvedValueOnce({ outcome: 'current', detail: { reason: 'up_to_date' }, membership: { revision: 4 } })
+    getView.mockResolvedValue({ id: 'v1', name: 'Orders' })
+    renderHook(() => useRefreshOnOpen(view({ v: 1, mode: 'live' })))
+    await waitFor(() => expect(getView).toHaveBeenCalledWith('v1'), { timeout: 4000 })
+    expect(refreshMembership).toHaveBeenCalledTimes(2)
+  })
+
+  it('asks again through a server that was slow or busy, as long as it said', async () => {
+    refreshMembership
+      .mockRejectedValueOnce(Object.assign(new Error('timed out'), { status: 504, retryAfterMs: 20 }))
+      .mockRejectedValueOnce(Object.assign(new Error('busy'), { status: 429, retryAfterMs: 20 }))
+      .mockResolvedValueOnce({ outcome: 'current', detail: { reason: 'up_to_date' }, membership: {} })
+    renderHook(() => useRefreshOnOpen(view({ v: 1, mode: 'live' })))
+    await waitFor(() => expect(refreshMembership).toHaveBeenCalledTimes(3))
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('stops on a refusal', async () => {
+    refreshMembership.mockRejectedValue(Object.assign(new Error('no'), { status: 403 }))
+    renderHook(() => useRefreshOnOpen(view({ v: 1, mode: 'live' })))
+    await waitFor(() => expect(refreshMembership).toHaveBeenCalled())
+    await new Promise((r) => setTimeout(r, 120))
+    expect(refreshMembership).toHaveBeenCalledTimes(1)
+  })
+
+  it('a hidden tab waits, and asks as soon as it is looked at', async () => {
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    refreshMembership
+      .mockRejectedValueOnce(Object.assign(new Error('busy'), { status: 503, retryAfterMs: 10 }))
+      .mockResolvedValue({ outcome: 'current', detail: { reason: 'up_to_date' }, membership: {} })
+    renderHook(() => useRefreshOnOpen(view({ v: 1, mode: 'live' })))
+    await waitFor(() => expect(refreshMembership).toHaveBeenCalledTimes(1))
+    await new Promise((r) => setTimeout(r, 80))
+    expect(refreshMembership).toHaveBeenCalledTimes(1)
+    visibility.mockReturnValue('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => expect(refreshMembership).toHaveBeenCalledTimes(2))
+    visibility.mockRestore()
+  })
+
   it.each([
-    ['a snapshot', view({ v: 1, mode: 'snapshot' })],
     ['a draft', view({ v: 1, mode: 'live' }, { draftBranchId: 'b1' })],
     ['an ordinary view', view(null)],
   ])('asks nothing for %s', (_what, v) => {

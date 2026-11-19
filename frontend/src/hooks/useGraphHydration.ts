@@ -540,6 +540,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // update swaps in its new members (useRefreshOnOpen bumps the nonce).
     const subsetKey = activeView?.search ? `|subset:${JSON.stringify(activeView.search)}#${subsetNonce}`
         : activeView?.membership ? `|members#${subsetNonce}` : ''
+    // The same view asked for answers on the current data is not a new view: its pages are
+    // swapped in place, never cleared first.
+    const subsetIdentity = subsetKey.replace(/#\d+$/, '')
     const lastSubsetNonceRef = useRef(0)
     // The view a subset feed's next page is asked for, read when the page is
     // fetched (after commit), so it is set in an effect, not during render.
@@ -634,10 +637,12 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         // not let the claimed-feed effect seed feeds this run is about to write.
         readyKeyRef.current = null
 
-        // A genuinely NEW view (new initKey) resets the retry budget.
-        const isFreshView = lastInitKeyRef.current !== initKey
+        // A genuinely NEW view resets the retry budget. Its feed's nonce alone — the same view's
+        // layers asked again on the current data (an update landed) — is not one.
+        const viewKey = `${providerVersion}:${activeView?.id ?? 'default'}:${layoutType}${subsetIdentity}`
+        const isFreshView = lastInitKeyRef.current !== viewKey
         if (isFreshView) {
-            lastInitKeyRef.current = initKey
+            lastInitKeyRef.current = viewKey
             retryCountRef.current = 0
         }
         // Keyed on the other deps too, so only a retry reuses a partial load's
@@ -1072,6 +1077,15 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         allNodes.map(n => toCanvasNode(n)),
                         anchorEdges.map(e => toCanvasEdge(e)),
                     )
+                    // The same view's layers read again (an update landed): what they fed before
+                    // and no longer do has left the view. Taken out — never the whole canvas.
+                    if (!isFreshView && refreshSubset && (subsetSearch || activeView?.membership)) {
+                        const fedNow = new Set(allNodes.map(n => n.urn))
+                        const left = useCanvasStore.getState().nodes
+                            .filter(n => typeof n.data?.feedLayerId === 'string' && !fedNow.has(String(n.data?.urn ?? n.id)))
+                            .map(n => n.id)
+                        if (left.length) useCanvasStore.getState().removeNodes(left)
+                    }
                     // setGraph clears pagers and feeds; both writes re-seed them —
                     // in ONE store update (56 separate ones were 56 full renders).
                     const seedAnchorPagers = () => {
@@ -1324,7 +1338,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey, retryEpoch, subsetKey, atRevision])
+    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey, retryEpoch, subsetKey, subsetIdentity, atRevision])
 
     // Explicit, user-triggered retry (the overlay's "Retry" button, or when a
     // background tab is brought back to the foreground). Re-arms a fresh round

@@ -128,6 +128,22 @@ describe('member feeds', () => {
     expect(feed('up')).toMatchObject({ hasMore: false, search: { delivered: 3 } })
   })
 
+  it('an update that lands swaps its pages in place: never a blank canvas, and what left goes', async () => {
+    const hydrating = renderHook(() => useGraphHydration({ hydrate: true }))
+    await waitFor(() => expect(hydrating.result.current.hydrationStatus).toBe('ready'))
+    expect(urns()).toEqual(['urn:d1', 'urn:kept', 'urn:u1', 'urn:u2'])
+    // u2 left the view; u4 arrived.
+    mockProvider.viewMembersPage.mockImplementation(async (_v: string, req: { layerId: string }) => (req.layerId === 'up'
+      ? page('up', { nodes: [node('urn:u1'), node('urn:u4')], delivered: 2, totalCount: 2 })
+      : page('down', { nodes: [node('urn:d1')], delivered: 1, totalCount: 1 })))
+    const sizes: number[] = []
+    const unsubscribe = useCanvasStore.subscribe((st) => sizes.push(st.nodes.length))
+    await act(async () => { useCanvasStore.getState().refreshSubsetFeeds() })
+    await waitFor(() => expect(urns()).toEqual(['urn:d1', 'urn:kept', 'urn:u1', 'urn:u4']))
+    unsubscribe()
+    expect(sizes.every((n) => n > 0)).toBe(true)
+  })
+
   it('with the preview off it still shows the members it last had', async () => {
     useFeaturesStore.setState((s) => ({ values: { ...s.values, viewMembershipEnabled: false } }))
     await hydrate()

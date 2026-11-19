@@ -9,7 +9,7 @@
  * against the limit a view can hold, and says in words what would help when a
  * result is over it.
  */
-import { useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -123,6 +123,10 @@ export function SaveAsViewSheet({
   const [choices, setChoices] = useState<SaveChoices>({ choice: firstOffer, keep: 'withResults', nest: true })
   const [saving, setSaving] = useState(false)
   const [savingProgress, setSavingProgress] = useState<MembershipResolving | null>(null)
+  // A slow or busy server is asked again as it was: when, said on the button.
+  const [retryIn, setRetryIn] = useState<number | null>(null)
+  const saveAbort = useRef<AbortController | null>(null)
+  useEffect(() => () => saveAbort.current?.abort(), [])
   const [error, setError] = useState<string | null>(null)
   // One per sheet: a retry of this save answers with the view the first attempt made.
   const [idempotencyKey] = useState(() => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`))
@@ -151,16 +155,29 @@ export function SaveAsViewSheet({
     if (!canSave) return
     setSaving(true)
     setError(null)
+    setRetryIn(null)
+    const controller = new AbortController()
+    saveAbort.current = controller
     try {
       const out = await createFromMembers(createRequestOf({
         name, visibility, mode: live ? 'live' : 'snapshot', workspaceId, dataSourceId,
         spec, viewId, choices: withTemplate, origin: draft.origin ?? (spec.seeds.query ? 'search' : 'narrow'),
-      }), idempotencyKey, setSavingProgress)
+      }), idempotencyKey, (p) => { setRetryIn(null); setSavingProgress(p) }, { onRetry: setRetryIn, signal: controller.signal })
+      // It is saved: it opens and fills in as its members are worked out.
       onSaved(out.view)
     } catch (err) {
+      if (controller.signal.aborted) return
       setError(saveErrorText(err))
       setSaving(false)
+    } finally {
+      setRetryIn(null)
     }
+  }
+  /** Stop asking. A save the server already took stays saved (its key), and shows in the list. */
+  const stopSaving = () => {
+    saveAbort.current?.abort()
+    setSaving(false)
+    setSavingProgress(null)
   }
 
   const onCardKey = (e: KeyboardEvent, from: LayoutChoice) => {
@@ -378,7 +395,7 @@ export function SaveAsViewSheet({
               {plan ? meterText(plan) : 'Working out what it holds…'}
             </p>
             <div className="flex items-center gap-2 flex-none">
-            <button type="button" onClick={onClose} disabled={saving} className="h-9 px-4 rounded-xl text-[13px] font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">
+            <button type="button" onClick={saving ? stopSaving : onClose} className="h-9 px-4 rounded-xl text-[13px] font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">
               Cancel
             </button>
             <button
@@ -391,7 +408,11 @@ export function SaveAsViewSheet({
               )}
             >
               {saving ? <LucideIcons.Loader2 className="w-4 h-4 animate-spin" /> : <LucideIcons.BookmarkPlus className="w-4 h-4" />}
-              {saving ? (savingProgress ? resolvingText(savingProgress).replace(/…$/, '') : 'Saving…') : 'Save view'}
+              {saving
+                ? retryIn !== null
+                  ? `Still saving — trying again in ${Math.max(1, Math.round(retryIn / 1000))} s`
+                  : savingProgress ? resolvingText(savingProgress).replace(/…$/, '') : 'Saving…'
+                : 'Save view'}
               {canSave && <Kbd shortcut="mod+enter" tone="onAccent" />}
             </button>
             </div>

@@ -53,7 +53,7 @@ import { SubsetIssueBanner } from '@/features/search-views/SubsetIssueBanner'
 import { UpdateSubsetSearchDialog } from '@/features/search-views/UpdateSubsetSearchDialog'
 import { getSearchStatus, putSearch, SEARCH_VIEW_QUERY_KEY } from '@/services/searchViewsApi'
 import type { SearchViewStatus } from '@/types/searchView'
-import { memberActionsFor } from '@/features/live-views/model'
+import { memberActionsFor, workingText } from '@/features/live-views/model'
 import { getMembershipStatus, memberOps, MEMBERSHIP_QUERY_KEY } from '@/services/liveViewsApi'
 import type { MemberOps, MembershipExpand, MembershipSpec } from '@/types/membership'
 import type { Predicate, SearchQuery } from '@/types/search'
@@ -74,7 +74,7 @@ import { useGraphProvider } from '@/providers'
 import type { AggregatedEdgeInfo, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { layerClaimedTypes, subsetFeedKey, useGraphHydration } from '@/hooks/useGraphHydration'
-import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
+import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown, Loader2 } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { SelectionBar } from './SelectionBar'
@@ -4998,14 +4998,20 @@ export function ContextViewCanvas({
     enabled: searchViewsOn && subsetView && !!narrowViewId,
     staleTime: 15_000,
   })
-  // A view made from a query that follows another: what it follows (its chip reads the same).
+  // A view made from a query: how keeping it is going, and what it follows (its chip reads the
+  // same). Its first answer still being worked out says so over the canvas, and is watched.
   const membershipOn = useFeature('viewMembershipEnabled')
-  const { data: followStatus } = useQuery({
+  const { data: membershipStatus } = useQuery({
     queryKey: [MEMBERSHIP_QUERY_KEY, narrowViewId],
     queryFn: () => getMembershipStatus(narrowViewId!),
-    enabled: membershipOn && followsBase && !!narrowViewId,
+    enabled: membershipOn && membersFed && !!narrowViewId,
     staleTime: 15_000,
+    refetchInterval: (query) => (query.state.data?.status === 'updating' ? 3_000 : false),
   })
+  const followStatus = followsBase ? membershipStatus : undefined
+  const firstAnswer = membershipStatus?.status === 'updating' && membershipStatus.revision === 0
+    ? (workingText(membershipStatus) ?? 'Working out its members…')
+    : null
   // WHAT A VIEW SAVED FROM HERE WOULD FOLLOW, as a subset: this view; or, in a view that
   // follows one already, the view it follows — never a chain. A view with a layout of its
   // own made from a search or a query has none to follow.
@@ -7282,6 +7288,19 @@ export function ContextViewCanvas({
           >
             <span className="font-medium shrink-0">Connections are still catching up.</span>
             <span>{catchUpMessage(projectionCatchUp.commitsBehind)}</span>
+          </div>
+        )}
+        {/* A view made from a query, its first answer still being worked out: it fills in as
+            its members are placed, a turn at a time. */}
+        {firstAnswer && (
+          <div
+            data-canvas-interactive
+            data-testid="list-view-working"
+            role="status"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-sky-500/10 border border-sky-500/40 text-sky-700 dark:text-sky-300 text-xs flex items-center gap-2 z-20"
+          >
+            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" aria-hidden />
+            <span><span className="font-medium">{firstAnswer}</span> — it fills in as they are placed.</span>
           </div>
         )}
         {/* Summaries banner — ONE, and plain: the lines between collapsed

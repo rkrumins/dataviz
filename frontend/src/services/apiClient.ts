@@ -10,6 +10,7 @@
  */
 
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { parseRetryAfterMs } from './graphRequestFailure'
 import { useHealthStore } from '@/store/health'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 import { readJsonLossless } from '@/lib/losslessJson'
@@ -55,7 +56,11 @@ async function checkedFetch(
         // own ``detail``, so a caller can tell one refusal from another by
         // its ``type`` instead of its message.
         if (res.status === 401) throw Object.assign(new Error('Session expired'), { status: 401 })
-        throw Object.assign(new Error(detail), { status: res.status, detail: bodyDetail(text) })
+        // So does the server's ``Retry-After``: a caller asking again waits as long as it said.
+        const retryAfterMs = parseRetryAfterMs(res.headers.get('Retry-After'))
+        throw Object.assign(new Error(detail), {
+            status: res.status, detail: bodyDetail(text), ...(retryAfterMs !== null ? { retryAfterMs } : {}),
+        })
     }
     return res
 }

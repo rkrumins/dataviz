@@ -29,4 +29,35 @@ describe('createFromMembers', () => {
       expect(JSON.parse((init as { body: string }).body)).not.toHaveProperty('waitMs')
     }
   })
+
+  it('asks again as it was through a slow, busy or dropped answer — never a second view', async () => {
+    authFetch.mockReset()
+    authFetch
+      .mockRejectedValueOnce(Object.assign(new Error('Request timed out'), { status: 504, retryAfterMs: 5 }))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(Object.assign(new Error('short'), { status: 503, retryAfterMs: 5 }))
+      .mockResolvedValueOnce({ view: { id: 'v3' }, membership: { status: 'updating' } })
+    const onRetry = vi.fn()
+    const out = await createFromMembers(body, 'key-2', undefined, { onRetry })
+    expect(out.view.id).toBe('v3')
+    expect(onRetry).toHaveBeenCalledTimes(3)
+    for (const [, init] of authFetch.mock.calls) {
+      expect((init as { headers: Record<string, string> }).headers['Idempotency-Key']).toBe('key-2')
+    }
+  }, 10000)
+
+  it('a refusal is final, and Cancel stops asking', async () => {
+    authFetch.mockReset()
+    authFetch.mockRejectedValueOnce(Object.assign(new Error('over'), { status: 422 }))
+    await expect(createFromMembers(body, 'key-3')).rejects.toThrow('over')
+    expect(authFetch).toHaveBeenCalledTimes(1)
+    authFetch.mockReset()
+    authFetch.mockRejectedValue(Object.assign(new Error('busy'), { status: 429, retryAfterMs: 30_000 }))
+    const controller = new AbortController()
+    const asked = createFromMembers(body, 'key-4', undefined, { signal: controller.signal })
+    await new Promise((r) => setTimeout(r, 10))
+    controller.abort()
+    await expect(asked).rejects.toBeDefined()
+    expect(authFetch).toHaveBeenCalledTimes(1)
+  })
 })
