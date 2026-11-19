@@ -1,11 +1,11 @@
 /**
  * ViewCardOverflowMenu — "..." overflow menu on view cards with
- * lifecycle actions: Delete, Change Visibility, Share — and, for a Context
- * View, keeping its layers as a layout template.
+ * lifecycle actions: Delete, Change Visibility, Share, Duplicate — and, for a
+ * Context View, keeping its layers as a layout template.
  */
 import { useState, useRef, useEffect, useCallback, useContext } from 'react'
 import {
-  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2, FileDown, FileUp, Milestone, LayoutTemplate,
+  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2, FileDown, FileUp, Milestone, LayoutTemplate, Copy,
 } from 'lucide-react'
 import {
   buildVisibilityOptions, visibilityDescription, VISIBILITY_ACCENT,
@@ -23,6 +23,8 @@ import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import type { ViewLayerConfig } from '@/types/schema'
+import { DuplicateViewDialog } from './DuplicateViewDialog'
+import type { MadeFrom } from './madeFrom'
 
 interface ViewCardOverflowMenuProps {
   viewId: string
@@ -41,6 +43,8 @@ interface ViewCardOverflowMenuProps {
   onVisibilityChange?: (visibility: 'private' | 'workspace' | 'enterprise') => void
   /** A Context View's layers: offers keeping them as a layout template. */
   templateLayers?: ViewLayerConfig[]
+  /** What the view is made from, so Duplicate can say what its copy will be. */
+  madeFrom?: MadeFrom | null
 }
 
 export function ViewCardOverflowMenu({
@@ -56,6 +60,7 @@ export function ViewCardOverflowMenu({
   onShare,
   onVisibilityChange,
   templateLayers,
+  madeFrom = null,
 }: ViewCardOverflowMenuProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [visibilitySubmenu, setVisibilitySubmenu] = useState(false)
@@ -66,6 +71,7 @@ export function ViewCardOverflowMenu({
   const [exportOpen, setExportOpen] = useState(false)
   const [versionsOpen, setVersionsOpen] = useState(false)
   const [savingAsTemplate, setSavingAsTemplate] = useState(false)
+  const [duplicating, setDuplicating] = useState(false)
   const templatesOn = useLayoutTemplatesEnabled()
   const portability = useViewPortability()
   const exportEnabled = portability.canExport
@@ -150,6 +156,9 @@ export function ViewCardOverflowMenu({
           onClose={() => setSavingAsTemplate(false)}
         />
       )}
+      {duplicating && (
+        <DuplicateViewDialog viewId={viewId} viewName={viewName} madeFrom={madeFrom} onClose={() => setDuplicating(false)} />
+      )}
       {versionsOpen && (
         <ViewVersionsDrawer
           viewId={viewId}
@@ -216,6 +225,14 @@ export function ViewCardOverflowMenu({
               >
                 <Share2 className="w-3.5 h-3.5" />
                 Share
+              </button>
+              <button
+                onClick={() => { setDuplicating(true); setIsOpen(false) }}
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                style={{ width: 'calc(100% - 4px)' }}
+              >
+                <Copy className="w-3.5 h-3.5" />
+                Duplicate…
               </button>
               <button
                 onClick={() => setVisibilitySubmenu(true)}

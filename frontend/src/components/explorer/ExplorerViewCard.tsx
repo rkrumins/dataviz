@@ -33,6 +33,8 @@ import { ContributorTrail } from '@/features/view-filters/components/Contributor
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { SourceKindBadge } from '@/features/view-filters/components/SourceKindBadge'
 import { layersOfViewConfig } from '@/components/templates/fromView'
+import { ViewMadeFromBadge } from '@/components/explorer/ViewMadeFromBadge'
+import { madeFromOf } from '@/components/explorer/madeFrom'
 
 // View type theme (label + colours) comes from the SHARED resolver in
 // lib/viewUtils — see viewTypeMeta(). Do not reintroduce a local map: a
@@ -258,6 +260,7 @@ export function ExplorerViewCard({
   const overflowCount = tags.length - visibleTags.length
   const healthInfo = healthStatus ? HEALTH_INDICATOR[healthStatus] : null
   const hasPreview = view.viewType === 'hierarchy' || view.viewType === 'reference' || view.viewType === 'graph' || view.viewType === 'layered-lineage'
+  const madeFrom = madeFromOf(view.config)
 
   return (
     <div
@@ -448,6 +451,7 @@ export function ExplorerViewCard({
             onDelete={() => onDelete?.()}
             onShare={onManageSharing ?? onShare}
             templateLayers={view.viewType === 'reference' ? layersOfViewConfig(view.config) : undefined}
+            madeFrom={madeFrom}
           />
             </>
           )}
@@ -510,6 +514,9 @@ export function ExplorerViewCard({
                 filtered list explains itself. A short word, so it shares this
                 row; the glyph alone in compact density. */}
             <SourceKindBadge kind={view.sourceKind} compact={compact} />
+            {/* Made from a query, or a subset of another view: from its config, which the
+                list carries — a card asks for no counts. */}
+            <ViewMadeFromBadge madeFrom={madeFrom} compact={compact} />
             {healthInfo && (
               <span
                 className={cn(

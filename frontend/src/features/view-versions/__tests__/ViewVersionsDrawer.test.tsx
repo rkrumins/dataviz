@@ -177,6 +177,25 @@ describe('ViewVersionsDrawer', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('counts the versions of a view made from a query by their members', async () => {
+    listMock.mockResolvedValue({
+      ...page(),
+      items: [
+        version(3, { stats: { layers: 2, assignments: 0, members: 1200 } }),
+        version(2, { stats: { layers: 2, assignments: 0, members: 1000 } }),
+        // Saved by a server from before members were counted.
+        version(1, { source: 'create' }),
+      ],
+    })
+    renderDrawer()
+    expect(await screen.findByText('2 layers · 1,200 members')).toBeInTheDocument()
+    expect(screen.getByText('+200')).toBeInTheDocument()
+    expect(screen.getByText('2 layers · 1,000 members')).toBeInTheDocument()
+    expect(screen.getByText('2 layers · 10 placements')).toBeInTheDocument()
+    // Members against placements is no change of either.
+    expect(screen.queryByText('+990')).not.toBeInTheDocument()
+  })
+
   it('lets a reader read, and only read', async () => {
     renderDrawer(false)
     expect(await screen.findByText('Changes since v3')).toBeInTheDocument()

@@ -48,7 +48,7 @@ import { useFeature } from '@/store/features'
 import { usePermission } from '@/store/auth'
 import { onRadioGroupKeyDown } from '@/lib/radioGroupKeys'
 import { useResolveGraph } from '@/features/versioning/hooks/useVersioning'
-import { VERSION_SOURCE_LABEL, fileSize, pluralize, shortHash, viewFileName, viewPackageName } from './format'
+import { VERSION_SOURCE_LABEL, fileSize, heldCount, pluralize, shortHash, viewFileName, viewPackageName } from './format'
 
 export interface ExportViewDialogProps {
   /** One view, or several (the Explorer's bulk bar). */
@@ -481,8 +481,9 @@ function FilePreview({ filename, stats, bytes, withData = false }: {
   bytes?: number
   withData?: boolean
 }) {
+  const held = heldCount(stats)
   const rows: Array<[string, number | undefined]> = [
-    ['layers', stats?.layers], ['placements', stats?.assignments], ['rules', stats?.rules],
+    ['layers', stats?.layers], [`${held.unit}s`, held.count], ['rules', stats?.rules],
     ['display rules', stats?.displayRules],
   ]
   return (

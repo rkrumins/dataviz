@@ -33,7 +33,7 @@ import {
   useCompareViewVersions, useRestoreViewVersion, useSaveViewVersion, useViewVersionHistory, useViewVersionStatus,
 } from '@/hooks/useViewVersions'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
-import { VERSION_SOURCE_LABEL, percent, pluralize, shortHash } from '@/features/view-transfer/format'
+import { VERSION_SOURCE_LABEL, heldCount, heldText, percent, pluralize, shortHash } from '@/features/view-transfer/format'
 import { VersionDiffView } from './VersionDiffView'
 
 const SOURCE_ICON: Record<ViewVersionSource, typeof Flag> = {
@@ -254,8 +254,10 @@ function VersionRow({ version: v, previous, isHead, canEdit, canExport, onCompar
   onExport: () => void
 }) {
   const Icon = SOURCE_ICON[v.source] ?? Save
-  const placements = v.stats.assignments ?? 0
-  const delta = previous ? placements - (previous.stats.assignments ?? 0) : 0
+  const held = heldCount(v.stats)
+  // Measured against the previous version in the same unit only: one counted before members were.
+  const before = previous ? heldCount(previous.stats) : null
+  const delta = before && before.unit === held.unit ? held.count - before.count : 0
   const provenance = (v.provenance ?? {}) as {
     origin?: { environment?: string; version?: number }
     restoredFrom?: number
@@ -289,7 +291,7 @@ function VersionRow({ version: v, previous, isHead, canEdit, canExport, onCompar
           {v.createdByName ?? 'Someone'}{v.message ? <> · <span className="text-ink-secondary">“{v.message}”</span></> : null}
         </p>
         <div className="flex items-center gap-2 mt-1 text-[10px] text-ink-muted">
-          <span>{pluralize(v.stats.layers ?? 0, 'layer')} · {pluralize(placements, 'placement')}</span>
+          <span>{pluralize(v.stats.layers ?? 0, 'layer')} · {heldText(held)}</span>
           {delta !== 0 && <span className={delta > 0 ? 'text-emerald-600' : 'text-rose-600'}>{delta > 0 ? `+${delta}` : delta}</span>}
           {imported && (
             <span title="How well the file matched this data source when it was imported">

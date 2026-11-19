@@ -7,6 +7,9 @@
  * template is recorded as where the view started. Its entity types resolve
  * against THIS data's semantic layer, and what doesn't match is said, not
  * silently dropped.
+ *
+ * A view made from a query is a Context View: only how its layers look is
+ * edited, never its layout type, its layers' types, or which layers it has.
  */
 import { useState } from 'react'
 import { render, screen, fireEvent } from '@testing-library/react'
@@ -226,5 +229,56 @@ describe('LayoutStep — the template library', () => {
     expect(spy.mock.calls[0][0].contextModelId).toBeUndefined()
     expect(spy.mock.calls[0][0].contextModelVersion).toBeUndefined()
     expect(spy.mock.calls[0][0].assignments).toEqual({})
+  })
+})
+
+describe('LayoutStep — a view made from a query', () => {
+  /** A list view's own layers: they hold no types, its query places its members in them. */
+  function ListViewHarness({ spy }: { spy: (u: Partial<WizardFormData>) => void }) {
+    const [formData, setFormData] = useState(makeFormData({
+      assignments: {},
+      layers: [
+        { id: 'sources', name: 'Sources', color: '#3b82f6', entityTypes: [], order: 0 },
+        { id: 'marts', name: 'Marts', color: '#10b981', entityTypes: [], order: 1 },
+      ],
+    }))
+    return (
+      <MemoryRouter>
+        <LayoutStep
+          formData={formData}
+          updateFormData={u => { spy(u); setFormData(f => ({ ...f, ...u })) }}
+          layoutTypes={layoutTypes}
+          lookOnly
+        />
+      </MemoryRouter>
+    )
+  }
+
+  it('offers no other layout type, template, or layer to add or remove — only how its layers look', () => {
+    lib.templates = [MEDALLION]
+    ds.entityTypes = [
+      { id: 'dataset', name: 'Dataset', pluralName: 'Datasets', hierarchy: { level: 0, canContain: [] }, visual: { color: '#000' } },
+    ]
+    const spy = vi.fn()
+    render(<ListViewHarness spy={spy} />)
+
+    expect(screen.queryByText('Choose your layout type')).not.toBeInTheDocument()
+    expect(screen.queryByText('Graph')).not.toBeInTheDocument()
+    expect(screen.queryByText('Hierarchy')).not.toBeInTheDocument()
+    expect(screen.getByText('How its layers look')).toBeInTheDocument()
+    expect(screen.queryByText('Template library')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Switch template/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Add Layer/ })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Sources'))
+    expect(screen.queryByText('Entity Types')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByDisplayValue('Sources'), { target: { value: 'Where it comes from' } })
+    expect(spy).toHaveBeenLastCalledWith({
+      layers: [
+        expect.objectContaining({ id: 'sources', name: 'Where it comes from', entityTypes: [] }),
+        expect.objectContaining({ id: 'marts', name: 'Marts' }),
+      ],
+    })
+    expect(spy.mock.calls.some(([u]) => 'layoutType' in u || 'assignments' in u || 'entityScope' in u)).toBe(false)
   })
 })

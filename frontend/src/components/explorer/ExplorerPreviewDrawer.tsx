@@ -51,6 +51,9 @@ import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib
 import type { View } from '@/services/viewApiService'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { ViewLayerConfig } from '@/types/schema'
+import { chipLabel } from '@/features/search-views/model'
+import { ViewMadeFromBadge } from './ViewMadeFromBadge'
+import { layerMembersText, madeFromOf, membershipLine, useMadeFromStatus, type MadeFrom } from './madeFrom'
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -130,7 +133,12 @@ function HierarchyPreview() {
 }
 
 /** Data-driven reference model layer preview with scroll controls */
-function ReferenceLayerPreview({ layers }: { layers: ViewLayerConfig[] }) {
+function ReferenceLayerPreview({ layers, untypedText }: {
+  layers: ViewLayerConfig[]
+  /** What a layer without types holds, for a view whose layers aren't placed by type (one made
+   *  from a query, a subset's other matches). Unset: it has no types assigned. */
+  untypedText?: (layerId: string) => string
+}) {
   const sorted = [...layers].sort((a, b) => (a.order ?? a.sequence ?? 0) - (b.order ?? b.sequence ?? 0))
   const scrollable = sorted.length > 3
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -225,6 +233,8 @@ function ReferenceLayerPreview({ layers }: { layers: ViewLayerConfig[] }) {
                       </span>
                     )}
                   </div>
+                ) : untypedText ? (
+                  <span className="text-[9px] text-ink-muted">{untypedText(layer.id)}</span>
                 ) : (
                   <span className="text-[9px] text-ink-muted/40 italic">No types assigned</span>
                 )}
@@ -271,6 +281,26 @@ function ReferenceLayerPreview({ layers }: { layers: ViewLayerConfig[] }) {
         </>
       )}
     </div>
+  )
+}
+
+/** A view made from a query: each layer says how many members its query placed there — read for
+ *  the one view this preview shows, never for a card. */
+function MembersLayerPreview({ view, madeFrom, layers }: { view: View; madeFrom: MadeFrom; layers: ViewLayerConfig[] }) {
+  const { membership } = useMadeFromStatus(view, madeFrom)
+  return <ReferenceLayerPreview layers={layers} untypedText={id => layerMembersText(membership, id)} />
+}
+
+/** What the view is made from, as it now stands: "Auto-updating · 1,234 members", "Subset of
+ *  Payments". Until that is read (or with its feature off), what its config says. */
+function MadeFromPill({ view, madeFrom }: { view: View; madeFrom: MadeFrom }) {
+  const { membership, search } = useMadeFromStatus(view, madeFrom)
+  return (
+    <ViewMadeFromBadge
+      madeFrom={madeFrom}
+      label={membership ? membershipLine(membership) : search ? chipLabel(search) : undefined}
+      className="gap-1.5 rounded-full border border-accent-lineage/25 bg-accent-lineage/[0.08] px-2.5 py-1 text-[11px] font-semibold"
+    />
   )
 }
 
@@ -353,6 +383,7 @@ export function ExplorerPreviewDrawer({
   const usageIds = useMemo(() => (viewId ? [viewId] : []), [viewId])
   const { data: usageMap } = useViewUsage(usageIds, isOpen)
   const usage = viewId ? usageMap?.[viewId] : undefined
+  const madeFrom = view ? madeFromOf(view.config) : null
   const content = (
     <>
       <ViewActivityDrawer
@@ -420,6 +451,7 @@ export function ExplorerPreviewDrawer({
                       </HoverTip>
                     )
                   })()}
+                  {madeFrom && <MadeFromPill view={view} madeFrom={madeFrom} />}
                 </div>
                 <h2 className="text-ink text-lg font-bold leading-tight">
                   {view.name}
@@ -502,9 +534,14 @@ export function ExplorerPreviewDrawer({
                         </span>
                       )}
                     </span>
-                    {layers.length > 0
-                      ? <ReferenceLayerPreview layers={layers} />
-                      : <ReferencePreviewFallback />
+                    {layers.length === 0
+                      ? <ReferencePreviewFallback />
+                      : madeFrom?.kind === 'query'
+                        ? <MembersLayerPreview view={view} madeFrom={madeFrom} layers={layers} />
+                        : <ReferenceLayerPreview
+                            layers={layers}
+                            untypedText={madeFrom?.kind === 'subset' ? () => 'Every other match' : undefined}
+                          />
                     }
                   </div>
                 )

@@ -71,6 +71,10 @@ interface LayoutStepProps {
     onInitialTemplateApplied?: () => void
     /** The workspace's default template, when the view started from it. */
     workspaceDefault?: { templateId: string; workspaceName: string }
+    /** A view made from a query: a Context View whose members the server places in its layers.
+     *  Only how its layers look changes here — their names, colours, descriptions and order —
+     *  never its layout type, nor which layers it has or what they hold. */
+    lookOnly?: boolean
 }
 
 export { LAYER_COLORS } from '../layerColors'
@@ -213,7 +217,7 @@ function TemplateGallery({
 
 export function LayoutStep({
     formData, updateFormData, layoutTypes, dataSourceId, blank, imported, initialTemplateId, onInitialTemplateApplied,
-    workspaceDefault,
+    workspaceDefault, lookOnly,
 }: LayoutStepProps) {
     const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null)
     // Blank models have no data source to probe; their ontology schema is hydrated
@@ -247,7 +251,7 @@ export function LayoutStep({
     // Existing-source mode keeps its original semantics: the gallery shows while
     // there are no layers (no choice is REQUIRED — canProceed is unchanged there).
     const [galleryOpen, setGalleryOpen] = useState(false)
-    const showGallery = !imported && (galleryOpen
+    const showGallery = !imported && !lookOnly && (galleryOpen
         || (blank ? !formData.layoutTemplateId : formData.layers.length === 0))
 
     const handleSwitchTemplate = useCallback(() => {
@@ -495,7 +499,8 @@ export function LayoutStep({
                     onClose={() => setSavingAsTemplate(false)}
                 />
             )}
-            {/* Layout Type Selection */}
+            {/* Layout Type Selection — none for a view made from a query: it is a Context View. */}
+            {!lookOnly && (
             <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -563,6 +568,7 @@ export function LayoutStep({
                     ))}
                 </div>
             </motion.div>
+            )}
 
             {/* Layer Configuration (for Reference Model) */}
             <AnimatePresence>
@@ -576,12 +582,14 @@ export function LayoutStep({
                         <div className="flex items-center justify-between">
                             <div>
                                 <h4 className="font-bold text-slate-900 dark:text-white">
-                                    {showGallery ? 'Choose a starting template' : 'Configure Layers'}
+                                    {showGallery ? 'Choose a starting template' : lookOnly ? 'How its layers look' : 'Configure Layers'}
                                 </h4>
                                 <p className="text-sm text-slate-500">
                                     {showGallery
                                         ? 'Pick a starting arrangement — you can refine the layers next'
-                                        : 'Define the horizontal layers for your context view'}
+                                        : lookOnly
+                                            ? 'Its query places its members in these layers, so it stays a Context View. Rename, recolour, describe or reorder them here.'
+                                            : 'Define the horizontal layers for your context view'}
                                 </p>
                             </div>
                             <div className="flex items-center gap-2">
@@ -595,7 +603,7 @@ export function LayoutStep({
                                         Save as template
                                     </button>
                                 )}
-                                {!showGallery && !imported && (
+                                {!showGallery && !imported && !lookOnly && (
                                     <button
                                         onClick={handleSwitchTemplate}
                                         className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
@@ -607,7 +615,7 @@ export function LayoutStep({
                                 {/* Existing-source mode keeps manual building available even
                                     while the gallery shows (its original behavior); blank mode
                                     requires an explicit template choice first. */}
-                                {(!showGallery || !blank) && (
+                                {(!showGallery || !blank) && !lookOnly && (
                                     <button
                                         onClick={handleAddLayer}
                                         className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
@@ -793,12 +801,14 @@ export function LayoutStep({
                                             <span className="text-xs text-slate-400 px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded-full">
                                                 Order: {index + 1}
                                             </span>
+                                            {!lookOnly && (
                                             <button
                                                 onClick={(e) => { e.stopPropagation(); handleRemoveLayer(layer.id) }}
                                                 className="p-1.5 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/20 text-red-500 transition-colors"
                                             >
                                                 <Trash2 className="w-4 h-4" />
                                             </button>
+                                            )}
                                             {expandedLayerId === layer.id ? (
                                                 <ChevronDown className="w-5 h-5 text-slate-400" />
                                             ) : (
@@ -853,6 +863,8 @@ export function LayoutStep({
                                                                 className="w-full mt-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-sm"
                                                             />
                                                         </div>
+                                                        {/* A view made from a query places its members itself: its layers hold no types. */}
+                                                        {!lookOnly && (
                                                         <div>
                                                             <label className="text-xs font-medium text-slate-500 uppercase">Entity Types</label>
                                                             <div className="flex flex-wrap gap-1.5 mt-1 min-h-[32px]">
@@ -884,6 +896,7 @@ export function LayoutStep({
                                                                 )}
                                                             </div>
                                                         </div>
+                                                        )}
                                                     </div>
                                                 </motion.div>
                                             )}

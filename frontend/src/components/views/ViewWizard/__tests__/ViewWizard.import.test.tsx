@@ -12,6 +12,8 @@
  *   - overwriting another view is offered only for a view you can edit, asked when it is picked;
  *   - entities whose lookup failed can be looked up again, one view or many;
  *   - the Match step says when the ontology here isn't the one the view was exported with;
+ *   - a snapshot's members go with it as the file carries them, one view or many; a view without
+ *     them sends none;
  *   - a file of several views: every view checked in one request, then imported one request per
  *     view under one batch id; an update keeps the view's own details; a failure doesn't stop the
  *     rest and is retried under the same request id; a view switched to a copy is checked again, as
@@ -380,6 +382,31 @@ describe('ViewWizard — Import journey', () => {
     expect(await screen.findByText(/Integrity verified/)).toBeInTheDocument()
   })
 
+  it('sends a snapshot’s members with it, as the file carries them', async () => {
+    const file = inspected()
+    file.views[0].members = {
+      format: 'rows-v1', count: 2, columns: ['urn', 'layerId', 'whole', 'name', 'type', 'orderKey', 'logicalNodeId'],
+      rows: [['urn:a', 'l1', false, 'a table', 'dataset', null, null], ['urn:b', 'l1', true, 'b schema', 'schema', 'a0', null]],
+    }
+    inspectMock.mockResolvedValue(file)
+    reconcileMock.mockResolvedValue(reconciled())
+    importMock.mockResolvedValue(imported('view_new'))
+    renderImport()
+
+    await screen.findByText('Create a new view')
+    await next()                                          // → Target
+    await next()                                          // → Match
+    await screen.findByText('How it fits here')
+    for (const step of ['basics-step', 'layout-step', 'assignment-step', 'entities-step', 'preview-step']) {
+      await next()
+      await screen.findByTestId(step)
+    }
+    fireEvent.click(screen.getByRole('button', { name: /Import View/ }))
+
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(1))
+    expect(importMock.mock.calls[0][0].members).toEqual(file.views[0].members)
+  })
+
   it('updates the view that is already here, skipping the target', async () => {
     inspectMock.mockResolvedValue(inspected({
       pv_1: [{ viewId: 'view_uat', name: 'Finance (UAT)', workspaceId: 'ws1', workspaceName: 'UAT', dataSourceId: 'ds1', headVersion: 3, canEdit: true, status: 'fast_forward' }],
@@ -566,6 +593,24 @@ describe('ViewWizard — importing every view of a file', () => {
     // Each view's design is the file's now: a canvas that has one open reads its rules again.
     expect(reloadLibraryMock).toHaveBeenCalledWith('view_uat')
     expect(reloadLibraryMock).toHaveBeenCalledWith('view_new')
+  })
+
+  it('sends a snapshot’s members with it, and no members with a view that has none', async () => {
+    const file = inspectedPair()
+    const members = { format: 'rows-v1' as const, count: 1, columns: ['urn', 'layerId'], rows: [['urn:a', 'l1']] }
+    file.views[1] = { ...file.views[1], members }
+    inspectMock.mockResolvedValue(file)
+    importMock.mockImplementation(async (req: { target: { viewId?: string } }) => imported(req.target.viewId ?? 'view_new'))
+    renderImport()
+    await throughToReview()
+    await next()                                          // → Review
+    fireEvent.click(await screen.findByRole('button', { name: /Import 2 views/ }))
+
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(2))
+    const [[plain], [snapshot]] = importMock.mock.calls
+    // A server that takes no members is never sent the key.
+    expect(plain).not.toHaveProperty('members')
+    expect(snapshot.members).toEqual(members)
   })
 
   it('maps a type that isn’t here once, for every view from that source', async () => {

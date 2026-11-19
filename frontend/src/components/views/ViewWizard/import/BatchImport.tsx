@@ -407,6 +407,8 @@ export function BatchImport({ steps, onBackToFile, onClose, preset }: {
           },
           manifest: e.view.manifest,
           history: e.view.history,
+          // A snapshot's members, as the file carries them.
+          ...(e.view.members ? { members: e.view.members } : {}),
           resolutions: e.resolutions,
           expectedTargetHash: r.update?.targetWorkingHash ?? null,
           requestId: e.requestId,

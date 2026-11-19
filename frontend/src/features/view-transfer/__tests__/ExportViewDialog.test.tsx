@@ -165,6 +165,16 @@ describe('ExportViewDialog', () => {
     expect(previewExport).not.toHaveBeenCalled()
   })
 
+  it('counts a view made from a query by its members, not its placements', async () => {
+    vi.mocked(listViewVersions).mockResolvedValue(page(false))
+    previewing({ view_1: { stats: { layers: 2, assignments: 0, members: 3400, rules: 0, displayRules: 0 } } })
+    renderDialog()
+
+    expect(await screen.findByText('members')).toBeInTheDocument()
+    expect(screen.getByText('3,400')).toBeInTheDocument()
+    expect(screen.queryByText('placements')).not.toBeInTheDocument()
+  })
+
   it('has someone who can’t edit the view export its latest version, saving nothing', async () => {
     vi.mocked(listViewVersions).mockResolvedValue(page(true))
     previewing({ view_1: { dirty: true, maySeal: false, exportsAs: 3, includesUnsaved: false } })

@@ -2109,8 +2109,9 @@ export interface BranchViewChange {
   stagedBy?: string | null
   stagedByName?: string | null
   stagedAt?: string | null
-  /** create: its headline counts, and who it goes live for. */
-  stats?: { layers?: number; assignments?: number }
+  /** create: its headline counts (`members` for a view made from a query, from a server that
+   *  counts them), and who it goes live for. */
+  stats?: { layers?: number; assignments?: number; members?: number }
   goesLiveAs?: 'private' | 'workspace'
   /** update / layout: what it changes. */
   diff?: ViewDefinitionDiff
