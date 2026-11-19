@@ -27,6 +27,12 @@ def _script():
     return ScriptDirectory.from_config(_alembic_config())
 
 
+def _parents(script, revision):
+    """The revisions ``revision`` follows: one (a string to alembic), or several for a merge."""
+    down = script.get_revision(revision).down_revision
+    return [down] if isinstance(down, str) else list(down)
+
+
 def _plan(stamped, **kw):
     inputs = {"virgin": False, "own": {}, "lines": schema_plan.other_lines(_alembic_config().get_main_option(
         "script_location")), "open_placement": None, "changed": [], "built": ("main at abc", True)}
@@ -40,7 +46,7 @@ def test_the_plan_says_what_an_upgrade_would_do():
     assert _plan([head])["verdict"] == "up_to_date"
     assert _plan([], virgin=True)["verdict"] == "fresh_install"
 
-    behind = _plan(list(script.get_revision(head).down_revision))
+    behind = _plan(_parents(script, head))
     assert behind["verdict"] == "upgrade" and behind["wouldRun"] == [head]
 
     # #670's stamp: placed exactly, then everything the heads need that it doesn't have.
@@ -57,7 +63,7 @@ def test_the_plan_says_what_an_upgrade_would_do():
 
 def test_the_plan_holds_a_shared_database_to_main():
     script = _script()
-    behind = list(script.get_revision(script.get_current_head()).down_revision)
+    behind = _parents(script, script.get_current_head())
     branch = ("claude/x at abc", False)
     assert _plan(behind, shared=True, built=branch)["verdict"] == "refused"
     assert _plan([script.get_current_head()], shared=True, built=branch)["verdict"] == "up_to_date"
@@ -186,8 +192,10 @@ def test_a_backup_is_made_only_when_an_upgrade_would_change_something(scratch_db
     assert list(tmp_path.iterdir()) == []
 
     # Behind its head: dumped, readable, named for where the upgrade takes it.
-    _sql(scratch_db, f"UPDATE alembic_version SET version_num = '{min(script.get_revision(head).down_revision)}'")
-    _sql(scratch_db, "INSERT INTO alembic_version VALUES ('20261119_1300_merge_member_sets')")
+    first, *rest = _parents(script, head)
+    _sql(scratch_db, f"UPDATE alembic_version SET version_num = '{first}'")
+    for parent in rest:
+        _sql(scratch_db, f"INSERT INTO alembic_version VALUES ('{parent}')")
     out = _job(scratch_db, "backup", "--dir", str(tmp_path), "--keep", "2")
     assert out.returncode == 0, out.stderr[-2000:]
     [dump] = list(tmp_path.glob("*.dump"))
@@ -253,3 +261,68 @@ def test_the_admin_schema_status_reads_the_database_live(scratch_db, monkeypatch
     status = schema_status()
     assert not status["atHead"] and status["plan"]["placement"]["stamps"] == ["20261113_1400_gv_ps_candidate"]
     assert status["plan"]["wouldRun"][-1] == head
+
+
+# ── The version store: built by the upgrade, held to its models ──────────────────────────────
+
+
+def test_a_fresh_install_builds_the_version_store_before_it_stamps_head(monkeypatch):
+    """No migration makes ``graphver``; a fresh install stamped at head without it passed ``check``
+    and refused every graph read (503) until a versioning worker had started."""
+    import contextlib
+    import types
+
+    from backend.app.db import seed_reference_data as seeds
+    from backend.scripts import upgrade
+
+    done = []
+    monkeypatch.setattr(upgrade.command, "upgrade", lambda _cfg, rev: done.append(f"upgrade {rev}"))
+    monkeypatch.setattr(upgrade.command, "stamp", lambda _cfg, rev: done.append(f"stamp {rev}"))
+    monkeypatch.setattr(upgrade, "_build_graphver", lambda: done.append("graphver"))
+    monkeypatch.setattr(seeds, "seed_reference_data", lambda _conn: {})
+    monkeypatch.setattr(seeds, "reconcile_reference_data", lambda _conn: None)
+    monkeypatch.setattr(upgrade, "create_engine", lambda *a, **kw: types.SimpleNamespace(
+        begin=lambda: contextlib.nullcontext(object())))
+    monkeypatch.setenv("MANAGEMENT_DB_URL", "postgresql+asyncpg://u:p@nowhere/db")
+    upgrade._install_fresh(object())
+    assert done == ["upgrade 0001_baseline", "graphver", "stamp heads"]
+
+
+def test_the_version_store_is_held_to_its_models_only_where_it_lives(monkeypatch):
+    from backend.scripts import upgrade
+
+    here = "postgresql+asyncpg://u:p@db/synodic"
+    monkeypatch.setenv("MANAGEMENT_DB_URL", here)
+    monkeypatch.delenv("GRAPHVER_DB_URL", raising=False)
+    assert upgrade._graphver_here()
+    monkeypatch.setenv("GRAPHVER_DB_URL", here)
+    assert upgrade._graphver_here()
+    monkeypatch.setenv("GRAPHVER_DB_URL", "postgresql+asyncpg://u:p@elsewhere/graphver")
+    assert not upgrade._graphver_here()
+    names = {t.name for t in upgrade._graphver_tables()}
+    assert {"graphs", "branches", "commits", "jobs", "node_versions"} <= names
+
+
+def _graphver_tables(url):
+    return {name for (name,) in _sql(url, "SELECT table_name FROM information_schema.tables "
+                                          "WHERE table_schema = 'graphver'")}
+
+
+@E2E
+def test_a_fresh_database_upgraded_has_the_version_store_and_verify_schema_holds_it(scratch_db):
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0, out.stderr[-3000:]
+    tables = _graphver_tables(scratch_db)
+    assert {"graphs", "branches", "commits", "jobs", "node_versions_p0"} <= tables, sorted(tables)
+    assert _job(scratch_db, "check").returncode == 0
+    out = _job(scratch_db, "verify-schema")
+    assert out.returncode == 0, out.stderr[-3000:]
+
+    # A version store table gone is a mismatch verify-schema names; the next upgrade builds it.
+    _sql(scratch_db, "DROP TABLE graphver.change_sets")
+    out = _job(scratch_db, "verify-schema")
+    assert out.returncode == 1 and "missing table graphver.change_sets" in out.stderr, out.stderr[-3000:]
+    out = _job(scratch_db, "upgrade")
+    assert out.returncode == 0, out.stderr[-3000:]
+    assert "change_sets" in _graphver_tables(scratch_db)
+    assert _job(scratch_db, "verify-schema").returncode == 0

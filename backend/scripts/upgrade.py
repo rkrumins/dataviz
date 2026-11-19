@@ -165,8 +165,44 @@ def _install_fresh(cfg) -> None:
         reconcile_reference_data(conn)          # records every entry as applied
     log.info("Seeded reference data: %s", written)
 
+    # Before the stamp: a database stamped at head without it is one ``check`` passes and
+    # every graph read refuses.
+    _build_graphver()
+
     command.stamp(cfg, "heads")
     log.info("Stamped to head")
+
+
+def _graphver_here() -> bool:
+    """Whether the version store lives in the management database: ``GRAPHVER_DB_URL`` unset (the
+    shipped deployments), or naming that same database."""
+    from backend.app.services.versioning import config as gv_config
+
+    return gv_config.graphver_db_url() == os.environ["MANAGEMENT_DB_URL"]
+
+
+def _build_graphver() -> None:
+    """The version store's schema (``graphver``), built as a versioning worker builds it when it
+    starts: ``create_schema_and_partitions``, idempotent, serialised by a lock of its own. Graph
+    reads need it and no migration makes it, so a fresh install without it answered 503 to every
+    one until a worker had started."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from backend.app.services.versioning import config as gv_config
+    from backend.app.services.versioning import models as gv_models
+
+    async def build() -> None:
+        engine = create_async_engine(gv_config.graphver_db_url(), poolclass=NullPool)
+        try:
+            await gv_models.create_schema_and_partitions(engine)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(build())
+    log.info("Built the version store's schema (%s)", gv_config.graphver_schema())
 
 
 def _other_lines(cfg) -> dict[str, list[list[str]]]:
@@ -312,6 +348,11 @@ def cmd_upgrade(revision: str, fast_path: bool = True, rewind_to: str | None = N
             return 1
     log.info("Alembic upgrade -> %s", revision)
     _upgrade(cfg, revision)
+    if revision == "heads":
+        # As a fresh install has it: the graphver migrations change the schema only once it
+        # exists, so a database migrated here without it is otherwise at head and still refuses
+        # every graph read.
+        _build_graphver()
     if placed is not None and revision == "heads":
         # Placed by this build: head is claimed only once the schema bears it out.
         was, stamps, kept = placed
@@ -487,6 +528,15 @@ def _orm_metadata():
     return Base.metadata
 
 
+def _graphver_tables() -> list:
+    """The version store's tables, as its models declare them (the hash partitions of each
+    partitioned one are not declared, only the table they partition)."""
+    from backend.app.services.versioning.db import VersioningBase
+    from backend.app.services.versioning import models as _graphver_models  # noqa: F401
+
+    return list(VersioningBase.metadata.sorted_tables)
+
+
 def _type_name(column_type, dialect) -> str:
     """A column type as Postgres names it. A ``FLOAT`` with no precision is stored as ``DOUBLE
     PRECISION`` and reflected so: told the same, or every ``Float`` column reads as a mismatch."""
@@ -497,8 +547,9 @@ def _type_name(column_type, dialect) -> str:
     return "DOUBLE PRECISION" if name == "FLOAT" else name
 
 
-def _compare_schema(engine) -> tuple[list[str], list[str], list[str]]:
-    """Compare the live database against ORM metadata.
+def _compare_schema(engine, graphver: bool = False) -> tuple[list[str], list[str], list[str]]:
+    """Compare the live database against ORM metadata — with ``graphver``, the version store's
+    tables too (``verify-schema``, where the store lives in this database).
 
     Returns ``(failures, default_diffs, extra_columns)``:
 
@@ -520,14 +571,14 @@ def _compare_schema(engine) -> tuple[list[str], list[str], list[str]]:
     def _type_of(column_type) -> str:
         return _type_name(column_type, dialect)
 
-    metadata = _orm_metadata()
+    tables = list(_orm_metadata().sorted_tables) + (_graphver_tables() if graphver else [])
     inspector = sa_inspect(engine)
 
     failures: list[str] = []
     default_diffs: list[str] = []
     extra_columns: list[str] = []
 
-    for table in metadata.sorted_tables:
+    for table in tables:
         qualified = f"{table.schema or 'public'}.{table.name}"
         if not inspector.has_table(table.name, schema=table.schema):
             failures.append(f"missing table {qualified}")
@@ -592,9 +643,14 @@ def cmd_verify_schema(strict_defaults: bool = False) -> int:
     too, never failed — those are leftovers on long-lived databases
     (``resource_grants.expires_at``, ``views.display_rules``) and dropping
     them is a deliberate act, not a CI job's decision.
+
+    The version store's tables (``graphver``) are held to its models too
+    when it lives in this database: ``upgrade`` builds them, and a database
+    without them refuses every graph read.
     """
     engine = create_engine(_sync_url(), pool_pre_ping=True)
-    failures, default_diffs, extra_columns = _compare_schema(engine)
+    graphver = _graphver_here()
+    failures, default_diffs, extra_columns = _compare_schema(engine, graphver=graphver)
 
     for line in extra_columns:
         log.info("Column in database but not in the ORM (ignored): %s", line)
@@ -623,7 +679,8 @@ def cmd_verify_schema(strict_defaults: bool = False) -> int:
 
     log.info(
         "Schema matches the ORM: %d tables verified, %d default difference(s) "
-        "tolerated", len(_orm_metadata().sorted_tables), len(default_diffs),
+        "tolerated", len(_orm_metadata().sorted_tables) + (len(_graphver_tables()) if graphver else 0),
+        len(default_diffs),
     )
     return 0
 
