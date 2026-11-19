@@ -98,6 +98,13 @@ NDJSON keep arrays. An entity at the top of the graph has empty parent cells and
   is drawn in.
 * **A saved trace** stores them in its columnar snapshot (inner `v: 2`). Traces saved before keep
   their lane path, with empty parent cells, rather than a guess.
+* **Flows say where both ends sit.** A flow row is `source, target, type` (first, as before), then
+  for each end its name, type, parent (URN, name, type) and path (names and URNs) — and, in the
+  dock's files, the layer it is drawn in. The dock's CSV is now two files, the entities and
+  `…-flows.csv`; the dock's JSON `edges`, a saved trace's files and the server's flows file
+  (`part=edges`, and a JSON document's `edges`) carry the same. The server reads the ends' names
+  and types from the set's rows and their chains as it does for members, one page of flows at a
+  time, one names cache across a document's nodes and flows.
 * **The server's download** asks the graph for the chains of each 1,000 rows in one admitted
   statement (`get_ancestor_chains`, which FalkorDB, its drafts and versioned branches all
   implement) and names the containers it hasn't already seen in one more. A provider that can't say

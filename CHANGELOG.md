@@ -42,6 +42,8 @@ versioned and unversioned graphs alike.
   it follows changes how it places things. **Save as view…** on a trace chooses it.
 - **Where each entity sits, in every export**: `parentUrn`, `parentName`, `parentType`, `path`
   and `pathUrns` in the dock's CSV and JSON, saved traces and member-set downloads.
+- **Every flow says where both its ends sit** (name, type, parent, path; the layer in the dock's
+  files). The dock's CSV is two files: the entities and their flows.
 - **List views' members nest in their containers** (`inLayer` on the member feed).
 
 ### Changed

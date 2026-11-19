@@ -182,9 +182,9 @@ trace shows — N rows, open or not*, or, while the trace is still landing,
 
 | Choice | What you get |
 | --- | --- |
-| **CSV** | One row per entity the trace shows — seed, upstream, downstream or both, its hops each way, the layer it is drawn in, where it sits, and which of your seeds reach it. Where it sits is its parent (`parentUrn`, `parentName`, `parentType`) and every container from the top down to it (`path` as names, `A / B`; `pathUrns` as URNs, `a; b`); both are empty for an entity at the top of the graph. Closed cards are included; the containers are each row's path, not rows of their own. Opens in any spreadsheet. |
-| **JSON** | The same entities and the flows between them, with the question that found them (the seeds and how far each way), so a script can ask it again. |
-| **Everything it reaches…** | The complete trace, worked out on the server: your starting entities and what is inside them (two levels down), every source and consumer, inside this view or not, however many, each with its parent and path as in the CSV above (not its layer: it may not be in this view). Choose CSV, NDJSON or JSON, and **Include the flows between them** if you want the lineage itself as well (a second file, or part of the JSON). The panel shows how far it has got; close it and ask again later, and it carries on where it was. |
+| **CSV** | One row per entity the trace shows — seed, upstream, downstream or both, its hops each way, the layer it is drawn in, where it sits, and which of your seeds reach it. Where it sits is its parent (`parentUrn`, `parentName`, `parentType`) and every container from the top down to it (`path` as names, `A / B`; `pathUrns` as URNs, `a; b`); both are empty for an entity at the top of the graph. Closed cards are included; the containers are each row's path, not rows of their own. A second file, `…-flows.csv`, holds the flows between them — see [Reading the files](#reading-the-files). Opens in any spreadsheet. |
+| **JSON** | The same entities and the flows between them — each flow with both its ends, as in the flows file — with the question that found them (the seeds and how far each way), so a script can ask it again. |
+| **Everything it reaches…** | The complete trace, worked out on the server: your starting entities and what is inside them (two levels down), every source and consumer, inside this view or not, however many, each with its parent and path as in the CSV above (not its layer: it may not be in this view). Choose CSV, NDJSON or JSON, and **Include the flows between them** if you want the lineage itself as well (a second file, or part of the JSON), each flow with both its ends as below. The panel shows how far it has got; close it and ask again later, and it carries on where it was. |
 | **Save as view…** | A view of its own of what the trace shows — your starting entities with everything inside them, and everything they reach on the sides you're reading — as a subset of the view you traced in: its layers, each entity where that view places it, including what someone placed there by hand. See [Keep a narrowing as a view](#keep-a-narrowing-as-a-view). |
 | **Save trace** | Keeps the trace in this browser, with what it found. |
 
@@ -196,6 +196,27 @@ trace shows — N rows, open or not*, or, while the trace is still landing,
 - **Everything it reaches…** needs **Export** to be on in **Administration →
   Features**, and works on data sources whose lineage the server can follow
   (FalkorDB today).
+
+### Reading the files
+
+The CSV comes as two files that go together: the **entities**, one row each,
+and the **flows** between them, one row per flow. Most spreadsheets and graph
+tools (pandas, Excel, NetworkX, Gephi, Neo4j's CSV import) read the pair as
+it is: the entities are the nodes, the flows the edges.
+
+Each flow names its `source`, its `target` and its `type`, then the same
+facts about each end: `sourceName`, `sourceType`, `sourceLayer`, its parent
+(`sourceParentUrn`, `sourceParentName`, `sourceParentType`) and its path
+(`sourcePath`, `sourcePathUrns`) — and `target…` likewise. The server's flows
+file has every column but the layers: what it reaches may not be in this view.
+
+- **What feeds a column:** filter the flows to `target` = its URN. Each row's
+  `sourcePath` says which table, schema and platform the source sits in.
+- **What a column feeds:** filter the flows to `source` = its URN.
+- **A table's lineage:** filter the flows to `sourceParentUrn` (or
+  `targetParentUrn`) = the table's URN.
+- **More about either end** (its role, its hops, which seeds reach it): join
+  the flows to the entities file on `source` or `target` = `urn`.
 
 ### Saved traces
 
