@@ -49,6 +49,12 @@ def tiers(monkeypatch) -> _TimeoutMiddleware:
 
 @pytest.fixture
 def settings(monkeypatch):
+    """The shipped search settings, on a deployment with no cluster window: the
+    observed window is process-wide, so a reading an earlier test took is cleared."""
+    from backend.app.providers import falkordb_provider
+
+    monkeypatch.setattr(falkordb_provider, "_OBSERVED_NODE_TIMEOUT_S", None)
+    monkeypatch.delenv("FALKORDB_MODE", raising=False)
     monkeypatch.delenv("DEEP_SEARCH_CHUNK_TIMEOUT_MS", raising=False)
     get_deep_search_settings.cache_clear()
     yield get_deep_search_settings()

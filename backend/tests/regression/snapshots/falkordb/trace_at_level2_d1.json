@@ -3,23 +3,15 @@
     {
       "confidence": null,
       "edge_type": "CONTAINS",
-      "id": "1",
+      "id": "urn:test:domain:root -CONTAINS-> urn:test:schema:s1",
       "properties": {},
-      "source_urn": "urn:test:schema:s2",
-      "target_urn": "urn:test:dataset:d2"
+      "source_urn": "urn:test:domain:root",
+      "target_urn": "urn:test:schema:s1"
     },
     {
       "confidence": null,
       "edge_type": "CONTAINS",
-      "id": "2",
-      "properties": {},
-      "source_urn": "urn:test:schema:s1",
-      "target_urn": "urn:test:dataset:d1"
-    },
-    {
-      "confidence": null,
-      "edge_type": "CONTAINS",
-      "id": "3",
+      "id": "urn:test:domain:root -CONTAINS-> urn:test:schema:s2",
       "properties": {},
       "source_urn": "urn:test:domain:root",
       "target_urn": "urn:test:schema:s2"
@@ -27,10 +19,18 @@
     {
       "confidence": null,
       "edge_type": "CONTAINS",
-      "id": "4",
+      "id": "urn:test:schema:s1 -CONTAINS-> urn:test:dataset:d1",
       "properties": {},
-      "source_urn": "urn:test:domain:root",
-      "target_urn": "urn:test:schema:s1"
+      "source_urn": "urn:test:schema:s1",
+      "target_urn": "urn:test:dataset:d1"
+    },
+    {
+      "confidence": null,
+      "edge_type": "CONTAINS",
+      "id": "urn:test:schema:s2 -CONTAINS-> urn:test:dataset:d2",
+      "properties": {},
+      "source_urn": "urn:test:schema:s2",
+      "target_urn": "urn:test:dataset:d2"
     }
   ],
   "downstream_urns": [
@@ -40,7 +40,7 @@
     {
       "confidence": null,
       "edge_type": "DERIVES_FROM",
-      "id": "6",
+      "id": "urn:test:dataset:d1 -DERIVES_FROM-> urn:test:dataset:d2",
       "properties": {
         "sourceEdgeTypes": [
           "DERIVES_FROM"
@@ -67,14 +67,16 @@
       "entity_type": "dataset",
       "last_synced_at": "",
       "layer_assignment": "",
-      "properties": {},
+      "properties": {
+        "childCount": 0
+      },
       "qualified_name": "",
       "source_system": "",
       "tags": [],
       "urn": "urn:test:dataset:d1"
     },
     {
-      "child_count": 0,
+      "child_count": null,
       "description": "",
       "display_name": "Dataset 2",
       "entity_type": "dataset",
@@ -87,39 +89,45 @@
       "urn": "urn:test:dataset:d2"
     },
     {
-      "child_count": 0,
+      "child_count": 2,
       "description": "",
       "display_name": "Root Domain",
       "entity_type": "domain",
       "last_synced_at": "",
       "layer_assignment": "",
-      "properties": {},
+      "properties": {
+        "childCount": 2
+      },
       "qualified_name": "",
       "source_system": "",
       "tags": [],
       "urn": "urn:test:domain:root"
     },
     {
-      "child_count": 0,
+      "child_count": 1,
       "description": "",
       "display_name": "Schema 1",
       "entity_type": "schema",
       "last_synced_at": "",
       "layer_assignment": "",
-      "properties": {},
+      "properties": {
+        "childCount": 1
+      },
       "qualified_name": "",
       "source_system": "",
       "tags": [],
       "urn": "urn:test:schema:s1"
     },
     {
-      "child_count": 0,
+      "child_count": 2,
       "description": "",
       "display_name": "Schema 2",
       "entity_type": "schema",
       "last_synced_at": "",
       "layer_assignment": "",
-      "properties": {},
+      "properties": {
+        "childCount": 2
+      },
       "qualified_name": "",
       "source_system": "",
       "tags": [],

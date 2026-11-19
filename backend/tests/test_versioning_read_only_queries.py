@@ -347,6 +347,8 @@ def test_the_projector_is_bounded_by_the_cluster_window(monkeypatch):
     from backend.app.services.versioning import projection as proj
 
     monkeypatch.setattr(prov, "_CLUSTER_NODE_TIMEOUT_S", 15.0)
+    monkeypatch.setattr(prov, "_OBSERVED_NODE_TIMEOUT_S", None)
+    monkeypatch.setenv("FALKORDB_MODE", "cluster")
     seen = {}
 
     class _Client:
@@ -366,7 +368,11 @@ def test_the_projector_is_unclamped_without_a_cluster_window(monkeypatch):
     from backend.app.providers import falkordb_provider as prov
     from backend.app.services.versioning import projection as proj
 
+    # No cluster: nothing reported (the observed window is process-wide, so a reading an
+    # earlier test took is cleared) and none configured.
     monkeypatch.setattr(prov, "_CLUSTER_NODE_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(prov, "_OBSERVED_NODE_TIMEOUT_S", None)
+    monkeypatch.delenv("FALKORDB_MODE", raising=False)
     seen = {}
 
     class _Client:

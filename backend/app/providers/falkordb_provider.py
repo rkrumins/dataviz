@@ -686,11 +686,14 @@ _CLUSTER_REPLICA_READ_SHARE = 2 / 3
 #: variable is missing is not a safety limit.
 _ASSUMED_CLUSTER_NODE_TIMEOUT_S = 15.0
 
-#: The smallest ``cluster-node-timeout`` any connected node has REPORTED,
-#: read off its own ``CONFIG GET`` (see ``note_cluster_node_timeout``). The
-#: node is the authority: an env mirror can be stale, wrong, or absent, and
+#: The smallest ``cluster-node-timeout`` any connected CLUSTER node has
+#: REPORTED, read off its own ``CONFIG GET`` (see ``note_cluster_node_timeout``).
+#: The node is the authority: an env mirror can be stale, wrong, or absent, and
 #: this one cannot. Smallest, not last, because the clamp has to hold for
-#: every shard a process talks to.
+#: every shard a process talks to. Only a cluster connection asks: a standalone
+#: or sentinel node answers the same ``CONFIG GET`` with Redis's 15000 ms
+#: default, a window no failure detector of its runs on, and recording that
+#: clamped every search and write in the process as if it were clustered.
 _OBSERVED_NODE_TIMEOUT_S: Optional[float] = None
 
 #: Latched so the "assuming a window" warning is said once per process
@@ -725,18 +728,20 @@ def _cluster_window_s() -> Optional[float]:
     """The cluster's failure-detector window (``cluster-node-timeout``) in
     seconds, or ``None`` when there is no cluster to outlive.
 
-    Three sources, most authoritative first: what a node REPORTED about
-    itself, the ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` env mirror, and — when
-    we know we are clustered but neither has answered — an assumed window,
-    announced once. ``None`` is returned only for a standalone or sentinel
-    deployment, where a budget genuinely has no cluster to outlive."""
+    Three sources, most authoritative first: what a cluster node REPORTED
+    about itself, the ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` env mirror, and —
+    when neither has answered — an assumed window, announced once. ``None``
+    unless this process talks to a cluster — ``FALKORDB_MODE`` says so, or a
+    provider connected in cluster mode has reported its window — so a
+    standalone or sentinel deployment, where a budget genuinely has no
+    cluster to outlive, is never clamped, whatever the env mirror says."""
     global _ASSUMED_WINDOW_WARNED
-    window = _OBSERVED_NODE_TIMEOUT_S
-    if window is None and _CLUSTER_NODE_TIMEOUT_S > 0:
-        window = _CLUSTER_NODE_TIMEOUT_S
+    window = _OBSERVED_NODE_TIMEOUT_S        # only ever recorded off a cluster node
     if window is None:
         if not _in_cluster_mode():
             return None
+        if _CLUSTER_NODE_TIMEOUT_S > 0:
+            return _CLUSTER_NODE_TIMEOUT_S
         window = _ASSUMED_CLUSTER_NODE_TIMEOUT_S
         if not _ASSUMED_WINDOW_WARNED:
             _ASSUMED_WINDOW_WARNED = True
@@ -3394,7 +3399,11 @@ class FalkorDBProvider(GraphDataProvider):
                 # The node's own failure-detector window, from the node.
                 # Every query budget is derived from this, so reading it
                 # here is what stops the clamp depending on a ConfigMap
-                # somebody has to remember. Best-effort, like the rest.
+                # somebody has to remember. Best-effort, like the rest. A
+                # cluster node's only: a standalone or sentinel node answers
+                # with Redis's 15000 ms default, which nothing of its runs on.
+                if getattr(self._conn_cfg, "mode", None) != "cluster":
+                    return
                 try:
                     from backend.app.providers.shard_capacity import _config_get
 

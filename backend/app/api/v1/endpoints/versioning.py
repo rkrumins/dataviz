@@ -165,7 +165,7 @@ def get_import_export_service():
     if _ie_service is None:
         from backend.app.services.versioning.import_export.service import ImportExportService
         _ie_service = ImportExportService(
-            versioning=_service, scope_resolver=_resolve_export_view_scope,
+            versioning=_service, scope_resolver=_view_export_scope,
             ontology_resolver=_resolve_ontology_types,
             layout_writer=_write_view_import_assignments,
             publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope,
@@ -4034,27 +4034,17 @@ async def sync_ingest(
 # --------------------------------------------------------------------------- #
 
 
-async def _resolve_export_view_scope(workspace_id, data_source_id, view_id, branch_id=None):
+async def _view_export_scope(workspace_id, data_source_id, view_id, branch_id=None):
     """Resolve a view's ENTITY SET for a **view-scoped export**, from the authoritative source:
     the view's stored ``config`` reference-layout ``assignments`` map (canonical, up-converted from
     legacy per-layer ``entityAssignments`` by ``parse_reference_layout``) — the explicit
     physical-entity → logical-layer placements. A Context View places a top-level entity into a
     layer with ``inheritsChildren`` so the whole subtree belongs to the view — so the scope is the
     assigned URNs + their containment descendants (expanded in the worker, which has the graph).
-    Returns a scope dict, or ``None`` (fail-open → whole data source) when the view has no explicit
-    assignments (or is missing/malformed). Runs in the worker's background context, so it opens its
-    own management-DB session."""
-    if not (workspace_id and view_id):
-        return None
-    try:
-        return await _view_export_scope(workspace_id, data_source_id, view_id, branch_id)
-    except Exception:
-        logger.exception("view-scope resolution failed for export (view=%s)", view_id)
-        return None
-
-
-async def _view_export_scope(workspace_id, data_source_id, view_id, branch_id=None):
-    """:func:`_resolve_export_view_scope`'s work, raising on failure instead of failing open."""
+    Returns a scope dict; ``{"holds_nothing": True}`` when the view places nothing, whatever kind
+    of view it is (its export is refused, never widened to the whole data source); ``None`` when
+    the view is gone. Raises when the view can't be read: the export fails instead of failing open.
+    Runs in the worker's background context too, so it opens its own management-DB session."""
     from backend.app.db.engine import get_async_session
     from backend.app.db.models import ViewORM
     from backend.app.db.repositories.view_repo import effective_view_config
@@ -4070,7 +4060,7 @@ async def _view_export_scope(workspace_id, data_source_id, view_id, branch_id=No
         config = await view_members_repo.with_members(
             session, view.id, await effective_view_config(session, view, branch_id))
         cont = await _live_containment_types(session, workspace_id, data_source_id)
-    return export_scope_of(config, cont)
+    return export_scope_of(config, cont) or {"holds_nothing": True}
 
 
 def export_scope_of(config, containment_types: List[str]) -> Optional[Dict[str, Any]]:
@@ -4085,7 +4075,7 @@ def export_scope_of(config, containment_types: List[str]) -> Optional[Dict[str, 
     assigned = [u for u, a in layout.assignments.items() if a.get("layerId")]
     inherit = [u for u, a in layout.assignments.items() if a.get("inheritsChildren", True)]
     if not assigned:
-        return None             # nothing explicitly scoped → a view export takes the whole DS
+        return None             # nothing placed: a view export of it is refused, never widened
     return {"assigned_urns": assigned, "inherit_urns": inherit, "containment_types": containment_types}
 
 
@@ -5111,6 +5101,8 @@ async def create_export(
     _split = lambda v: [x.strip() for x in (v or "").split(",") if x.strip()]  # noqa: E731
     await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
                                user=user, claims=claims, session=session, svc=svc)
+    if view_id:
+        await _view_scope_or_refuse(ws_id, meta, view_id, branch_id)
     key = _callers_key(user, idempotency_key)
     job = await _job_for_key(ie, graph_id, key, "export")
     if job is None:
@@ -5167,7 +5159,25 @@ async def _check_export_access(
             raise HTTPException(status_code=422, detail={
                 "reason": "subset_matches_export",
                 "message": "A subset view shows its search's matches, not data of its own: export "
-                           "its matches from search instead (Export on one of its layers)."})
+                           "a layer's matches from its menu (Export this layer…), or export "
+                           "matches from search."})
+
+
+async def _view_scope_or_refuse(ws_id: str, meta: dict, view_id: str,
+                                branch_id: Optional[str]) -> Dict[str, Any]:
+    """The export scope of ``view_id`` (:func:`_view_export_scope`), for an export about to be
+    planned, streamed or started: a view that holds nothing is 422 ``view_holds_nothing`` whatever
+    kind of view it is, never an export of the whole data source in its name; one gone since its
+    access was checked, 404."""
+    from backend.app.services.versioning.import_export.service import VIEW_HOLDS_NOTHING
+
+    scope = await _view_export_scope(ws_id, meta.get("data_source_id"), view_id, branch_id)
+    if scope is None:
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    if scope.get("holds_nothing"):
+        raise HTTPException(status_code=422, detail={"reason": "view_holds_nothing",
+                                                     "message": VIEW_HOLDS_NOTHING})
+    return scope
 
 
 async def _export_selection(
@@ -5184,21 +5194,20 @@ async def _export_selection(
 
     await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
                                user=user, claims=claims, session=session, svc=svc)
+    scope = await _view_scope_or_refuse(ws_id, meta, view_id, branch_id) if view_id else None
     try:
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     keep, view = None, None
     if view_id:
-        scope = await _view_export_scope(ws_id, meta.get("data_source_id"), view_id, branch_id)
         view = {"viewId": view_id, "placements": 0, "found": 0, "entities": None}
-        if scope:
-            found = await stream.view_entities(snap, scope, budget_s=budget_s)
-            if found is None:
-                view.update(placements=len(set(scope["assigned_urns"])), found=None)
-                return snap, None, view
-            keep = found["keep"]
-            view.update(placements=found["placed"], found=found["found"], entities=len(keep))
+        found = await stream.view_entities(snap, scope, budget_s=budget_s)
+        if found is None:
+            view.update(placements=len(set(scope["assigned_urns"])), found=None)
+            return snap, None, view
+        keep = found["keep"]
+        view.update(placements=found["placed"], found=found["found"], entities=len(keep))
     selection = stream.Selection.of(keep=keep, ids=_split_list(ids), types=_split_list(types))
     return snap, selection, view
 

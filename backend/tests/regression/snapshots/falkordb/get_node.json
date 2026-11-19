@@ -5,7 +5,9 @@
   "entity_type": "dataset",
   "last_synced_at": "",
   "layer_assignment": "",
-  "properties": {},
+  "properties": {
+    "childCount": 0
+  },
   "qualified_name": "",
   "source_system": "",
   "tags": [],

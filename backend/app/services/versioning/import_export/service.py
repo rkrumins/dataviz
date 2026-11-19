@@ -47,6 +47,11 @@ from .uploads import PACKAGE_PREFIX
 
 logger = logging.getLogger(__name__)
 
+#: Why a view-scoped export of a view that holds nothing is refused: it is never widened to the
+#: whole data source in the view's name.
+VIEW_HOLDS_NOTHING = ("This view holds nothing yet, so there is nothing to export from it. Export the "
+                      "whole data source instead, or place entities in the view first.")
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -517,7 +522,7 @@ class ImportExportService:
         if mode == "replace" and view_id:
             if self._replace_scope_resolver is not None:
                 scope = await self._replace_scope_resolver(ws, ds, view_id, branch_id)
-            if not scope:
+            if not scope or scope.get("holds_nothing"):
                 raise ValueError("This view has nothing placed in it, so an import that replaces "
                                  "the view's contents has nothing it may delete. Nothing was imported.")
         ontology = None
@@ -743,10 +748,18 @@ class ImportExportService:
 
             package = PackageExport(options["package"], workspace_id=ws, data_source_id=ds)
             scope = await package.prepare(self._phase(lease))
-        elif view_id and self._scope_resolver is not None:
+        elif view_id:
             # Branch-effective: an export of a draft branch scopes to that
-            # draft's own view assignments (base ⊕ overlay).
-            scope = await self._scope_resolver(ws, ds, view_id, branch_id)
+            # draft's own view assignments (base ⊕ overlay). It fails closed: a view that holds
+            # nothing, is gone, or whose scope can't be read fails the job — never exports the
+            # whole data source in the view's name.
+            if self._scope_resolver is not None:
+                scope = await self._scope_resolver(ws, ds, view_id, branch_id)
+            if scope is None:
+                raise LookupError("The view this export takes its data from couldn't be read (it "
+                                  "may have been deleted), so nothing was exported.")
+            if scope.get("holds_nothing"):
+                raise ValueError(VIEW_HOLDS_NOTHING)
         return await ExportWorker(self._svc, self._store, scope=scope, options=options or {},
                                   package=package).run(job_id, lease=lease)
 

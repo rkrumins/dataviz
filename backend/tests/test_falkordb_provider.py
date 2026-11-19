@@ -46,6 +46,10 @@ async def falkordb_provider():
         graph_name=graph_name,
     )
     await provider._ensure_connected()
+    # The ontology's types, as ContextEngine hands them over (tests/regression/_runner.py): a
+    # provider that hasn't been told its containment types refuses the reads that need them.
+    provider.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    provider.set_resolved_edge_metadata({}, ["PRODUCES"])
     # Seed with minimal data
     nodes = [
         GraphNode(urn="urn:li:domain:test", entityType="domain", displayName="Test Domain"),
@@ -119,7 +123,7 @@ async def test_falkordb_get_stats(falkordb_provider):
 @skip_if_no_falkordb
 async def test_falkordb_get_schema_stats(falkordb_provider):
     stats = await falkordb_provider.get_schema_stats()
-    assert stats.totalNodes >= 3
-    assert stats.totalEdges >= 2
-    assert len(stats.entityTypeStats) > 0
-    assert len(stats.edgeTypeStats) > 0
+    assert stats.total_nodes >= 3
+    assert stats.total_edges >= 2
+    assert len(stats.entity_type_stats) > 0
+    assert len(stats.edge_type_stats) > 0

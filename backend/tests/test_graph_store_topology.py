@@ -29,6 +29,16 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def _no_fleet_snapshot(monkeypatch):
+    """No shared snapshot: one a running Redis kept from an earlier test (or another
+    process) would answer in place of the nodes a test stubs. ``bus`` gives a test one."""
+    async def _no_bus():
+        return None
+
+    monkeypatch.setattr(topology, "_shared_bus", _no_bus)
+
+
 # ── fakes ────────────────────────────────────────────────────────────────
 
 

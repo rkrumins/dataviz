@@ -126,6 +126,12 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "search_views", RESOURCE,
         "get_view_search", "update_view_search", "list_view_subsets",
     ),
+    # A view's saved narrowings, read. Not saving or deleting one: a narrowing is
+    # shared with everyone on the view, a person's choice to make.
+    **_entries(
+        "view_narrowings", RESOURCE,
+        "list_view_narrowings", "get_view_narrowing", "get_view_narrowing_held",
+    ),
     # Exporting view definitions to a file. Not the import side, nor view
     # packages: those write into graphs and data sources named only in the
     # body, which nothing here could hold to the key's selection.
@@ -174,6 +180,20 @@ SURFACE: dict[tuple[str, str], Rule] = {
     **_entries("canvas", RESOURCE, "canvas_bootstrap", "canvas_expand", reads_only=True),
     **_entries("graph_members", RESOURCE, "resolve_members", "plan_members", reads_only=True),
     **_entries("graph_view_feed", RESOURCE, "view_feed", reads_only=True),
+    # A list view's members and where a list or subset view draws entities, read in the
+    # view the request names.
+    **_entries("graph_view_members", RESOURCE, "view_members", reads_only=True),
+    **_entries("graph_view_placements", RESOURCE, "view_placements", reads_only=True),
+    # One layer of a list view as a file: readied in the view the request names, then
+    # downloaded with the token that names its view — which the handler reads as a
+    # browser session does (``can_read_view``), held to the key's selection.
+    **_entries("graph_view_members_export", RESOURCE, "export_view_members", reads_only=True),
+    **_entries("graph_view_members_export", FILTERED, "download_view_members"),
+    # A scope resolved in full, then listed and downloaded: each read on the graph the
+    # request reaches (a set kept for another is gone), its download by the token
+    # issued to the key's owner for that set.
+    **_entries("graph_member_sets", RESOURCE, "resolve_member_set", reads_only=True),
+    **_entries("graph_member_sets", RESOURCE, "list_member_set", "download_member_set"),
     **_entries("assignments", RESOURCE, "compute_assignments", reads_only=True),
     **_entries("graph_export", DATA_SOURCE, "plan_live_export", "stream_live_export"),
     # Workspace metadata read through the capability gate; changing it is

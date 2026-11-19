@@ -58,13 +58,31 @@ async def _stored(db_session, view_id):
 
 
 class TestTheSearchIsTheServers:
-    async def test_a_plain_create_drops_a_search_and_a_membership_sent_with_it(self, test_client, db_session):
+    @pytest.mark.parametrize("made_of", [
+        {"search": {"v": 1, "predicate": P, "within": "dataSource", "layout": "own"}},
+        {"membership": {"v": 1, "sources": []}},
+    ])
+    async def test_a_plain_create_refuses_a_search_or_a_membership_sent_with_it(
+        self, test_client, db_session, made_of,
+    ):
+        # Refused, not dropped: dropped, the view would be made as a different kind of view.
         ws = await _ws(test_client)
         resp = await test_client.post("/api/v1/views/", json={
             "name": "Sneaky", "workspaceId": ws, "viewType": "reference",
-            "config": {"search": {"v": 1, "predicate": P, "within": "dataSource", "layout": "own"},
-                       "membership": {"v": 1, "sources": []}, "content": {"entityScope": "all"}}})
-        assert resp.status_code == 201
+            "config": {**made_of, "content": {"entityScope": "all"}}})
+        assert resp.status_code == 422, resp.text
+        detail = resp.json()["detail"]
+        assert detail["reason"] == "made_by_its_route"
+        for route in ("POST /views/from-members", "POST /views/from-search", "POST /views/{id}/duplicate"):
+            assert route in detail["message"]
+        assert (await db_session.execute(select(ViewORM).where(ViewORM.name == "Sneaky"))).first() is None
+
+    async def test_a_plain_create_takes_a_null_search_or_membership_as_none(self, test_client, db_session):
+        ws = await _ws(test_client)
+        resp = await test_client.post("/api/v1/views/", json={
+            "name": "Plain", "workspaceId": ws, "viewType": "reference",
+            "config": {"search": None, "membership": None, "content": {"entityScope": "all"}}})
+        assert resp.status_code == 201, resp.text
         _row, config = await _stored(db_session, resp.json()["id"])
         assert "search" not in config and "membership" not in config
 
@@ -87,8 +105,13 @@ class TestLayouts:
         resp = await test_client.put(f"/api/v1/views/{sub['id']}/layout", json={
             "referenceLayout": {"layers": LAYERS, "assignments": {}}})
         assert resp.status_code == 422 and "base view" in resp.text
-        ok = await test_client.put(f"/api/v1/views/{sub['id']}/layout", json={
+        # A subset holds every match of its layers' types: a scope of placed entities only
+        # is refused (list_view_context_only), none at all or its own is kept.
+        curated = await test_client.put(f"/api/v1/views/{sub['id']}/layout", json={
             "referenceLayout": {"layers": [], "assignments": {}}, "entityScope": "curated"})
+        assert curated.status_code == 422 and curated.json()["detail"]["reason"] == "list_view_context_only"
+        ok = await test_client.put(f"/api/v1/views/{sub['id']}/layout", json={
+            "referenceLayout": {"layers": [], "assignments": {}}})
         assert ok.status_code == 200, ok.text
         _row, config = await _stored(db_session, sub["id"])
         assert config["content"]["entityScope"] == "all"
@@ -113,7 +136,7 @@ class TestLayouts:
         layers = [{"id": "a", "name": "Charts", "entityTypes": ["chart"]},
                   {"id": REST_LAYER_ID, "name": "Other", "showUnassigned": True}]
         resp = await test_client.put(f"/api/v1/views/{sub['id']}/layout", json={
-            "referenceLayout": {"layers": layers, "assignments": {}}, "entityScope": "curated"})
+            "referenceLayout": {"layers": layers, "assignments": {}}, "entityScope": "all"})
         assert resp.status_code == 200, resp.text
         _row, config = await _stored(db_session, sub["id"])
         assert [l["id"] for l in config["layout"]["referenceLayout"]["layers"]] == ["a", REST_LAYER_ID]

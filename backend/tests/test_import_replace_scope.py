@@ -106,6 +106,6 @@ async def test_an_upsert_never_asks_for_the_scope(job):
 
 def test_the_api_service_resolves_the_scope_failing_closed():
     """The factory (the transfer lane builds through it too) injects the resolver that raises on
-    failure, not the export's, which falls back to the whole data source."""
+    failure — the export's too: neither falls back to the whole data source."""
     svc = versioning_ep.get_import_export_service()
     assert svc._replace_scope_resolver is versioning_ep._view_export_scope

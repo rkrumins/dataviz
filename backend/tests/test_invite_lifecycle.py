@@ -701,16 +701,56 @@ def test_the_migration_and_the_orm_agree():
     """Tests build their schema with ``create_all`` (the ORM); production
     builds it with Alembic. Nothing forces the two to match, so a column
     added to one and not the other passes every test here and fails on
-    deploy. Apply the migration to a blank database and compare.
+    deploy. Run the migrations and compare the columns they make.
+
+    Run as Postgres runs them, as SQL that is never executed: SQLite
+    can't take ``ADD COLUMN IF NOT EXISTS``, which the chain writes so a
+    database ``create_all`` already built takes it too. The columns are
+    read off the operations the migrations ask for.
     """
+    import contextlib
     import importlib.util
+    import io
     from pathlib import Path
 
     import sqlalchemy as sa
     from alembic.migration import MigrationContext
-    from alembic.operations import Operations
+    from alembic.operations import Operations, ops
 
     from backend.app.db.models import InviteORM, InviteRedemptionORM
+
+    tables: dict[str, set[str]] = {}
+
+    def _record(operation) -> None:
+        """An operation a migration asks for, kept as the columns it leaves each table with."""
+        if isinstance(operation, ops.CreateTableOp):
+            tables[operation.table_name] = {
+                c.name for c in operation.columns if isinstance(c, sa.Column)}
+        elif isinstance(operation, ops.AddColumnOp):
+            tables[operation.table_name].add(operation.column.name)
+        elif isinstance(operation, ops.DropColumnOp):
+            tables[operation.table_name].discard(operation.column_name)
+        elif isinstance(operation, ops.DropTableOp):
+            tables.pop(operation.table_name, None)
+
+    @contextlib.contextmanager
+    def _offline():
+        """``op`` for the migration, each operation recorded and written as Postgres SQL to
+        nowhere."""
+        operations = Operations(MigrationContext.configure(
+            dialect_name="postgresql", opts={"as_sql": True, "output_buffer": io.StringIO()}))
+        invoke = operations.invoke
+
+        def recorded(operation):
+            _record(operation)
+            return invoke(operation)
+
+        operations.invoke = recorded
+        operations._install_proxy()
+        try:
+            yield
+        finally:
+            operations._remove_proxy()
 
     # Every migration touching these tables, in order. Append here when
     # you add another — that is the point of the test: a column added to
@@ -728,27 +768,24 @@ def test_the_migration_and_the_orm_agree():
         spec.loader.exec_module(mod)
         migrations.append(mod)
 
-    engine = sa.create_engine("sqlite://")
-    with engine.connect() as conn:
-        for mod in migrations:
-            with Operations.context(MigrationContext.configure(conn)):
-                mod.upgrade()
-        inspector = sa.inspect(conn)
+    for mod in migrations:
+        with _offline():
+            mod.upgrade()
 
-        for model in (InviteORM, InviteRedemptionORM):
-            migrated = {c["name"] for c in inspector.get_columns(model.__tablename__)}
-            declared = {c.name for c in model.__table__.columns}
-            assert migrated == declared, (
-                f"{model.__tablename__}: migration has {sorted(migrated - declared)} "
-                f"that the ORM does not; ORM has {sorted(declared - migrated)} "
-                f"that the migration does not"
-            )
+    for model in (InviteORM, InviteRedemptionORM):
+        migrated = tables.get(model.__tablename__, set())
+        declared = {c.name for c in model.__table__.columns}
+        assert migrated == declared, (
+            f"{model.__tablename__}: migration has {sorted(migrated - declared)} "
+            f"that the ORM does not; ORM has {sorted(declared - migrated)} "
+            f"that the migration does not"
+        )
 
-        # And it must roll back cleanly, or a bad deploy cannot be undone.
-        for mod in reversed(migrations):
-            with Operations.context(MigrationContext.configure(conn)):
-                mod.downgrade()
-        assert "invites" not in sa.inspect(conn).get_table_names()
+    # And it must roll back cleanly, or a bad deploy cannot be undone.
+    for mod in reversed(migrations):
+        with _offline():
+            mod.downgrade()
+    assert "invites" not in tables and "invite_redemptions" not in tables
 
 
 def test_corrupt_group_json_does_not_take_down_a_signup():
