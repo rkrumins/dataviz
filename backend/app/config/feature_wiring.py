@@ -824,6 +824,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /views/from-members — makes a list view of a narrowing",
             ("GET/PUT /views/{id}/membership, POST /views/{id}/membership/members and "
              "/views/{id}/membership/refresh — a list view's members and its updates"),
+            ("GET/PUT/DELETE /views/{id}/narrowings — narrowings saved with a view, and the "
+             "URNs each held"),
             ("GET /views/{id}/subsets — with searchViewsEnabled, either lists a view's subsets "
              "(a list view that follows it is one)"),
         ),
