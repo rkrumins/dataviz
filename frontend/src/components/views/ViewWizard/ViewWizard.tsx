@@ -1205,6 +1205,11 @@ function ViewWizardBody({
         if (mode !== 'edit' || !fullViewQuery.data) return null
         return viewToViewConfig(fullViewQuery.data)
     }, [mode, fullViewQuery.data])
+    // A view made from a query is a Context View whose members the server places in its layers,
+    // and a subset view's layers and scope come from its search: each keeps the layout it has.
+    // Neither is offered another layout type, nor its scope or placements to edit.
+    const madeFromQuery = mode === 'edit' && !!editingView?.membership
+    const keepsItsLayout = madeFromQuery || (mode === 'edit' && !!editingView?.search)
 
     const [currentStep, setCurrentStep] = useState<WizardStep>('basics')
     const [isSubmitting, setIsSubmitting] = useState(false)
@@ -1220,6 +1225,8 @@ function ViewWizardBody({
         provision: 'pending', create: 'pending', layout: 'pending', import: 'pending', publication: 'pending',
     })
     const [submitError, setSubmitError] = useState<string | null>(null)
+    /** Why an edit's save didn't go through, in words. */
+    const [saveError, setSaveError] = useState<string | null>(null)
     /** A free graph name the server handed back after a late collision (blank models). */
     const [nameConflict, setNameConflict] = useState<string | null>(null)
     // The saved view, held until the user actually leaves the success step.
@@ -1238,11 +1245,13 @@ function ViewWizardBody({
     // own write triggers one) must not reset them. The tags it was filled with
     // are kept, so that a save sends tags only when they were changed here.
     const hydratedTagsRef = useRef<string[] | null>(null)
+    const hydratedLayersRef = useRef<ViewLayerConfig[] | null>(null)
     const formEditedRef = useRef(false)
     useEffect(() => {
         if (mode === 'edit' && editingView && !(hydratedTagsRef.current && formEditedRef.current)) {
             hydratedTagsRef.current = editingView.tags ?? []
             const { layers, assignments, defaultNodeSortMode } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
+            hydratedLayersRef.current = layers
             setFormData({
                 name: editingView.name,
                 description: editingView.description ?? '',
@@ -1290,6 +1299,7 @@ function ViewWizardBody({
             setDriftDismissed(false)
             setPhase('steps')
             setSubmitError(null)
+            setSaveError(null)
             setStageStates({ provision: 'pending', create: 'pending', layout: 'pending', import: 'pending', publication: 'pending' })
             clearSelection()
             clearAssignments()
@@ -1350,6 +1360,17 @@ function ViewWizardBody({
                 { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
             ]
         }
+        // A view made from a query: its details and who can see it, and how its own layers look —
+        // none when it follows another view, whose layers they are. Its members are placed by its
+        // query, so there is no scope or placement to choose.
+        if (mode === 'edit' && editingView?.membership) {
+            const ownLayers = normalizeReferenceLayout(editingView.layout?.referenceLayout).layers.length > 0
+            return [
+                { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
+                ...(ownLayers ? [{ id: 'layout' as const, label: 'Layers', icon: <LayoutTemplate className="w-4 h-4" /> }] : []),
+                { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
+            ]
+        }
         const steps: StepDef[] = []
         // In create mode, scope is step 0 (handled externally) — include it for the stepper
         if (mode === 'create') {
@@ -1369,7 +1390,8 @@ function ViewWizardBody({
         }
         steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [formData.layoutType, mode, isBlank, isImport, isImportUpdate, importWithData, importBuildable, editingView?.search])
+    }, [formData.layoutType, mode, isBlank, isImport, isImportUpdate, importWithData, importBuildable, editingView?.search,
+        editingView?.membership, editingView?.layout?.referenceLayout])
 
     const currentStepIndex = activeSteps.findIndex(s => s.id === currentStep)
     const isLastStep = currentStepIndex === activeSteps.length - 1
@@ -1592,6 +1614,7 @@ function ViewWizardBody({
         }
         setIsSubmitting(true)
         setProvisionError(null)
+        setSaveError(null)
         // Enterprise was chosen by someone who can't grant it: create at the
         // widest tier they can set, then ask on their behalf.
         const wantsPublication = formData.visibility === 'enterprise' && !canPublishHere
@@ -1770,7 +1793,10 @@ function ViewWizardBody({
                     name: formData.name,
                     description: formData.description,
                     icon: formData.icon,
-                    layoutType: formData.layoutType,
+                    // A view made from a query, or a subset, stays the Context View it is.
+                    layoutType: keepsItsLayout && editingView
+                        ? editingView.layout.type as 'graph' | 'hierarchy' | 'reference'
+                        : formData.layoutType,
                     layers: normalizedLayout.layers,
                     visibleEntityTypes: formData.visibleEntityTypes,
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
@@ -1807,7 +1833,16 @@ function ViewWizardBody({
                         )
                     }
                 }
+                if (!result.success) setSaveError(saveErrorText(result.error))
                 if (result.success && result.data) {
+                    // Its layout is its query's or its search's: written only when its own layers
+                    // were restyled here, and then only them — its placements and everything else
+                    // the layout carries go back as stored, and its scope not at all.
+                    if (keepsItsLayout && sameJson(formData.layers, hydratedLayersRef.current ?? [])) {
+                        onComplete?.(result.data)
+                        onClose()
+                        return
+                    }
                     // A scope PINNED in this wizard session wins (the user just chose a
                     // rule-driven layout); else preserve an explicit
                     // editingView.content.entityScope; else derive from the submitted
@@ -1830,10 +1865,13 @@ function ViewWizardBody({
                         Object.entries((editingView?.layout?.referenceLayout ?? {}) as Record<string, unknown>)
                             .filter(([key]) => key !== 'layers' && key !== 'assignments' && key !== 'defaultNodeSortMode'),
                     )
+                    const stored = (editingView?.layout?.referenceLayout ?? {}) as Record<string, unknown>
+                        & { assignments?: Record<string, LayerAssignmentEntry> }
                     try {
                         const layoutResult = await updateViewLayout(viewId, {
-                            referenceLayout: { ...priorSideFields, ...normalizedLayout },
-                            entityScope,
+                            ...(keepsItsLayout
+                                ? { referenceLayout: { ...stored, layers: formData.layers, assignments: stored.assignments ?? {} } }
+                                : { referenceLayout: { ...priorSideFields, ...normalizedLayout }, entityScope }),
                             // A deliberate save is a version of the view; on a draft it waits
                             // for the draft to be published.
                             ...(branchId ? {} : { checkpoint: { source: 'wizard' as const } }),
@@ -1847,13 +1885,14 @@ function ViewWizardBody({
                         // open (isSubmitting resets below) so the user can retry rather than
                         // silently losing their layer/assignment edits.
                         console.error('[ViewWizard] updateViewLayout failed after update', err)
+                        setSaveError(saveErrorText(err instanceof Error ? err.message : undefined))
                     }
                 }
             }
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, fullViewQuery.data, editingView, clearDraft, canPublishHere, notify, isImport, handleImportSubmit])
+    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, fullViewQuery.data, editingView, keepsItsLayout, clearDraft, canPublishHere, notify, isImport, handleImportSubmit])
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
         markDirty()
@@ -2124,6 +2163,16 @@ function ViewWizardBody({
                 </div>
             )}
 
+            {saveError && (
+                <div role="alert" className="mb-6 flex items-start gap-3 rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3">
+                    <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-red-700 dark:text-red-300">Couldn't save the view</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">{saveError}</p>
+                    </div>
+                </div>
+            )}
+
             {/* Resume an autosaved draft for this exact scope. */}
             {pendingDraft && !isImport && (
                 <div className="mb-6 flex items-center gap-3 rounded-xl border border-blue-500/20 bg-blue-500/5 px-4 py-3">
@@ -2192,6 +2241,12 @@ function ViewWizardBody({
                     layers come from, from the <span className="font-medium text-ink">Subset of</span> chip in its header.
                 </p>
             )}
+            {currentStep === 'basics' && madeFromQuery && (
+                <p role="note" className="mb-4 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-4 py-3 text-[12.5px] leading-snug text-ink-muted">
+                    This view is made from a query: its query decides what it holds and the layer each member goes in,
+                    so it is always a Context View. Change its query from the chip in its header.
+                </p>
+            )}
             {currentStep === 'basics' && (
                 <BasicsStep
                     formData={formData}
@@ -2227,6 +2282,7 @@ function ViewWizardBody({
                     initialTemplateId={startTemplateApplied ? undefined : startTemplateId}
                     onInitialTemplateApplied={markStartTemplateApplied}
                     workspaceDefault={workspaceDefault}
+                    lookOnly={madeFromQuery}
                 />
             )}
             {currentStep === 'assignment' && (
@@ -2286,6 +2342,7 @@ function ViewWizardBody({
                         formData={formData}
                         scopeContext={scopeContext}
                         viewEntityScope={editingView?.content?.entityScope}
+                        madeFromQuery={madeFromQuery}
                     />
                 </>
             )}
@@ -2299,6 +2356,16 @@ function ViewWizardBody({
 // ============================================
 // Helpers
 // ============================================
+
+/** A save the server refused, in words. A view made from a query, or a subset, is a Context View
+ *  whatever a save asks: the server refuses another layout type or scope for it
+ *  (`list_view_context_only`), and says why — or, when its reply carries no words, this does. */
+function saveErrorText(message: string | undefined): string {
+    if (message?.includes('list_view_context_only')) {
+        return 'A view made from a query, or a subset, can only be a Context View: its layout type and scope stay as they are.'
+    }
+    return message || 'The view could not be saved. Please try again.'
+}
 
 function buildScopeContext(
     workspaces: ReturnType<typeof useWorkspacesStore.getState>['workspaces'],

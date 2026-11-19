@@ -46,6 +46,8 @@ interface PreviewStepProps {
     /** The scope the view being EDITED already stores. Ranks below a choice made
      *  in this session and above the derivation — the order the save applies. */
     viewEntityScope?: 'all' | 'curated'
+    /** A view made from a query: it shows the members its query reaches, not entities placed here. */
+    madeFromQuery?: boolean
 }
 
 // ============================================
@@ -56,7 +58,7 @@ interface PreviewStepProps {
 // a tenth private copy, which is how the review step ended up announcing
 // "Enterprise" with a green tick and no word about what that does.
 
-export function PreviewStep({ formData, scopeContext, viewEntityScope }: PreviewStepProps) {
+export function PreviewStep({ formData, scopeContext, viewEntityScope, madeFromQuery }: PreviewStepProps) {
     const schema = useSchemaStore(s => s.schema)
     const { appName } = useBrand()
     const activeWorkspace = useWorkspacesStore(s => s.getActiveWorkspace())
@@ -258,14 +260,18 @@ export function PreviewStep({ formData, scopeContext, viewEntityScope }: Preview
                                         What it shows
                                     </p>
                                     <p className="font-semibold text-slate-800 dark:text-slate-200">
-                                        {isOpenScope
-                                            ? 'Everything that matches your columns'
-                                            : `Only the ${placedCount} ${placedCount === 1 ? 'entity' : 'entities'} you placed`}
+                                        {madeFromQuery
+                                            ? 'The members its query reaches'
+                                            : isOpenScope
+                                                ? 'Everything that matches your columns'
+                                                : `Only the ${placedCount} ${placedCount === 1 ? 'entity' : 'entities'} you placed`}
                                     </p>
                                     <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                                        {isOpenScope
-                                            ? 'Entities added to the source later appear on their own, in the column their type belongs to.'
-                                            : 'Everything else stays out, including entities added to the source later. Their children come along with them.'}
+                                        {madeFromQuery
+                                            ? 'Each member is placed in its layer by the query; saving here leaves what it holds as it is.'
+                                            : isOpenScope
+                                                ? 'Entities added to the source later appear on their own, in the column their type belongs to.'
+                                                : 'Everything else stays out, including entities added to the source later. Their children come along with them.'}
                                     </p>
                                 </div>
                             </div>
