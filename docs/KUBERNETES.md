@@ -606,8 +606,11 @@ shows the volume mounted there.
 
 ## Upgrade and roll back
 
-Take a database backup before every upgrade — Cloud SQL backups for managed Postgres; see
-[Runbooks](/docs/runbooks#back-up-and-restore).
+Take a database backup before every upgrade. The Helm chart does this itself (below). Otherwise use
+Cloud SQL backups for managed Postgres; see [Runbooks](/docs/runbooks#back-up-and-restore).
+
+Before upgrading, `synodic-upgrade plan` (in the `synodic-upgrade` image, with the release's
+database settings) says what the upgrade would do, changing nothing.
 
 **Kustomize:**
 
@@ -632,7 +635,31 @@ To roll back, apply the previous tag the same way:
    ```
 
    The schema Job runs first, as a pre-upgrade hook; the new pods start once it has finished.
+   Just before it, `dataviz-db-backup` dumps the database, when the upgrade would run a migration.
 3. [Verify](#verify-the-deployment).
+
+**The Helm chart's pre-upgrade backup** (`backup:` in `values.yaml`, on by default):
+- **When:** on every `helm upgrade` that would run a migration, before the schema Job. A deploy that migrates nothing makes no dump.
+- **Where:** the `dataviz-db-backups` volume, which keeps the newest `backup.keep` dumps (5) and is kept on uninstall.
+  - It needs a default StorageClass, or `backup.volume.storageClass`.
+  - The upgrade that first creates the volume has nowhere to write yet, so it skips its backup, unless a bucket is set.
+- **Also to a bucket:** `backup.bucket.name`, S3-compatible.
+  - GCS: `endpointUrl: https://storage.googleapis.com`, with HMAC keys.
+  - `backup.bucket.existingSecret` names a Secret with `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+  - Set retention with the bucket's lifecycle rule.
+- **A failed dump stops the upgrade:** the schema Job doesn't run without a backup.
+- **A large database** can take longer to dump than `helm upgrade` waits (5 minutes by default): raise `--timeout`.
+- **Behind a transaction pooler:** if `MANAGEMENT_DB_URL` goes through one (Cloud SQL managed pooling in transaction mode), add `BACKUP_DATABASE_URL`, a direct connection, to the Secret; `pg_dump` can't use a pooler.
+- **Off:** `backup.enabled=false`.
+
+**Restore a backup** to roll back a migration, from a pod that mounts the volume or holds the dump:
+
+```bash
+pg_restore --clean --if-exists --no-owner --dbname "$DATABASE_URL" <dump>
+```
+
+Then roll the release back (`helm rollback`) to the one the dump was taken with, or a newer one. A
+dump is named `<database>-<when>-to-<revision>.dump`, after the head the upgrade was taking it to.
 
 To roll back: `helm rollback dataviz <revision> -n <namespace>`.
 

@@ -74,6 +74,11 @@ jobs:
       - name: Production stops on an unplaced stamp; dev's presets recover it
         run: python -m pytest backend/tests/test_upgrade_presets.py -q --noconftest
 
+      # Helm's pre-upgrade backup: between the bootstrap and the upgrade, and never blocking a
+      # deploy for an older image or nowhere to write.
+      - name: The pre-upgrade backup runs where it must
+        run: python -m pytest backend/tests/test_helm_backup.py -q --noconftest
+
       # 3. THE ADDITIVE MIRROR. `init_aggregation_db` and the alembic chain are
       #    two halves of one contract, and the comments in each said "mirrored"
       #    while nothing checked it. `observed_cell_ratio` shipped with a

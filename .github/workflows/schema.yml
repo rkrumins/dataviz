@@ -208,10 +208,10 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
       - name: Install dependencies
-        run: pip install --disable-pip-version-check -r backend/requirements.txt
+        run: pip install --disable-pip-version-check -r backend/requirements.txt -r backend/requirements-test.txt
       - name: The upgrade Job's paths
         working-directory: backend
-        run: python -m pytest tests/test_upgrade_foreign_stamps.py -q -ra
+        run: python -m pytest tests/test_upgrade_foreign_stamps.py tests/test_upgrade_extras.py -q -ra
 
   chain-replay:
     name: The migration chain still replays from empty

@@ -311,6 +311,33 @@ upgrade:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
 
+# ── Pre-upgrade database backup (synodic-upgrade backup) ─────────────
+# A pg_dump of the database just before the schema upgrade changes it, as a pre-upgrade hook
+# (templates/db-backup.yaml): only when the upgrade would run a migration, so a deploy that
+# migrates nothing costs nothing. Restoring the dump is the rollback for a bad migration.
+# Raise `helm upgrade --timeout` (5m by default) for a database that takes longer to dump.
+backup:
+  enabled: true
+  keep: 5                       # dumps kept on the volume
+  timeoutSeconds: 3600
+  resources: {}
+  # A volume of its own, kept on uninstall. Needs a default StorageClass, or storageClass here.
+  # The upgrade that first creates it has nowhere to write yet: it skips, unless a bucket is set.
+  volume:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  # Also copy each dump to an S3-compatible bucket (GCS: endpointUrl https://storage.googleapis.com
+  # and HMAC keys). existingSecret holds AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY; retention is the
+  # bucket's lifecycle rule. A pooler-fronted MANAGEMENT_DB_URL: add BACKUP_DATABASE_URL, a direct
+  # connection, to the Secret.
+  bucket:
+    name: ""
+    prefix: synodic-db-backups
+    endpointUrl: ""
+    region: ""
+    existingSecret: ""
+
 # ── Boot ordering ─────────────────────────────────────────────────────
 # Adds a wait-for-controlplane initContainer to viz/worker/stats so the
 # singleton control plane finishes Alembic + creates the aggregation schema

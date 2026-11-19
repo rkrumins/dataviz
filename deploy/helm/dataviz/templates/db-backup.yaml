@@ -1,0 +1,98 @@
+{{- /*
+synodic-upgrade backup — a pg_dump of the database just before the schema upgrade (weight 5)
+changes it, on pre-upgrade only: a first install has nothing to back up.
+
+  0  →  dataviz-db-init
+  3  →  dataviz-db-backup   ← THIS (only when the upgrade would change something)
+  5  →  dataviz-upgrade
+
+The decision is the upgrade Job's own (`synodic-upgrade plan`): no pending migration, no dump, so a
+deploy that migrates nothing costs nothing. A dump that fails fails this hook, and the upgrade
+doesn't run without one. It never blocks a deploy for want of somewhere to write: an image older
+than backups, or the upgrade that first creates the volume with no bucket set, skips with a log
+line. Restoring a dump is the rollback for a bad migration (docs/KUBERNETES.md).
+*/ -}}
+{{- $b := default (dict) .Values.backup -}}
+{{- $vol := default (dict) $b.volume -}}
+{{- $bucket := default (dict) $b.bucket -}}
+{{- if and .Values.upgrade.enabled (ne (toString $b.enabled) "false") }}
+{{- $useVolume := ne (toString $vol.enabled) "false" -}}
+{{- $volumeExists := and $useVolume (lookup "v1" "PersistentVolumeClaim" .Release.Namespace "dataviz-db-backups") -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dataviz-db-backup
+  labels:
+    {{- include "dataviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-backup
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "3"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ $b.timeoutSeconds | default 3600 }}
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "dataviz.labels" . | nindent 8 }}
+        app.kubernetes.io/component: db-backup
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 1000                   # so the image's non-root user can write the volume
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backup
+          image: {{ include "dataviz.image" (dict "ctx" $ "name" "synodic-upgrade") | quote }}
+          imagePullPolicy: {{ .Values.upgrade.pullPolicy | default "Always" }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              if ! grep -q "def cmd_backup" /app/backend/scripts/upgrade.py; then
+                echo "This upgrade image predates backups: no backup this time."; exit 0
+              fi
+              {{- if not (or $volumeExists $bucket.name) }}
+              echo "No backup volume yet (this release creates it) and no bucket set: no backup this time."
+              exit 0
+              {{- end }}
+              exec python -m backend.scripts.upgrade backup --dir /backups --keep {{ $b.keep | default 5 }}
+              {{- with $bucket.name }} --bucket {{ . | quote }}{{ end }}
+              {{- with $bucket.prefix }} --prefix {{ . | quote }}{{ end }}
+              {{- with $bucket.endpointUrl }} --endpoint-url {{ . | quote }}{{ end }}
+              {{- with $bucket.region }} --region {{ . | quote }}{{ end }}
+          envFrom:
+            - configMapRef:
+                name: dataviz-config
+            - secretRef:
+                name: {{ include "dataviz.secretName" . }}
+            {{- with $bucket.existingSecret }}
+            - secretRef:
+                name: {{ . }}           # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+            {{- end }}
+          # The same decision the upgrade Job makes.
+          env:
+            - name: SYNODIC_SHARED_DATABASE
+              value: {{ ne (toString .Values.upgrade.sharedDatabase) "false" | quote }}
+            - name: SYNODIC_UPGRADE_RECOVER
+              value: {{ eq (toString .Values.upgrade.recoverForeignStamps) "true" | quote }}
+          volumeMounts:
+            - name: backups
+              mountPath: /backups
+          {{- with $b.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: backups
+          {{- if $volumeExists }}
+          persistentVolumeClaim:
+            claimName: dataviz-db-backups
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

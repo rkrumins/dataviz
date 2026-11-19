@@ -92,11 +92,19 @@ Verified on 2026-08-18: a database installed by an image nine days stale (stampe
 `20260802_1000_open_publish`, missing `providers` / `workspaces.identity_property`) took six
 revisions to head under a current image and came out `verify-schema`-clean.
 
-One thing re-running does **not** restore: `seed_reference_data` runs only on the virgin install,
-and nothing re-seeds afterwards. Permissions, system roles and grants added to
-`backend/app/config/rbac_seed.py` after a database was created never reach it, and no migration
-inserts them either. The function is idempotent (`ON CONFLICT DO NOTHING`) and reports rows
-actually written, so it is safe to call on every upgrade — it simply is not called today.
+Built-in reference data reaches existing databases too. `seed_reference_data` writes the RBAC rows
+on the virgin install. After every upgrade, `reconcile_reference_data` adds the permissions, system
+roles and grants from `backend/app/config/rbac_seed.py` that the database hasn't had yet, and
+records each in `reference_data_applied`, so it is added once:
+- **An admin's removal stays.** An admin can remove a grant from a built-in role (Admin →
+  Permissions). Once recorded, an entry is never added again, so the removal survives every upgrade.
+  Re-running the seeder instead would put it back.
+- **The first run on an existing database** can't tell a grant that was never made from one an admin
+  removed. It adds a missing grant only when its role or permission is new in that same run, and
+  reports the rest. Admin → Permissions → Reset to default restores a role's built-in grants.
+- **A built-in role whose name a custom role already has** gets none of its grants, with a warning.
+
+Anything it adds or reports is logged, and recorded in `alembic_history` as `seeded`.
 
 ## Writing a migration
 
@@ -256,6 +264,34 @@ python -m backend.scripts.other_lines
 - `20261113_1000_gv_ps_served_fill` … `20261113_1400_gv_ps_candidate` came into `main` this way, from #670.
 - `20261119_1400_merge_ps_build` joins them.
 
+## Seeing what an upgrade would do first
+
+`synodic-upgrade plan` reads the database and changes nothing: no lock, no writes. It reports what `upgrade` would do, because the decision is the Job's own (`backend/app/db/schema_plan.py`):
+- **The verdict:** refused (and why), a fresh install, up to date, or an upgrade.
+- **Placement:** for a database another build stamped, where it would be placed, and how.
+- **The migrations** an upgrade would run, in the order it would run them.
+- **What to know first:** a migration changed since it ran, a placement left unchecked, an unrecorded build on a shared database.
+
+It takes the same `--recover`, `--shared-database` and `--rewind-to` as `upgrade`, reads the same variables, and exits 1 when the upgrade would refuse. `--json` prints the plan for a script or a pipeline.
+
+Super-admins see the same from the app: **Admin → Infrastructure → Database schema**, read live from the database (`GET /api/v1/admin/system/schema`). It shows:
+- the applied revisions, against this server's head;
+- the build the server was made from;
+- what an upgrade with this build would do;
+- warnings, and built-in grants the database doesn't have;
+- the recent `alembic_history`: what ran or was stamped, placed and checked, changed, or seeded.
+
+## A backup before every migration
+
+`synodic-upgrade backup --dir DIR` dumps the database (`pg_dump`, custom format) before an upgrade changes it:
+- **Only when there's something to change:** only when `plan` says the upgrade would run something. `--force` dumps anyway.
+- **Never half-written:** the dump is written beside its final name, and moved there once `pg_restore` reads it back.
+- **Old dumps go:** it keeps the newest `--keep` (5).
+- **A bucket copy:** with `--bucket`, it also copies the dump to an S3-compatible bucket.
+- **Failure stops the upgrade:** a failed dump exits 1, so a pre-upgrade hook stops the upgrade instead of migrating without one.
+
+The Helm chart runs it as a hook before the schema Job ([Deploying on Kubernetes](/docs/kubernetes)). Restoring the dump (`pg_restore --clean --if-exists`) is the rollback for a bad migration.
+
 ## Only builds from main migrate a shared database
 
 A branch's build that migrates a database others use stamps it with revisions `main` may never have. That is how every foreign stamp above came about. So the Job holds a shared database to `main`:
@@ -280,6 +316,8 @@ This is not the old recovery. `env.py` used to "recover" by stamping back to `00
 ## Commands
 
 ```bash
+synodic-upgrade plan                       # what `upgrade` would do now, changing nothing (--json; exit 1 if it would refuse)
+synodic-upgrade backup --dir DIR           # pg_dump first, when an upgrade would change something (--force: always)
 synodic-upgrade upgrade                    # to every head (fast path on a virgin database)
 synodic-upgrade upgrade --no-fast-path     # force the chain even on a virgin database
 synodic-upgrade upgrade --rewind-to REV    # a database another build moved on: place it at REV first

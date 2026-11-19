@@ -163,7 +163,7 @@ The Postgres database that holds users, workspaces, views and settings. Per-role
 | Variable | Default | Description | Read in |
 |---|---|---|---|
 | `CREDENTIAL_ENCRYPTION_KEY` | — (secret, set your own) | Fernet key that encrypts the credentials stored for data sources and identity providers. Unset, credentials are stored unencrypted, except with `ENV=production`, where saving one fails instead. | `backend/app/db/repositories/connection_repo.py` |
-| `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:***@localhost:5432/synodic` / required / — *(differs by call site)* | Address of the management database: a Postgres URL starting with `postgresql+asyncpg://`. Unset, processes fall back to the local development database. | `backend/alembic/env.py`, `backend/app/db/engine.py`, `backend/app/services/system_status/probes.py` +4 more |
+| `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:***@localhost:5432/synodic` / required / — *(differs by call site)* | Address of the management database: a Postgres URL starting with `postgresql+asyncpg://`. Unset, processes fall back to the local development database. | `backend/alembic/env.py`, `backend/app/db/engine.py`, `backend/app/services/system_status/probes.py` +5 more |
 
 ### Internal tuning
 
@@ -182,8 +182,9 @@ The Postgres database that holds users, workspaces, views and settings. Per-role
 | `MIGRATION_LOCK_TIMEOUT` | `10s` | `backend/alembic/env.py` |
 | `MIGRATION_SQL_LOG` | — | `backend/alembic/env.py` |
 | `MIGRATION_STATEMENT_TIMEOUT` | `0` | `backend/alembic/env.py` |
-| `SYNODIC_BUILD_REF` | `?` / — *(differs by call site)* | `backend/app/db/migration_records.py`, `backend/scripts/upgrade.py` |
-| `SYNODIC_BUILD_SHA` | — | `backend/app/db/migration_records.py`, `backend/scripts/upgrade.py` |
+| `SYNODIC_BUILD_ON_MAIN` | — | `backend/app/db/schema_plan.py` |
+| `SYNODIC_BUILD_REF` | `?` / — *(differs by call site)* | `backend/app/db/migration_records.py`, `backend/app/db/schema_plan.py` |
+| `SYNODIC_BUILD_SHA` | — | `backend/app/db/migration_records.py`, `backend/app/db/schema_plan.py` |
 | `VIEWS_BATCH_ENRICH` | `true` | `backend/app/db/repositories/view_repo.py` |
 
 ## Redis
@@ -883,6 +884,7 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | Variable | Default | Read in |
 |---|---|---|
 | `AGG_CONTROL_PLANE` | `http://localhost:8091` | `backend/scripts/rematerialize_all_graphs.py` |
+| `BACKUP_DATABASE_URL` | — | `backend/scripts/upgrade.py` |
 | `DATAVIZ_SKIP_LOAD_SIGNAL` | — | `backend/scripts/signal_data_changed.py` |
 | `FALKORDB_GRAPH_NAME` | `nexus_lineage` / `nexus` *(differs by call site)* | `backend/scripts/add_column_lineage.py`, `backend/scripts/docker_seed.py`, `backend/scripts/optimize_falkordb.py` +1 more |
 | `LINEAGE_IMPORT_CHUNK` | `10000` | `backend/scripts/import_layered_lineage.py` |
@@ -900,7 +902,6 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | `SEED_SCENARIOS` | `finance,ecommerce` | `backend/scripts/docker_seed.py` |
 | `SYNODIC_API_KEY` | — (secret, set your own) | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_BASE_URL` | `http://localhost:8000` | `backend/scripts/publish_view_library.py` |
-| `SYNODIC_BUILD_ON_MAIN` | — | `backend/scripts/upgrade.py` |
 | `SYNODIC_EMAIL` | — | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_PASSWORD` | — (secret, set your own) | `backend/scripts/bench_versioning.py`, `backend/scripts/publish_view_library.py` |
 | `SYNODIC_SHARED_DATABASE` | — | `backend/scripts/upgrade.py` |
