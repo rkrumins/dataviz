@@ -206,6 +206,37 @@ async def test_a_subset_view_is_made_again_with_its_search(
     assert layers == [("Columns", ["column"], "#0f0"), ("Everything else", [], None)]
 
 
+# ── Asked again ─────────────────────────────────────────────────────────────
+
+
+async def test_the_same_key_carries_one_copy_on_and_no_key_makes_a_new_one(
+    test_client: AsyncClient, db_session: AsyncSession, graph, membership_on, subsets_on,
+):
+    """A copy of a large list view is worked out a step at a time (202: send it again): the
+    same ``Idempotency-Key`` carries that one copy on — and a copy sent again after no answer
+    is the one already made, never a second."""
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    listed = await list_view(test_client, ws, src)
+    subset_id = await subset(test_client, ws, await ordinary(test_client, ws))
+
+    async def copies() -> int:
+        return len((await db_session.execute(select(ViewORM.id).where(ViewORM.name.like("Copy of %")))).all())
+
+    for view_id in (listed, subset_id):
+        before = await copies()
+        key = {"Idempotency-Key": f"dup-{view_id}"}
+        first = await test_client.post(f"/api/v1/views/{view_id}/duplicate", headers=key)
+        assert first.status_code == 201, first.text
+        again = await test_client.post(f"/api/v1/views/{view_id}/duplicate", headers=key)
+        assert again.status_code in (200, 201), again.text
+        assert again.json()["view"]["id"] == first.json()["view"]["id"], "the copy already made"
+        assert await copies() == before + 1
+        fresh = await duplicate(test_client, view_id)
+        assert fresh.status_code == 201 and fresh.json()["view"]["id"] != first.json()["view"]["id"]
+        assert await copies() == before + 2
+
+
 # ── Who may ─────────────────────────────────────────────────────────────────
 
 

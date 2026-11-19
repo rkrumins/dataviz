@@ -6,7 +6,8 @@
   own steps (``view_membership.make_list_view``): the same definition, layout and mode, its
   layers and entries as they are, its members worked out afresh. It answers as that route
   does: 201 with how keeping it is going (maybe still ``updating``), or 202 while what its
-  sources reach is still being worked out — nothing is made then: send it again.
+  sources reach is still being worked out — nothing is made then: send it again, with the same
+  ``Idempotency-Key``, to carry on.
 * **A subset view** (``config.search``) — made through ``POST /views/from-search``, with the
   same search, base, layout and what it keeps beside its matches.
 
@@ -22,7 +23,7 @@ import json
 import uuid
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Body, Depends, Path, Response
+from fastapi import APIRouter, Body, Depends, Header, Path, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -101,8 +102,13 @@ async def duplicate_view(
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
     engine_scope: EngineScope = Depends(get_engine_scope),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key", max_length=128),
 ):
-    """Make a copy of a view: see the module docstring. 201 ``{view, membership?, search?}``."""
+    """Make a copy of a view: see the module docstring. 201 ``{view, membership?, search?}``.
+
+    ``Idempotency-Key`` carries one copy on: a view made from a query answered 202 is asked
+    again with the same key and carries on where it got to, and a list or subset copy sent
+    again after no answer is the one already made. Without one, each request is a new copy."""
     body = body or DuplicateRequest()
     actor = _user_id(user)
     row, _ = await _view(session, view_id, user, claims, edit=False)
@@ -118,8 +124,9 @@ async def duplicate_view(
         icon=config.get("icon") if isinstance(config.get("icon"), str) else None, tags=_tags(row),
         visibility=body.visibility, workspace_id=workspace_id, data_source_id=data_source_id,
     )
-    # A fresh request id each time: a copy is a new view, worked out afresh.
-    request_key = f"duplicate-{uuid.uuid4().hex}"
+    # The caller's key, bound to this view; without one, a fresh id: a new copy each time.
+    request_key = (f"duplicate:{row.id}:{idempotency_key}" if idempotency_key
+                   else f"duplicate-{uuid.uuid4().hex}")
     definition = read_definition(config)
 
     if definition is not None:

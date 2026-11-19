@@ -35,10 +35,10 @@ function invalidate(viewId: string) {
 }
 
 /** A backstop, not a budget: at ten seconds an ask, about five hours. */
-const RESOLVE_MAX_ASKS = 2_000
+export const RESOLVE_MAX_ASKS = 2_000
 
 /** Wait `ms`, or less if `signal` aborts (then reject as the fetch would). */
-function pause(ms: number, signal?: AbortSignal): Promise<void> {
+export function pause(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(signal.reason ?? new DOMException('Aborted', 'AbortError')); return }
     const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve() }, ms)
