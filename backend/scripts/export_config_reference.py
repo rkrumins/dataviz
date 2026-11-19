@@ -92,8 +92,15 @@ NOTES: dict[str, tuple[str, str | None]] = {
         None,
     ),
     "DEEP_SEARCH_VIEW_FEED_MAX_ROWS": (
-        "Rows one layer of a subset view lists on the canvas (at least 200). The rest are reached "
-        "by searching inside the layer, or by exporting it.",
+        "A ceiling on the rows one layer of a subset view lists on the canvas. `0` (the default) "
+        "sets none: a layer pages on, as the reader scrolls, to its last match. With a ceiling, "
+        "past it the page says `capped`, and the layer is searched or exported for the rest.",
+        None,
+    ),
+    "DEEP_SEARCH_VIEW_FEED_SESSION_ROWS": (
+        "Rows one scan of a subset view's layer keeps for the pages read from it (at least 50). "
+        "Past them, the next page starts a new scan where the last one ended, so a layer of any "
+        "size is read a scan at a time.",
         None,
     ),
     "GRAPH_CACHE_ENABLED_VIEW_FEED": (
@@ -157,9 +164,10 @@ NOTES: dict[str, tuple[str, str | None]] = {
         None,
     ),
     "VIEW_MEMBERS_FEED_MAX_ROWS": (
-        "Members one layer of a view made from a query lists on the canvas "
-        "(`POST /graph/view-members`); past them its page says `capped`, and the layer is searched "
-        "or exported for the rest.",
+        "A ceiling on the members one layer of a view made from a query lists on the canvas "
+        "(`POST /graph/view-members`). `0` (the default) sets none: a layer pages on, as the "
+        "reader scrolls, to its last member. With a ceiling, past it the page says `capped`, and "
+        "the layer is searched or exported for the rest.",
         None,
     ),
     "FAIR_SHARE_VIEW_FEED_RATE": (

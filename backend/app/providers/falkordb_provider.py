@@ -6804,7 +6804,8 @@ class FalkorDBProvider(GraphDataProvider):
         session's tally. See ``falkordb_search/engine.py``."""
         from .falkordb_search.engine import read_ancestor_counts
         await self._ensure_connected()
-        return await read_ancestor_counts(self, session_id, urns, scope_hash=context.scope_hash)
+        return await read_ancestor_counts(self, session_id, urns, scope_hash=context.scope_hash,
+                                          scope_hashes=context.scope_hashes)
 
     @_search_reads
     async def deep_search_resolve_refs(self, scope, refs, *, context, confined=False,

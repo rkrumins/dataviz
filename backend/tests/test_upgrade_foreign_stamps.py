@@ -285,7 +285,9 @@ def test_a_database_keeps_the_lineage_of_every_build_that_migrated_it(scratch_db
     assert f"its migration chain ends at ['{head}']" in out.stderr
     rows = dict(_sql(scratch_db, "SELECT revision, parents FROM alembic_lineage"))
     assert len(rows) == len(list(script.walk_revisions()))
-    assert rows[head] == ",".join(sorted(script.get_revision(head).down_revision))
+    parents = script.get_revision(head).down_revision
+    parents = (parents,) if isinstance(parents, str) else parents
+    assert rows[head] == ",".join(sorted(parents))
 
     # A build with a merge revision made by hand moved it on, and wrote its chain as it did:
     # no file or git ref has the revision, the database does.

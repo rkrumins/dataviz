@@ -1123,13 +1123,14 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
    an auto-updating view, the members are data, not design.
 
 4. Read it. Its layers page its members through `POST /api/v1/{ws}/graph/view-members`
-   (up to 5,000 a layer). Beside them:
+   (`limit` up to 1,000 a page), every member to the last: a page says `capped` only when an
+   operator has set `VIEW_MEMBERS_FEED_MAX_ROWS`. Beside them:
 
    | Route | Answers |
    |---|---|
-   | `POST /api/v1/{ws}/graph/view-placements?viewId=` with `{"urns": [...]}` (1–2,000) | Where the view draws each entity: `{placements: {urn: {layerId, source}}, epoch, dataVersion, digest}`. `source` is `member` (its row), `entry` (placed by hand), `whole` (inside a member kept whole), `layout` (where the view's layout — or the view it follows — puts it), `fallback`, or `none` (`layerId: null`: drawn nowhere). Also for subset views. `422 not_served_view` for any other view; `409 base_missing` when the view it follows is gone |
+   | `POST /api/v1/{ws}/graph/view-placements?viewId=` with `{"urns": [...]}` (1–2,000) | Where the view draws each entity: `{placements: {urn: {layerId, source, inLayer}}, epoch, dataVersion, digest}`. `source` is `member` (its row), `entry` (placed by hand), `whole` (inside a member kept whole), `inside` (inside a member, drawn under it in its layer), `layout` (where the view's layout — or the view it follows — puts it), `fallback`, or `none` (`layerId: null`: drawn nowhere). `inLayer`: how many of its containers it is drawn inside. With `"nodes": true` (at most 500 URNs, else `422 too_many_nodes`) it also answers `nodes: {urn: node}`, each one drawn in a layer as its layer's pages list it (`ancestorPath`, `inLayer`). Also for subset views. `422 not_served_view` for any other view; `409 base_missing` when the view it follows is gone |
    | `POST /api/v1/{ws}/graph/view-members/export?viewId=&layerId=` | One layer, ready to download: `{downloadToken, rows, epoch}`. The token is the caller's, for ten minutes |
-   | `GET /api/v1/{ws}/graph/view-members/download?token=&format=csv\|ndjson` | That layer's members, streamed: `urn, name, type, layer, via, hops, whole, parentUrn, parentName, parentType, path, pathUrns`. `403 link_expired` for a token that isn't the caller's or has expired; `410 epoch_gone` when the view has moved on — export again |
+   | `GET /api/v1/{ws}/graph/view-members/download?token=&format=csv\|ndjson` | That layer's members, streamed: `urn, name, type, layer, via, hops, whole, parentUrn, parentName, parentType, path, pathUrns`. `403 link_expired` for a token that isn't the caller's or has expired. When the view has moved on to a new answer since the export, it streams the answer readers see now; `X-Members-Epoch` says which |
 
    A layer filter (`{"kind": "layer", "layerAssignment": "<layer id>"}`) in a search of the
    view finds that layer's members. Inside `or`/`not`, or in a rule, it is a list of at most

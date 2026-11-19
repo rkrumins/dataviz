@@ -290,7 +290,7 @@ FalkorDB (and its drafts) only; other providers keep the honest refusal.
 | `MEMBER_SET_MAX_DURATION_S` | 7,200 | How long one set may take across all its requests; past it, `deadline`. |
 | `MEMBER_SET_TTL_HOURS` | 24 | How long a complete set is kept to be listed and downloaded. |
 | `LIVE_VIEW_MAX_MEMBERS` | 250,000 | Members one list view holds; past it, `over_cap`. |
-| `VIEW_MEMBERS_FEED_MAX_ROWS` | 5,000 | Members one layer of a list view lists on the canvas; past it, `capped`. |
+| `VIEW_MEMBERS_FEED_MAX_ROWS` | 5,000 | Members one layer of a list view lists on the canvas; past it, `capped`. Since [2026-11-19](RELEASE_NOTES_2026-11-19_subset-views-and-saved-narrowings.md), `0`: no ceiling unless an operator sets one. |
 
 In code: share links carry at most 25 seeds and 7,000 characters; a browser keeps 100 saved traces
 a view and snapshots of up to 500,000 rows.
@@ -317,12 +317,14 @@ a view and snapshots of up to 500,000 rows.
 * **The canvas's own Narrow still starts from a search's first 5,000 matches** and holds 50,000
   members; a view saved from it, and an export, start from every match.
 * **A layer lists 5,000 members on the canvas**; search the view, or export it, for the rest.
+  *Lifted on [2026-11-19](RELEASE_NOTES_2026-11-19_subset-views-and-saved-narrowings.md): a layer pages on to its last member.*
 * **Inside a view of more than 5,000 members**, a search reads the members themselves (and inside
   the ones kept whole), not inside every member. Facets other than "inside", Connections searches,
   the property catalog, explain and aggregate-only searches still refuse there, and say why.
 * **Saved traces are in one browser.** They do not follow a person between machines.
 * **URN seeds stay at 5,000 per spec** (a trace has at most 25); only query seeds are unlimited.
 * **Member sets are not on the API-key surface yet**, so scripts using an API key can't reach them.
+  *Lifted on [2026-11-19](RELEASE_NOTES_2026-11-19_subset-views-and-saved-narrowings.md): an API key reads them (writes stay off).*
 * **Edges inside a container seed** are kept only when both ends are members.
 * **A view that follows another** re-places its members on its next open after the followed view
   changes how it places things (it says **Waiting to update** meanwhile). Members can't be moved in
