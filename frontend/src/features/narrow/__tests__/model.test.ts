@@ -7,10 +7,12 @@ import {
   canonicalSpec,
   describeNarrow,
   layerDistribution,
+  narrowingRecord,
   NO_EXPANSION,
   PRESETS,
   presetOf,
   sameExpand,
+  savedText,
   seedsLabel,
   specFor,
   specKey,
@@ -139,5 +141,30 @@ describe('what the canvas draws', () => {
     const { layers: shares, elsewhere } = layerDistribution(r, (u) => layers[u])
     expect(shares).toEqual([{ layerId: 'gold', count: 1 }, { layerId: 'bronze', count: 1 }])
     expect(elsewhere).toBe(1)
+  })
+})
+
+describe('saved narrowings', () => {
+  it('says what is new and gone since it was saved — or only that it is saved', () => {
+    const at = '2026-11-03T10:00:00Z'
+    const day = new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+    expect(savedText({ name: 'A', savedAt: at })).toBe('Saved as “A”')
+    expect(savedText({ name: 'A', savedAt: at, since: { added: 1200, removed: 0, approximate: true } })).toBe(`“A” · about +1,200 new · −0 gone since ${day}`)
+    expect(savedText({ name: 'A', savedAt: at, since: { added: 0, removed: 0, approximate: false } })).toBe(`“A” · the same as on ${day}`)
+  })
+
+  it('saves what the server keeps of each part', () => {
+    const result = { specHash: 'h', members: [], wholeSubtree: [], chains: {}, missingSeeds: 0, dataVersion: 'd1', elapsedMs: 0,
+      counts: { seeds: 1, inside: 0, upstream: 0, downstream: 0, partnerInside: 0, total: 1 },
+      truncated: Array.from({ length: 30 }, () => ({ reason: 'deadline' as const, seen: 1, limit: 1 })) }
+    const seedNames = Object.fromEntries(Array.from({ length: 250 }, (_, i) => [`u${i}`, 'n'.repeat(200)]))
+    const out = narrowingRecord({ spec: specFor({ urns: ['u0'] }), seedsLabel: 'x'.repeat(600), seedNames, result }, 'Mine')
+    expect(out.name).toBe('Mine')
+    expect(out.seedsLabel).toHaveLength(500)
+    expect(Object.keys(out.seedNames!)).toHaveLength(200)
+    expect(out.seedNames!.u0).toHaveLength(120)
+    expect(out.truncated).toHaveLength(20)
+    expect(out.dataVersion).toBe('d1')
+    expect(out).not.toHaveProperty('held')
   })
 })

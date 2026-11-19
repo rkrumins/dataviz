@@ -33,6 +33,7 @@ import { ImportExportMenu, type ViewFileActions } from './ImportExportMenu'
 import { MoreMenu } from './MoreMenu'
 import { TraceHistoryPanel, type TraceHistoryPanelEntry } from './TraceHistoryPanel'
 import type { SavedTracesSectionProps } from '@/components/canvas/trace/SavedTracesSection'
+import { SavedNarrowingsButton, type SavedNarrowingsSectionProps } from '@/features/narrow/SavedNarrowingsSection'
 import { useFolded } from './toolbarFold'
 import { HoverTip } from '@/components/ui/HoverTip'
 
@@ -92,6 +93,8 @@ export interface ComprehensionToolsProps {
   onCopyTraceHistoryLink?: (index: number) => string | null
   /** The traces this reader saved in this view, listed in the launcher. */
   savedTraces?: SavedTracesSectionProps
+  /** Narrowings saved with the view: a button of their own while there are any. */
+  savedNarrowings?: SavedNarrowingsSectionProps
   /** Open the Lineage Lens on the current selection (same gating as
    *  Trace: a single non-logical entity). Optional — hosts that don't
    *  wire the lens show no button. */
@@ -162,6 +165,7 @@ export function ComprehensionTools({
   onClearTraceHistory,
   onCopyTraceHistoryLink,
   savedTraces,
+  savedNarrowings,
   onOpenLens,
   onOpenOrphans,
   onOpenHistory,
@@ -456,6 +460,8 @@ export function ComprehensionTools({
           )}
         </div>
       )}
+
+      {savedNarrowings && <SavedNarrowingsButton {...savedNarrowings} />}
 
       {/* Trace Depth — visible only during an active trace. Sits right
           next to the Trace toggle so the active scope (↑N upstream,

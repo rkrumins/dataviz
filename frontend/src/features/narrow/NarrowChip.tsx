@@ -4,7 +4,8 @@
  * A canvas showing part of a view must never pass for the whole of it: the chip
  * stays at the top for as long as the narrowing does, naming how many entities
  * it shows and what they are, with every limit the answer reached. From it the
- * narrowing can be changed, handed to someone else as a link, or put away.
+ * narrowing can be changed, saved with the view (a short link, and what is new and
+ * gone each time it is opened), exported, handed to someone else as a link, or put away.
  */
 import { useState } from 'react'
 import { motion } from 'framer-motion'
@@ -14,7 +15,7 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { MOTION } from '@/lib/motion'
 import { cn } from '@/lib/utils'
 
-import { canRetry, describeNarrow, truncationNotes } from './model'
+import { canRetry, describeNarrow, savedText, truncationNotes } from './model'
 import type { AppliedNarrow } from './narrowStore'
 
 export interface NarrowChipProps {
@@ -28,6 +29,11 @@ export interface NarrowChipProps {
   /** Keep the narrowing as a view of its own; absent when it can't be (the
    *  preview is off, or the reader may not create views here). */
   onSaveAsView?: () => void
+  /** Keep it with this view, under a name — rejects with the server's words. Absent when
+   *  it can't be (no one signed in, or the preview is off). */
+  onSave?: (name: string) => Promise<void>
+  /** Export everything it shows, with every entity's parent and path. */
+  onExport?: () => void
 }
 
 const quiet = cn(
@@ -48,11 +54,75 @@ function breakdown(applied: AppliedNarrow): string {
   return parts.filter(Boolean).join(' · ')
 }
 
-export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsView }: NarrowChipProps) {
+/** A name for it, until the reader gives one. */
+function nameFor(sentence: string): string {
+  const name = sentence.charAt(0).toUpperCase() + sentence.slice(1)
+  return name.length > 120 ? `${name.slice(0, 119)}…` : name
+}
+
+function SaveForm({ sentence, onSave, onDone }: {
+  sentence: string
+  onSave: (name: string) => Promise<void>
+  onDone: () => void
+}) {
+  const [name, setName] = useState(() => nameFor(sentence))
+  const [state, setState] = useState<{ kind: 'idle' } | { kind: 'saving' } | { kind: 'failed'; message: string }>({ kind: 'idle' })
+  const save = async () => {
+    if (!name.trim()) return
+    setState({ kind: 'saving' })
+    try {
+      await onSave(name.trim())
+      onDone()
+    } catch (err) {
+      setState({ kind: 'failed', message: err instanceof Error && err.message ? err.message : 'Couldn’t save it. Try again.' })
+    }
+  }
+  return (
+    <div
+      role="dialog"
+      aria-label="Save this narrowing"
+      className={cn(
+        'pointer-events-auto absolute right-0 top-[calc(100%+6px)] w-[300px] p-3 rounded-xl text-left',
+        'bg-white dark:bg-neutral-900 ring-1 ring-black/10 dark:ring-white/10 shadow-xl',
+      )}
+      onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onDone() } }}
+    >
+      <form onSubmit={(e) => { e.preventDefault(); void save() }}>
+        <label className="block text-[11px] font-semibold text-ink-secondary" htmlFor="narrow-save-name">Save with this view</label>
+        <input
+          id="narrow-save-name"
+          autoFocus
+          value={name}
+          maxLength={120}
+          onChange={(e) => setName(e.target.value)}
+          className="mt-1 w-full h-8 px-2 rounded-lg text-[12px] bg-black/[0.04] dark:bg-white/[0.06] ring-1 ring-black/10 dark:ring-white/10 text-ink"
+        />
+        <p className="mt-1.5 text-[10.5px] leading-snug text-ink-muted">
+          Anyone who can open this view can open it, by a short link — and see what is new and gone since.
+        </p>
+        {state.kind === 'failed' && <p role="alert" className="mt-1.5 text-[10.5px] leading-snug text-rose-600 dark:text-rose-400">{state.message}</p>}
+        <div className="mt-2 flex justify-end gap-1">
+          <button type="button" onClick={onDone} className={quiet}>Cancel</button>
+          <button
+            type="submit"
+            disabled={state.kind === 'saving' || !name.trim()}
+            className={cn(quiet, 'text-accent-lineage hover:text-accent-lineage hover:bg-accent-lineage/10 disabled:opacity-50')}
+          >
+            {state.kind === 'saving' ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsView, onSave, onExport }: NarrowChipProps) {
   const [copied, setCopied] = useState(false)
+  const [saving, setSaving] = useState(false)
   const total = applied.result.counts.total
   const notes = truncationNotes(applied.result)
   const sentence = describeNarrow(applied.spec, applied.seedsLabel)
+  const saved = applied.saved
 
   const copy = async () => {
     if (!link) return
@@ -89,7 +159,9 @@ export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsVi
             <span className="block font-display text-[12.5px] text-ink leading-tight truncate">
               Narrowed to <strong className="font-semibold tabular-nums">{total.toLocaleString()}</strong> {total === 1 ? 'entity' : 'entities'}
             </span>
-            <span className="block mt-0.5 text-[10.5px] text-ink-muted leading-tight truncate">{sentence}</span>
+            <span className="block mt-0.5 text-[10.5px] text-ink-muted leading-tight truncate" data-narrow-saved={saved ? saved.id : undefined}>
+              {saved ? savedText(saved) : sentence}
+            </span>
           </span>
         </HoverTip>
         {notes.length > 0 && (
@@ -110,6 +182,17 @@ export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsVi
             <LucideIcons.SlidersHorizontal className="w-3 h-3" aria-hidden="true" />
             Edit
           </button>
+          {onSave && !saved && (
+            <span className="relative flex">
+              <HoverTip className="flex" label="Save this narrowing" detail="Keep it with this view for everyone who can open it, under a short link.">
+                <button type="button" onClick={() => setSaving((o) => !o)} className={quiet} aria-expanded={saving}>
+                  <LucideIcons.Bookmark className="w-3 h-3 text-accent-lineage" aria-hidden="true" />
+                  Save
+                </button>
+              </HoverTip>
+              {saving && <SaveForm sentence={sentence} onSave={onSave} onDone={() => setSaving(false)} />}
+            </span>
+          )}
           {onSaveAsView && (
             <HoverTip className="flex" label="Save as a view" detail="Keep this as a view of its own on the same data, to share — kept up to date, or as it is now.">
               <button type="button" onClick={onSaveAsView} className={quiet}>
@@ -118,10 +201,19 @@ export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsVi
               </button>
             </HoverTip>
           )}
+          {onExport && (
+            <HoverTip className="flex" label="Export what it shows" detail="Every entity with its parent and path, and the flows between them — as CSV, NDJSON or JSON.">
+              <button type="button" onClick={onExport} className={quiet} aria-label="Export">
+                <LucideIcons.Download className="w-3 h-3" aria-hidden="true" />
+              </button>
+            </HoverTip>
+          )}
           <HoverTip
             className="flex"
-            label={link ? 'Copy a link to this narrowing' : 'Too many starting points for a link'}
-            detail={link ? 'It opens the view narrowed the same way, on the data as it is then.' : 'Narrow from a search instead: a link carries the search.'}
+            label={link ? (saved ? 'Copy its short link' : 'Copy a link to this narrowing') : 'Too long for a link'}
+            detail={link
+              ? 'It opens the view narrowed the same way, on the data as it is then.'
+              : onSave ? 'Save it with the view for a short link.' : 'Narrow from a search instead: a link carries the search.'}
           >
             <button type="button" onClick={copy} disabled={!link} className={cn(quiet, 'disabled:opacity-40 disabled:pointer-events-none')} aria-label="Copy link">
               {copied ? <LucideIcons.Check className="w-3 h-3 text-emerald-500" /> : <LucideIcons.Link className="w-3 h-3" />}

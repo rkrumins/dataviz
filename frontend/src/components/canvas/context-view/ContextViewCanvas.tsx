@@ -44,10 +44,19 @@ import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { useFeature } from '@/store/features'
 import { NarrowChip } from '@/features/narrow/NarrowChip'
 import { NarrowComposer } from '@/features/narrow/NarrowComposer'
-import { PRESETS as NARROW_PRESETS, seedsLabel as narrowSeedsLabel, specFor, specKey, type PresetId } from '@/features/narrow/model'
+import {
+  describeNarrow, narrowingRecord, PRESETS as NARROW_PRESETS, savedMarkOf, seedsLabel as narrowSeedsLabel, specFor, specKey, type PresetId,
+} from '@/features/narrow/model'
 import { canShareNarrow, decodeNarrowShare, narrowLink } from '@/features/narrow/narrowShareCodec'
 import { useNarrowStore, type NarrowDraft } from '@/features/narrow/narrowStore'
+import type { SavedNarrowingsSectionProps } from '@/features/narrow/SavedNarrowingsSection'
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
+import { useSavedNarrowingCopies } from '@/features/narrow/useSavedNarrowingCopies'
+import {
+  deleteNarrowing, getNarrowing, listNarrowings, NARROWINGS_QUERY_KEY, narrowingSince, newNarrowingId,
+  packHeld, readHeld, saveNarrowing, type SavedNarrowing,
+} from '@/services/viewNarrowingsApi'
+import { httpStatusOf } from '@/services/graphRequestFailure'
 import { SaveAsView } from '@/features/search-views/SaveAsView'
 import { SubsetIssueBanner } from '@/features/search-views/SubsetIssueBanner'
 import { UpdateSubsetSearchDialog } from '@/features/search-views/UpdateSubsetSearchDialog'
@@ -55,7 +64,7 @@ import { getSearchStatus, putSearch, SEARCH_VIEW_QUERY_KEY } from '@/services/se
 import type { SearchViewStatus } from '@/types/searchView'
 import { memberActionsFor, workingText } from '@/features/live-views/model'
 import { getMembershipStatus, memberOps, MEMBERSHIP_QUERY_KEY } from '@/services/liveViewsApi'
-import type { MemberOps, MembershipExpand, MembershipSpec } from '@/types/membership'
+import type { MemberOps, MembershipExpand, MembershipResult, MembershipSpec } from '@/types/membership'
 import type { Predicate, SearchQuery } from '@/types/search'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
@@ -4885,18 +4894,21 @@ export function ContextViewCanvas({
     if (narrowViewId) useNarrowStore.getState().openComposer(narrowViewId, draft)
   }, [narrowViewId])
   // Apply without the composer (a preset from the right-click menu, a shared
-  // link, Try again): resolve, then narrow — or say why not.
-  const narrowNow = useCallback(async (draft: NarrowDraft) => {
-    if (!narrowViewId || !provider.resolveMembers) return
+  // link, Try again): resolve, then narrow — or say why not. The answer applied,
+  // or null.
+  const narrowNow = useCallback(async (draft: NarrowDraft): Promise<MembershipResult | null> => {
+    if (!narrowViewId || !provider.resolveMembers) return null
     try {
       const result = await provider.resolveMembers(narrowViewId, { spec: draft.spec })
       if (result.counts.total === 0) {
         notify('warning', 'Nothing to narrow to — none of the starting points exist any more.')
-        return
+        return null
       }
       useNarrowStore.getState().apply(narrowViewId, draft, result)
+      return result
     } catch (err) {
       notify('error', narrowErrorText(err))
+      return null
     }
   }, [narrowViewId, provider, notify])
   const clearNarrow = useCallback(() => useNarrowStore.getState().clear(), [])
@@ -4918,7 +4930,11 @@ export function ContextViewCanvas({
     params.delete('narrow')
     const qs = params.toString()
     window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
-    void narrowNow({ spec: initialNarrowShare.spec, seedsLabel: initialNarrowShare.label ?? 'the shared starting points' })
+    void narrowNow({
+      spec: initialNarrowShare.spec,
+      seedsLabel: initialNarrowShare.label ?? 'the shared starting points',
+      ...(initialNarrowShare.names ? { seedNames: initialNarrowShare.names } : {}),
+    })
   }, [initialNarrowShare, narrowEnabled, narrowViewId, narrowNow])
   const narrowFromSearch = useCallback((query: SearchQuery) => {
     openNarrow({
@@ -4992,6 +5008,135 @@ export function ContextViewCanvas({
       : traceKeep),
     [traceKeep, traceSaveAsView, traceExportEverything],
   )
+
+  // SAVED NARROWINGS — a narrowing kept with the view for everyone who can open it,
+  // under a short link (`?narrowSaved={id}`). Opening one asks its question again and
+  // says what is new and gone since it was saved; its saver also keeps what it showed
+  // then, in this browser.
+  const canSaveNarrowing = narrowEnabled && !!narrowViewId && authUserId !== 'anon'
+  const canExportNarrowing = graphExportEnabled && provider instanceof RemoteGraphProvider
+  const savedNarrowingsQuery = useQuery({
+    queryKey: [NARROWINGS_QUERY_KEY, narrowViewId],
+    queryFn: ({ signal }) => listNarrowings(narrowViewId!, signal),
+    enabled: narrowEnabled && !!narrowViewId,
+    staleTime: 30_000,
+  })
+  const savedNarrowings = savedNarrowingsQuery.data?.items
+  // The chip's link: a saved narrowing's short one, else the narrowing itself — when it fits.
+  const narrowShareUrl = useMemo(
+    () => (narrowApplied && canShareNarrow(narrowApplied.spec)
+      ? narrowLink(narrowApplied.spec, narrowApplied.seedsLabel, narrowApplied.seedNames).url
+      : null),
+    [narrowApplied],
+  )
+  const narrowingCopies = useSavedNarrowingCopies(authUserId)
+  const savedNarrowingLink = useCallback((id: string) => {
+    const url = new URL(window.location.href)
+    for (const p of ['narrow', 'trace', 'lens']) url.searchParams.delete(p)
+    url.searchParams.set('narrowSaved', id)
+    return url.toString()
+  }, [])
+  const saveAppliedNarrowing = useCallback(async (name: string) => {
+    const applied = useNarrowStore.getState().applied
+    if (!applied || !narrowViewId) return
+    const id = newNarrowingId()
+    const held = await packHeld(applied.result)
+    const saved = await saveNarrowing(narrowViewId, id, { ...narrowingRecord(applied, name), ...(held ? { held } : {}) })
+    useNarrowStore.getState().markSaved(savedMarkOf(saved), applied.result.specHash)
+    void queryClient.invalidateQueries({ queryKey: [NARROWINGS_QUERY_KEY, narrowViewId] })
+    notify('success', `Saved “${saved.name}” with this view — anyone who can open it can open this, by its link.`)
+    // What it shows now, kept for its saver: worked out on the server, in the background.
+    if (canExportNarrowing && provider instanceof RemoteGraphProvider) {
+      const fileBase = `narrowing-${saved.name.replace(/[^\w-]+/g, '-').slice(0, 60)}-${new Date().toISOString().slice(0, 10)}`
+      void narrowingCopies.keep({ id, viewId: narrowViewId, spec: applied.spec, fileBase, provider }).catch(() => false)
+    }
+  }, [narrowViewId, queryClient, notify, canExportNarrowing, provider, narrowingCopies])
+  const openSavedNarrowing = useCallback(async (id: string) => {
+    if (!narrowViewId) return
+    let saved: SavedNarrowing
+    try {
+      saved = await getNarrowing(narrowViewId, id)
+    } catch (err) {
+      notify('error', httpStatusOf(err) === 404
+        ? 'That saved narrowing is gone — or it was saved with a view you can’t open.'
+        : narrowErrorText(err))
+      return
+    }
+    const mark = savedMarkOf(saved)
+    const result = await narrowNow({
+      spec: saved.spec,
+      seedsLabel: saved.seedsLabel ?? 'the saved starting points',
+      ...(saved.seedNames ? { seedNames: saved.seedNames } : {}),
+      saved: mark,
+    })
+    if (!result || !saved.held.kept) return
+    // What is new and gone since: from what it held then. Without it, the chip says only
+    // that it is saved.
+    const held = await readHeld(narrowViewId, id).catch(() => null)
+    if (held) useNarrowStore.getState().markSaved({ ...mark, since: narrowingSince(held, saved.held.complete, result) }, result.specHash)
+  }, [narrowViewId, narrowNow, notify])
+  // A SAVED NARROWING'S LINK (`?narrowSaved=…`): opened once the preview is known to be on,
+  // and the param stripped, as a shared narrowing's is.
+  const [initialSavedNarrowing] = useState(() => (atRevision ? null : new URLSearchParams(window.location.search).get('narrowSaved')))
+  const savedNarrowingUsed = useRef(false)
+  useEffect(() => {
+    if (!initialSavedNarrowing || savedNarrowingUsed.current || !narrowEnabled || !narrowViewId) return
+    savedNarrowingUsed.current = true
+    const params = new URLSearchParams(window.location.search)
+    params.delete('narrowSaved')
+    const qs = params.toString()
+    window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
+    if (/^[A-Za-z0-9_-]{8,32}$/.test(initialSavedNarrowing)) void openSavedNarrowing(initialSavedNarrowing)
+  }, [initialSavedNarrowing, narrowEnabled, narrowViewId, openSavedNarrowing])
+  const savedNarrowingsProps = useMemo<SavedNarrowingsSectionProps | undefined>(() => {
+    if (!narrowEnabled || !narrowViewId || !savedNarrowings?.length) return undefined
+    const byId = new Map(savedNarrowings.map((n) => [n.id, n]))
+    const refresh = () => queryClient.invalidateQueries({ queryKey: [NARROWINGS_QUERY_KEY, narrowViewId] })
+    return {
+      items: savedNarrowings.map((n) => {
+        const at = Date.parse(n.updatedAt ?? n.createdAt ?? '')
+        return {
+          id: n.id, name: n.name, savedAt: Number.isNaN(at) ? null : at,
+          sentence: describeNarrow(n.spec, n.seedsLabel ?? 'the saved starting points'),
+          held: n.held.count, canChange: n.canChange,
+          active: narrowApplied?.saved?.id === n.id, hasCopy: narrowingCopies.ids.has(n.id),
+        }
+      }),
+      onOpen: (id) => { void openSavedNarrowing(id) },
+      onCopyLink: savedNarrowingLink,
+      onExport: (id) => {
+        const n = byId.get(id)
+        if (!n) return
+        if (canExportNarrowing) setLineageExport({ spec: n.spec, seedsLabel: n.seedsLabel ?? n.name })
+        else notify('info', 'Exporting is off here — open it to see what it shows.')
+      },
+      onDownloadCopy: (id) => {
+        void narrowingCopies.download(id).then((ok) => { if (!ok) notify('warning', 'This browser no longer keeps it — export what it shows now instead.') })
+      },
+      onRename: (id, name) => {
+        const n = byId.get(id)
+        if (!n || name === n.name) return
+        saveNarrowing(narrowViewId, id, narrowingRecord(n, name))
+          .then((renamed) => {
+            const applied = useNarrowStore.getState().applied
+            if (applied?.saved?.id === id) useNarrowStore.getState().markSaved({ ...applied.saved, name: renamed.name }, applied.result.specHash)
+            return refresh()
+          })
+          .catch((err: unknown) => notify('error', err instanceof Error ? err.message : 'Couldn’t rename it.'))
+      },
+      onRemove: (id) => {
+        deleteNarrowing(narrowViewId, id)
+          .then(() => {
+            narrowingCopies.drop(id)
+            const applied = useNarrowStore.getState().applied
+            if (applied?.saved?.id === id) useNarrowStore.setState({ applied: { ...applied, saved: undefined } })
+            return refresh()
+          })
+          .catch((err: unknown) => notify('error', err instanceof Error ? err.message : 'Couldn’t remove it.'))
+      },
+    }
+  }, [narrowEnabled, narrowViewId, savedNarrowings, narrowApplied?.saved?.id, narrowingCopies, openSavedNarrowing,
+    savedNarrowingLink, canExportNarrowing, notify, queryClient])
 
   // SUBSET VIEWS (features/search-views) — a search's matches kept as a view of
   // their own; in a subset view, its layers list them. A preview switch
@@ -7113,6 +7258,7 @@ export function ContextViewCanvas({
         onClearTraceHistory={clearTraceHistory}
         onCopyTraceHistoryLink={traceHistoryLink}
         savedTraces={savedList}
+        savedNarrowings={savedNarrowingsProps}
         onOpenLens={() => openLensForSelection(selectedNodeIds)}
         onSetTraceDepth={(dir, value) => {
           // A VIEW limit on the already-walked flow — applies instantly,
@@ -7237,10 +7383,16 @@ export function ContextViewCanvas({
             applied={narrowApplied}
             onEdit={() => openNarrow({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })}
             onClear={clearNarrow}
-            link={canShareNarrow(narrowApplied.spec) ? () => narrowLink(narrowApplied.spec, narrowApplied.seedsLabel) : undefined}
+            link={narrowApplied.saved
+              ? () => savedNarrowingLink(narrowApplied.saved!.id)
+              : narrowShareUrl ? () => narrowShareUrl : undefined}
             onRetry={() => { void narrowNow(narrowApplied) }}
             onSaveAsView={canSaveAsView
               ? () => setSaveAsDraft({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })
+              : undefined}
+            onSave={canSaveNarrowing ? saveAppliedNarrowing : undefined}
+            onExport={canExportNarrowing
+              ? () => setLineageExport({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel })
               : undefined}
           />
         )}

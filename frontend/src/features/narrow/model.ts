@@ -11,6 +11,7 @@
  *
  * Pure: no React, no store.
  */
+import type { SavedNarrowing, SavedNarrowingInput } from '@/services/viewNarrowingsApi'
 import type {
   MemberEntry,
   MembershipExpand,
@@ -222,4 +223,45 @@ export function layerDistribution(
     else elsewhere++
   }
   return { layers: [...counts].map(([layerId, count]) => ({ layerId, count })), elsewhere }
+}
+
+// ── Saved with the view ────────────────────────────────────────────────────
+
+/** A saved narrowing, in words: its name, and what is new and gone since it was saved. */
+export function savedText(saved: { name: string; savedAt: string | null; since?: { added: number; removed: number; approximate: boolean } }): string {
+  const when = saved.savedAt ? new Date(saved.savedAt) : null
+  const day = when && !Number.isNaN(when.getTime())
+    ? when.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+    : null
+  if (!saved.since || !day) return `Saved as “${saved.name}”`
+  const { added, removed, approximate } = saved.since
+  const about = approximate ? 'about ' : ''
+  if (added === 0 && removed === 0) return `“${saved.name}” · ${approximate ? 'about the same as' : 'the same as'} on ${day}`
+  return `“${saved.name}” · ${about}+${added.toLocaleString()} new · −${removed.toLocaleString()} gone since ${day}`
+}
+
+/** How a saved narrowing is marked on the canvas. */
+export function savedMarkOf(n: SavedNarrowing): { id: string; name: string; savedAt: string | null } {
+  return { id: n.id, name: n.name, savedAt: n.updatedAt ?? n.createdAt ?? null }
+}
+
+/** A narrowing as it is saved under `name` — from the one applied, or one already saved
+ *  (a rename) — within what the server keeps of each part. */
+export function narrowingRecord(
+  n: SavedNarrowing | { spec: MembershipSpec; seedsLabel?: string; seedNames?: Record<string, string>; result: MembershipResult },
+  name: string,
+): SavedNarrowingInput {
+  const seedNames = Object.entries(n.seedNames ?? {}).slice(0, 200).map(([u, v]) => [u, v.slice(0, 120)] as const)
+  const counts = 'result' in n ? n.result.counts : n.counts
+  const truncated = 'result' in n ? n.result.truncated : n.truncated
+  const dataVersion = 'result' in n ? n.result.dataVersion : n.dataVersion
+  return {
+    name,
+    spec: n.spec,
+    ...(n.seedsLabel ? { seedsLabel: n.seedsLabel.slice(0, 500) } : {}),
+    ...(seedNames.length ? { seedNames: Object.fromEntries(seedNames) } : {}),
+    ...(counts ? { counts } : {}),
+    ...(truncated ? { truncated: truncated.slice(0, 20) } : {}),
+    ...(dataVersion ? { dataVersion } : {}),
+  }
 }

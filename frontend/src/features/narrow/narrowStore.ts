@@ -9,6 +9,7 @@
  */
 import { create } from 'zustand'
 
+import type { SinceSaved } from '@/services/viewNarrowingsApi'
 import type { MembershipOrigin, MembershipResult, MembershipSpec } from '@/types/membership'
 
 import { visibilityOf, type NarrowVisibility } from './model'
@@ -21,6 +22,17 @@ export interface NarrowDraft {
   seedNames?: Record<string, string>
   /** Where it came from, when not a narrowing or a search (a trace). */
   origin?: MembershipOrigin
+  /** It is a narrowing saved with the view — opened from it, or just saved. */
+  saved?: SavedMark
+}
+
+export interface SavedMark {
+  id: string
+  name: string
+  /** When it was last saved (ISO). */
+  savedAt: string | null
+  /** What is new and gone since — once what it held has been read. */
+  since?: SinceSaved
 }
 
 export interface AppliedNarrow extends NarrowDraft {
@@ -34,6 +46,9 @@ interface NarrowState {
   composer: NarrowDraft | null
   /** Narrow the canvas of `viewId` to a resolved scope. */
   apply: (viewId: string, draft: NarrowDraft, result: MembershipResult) => void
+  /** The applied narrowing is (now) saved with its view — while it is still the one the
+   *  answer `specHash` is for. */
+  markSaved: (mark: SavedMark, specHash: string) => void
   /** Show the whole view again. */
   clear: () => void
   openComposer: (viewId: string, draft: NarrowDraft) => void
@@ -49,6 +64,10 @@ export const useNarrowStore = create<NarrowState>((set, get) => ({
     applied: { ...draft, result, visibility: visibilityOf(result) },
     composer: null,
   }),
+  markSaved: (mark, specHash) => {
+    const applied = get().applied
+    if (applied?.result.specHash === specHash) set({ applied: { ...applied, saved: mark } })
+  },
   clear: () => set({ applied: null, composer: null }),
   openComposer: (viewId, draft) => {
     // A composer opened in another view starts that view afresh.

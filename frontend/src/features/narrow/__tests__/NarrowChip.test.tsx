@@ -2,7 +2,7 @@
  * NarrowChip — a narrowed canvas says so, for as long as it is narrowed, with
  * how to change it, share it, or put it away.
  */
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { MembershipResult } from '@/types/membership'
@@ -79,5 +79,40 @@ describe('NarrowChip — Save as view', () => {
     rerender(<NarrowChip applied={applied()} onEdit={vi.fn()} onClear={vi.fn()} onSaveAsView={onSaveAsView} />)
     fireEvent.click(screen.getByRole('button', { name: /Save as view/ }))
     expect(onSaveAsView).toHaveBeenCalledOnce()
+  })
+})
+
+describe('NarrowChip — saved with the view', () => {
+  it('saves it under a name, and says what the server refused', async () => {
+    const onSave = vi.fn<(name: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('You have saved 50 narrowings on this view.'))
+      .mockResolvedValueOnce(undefined)
+    render(<NarrowChip applied={applied()} onEdit={vi.fn()} onClear={vi.fn()} onSave={onSave} />)
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))
+    const name = screen.getByLabelText('Save with this view')
+    expect(name).toHaveValue('Orders, everything inside it and everything upstream')
+    fireEvent.change(name, { target: { value: 'Orders upstream' } })
+    const form = () => within(screen.getByRole('dialog', { name: 'Save this narrowing' }))
+    await act(async () => { fireEvent.click(form().getByRole('button', { name: 'Save' })) })
+    expect(screen.getByRole('alert')).toHaveTextContent('You have saved 50 narrowings on this view.')
+    await act(async () => { fireEvent.click(form().getByRole('button', { name: 'Save' })) })
+    expect(onSave).toHaveBeenLastCalledWith('Orders upstream')
+    expect(screen.queryByRole('dialog', { name: 'Save this narrowing' })).toBeNull()
+  })
+
+  it('once saved, names it and what is new and gone since — and offers no second save', () => {
+    const saved = { ...applied(), saved: { id: 'n1', name: 'Orders upstream', savedAt: '2026-11-03T10:00:00Z', since: { added: 3, removed: 1, approximate: false } } }
+    render(<NarrowChip applied={saved} onEdit={vi.fn()} onClear={vi.fn()} onSave={vi.fn()} link={() => 'https://x/v?narrowSaved=n1'} />)
+    const chip = screen.getByRole('status', { name: 'The canvas is narrowed' })
+    const day = new Date('2026-11-03T10:00:00Z').toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+    expect(chip).toHaveTextContent(`“Orders upstream” · +3 new · −1 gone since ${day}`)
+    expect(screen.queryByRole('button', { name: /^Save$/ })).toBeNull()
+  })
+
+  it('exports what it shows', () => {
+    const onExport = vi.fn()
+    render(<NarrowChip applied={applied()} onEdit={vi.fn()} onClear={vi.fn()} onExport={onExport} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }))
+    expect(onExport).toHaveBeenCalledOnce()
   })
 })

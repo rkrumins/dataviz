@@ -40,3 +40,17 @@ describe('narrowStore', () => {
     expect(useNarrowStore.getState().applied).toBeNull()
   })
 })
+
+describe('narrowStore — saved with the view', () => {
+  it('marks the narrowing on screen as saved, and never another one', () => {
+    const result = { specHash: 'h1', members: [], wholeSubtree: [], chains: {}, missingSeeds: 0, truncated: [], dataVersion: '', elapsedMs: 0,
+      counts: { seeds: 1, inside: 0, upstream: 0, downstream: 0, partnerInside: 0, total: 1 } }
+    useNarrowStore.getState().apply('v1', { spec: specFor({ urns: ['a'] }), seedsLabel: 'a' }, result)
+    useNarrowStore.getState().markSaved({ id: 'n1', name: 'A', savedAt: null }, 'other-spec')
+    expect(useNarrowStore.getState().applied?.saved).toBeUndefined()
+    useNarrowStore.getState().markSaved({ id: 'n1', name: 'A', savedAt: null }, 'h1')
+    expect(useNarrowStore.getState().applied?.saved).toEqual({ id: 'n1', name: 'A', savedAt: null })
+    useNarrowStore.getState().apply('v1', { spec: specFor({ urns: ['b'] }), seedsLabel: 'b' }, { ...result, specHash: 'h2' })
+    expect(useNarrowStore.getState().applied?.saved).toBeUndefined()
+  })
+})

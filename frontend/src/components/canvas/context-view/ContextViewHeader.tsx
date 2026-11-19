@@ -39,6 +39,7 @@ import { ViewerActions } from './header/ViewerActions'
 import type { ViewFileActions } from './header/ImportExportMenu'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
 import type { SavedTracesSectionProps } from '@/components/canvas/trace/SavedTracesSection'
+import type { SavedNarrowingsSectionProps } from '@/features/narrow/SavedNarrowingsSection'
 import { EditorActions } from './header/EditorActions'
 import { ToolbarFoldProvider, useToolbarFold } from './header/toolbarFold'
 
@@ -92,6 +93,8 @@ export interface ContextViewHeaderProps {
   onCopyTraceHistoryLink?: (index: number) => string | null
   /** Saved traces, listed in the same launcher. Optional. */
   savedTraces?: SavedTracesSectionProps
+  /** Narrowings saved with the view — their own button, while there are any. Optional. */
+  savedNarrowings?: SavedNarrowingsSectionProps
   /** Open the Lineage Lens on the current selection. Optional. */
   onOpenLens?: () => void
 
@@ -191,6 +194,7 @@ export function ContextViewHeader({
   onClearTraceHistory,
   onCopyTraceHistoryLink,
   savedTraces,
+  savedNarrowings,
   onOpenLens,
   isDraft,
   canManage,
@@ -278,6 +282,7 @@ export function ContextViewHeader({
     onClearTraceHistory,
     onCopyTraceHistoryLink,
     savedTraces,
+    savedNarrowings,
     onOpenLens,
     onTogglePropertyManager,
     propertyManagerOpen,
