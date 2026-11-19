@@ -45,8 +45,10 @@
       "target_urn": "urn:test:schema:s2"
     }
   ],
+  "degraded_detail": null,
   "has_more": false,
   "lineage_edges": [],
   "next_cursor": null,
+  "next_offset": 2,
   "total_children": 2
 }

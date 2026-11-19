@@ -37,14 +37,23 @@ def _snapshot_root(provider: str) -> Path:
     return target
 
 
+_EDGE_ENDS = {"source_urn", "target_urn", "edge_type"}
+
+
 def _stabilize(value: Any) -> Any:
     """Sort lists of dicts on a stable key, walk recursively. A node's or
     edge's ``version`` (its OCC token, added after these snapshots were
     taken) is left out while unset: the fixture is never written through
-    version control, so a provider reading it has none to give."""
+    version control, so a provider reading it has none to give. An edge
+    named by the store's own id — a number FalkorDB hands out in insertion
+    order, which no fixture edge has — is named by what it joins instead, so
+    the snapshot pins the edges, not the order they were written in."""
     if isinstance(value, dict):
-        return {k: _stabilize(v) for k, v in sorted(value.items())
-                if not (k == "version" and v is None)}
+        out = {k: _stabilize(v) for k, v in sorted(value.items())
+               if not (k == "version" and v is None)}
+        if _EDGE_ENDS <= out.keys() and str(out.get("id", "")).isdigit():
+            out["id"] = f"{out['source_urn']} -{out['edge_type']}-> {out['target_urn']}"
+        return out
     if isinstance(value, (list, tuple)):
         items = [_stabilize(v) for v in value]
         # When every element is a dict that has a stable id, sort on it.

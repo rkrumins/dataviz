@@ -22,7 +22,7 @@
   "has_more": false,
   "nodes": [
     {
-      "child_count": 0,
+      "child_count": null,
       "description": "",
       "display_name": "Dataset 1",
       "entity_type": "dataset",
@@ -35,7 +35,7 @@
       "urn": "urn:test:dataset:d1"
     },
     {
-      "child_count": 0,
+      "child_count": null,
       "description": "",
       "display_name": "Dataset 2",
       "entity_type": "dataset",
@@ -48,7 +48,7 @@
       "urn": "urn:test:dataset:d2"
     },
     {
-      "child_count": 0,
+      "child_count": null,
       "description": "",
       "display_name": "Dataset 3",
       "entity_type": "dataset",
