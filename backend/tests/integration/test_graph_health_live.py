@@ -28,7 +28,7 @@ from backend.app.auth.dependencies import get_current_user, get_permission_claim
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.settings import signals
 from backend.app.services.versioning import config as gv_config, db as gvdb
-from backend.app.services.versioning import models
+from backend.app.services.versioning import models, update_progress
 from backend.app.services.versioning.models import BranchORM
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.auth_service.interface import User
@@ -84,6 +84,7 @@ async def counts(monkeypatch):
 
     await empty()
     monkeypatch.setattr(signals, "_redis", lambda: client)
+    monkeypatch.setattr(update_progress, "_redis", lambda: client)
     signals.reset()
     yield client
     signals.reset()

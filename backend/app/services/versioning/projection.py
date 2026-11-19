@@ -33,7 +33,7 @@ from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence
 from sqlalchemy import Text, any_, bindparam, case, func, literal, null, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY
 
-from . import build_policy, candidates, config, db, keymigrate, residency_policy
+from . import build_policy, candidates, config, db, keymigrate, residency_policy, update_progress
 from .errors import AmbiguousSpelling, LockBusy
 from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
@@ -438,6 +438,30 @@ _PASS_HELD: ContextVar[Optional[_Held]] = ContextVar("projection_pass_held", def
 #: Its progress then goes on the build, not on the serving row the build leaves alone.
 _PASS_BUILD: ContextVar[Optional[str]] = ContextVar("projection_pass_build", default=None)
 
+#: The update a pass publishes the progress of (``update_progress``): set once it claims its graph
+#: (a build step: once it begins), and ended by the pass, else, unpublished, when it returns.
+_PASS_UPDATE: ContextVar[object] = ContextVar("projection_pass_update",
+                                              default=update_progress.NOTHING)
+
+
+def _end_open_update() -> None:
+    """End the pass's update, unpublished, unless the pass ended it (or held it for the next)."""
+    update = _PASS_UPDATE.get()
+    if update.open:
+        update.finish(published=False)
+
+
+def _phase_of(from_seq: int, status: str, served: Optional[int], published: bool) -> str:
+    """What a pass from ``from_seq`` writes, as its progress names it (``update_progress``): a
+    window into the copy readers read (``updating``); else a whole copy, loaded back into memory
+    (``loading``: a load of a graph published before), written anew over one that serves a
+    version (a rebuild: ``updating``), or written from nothing (``seeding``)."""
+    if from_seq > 0:
+        return "updating"
+    if status == "rehydrating" and published:
+        return "loading"
+    return "seeding" if served is None else "updating"
+
 
 #: The pass marker, the last FalkorDB write of every publishing pass (``_write_marker``). Its
 #: label is derived, so no count, scan or search sees it. ``epoch`` changes with every claim, so
@@ -480,13 +504,18 @@ _MARKER_READ = "MATCH (m:_GVProjMeta) RETURN m.seq"
 #: so far did that the pass publishing it must know: whether one made a structural change
 #: (``pStructural``), and how many writes they dropped (``pDropped``). A pass from the same ``pFrom``
 #: resumes it. It is cleared once its pages are done, and when an operator's rebuild is accepted.
+#: It also carries the update's progress (``update_progress``) to the pass that resumes it: the rows
+#: done (``pDone``), when the update started (``pStartedAt``, epoch seconds) and its rate (``pRate``).
 _CURSOR_READ = ("MATCH (m:_GVProjMeta) "
-                "RETURN m.pFrom, m.pTo, m.pStep, m.pAfter, m.pStructural, m.pDropped")
+                "RETURN m.pFrom, m.pTo, m.pStep, m.pAfter, m.pStructural, m.pDropped, m.pDone, "
+                "m.pStartedAt, m.pRate")
 _CURSOR_WRITE = ("MERGE (m:_GVProjMeta {id: 'meta'}) "
                  "SET m.pFrom = $from, m.pTo = $to, m.pStep = $step, m.pAfter = $after, "
-                 "m.pStructural = $structural, m.pDropped = $dropped")
+                 "m.pStructural = $structural, m.pDropped = $dropped, m.pDone = $done, "
+                 "m.pStartedAt = $startedAt, m.pRate = $rate")
 _CURSOR_CLEAR = ("MATCH (m:_GVProjMeta) "
-                 "REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter, m.pStructural, m.pDropped")
+                 "REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter, m.pStructural, m.pDropped, m.pDone, "
+                 "m.pStartedAt, m.pRate")
 
 #: A build seeded from Postgres carries the serving key's lineage summaries over
 #: (``FalkorProjector._copy_summaries``): the serving key's summary cells a page of source nodes at
@@ -527,16 +556,19 @@ class _PassPartial(Exception):
 class _Cursor:
     """Where a long pass is, and when it must stop: it writes itself after each page.
     ``structural`` and ``dropped``: for a paged window, what the pages earlier passes wrote did
-    (:meth:`FalkorProjector._apply_paged`)."""
+    (:meth:`FalkorProjector._apply_paged`). ``carried``: the progress the passes before left,
+    ``(done, started_at, rate)``, for the pass's update to take up (``_progress_writer``)."""
 
     __slots__ = ("client", "from_seq", "to_seq", "resume", "deadline", "used",
-                 "structural", "dropped")
+                 "structural", "dropped", "done", "started_at", "rate")
 
     def __init__(self, client, from_seq: int, to_seq: int, resume: Optional[Tuple[str, str]],
-                 deadline: Optional[float], *, structural: bool = False, dropped: int = 0) -> None:
+                 deadline: Optional[float], *, structural: bool = False, dropped: int = 0,
+                 carried: Tuple[int, Optional[float], Optional[float]] = (0, None, None)) -> None:
         self.client, self.from_seq, self.to_seq = client, from_seq, to_seq
         self.resume, self.deadline, self.used = resume, deadline, False
         self.structural, self.dropped = structural, dropped
+        self.done, self.started_at, self.rate = carried
 
     def start(self, step: str, steps: Sequence[str]) -> Optional[str]:
         """Where ``step`` starts: after the resumed position on the resumed step, from the start
@@ -551,17 +583,21 @@ class _Cursor:
     async def page_done(self, step: str, after: str, written: int, *, structural: bool = False,
                         dropped: int = 0) -> None:
         """After a page has landed: write where the pass is (and, for a paged window, what its
-        pages so far did: ``structural``, ``dropped``), and stop it past its time."""
+        pages so far did: ``structural``, ``dropped``; and the pass's progress), and stop it past
+        its time."""
+        update = _PASS_UPDATE.get()
         await _q(self.client, _CURSOR_WRITE, params={
             "from": self.from_seq, "to": self.to_seq, "step": step, "after": str(after),
-            "structural": structural, "dropped": dropped})
+            "structural": structural, "dropped": dropped, "done": update.done,
+            "startedAt": update.started_at, "rate": update.rate})
         self.used = True
         if self.deadline is not None and time.monotonic() > self.deadline:
             raise _PassPartial(written)
 
 
-#: A cursor as read: ``(pFrom, pTo, pStep, pAfter, pStructural, pDropped)``.
-_Found = Tuple[int, int, str, str, bool, int]
+#: A cursor as read: ``(pFrom, pTo, pStep, pAfter, pStructural, pDropped, pDone, pStartedAt,
+#: pRate)``.
+_Found = Tuple[int, int, str, str, bool, int, int, Optional[float], Optional[float]]
 
 
 async def _read_cursor(client) -> Optional[_Found]:
@@ -576,7 +612,8 @@ async def _read_cursor(client) -> Optional[_Found]:
         return None
     row = rows[0]
     return (int(row[0]), int(row[1]), str(row[2] or ""), str(row[3] or ""), bool(row[4]),
-            int(row[5] or 0))
+            int(row[5] or 0), int(row[6] or 0), None if row[7] is None else float(row[7]),
+            None if row[8] is None else float(row[8]))
 
 
 def _resumes(found: Optional[_Found], from_seq: int, to_seq: int) -> bool:
@@ -1535,9 +1572,12 @@ class FalkorProjector:
                 return {"noop": True, "skipped": "in-flight"}
             stats = _PASS_STATS.set(_PassStats())
             held = _PASS_HELD.set(_Held(graph_id))
+            update = _PASS_UPDATE.set(update_progress.NOTHING)
             try:
                 return await self._project_graph_locked(graph_id, respect_backoff=respect_backoff)
             finally:
+                _end_open_update()       # failed, cancelled, held back or superseded: no progress
+                _PASS_UPDATE.reset(update)
                 _PASS_HELD.reset(held)
                 _PASS_STATS.reset(stats)
         finally:
@@ -1922,6 +1962,10 @@ class FalkorProjector:
             return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "superseded"}
         mine, attempts = claimed
         pass_started = time.monotonic()
+        # Its progress, for readers and admins (``update_progress``), until it ends.
+        update = update_progress.Update(
+            graph_id, _phase_of(from_seq, ps.status, served, last_published is not None), to_seq)
+        _PASS_UPDATE.set(update)
         cursor: Optional[_Cursor] = None
         changes, structural, retypes, rekeys, rollup_pairs = ([], [], [], []), False, [], [], None
         superseded = False
@@ -1970,15 +2014,16 @@ class FalkorProjector:
                     # ``pTo``, where it stopped. The window after it is the next pass's.
                     if paged:
                         found = await _read_cursor(client)
-                    resume, before = None, (False, 0)
+                    resume, before = None, (False, 0, 0, None, None)
                     if _resumes(found, from_seq, to_seq):
                         to_seq, resume, before = found[1], (found[2], found[3]), found[4:]
+                        update.target_seq = to_seq
                         logger.info("projection of %s resumes (%d, %d] at %s after %s", graph_id,
                                     from_seq, to_seq, found[2], found[3] or "the start")
                     cursor = _Cursor(client, from_seq, to_seq, resume,
                                      (pass_started + config.PROJECTION_PASS_MAX_SECS)
                                      if config.PROJECTION_PASS_MAX_SECS > 0 else None,
-                                     structural=before[0], dropped=before[1])
+                                     structural=before[0], dropped=before[1], carried=before[2:])
                 total_items = sum(len(c) for c in changes)
                 prior = None
                 if from_seq > 0 and not paged:
@@ -2028,9 +2073,10 @@ class FalkorProjector:
             else:
                 await self._rekey_in_place(client, rekeys)
                 await self._relabel_in_place(client, retypes, levels=level_map)
+                update.count(total_items)
                 dropped = await self._apply(client, *changes, level_map=level_map,
                                             provider_id=provider_id, owned=owned,
-                                            prior=prior) or 0
+                                            prior=prior, progress=update.add) or 0
             window_rollups_applied = False
             # Incremental :AGGREGATED rollup maintenance for a publish window, once its raw writes
             # have landed: a pass that stops part-way computes none. A full replay's rollups are
@@ -2129,6 +2175,8 @@ class FalkorProjector:
                 logger.error("projection for %s held back at seq %d; holding watermark "
                              "at %d so reads stay on Postgres; retry after backoff — %s", graph_id,
                              to_seq, from_seq, verify_error)
+            if published:
+                update.finish(published=True)        # readers have it: the last update now
         except _PassPartial as stop:
             # Out of its time at a page boundary, its cursor written: not a failure. It publishes
             # nothing, records no error and no backoff, and asks for the next pass at once, which
@@ -2149,6 +2197,8 @@ class FalkorProjector:
                                           status="rebuilding" if from_seq <= 0 else "idle")
             if not await asyncio.shield(finish_partial()):
                 await self._yield_superseded(graph_id, from_seq)
+            else:
+                update.hold()                        # as it stands, for the pass that resumes it
             await nudge_projection(graph_id)
             return {"projected": from_seq, "applied": stop.written, "noop": False,
                     "partial": True, "target": to_seq}
@@ -2404,6 +2454,12 @@ class FalkorProjector:
             return {**noop, "skipped": "build_slots"}
         building.add(graph_id)
         build_token, held_token = _PASS_BUILD.set(build_id), _PASS_HELD.set(None)
+        # Its progress: the version readers get once it is switched to, built since it was asked
+        # for; a step that goes on in the next pass holds it, the switch records it as the last.
+        update = update_progress.Update(
+            graph_id, "switching" if step in ("catching_up", "switching") else "building",
+            graph.main_head_commit_seq, started=state.get("since"))
+        update_token = _PASS_UPDATE.set(update)
         try:
             if step in ("queued", "copying"):
                 # Found copying: its pod stopped mid-copy, or a later step failed and it starts
@@ -2420,6 +2476,7 @@ class FalkorProjector:
         except _PassPartial as stop:
             # Out of its time at a page boundary, its cursor written in the build's key: the next
             # pass resumes the catch-up there. Not a failure.
+            update.hold()
             await nudge_projection(graph_id)
             return {**noop, "noop": False, "partial": True, "applied": stop.written}
         except asyncio.CancelledError:
@@ -2459,6 +2516,8 @@ class FalkorProjector:
                     retryAt=_retry_at(attempts), waiting=None, **restart)
             return {**noop, "noop": False, "build_error": str(exc)[:300]}
         finally:
+            _end_open_update()       # waiting, failed, dropped or replaced: no progress
+            _PASS_UPDATE.reset(update_token)
             _PASS_HELD.reset(held_token)
             _PASS_BUILD.reset(build_token)
             building.discard(graph_id)
@@ -2583,6 +2642,7 @@ class FalkorProjector:
         observe("graphver_build_copy_seconds", took)
         logger.info("build %s of %s: copied '%s' at version %d into '%s' in %.2fs", build_id,
                     graph_id, ps.falkor_graph_name, served, name, took)
+        _PASS_UPDATE.get().hold()                    # the catch-up goes on in the next pass
         return {**noop, "noop": False}
 
     async def _serving_whole(self, ps) -> int:
@@ -2715,11 +2775,11 @@ class FalkorProjector:
             # A proof the node takes the writes below, which also makes a fresh key.
             await _q(client, "RETURN 1", timeout_ms=_READ_TIMEOUT_MS)
             found = await _read_cursor(client)
-            resume, before = None, (False, 0)
+            resume, before = None, (False, 0, 0, None, None)
             if _resumes(found, 0, seq):
                 resume, before = (found[2], found[3]), found[4:]
             cursor = _Cursor(client, 0, seq, resume, deadline, structural=before[0],
-                             dropped=before[1])
+                             dropped=before[1], carried=before[2:])
             await self._reconcile_in_place(
                 client, graph_id, main_id, seq, await self._resolve_level_map(graph_id),
                 track_progress=True, rollups_moved_this_pass=True, provider_id=provider,
@@ -2744,6 +2804,7 @@ class FalkorProjector:
                 graph_id, build_id, retryAt=retry_at,
                 waiting="a lineage-summaries job is building the serving key's summaries")
             return {**noop, "skipped": "build_waiting", "retryAt": retry_at}
+        _PASS_UPDATE.get().enter("building")         # the summaries carried over count no rows
         after = int(state.get("summariesAt") or 0)
         since = state.get("summariesSince")
         if not after or not since:
@@ -2777,6 +2838,7 @@ class FalkorProjector:
         increment("graphver_builds_total", step="seeded")
         logger.info("build %s of %s: seeded '%s' at version %d from Postgres", build_id, graph_id,
                     name, seq)
+        _PASS_UPDATE.get().hold()                    # the catch-up goes on in the next pass
         return {**noop, "noop": False, "build": "catching_up"}
 
     async def _clear_summaries(self, client) -> None:
@@ -2902,22 +2964,25 @@ class FalkorProjector:
             if changes is not None:
                 _structural, retypes, rekeys = await self._window_meta(s, graph, main_id, seq,
                                                                        changes)
+        update = _PASS_UPDATE.get()
         if changes is None:
             found = await _read_cursor(client)
-            resume, before = None, (False, 0)
+            resume, before = None, (False, 0, 0, None, None)
             if _resumes(found, seq, head):
                 head, resume, before = found[1], (found[2], found[3]), found[4:]
+                update.target_seq = head
             cursor = _Cursor(client, seq, head, resume,
                              (started + config.PROJECTION_PASS_MAX_SECS)
                              if config.PROJECTION_PASS_MAX_SECS > 0 else None,
-                             structural=before[0], dropped=before[1])
+                             structural=before[0], dropped=before[1], carried=before[2:])
             await self._apply_paged(client, graph_id, main_id, seq, head, level_map=level_map,
                                     provider_id=provider, owned=True, cursor=cursor)
         else:
             await self._rekey_in_place(client, rekeys)
             await self._relabel_in_place(client, retypes, levels=level_map)
+            update.count(sum(len(c) for c in changes))
             await self._apply(client, *changes, level_map=level_map, provider_id=provider,
-                              owned=True)
+                              owned=True, progress=update.add)
         stale = bool(state.get("rollupsStale"))
         if self._edge_types_resolver is not None:
             async with self._session() as s:
@@ -2934,6 +2999,7 @@ class FalkorProjector:
                                          **({"rollupsStale": True} if stale else {}))
         logger.info("build %s of %s: caught up (%d, %d] in %.2fs", build_id, graph_id, seq, head,
                     time.monotonic() - started)
+        update.hold()                                # the switch comes in the next pass
         return {**noop, "noop": False, "build": "catching_up", "target": head}
 
     async def _build_switch(self, graph_id, ps, graph, state, policy, noop) -> Dict[str, object]:
@@ -2975,6 +3041,11 @@ class FalkorProjector:
             rollups_stale=stale)
         if owed is None:
             raise RuntimeError("the switch was refused")
+        # Readers have version ``seq``: the last update, timed from when the build was asked for.
+        # A build counts no rows of its own (a copy counts none), so none are recorded.
+        update = _PASS_UPDATE.get()
+        update.target_seq = seq
+        update.finish(published=True, counted=False)
         increment("graphver_builds_total", step="switched")
         logger.info("build %s of %s: switched readers from '%s' to '%s' at version %d",
                     build_id, graph_id, old, ps.candidate_graph_name, seq)
@@ -3594,9 +3665,10 @@ class FalkorProjector:
     async def _window_pages(self, s, graph, main_id, from_seq, to_seq, kind: str, after: str = ""):
         """:meth:`_compute_changes` of the window's ``kind`` entities (``node`` or ``edge``), a page
         of ``PROJECTION_PAGE`` version rows at a time (a keyset on their ids, from after ``after``):
-        each page's entities at their final row in the window, with the page's last version id.
-        An entity with rows on two pages comes up on both, at the same final value — written
-        twice, never stale."""
+        each page's entities at their final row in the window, with the page's last version id
+        and how many version rows it held (the window's progress: its pages' rows add up to
+        :meth:`_window_rows`). An entity with rows on two pages comes up on both, at the same final
+        value — written twice, never stale."""
         model = NodeVersionORM if kind == "node" else EdgeVersionORM
         named = ((model.urn, model.entity_type, null(), null()) if kind == "node" else
                  (null(), model.edge_type, model.source_entity_id, model.target_entity_id))
@@ -3619,7 +3691,7 @@ class FalkorProjector:
                     (kind, graph.id, vid),
                     (("urn", urn), (type_key, typ), ("sourceEntityId", src), ("targetEntityId", tgt))))
             yield (await self._changes_of(s, graph, main_id, from_seq, last, {}, {}, to_seq=to_seq),
-                   page[-1][0])
+                   page[-1][0], len(page))
             if len(page) < config.PROJECTION_PAGE:
                 return
             after = page[-1][0]
@@ -4645,7 +4717,8 @@ class FalkorProjector:
         rollups to the batch job, and a customer's key is swept, as if they had written."""
         async with self._session() as s:
             total = await self._live_count(s, graph_id, main_id)
-        progress = self._progress_writer(graph_id, total) if track_progress and total else None
+        progress = (self._progress_writer(graph_id, total, cursor) if track_progress and total
+                    else None)
         steps = ("fk_node", "fk_edge", "node", "edge")
         resumed = cursor is not None and cursor.resume is not None
         done = {"writes": 0, "structural": resumed, "kept": resumed and not owned}
@@ -5344,15 +5417,25 @@ class FalkorProjector:
         await self._run_edge_deletes(client, edge_deletes)
         await _q(client, _SWEPT_WRITE, params={"seq": to_seq})
 
-    def _progress_writer(self, graph_id: str, total: int):
+    def _progress_writer(self, graph_id: str, total: int, cursor: Optional[_Cursor] = None):
         """Throttled full-seed progress: accumulates per-chunk counts and persists to
         ``projection_state.progress_done/total`` at most ~1/s (always on the final item),
         so the Data health poll sees live movement without a DB write per chunk.
-        Best-effort by design — a progress write must never fail the projection."""
-        state = {"done": 0, "last": 0.0}
+        Best-effort by design — a progress write must never fail the projection.
+
+        The pass's update (``update_progress``) counts the same rows. A ``cursor`` the pass
+        resumes carries what the passes before it counted, when the update began and its rate:
+        the count goes on from there."""
+        resumed = cursor is not None and cursor.resume is not None
+        state = {"done": cursor.done if resumed else 0, "last": 0.0}
+        update = _PASS_UPDATE.get()
+        if resumed:
+            update.resume(started=cursor.started_at, rate=cursor.rate)
+        update.count(total, state["done"])
 
         async def _on_chunk(n: int) -> None:
             state["done"] += n
+            await update.add(n)
             now = time.monotonic()
             if now - state["last"] < 1.0 and state["done"] < total:
                 return
@@ -5394,15 +5477,15 @@ class FalkorProjector:
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             total = await self._window_rows(s, graph, main_id, from_seq, to_seq)
-        progress = self._progress_writer(graph_id, total) if total else None
+        progress = self._progress_writer(graph_id, total, cursor) if total else None
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             for kind in ("node", "edge"):
                 after = cursor.start(kind, ("node", "edge")) if cursor else ""
                 if after is None:
                     continue                             # a resumed pass had finished these
-                async for changes, last_id in self._window_pages(s, graph, main_id, from_seq,
-                                                                 to_seq, kind, after=after):
+                async for changes, last_id, rows in self._window_pages(
+                        s, graph, main_id, from_seq, to_seq, kind, after=after):
                     moved, retypes, rekeys = await self._window_meta(s, graph, main_id, from_seq,
                                                                      changes)
                     structural = structural or moved
@@ -5415,7 +5498,7 @@ class FalkorProjector:
                                                  prior=prior) or 0
                     written += sum(len(c) for c in changes)
                     if progress:
-                        await progress(sum(len(c) for c in changes))
+                        await progress(rows)
                     if cursor is not None:
                         await cursor.page_done(kind, last_id, written, structural=structural,
                                                dropped=dropped)

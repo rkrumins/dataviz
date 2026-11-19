@@ -6,7 +6,9 @@
  * the headline; click opens the whole path as lanes joined by a rail, each lane with its version,
  * revision and times, the rail between two lanes showing whether they agree (solid), are catching
  * up (flowing) or have come apart (broken). Every word comes from `deriveSync`, so the pill, the
- * hover and the card cannot disagree.
+ * hover and the card cannot disagree. While the graph is updated and the server says how far it is
+ * (`versioned.progress`), the pill adds the percentage and time left and the graph's lane shows the
+ * update itself (`UpdateProgress`).
  */
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import * as Popover from '@radix-ui/react-popover'
@@ -18,6 +20,9 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import { usePermission } from '@/store/auth'
 import { usePersonaMode } from '@/store/persona'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
+import type { GraphUpdateProgress } from '@/services/versioningApiService'
+import { UpdateProgress } from '@/features/versioning/components/UpdateProgress'
+import { describeProgress } from '@/features/versioning/components/updateProgressWords'
 import { deriveSync, shortRevision, type SyncLane, type SyncTone } from './deriveSync'
 import { useSyncStatus } from './useSyncStatus'
 
@@ -106,8 +111,10 @@ function RevisionTag({ id, message }: { id: string; message?: string | null }) {
   )
 }
 
-function Lane({ lane, next, last, sameRevisionAsPrevious }: {
+function Lane({ lane, next, last, sameRevisionAsPrevious, update }: {
   lane: SyncLane; next?: SyncLane; last: boolean; sameRevisionAsPrevious?: boolean
+  /** The graph's lane: how far its update in flight is, in place of the lane's own bar. */
+  update?: GraphUpdateProgress | null
 }) {
   const reduce = useReducedMotion()
   const t = TONE[lane.tone]
@@ -143,7 +150,8 @@ function Lane({ lane, next, last, sameRevisionAsPrevious }: {
           <span className="text-[10.5px] text-ink-muted">{lane.tech}</span>
         </div>
         <div className={cn('mt-0.5 text-[12px] font-medium', t.ink)}>{lane.status}</div>
-        {lane.progress != null && <ProgressBar value={lane.progress} label={`${lane.title} progress`} className="mt-1.5" />}
+        {update ? <UpdateProgress progress={update} className="mt-2" />
+          : lane.progress != null && <ProgressBar value={lane.progress} label={`${lane.title} progress`} className="mt-1.5" />}
         {lane.revision?.commitId && (
           sameRevisionAsPrevious
             ? <span className="mt-1 block text-[10.5px] text-ink-muted">Same revision as the system of record</span>
@@ -182,16 +190,25 @@ export function SyncStatusChip({ workspaceId, dataSourceId, viewId, className }:
   const verdict = useMemo(() => deriveSync(q.data, now), [q.data, now])
   if (q.isError && !q.data) return null        // not readable here — say nothing rather than guess
   const t = TONE[verdict.tone]
+  // How far the graph's update in flight is, when the server can say (null otherwise).
+  const update = q.data?.versioned?.progress ?? null
+  const howFar = update ? describeProgress(update) : null
 
   // The Business view keeps the verdict and drops the path: the same pill, colour and mark, in
   // words a reader acts on, with no card behind it — so no store names, no revision ids and no
   // account of how this kind of graph stays in sync.
   if (!technical) {
     // An earlier version on screen while the newer one is written is said as such, with which
-    // and until when on hover: the view is complete, only not the newest yet.
+    // and until when on hover: the view is complete, only not the newest yet. How far the newer
+    // one is, once the server says.
+    const updating = verdict.tone === 'busy' && update
     const words = verdict.showingOlder
-      ? verdict.tone === 'busy' ? 'Showing an earlier version · updating…' : 'Showing an earlier version'
-      : verdict.tone === 'busy' ? 'Updating…'
+      ? verdict.tone === 'busy'
+        ? updating && howFar?.bare
+          ? <>Showing an earlier version · <UpdateProgress progress={update} variant="chip" withVersion={false} /></>
+          : 'Showing an earlier version · updating…'
+        : 'Showing an earlier version'
+      : verdict.tone === 'busy' ? updating ? <UpdateProgress progress={update} variant="chip" /> : 'Updating…'
       : verdict.tone === 'ok' ? `Up to date · checked ${timeAgo(q.data!.checkedAt)}`
       : verdict.tone === 'idle' ? verdict.chip
       : 'May be out of date'
@@ -202,7 +219,7 @@ export function SyncStatusChip({ workspaceId, dataSourceId, viewId, className }:
         className,
       )}>
         <SyncMark tone={verdict.tone} size={13} />
-        <span>{words}</span>
+        <span className="inline-flex min-w-0 items-center gap-1">{words}</span>
       </span>
     )
     return verdict.showingOlder
@@ -223,7 +240,7 @@ export function SyncStatusChip({ workspaceId, dataSourceId, viewId, className }:
         <Popover.Trigger asChild>
           <button
             type="button"
-            aria-label={`Sync status: ${verdict.kindLabel ? `${verdict.kindLabel}, ` : ''}${verdict.headline}`}
+            aria-label={`Sync status: ${verdict.kindLabel ? `${verdict.kindLabel}, ` : ''}${verdict.headline}${howFar ? `. ${howFar.sentence}` : ''}`}
             className={cn(
               'inline-flex items-center gap-1.5 h-5 px-2 rounded-full border text-[11px] font-medium leading-none whitespace-nowrap transition-colors',
               t.pill,
@@ -231,6 +248,12 @@ export function SyncStatusChip({ workspaceId, dataSourceId, viewId, className }:
           >
             <SyncMark tone={verdict.tone} size={13} />
             <span>{verdict.chip}</span>
+            {howFar?.bare && verdict.busy && (
+              <>
+                <span aria-hidden>·</span>
+                <UpdateProgress progress={update} variant="chip" withVersion={false} />
+              </>
+            )}
           </button>
         </Popover.Trigger>
       </HoverTip>
@@ -281,6 +304,7 @@ export function SyncStatusChip({ workspaceId, dataSourceId, viewId, className }:
                 last={i === lanes.length - 1}
                 sameRevisionAsPrevious={lane.key === 'graph' && !!record?.revision?.commitId
                   && record.revision.commitId === lane.revision?.commitId}
+                update={lane.key === 'graph' ? update : null}
               />
             ))}
           </ol>

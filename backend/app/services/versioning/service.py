@@ -5696,16 +5696,8 @@ class GraphVersioningService:
                 st = review_state.standing(requests[pr.id], events[pr.id], last[pr.id])
                 rule = await rule_for(ds_of[pr.id])
                 verdict = review_state.apply_rule(st.reviewers, len(st.standing), rule)
-                asked = [r for r in requests[pr.id] if (r["subject_type"], r["subject_id"]) == ("user", me)
-                         or (r["subject_type"] == "group" and r["subject_id"] in groups)]
+                asked = review_state.asked_of(me, groups, requests[pr.id])
                 mine = st.reviewed.get(me)
-                # A group's request waits on its members until one of them approves it, since it was asked.
-                by_subject = {(x["type"], x["id"]): x for x in st.reviewers}
-                waiting = [r for r in asked if r["subject_type"] == "user" or not (
-                    (g := by_subject.get(("group", r["subject_id"]))) and g["state"] == "approved"
-                    and (g["at"] or "") >= (r["requested_at"] or ""))]
-                answered = not waiting or (mine is not None and st.current(me) and all(
-                    (mine["at"] or "") >= (r["requested_at"] or "") for r in waiting))
                 others = [e["created_at"] for e in events[pr.id] if e["actor"] != me]
                 if pr.actor != me:
                     others.append(pr.created_at)
@@ -5720,7 +5712,7 @@ class GraphVersioningService:
                 }
                 held = bool(st.holding) or bool(rule.threads_hold and threads.get(pr.id))
                 inn = ["open"]
-                if asked and pr.actor != me and not answered:
+                if review_state.waits_on(me, pr.actor, asked, st):
                     inn.append("needs_review")
                 if pr.actor == me:
                     inn.append("sent_back" if st.holding else "ready" if verdict["satisfied"] and not held

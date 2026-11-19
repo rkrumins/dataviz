@@ -58,6 +58,7 @@ tests/integration/test_graph_changes_idempotent.py
 tests/integration/test_graph_changes_in_parts.py
 tests/integration/test_graph_changes_name_identity.py
 tests/integration/test_graph_changes_one_commit.py
+tests/integration/test_graph_digest_live.py
 tests/integration/test_graph_freeze.py
 tests/integration/test_graph_health_live.py
 tests/integration/test_graph_lifecycle_purge.py
@@ -137,6 +138,7 @@ tests/integration/test_snapshot_edges_between.py
 tests/integration/test_stage2_collaboration_story.py
 tests/integration/test_sync_curation_guard.py
 tests/integration/test_transfer_queue.py
+tests/integration/test_update_progress_live.py
 tests/integration/test_versioned_graph_settings_live.py
 tests/integration/test_versioning_admin_graphs_live.py
 tests/integration/test_versioning_api.py

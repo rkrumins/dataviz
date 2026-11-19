@@ -1562,6 +1562,18 @@ async def list_versioned_graphs(
 
     live = set(present_ids)
     directory = await _resolve_data_sources([r.data_source_id for r in page])
+    # How far each update in flight is: one pipelined Redis read for the page, of the graphs that
+    # may have one (a fork has none of its own). Best effort: unreadable, none is shown.
+    from backend.app.services.versioning import update_progress
+
+    progress: dict = {}
+    updating = [r.id for r in page if r.fork_parent_graph_id is None and update_progress.in_flight(
+        status=r.status, behind=(r.lag or 0) > 0, building=isinstance(r.candidate_state, dict))]
+    if updating:
+        try:
+            progress = await update_progress.read_many(updating)
+        except Exception as exc:  # noqa: BLE001 — progress is best effort
+            logger.warning("versioned-graph inventory: update progress unreadable: %s", exc)
 
     def residency_of(r) -> dict:
         """Residency (doc 17): its class, whether its key is in FalkorDB, why it was evicted, its
@@ -1609,6 +1621,8 @@ async def list_versioned_graphs(
             **read_mode_fields(r),
             # A new version built beside its key (read mode beside), while one is.
             "build": candidates.block(r),
+            # How far its update in flight is, and the time it has left; null while none is.
+            "progress": progress.get(r.id),
         } for r in page],
         "nextCursor": page[-1].id if more else None,
         "total": total,

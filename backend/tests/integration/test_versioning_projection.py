@@ -288,15 +288,15 @@ class FakeGraph:
             self.proj_meta = dict(params)
             return None
         if cypher == ("MATCH (m:_GVProjMeta) RETURN m.pFrom, m.pTo, m.pStep, m.pAfter, "
-                      "m.pStructural, m.pDropped"):
+                      "m.pStructural, m.pDropped, m.pDone, m.pStartedAt, m.pRate"):
             c = self.cursor
             return _Result([[c["from"], c["to"], c["step"], c["after"], c["structural"],
-                             c["dropped"]]] if c else [])
+                             c["dropped"], c["done"], c["startedAt"], c["rate"]]] if c else [])
         if cypher.startswith("MERGE (m:_GVProjMeta {id: 'meta'}) SET m.pFrom = $from"):
             self.cursor = dict(params)
             return None
         if cypher == ("MATCH (m:_GVProjMeta) REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter, "
-                      "m.pStructural, m.pDropped"):
+                      "m.pStructural, m.pDropped, m.pDone, m.pStartedAt, m.pRate"):
             self.cursor = None
             return None
         if cypher == "MATCH (m:_GVProjMeta) RETURN m.sweptSeq":

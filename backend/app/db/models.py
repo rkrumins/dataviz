@@ -451,6 +451,51 @@ class SettingsImportORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# graph_seen / graph_watches                                           #
+# (what changed since you last looked, and watching: ``graph_digest``) #
+# ------------------------------------------------------------------ #
+
+class GraphSeenORM(Base):
+    """How far one person has looked at a versioned graph: the version of its published line they
+    marked seen, and when. Keyed by the data source (one versioned graph each). The marker only
+    moves forward (``graph_watch_repo.mark_seen``)."""
+
+    __tablename__ = "graph_seen"
+
+    user_id = Column(Text, nullable=False)
+    data_source_id = Column(Text, nullable=False)
+    seen_seq = Column(BigInteger, nullable=False)
+    seen_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "data_source_id", name="pk_graph_seen"),
+    )
+
+
+class GraphWatchORM(Base):
+    """One person watching a versioned graph (``entity_urn`` NULL) or one entity in it (its urn):
+    a publish that changes what they watch tells them in their Inbox. NULLs are distinct to a
+    unique constraint, so ``uq_graph_watches_graph`` holds "the whole graph" to one row."""
+
+    __tablename__ = "graph_watches"
+
+    id = Column(Text, primary_key=True, default=lambda: f"gw_{uuid.uuid4().hex[:12]}")
+    user_id = Column(Text, nullable=False)
+    data_source_id = Column(Text, nullable=False)
+    entity_urn = Column(Text, nullable=True)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "data_source_id", "entity_urn", name="uq_graph_watches"),
+        Index("uq_graph_watches_graph", "user_id", "data_source_id", unique=True,
+              postgresql_where=text("entity_urn IS NULL"),
+              sqlite_where=text("entity_urn IS NULL")),
+        # Who to tell when a graph is published.
+        Index("ix_graph_watches_ds", "data_source_id", "entity_urn"),
+    )
+
+
+# ------------------------------------------------------------------ #
 # feature_categories  (definitions: id, label, icon, color, order)     #
 # ------------------------------------------------------------------ #
 

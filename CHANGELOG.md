@@ -905,6 +905,9 @@ integration's many small changes as a few commits.
   workspace's and data source's review rules (`review_required_approvals`, `review_threads_hold`)
   into the store once, as the import above copies the rest: an old 0 approvals is "everyone asked",
   and the old columns are written for one release too.
+- **Migrations `20261116_1200_graph_watch` and `20261119_1800_merge_graph_watch`** add `graph_seen`
+  (how far each person has looked at a versioned graph) and `graph_watches` (what they watch in it),
+  new tables only, then join that revision to the settings line's head (the merge runs nothing).
 - **Migrations `20261113_1000_gv_ps_served_fill`, `20261113_1100_build_policy`,
   `20261113_1200_gv_ps_window_rows`, `20261113_1300_gv_ps_read_mode` and
   `20261113_1400_gv_ps_candidate`** fill `projection_state.served_commit_seq` where a graph's key

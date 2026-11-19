@@ -120,6 +120,8 @@ async def _run() -> None:
         # and no build.
         "readMode": None, "readModeEffective": "latest", "readModeDeclared": "latest",
         "readModeSource": "default", "readModeWhy": [], "build": None,
+        # In sync and idle: no update can be in flight, so none is read.
+        "progress": None,
     }
     # A fork has no residency of its own (doc 17): no key, no class, no state; its root's row has
     # them, and its reads count there. Nor a projection's state: it is never evicted, behind or

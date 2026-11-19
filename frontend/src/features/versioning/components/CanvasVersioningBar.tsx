@@ -62,6 +62,8 @@ import { OthersSavedChip } from './OthersSavedChip'
 import { CommitDialog } from './CommitDialog'
 import { ForkStrip } from './ForkStrip'
 import { PublishReceiptBanner } from './PublishReceiptBanner'
+import { DigestChip } from './DigestChip'
+import { DigestSheet } from './DigestSheet'
 import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
 
 interface CanvasVersioningBarProps {
@@ -115,6 +117,8 @@ export function CanvasVersioningBar({
   // A comparison of two revisions to open History on, and a revision to export as it was.
   const [compare, setCompare] = useState<CompareRequest | null>(null)
   const [exportAt, setExportAt] = useState<number | null>(null)
+  // What changed since the reader last looked: its sheet, opened from the chip in the row below.
+  const [digestOpen, setDigestOpen] = useState(false)
 
   // Travelling in time (the revision viewer, a preview): the past revision this view reads, its
   // `?rev=` link, and two revisions highlighted on the canvas.
@@ -407,6 +411,8 @@ export function CanvasVersioningBar({
             </HoverTip>
           </span>
         )}
+        {/* Says nothing unless something was published since the reader last looked. */}
+        <DigestChip workspaceId={workspaceId} graphId={graphId} onOpen={() => setDigestOpen(true)} />
         <RefreshingBadge workspaceId={workspaceId} graphId={graphId} />
         {/* Which store serves reads: says nothing while published is on FalkorDB. */}
         <ReadRouteChip workspaceId={workspaceId} graphId={graphId} isDraft={isDraft} />
@@ -597,6 +603,17 @@ export function CanvasVersioningBar({
           onClose={() => setShowPublish(false)}
           canPublishDraft={manageable}
           dataSourceId={dataSourceId}
+        />
+      )}
+
+      {graphId && (
+        <DigestSheet
+          wsId={workspaceId}
+          graphId={graphId}
+          mainBranchId={resolve.data?.mainBranchId ?? null}
+          open={digestOpen}
+          onOpenChange={setDigestOpen}
+          onCompare={(fromSeq, toSeq) => { setDigestOpen(false); openCompare(fromSeq, toSeq) }}
         />
       )}
 

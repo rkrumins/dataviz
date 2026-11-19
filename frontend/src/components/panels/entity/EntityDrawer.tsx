@@ -38,6 +38,7 @@ import { Tabs, TabsContent } from '@/components/ui/Tabs'
 import { DrawerBody, DrawerFrame, DrawerShell } from '../shell/DrawerShell'
 import { JsonView } from '../shell/JsonView'
 import { useDrawerHistoryScope } from '../useDrawerHistoryScope'
+import { EntityWatchButton } from '@/features/versioning/components/WatchButtons'
 import { useEntityEditSession } from './useEntityEditSession'
 import { EntityHeader, type EntityTab } from './EntityHeader'
 import { EntityViewTab } from './EntityViewTab'
@@ -235,6 +236,9 @@ function OpenEntityDrawer({
             onFocusNode={onFocusNode}
             customizing={customizing}
             onCustomize={toggleCustomize}
+            watch={versioningEnabled && scope.wsId && scope.graphId && !isGhost && !unsavedCreate
+              ? <EntityWatchButton wsId={scope.wsId} graphId={scope.graphId} urn={urn} name={title} />
+              : undefined}
           />
 
           <DrawerBody>

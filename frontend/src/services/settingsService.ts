@@ -31,6 +31,7 @@ import { authFetch } from './apiClient'
 import { withReason } from './activityReason'
 import { graphStoreService } from './graphStoreService'
 import type { ResidencyState, VersionedGraphRow, VersionedGraphsFilter } from './systemStatusService'
+import type { GraphUpdateProgress } from './versioningApiService'
 import type {
     Audience, Editor, Limits, NodeMemory, ResolvedSetting, ResolvedValues, Scope, SettingsSchema, SettingValue, Status, TrailScope,
     WhyItem,
@@ -518,8 +519,8 @@ export interface GraphHealth {
     serving: { seq: number; version: Revision | null; source: 'graph_store' | 'database' | null } | null
     versionsBehind: number | null
     readMode: { effective: string; declared: string | null; source: string; why: WhyItem[] } | null
-    /** Kept as served: null until updates publish their progress. */
-    progress: Record<string, unknown> | null
+    /** How far an update in flight is, as served: null while none is (absent from a server that doesn't publish it). */
+    progress?: GraphUpdateProgress | null
     lastUpdate: { finishedAt: string | null; durationSecs: number | null; rows: number | null; ratePerSec: number | null } | null
     /** Its copy; `state` as the inventory has it (null: no copy in the graph store yet). */
     memory: {
