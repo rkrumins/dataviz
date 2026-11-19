@@ -65,11 +65,12 @@ DIMENSION_LABELS: Mapping[str, str] = {
     "cost": "Cost",
 }
 
-#: How a value is entered and shown. ``*_or_unlimited`` / ``days_or_forever`` store the words
-#: ``"unlimited"`` / ``"forever"`` as values; ``None`` always means "nothing chosen here".
+#: How a value is entered and shown. ``*_or_unlimited`` / ``days_or_forever`` /
+#: ``count_or_everyone`` store the words ``"unlimited"`` / ``"forever"`` / ``"everyone"`` as values;
+#: ``None`` always means "nothing chosen here".
 Kind = Literal["bool", "count", "ratio", "percent", "ms", "seconds", "bytes", "choice", "days",
-               "days_or_forever", "count_or_unlimited", "bytes_or_unlimited", "identifier",
-               "refusal_budget"]
+               "days_or_forever", "count_or_unlimited", "bytes_or_unlimited", "count_or_everyone",
+               "identifier", "refusal_budget"]
 
 #: When a change is acted on — said in words that are true of the code, each pinned by a test.
 TakesEffect = Literal["next_read", "next_write", "next_pass", "next_publish", "build_start",
@@ -209,7 +210,7 @@ class Legacy:
     data_source_column: Optional[str] = None
     projection_state_column: Optional[str] = None
     encode: Optional[Literal["zero_is_forever", "zero_is_unlimited", "minus_one_is_unlimited",
-                             "fraction"]] = None
+                             "zero_is_everyone", "fraction"]] = None
 
 
 @dataclass(frozen=True)

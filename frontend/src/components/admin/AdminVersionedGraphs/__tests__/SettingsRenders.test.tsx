@@ -1,5 +1,5 @@
 /**
- * Staging one value redraws that setting's row, not the page's 46: rows are memoised on what they
+ * Staging one value redraws that setting's row, not the page's 48: rows are memoised on what they
  * show, and the callbacks they get keep their identity. Counted at the kit's SettingRow.
  */
 import { screen, within } from '@testing-library/react'

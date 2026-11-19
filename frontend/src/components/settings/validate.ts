@@ -6,7 +6,7 @@
 import { formatValue, sameValue } from './format'
 import type { Setting, SettingValue, Values } from './types'
 
-const WHOLE: ReadonlySet<Setting['kind']> = new Set(['count', 'seconds', 'bytes', 'days', 'ms', 'days_or_forever', 'count_or_unlimited', 'bytes_or_unlimited'])
+const WHOLE: ReadonlySet<Setting['kind']> = new Set(['count', 'seconds', 'bytes', 'days', 'ms', 'days_or_forever', 'count_or_unlimited', 'bytes_or_unlimited', 'count_or_everyone'])
 
 export interface ValidationContext {
     /** Values with the staged changes applied: what the rules are checked against. */
@@ -40,7 +40,7 @@ export function validateValue(s: Setting, v: SettingValue | null, ctx: Validatio
         return /^(unlimited|\d+|\d+(\.\d+)?%)$/.test(String(v)) ? null : 'Enter none, a number of rows, a share like 0.5%, or unlimited.'
     }
     if (s.kind === 'bool') return null
-    if (v === 'unlimited' || v === 'forever') return null
+    if (v === 'unlimited' || v === 'forever' || v === 'everyone') return null
 
     const n = Number(v)
     if (typeof v !== 'number' || !Number.isFinite(n)) return 'Enter a number.'

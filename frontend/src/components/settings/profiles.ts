@@ -35,7 +35,7 @@ export interface ProfilePlan {
 
 /** A value as a limit compares it: the words are as large as it goes. */
 function asNumber(v: SettingValue): number | null {
-    if (v === 'unlimited' || v === 'forever') return Infinity
+    if (v === 'unlimited' || v === 'forever' || v === 'everyone') return Infinity
     return typeof v === 'number' ? v : null
 }
 

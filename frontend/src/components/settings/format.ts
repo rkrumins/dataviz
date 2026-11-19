@@ -57,6 +57,7 @@ export function formatValue(s: Setting, v: SettingValue | null | undefined): str
         case 'days': return formatDays(n)
         case 'days_or_forever': return formatDaysOrForever(v === 'forever' ? 'forever' : n)
         case 'count_or_unlimited': return formatCountOrUnlimited(v === 'unlimited' ? 'unlimited' : n, s.unit ?? undefined)
+        case 'count_or_everyone': return v === 'everyone' ? 'Everyone asked' : formatCount(n, s.unit ?? undefined)
         case 'bytes_or_unlimited': return formatBytesOrUnlimited(v === 'unlimited' ? 'unlimited' : n)
         case 'identifier': return identifierLabel(String(v))
         case 'refusal_budget': return formatRefusalBudget(String(v))

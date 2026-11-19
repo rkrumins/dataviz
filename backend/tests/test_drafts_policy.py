@@ -227,7 +227,8 @@ async def test_a_workspace_value_reaches_a_graph_without_its_own_and_a_fork_foll
     policy = await drafts_policy.load(db_session, "ds_1")
     assert (policy.levels, policy.default_visibility) == ("private_only", "private")
     assert dict(policy.sources) == {"levels": "workspace", "defaultVisibility": "workspace",
-                                    "selfApproval": "default", "selfMerge": "default"}
+                                    "selfApproval": "default", "selfMerge": "default",
+                                    "requiredApprovals": "default", "threadsHold": "default"}
     assert (await drafts_policy.load(db_session, "ds_9")).levels == "any", "another workspace's"
     assert (await drafts_policy.effective("ws_1")).levels == "private_only"
     settings_world.set("drafts.levels", "graph", "ds_1", "public_only")    # its own wins
@@ -352,3 +353,35 @@ def test_a_review_rule_resolves_like_the_rest_and_true_is_not_one_approval():
         except ValidationError:
             continue
         raise AssertionError(f"{bad!r} was taken as a number of approvals")
+
+
+@pytest.mark.asyncio
+async def test_the_review_rules_save_in_the_stores_words_and_the_old_columns_numbers(
+        test_client, db_session, estate, versioning_on, settings_world):
+    """Through an old endpoint, ``requiredApprovals`` 0 (everyone asked) is saved in the store as
+    ``"everyone"`` and written through to the old column as 0, and the endpoint, its activity record
+    and the policy read back 0. The rule the merge gate holds a review to follows the store."""
+    workspace = "/api/v1/ws_1/versioning/drafts-policy"
+    changed = await test_client.put(workspace, json={"requiredApprovals": 0, "threadsHold": True})
+    assert changed.status_code == 200, changed.text
+    assert {(a.key, a.scope, a.after_value) for a in settings_world.saves[-1].applied} == {
+        ("drafts.requiredApprovals", "workspace", "everyone"), ("drafts.threadsHold", "workspace", True)}
+    body = changed.json()
+    assert (body["settings"]["requiredApprovals"], body["settings"]["threadsHold"]) == (0, True)
+    assert (body["effective"]["requiredApprovals"], body["effective"]["sources"]["requiredApprovals"]) == (
+        0, "workspace")
+    [event] = await _recorded(db_session)
+    assert event["details"]["to"] == {"requiredApprovals": 0, "threadsHold": True}
+    ws = await db_session.get(WorkspaceORM, "ws_1", populate_existing=True)
+    assert (ws.review_required_approvals, ws.review_threads_hold) == (0, True)
+
+    source = "/api/v1/ws_1/versioning/data-sources/ds_1/drafts-policy"
+    changed = await test_client.put(source, json={"requiredApprovals": 2})
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["overrides"]["requiredApprovals"] == 2
+    ds = await db_session.get(WorkspaceDataSourceORM, "ds_1", populate_existing=True)
+    assert ds.review_required_approvals == 2
+    rule = (await drafts_policy.load(db_session, "ds_1")).rule
+    assert (rule.required_approvals, rule.threads_hold) == (2, True)
+    settings_world.set("drafts.requiredApprovals", "graph", "ds_1", "everyone")   # the new API's save
+    assert (await drafts_policy.load(db_session, "ds_1")).rule.required_approvals == 0

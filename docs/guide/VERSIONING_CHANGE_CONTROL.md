@@ -368,7 +368,11 @@ history**, for every data source in it:
   only**. Turning private drafts off leaves existing private drafts as they are;
 - **People may approve their own reviews**;
 - **People may merge their own reviews**. With it off, drafts are published only
-  through a review someone else merges.
+  through a review someone else merges;
+- **Approvals a review needs** — **Everyone asked**, or a set number (see [How
+  many approvals a review needs](/guide/review-center#how-many-approvals-a-review-needs));
+- **Open threads hold the merge**. With it on, a review merges only once every
+  thread on it is resolved.
 
 A data source can set its own: on its **Versioning** tab, **Open settings** opens
 its settings, where each one is its own or follows the workspace's (**Use the

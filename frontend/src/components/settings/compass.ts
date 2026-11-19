@@ -9,7 +9,7 @@
  * - A NUMBER moves each dimension it affects by how far the value sits from the recommended one,
  *   as a share of the way to the end of its range (−1 to +1), in the direction its effect's
  *   `upVerdict` says raising it goes (better or worse), times the effect's weight. A word that is a
- *   value ("unlimited", "forever") is as far up as it goes.
+ *   value ("unlimited", "forever", "everyone") is as far up as it goes.
  * - A SWITCH counts on as up and off as down, against the recommended value.
  *
  * A dimension's score is its weighted sum over the weights that touched it: −1 (every setting
@@ -44,8 +44,8 @@ const clamp1 = (n: number) => Math.max(-1, Math.min(1, n))
 /** How far `v` sits from `base`, as a share of the way to the end of the range: −1 to +1. */
 function displacement(s: Setting, v: SettingValue, base: SettingValue): number {
     if (v === base) return 0
-    if (v === 'unlimited' || v === 'forever') return 1
-    if (base === 'unlimited' || base === 'forever') return -1
+    if (v === 'unlimited' || v === 'forever' || v === 'everyone') return 1
+    if (base === 'unlimited' || base === 'forever' || base === 'everyone') return -1
     if (typeof v === 'boolean') return v === base ? 0 : v ? 1 : -1
     const n = Number(v)
     const b = Number(base)

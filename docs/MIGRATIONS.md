@@ -370,6 +370,23 @@ where it differs from the platform's.
   `projection_state.read_mode`, and each graph keeps the residency class its row holds.
 - The downgrade forgets the markers; the values stay, as the store's.
 
+**`20261119_1600_merge_settings` joins the two to `main`'s chain.** They came off
+`20261113_1400_gv_ps_candidate` before `main` took that line in on its own, and environments
+deployed from this branch ran them, so they keep the parents they were pushed with (the lineage
+record lists them). The merge revision runs nothing.
+
+**`20261119_1700_review_rules_store` copies in the review rules.** `20261118_1100_review_rules` put
+`review_required_approvals` (0 to 10, where 0 is everyone asked) and `review_threads_hold` on
+`workspaces` and `workspace_data_sources`. They are the settings `drafts.requiredApprovals` and
+`drafts.threadsHold` now, and the old columns are written through for one release, like the rest of
+the drafts and reviews policy. The revision copies what they hold as `20261116_1100_settings_import`
+copied the other fields: `ON CONFLICT DO NOTHING`, a `migration` change for each value, forks
+skipped, under the store's writers' lock, waiting at most five seconds for a lock, and the marker
+`legacy_review_rules`. NULL copies nothing, and an old `0` approvals is `everyone`. It reads only
+the columns the tables have, so on a database whose schema is short of what its stamp claims it
+copies what is there, and runs again once `--recover` has made the rest. The downgrade forgets the
+marker.
+
 **Rolling back.** For one release, every save through the store writes the old storage too:
 New-version builds' JSON, the `platform_settings` columns, a workspace's and a data source's
 columns (a data source's forks' as well), and a graph's `projection_state.read_mode`. Each graph's

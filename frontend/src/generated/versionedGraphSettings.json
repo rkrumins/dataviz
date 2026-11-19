@@ -4958,6 +4958,194 @@
       "category": "drafts",
       "choices": [],
       "default": {
+        "attr": null,
+        "code": "everyone",
+        "env": null
+      },
+      "defaultLimits": {},
+      "docs": "versioned-graph-settings#drafts-requiredapprovals",
+      "freshness": "strict",
+      "guidance": {
+        "aliases": [
+          "required approvals",
+          "approvals",
+          "two approvals",
+          "reviewers"
+        ],
+        "changeWhen": [
+          "A rule says two people must approve every change, whoever they are: set 2.",
+          "Reviews wait on someone who was asked but is away: set a number, so any approvers will do."
+        ],
+        "effects": [
+          {
+            "dimension": "consistency",
+            "down": "Fewer people check each change.",
+            "up": "More people check each change before it merges.",
+            "upVerdict": "better",
+            "weight": "medium"
+          },
+          {
+            "dimension": "update_speed",
+            "down": "Changes merge sooner.",
+            "up": "Merges wait for more approvals.",
+            "upVerdict": "worse",
+            "weight": "medium"
+          }
+        ],
+        "evidence": "drafts_policy.EffectiveDraftsPolicy.rule gives review_state.ReviewRule its required_approvals (everyone asked is 0); service._review_gate raises ApprovalRequired before any merge work, then ChangesRequested (409 changes_requested) and ThreadsOpen. Read at every merge, never cached.",
+        "example": "Every person or group asked must approve before a review merges.",
+        "means": "Everyone asked: every person or group asked to review must approve, and a review that asks no one needs no approval. A number: at least that many approvals, from anyone who may approve, whoever was asked. Either way, an approval counts only while the draft hasn't changed since it was given, and a request for changes holds the merge until the draft changes.",
+        "recommended": {
+          "forThisPlatform": null,
+          "value": "everyone",
+          "why": "Everyone you ask has a say; set a number where any approvers will do, or a rule needs a set count."
+        },
+        "risk": "low",
+        "riskNote": "With a number, a review merges once that many approve, even if someone asked hasn't.",
+        "summary": "How many approvals a review needs before it can merge.",
+        "symptoms": [
+          "A review is approved but won't merge",
+          "A merge waits for one reviewer"
+        ]
+      },
+      "key": "drafts.requiredApprovals",
+      "kind": "count_or_everyone",
+      "label": "Approvals a review needs",
+      "legacy": {
+        "buildPolicy": null,
+        "dataSourceColumn": "review_required_approvals",
+        "encode": "zero_is_everyone",
+        "platformColumn": null,
+        "projectionStateColumn": null,
+        "residencyPolicy": null,
+        "workspaceColumn": "review_required_approvals"
+      },
+      "limitable": [
+        "lock"
+      ],
+      "materialized": null,
+      "question": "How many approvals does a review need before it can merge?",
+      "range": [
+        1,
+        10
+      ],
+      "requires": [],
+      "routing": false,
+      "rules": [],
+      "scopes": {
+        "graph": "workspace_admin",
+        "platform": "system_admin",
+        "workspace": "workspace_admin"
+      },
+      "section": "reviews",
+      "takesEffect": {
+        "text": "The next merge: an open review is held to the new rule from then on.",
+        "when": "next_review_action"
+      },
+      "ui": {},
+      "unit": "approvals",
+      "unreadable": "last_known",
+      "uses": [],
+      "visual": null
+    },
+    {
+      "audience": "business",
+      "caps": [],
+      "category": "drafts",
+      "choices": [],
+      "default": {
+        "attr": null,
+        "code": false,
+        "env": null
+      },
+      "defaultLimits": {},
+      "docs": "versioned-graph-settings#drafts-threadshold",
+      "freshness": "strict",
+      "guidance": {
+        "aliases": [
+          "open threads",
+          "unresolved comments",
+          "threads hold"
+        ],
+        "changeWhen": [
+          "Questions raised in a review must be answered before a change lands: turn it on.",
+          "Threads hold notes that needn't block a merge: keep it off."
+        ],
+        "effects": [
+          {
+            "dimension": "consistency",
+            "down": "A change can land with questions still open.",
+            "up": "Every question raised is answered before a change lands.",
+            "upVerdict": "better",
+            "weight": "medium"
+          },
+          {
+            "dimension": "update_speed",
+            "down": "Merges don't wait for discussion.",
+            "up": "Merges wait for every thread to be resolved.",
+            "upVerdict": "worse",
+            "weight": "low"
+          }
+        ],
+        "evidence": "drafts_policy.EffectiveDraftsPolicy.rule gives review_state.ReviewRule its threads_hold; service._review_gate raises ThreadsOpen (409 threads_open, with how many are open) before any merge work. Read at every merge, never cached.",
+        "example": "Open threads don't hold a review's merge.",
+        "means": "On, a review can't merge while any of its threads is open: someone resolves each one first. Off, threads are for discussion and don't hold the merge.",
+        "recommended": {
+          "forThisPlatform": null,
+          "value": false,
+          "why": "Threads stay a place to talk without blocking; turn it on where every question must be answered first."
+        },
+        "risk": "low",
+        "riskNote": "On, a forgotten thread holds a review until someone resolves it.",
+        "summary": "Whether a review with open threads waits for them to be resolved before it can merge.",
+        "symptoms": [
+          "A review won't merge because of open threads",
+          "Changes merge with questions unanswered"
+        ]
+      },
+      "key": "drafts.threadsHold",
+      "kind": "bool",
+      "label": "Open threads hold the merge",
+      "legacy": {
+        "buildPolicy": null,
+        "dataSourceColumn": "review_threads_hold",
+        "encode": null,
+        "platformColumn": null,
+        "projectionStateColumn": null,
+        "residencyPolicy": null,
+        "workspaceColumn": "review_threads_hold"
+      },
+      "limitable": [
+        "lock"
+      ],
+      "materialized": null,
+      "question": "Should open threads stop a review merging until they are resolved?",
+      "range": null,
+      "requires": [],
+      "routing": false,
+      "rules": [],
+      "scopes": {
+        "graph": "workspace_admin",
+        "platform": "system_admin",
+        "workspace": "workspace_admin"
+      },
+      "section": "reviews",
+      "takesEffect": {
+        "text": "The next merge.",
+        "when": "next_review_action"
+      },
+      "ui": {},
+      "unit": null,
+      "unreadable": "last_known",
+      "uses": [],
+      "visual": null
+    },
+    {
+      "audience": "business",
+      "caps": [],
+      "category": "drafts",
+      "choices": [],
+      "default": {
         "attr": "MAX_FORKS_PER_GRAPH",
         "code": 10,
         "env": "GRAPHVER_MAX_FORKS_PER_GRAPH"

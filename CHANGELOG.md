@@ -188,6 +188,10 @@ integration's many small changes as a few commits.
   - Each save is one activity event: `platform.versioning.settings_updated`,
     `workspace.versioning.settings_updated` or `workspace.versioning.graph_settings_updated`.
   - `docs/RBAC.md` has who may set what, where.
+- **The review rules are settings too.** **Approvals a review needs** (everyone asked, or a set
+  number) and **Open threads hold the merge** sit under Drafts & history with the rest of the drafts
+  and reviews policy: for a workspace or a graph as before, and now for the whole platform, where a
+  system administrator can also lock either one.
 - **Profiles: starting points for one outcome.** Balanced, Fastest reads, Always exact, Least
   memory and Big import tonight each set the settings they cover. Applying one stages its values at
   the level you are editing, only those you may set there, and says which it left out and why;
@@ -896,6 +900,11 @@ integration's many small changes as a few commits.
   in what was changed through the old endpoints meanwhile:
   `python -m backend.app.services.settings legacy-diff --adopt`. `docs/MIGRATIONS.md` has the
   details.
+- **Migrations `20261119_1600_merge_settings` and `20261119_1700_review_rules_store`** join the
+  settings store's two revisions to `main`'s chain (the merge runs nothing), then copy each
+  workspace's and data source's review rules (`review_required_approvals`, `review_threads_hold`)
+  into the store once, as the import above copies the rest: an old 0 approvals is "everyone asked",
+  and the old columns are written for one release too.
 - **Migrations `20261113_1000_gv_ps_served_fill`, `20261113_1100_build_policy`,
   `20261113_1200_gv_ps_window_rows`, `20261113_1300_gv_ps_read_mode` and
   `20261113_1400_gv_ps_candidate`** fill `projection_state.served_commit_seq` where a graph's key

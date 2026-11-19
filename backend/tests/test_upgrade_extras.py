@@ -27,6 +27,12 @@ def _script():
     return ScriptDirectory.from_config(_alembic_config())
 
 
+def _parents(script, revision: str) -> list:
+    """A revision's parents, one or several (a merge revision's ``down_revision`` is a tuple)."""
+    down = script.get_revision(revision).down_revision
+    return [down] if isinstance(down, str) else list(down or ())
+
+
 def _plan(stamped, **kw):
     inputs = {"virgin": False, "own": {}, "lines": schema_plan.other_lines(_alembic_config().get_main_option(
         "script_location")), "open_placement": None, "changed": [], "built": ("main at abc", True)}
@@ -40,13 +46,13 @@ def test_the_plan_says_what_an_upgrade_would_do():
     assert _plan([head])["verdict"] == "up_to_date"
     assert _plan([], virgin=True)["verdict"] == "fresh_install"
 
-    behind = _plan(list(script.get_revision(head).down_revision))
+    behind = _plan(_parents(script, head))
     assert behind["verdict"] == "upgrade" and behind["wouldRun"] == [head]
 
-    # #670's stamp: placed exactly, then everything the heads need that it doesn't have.
+    # #670's stamp: placed exactly, on #668's line, then everything the heads need that it doesn't have.
     placed = _plan(["20261116_1200_graph_watch"])
-    assert placed["placement"]["stamps"] == ["20261113_1400_gv_ps_candidate"]
-    have = schema_plan.ancestors(script, ["20261113_1400_gv_ps_candidate"])
+    assert placed["placement"]["stamps"] == ["20261116_1100_settings_import"]
+    have = schema_plan.ancestors(script, ["20261116_1100_settings_import"])
     assert set(placed["wouldRun"]) == {r.revision for r in script.walk_revisions()} - have
     assert placed["wouldRun"][-1] == head                   # ancestors first
 
@@ -57,7 +63,7 @@ def test_the_plan_says_what_an_upgrade_would_do():
 
 def test_the_plan_holds_a_shared_database_to_main():
     script = _script()
-    behind = list(script.get_revision(script.get_current_head()).down_revision)
+    behind = _parents(script, script.get_current_head())
     branch = ("claude/x at abc", False)
     assert _plan(behind, shared=True, built=branch)["verdict"] == "refused"
     assert _plan([script.get_current_head()], shared=True, built=branch)["verdict"] == "up_to_date"
@@ -251,5 +257,5 @@ def test_the_admin_schema_status_reads_the_database_live(scratch_db, monkeypatch
     # Another build's stamp: shown, with where the upgrade would place it and what it would run.
     _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261116_1200_graph_watch'")
     status = schema_status()
-    assert not status["atHead"] and status["plan"]["placement"]["stamps"] == ["20261113_1400_gv_ps_candidate"]
+    assert not status["atHead"] and status["plan"]["placement"]["stamps"] == ["20261116_1100_settings_import"]
     assert status["plan"]["wouldRun"][-1] == head

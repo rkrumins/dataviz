@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { SCHEMA, SETTINGS_BY_KEY as S } from '../__fixtures__/schema'
-import { GRAPH_VALUES, WORKSPACE_VALUES } from '../__fixtures__/resolved'
+import { GRAPH_VALUES, PLATFORM_VALUES, WORKSPACE_VALUES } from '../__fixtures__/resolved'
 import { boundsAt, describeFix, formatValue, inheritedAt, settingAnchor } from '../format'
 import { changeImpacts, choiceImpacts } from '../impacts'
 import { orderForLens } from '../lens'
@@ -31,6 +31,9 @@ describe('formatValue', () => {
         expect(formatValue(S['residency.bytesPerEntity'], 550)).toBe('550 bytes')
         expect(formatValue(S['trash.restoreDays'], 1)).toBe('1 day')
         expect(formatValue(S['drafts.keepClosedDays'], 'forever')).toBe('Forever')
+        expect(formatValue(S['drafts.requiredApprovals'], 'everyone')).toBe('Everyone asked')
+        expect(formatValue(S['drafts.requiredApprovals'], 1)).toBe('1 approval')
+        expect(formatValue(S['drafts.requiredApprovals'], 2)).toBe('2 approvals')
         expect(formatValue(S['reads.maxVersionsBehind'], 'unlimited')).toBe('Unlimited')
         expect(formatValue(S['reads.maxVersionsBehind'], 3)).toBe('3 versions')
         expect(formatValue(S['builds.copyMaxBytes'], 8 * 1024 ** 3)).toBe('8 GB')
@@ -85,6 +88,11 @@ describe('validateValue', () => {
         expect(validateValue(S['imports.maxRefusedRows'], '0.5%', { values })).toBeNull()
         expect(validateValue(S['imports.maxRefusedRows'], 'lots', { values })).toMatch(/^Enter none/)
         expect(validateValue(S['drafts.keepClosedDays'], 'forever', { values })).toBeNull()
+        // Everyone asked is the word, not 0: a set number is 1 to 10.
+        const approvals = { values, bounds: boundsAt(S['drafts.requiredApprovals'], PLATFORM_VALUES['drafts.requiredApprovals'], 'platform') }
+        expect(validateValue(S['drafts.requiredApprovals'], 'everyone', approvals)).toBeNull()
+        expect(validateValue(S['drafts.requiredApprovals'], 3, approvals)).toBeNull()
+        expect(validateValue(S['drafts.requiredApprovals'], 0, approvals)).toBe('Enter 1 approval to 10 approvals.')
         expect(validateValue(S['reads.mode'], null, { values })).toBeNull()
     })
 

@@ -13,7 +13,7 @@
  *   chosen, which level it came from, the whole trail Default → Platform → Workspace → Graph, a
  *   status and why, and whether the viewer may change it.
  *
- * `null` always means "nothing chosen here". `"unlimited"` and `"forever"` are values.
+ * `null` always means "nothing chosen here". `"unlimited"`, `"forever"` and `"everyone"` are values.
  */
 
 // ── Vocabulary ──────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ export const DIMENSIONS = ['consistency', 'availability', 'read_speed', 'update_
 export type Dimension = (typeof DIMENSIONS)[number]
 export const KINDS = [
     'bool', 'count', 'ratio', 'percent', 'ms', 'seconds', 'bytes', 'choice', 'days',
-    'days_or_forever', 'count_or_unlimited', 'bytes_or_unlimited', 'identifier', 'refusal_budget',
+    'days_or_forever', 'count_or_unlimited', 'bytes_or_unlimited', 'count_or_everyone', 'identifier', 'refusal_budget',
 ] as const
 export type Kind = (typeof KINDS)[number]
 export const TAKES_EFFECT = [
@@ -50,7 +50,7 @@ export const VISUALS = ['read_timeline', 'write_rhythm', 'memory_marks', 'copy_r
 export type Visual = (typeof VISUALS)[number]
 export const LIMIT_KINDS = ['allowed', 'range', 'lock'] as const
 export type LimitKind = (typeof LIMIT_KINDS)[number]
-export const LEGACY_ENCODES = ['zero_is_forever', 'zero_is_unlimited', 'minus_one_is_unlimited', 'fraction'] as const
+export const LEGACY_ENCODES = ['zero_is_forever', 'zero_is_unlimited', 'zero_is_everyone', 'minus_one_is_unlimited', 'fraction'] as const
 export type LegacyEncode = (typeof LEGACY_ENCODES)[number]
 
 /** A value as stored: a number, a flag, a word ("in_place", "unlimited", "prop.sku", "0.5%"). */

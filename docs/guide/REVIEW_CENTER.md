@@ -269,18 +269,22 @@ members (up to 200).
 
 ### How many approvals a review needs
 
-Each data source says how many approvals its reviews need, under **Drafts and
-reviews** (a workspace sets it for all its data sources, and a data source can
-choose its own):
+Each data source says how many approvals its reviews need: **Approvals a review
+needs**, under **Drafts & history** in its settings (**Open settings** on its
+**Versioning** tab). A workspace sets it for all its data sources on its
+**Versioned graphs** tab, and a Super Admin for the platform under
+**Administration → Versioned graphs**; a data source's own choice wins, then its
+workspace's. [Versioned Graph
+Settings](/guide/versioned-graph-settings#drafts-requiredapprovals) explains it.
 
 | **Approvals a review needs** | Means |
 | --- | --- |
 | **Everyone asked** (the default) | Every person and group asked must approve. A review that asks no one needs no approval |
-| **1 approval** … **10 approvals** | That many approvals that still stand, from anyone who may approve — asked or not |
+| **A set number**, 1 to 10 | That many approvals that still stand, from anyone who may approve — asked or not |
 
 An approval stands until the draft changes after it. **Open threads hold the
-merge** set to **Yes** means a review merges only once every thread on it is
-resolved. **Whoever opens a review may approve it** set to **No** means its
+merge** turned on means a review merges only once every thread on it is
+resolved. **People may approve their own reviews** turned off means its
 author's approval never counts — not even for a group they're in. A fork follows
 its parent's rules.
 

@@ -12,7 +12,7 @@ import { NotificationStack } from '@/components/ui/notifications'
 import { versionedGraphsFetch, type Scenario } from '@/harness/versionedGraphsFixtures'
 import { Where } from './Where'
 
-// A settings page draws 46 rich rows on its first answer; with the whole suite running in parallel
+// A settings page draws 48 rich rows on its first answer; with the whole suite running in parallel
 // that can take longer than the 1 s `findBy*` waits by default.
 configure({ asyncUtilTimeout: 5000 })
 
