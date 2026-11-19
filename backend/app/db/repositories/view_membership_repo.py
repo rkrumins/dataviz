@@ -74,6 +74,17 @@ async def ensure(session: AsyncSession, row: ViewORM, *, status: str = "pending"
     return state
 
 
+async def shown_members(session: AsyncSession, row: ViewORM) -> Optional[int]:
+    """How many members a view made from a query holds as readers see them — 0 before its
+    first answer — or None for any other view: what an export's preview and a draft's
+    review count beside its design (whose counts never include them)."""
+    config = loads(row.config)
+    if not isinstance(config, dict) or not isinstance(config.get("membership"), dict):
+        return None
+    state = await get(session, row.id)
+    return int(state.member_count or 0) if state is not None and state.members_epoch is not None else 0
+
+
 async def mark_pending(session: AsyncSession, row: ViewORM, *, reason: str) -> None:
     """The view's members need working out again (a snapshot stays as it is)."""
     state = await ensure(session, row)

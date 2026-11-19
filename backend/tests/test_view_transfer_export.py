@@ -6,15 +6,23 @@ import time
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from backend.app.db.models import ViewActivityLogORM, ViewORM
+from backend.app.db.models import ViewActivityLogORM, ViewMemberORM, ViewORM
+from backend.app.db.repositories import view_members_repo
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.view_transfer import bundle as bundle_mod
+from backend.app.services.view_transfer import limits
 from backend.app.services.view_transfer.canonical import content_hash, portable_definition
 
 from backend.app.services.permission_service import PermissionClaims
 from backend.tests.test_view_transfer_import import _as, _user
+from backend.tests.test_views_from_members_api import (  # noqa: F401 — fixtures
+    body as members_body,
+    graph,
+    membership_on,
+    source_view,
+)
 
 pytestmark = pytest.mark.usefixtures("view_portability_enabled")  # the preview ships off
 
@@ -227,6 +235,121 @@ async def test_a_legacy_view_without_an_identity_gets_one_on_export(test_client,
     await db_session.flush()
     view = (await _export(test_client, {"viewId": vid})).json()["views"][0]
     assert view["portableId"].startswith("pv_")
+
+
+# ── A view made from a query: its members ───────────────────────────────────
+
+COLUMNS = ["urn", "layerId", "whole", "name", "type", "orderKey", "logicalNodeId"]
+
+
+async def _list_view(client: AsyncClient, ws: str, src: str, **overrides) -> str:
+    resp = await client.post("/api/v1/views/from-members", json=members_body(ws, src, **overrides))
+    assert resp.status_code == 201, resp.text
+    return resp.json()["view"]["id"]
+
+
+async def test_a_snapshot_carries_its_members_beside_its_definition(
+    test_client, db_session, fake_graph, graph, membership_on, monkeypatch,
+):
+    """A snapshot's members are data, not design: carried beside its definition, in name
+    order — never in it, nor in its hash. A view kept up to date carries none: it works its
+    members out where it arrives."""
+    async def _engine_for(session, workspace_id, data_source_id, **kwargs):
+        raise ConnectionError("no graph here")
+
+    monkeypatch.setattr("backend.app.services.view_transfer.inspect.engine_for", _engine_for)
+    ws = await _workspace(test_client)
+    src = await source_view(test_client, ws)
+    frozen = await _list_view(test_client, ws, src, mode="snapshot", name="Frozen")
+    kept = await _list_view(test_client, ws, src, name="Kept up to date")
+    # Named so that name order isn't URN order.
+    await db_session.execute(update(ViewMemberORM).where(
+        ViewMemberORM.view_id == frozen, ViewMemberORM.urn == "col_a1",
+    ).values(name="zeta", sort_key=view_members_repo.sort_key("zeta", "col_a1")))
+    await db_session.commit()
+
+    resp = await _export(test_client, {"viewId": frozen}, {"viewId": kept})
+    assert resp.status_code == 200, resp.text
+    snapshot, live = resp.json()["views"]
+    assert "members" not in live
+    members = snapshot["members"]
+    assert (members["format"], members["count"], members["columns"]) == ("rows-v1", 6, COLUMNS)
+    assert [row[0] for row in members["rows"]] == ["col_a2", "col_b1", "dom", "tbl_a", "tbl_b", "col_a1"]
+    layers = {l["id"]: l["name"] for l in snapshot["definition"]["layout"]["referenceLayout"]["layers"]}
+    rows = {row[0]: dict(zip(COLUMNS, row)) for row in members["rows"]}
+    assert (layers[rows["col_a1"]["layerId"]], rows["col_a1"]["name"], rows["col_a1"]["type"]) == (
+        "Columns", "zeta", "column")
+    held = (await db_session.execute(select(ViewMemberORM.urn, ViewMemberORM.layer_id, ViewMemberORM.whole).where(
+        ViewMemberORM.view_id == frozen))).all()
+    assert {(r["urn"], r["layerId"], r["whole"]) for r in rows.values()} == {tuple(h) for h in held}
+    assert snapshot["definition"]["layout"]["referenceLayout"]["assignments"] == {}
+    assert snapshot["definitionHash"] == content_hash(portable_definition(snapshot["definition"], "reference"))
+
+    parsed = bundle_mod.parse_bundle(resp.content)
+    assert parsed.integrity == "verified" and parsed.views[0].raw["members"]["count"] == 6
+    stripped = json.loads(resp.content)
+    stripped["views"][0].pop("members")
+    without = bundle_mod.parse_bundle(json.dumps(stripped).encode())
+    assert without.integrity == "verified", "the section is outside every hash"
+    assert without.views[0].actual_hash == parsed.views[0].actual_hash
+
+    inspected = await test_client.post("/api/v1/views/transfer/inspect", content=resp.content,
+                                       headers={"content-type": "application/json"})
+    assert inspected.status_code == 200, inspected.text
+    assert [v["members"] for v in inspected.json()["views"]] == [members, None], "what the wizard sends back"
+
+
+def test_a_snapshots_members_count_against_a_files_limit(monkeypatch):
+    doc = _minimal_bundle()
+    doc["views"][0]["members"] = {"format": "rows-v1", "count": 2, "columns": COLUMNS, "rows": [
+        ["urn:a", "l1", False, "a", "table", None, None], ["urn:b", "l1", True, "b", "table", None, None]]}
+    assert bundle_mod.parse_bundle(json.dumps(doc).encode()).integrity == "verified"
+    monkeypatch.setattr(limits, "MAX_ASSIGNMENTS_PER_BUNDLE", 1)
+    with pytest.raises(bundle_mod.BundleError) as info:
+        bundle_mod.parse_bundle(json.dumps(doc).encode())
+    assert info.value.code == "too_many_assignments"
+
+
+@pytest.mark.parametrize("damage", [
+    {"count": 3},
+    {"rows": [["urn:a", "l1"]], "count": 1},
+    {"columns": ["urn", "name"], "rows": [["urn:a", "a"]], "count": 1},
+    {"format": "rows-v9"},
+])
+def test_a_damaged_members_section_is_refused(damage):
+    doc = _minimal_bundle()
+    doc["views"][0]["members"] = {"format": "rows-v1", "count": 1, "columns": COLUMNS,
+                                  "rows": [["urn:a", "l1", False, "a", "table", None, None]], **damage}
+    with pytest.raises(bundle_mod.BundleError) as info:
+        bundle_mod.parse_bundle(json.dumps(doc).encode())
+    assert info.value.code == "invalid_bundle"
+
+
+async def test_the_preview_counts_a_list_views_members(test_client, fake_graph, graph, membership_on):
+    """Its design holds none of its members, so the preview counts them beside it — and a
+    snapshot's, which its file carries, in its size."""
+    ws = await _workspace(test_client)
+    src = await source_view(test_client, ws)
+    frozen = await _list_view(test_client, ws, src, mode="snapshot")
+    kept = await _list_view(test_client, ws, src)
+    plain = await _view(test_client, ws)
+    snapshot, live, ordinary = await _preview(test_client, frozen, kept, plain)
+    assert (snapshot["stats"]["members"], live["stats"]["members"]) == (6, 6)
+    assert snapshot["stats"]["assignments"] == live["stats"]["assignments"] == 0
+    assert "members" not in ordinary["stats"]
+    assert snapshot["estimatedBytes"] > live["estimatedBytes"]
+
+
+async def test_a_drafts_review_counts_a_list_views_members(test_client, db_session, graph, membership_on):
+    from backend.app.services import draft_views
+
+    ws = await _workspace(test_client)
+    view_id = await _list_view(test_client, ws, await source_view(test_client, ws))
+    row = (await db_session.execute(select(ViewORM).where(ViewORM.id == view_id))).scalar_one()
+    row.draft_branch_id = "br-review"           # waiting in a draft to go live, as a staged import does
+    await db_session.commit()
+    [entry] = await draft_views.changes_on(db_session, "br-review")
+    assert (entry["change"], entry["stats"]["members"], entry["stats"]["assignments"]) == ("create", 6, 0)
 
 
 # ── Parsing ─────────────────────────────────────────────────────────────────

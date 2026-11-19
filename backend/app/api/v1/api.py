@@ -19,6 +19,7 @@ from .endpoints import (
     graph_store,
     groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
     view_membership, view_narrowings, search_views,
+    view_duplicate,
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
     workspace_directory, data_source_transfers,
@@ -235,6 +236,8 @@ api_router.include_router(
     prefix="/views",
     tags=["views:subsets"],
 )
+# A proper copy of a view: `/views/{view_id}/duplicate`. Before views.router for the same reason.
+api_router.include_router(view_duplicate.router, prefix="/views", tags=["views"])
 # The bell — every route is scoped to the calling user by construction.
 api_router.include_router(
     notifications.router,

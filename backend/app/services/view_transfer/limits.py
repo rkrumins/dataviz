@@ -12,7 +12,7 @@ MAX_VIEWS_PER_BUNDLE = 200
 #: Bytes in one uploaded bundle (the request body).
 MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 
-#: Assignments across every view in one bundle.
+#: Assignments across every view in one bundle — a snapshot's members (``members.rows``) among them.
 MAX_ASSIGNMENTS_PER_BUNDLE = 250_000
 
 #: Entries kept in a view's carried history. The oldest are dropped first.

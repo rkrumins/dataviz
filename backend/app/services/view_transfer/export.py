@@ -10,7 +10,9 @@ The file also carries, per view:
   lookup per graph however many views share it), so the importing side can say WHAT didn't
   match, not just how many;
 * its history: the version hashes the view has been through, including those carried in from
-  earlier imports, which is how a later import finds the version both sides last agreed on.
+  earlier imports, which is how a later import finds the version both sides last agreed on;
+* a snapshot's members (``members``, beside the definition and never hashed): a view made from
+  a query that keeps them as they are arrives with them. One kept up to date carries none.
 """
 from __future__ import annotations
 
@@ -21,10 +23,11 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ViewORM, ViewVersionORM
-from backend.app.db.repositories import view_repo, view_version_repo
+from backend.app.db.repositories import view_members_repo, view_membership_repo, view_repo, view_version_repo
 from backend.app.services.view_transfer import limits
 from backend.app.services.view_transfer.bundle import assemble_bundle
 from backend.app.services.view_transfer.canonical import canonical_json
@@ -33,6 +36,8 @@ from backend.app.services.view_transfer.references import (
     collect, definition_stats, urns_of_kind,
 )
 from backend.app.services.view_transfer.sources import describe_source, effective_data_source, engine_for
+from backend.common.models.view_membership import read_definition
+from backend.common.models.view_transfer import MEMBER_COLUMNS, MEMBERS_FORMAT
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +109,44 @@ def _measured(definition: dict) -> Tuple[int, Dict[str, int]]:
     return len(canonical_json(definition)), definition_stats(definition)
 
 
+def _snapshot(definition: Any) -> bool:
+    """A view made from a query that keeps its members as they are: its file carries them."""
+    membership = read_definition(definition) if isinstance(definition, dict) else None
+    return membership is not None and membership.mode != "live"
+
+
+async def members_of(session: AsyncSession, row: ViewORM) -> Dict[str, Any]:
+    """A snapshot's members as its file carries them (``view_transfer.ViewMembers``): the rows
+    readers see, read ``READ_BATCH`` at a time in the order they were found, written in name
+    order."""
+    epoch = await view_members_repo.members_epoch(session, row.id)
+    rows = view_members_repo._ROWS
+    found: List[tuple] = []
+    after = -1
+    while epoch is not None:
+        batch = (await session.execute(
+            select(rows.c.ord, rows.c.sort_key, rows.c.urn, rows.c.layer_id, rows.c.whole, rows.c.name,
+                   rows.c.type, rows.c.order_key, rows.c.logical_node_id)
+            .where(rows.c.view_id == row.id, rows.c.epoch == epoch, rows.c.ord > after)
+            .order_by(rows.c.ord).limit(view_members_repo.READ_BATCH)
+        )).all()
+        found.extend(batch)
+        if len(batch) < view_members_repo.READ_BATCH:
+            break
+        after = batch[-1].ord
+    found.sort(key=lambda r: (r.sort_key, r.urn))
+    return {
+        "format": MEMBERS_FORMAT, "count": len(found), "columns": list(MEMBER_COLUMNS),
+        "rows": [[r.urn, r.layer_id, bool(r.whole), r.name, r.type, r.order_key, r.logical_node_id]
+                 for r in found],
+    }
+
+
 async def preview(session: AsyncSession, row: ViewORM, *, may_seal: bool) -> Dict[str, Any]:
     """What exporting ``row`` as it stands would write (see ``seal``), without writing anything:
     the version it goes out as, whether that includes unsaved changes, its counts and roughly
-    how big it makes the file."""
+    how big it makes the file. A view made from a query counts its members too (``members``:
+    as readers see them), which its design never holds; a snapshot's file carries them."""
     latest = await view_version_repo.head(session, row.id)
     state = await view_version_repo.working_state_async(row)
     dirty = (await view_version_repo.status(row, latest, state))["dirty"]
@@ -118,6 +157,11 @@ async def preview(session: AsyncSession, row: ViewORM, *, may_seal: bool) -> Dic
         design_bytes = await view_version_repo.stored_size(session, row.id, latest.version)
         stats = view_version_repo.to_summary(latest)["stats"]
         exports_as = latest.version
+    members = await view_membership_repo.shown_members(session, row)
+    carried = 0
+    if members is not None:
+        stats = {**stats, "members": members}
+        carried = members if _snapshot(state.definition) else 0
     ds = await effective_data_source(session, row)
     return {
         "viewId": row.id,
@@ -131,7 +175,7 @@ async def preview(session: AsyncSession, row: ViewORM, *, may_seal: bool) -> Dic
         "includesUnsaved": dirty and may_seal,
         "stats": stats,
         "estimatedBytes": round(design_bytes * _FILE_BYTES_PER_DESIGN_BYTE
-                                + int(stats.get("assignments") or 0) * _FILE_BYTES_PER_PLACEMENT),
+                                + (int(stats.get("assignments") or 0) + carried) * _FILE_BYTES_PER_PLACEMENT),
     }
 
 
@@ -239,7 +283,7 @@ async def export_views(
             definition_stats(item.definition),
         ))
         history, truncated = await _history(session, item, history_rows[item.row.id], names)
-        entries.append({
+        entry = {
             "source": key,
             "portableId": item.row.portable_id,
             "sourceViewId": item.row.id,
@@ -254,7 +298,10 @@ async def export_views(
             },
             "history": history,
             "historyTruncated": truncated,
-        })
+        }
+        if _snapshot(item.definition):
+            entry["members"] = await members_of(session, item.row)
+        entries.append(entry)
 
     exporter = names.get(actor or "")
     bundle = assemble_bundle(

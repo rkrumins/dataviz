@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_async_session
 from backend.app.db.models import ViewLayoutOverlayORM, ViewORM
-from backend.app.db.repositories import view_repo, view_version_repo
+from backend.app.db.repositories import view_membership_repo, view_repo, view_version_repo
 from backend.app.services.view_transfer.canonical import content_hash, portable_definition
 from backend.app.services.view_transfer.diff import diff_definitions
 from backend.app.services.view_transfer.references import definition_stats
@@ -45,7 +45,8 @@ async def changes_on(session: AsyncSession, branch_id: str) -> List[Dict[str, An
     """What a draft changes in views, beside its graph changes, one entry per view:
 
     * ``create``: a view that exists only in the draft (an import waiting to go live), with its
-      headline counts and the visibility it goes live with;
+      headline counts (a view made from a query's members among them) and the visibility it
+      goes live with;
     * ``update``: an import staged in the draft for a view here, with what it changes;
     * ``layout``: layer edits made in the draft (an overlay that proposes nothing is left out).
 
@@ -81,8 +82,11 @@ async def changes_on(session: AsyncSession, branch_id: str) -> List[Dict[str, An
         if view_id in waiting:
             head = await view_version_repo.head(session, row.id)
             provenance = (view_version_repo.to_summary(head).get("provenance") or {}) if head else {}
-            entry.update(change="create", stats=await asyncio.to_thread(definition_stats, proposed),
-                         goesLiveAs=staged.get("visibility") or "private")
+            stats = await asyncio.to_thread(definition_stats, proposed)
+            members = await view_membership_repo.shown_members(session, row)
+            if members is not None:
+                stats["members"] = members      # a view made from a query: its design holds none
+            entry.update(change="create", stats=stats, goesLiveAs=staged.get("visibility") or "private")
         elif overlay is not None and overlay.definition is not None:
             provenance = staged.get("provenance") or {}
             entry.update(change="update", diff=await asyncio.to_thread(

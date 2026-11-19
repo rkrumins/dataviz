@@ -24,11 +24,14 @@ before it, so no connection is held while the graph answers.
 """
 from __future__ import annotations
 
+import asyncio
+import copy
 import hashlib
 import json
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional, Set
 
@@ -63,7 +66,7 @@ from backend.app.services import template_access, view_access
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.graph_cache import ENDPOINT_TRACE_CLOSURE
 from backend.app.services.live_views import layouts, pipeline
-from backend.app.services.live_views.ownership import MemberOpError, apply_member_ops, layer_ids_of
+from backend.app.services.live_views.ownership import MemberOpError, apply_member_ops, layer_ids_of, take_members
 from backend.app.services.live_views.pipeline import EngineScope, PipelineError
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.view_transfer.sources import engine_for
@@ -214,7 +217,7 @@ async def membership_status(
                                         or await view_access.can_read_view(session, ctx, base))
         follows = ReadInView(view_id=definition.layout.source_view_id, name=base.name if visible else None,
                              available=base is not None)
-    if definition.mode != "live" and _running(state, definition) is None:
+    if definition.mode != "live" and _running(state, definition) is None and not _unanswered(state):
         status = "frozen"
     else:
         status = state.status if state is not None and state.status != "frozen" else "pending"
@@ -243,6 +246,12 @@ def _running(state, definition: MembershipDefinition) -> Optional[dict]:
     """The run working the view out now, if any: one a request before left ``running``
     (or a new view's first answer), which the next request carries on."""
     return view_membership_repo.in_progress(state, definition.resolution_hash())
+
+
+def _unanswered(state) -> bool:
+    """The view has never had an answer: a snapshot imported without its members works its
+    first one out (once), as a new view does."""
+    return state is None or state.members_epoch is None
 
 
 async def _view(
@@ -364,10 +373,33 @@ async def create_view_from_members(
     gets the view the first attempt made (200, its status as it is now — maybe still
     ``updating``), never a second one. A 202 records nothing against it.
     """
+    actor = _user_id(user)
+    return await make_list_view(
+        response, body, request_id=f"fm:{actor}:{idempotency_key}" if idempotency_key else None,
+        user=user, claims=claims, session=session, engine_scope=engine_scope)
+
+
+@dataclass
+class ListViewCopy:
+    """The view made from a query a duplicate copies (``POST /views/{id}/duplicate``)."""
+    view_id: str
+    name: str
+    config: dict
+
+
+async def make_list_view(
+    response: Response, body: FromMembersRequest, *, request_id: Optional[str], user,
+    claims: PermissionClaims, session: AsyncSession, engine_scope: EngineScope,
+    copy_of: Optional[ListViewCopy] = None,
+):
+    """``POST /views/from-members``, past its request: a duplicate of a view made from a query
+    is made here too. ``copy_of``: the view it copies — its layers, the entries people placed
+    in it, where they put members and the rest of its design are the copy's as they are (its
+    definition's own, ``body`` its sources, layout and mode); its members are worked out
+    afresh, checked and counted as any new view's."""
     started = time.monotonic()
     budget = _budget_s()
     actor = _user_id(user)
-    request_id = f"fm:{actor}:{idempotency_key}" if idempotency_key else None
     if request_id:
         replayed = await _replayed(session, request_id, actor)
         if replayed is not None:
@@ -384,8 +416,10 @@ async def create_view_from_members(
         return ctx, ds, await _check_views(session, ctx, definition, workspace_id=body.workspace_id,
                                            data_source_id=ds)
 
+    copied = read_definition(copy_of.config) if copy_of is not None else None
     definition = MembershipDefinition(
         mode=body.mode, sources=body.sources, layout=body.layout, exclude=body.exclude,
+        overrides=copied.overrides if copied is not None else {},
         provenance=body.provenance.model_copy(update={"created_at": now_iso(), "created_by": actor}),
     )
     if body.layout.kind in ("template", "custom") and not body.layers:
@@ -409,10 +443,13 @@ async def create_view_from_members(
                     "reason": "short_answer", "truncated": found.retryable,
                     "message": "The graph couldn't answer in full, so nothing was saved. Try again in a moment.",
                 })
-            draft = await pipeline.draft_cached(
-                session, engine, found, definition, source_config=copied_from, client_layers=body.layers,
-                keep=body.keep, limit=limit, place_sample=body.layout.kind not in ("template", "custom", "follow"),
-                bounded=True)
+            if copy_of is not None:
+                draft = await pipeline.draft_copy(session, found, definition, copy_of.config, limit=limit)
+            else:
+                draft = await pipeline.draft_cached(
+                    session, engine, found, definition, source_config=copied_from, client_layers=body.layers,
+                    keep=body.keep, limit=limit,
+                    place_sample=body.layout.kind not in ("template", "custom", "follow"), bounded=True)
     except PipelineError as exc:
         raise _refused(exc) from exc
     except NotImplementedError as exc:
@@ -427,7 +464,7 @@ async def create_view_from_members(
     # Saved in one transaction, everything checked again: the data source is held in its
     # workspace until it commits, and the views it names are still there to read.
     await authorize()
-    config = pipeline.view_config(draft, icon=body.icon)
+    config = pipeline.view_config(draft, icon=body.icon) if copy_of is None else _copied_config(copy_of, draft)
     try:
         await view_repo.check_layer_rules(session, view_repo._base_reference_layout(config), {})
     except ValueError as exc:
@@ -446,9 +483,11 @@ async def create_view_from_members(
     row = (await session.execute(select(ViewORM).where(ViewORM.id == view.id))).scalar_one()
     if body.layout.kind == "follow":
         row.subset_of = body.layout.source_view_id      # among that view's subsets, served its layers
+    provenance = {"madeFrom": draft.definition.provenance.model_dump(by_alias=True, exclude_none=True)}
+    if copy_of is not None:
+        provenance["copyOf"] = copy_of.view_id
     version, created = await view_version_repo.checkpoint(
-        session, row, source="create", actor=actor, request_id=request_id,
-        provenance={"madeFrom": draft.definition.provenance.model_dump(by_alias=True, exclude_none=True)},
+        session, row, source="create", actor=actor, request_id=request_id, provenance=provenance,
     )
     if not created and version.view_id != row.id:
         # The same request, sent twice at once: the other copy made the view.
@@ -459,12 +498,18 @@ async def create_view_from_members(
             raise refused(409, "made_by_another_request", "This view was just made by another request.")
         return replayed
     owner = f"web:{uuid.uuid4().hex[:12]}"
-    await pipeline.start(session, row, draft.definition, found, owner=owner, members=draft.members)
-    await view_activity_repo.record_view_activity(
-        session, view_id=row.id, workspace_id=row.workspace_id, action="created", actor=actor,
-        summary=f'Created "{row.name}" from a query',
-    )
-    await session.commit()                 # made: its members are placed after, a page at a time
+    epoch = await pipeline.start(session, row, draft.definition, found, owner=owner, members=draft.members)
+    try:
+        await view_activity_repo.record_view_activity(
+            session, view_id=row.id, workspace_id=row.workspace_id, action="created", actor=actor,
+            summary=(f'Created "{row.name}" from a query' if copy_of is None
+                     else f'Created "{row.name}" as a copy of "{copy_of.name}"'),
+        )
+        await session.commit()             # made: its members are placed after, a page at a time
+    except asyncio.CancelledError:
+        # Cut off as it saves — which may land all the same: its claim is let go at once.
+        pipeline._let_go(row.id, owner=owner, epoch=epoch)
+        raise
 
     left = max(0.0, budget - (time.monotonic() - started))
     try:
@@ -477,6 +522,16 @@ async def create_view_from_members(
                                  .execution_options(populate_existing=True))).scalar_one()
     view = await view_repo.get_view_enriched(session, row.id, user_id=actor)
     return ViewWithMembership(view=view, membership=await membership_status(session, row, draft.definition))
+
+
+def _copied_config(copy_of: ListViewCopy, draft: pipeline.Draft) -> dict:
+    """A copy's config: the view it copies as that view stores it — its layers, the entries
+    people placed, the rest of its design — with the copy's own definition. Members are
+    never entries of a config (``view_members``): any a config carries from before are not."""
+    config = copy.deepcopy(copy_of.config)
+    take_members(config)
+    config["membership"] = draft.definition.model_dump(mode="json", by_alias=True, exclude_none=True)
+    return config
 
 
 def _resolving(found: List[MemberSetStatus]) -> JSONResponse:
@@ -745,16 +800,20 @@ async def refresh_view_membership(
     read from the graph unless the data or the query changed since it was last
     worked out (or a run is still working it out, which this carries on), a held
     removal stays held, and within 30 seconds of the last update it answers
-    ``current`` rather than a 429."""
+    ``current`` rather than a 429.
+
+    A snapshot is refreshed only while it has never had an answer (one imported without
+    its members): it works that out once, as a new view does, and is frozen after."""
     actor = _user_id(user)
     opened = trigger == "open"
     row, ctx = await _view(session, view_id, user, claims, edit=not opened)
     definition = _definition_of(row)
     state = await view_membership_repo.get(session, view_id)
     running = _running(state, definition) is not None
+    frozen = definition.mode != "live" and not running and not _unanswered(state)
     if opened:
         confirm_removals = False
-        reason = ("snapshot" if definition.mode != "live" and not running
+        reason = ("snapshot" if frozen
                   else "recent" if state is not None and not running and not _older_than(
                       state.last_started_at, REFRESH_MIN_INTERVAL_SECS)
                   else None)
@@ -762,7 +821,7 @@ async def refresh_view_membership(
             increment("live_view_refresh_total", outcome="current", trigger="open")
             return RefreshResult(outcome="current", detail={"reason": reason},
                                  membership=await membership_status(session, row, definition, ctx))
-    elif definition.mode != "live" and not running:
+    elif frozen:
         raise HTTPException(status_code=409, detail={"reason": "frozen", "message": (
             "This view is a snapshot: its members stay as they are. Resume updates to refresh it.")})
     # A change waiting to be worked out, a run to carry on, or a held update being

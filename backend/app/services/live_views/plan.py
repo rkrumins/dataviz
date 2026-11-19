@@ -23,7 +23,8 @@ Pure and deterministic, and a member's row depends on nothing but itself and its
 path: any page size gives the same rows, and planning again over its own answer
 changes nothing — but for ``in_layer`` in a stages layout, where a container is in a
 stage only while everything on the page inside it is. Entries people placed
-themselves ("Always include") are never members.
+themselves ("Always include") are never members — nor are the roots a view-scoped
+import pinned in the view (``assignedBy: "import"``): entries too, each in its layer.
 """
 from __future__ import annotations
 
@@ -82,6 +83,17 @@ def source_placer(source_config: dict, link: Mapping[str, str], facts: Mapping[s
             opened = place_all(spec.with_scope("all"), universe, parents)
             placed = {u: (p if p.member else opened[u]) for u, p in placed.items()}
         return {u: link.get(placed[u].layer_id) if placed[u].member else None for u in cands}
+
+    return place
+
+
+def prepared_placer(placed: Mapping[str, Optional[str]], link: Mapping[str, str]) -> Placer:
+    """Where the view made from a query it was made from has each entity, in this view's
+    copy of that layer: ``placed``, read before the page is planned (its member rows,
+    ``where.place_in_list`` — its config holds none of them, so ``source_placer`` would
+    place by its layer rules alone). An entity it has nowhere has no opinion here."""
+    def place(cands: Mapping[str, Candidate]) -> Dict[str, Optional[str]]:
+        return {u: link.get(placed[u]) if placed.get(u) else None for u in cands}
 
     return place
 

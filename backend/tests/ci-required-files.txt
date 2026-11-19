@@ -342,6 +342,7 @@ tests/test_versioning_viewer_ctx.py
 tests/test_view_avatar_ids.py
 tests/test_view_branch_scope.py
 tests/test_view_bundle_schema.py
+tests/test_view_duplicate_api.py
 tests/test_view_facets_live.py
 tests/test_view_feed_api.py
 tests/test_view_filters_api.py

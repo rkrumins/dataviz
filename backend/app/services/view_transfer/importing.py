@@ -12,6 +12,7 @@ matched, record activity, and re-read the result so the response can PROVE what 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid
@@ -40,6 +41,7 @@ from backend.app.services.view_transfer.references import Rewrite, collect, refe
 from backend.app.services.view_transfer.sources import engine_for
 from backend.common.models.view_membership import read_definition
 from backend.common.models.management import ViewCreateRequest
+from backend.common.models.view_transfer import ViewMembers
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,64 @@ def _snapshot_members(raw: Any) -> Dict[str, dict]:
     if definition is None or definition.mode == "live":
         return {}
     return {u: e for u, e in parse_reference_layout(raw).assignments.items() if is_machine(e)}
+
+
+@dataclass
+class _Carried:
+    """A snapshot's members as a file carries them: placed as its rows say (``entries``,
+    assignment-shaped), each with its name and type (``names``)."""
+    entries: Dict[str, dict] = field(default_factory=dict)
+    names: Dict[str, Tuple[Optional[str], Optional[str]]] = field(default_factory=dict)
+
+
+def _carried(item: ImportItem) -> Optional[_Carried]:
+    """What the file carries of a snapshot's members: its ``members`` section, else the server's
+    entries of a file from before (``_snapshot_members``) — or None, when it carries neither."""
+    if item.members is not None:
+        section = ViewMembers.model_validate(item.members)
+        carried = _Carried()
+        for urn, row in section.by_urn().items():
+            carried.entries[urn] = {k: v for k, v in (
+                ("layerId", row["layerId"]), ("inheritsChildren", row.get("whole") is True),
+                ("orderKey", row.get("orderKey")), ("logicalNodeId", row.get("logicalNodeId"))) if v is not None}
+            carried.names[urn] = (row.get("name"), row.get("type"))
+        return carried
+    legacy = _snapshot_members(item.definition)
+    return _Carried(entries=legacy) if legacy else None
+
+
+async def _keep_members(session: AsyncSession, row: ViewORM, carried: _Carried, config: dict) -> None:
+    """A snapshot's members as its file carries them become its members here, at a fresh
+    epoch: its answer, recorded as one worked out here would be — it is frozen, so nothing
+    works it out again. ``config``: the view's, as the import writes it — a member in a layer
+    it doesn't have waits in its fallback layer."""
+    state = await view_membership_repo.ensure(session, row, status="frozen")
+    if "names" in inspect.signature(view_members_repo.replace).parameters:
+        await view_members_repo.replace(session, state, row.id, carried.entries, names=carried.names)
+    else:
+        await view_members_repo.replace(session, state, row.id, carried.entries)
+    await view_members_repo.rehome_view(session, row.id, config)
+    per_layer = await view_members_repo.per_layer(session, row.id, state.members_epoch)
+    definition = read_definition(config)
+    entries = (((config.get("layout") or {}).get("referenceLayout") or {}).get("assignments") or {})
+    people = sum(1 for e in entries.values() if isinstance(e, dict) and not is_machine(e))
+    state.status, state.status_detail, state.materialize, state.held = "frozen", None, None, None
+    state.lease_owner = state.lease_until = None
+    state.key_count = state.member_count + people
+    state.counts = view_membership_repo.dumps({
+        "members": state.member_count, "containers": 0, "included": people, "fallback": 0, "missingSeeds": 0,
+        "perLayer": dict(per_layer)})
+    state.revision = int(state.revision or 0) + 1
+    state.last_applied_at = view_membership_repo.now_iso()
+    if definition is not None:
+        state.resolution_hash = state.applied_resolution_hash = definition.resolution_hash()
+
+
+async def _unanswered(session: AsyncSession, row: ViewORM) -> None:
+    """A snapshot that arrives without its members works its first answer out here, once."""
+    state = await view_membership_repo.ensure(session, row)
+    if state.members_epoch is None:
+        state.status, state.status_detail = "pending", view_membership_repo.dumps({"reason": "imported"})
 
 
 def _canonical(definition: Any, view_type: str) -> Tuple[dict, str]:
@@ -280,6 +340,8 @@ class ImportItem:
     strategy: str = "replace"
     #: The file's own definition, when what is written differs from it (see ``origin_hash``).
     origin_definition: Optional[Dict[str, Any]] = None
+    #: A snapshot's members, as its file carries them (``view_transfer.ViewMembers``).
+    members: Optional[Dict[str, Any]] = None
 
 
 class AlreadyImported(Exception):
@@ -510,16 +572,18 @@ async def import_item(
         row.subset_of = _subset_of(definition)
         if forked_from:
             item.provenance = {**item.provenance, "forkedFrom": forked_from}
-        arrived = read_definition(json.loads(row.config or "{}"))
-        carried = _snapshot_members(item.definition)
+        written = json.loads(row.config or "{}")
+        arrived = read_definition(written)
+        carried = _carried(item)
         if arrived is not None and arrived.mode == "live":
             # A view made from a query arrives with no members (they are data, not
             # design): it works them out against the data here.
             await view_membership_repo.mark_pending(session, row, reason="imported")
-        elif arrived is not None and carried:
+        elif arrived is not None and carried is not None:
             # A snapshot whose file carries its members: they are its members here.
-            state = await view_membership_repo.ensure(session, row, status="frozen")
-            await view_members_repo.replace(session, state, row.id, carried)
+            await _keep_members(session, row, carried, written)
+        elif arrived is not None:
+            await _unanswered(session, row)
     else:
         row = await _locked_target(session, item)
         _same_kind(row, definition)
@@ -528,13 +592,15 @@ async def import_item(
                                                   message="Saved automatically before importing")
         imported = await asyncio.to_thread(config_from_definition, definition, icon=item.metadata.get("icon"))
         # A view kept up to date keeps its members until they are worked out again; a
-        # snapshot keeps its own, unless the file carries the ones to keep instead.
-        carried = _snapshot_members(item.definition)
+        # snapshot keeps its own, unless the file carries the ones to keep instead (one
+        # that has none yet works them out here).
+        carried = _carried(item)
         if carry_into_config(imported):
             await view_membership_repo.mark_pending(session, row, reason="design_replaced")
-        elif carried and read_definition(imported) is not None:
-            await view_members_repo.replace(session, await view_membership_repo.ensure(session, row),
-                                            row.id, carried)
+        elif carried is not None and read_definition(imported) is not None:
+            await _keep_members(session, row, carried, imported)
+        elif read_definition(imported) is not None:
+            await _unanswered(session, row)
         await view_members_repo.rehome_view(session, row.id, imported)
         await view_repo.tell_followers(session, row, imported)
         row.config = await asyncio.to_thread(json.dumps, imported)

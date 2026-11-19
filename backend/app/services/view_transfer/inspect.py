@@ -230,5 +230,6 @@ def view_payload(parsed: ParsedBundle) -> List[Dict[str, Any]]:
             "manifest": raw.get("manifest") or {},
             "history": raw.get("history") or [],
             "historyTruncated": bool(raw.get("historyTruncated")),
+            "members": raw.get("members"),
         })
     return out
