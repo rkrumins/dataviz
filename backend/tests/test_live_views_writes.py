@@ -54,7 +54,7 @@ async def _members(session: AsyncSession, view_id: str, placed: dict) -> None:
 
 async def _view(client: AsyncClient, session: AsyncSession, *, mode: str = "live") -> str:
     """A view as ``POST /views/from-members`` leaves one: its definition — which only that
-    route writes (``POST /views`` drops one sent with it) — the entries people placed, and
+    route writes (``POST /views`` refuses one sent with it) — the entries people placed, and
     its members in the member table."""
     ws = await client.post("/api/v1/admin/workspaces", json={"name": "Live WS", "dataSources": []})
     assert ws.status_code == 201
@@ -96,7 +96,7 @@ async def _placed(session: AsyncSession, view_id: str) -> dict:
 async def _save(client: AsyncClient, view_id: str, assignments: dict, *, branch: str | None = None, layers=LAYERS):
     resp = await client.put(
         f"/api/v1/views/{view_id}/layout", params={"branchId": branch} if branch else None,
-        json={"referenceLayout": {"layers": layers, "assignments": assignments}, "entityScope": "all"},
+        json={"referenceLayout": {"layers": layers, "assignments": assignments}, "entityScope": "curated"},
     )
     assert resp.status_code == 200, resp.text
 

@@ -13,6 +13,7 @@ post-filtering); transitions to/from ``enterprise`` require
 ``workspace:view:publish``. The kill-switch ``RBAC_ENFORCE_VIEWS=false``
 reverts scoping to legacy behaviour (auth requirements stay).
 """
+import json
 import logging
 import os
 import re
@@ -112,6 +113,19 @@ async def _load_view_orm(
     if view is None:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     return view
+
+
+async def _refuse_context_only(session: AsyncSession, view_id: str, **change) -> None:
+    """422 ``list_view_context_only`` when ``change`` (a ``view_type``, a layout's
+    ``layout_type`` or ``entity_scope``) would turn a list view or a subset view into
+    another kind of view (``view_repo.context_only_problem``)."""
+    row = await session.get(ViewORM, view_id)
+    config = json.loads(row.config or "{}") if row is not None else {}
+    problem = view_repo.context_only_problem(config if isinstance(config, dict) else {}, **change)
+    if problem:
+        raise HTTPException(status_code=422, detail={
+            "reason": "list_view_context_only", "message": problem,
+        })
 
 
 def _category_filters(
@@ -847,8 +861,17 @@ async def create_view(
     )
     # What a view is made from — a query's members (``membership``), a search
     # (``search``) — is the server's to write, checked by the routes that make
-    # such views: a client's copy here would be stored unchecked.
+    # such views: a client's copy here would be stored unchecked. Refused, not
+    # dropped: dropped, the view would be made as a different kind of view.
     if isinstance(req.config, dict):
+        if any(req.config.get(key) is not None for key in ("membership", "search")):
+            raise HTTPException(status_code=422, detail={
+                "reason": "made_by_its_route",
+                "message": "A list view or a subset view is made by its own route, which works "
+                           "out what it holds: POST /views/from-members for a list view, "
+                           "POST /views/from-search for a subset view, or "
+                           "POST /views/{id}/duplicate to copy one.",
+            })
         req.config.pop("membership", None)
         req.config.pop("search", None)
 
@@ -1017,6 +1040,14 @@ async def update_view(
                 detail="Missing permission: workspace:view:edit",
             )
 
+    # A list view or a subset view stays a Context View: as a Graph or Hierarchy
+    # view it would load what its members or matches were chosen from.
+    layout = req.config.get("layout") if isinstance(req.config, dict) else None
+    await _refuse_context_only(
+        session, view_id, view_type=req.view_type,
+        layout_type=layout.get("type") if isinstance(layout, dict) else None,
+    )
+
     # Only when the type CHANGES. Withdrawing a layout stops NEW work in it; a view already
     # built in that layout must stay editable, or "existing views keep working" — which is what
     # the admin is told — would be false the moment they renamed one.
@@ -1135,6 +1166,9 @@ async def update_view_layout(
     if branch_id:
         await require_branch_scope(session, svc, await _load_view_orm(session, view_id), branch_id,
                                    actor=_user_id(user), claims=claims, write=True)
+    # A list view shows its members alone, a subset view its matches: a layout that
+    # asks for another scope would show what they were chosen from.
+    await _refuse_context_only(session, view_id, entity_scope=req.entity_scope)
 
     try:
         if branch_id:

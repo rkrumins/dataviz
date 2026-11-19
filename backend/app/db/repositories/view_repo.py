@@ -815,6 +815,34 @@ def _keep_config_layout(new_config: Any, stored_config: dict) -> None:
             new_config.pop(key, None)
 
 
+#: Why a list view or a subset view can't be turned into another kind of view
+#: (``list_view_context_only``): anything but a Context View of what it holds would load
+#: what its members or matches were chosen from.
+CONTEXT_VIEW_ONLY = ("A list view or a subset view is always a Context View that shows just its "
+                     "members or matches: it can't become a Graph or Hierarchy view, or show "
+                     "entities it doesn't hold. Make a new view to lay them out another way.")
+
+
+def context_only_problem(
+    config: dict, *, view_type: Optional[str] = None, layout_type: Optional[str] = None,
+    entity_scope: Optional[str] = None,
+) -> Optional[str]:
+    """Why a write can't give the view whose stored config is ``config`` the ``view_type``,
+    layout ``layout_type`` or ``entity_scope`` it asks for, else None. A list view (one made
+    from a query: ``membership``) or a subset view (``search``) is a Context View for good,
+    showing only its members (``curated``) or its matches (``all``); a write that leaves any
+    of them out, or asks for what it already is, passes."""
+    from backend.app.services.search_views import is_subset
+    subset = is_subset(config)
+    if not subset and not isinstance(config.get("membership"), dict):
+        return None
+    if view_type not in (None, "reference") or layout_type not in (None, "reference"):
+        return CONTEXT_VIEW_ONLY
+    if entity_scope is not None and entity_scope != ("all" if subset else "curated"):
+        return CONTEXT_VIEW_ONLY
+    return None
+
+
 def _subset_layout(config: dict, reference_layout: dict) -> bool:
     """Whether ``config`` is a subset view's — and if so, refuse a layout it can't
     hold (``ValueError``, a 422): one that follows its base stores no layers, an
