@@ -988,6 +988,8 @@ trace**. With a key, **Data: read** is enough.
 | `children` | `0`, `1`, `2` or `"all"`: levels inside the starting points |
 | `upstream`, `downstream` | `0`–`25` or `"all"`: lineage steps, walked as `trace/closure` walks them |
 | `partnerChildren` | `0`, `1` or `"all"`: levels inside the sources and consumers found |
+| `partnerHosts` | `true`, or leave it out: the sources and consumers found include the tables they sit in. An entity whose type can contain nothing (a column) sits in its container, its table; `partnerChildren` then reads inside those tables |
+| `partnerLineage` | `true`, or leave it out; needs `partnerHosts`: those tables are traced too, from everything inside them that carries lineage, within the same steps. A much wider walk |
 
 ### Save what a set of entities reaches as a view of its own
 

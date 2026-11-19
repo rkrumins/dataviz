@@ -30,6 +30,40 @@
       }
     },
     {
+      "name": "a trace with everything inside the tables it reaches, and their lineage too",
+      "builder": "plan",
+      "input": {
+        "trace": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"], "showUpstream": true, "showDownstream": true, "depthUp": 25, "depthDown": 3},
+        "reach": {"inside": "all", "lineage": true},
+        "viewId": "view_base",
+        "choices": {"choice": "follow", "keep": "all", "nest": true}
+      },
+      "body": {
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": "all", "upstream": "all", "downstream": 3, "partnerChildren": "all", "partnerHosts": true, "partnerLineage": true}}}],
+        "layout": {"kind": "follow", "sourceViewId": "view_base", "nest": true},
+        "keep": "all"
+      }
+    },
+    {
+      "name": "a trace kept with a level inside the tables it reaches",
+      "builder": "create",
+      "input": {
+        "name": "Orders, and the columns of what it reaches", "visibility": "private", "mode": "live", "workspaceId": "ws_1", "dataSourceId": "ds_1",
+        "trace": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"], "showUpstream": true, "showDownstream": true, "depthUp": 25, "depthDown": 3},
+        "reach": {"inside": 1, "lineage": false},
+        "viewId": "view_base",
+        "choices": {"choice": "follow", "keep": "all", "nest": true},
+        "origin": "trace"
+      },
+      "body": {
+        "name": "Orders, and the columns of what it reaches", "visibility": "private", "workspaceId": "ws_1", "dataSourceId": "ds_1", "mode": "live",
+        "sources": [{"spec": {"v": 1, "seeds": {"urns": ["urn:li:dataset:orders", "urn:li:dataset:sales"]}, "within": "view", "expand": {"children": "all", "upstream": "all", "downstream": 3, "partnerChildren": 1, "partnerHosts": true}}}],
+        "layout": {"kind": "follow", "sourceViewId": "view_base", "nest": true},
+        "keep": "all",
+        "provenance": {"origin": "trace", "viewId": "view_base"}
+      }
+    },
+    {
       "name": "a trace, laid out as lineage stages",
       "builder": "plan",
       "input": {

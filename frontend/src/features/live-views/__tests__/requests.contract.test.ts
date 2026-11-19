@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
+import { withPartnerReach } from '@/features/narrow/model'
 import { traceMembershipSpec } from '@/hooks/lib/traceExport'
 import type { MembershipOrigin, MembershipSpec } from '@/types/membership'
 
@@ -23,6 +24,8 @@ interface Case {
   input: {
     spec?: MembershipSpec
     trace?: Parameters<typeof traceMembershipSpec>[0]
+    /** What is inside the tables the trace reaches, as the sheet's choice. */
+    reach?: { inside: 0 | 1 | 'all'; lineage: boolean }
     viewId: string
     choices: SaveChoices
     name?: string
@@ -41,7 +44,8 @@ const { cases } = JSON.parse(readFileSync(FIXTURE, 'utf-8')) as { cases: Case[] 
 
 describe('the requests that make a view from a query', () => {
   it.each(cases.map(c => [c.name, c] as const))('%s', (_name, c) => {
-    const spec = c.input.spec ?? traceMembershipSpec(c.input.trace!)
+    const asked = c.input.spec ?? traceMembershipSpec(c.input.trace!)
+    const spec = c.input.reach ? withPartnerReach(asked, c.input.reach.inside, c.input.reach.lineage) : asked
     const body = c.builder === 'plan'
       ? planRequestOf(spec, c.input.viewId, c.input.choices)
       : createRequestOf({
