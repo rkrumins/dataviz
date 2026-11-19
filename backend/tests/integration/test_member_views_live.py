@@ -197,10 +197,11 @@ async def test_a_view_of_fifty_thousand_members(
                 break
         assert names == sorted(names, key=lambda s: (s.lower(), s)) or len(names) == 0
         assert page["countStatus"] == "exact"
-        assert len(names) == min(page["totalCount"], 5000)
+        # Every member, paged to the end: a layer lists all it holds.
+        assert len(names) == page["totalCount"]
         totals[layer["id"]] = page["totalCount"]
     print(f"\n{members:,} members: {resolving} answers of 202, view ready in {elapsed:.1f} s, "
-          f"{len(seen):,} listed across {pages} pages (each layer lists up to 5,000)")
+          f"{len(seen):,} listed across {pages} pages (each layer paged to its end)")
 
     # A trace over it: its cards placed where the view draws them — members in the layer
     # their feed lists them in, what it doesn't hold (the domains around them) in its
@@ -215,10 +216,13 @@ async def test_a_view_of_fifty_thousand_members(
     assert placed.status_code == 200, placed.text
     where = placed.json()["placements"]
     assert len(where) == len(sample) + len(domains) + 1
-    assert all(where[u] == {"layerId": fed[u], "source": "member"} for u in sample)
+    def at(u: str) -> tuple:
+        return where[u]["layerId"], where[u]["source"]
+
+    assert all(at(u) == (fed[u], "member") for u in sample)
     waiting = view.json()["config"]["membership"]["layout"].get("fallbackLayerId")
-    outside = {"layerId": waiting, "source": "fallback"} if waiting else {"layerId": None, "source": "none"}
-    assert all(where[u] == outside for u in [*domains, "urn:nowhere"]), [where[u] for u in domains[:3]]
+    outside = (waiting, "fallback") if waiting else (None, "none")
+    assert all(at(u) == outside for u in [*domains, "urn:nowhere"]), [where[u] for u in domains[:3]]
     print(f"placements of {len(where):,} entities in {took * 1000:.0f} ms")
 
     # A layer filter finds exactly that layer: one listed among the search's roots, and one
