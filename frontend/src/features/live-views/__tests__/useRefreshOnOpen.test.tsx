@@ -14,6 +14,7 @@ const notify = vi.fn()
 let featureOn = true
 
 vi.mock('@/services/liveViewsApi', () => ({
+  MEMBERSHIP_QUERY_KEY: 'view-membership',
   refreshMembership: (...a: unknown[]) => refreshMembership(...a),
 }))
 vi.mock('@/services/viewApiService', () => ({
@@ -23,6 +24,7 @@ vi.mock('@/services/viewApiService', () => ({
 vi.mock('@/store/features', () => ({ useFeature: () => featureOn }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 
+import { queryClient } from '@/lib/queryClient'
 import { useSchemaStore } from '@/store/schema'
 
 import { useRefreshOnOpen } from '../useRefreshOnOpen'
@@ -87,6 +89,27 @@ describe('useRefreshOnOpen', () => {
     renderHook(() => useRefreshOnOpen(view({ v: 1, mode: 'live' })))
     await waitFor(() => expect(getView).toHaveBeenCalledWith('v1'), { timeout: 4000 })
     expect(refreshMembership).toHaveBeenCalledTimes(2)
+  })
+
+  it('waiting on someone else’s run, shows its members the moment the canvas sees them land — once', async () => {
+    refreshMembership
+      .mockResolvedValueOnce({ outcome: 'running', detail: {}, membership: { revision: 0, status: 'updating' } })
+      .mockResolvedValue({ outcome: 'current', detail: { reason: 'up_to_date' }, membership: { revision: 1, status: 'ok' } })
+    getView.mockResolvedValue({ id: 'v1', name: 'Orders' })
+    const { useCanvasStore } = await import('@/store/canvas')
+    const before = useCanvasStore.getState().subsetRefreshNonce
+    renderHook(() => useRefreshOnOpen(view({ v: 1, mode: 'live' })))
+    await waitFor(() => expect(refreshMembership).toHaveBeenCalledTimes(1))
+    await new Promise((r) => setTimeout(r, 0))
+    // The canvas's own reading of the view's status: its run has landed.
+    queryClient.setQueryData(['view-membership', 'v1'], { revision: 1, status: 'ok' })
+    await waitFor(() => expect(useCanvasStore.getState().subsetRefreshNonce).toBe(before + 1))
+    expect(getView).toHaveBeenCalledTimes(1)
+    // Its next ask is never sent: it already knows.
+    await new Promise((r) => setTimeout(r, 1500))
+    expect(refreshMembership).toHaveBeenCalledTimes(1)
+    expect(useCanvasStore.getState().subsetRefreshNonce).toBe(before + 1)
+    queryClient.removeQueries({ queryKey: ['view-membership', 'v1'] })
   })
 
   it('asks again through a server that was slow or busy, as long as it said', async () => {

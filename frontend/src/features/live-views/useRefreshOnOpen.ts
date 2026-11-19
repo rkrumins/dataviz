@@ -10,6 +10,10 @@
  * else's), and never gives up on a server that was slow, busy or briefly away: it
  * waits as long as the server said, or a growing pause, and asks again. It stops on
  * a refusal, when the page closes, and waits while the tab is hidden.
+ *
+ * While it waits on someone else's run, the canvas still reads the view's status
+ * every few seconds: a new revision seen there shows the new members at once,
+ * rather than at this page's next ask.
  */
 import { useEffect } from 'react'
 
@@ -17,11 +21,12 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { SUBSET_FOLLOW_MAX_MS, SUBSET_FOLLOW_MIN_MS } from '@/hooks/useGraphHydration'
 import { queryClient } from '@/lib/queryClient'
 import { isTransientFailure, patientDelayMs } from '@/services/graphRequestFailure'
-import { refreshMembership } from '@/services/liveViewsApi'
+import { MEMBERSHIP_QUERY_KEY, refreshMembership } from '@/services/liveViewsApi'
 import { getView, viewToViewConfig, type View } from '@/services/viewApiService'
 import { useCanvasStore } from '@/store/canvas'
 import { useFeature } from '@/store/features'
 import { useSchemaStore } from '@/store/schema'
+import type { MembershipStatus } from '@/types/membership'
 
 import { diffText } from './model'
 
@@ -53,6 +58,20 @@ export function useRefreshOnOpen(view: View | null | undefined): void {
     let timer: number | undefined
     let seenRevision: number | undefined
     let onVisible: (() => void) | null = null
+    // The members moved: shown once, however it is learnt — this page's answer, or the
+    // status the canvas reads while this page waits.
+    let landed = false
+    const moved = async () => {
+      if (landed || cancelled) return
+      landed = true
+      window.clearTimeout(timer)
+      await showMoved(viewId)
+    }
+    const unwatch = queryClient.getQueryCache().subscribe((event) => {
+      if (event.type !== 'updated' || event.query.queryKey[0] !== MEMBERSHIP_QUERY_KEY || event.query.queryKey[1] !== viewId) return
+      const status = event.query.state.data as MembershipStatus | undefined
+      if (seenRevision !== undefined && status && status.status !== 'updating' && status.revision > seenRevision) void moved()
+    })
     const later = (ms: number, next: () => void) => {
       timer = window.setTimeout(() => {
         // A hidden tab waits: asked again as soon as it is looked at.
@@ -75,27 +94,29 @@ export function useRefreshOnOpen(view: View | null | undefined): void {
           if (cancelled) return
           const revision = out.membership?.revision
           if (out.outcome === 'running' || out.outcome === 'busy') {
+            if (landed) return
             const wait = Math.min(SUBSET_FOLLOW_MAX_MS, SUBSET_FOLLOW_MIN_MS * 2 ** round)
             if (seenRevision === undefined) seenRevision = revision
             later(wait * (0.75 + Math.random() * 0.5), () => ask(round + 1, 0))
             return
           }
           if (out.outcome === 'applied') {
-            await showMoved(viewId)
+            await moved()
             notify('info', `Brought up to date · ${diffText(out.diff)}`)
             return
           }
           // Someone else's run landed while this page waited on it: show what it found.
-          if (seenRevision !== undefined && revision !== undefined && revision > seenRevision) await showMoved(viewId)
+          if (seenRevision !== undefined && revision !== undefined && revision > seenRevision) await moved()
         })
         .catch((err: unknown) => {
-          if (cancelled || !isTransientFailure(err)) return
+          if (cancelled || landed || !isTransientFailure(err)) return
           later(patientDelayMs(err, failures), () => ask(round, failures + 1))
         })
     }
     ask(0, 0)
     return () => {
       cancelled = true
+      unwatch()
       window.clearTimeout(timer)
       if (onVisible) document.removeEventListener('visibilitychange', onVisible)
     }
