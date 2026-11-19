@@ -2930,6 +2930,9 @@ class _TimeoutMiddleware:
         # A member set's file, read from its rows a page at a time, taking turns with the
         # graph exports (graph_member_sets.download_member_set).
         re.compile(r"^/api/v1/[^/]+/graph/member-sets/[^/]+/download$"),
+        # A layer of a view made from a query, read from its member table a page at a time,
+        # taking turns with the graph exports (graph_view_members_export.download_view_members).
+        re.compile(r"^/api/v1/[^/]+/graph/view-members/download$"),
         # The activity log as CSV, platform-wide or one workspace's: at most 50,000 rows, a
         # short keyset read per chunk, two at a time per process (activity._EXPORTS).
         re.compile(r"^/api/v1/admin/(?:workspaces/[^/]+/)?activity/export\.csv$"),

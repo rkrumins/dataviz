@@ -5165,9 +5165,9 @@ async def _check_export_access(
             # A subset view places nothing, so a view-scoped data export of it would be
             # the whole data source. Its matches are exported from its search.
             raise HTTPException(status_code=422, detail={
-                "reason": "subset_view",
-                "message": "A subset view's matches are exported from its search: use Export on "
-                           "one of its layers."})
+                "reason": "subset_matches_export",
+                "message": "A subset view shows its search's matches, not data of its own: export "
+                           "its matches from search instead (Export on one of its layers)."})
 
 
 async def _export_selection(

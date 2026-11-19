@@ -762,14 +762,18 @@ def config_of(row: ViewORM) -> dict:
 async def source_config(session: AsyncSession, definition: MembershipDefinition,
                         workspace_id: str) -> Optional[dict]:
     """The config of the view a ``source`` layout copies placements from, or a ``follow``
-    layout follows, while it exists."""
+    layout follows, while it exists — as it is read: one that follows a view itself is
+    served that view's layers (``view_repo.followed_configs``), so a view made like it
+    gets those."""
+    from backend.app.db.repositories.view_repo import followed_configs
+
     sid = definition.layout.source_view_id
     if definition.layout.kind not in ("source", "follow") or not sid:
         return None
     source = (await session.execute(select(ViewORM).where(ViewORM.id == sid, view_is_live()))).scalar_one_or_none()
     if source is None or source.workspace_id != workspace_id:
         return None
-    return config_of(source)
+    return (await followed_configs(session, [source])).get(source.id) or config_of(source)
 
 
 async def effective_data_source(session: AsyncSession, workspace_id: str,

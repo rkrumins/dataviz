@@ -25,6 +25,8 @@ DOWNLOAD_TOKEN_SECONDS = 3600
 #: What a token opens. A search export's is the tag every token had before there were two.
 SEARCH_EXPORT = "search-export"
 MEMBER_SET = "member-set"
+#: A layer of a view made from a query (``graph_view_members_export``).
+VIEW_MEMBERS = "view-members"
 
 
 def mint_download_token(sid: str, scope_hash: str, principal: str, key: str, *,

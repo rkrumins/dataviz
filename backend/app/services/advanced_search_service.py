@@ -20,6 +20,7 @@ and that's enforced here — before any Cypher is generated.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from contextlib import nullcontext
@@ -28,6 +29,7 @@ from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.repositories import view_members_repo
 from backend.app.db.repositories.view_members_repo import SearchMembers
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
@@ -42,6 +44,7 @@ from backend.app.services.search_views import layer_filters_in_subset, with_boun
 from backend.app.services.view_placement import LayerTarget, PlacementSpec
 from backend.app.services.view_scope import (
     EffectiveViewScope,
+    MemberScope,
     ViewNotFound,
     ViewScopeError,
     ViewScopeResolver,
@@ -58,6 +61,7 @@ from backend.common.models.search import (
     EdgePropertyPredicate,
     EdgesPredicate,
     GroupPredicate,
+    IsPredicate,
     LayerPredicate,
     MatchAllPredicate,
     NodeRef,
@@ -522,6 +526,13 @@ SUBSET_BASE_HIDDEN = ("Looked for inside this subset view's base view, which you
 #: What a search in a view that shows nothing is told (``EffectiveViewScope.holds_nothing``).
 VIEW_HOLDS_NOTHING = ("This view holds nothing yet — nothing is placed in it — so a search in "
                       "it finds nothing.")
+#: And one filtered to a layer of a view made from a query that holds nothing.
+LAYER_HOLDS_NOTHING = "This layer holds nothing, so a search in it finds nothing."
+
+
+def _nothing_note(eff_scope: EffectiveViewScope) -> str:
+    held = getattr(eff_scope, "member_layers", None)
+    return LAYER_HOLDS_NOTHING if held is not None and held.narrowed else VIEW_HOLDS_NOTHING
 
 
 def _finds_nothing(scope: SearchScope, eff_scope: EffectiveViewScope) -> bool:
@@ -676,12 +687,85 @@ def _check_layer_limits(spec: PlacementSpec) -> None:
             f"{LAYER_FILTER_MAX_HAND_PLACED:,}. Filter by type or by container instead.")
 
 
+#: Members a layer filter of a view made from a query lists when it can't narrow the search's
+#: roots — one inside OR or NOT, a rule's, or one outside the view's own scope.
+MEMBER_LAYER_LISTED_MAX = 1_000
+
+
+def _layer_leaves(predicate, *, top_only: bool = False) -> list:
+    """The layer filters in ``predicate`` — with ``top_only``, those every match must meet
+    (the predicate itself, or inside AND groups from the top)."""
+    if isinstance(predicate, LayerPredicate):
+        return [predicate]
+    if isinstance(predicate, GroupPredicate):
+        if top_only and predicate.op != "and":
+            return []
+        return [leaf for c in predicate.children for leaf in _layer_leaves(c, top_only=top_only)]
+    if top_only:
+        return []
+    if isinstance(predicate, RelatedPredicate):
+        return [] if predicate.where is None else _layer_leaves(predicate.where)
+    if isinstance(predicate, (PathPredicate, EdgesPredicate)):
+        return [leaf for w in (predicate.source_where, predicate.target_where) if w is not None
+                for leaf in _layer_leaves(w)]
+    return []
+
+
+def _urns_leaf(urns):
+    """The entities ``urns`` name: one condition, however many (it compiles to one list)."""
+    if not urns:
+        return _NOTHING
+    leaf = IsPredicate(refs=[NodeRef(urn=urns[0])])
+    return leaf.model_copy(update={"refs": [NodeRef(urn=u) for u in urns]})
+
+
+def _in_member_layers(predicate, eff_scope: EffectiveViewScope, notes: list, *, top: bool = True):
+    """A view made from a query's layer filters, as its members are kept: one the search's
+    roots were narrowed to already (``MemberLayers.narrowed``) matches everything in them;
+    any other, the layer's members listed (at most ``MEMBER_LAYER_LISTED_MAX``, else a 400)."""
+    held = eff_scope.member_layers
+    if isinstance(predicate, LayerPredicate):
+        layer_id = _layer_id(eff_scope.layers, predicate.layer_assignment)
+        if layer_id is None:
+            note = (f"No layer in this view is called \u201c{predicate.layer_assignment}\u201d, so the "
+                    f"layer filter matched entities whose stored layer is \u201c"
+                    f"{predicate.layer_assignment}\u201d.")
+            if note not in notes:
+                notes.append(note)
+            return predicate
+        if top and layer_id in held.narrowed:
+            return MatchAllPredicate()
+        urns = held.listed.get(layer_id)
+        if urns is None:
+            raise ValidationError(
+                f"This layer holds more than {MEMBER_LAYER_LISTED_MAX:,} members, so a layer filter "
+                "inside OR or NOT (or in a rule) can't list them. Filter by the layer on its own, "
+                "joined to the rest with AND, or filter by type or container instead.")
+        return _urns_leaf(list(urns))
+    if isinstance(predicate, GroupPredicate):
+        return predicate.model_copy(update={"children": [
+            _in_member_layers(c, eff_scope, notes, top=top and predicate.op == "and")
+            for c in predicate.children]})
+    if isinstance(predicate, RelatedPredicate) and predicate.where is not None:
+        return predicate.model_copy(update={
+            "where": _in_member_layers(predicate.where, eff_scope, notes, top=False)})
+    if isinstance(predicate, (PathPredicate, EdgesPredicate)):
+        return predicate.model_copy(update={
+            f"{side}_where": _in_member_layers(where, eff_scope, notes, top=False)
+            for side, where in (("source", predicate.source_where),
+                                ("target", predicate.target_where)) if where is not None})
+    return predicate
+
+
 def _with_resolved_layers(predicate, eff_scope: EffectiveViewScope, notes: list):
     """The predicate with each layer filter resolved against the view: the
     layer it names and how the view's canvas places entities there
-    (``view_placement``), carried on the filter for the engine. A value no
+    (``view_placement``), carried on the filter for the engine — or, in a view
+    made from a query, its members (``_in_member_layers``). A value no
     layer has keeps matching the stamp entities carry, and says so in
     ``notes``; a name two layers share, or a view past the limits, is a 400."""
+    if _has_layer(predicate) and eff_scope.member_layers is not None:
+        return _in_member_layers(predicate, eff_scope, notes)
     if not _has_layer(predicate) or eff_scope.placement is None:
         return predicate      # no layers: the stamp, as ever
     if isinstance(predicate, GroupPredicate):
@@ -954,6 +1038,7 @@ class AdvancedSearchService:
         client_requested_urns = bool(query.scope.root_urns)
         eff_scope = await self._resolve_scope(query.scope)
         await self._guard_view_data_source(eff_scope)
+        eff_scope = await self._member_layer_scope(eff_scope, [query.predicate], query.scope, narrow=True)
         # Only the uncapped engine reads a view's members where they are kept — and not
         # for Connections, whose far end is checked against the roots alone.
         members = (self._members(query.scope, eff_scope)
@@ -978,7 +1063,7 @@ class AdvancedSearchService:
                 eff_scope.view_id, eff_scope.workspace_id,
                 len(eff_scope.dropped_urns),
             )
-            extra_notes = [VIEW_HOLDS_NOTHING] if nothing_here else [
+            extra_notes = [_nothing_note(eff_scope)] if nothing_here else [
                 "All client-supplied root URNs were dropped — none "
                 "belonged to this view. Search short-circuited to "
                 "an empty page (security guard).",
@@ -1066,6 +1151,8 @@ class AdvancedSearchService:
         _validate_items(request.items)
         refused = self._refused_on_a_shared_link(request.items)
         scope, _eff = await self._rule_scope(request.scope, members=True)
+        _eff = await self._member_layer_scope(_eff, [item.predicate for item in request.items],
+                                              request.scope, narrow=False)
         if scope is None:
             return SearchMembershipResult(matches={item.id: [] for item in request.items},
                                           errors=refused)
@@ -1109,6 +1196,8 @@ class AdvancedSearchService:
             for item in request.items]})
         _validate_items(request.items, rule=request.purpose == "rule")
         scope, eff = await self._rule_scope(request.scope, members=True)
+        eff = await self._member_layer_scope(eff, [item.predicate for item in request.items],
+                                             request.scope, narrow=False)
         if scope is None:
             return SearchCountsResult(counts={
                 item.id: SearchRuleCount(count=0, status="complete") for item in request.items})
@@ -1225,7 +1314,8 @@ class AdvancedSearchService:
         if leaves > max_leaves:
             raise ValidationError(f"$.predicate has {leaves} leaves (max {max_leaves})")
         edges = isinstance(request.predicate, EdgesPredicate)
-        scope, eff = await self._rule_scope(request.scope, members=not edges)
+        scope, eff = await self._rule_scope(request.scope, members=not edges,
+                                            predicates=[request.predicate], narrow=True)
         if scope is None:
             # Every root the client named lies outside the view: nothing.
             return SearchExportResult(
@@ -1352,14 +1442,18 @@ class AdvancedSearchService:
         return [item.model_copy(update={"predicate": _with_resolved_refs(item.predicate, named)})
                 for item in items if item.id not in errors], errors
 
-    async def _rule_scope(self, requested: SearchScope, *, members: bool = False):
+    async def _rule_scope(self, requested: SearchScope, *, members: bool = False,
+                          predicates=(), narrow: bool = False):
         """The resolved scope a rule is evaluated in, or None when every root
         the client named lies outside the view (then nothing matches —
         never a widened search). ``members``: the caller reads a view's
-        members where they are kept (``_members``) when it can."""
+        members where they are kept (``_members``) when it can. ``predicates``:
+        what is asked in it, whose layer filters read a view's members
+        (``_member_layer_scope``; ``narrow`` for one search)."""
         client_requested_urns = bool(requested.root_urns)
         eff_scope = await self._resolve_scope(requested)
         await self._guard_view_data_source(eff_scope)
+        eff_scope = await self._member_layer_scope(eff_scope, predicates, requested, narrow=narrow)
         stamped, _note = _stamp_resolved_scope(
             SearchQuery(predicate=MatchAllPredicate(), scope=requested), eff_scope,
             members=members and self._members(requested, eff_scope) is not None)
@@ -1379,12 +1473,13 @@ class AdvancedSearchService:
         _count_and_validate(query)
         eff_scope = await self._resolve_scope(query.scope)
         await self._guard_view_data_source(eff_scope)
+        eff_scope = await self._member_layer_scope(eff_scope, [query.predicate], query.scope, narrow=True)
         self._refuse_outside_subset(eff_scope, "show the statement a search in this view runs",
                                     based_only=True)
         query, entity_types_note = _stamp_resolved_scope(query, eff_scope)
         if _finds_nothing(query.scope, eff_scope):
             # Nothing to explain: a search here runs no statement at all.
-            return {"cypher": "", "params": {}, "notes": [VIEW_HOLDS_NOTHING],
+            return {"cypher": "", "params": {}, "notes": [_nothing_note(eff_scope)],
                     "resolvedScope": _resolved_scope_summary(eff_scope)}
         query = await self._subset_query(query, eff_scope, None)
         _reject_unbounded_text_any(
@@ -1687,7 +1782,76 @@ class AdvancedSearchService:
         if (held is None or scope.scope_mode != "view" or self._session is None
                 or not getattr(self._engine.provider, "supports_member_scope", False)):
             return None
-        return SearchMembers(self._session, held.view_id, held.epoch, held.count)
+        return SearchMembers(self._session, held.view_id, held.epoch, held.count, layer_id=held.layer_id)
+
+    async def _member_layer_scope(self, eff_scope: EffectiveViewScope, predicates, requested: SearchScope,
+                                  *, narrow: bool) -> EffectiveViewScope:
+        """``eff_scope`` ready for the layer filters of ``predicates`` in a view made from a
+        query (``member_layers``): a filter every match of the one search meets
+        (``narrow``, in the view's own scope, with no roots of the client's) narrows its
+        roots to that layer's members; every other layer it names has its members listed,
+        up to ``MEMBER_LAYER_LISTED_MAX``. Any other scope as it is."""
+        held = getattr(eff_scope, "member_layers", None)
+        if held is None or self._session is None:
+            return eff_scope
+
+        def named(leaf) -> Optional[str]:
+            try:
+                return _layer_id(eff_scope.layers, leaf.layer_assignment)
+            except ValidationError:
+                return None     # a name two layers share: refused where the filter is resolved
+
+        wanted = {layer_id for p in predicates for leaf in _layer_leaves(p)
+                  for layer_id in [named(leaf)] if layer_id}
+        if not wanted:
+            return eff_scope
+        top: set = set()
+        if narrow and predicates and requested.scope_mode == "view" and not requested.root_urns:
+            top = {layer_id for leaf in _layer_leaves(predicates[0], top_only=True)
+                   for layer_id in [named(leaf)] if layer_id}
+        if top:
+            eff_scope = await self._in_layer(eff_scope, held, top)
+        listed = {layer_id: await self._layer_members(held, layer_id) for layer_id in sorted(wanted - top)}
+        return replace(eff_scope, member_layers=replace(held, narrowed=frozenset(top), listed=listed))
+
+    async def _in_layer(self, eff_scope: EffectiveViewScope, held, layers: set) -> EffectiveViewScope:
+        """The search's roots narrowed to one layer's members — and its entries — listed while
+        they fit the root cap, else that layer's members read where they are kept
+        (``member_scope``) beside the whole ones and the entries. Two layers at once hold
+        nothing: a member is in one. ``layer:<id>`` is folded into ``scope_hash``."""
+        key = "|".join(f"layer:{layer_id}" for layer_id in sorted(layers))
+        scope_hash = hashlib.sha1(f"{eff_scope.scope_hash}|{key}".encode()).hexdigest()[:12]
+        if len(layers) > 1:
+            return replace(eff_scope, root_urns=(), member_scope=None, unlisted_roots=0, holds_nothing=True,
+                           scope_hash=scope_hash)
+        (layer_id,) = layers
+        entries = {u for u, l in held.entries.items() if l == layer_id}
+        moved = {u for u, l in held.entries.items() if l != layer_id}
+        cap = get_deep_search_settings().scope_root_urns_cap
+        count = await view_members_repo.count(self._session, held.view_id, held.epoch, layer_id)
+        if count + len(entries) <= cap:
+            roots = sorted((set(await view_members_repo.urns(self._session, held.view_id, held.epoch,
+                                                              layer_id=layer_id)) - moved) | entries)
+            return replace(eff_scope, root_urns=tuple(roots), member_scope=None, unlisted_roots=0,
+                           holds_nothing=not roots, scope_hash=scope_hash)
+        whole = await view_members_repo.urns(self._session, held.view_id, held.epoch, limit=cap + 1,
+                                             whole=True, layer_id=layer_id)
+        roots = sorted(set(whole) | entries)
+        if len(roots) > cap:
+            return replace(eff_scope, root_urns=(), member_scope=None, unlisted_roots=count + len(entries),
+                           holds_nothing=False, scope_hash=scope_hash)
+        return replace(eff_scope, root_urns=tuple(roots), unlisted_roots=count - len(whole),
+                       holds_nothing=False, scope_hash=scope_hash,
+                       member_scope=MemberScope(held.view_id, held.epoch, count, layer_id=layer_id))
+
+    async def _layer_members(self, held, layer_id: str) -> Optional[Tuple[str, ...]]:
+        """A layer's members and entries, or None past ``MEMBER_LAYER_LISTED_MAX``."""
+        entries = {u for u, l in held.entries.items() if l == layer_id}
+        moved = {u for u, l in held.entries.items() if l != layer_id}
+        urns = await view_members_repo.urns(self._session, held.view_id, held.epoch, layer_id=layer_id,
+                                            limit=MEMBER_LAYER_LISTED_MAX + 1 + len(moved))
+        found = (set(urns) - moved) | entries
+        return tuple(sorted(found)) if len(found) <= MEMBER_LAYER_LISTED_MAX else None
 
     async def resolve_scope(self, requested: SearchScope) -> EffectiveViewScope:
         """The scope a search would run in, after the checks it makes: the view

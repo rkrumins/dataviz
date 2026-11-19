@@ -387,3 +387,42 @@ class ViewFeedPage(_Base):
         """Whether this page may stand in for the current one in an outage: a
         recent page served while the data changes may not."""
         return not self.stale
+
+
+#: URNs one ``POST /view-placements`` asks about.
+VIEW_PLACEMENTS_MAX = 2000
+
+#: Why a view draws an entity where it does: a member of a view made from a query (where a
+#: person put it on top), an entry a person placed, inside a member kept whole, where the
+#: view's layout places it, the layer what nothing places waits in — or nowhere.
+PlacementSource = Literal["member", "entry", "whole", "layout", "fallback", "none"]
+
+
+class ViewPlacementsRequest(_Base):
+    """``POST /{ws}/graph/view-placements?viewId=`` — where a view the server places (one
+    made from a query, or a subset view) draws each of these entities."""
+    urns: List[str] = Field(min_length=1, max_length=VIEW_PLACEMENTS_MAX)
+
+
+class EntityPlacement(_Base):
+    layer_id: Optional[str] = Field(None, alias="layerId")
+    source: PlacementSource
+
+
+class ViewPlacements(_Base):
+    """Each URN asked about → the layer the view draws it in and why. ``epoch``: the answer
+    of the view's members read (a view made from a query); ``digest``: what decided where
+    each goes, so a client knows when to ask again."""
+    placements: Dict[str, EntityPlacement] = Field(default_factory=dict)
+    epoch: Optional[int] = None
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    digest: str = ""
+
+
+class ViewMembersExport(_Base):
+    """``POST /{ws}/graph/view-members/export`` — a layer of a view made from a query, ready
+    to download: a token for ``GET /view-members/download`` (ten minutes, for this caller),
+    how many rows the file holds, and the answer they are read at."""
+    download_token: str = Field(alias="downloadToken")
+    rows: int
+    epoch: Optional[int] = None

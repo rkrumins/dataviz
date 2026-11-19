@@ -117,15 +117,17 @@ async def page(session: AsyncSession, view_id: str, epoch: int, layer_id: str,
 
 
 async def urns(session: AsyncSession, view_id: str, epoch: Optional[int], limit: Optional[int] = None,
-               *, whole: bool = False) -> List[str]:
+               *, whole: bool = False, layer_id: Optional[str] = None) -> List[str]:
     """An epoch's member URNs, in the order they were found — only those kept whole, with
-    ``whole``."""
+    ``whole``; only one layer's, with ``layer_id``."""
     if epoch is None:
         return []
     query = (select(_ROWS.c.urn).where(_ROWS.c.view_id == view_id, _ROWS.c.epoch == epoch)
              .order_by(_ROWS.c.ord))
     if whole:
         query = query.where(_ROWS.c.whole.is_(True))
+    if layer_id is not None:
+        query = query.where(_ROWS.c.layer_id == layer_id)
     if limit is not None:
         query = query.limit(limit)
     return list((await session.execute(query)).scalars().all())
@@ -273,17 +275,26 @@ HOLDS_BATCH = 1_000
 class SearchMembers:
     """One epoch's members as a search reads them when they are too many to list as its
     roots (``deep_search.ViewMembers``). A search runs its units side by side and a
-    database session answers one statement at a time, so its reads take turns."""
+    database session answers one statement at a time, so its reads take turns.
+    ``layer_id``: one layer's members only (a layer filter in the view)."""
 
-    def __init__(self, session: AsyncSession, view_id: str, epoch: int, count: int) -> None:
+    def __init__(self, session: AsyncSession, view_id: str, epoch: int, count: int,
+                 layer_id: Optional[str] = None) -> None:
         self._session, self._view_id, self._epoch, self.count = session, view_id, epoch, count
+        self._layer_id = layer_id
         self._turn = asyncio.Lock()
+
+    def _of(self) -> tuple:
+        here = (_ROWS.c.view_id == self._view_id, _ROWS.c.epoch == self._epoch)
+        return here if self._layer_id is None else (*here, _ROWS.c.layer_id == self._layer_id)
 
     def _searched(self) -> tuple:
         """The members a search reads itself: a whole one is a root, and one inside a
-        whole one (``covered``) is read under it."""
-        return (_ROWS.c.view_id == self._view_id, _ROWS.c.epoch == self._epoch,
-                _ROWS.c.whole.is_(False), _ROWS.c.covered.is_(False))
+        whole one (``covered``) is read under it — but in one layer, where the whole one
+        around it (in another layer) is not a root, it is read itself."""
+        if self._layer_id is not None:
+            return (*self._of(), _ROWS.c.whole.is_(False))
+        return (*self._of(), _ROWS.c.whole.is_(False), _ROWS.c.covered.is_(False))
 
     async def counts(self) -> Dict[str, Tuple[int, int]]:
         async with self._turn:
@@ -305,8 +316,7 @@ class SearchMembers:
         async with self._turn:
             for chunk in _chunks(sorted(set(urns)), min(HOLDS_BATCH, _params(self._session) - 2)):
                 found.update((await self._session.execute(
-                    select(_ROWS.c.urn).where(_ROWS.c.view_id == self._view_id, _ROWS.c.epoch == self._epoch,
-                                              _ROWS.c.urn.in_(list(chunk))))).scalars().all())
+                    select(_ROWS.c.urn).where(*self._of(), _ROWS.c.urn.in_(list(chunk))))).scalars().all())
         return found
 
 
