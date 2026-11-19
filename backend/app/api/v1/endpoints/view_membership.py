@@ -182,7 +182,7 @@ async def _check_views(
         if theirs != data_source_id:
             raise refused(422, "view_other_data_source", "That view shows a different data source.")
         if view_id == layout.source_view_id:
-            copied = pipeline.config_of(other)
+            copied = (await view_repo.followed_configs(session, [other])).get(other.id) or pipeline.config_of(other)
             refusal = pipeline.follow_refusal(copied) if layout.kind == "follow" else None
             if refusal:
                 raise refused(422, *refusal)

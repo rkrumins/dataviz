@@ -10,6 +10,7 @@ from .versioning_gate import versioning_write_gate
 from .endpoints import (
     metrics as metrics_endpoint,
     graph, graph_export, graph_members, graph_member_sets, graph_view_feed, graph_view_members, canvas,
+    graph_view_members_export, graph_view_placements,
     assignments, providers,
     ontologies, workspaces,
     assets, catalog, views, features, layout_templates,
@@ -529,6 +530,18 @@ api_router.include_router(
 # the member table, page by page. Behind the same gate.
 api_router.include_router(
     graph_view_members.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
+    dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
+)
+# One layer of a view made from a query as a file (POST /{ws_id}/graph/view-members/export,
+# GET .../view-members/download). Behind the same gate; the export switch on each route.
+api_router.include_router(
+    graph_view_members_export.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
+    dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
+)
+# Where a view made from a query, or a subset view, draws entities (POST
+# /{ws_id}/graph/view-placements): what a trace over it places its cards by. Behind the same gate.
+api_router.include_router(
+    graph_view_placements.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
     dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
 )
 api_router.include_router(

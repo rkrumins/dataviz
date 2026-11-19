@@ -820,6 +820,39 @@ async def test_a_subset_or_a_view_made_from_a_query_can_not_be_followed(
     assert unnamed.status_code == 422, "a follow layout names the view it follows"
 
 
+async def test_like_a_view_that_follows_another_copies_the_layers_it_is_served(
+    test_client: AsyncClient, db_session, graph, membership_on, preview,
+):
+    """Its own config stores no layers: "Like" copies those of the view it follows, as it
+    shows them — and it still can't be followed itself."""
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    follower = await following(test_client, ws, src)
+
+    planned = await preview(ws, follower, plan_body(follower, keep="all"))
+    assert planned.status_code == 200, planned.text
+    assert [(l["name"], l["linkLayerId"], l["count"]) for l in planned.json()["layers"]][:3] == [
+        ("Domains", "s_dom", 1), ("Tables", "s_tbl", 2), ("Columns", "s_col", 3)]
+
+    made_like = await test_client.post(URL, json=body(ws, follower, keep="all"))
+    assert made_like.status_code == 201, made_like.text
+    view_id = made_like.json()["view"]["id"]
+    layers = (await made(db_session, view_id))["layout"]["referenceLayout"]["layers"]
+    assert [(l["name"], l["linkLayerId"]) for l in layers] == [
+        ("Domains", "s_dom"), ("Tables", "s_tbl"), ("Columns", "s_col"), ("Dashboards", "s_dash"),
+        ("Other matches", "other-matches")], "the base's, and the fallback layer it is served"
+    by_link = {l["linkLayerId"]: l["id"] for l in layers}
+    assert {u: e["layerId"] for u, e in (await members_of(db_session, view_id)).items()} == {
+        "dom": by_link["s_dom"], "tbl_a": by_link["s_tbl"], "tbl_b": by_link["s_tbl"],
+        "col_a1": by_link["s_col"], "col_a2": by_link["s_col"], "col_b1": by_link["s_col"],
+    }
+
+    refused = await test_client.post(URL, json=body(ws, follower, layout=follow(follower)))
+    assert (refused.status_code, refused.json()["detail"]["reason"]) == (422, "base_is_subset")
+    previewed = await preview(ws, follower, plan_body(follower, layout=follow(follower)))
+    assert (previewed.status_code, previewed.json()["detail"]["reason"]) == (422, "base_is_subset")
+
+
 async def test_its_layers_are_changed_in_the_view_it_follows(
     test_client: AsyncClient, db_session, graph, membership_on,
 ):

@@ -272,6 +272,8 @@ ENDPOINT_MEMBERS = "members"
 ENDPOINT_VIEW_FEED = "view-feed"
 # A list view worked out before it is saved: the preview's, which the save that follows reuses.
 ENDPOINT_MEMBERS_DRAFT = "members-draft"
+# Where a view made from a query, or a subset view, draws entities (POST /graph/view-placements).
+ENDPOINT_VIEW_PLACEMENTS = "view.placements"
 
 _ENABLED_ENDPOINTS = {
     ENDPOINT_CHILDREN: _flag("GRAPH_CACHE_ENABLED_CHILDREN", default=True),
@@ -289,6 +291,8 @@ _ENABLED_ENDPOINTS = {
     ENDPOINT_MEMBERS: _flag("GRAPH_CACHE_ENABLED_MEMBERS", default=True),
     ENDPOINT_VIEW_FEED: _flag("GRAPH_CACHE_ENABLED_VIEW_FEED", default=True),
     ENDPOINT_MEMBERS_DRAFT: _flag("GRAPH_CACHE_ENABLED_MEMBERS", default=True),
+    # The same switch as the layer pages they are drawn beside.
+    ENDPOINT_VIEW_PLACEMENTS: _flag("GRAPH_CACHE_ENABLED_VIEW_FEED", default=True),
 }
 
 #: The endpoints whose answer is read out of the ``:AGGREGATED`` rollup layer,

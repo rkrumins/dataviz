@@ -199,6 +199,7 @@ async def plan_members(
     from sqlalchemy import select
 
     from backend.app.db.models import ViewORM, view_is_live
+    from backend.app.db.repositories import view_repo
     from backend.app.services.live_views import pipeline
 
     if any(s.spec.expand.upstream or s.spec.expand.downstream for s in body.sources) and not (
@@ -214,7 +215,8 @@ async def plan_members(
             ViewORM.id == (body.layout.source_view_id or viewId), view_is_live()))).scalar_one_or_none()
         if source_view is None or source_view.workspace_id != ws_id or not await can_read_view(source_view):
             raise refused(404, "view_not_found", "View not found")
-        copied_from = pipeline.config_of(source_view)
+        copied_from = ((await view_repo.followed_configs(session, [source_view])).get(source_view.id)
+                       or pipeline.config_of(source_view))
         refusal = pipeline.follow_refusal(copied_from) if body.layout.kind == "follow" else None
         if refusal:
             raise refused(422, *refusal)

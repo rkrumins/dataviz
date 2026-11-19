@@ -110,10 +110,27 @@ class ViewScopeError(ValueError):
 @dataclass(frozen=True)
 class MemberScope:
     """A view made from a query whose members are too many to list as a search's roots:
-    the epoch of its answer a search reads them at, and how many there are."""
+    the epoch of its answer a search reads them at, and how many there are — of one layer,
+    with ``layer_id`` (a layer filter in the view)."""
     view_id: str
     epoch: int
     count: int
+    layer_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MemberLayers:
+    """What a layer filter in a view made from a query (not one that follows a view) reads:
+    its members, by layer, where they are kept — at ``epoch``, its answer readers see — and
+    the entries people placed (``entries``: urn → layer). Filled in by the search service
+    for the search at hand: the layers a top-level filter narrowed its roots to
+    (``narrowed``), and each other layer's members listed, or None past the limit
+    (``listed``)."""
+    view_id: str
+    epoch: Optional[int]
+    entries: Dict[str, str] = field(default_factory=dict)
+    narrowed: FrozenSet[str] = frozenset()
+    listed: Dict[str, Optional[Tuple[str, ...]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -189,6 +206,9 @@ class EffectiveViewScope:
     beside ``root_urns`` — then the entries people placed and the members kept whole,
     whose insides are in the view too. None below the cap, for any other view, and when
     the whole ones alone are past it."""
+    member_layers: Optional[MemberLayers] = None
+    """A view made from a query that doesn't follow a view: its layers hold its members,
+    kept in their own table, so a layer filter reads them there (``placement`` is None)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -485,6 +505,14 @@ class ViewScopeResolver:
 
         placement, layers, placement_digest = (
             await self._followed_placement(view, config, members_epoch) or _placement_inputs(config))
+        member_layers = None
+        definition = read_definition(config)
+        if definition is not None and definition.layout.kind != "follow":
+            # Its members are rows of their own table, never placements of its config.
+            placement = None
+            member_layers = MemberLayers(view.id, members_epoch, entries={
+                urn: entry["layerId"] for urn, entry in parse_reference_layout(config).assignments.items()
+                if isinstance(entry, dict) and isinstance(entry.get("layerId"), str) and entry["layerId"]})
         scope_hash = _compute_scope_hash(
             view_id=view.id,
             updated_at=view.updated_at,
@@ -521,6 +549,7 @@ class ViewScopeResolver:
             holds_nothing=derive_entity_scope(config) == "curated" and not allowed_root_urns and not unlisted,
             unlisted_roots=unlisted,
             member_scope=member_scope,
+            member_layers=member_layers,
         )
 
     async def _resolve_subset(

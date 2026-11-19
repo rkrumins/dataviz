@@ -57,6 +57,7 @@ _MEANS = {
          "`definitionHash` stored now), its base view is gone (`base_missing`), it is frozen "
          "(`frozen`), it can't be changed in a draft (`draft_refused`), or the id sent is "
          "another question's (`set_mismatch`).",
+    410: "Gone: what a download link names is no longer kept (`epoch_gone`).",
     422: "Can't be done as asked; `reason` and `message` say why.",
     429: "Busy (`PROVIDER_BUSY`) or too soon (`too_soon`): ask again after `Retry-After`.",
     501: "The graph behind this data source can't answer this (it has no lineage walk).",

@@ -534,3 +534,61 @@ async def test_a_stranger_finds_no_view_to_list_from(test_client: AsyncClient, d
     with _as(_user("usr_stranger"), PermissionClaims(sid="s_stranger")):
         resp = await test_client.get("/api/v1/views/view_team/library/from-other-views")
     assert resp.status_code == 404
+
+
+# ── a view that follows another: its rules are that view's ───────────
+
+async def _follower(db_session, *, base_visibility: str = "workspace") -> None:
+    """``view_base`` with two rules, and ``view_follow`` — a view made from a query that
+    follows it, readable by the workspace."""
+    import json
+
+    db_session.add(WorkspaceORM(id=WS, name="Library"))
+    base = {"layout": {"type": "reference", "referenceLayout": {
+        "layers": [{"id": "b1", "name": "Tables", "order": 0, "entityTypes": ["table"]}],
+        "assignments": {}, "displayRules": [_rule("r1", "PII"), _rule("r2", "Owned")]}},
+        "content": {"entityScope": "all"}}
+    follow = {"layout": {"type": "reference", "referenceLayout": {"layers": [], "assignments": {},
+                                                                  "displayRules": [_rule("mine", "Mine")]}},
+              "content": {"entityScope": "curated"},
+              "membership": {"v": 1, "mode": "live", "sources": [{"spec": {"seeds": {"urns": ["urn:a"]}}}],
+                             "layout": {"kind": "follow", "sourceViewId": "view_base"}}}
+    db_session.add(ViewORM(id="view_base", name="Base", workspace_id=WS, visibility=base_visibility,
+                           created_by="usr_owner", config=json.dumps(base)))
+    db_session.add(ViewORM(id="view_follow", name="Follower", workspace_id=WS, visibility="workspace",
+                           created_by="usr_owner", subset_of="view_base", config=json.dumps(follow)))
+    await db_session.commit()
+
+
+async def test_a_follower_shows_the_rules_of_the_view_it_follows_and_says_which(
+    test_client: AsyncClient, db_session,
+):
+    await _follower(db_session)
+    owner = PermissionClaims(sid="s_owner", ws_perms={WS: ("workspace:view:read", "workspace:view:edit")})
+    with _as(_user("usr_owner"), owner):
+        library = await _library(test_client, "view_follow")
+        assert _names(library["displayRules"]) == ["PII", "Owned"], "the base's, never its own stored ones"
+        assert library["rulesFrom"] == {"viewId": "view_base", "name": "Base"}
+        assert (await _library(test_client, "view_base"))["rulesFrom"] is None
+
+        # Its rules are changed in the view it follows: every write says so.
+        for resp in (
+            await test_client.put("/api/v1/views/view_follow/library/rules/r9", json=_rule("r9", "New")),
+            await test_client.delete("/api/v1/views/view_follow/library/rules/r1"),
+            await test_client.put("/api/v1/views/view_follow/library/rules", json={"ids": ["r2", "r1"]}),
+        ):
+            assert resp.status_code == 409, resp.text
+            assert resp.json()["detail"]["reason"] == "rules_followed"
+            assert "the view it follows" in resp.json()["detail"]["message"]
+        assert _names((await _library(test_client, "view_follow"))["displayRules"]) == ["PII", "Owned"]
+
+
+async def test_a_reader_who_can_not_open_the_view_it_follows_is_not_told_its_name(
+    test_client: AsyncClient, db_session,
+):
+    await _follower(db_session, base_visibility="private")
+    reader = PermissionClaims(sid="s_reader", ws_perms={WS: ("workspace:view:read",)})
+    with _as(_user("usr_reader"), reader):
+        library = await _library(test_client, "view_follow")
+    assert library["rulesFrom"] == {"viewId": "view_base", "name": None}
+    assert _names(library["displayRules"]) == ["PII", "Owned"], "what the canvas shows them"

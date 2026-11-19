@@ -178,7 +178,7 @@ async def test_a_view_of_fifty_thousand_members(
     assert len(listing.content) < 100_000
 
     # Each layer pages its members in name order, every one once, its count exact.
-    seen, pages = set(), 0
+    seen, pages, fed, totals = set(), 0, {}, {}
     for layer in view.json()["config"]["layout"]["referenceLayout"]["layers"]:
         cursor, names = None, []
         while True:
@@ -191,14 +191,67 @@ async def test_a_view_of_fifty_thousand_members(
             for n in page["nodes"]:
                 assert n["urn"] not in seen
                 seen.add(n["urn"])
+                fed[n["urn"]] = layer["id"]
             cursor = page.get("cursor")
             if not cursor:
                 break
         assert names == sorted(names, key=lambda s: (s.lower(), s)) or len(names) == 0
         assert page["countStatus"] == "exact"
         assert len(names) == min(page["totalCount"], 5000)
+        totals[layer["id"]] = page["totalCount"]
     print(f"\n{members:,} members: {resolving} answers of 202, view ready in {elapsed:.1f} s, "
           f"{len(seen):,} listed across {pages} pages (each layer lists up to 5,000)")
+
+    # A trace over it: its cards placed where the view draws them — members in the layer
+    # their feed lists them in, what it doesn't hold (the domains around them) in its
+    # fallback layer: a stage holds only what the view does.
+    sample = sorted(fed)[:1700]
+    domains = sorted(set(nodes.values()))[:299]
+    on()
+    started = time.monotonic()
+    placed = await test_client.post(f"/api/v1/{ws}/graph/view-placements", params={"viewId": view_id},
+                                    json={"urns": [*sample, *domains, "urn:nowhere"]})
+    took = time.monotonic() - started
+    assert placed.status_code == 200, placed.text
+    where = placed.json()["placements"]
+    assert len(where) == len(sample) + len(domains) + 1
+    assert all(where[u] == {"layerId": fed[u], "source": "member"} for u in sample)
+    waiting = view.json()["config"]["membership"]["layout"].get("fallbackLayerId")
+    outside = {"layerId": waiting, "source": "fallback"} if waiting else {"layerId": None, "source": "none"}
+    assert all(where[u] == outside for u in [*domains, "urn:nowhere"]), [where[u] for u in domains[:3]]
+    print(f"placements of {len(where):,} entities in {took * 1000:.0f} ms")
+
+    # A layer filter finds exactly that layer: one listed among the search's roots, and one
+    # too large to list, read where its members are kept.
+    async def layer_search(layer_id: str) -> tuple:
+        found, session, asks = set(), None, 0
+        while True:
+            asks += 1
+            assert asks < 400
+            on()
+            resp = await test_client.post(f"/api/v1/{ws}/graph/search/advanced", json={
+                "predicate": {"kind": "layer", "layerAssignment": layer_id},
+                "scope": {"viewId": view_id, "scopeMode": "view"},
+                "options": {"results": "hits", "pageSize": 500, "waitMs": 5000,
+                            **({"sessionId": session} if session else {})}})
+            assert resp.status_code == 200, resp.text
+            page = resp.json()
+            if page.get("status") != "running":
+                break
+            session = page["sessionId"]
+        found = {h["node"]["urn"] for h in page["hits"] or []}
+        return found, page["totalCount"]
+
+    small = min((l for l in totals if totals[l]), key=lambda l: totals[l])
+    started = time.monotonic()
+    found, total = await layer_search(small)
+    assert total == totals[small] and found == {u for u, l in fed.items() if l == small}, (small, total)
+    large = max(totals, key=lambda l: totals[l])
+    assert totals[large] > 5000, "past the root cap: read where its members are kept"
+    found, total = await layer_search(large)
+    assert total == totals[large] and found <= {u for u, l in fed.items() if l == large} | set(nodes)
+    print(f"layer filters: {small} {totals[small]:,} and {large} {totals[large]:,} members, exactly, "
+          f"in {time.monotonic() - started:.1f} s")
 
 
 async def test_a_trace_saved_as_a_subset_that_follows_its_view(test_client: AsyncClient, membership_on, live):  # noqa: F811

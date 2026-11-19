@@ -1825,6 +1825,8 @@ async def _library_view(
 
 
 def _library_refusal(exc: view_library.LibraryError) -> HTTPException:
+    if exc.reason:
+        return HTTPException(status_code=exc.status, detail={"reason": exc.reason, "message": exc.detail})
     return HTTPException(status_code=exc.status, detail=exc.detail)
 
 
@@ -1839,11 +1841,20 @@ async def get_view_library(
 ):
     """The view's display rules — a draft's own on ``branchId`` once it has
     changed its layout, else the published ones — and its saved queries,
-    with whether the caller may change them."""
+    with whether the caller may change them. A view that follows another
+    shows that view's rules, and says which (``rulesFrom``: its name only
+    to a reader who can open it); its rules are changed there (409
+    ``rules_followed`` here)."""
     view_orm, can_edit = await _library_view(session, view_id, user, claims, edit=False)
     await require_branch_scope(session, svc, view_orm, branch_id,
                                actor=_user_id(user), claims=claims, write=False)
-    return await view_library.read_library(session, view_orm, branch_id, can_edit=can_edit)
+
+    async def can_read(other: ViewORM) -> bool:
+        if not rbac_flag("RBAC_ENFORCE_VIEWS"):
+            return True
+        return await view_access.can_read_view(session, await _viewer_context(session, user, claims), other)
+
+    return await view_library.read_library(session, view_orm, branch_id, can_edit=can_edit, can_read=can_read)
 
 
 @router.get("/{view_id}/library/from-other-views", response_model=List[OtherViewQuery])

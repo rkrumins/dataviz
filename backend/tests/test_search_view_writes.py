@@ -195,4 +195,37 @@ class TestExport:
             await versioning._check_export_access(
                 ws, "g", {"data_source_id": row.data_source_id}, branch_id=None, view_id=sub,
                 viewer=None, user=None, claims=None, session=db_session, svc=None)
-        assert exc.value.status_code == 422 and exc.value.detail["reason"] == "subset_view"
+        assert exc.value.status_code == 422 and exc.value.detail["reason"] == "subset_matches_export"
+
+    async def test_this_views_data_export_of_a_subset_says_to_export_its_matches_from_search(
+        self, test_client, on, db_session,
+    ):
+        """Asked over HTTP, before anything reads the graph (the worker's view scope fails open
+        to the whole data source): the plan, the stream and the job each answer 422."""
+        from backend.app.api.v1.endpoints import versioning
+        from backend.app.main import app
+
+        flags(graphExportEnabled=True)
+        ws = await _ws(test_client)
+        sub = (await _subset(test_client, ws, await _base(test_client, ws)))["view"]["id"]
+        row, _ = await _stored(db_session, sub)
+
+        async def graph_meta():
+            return {"data_source_id": row.data_source_id}
+
+        async def viewer():
+            return None
+
+        app.dependency_overrides[versioning.graph_in_workspace] = graph_meta
+        app.dependency_overrides[versioning.viewer_ctx] = viewer
+        app.dependency_overrides[versioning.get_versioning_service] = lambda: None
+        try:
+            for method, path in (("GET", "exports/plan"), ("GET", "exports/stream"), ("POST", "exports")):
+                resp = await test_client.request(method, f"/api/v1/{ws}/versioning/graphs/g_x/{path}",
+                                                 params={"viewId": sub})
+                assert resp.status_code == 422, (path, resp.text)
+                detail = resp.json()["detail"]
+                assert detail["reason"] == "subset_matches_export" and "search" in detail["message"]
+        finally:
+            for dep in (versioning.graph_in_workspace, versioning.viewer_ctx, versioning.get_versioning_service):
+                app.dependency_overrides.pop(dep, None)

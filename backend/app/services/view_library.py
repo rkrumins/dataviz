@@ -36,6 +36,7 @@ from backend.app.services.advanced_search_service import (
     _with_resolved_refs,
 )
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
+from backend.app.services.search_views import followed_base
 from backend.app.services.view_scope import _collect_content_scope, _collect_reference_roots
 from backend.common.models.search import Predicate, unwrap_edges
 from backend.common.models.view_library import (
@@ -49,6 +50,7 @@ from backend.common.models.view_library import (
     LibraryPack,
     LibraryPackSource,
     OtherViewQuery,
+    RulesFrom,
     SavedQuery,
     SavedQueryInput,
     ViewLibrary,
@@ -58,12 +60,19 @@ _PREDICATE = TypeAdapter(Predicate)
 
 
 class LibraryError(Exception):
-    """A request the library refuses: ``status`` is the HTTP answer."""
+    """A request the library refuses: ``status`` is the HTTP answer, ``reason`` a code a
+    client branches on, where it has one."""
 
-    def __init__(self, status: int, detail: str) -> None:
+    def __init__(self, status: int, detail: str, reason: Optional[str] = None) -> None:
         super().__init__(detail)
         self.status = status
         self.detail = detail
+        self.reason = reason
+
+
+#: What a rule written on a view that follows another is told.
+RULES_FOLLOWED = ("This view shows the display rules of the view it follows: change them "
+                  "there.")
 
 
 def _now() -> str:
@@ -200,9 +209,26 @@ async def _view(session: AsyncSession, view_id: str, *, lock: bool = False) -> V
 async def read_rules(session: AsyncSession, view: ViewORM,
                      branch_id: Optional[str]) -> List[Dict[str, Any]]:
     """The rules a canvas on ``branch_id`` shows: the draft's own, once it
-    has an overlay, else the published ones."""
+    has an overlay, else the published ones — and for a view that follows
+    another (``followed_base``), that view's, as it is served them."""
     config = await view_repo.effective_view_config(session, view, branch_id)
+    if followed_base(config) is not None:
+        config = (await view_repo.followed_configs(session, [view], {view.id: config})).get(view.id, config)
     return _rules_of(view_repo._base_reference_layout(config))
+
+
+async def _rules_from(session: AsyncSession, view: ViewORM,
+                      can_read: Optional[Callable[[ViewORM], Any]]) -> Optional[RulesFrom]:
+    """The view ``view`` follows, if any: its rules are that view's. Its name only for a
+    reader ``can_read`` lets open it."""
+    base_id = followed_base(view_repo._load_config(view))
+    if base_id is None:
+        return None
+    base = (await session.execute(
+        select(ViewORM).where(ViewORM.id == base_id, view_is_live()))).scalar_one_or_none()
+    shown = (base is not None and base.workspace_id == view.workspace_id and can_read is not None
+             and await can_read(base))
+    return RulesFrom(view_id=base_id, name=base.name if shown else None)
 
 
 async def _write_rules(session: AsyncSession, view_id: str, branch_id: Optional[str],
@@ -212,7 +238,8 @@ async def _write_rules(session: AsyncSession, view_id: str, branch_id: Optional[
     without touching the view's ``updated_at``. A draft's first write gives
     it its overlay, which forks the published layout as a layout edit does."""
     if branch_id:
-        await _view(session, view_id)
+        if followed_base(view_repo._load_config(await _view(session, view_id))) is not None:
+            raise LibraryError(409, RULES_FOLLOWED, reason="rules_followed")
         await view_repo.ensure_overlay(session, view_id, branch_id)
         overlay = (await session.execute(
             select(ViewLayoutOverlayORM).where(
@@ -231,6 +258,8 @@ async def _write_rules(session: AsyncSession, view_id: str, branch_id: Optional[
         config = json.loads(row.config or "{}")
         if not isinstance(config, dict):
             config = {}
+        if followed_base(config) is not None:
+            raise LibraryError(409, RULES_FOLLOWED, reason="rules_followed")
         layout = _published_layout(config)
         rules = change(_rules_of(layout))
         layout["displayRules"] = rules
@@ -399,12 +428,15 @@ async def order_queries(session: AsyncSession, view_id: str, ids: List[str]) -> 
 # ---------------------------------------------------------------------------
 
 async def read_library(session: AsyncSession, view: ViewORM, branch_id: Optional[str],
-                       *, can_edit: bool) -> ViewLibrary:
+                       *, can_edit: bool, can_read: Optional[Callable[[ViewORM], Any]] = None) -> ViewLibrary:
+    """The view's library. ``can_read``: whether the reader may open another view — the
+    one this follows is named only to one who may."""
     return ViewLibrary(
         view_id=view.id, branch_id=branch_id or None,
         display_rules=_flag_invalid(await read_rules(session, view, branch_id)),
         saved_queries=await read_queries(session, view.id),
         can_edit=can_edit,
+        rules_from=await _rules_from(session, view, can_read),
     )
 
 

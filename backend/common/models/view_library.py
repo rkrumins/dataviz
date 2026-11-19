@@ -87,12 +87,21 @@ class LibraryOrder(_Base):
     ids: List[str] = Field(max_length=LIBRARY_QUERIES_MAX)
 
 
+class RulesFrom(_Base):
+    """The view a view's display rules come from: the one it follows. ``name`` is None
+    for a reader who can't open it (or once it is gone)."""
+    view_id: str = Field(alias="viewId")
+    name: Optional[str] = None
+
+
 class ViewLibrary(_Base):
     view_id: str = Field(alias="viewId")
     branch_id: Optional[str] = Field(None, alias="branchId")
     display_rules: List[Dict[str, Any]] = Field(default_factory=list, alias="displayRules")
     saved_queries: List[SavedQuery] = Field(default_factory=list, alias="savedQueries")
     can_edit: bool = Field(False, alias="canEdit")
+    #: Set for a view that follows another: its display rules are that view's, changed there.
+    rules_from: Optional[RulesFrom] = Field(None, alias="rulesFrom")
 
 
 class LibraryPackSource(_Base):
