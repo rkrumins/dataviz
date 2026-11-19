@@ -62,7 +62,7 @@ import { SubsetIssueBanner } from '@/features/search-views/SubsetIssueBanner'
 import { UpdateSubsetSearchDialog } from '@/features/search-views/UpdateSubsetSearchDialog'
 import { getSearchStatus, putSearch, SEARCH_VIEW_QUERY_KEY } from '@/services/searchViewsApi'
 import type { SearchViewStatus } from '@/types/searchView'
-import { memberActionsFor, workingText } from '@/features/live-views/model'
+import { fillingInAfterBusy, memberActionsFor, workingText } from '@/features/live-views/model'
 import { getMembershipStatus, memberOps, MEMBERSHIP_QUERY_KEY } from '@/services/liveViewsApi'
 import type { MemberOps, MembershipExpand, MembershipResult, MembershipSpec } from '@/types/membership'
 import type { Predicate, SearchQuery } from '@/types/search'
@@ -512,6 +512,9 @@ function takeRail(open: () => void) {
     open()
   })
 }
+
+/** Entities one membership change takes (the server's `EXCLUDE_MAX`). */
+const MEMBER_OPS_MAX = 2000
 
 export function ContextViewCanvas({
   className,
@@ -4915,28 +4918,35 @@ export function ContextViewCanvas({
   const clearNarrow = useCallback(() => useNarrowStore.getState().clear(), [])
   // One narrowing per view: leaving the view (or this canvas) puts it away.
   useEffect(() => () => useNarrowStore.getState().clear(), [narrowViewId])
-  // A SHARED NARROWING (`?narrow=…`): decoded once, applied once the preview is
-  // known to be on, and the param stripped so a refresh or a copied URL stays
-  // clean. A malformed token decodes to null and the view opens normally.
-  const [initialNarrowShare] = useState(() => {
-    // Narrowing reads the graph as it is now: not over a past revision.
-    const raw = atRevision ? null : new URLSearchParams(window.location.search).get('narrow')
-    return raw ? decodeNarrowShare(raw) : null
-  })
+  // A SHARED NARROWING (`?narrow=…`): applied once narrowing can be — the preview on, and
+  // the view as it is now, not a past revision (which keeps the link, says why, and applies
+  // it on going back to Published) — and the param stripped so a refresh or a copied URL
+  // stays clean. A malformed token decodes to null and the view opens normally.
   const narrowShareUsed = useRef(false)
   useEffect(() => {
-    if (!initialNarrowShare || narrowShareUsed.current || !narrowEnabled || !narrowViewId) return
+    if (narrowShareUsed.current || !narrowEnabled || !narrowViewId) return
+    const raw = new URLSearchParams(window.location.search).get('narrow')
+    const share = raw ? decodeNarrowShare(raw) : null
+    if (!share) return
     narrowShareUsed.current = true
     const params = new URLSearchParams(window.location.search)
     params.delete('narrow')
     const qs = params.toString()
     window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
     void narrowNow({
-      spec: initialNarrowShare.spec,
-      seedsLabel: initialNarrowShare.label ?? 'the shared starting points',
-      ...(initialNarrowShare.names ? { seedNames: initialNarrowShare.names } : {}),
+      spec: share.spec,
+      seedsLabel: share.label ?? 'the shared starting points',
+      ...(share.names ? { seedNames: share.names } : {}),
     })
-  }, [initialNarrowShare, narrowEnabled, narrowViewId, narrowNow])
+  }, [narrowEnabled, narrowViewId, narrowNow])
+  const narrowLinkNoticed = useRef(false)
+  useEffect(() => {
+    if (!atRevision || narrowLinkNoticed.current) return
+    const params = new URLSearchParams(window.location.search)
+    if (!params.has('narrow') && !params.has('narrowSaved')) return
+    narrowLinkNoticed.current = true
+    notify('info', 'This link narrows the view as it is now. Go back to Published to open it.', undefined, 10000)
+  }, [atRevision, notify])
   const narrowFromSearch = useCallback((query: SearchQuery) => {
     openNarrow({
       spec: specFor({ query: query.predicate }, {}, query.scope?.scopeMode === 'data_source' ? 'dataSource' : 'view'),
@@ -5024,12 +5034,13 @@ export function ContextViewCanvas({
   })
   const savedNarrowings = savedNarrowingsQuery.data?.items
   // The chip's link: a saved narrowing's short one, else the narrowing itself — when it fits.
-  const narrowShareUrl = useMemo(
+  const narrowShare = useMemo(
     () => (narrowApplied && canShareNarrow(narrowApplied.spec)
-      ? narrowLink(narrowApplied.spec, narrowApplied.seedsLabel, narrowApplied.seedNames).url
+      ? narrowLink(narrowApplied.spec, narrowApplied.seedsLabel, narrowApplied.seedNames)
       : null),
     [narrowApplied],
   )
+  const narrowShareUrl = narrowShare?.url ?? null
   const narrowingCopies = useSavedNarrowingCopies(authUserId)
   const savedNarrowingLink = useCallback((id: string) => {
     const url = new URL(window.location.href)
@@ -5076,25 +5087,30 @@ export function ContextViewCanvas({
     const held = await readHeld(narrowViewId, id).catch(() => null)
     if (held) useNarrowStore.getState().markSaved({ ...mark, since: narrowingSince(held, saved.held.complete, result) }, result.specHash)
   }, [narrowViewId, narrowNow, notify])
-  // A SAVED NARROWING'S LINK (`?narrowSaved=…`): opened once the preview is known to be on,
-  // and the param stripped, as a shared narrowing's is.
-  const [initialSavedNarrowing] = useState(() => (atRevision ? null : new URLSearchParams(window.location.search).get('narrowSaved')))
+  // A SAVED NARROWING'S LINK (`?narrowSaved=…`): opened once narrowing can be, and the param
+  // stripped, as a shared narrowing's is.
   const savedNarrowingUsed = useRef(false)
   useEffect(() => {
-    if (!initialSavedNarrowing || savedNarrowingUsed.current || !narrowEnabled || !narrowViewId) return
+    if (savedNarrowingUsed.current || !narrowEnabled || !narrowViewId) return
+    const id = new URLSearchParams(window.location.search).get('narrowSaved')
+    if (!id) return
     savedNarrowingUsed.current = true
     const params = new URLSearchParams(window.location.search)
     params.delete('narrowSaved')
     const qs = params.toString()
     window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
-    if (/^[A-Za-z0-9_-]{8,32}$/.test(initialSavedNarrowing)) void openSavedNarrowing(initialSavedNarrowing)
-  }, [initialSavedNarrowing, narrowEnabled, narrowViewId, openSavedNarrowing])
+    if (/^[A-Za-z0-9_-]{8,32}$/.test(id)) void openSavedNarrowing(id)
+  }, [narrowEnabled, narrowViewId, openSavedNarrowing])
   const savedNarrowingsProps = useMemo<SavedNarrowingsSectionProps | undefined>(() => {
-    if (!narrowEnabled || !narrowViewId || !savedNarrowings?.length) return undefined
-    const byId = new Map(savedNarrowings.map((n) => [n.id, n]))
+    const failed = savedNarrowingsQuery.isError
+    if (!narrowEnabled || !narrowViewId || (!savedNarrowings?.length && !failed)) return undefined
+    const listed = savedNarrowings ?? []
+    const byId = new Map(listed.map((n) => [n.id, n]))
     const refresh = () => queryClient.invalidateQueries({ queryKey: [NARROWINGS_QUERY_KEY, narrowViewId] })
     return {
-      items: savedNarrowings.map((n) => {
+      error: failed ? 'Couldn’t load the narrowings saved with this view.' : null,
+      onRetry: () => { void savedNarrowingsQuery.refetch() },
+      items: listed.map((n) => {
         const at = Date.parse(n.updatedAt ?? n.createdAt ?? '')
         return {
           id: n.id, name: n.name, savedAt: Number.isNaN(at) ? null : at,
@@ -5136,7 +5152,7 @@ export function ContextViewCanvas({
           .catch((err: unknown) => notify('error', err instanceof Error ? err.message : 'Couldn’t remove it.'))
       },
     }
-  }, [narrowEnabled, narrowViewId, savedNarrowings, narrowApplied?.saved?.id, narrowingCopies, openSavedNarrowing,
+  }, [narrowEnabled, narrowViewId, savedNarrowings, savedNarrowingsQuery.isError, savedNarrowingsQuery.refetch, narrowApplied?.saved?.id, narrowingCopies, openSavedNarrowing,
     savedNarrowingLink, canExportNarrowing, notify, queryClient])
 
   // SUBSET VIEWS (features/search-views) — a search's matches kept as a view of
@@ -5165,10 +5181,14 @@ export function ContextViewCanvas({
     queryFn: () => getMembershipStatus(narrowViewId!),
     enabled: membershipOn && membersFed && !!narrowViewId,
     staleTime: 15_000,
-    refetchInterval: (query) => (query.state.data?.status === 'updating' ? 3_000 : false),
+    refetchInterval: (query) => {
+      const data = query.state.data
+      return data && (data.status === 'updating' || fillingInAfterBusy(data)) ? 3_000 : false
+    },
   })
   const followStatus = followsBase ? membershipStatus : undefined
-  const firstAnswer = membershipStatus?.status === 'updating' && membershipStatus.revision === 0
+  const firstAnswer = membershipStatus && membershipStatus.revision === 0
+    && (membershipStatus.status === 'updating' || fillingInAfterBusy(membershipStatus))
     ? (workingText(membershipStatus) ?? 'Working out its members…')
     : null
   // WHAT A VIEW SAVED FROM HERE WOULD FOLLOW, as a subset: this view; or, in a view that
@@ -5189,8 +5209,9 @@ export function ContextViewCanvas({
     return { viewId: narrowViewId, viewName: activeView.name ?? 'this view' }
   }, [activeView, narrowViewId, followStatus, subsetStatus])
   const [saveSearch, setSaveSearch] = useState<{ query: SearchQuery } | null>(null)
-  // A SUBSET'S MATCHES, exported: its search, where it searches — what its data is.
-  const [exportSubsetMatches, setExportSubsetMatches] = useState(false)
+  // MATCHES, exported through search: a subset's whole data is its search's matches (asked
+  // for when its data export is refused), and a subset's layer is a layer filter inside it.
+  const [exportMatches, setExportMatches] = useState<{ viewId: string; query: SearchQuery } | null>(null)
   const subsetMatchesQuery = useMemo((): { viewId: string; query: SearchQuery } | null => {
     const def = activeView?.search
     if (!def || !narrowViewId) return null
@@ -5199,26 +5220,56 @@ export function ContextViewCanvas({
   }, [activeView?.search, narrowViewId])
   const searchInLayer = useCallback((layerId: string) => {
     // In a subset view the server reads a layer filter as the layer's types, inside the view's
-    // search; in a view made from a query, as that layer's members.
+    // search; in a view made from a query, as that layer's members. It takes the place of the
+    // search the reader had, which Undo brings back.
+    const before = useSearchStore.getState().draftPredicate
     useSearchStore.getState().requestSearchRun({ kind: 'layer', layerAssignment: layerId } as Predicate, 'header')
     search.openPanel()
-  }, [search])
-  // EXPORTING A LAYER of a view made from a query — every member it holds, past what the
-  // canvas lists, each with its parent and path: the server writes the file.
+    if (before) {
+      const name = sortedLayers.find((l) => l.id === layerId)?.name ?? 'this layer'
+      notify('info', `Searching in ${name}`, {
+        label: 'Undo',
+        onClick: () => useSearchStore.getState().requestSearchRun(before, 'header'),
+      }, 6000)
+    }
+  }, [search, sortedLayers, notify])
+  // EXPORTING A LAYER of a view made from a query — every member it holds, loaded or not,
+  // each with its parent and path: the server writes the file. Once at a time per layer.
+  const [exportingLayers, setExportingLayers] = useState<ReadonlySet<string>>(() => new Set())
+  const exportingRef = useRef(new Set<string>())
   const exportLayer = useMemo(() => {
     if (!membersFed || !graphExportEnabled || !(provider instanceof RemoteGraphProvider) || !activeView?.id) return undefined
     const viewId = activeView.id
-    return (layerId: string) => {
+    const busy = (layerId: string, on: boolean) => {
+      if (on) exportingRef.current.add(layerId)
+      else exportingRef.current.delete(layerId)
+      setExportingLayers(new Set(exportingRef.current))
+    }
+    return (layerId: string, format: 'csv' | 'ndjson' = 'csv') => {
+      if (exportingRef.current.has(layerId)) return
       const layer = sortedLayers.find((l) => l.id === layerId)
+      busy(layerId, true)
       provider.exportViewMembersLayer(viewId, layerId)
         .then(({ downloadToken, rows }) => {
-          const name = `${(activeView.name || 'view').replace(/[^\w-]+/g, '-')}-${(layer?.name ?? layerId).replace(/[^\w-]+/g, '-')}-${new Date().toISOString().slice(0, 10)}.csv`
-          triggerBrowserDownload(provider.viewMembersDownloadUrl(downloadToken, 'csv'), name)
-          notify('info', `Downloading ${rows.toLocaleString()} ${rows === 1 ? 'row' : 'rows'} of ${layer?.name ?? 'this layer'}.`)
+          const name = `${(activeView.name || 'view').replace(/[^\w-]+/g, '-')}-${(layer?.name ?? layerId).replace(/[^\w-]+/g, '-')}-${new Date().toISOString().slice(0, 10)}.${format}`
+          triggerBrowserDownload(provider.viewMembersDownloadUrl(downloadToken, format), name)
+          notify('info', rows === 0
+            ? `${layer?.name ?? 'This layer'} holds nothing to export yet.`
+            : `Downloading ${rows.toLocaleString()} ${rows === 1 ? 'row' : 'rows'} of ${layer?.name ?? 'this layer'}.`)
         })
         .catch((err: unknown) => notify('error', err instanceof Error && err.message ? err.message : 'Couldn’t export this layer. Try again.'))
+        .finally(() => busy(layerId, false))
     }
   }, [membersFed, graphExportEnabled, provider, activeView?.id, activeView?.name, sortedLayers, notify])
+  // A subset's layer: its matches in that layer, through search's export (which asks the format).
+  const exportSubsetLayer = useMemo(() => {
+    if (!subsetView || !graphExportEnabled || !narrowViewId) return undefined
+    const viewId = narrowViewId
+    return (layerId: string) => setExportMatches({
+      viewId,
+      query: { predicate: { kind: 'layer', layerAssignment: layerId }, scope: { viewId, scopeMode: 'view' } } as SearchQuery,
+    })
+  }, [subsetView, graphExportEnabled, narrowViewId])
   // EDITING A SUBSET'S SEARCH (`?editSubset=<id>`, from its header chip): the search
   // opens here — where its matches are looked for — with the subset's search in it,
   // and the results' save becomes "Update …".
@@ -5281,13 +5332,14 @@ export function ContextViewCanvas({
   const memberMenuActions = useMemo<ContextMenuAction[]>(() => {
     const target = interactions.state.contextMenu.target
     if (!membersEditable || !target || target.type !== 'node') return []
-    const urn = (displayMap.get(target.id)?.data?.urn as string | undefined) ?? target.id
     // What people placed is in the layout; a member the query found is a row of the
     // member feed, in the layer the server placed it in.
-    const feedLayer = displayMap.get(target.id)?.data?.feedLayerId as string | undefined
-    const entry = currentLayout().assignments[urn] ?? (feedLayer ? { assignedBy: 'query', layerId: feedLayer } : undefined)
-    if (!entry) return []
-    const name = canvasDisplayName(urn)
+    const entryOf = (id: string) => {
+      const u = (displayMap.get(id)?.data?.urn as string | undefined) ?? id
+      const feedLayer = displayMap.get(id)?.data?.feedLayerId as string | undefined
+      const e = currentLayout().assignments[u] ?? (feedLayer ? { assignedBy: 'query', layerId: feedLayer } : undefined)
+      return e ? { urn: u, entry: e } : null
+    }
     const run = (ops: MemberOps, done: string, undo: MemberOps) => () => {
       interactions.closeContextMenu()
       void applyMemberOps(ops).then((ok) => {
@@ -5298,6 +5350,36 @@ export function ContextViewCanvas({
         }, 8000)
       })
     }
+    // Part of a selection: the selection's members, together (up to what one change takes).
+    if (selectedNodeIds.length > 1 && selectedNodeIds.includes(target.id)) {
+      const picked = selectedNodeIds.map(entryOf).filter((x): x is NonNullable<typeof x> => x !== null).slice(0, MEMBER_OPS_MAX)
+      if (picked.length > 1) {
+        const found = picked.filter((p) => p.entry.assignedBy === 'query')
+        const placed = picked.filter((p) => p.entry.assignedBy !== 'query')
+        const urns = picked.map((p) => p.urn)
+        const many = (n: number) => `${n.toLocaleString()} ${n === 1 ? 'entity' : 'entities'}`
+        const bulk: ContextMenuAction[] = [{
+          id: 'members-exclude', label: `Keep ${many(urns.length)} out of this view`, icon: 'EyeOff',
+          onClick: run({ exclude: urns }, `${many(urns.length)} kept out of this view, whatever its query finds`, { unexclude: urns }),
+        }]
+        if (found.length) {
+          bulk.push({ id: 'members-include', label: `Always include ${many(found.length)}`, icon: 'Pin',
+            onClick: run({ include: found.map((p) => ({ urn: p.urn, layerId: p.entry.layerId })) },
+              `${many(found.length)} always included`, { uninclude: found.map((p) => p.urn) }) })
+        }
+        if (placed.length) {
+          bulk.push({ id: 'members-uninclude', label: `Stop always including ${many(placed.length)}`, icon: 'PinOff',
+            onClick: run({ uninclude: placed.map((p) => p.urn) }, `${many(placed.length)} follow the query again`,
+              { include: placed.map((p) => ({ urn: p.urn, layerId: p.entry.layerId })) }) })
+        }
+        bulk[bulk.length - 1] = { ...bulk[bulk.length - 1], dividerAfter: true }
+        return bulk
+      }
+    }
+    const one = entryOf(target.id)
+    if (!one) return []
+    const { urn, entry } = one
+    const name = canvasDisplayName(urn)
     const actions = memberActionsFor(entry).map((action): ContextMenuAction => {
       if (action === 'exclude') {
         return { id: 'member-exclude', label: 'Keep out of this view', icon: 'EyeOff',
@@ -5313,7 +5395,7 @@ export function ContextViewCanvas({
     if (actions.length) actions[actions.length - 1] = { ...actions[actions.length - 1], dividerAfter: true }
     return actions
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interactions.state.contextMenu.target, membersEditable, displayMap, applyMemberOps, notify])
+  }, [interactions.state.contextMenu.target, membersEditable, displayMap, applyMemberOps, notify, selectedNodeIds])
   const nodeCustomActions = useMemo(() => [...memberMenuActions, ...reorderMenuActions], [memberMenuActions, reorderMenuActions])
   // Right-click → Narrow to this: one entry per reach, applied at once; or
   // choose in the composer. The selection the entity is part of narrows together.
@@ -6205,7 +6287,8 @@ export function ContextViewCanvas({
         ? () => layerFold.setLayerFolded(layer.id, !layerFold.folded.has(layer.id))
         : undefined,
       onDelete: () => deleteLayerWithUndo(layer.id),
-      onStartEditing: !isDraft && canEnterEdit ? handleEnterEdit : undefined,
+      // A view whose layers come from the view it follows changes none of them, draft or not.
+      onStartEditing: !isDraft && canEnterEdit && !subsetFollows ? handleEnterEdit : undefined,
       onOpenSettings: () => takeRail(() => { setBulkEditFor(null); setLayerSettingsFor(layer.id) }),
       // The Business view's header keeps to the essentials; its own actions are here.
       ...(personaMode !== 'technical' && {
@@ -6220,11 +6303,20 @@ export function ContextViewCanvas({
           seedsLabel: `everything in ${layer.name}`,
         })
         : undefined,
+      // A layer the server pages holds more than the canvas may have loaded: found and
+      // exported whole on the server.
+      onSearchInLayer: fedView ? () => searchInLayer(layer.id) : undefined,
+      onExportLayer: exportLayer
+        ? (format?: 'csv' | 'ndjson') => exportLayer(layer.id, format)
+        : exportSubsetLayer ? () => exportSubsetLayer(layer.id) : undefined,
+      exportFormats: exportLayer ? ['csv', 'ndjson'] as const : undefined,
+      exportingLayer: exportingLayers.has(layer.id),
     }
   }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
     canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, personaMode, canEditGraph, subsetView,
-    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setBulkEditFor, setLayerSettingsFor])
+    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setBulkEditFor, setLayerSettingsFor,
+    fedView, searchInLayer, exportLayer, exportSubsetLayer, exportingLayers])
 
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
@@ -7412,6 +7504,9 @@ export function ContextViewCanvas({
             link={narrowApplied.saved
               ? () => savedNarrowingLink(narrowApplied.saved!.id)
               : narrowShareUrl ? () => narrowShareUrl : undefined}
+            linkNote={!narrowApplied.saved && narrowShare?.namesDropped
+              ? 'The starting points’ names are left out, to keep the link short.'
+              : undefined}
             onRetry={() => { void narrowNow(narrowApplied) }}
             onSaveAsView={canSaveAsView
               ? () => setSaveAsDraft({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })
@@ -7668,7 +7763,7 @@ export function ContextViewCanvas({
             branchId={effectiveBranchId ?? undefined}
             // At a past revision, exporting exports the graph as it was then: what is on screen.
             asOfSeq={viewExecCtx?.asOfSeq ?? null}
-            onExportMatches={subsetMatchesQuery ? () => setExportSubsetMatches(true) : undefined}
+            onExportMatches={subsetMatchesQuery ? () => setExportMatches(subsetMatchesQuery) : undefined}
             onClose={() => setShowExportDialog(false)}
           />
         )}
@@ -8442,7 +8537,7 @@ export function ContextViewCanvas({
                 subsetFeed={subsetFeedByLayer.get(layer.id)}
                 emptyText={subsetView ? 'No matches' : undefined}
                 onSearchInLayer={subsetView || membersFed ? searchInLayer : undefined}
-                onExportLayer={exportLayer}
+                onExportLayer={exportLayer ?? exportSubsetLayer}
                 onScroll={handleLayerScroll}
                 // A subset of a search's matches is placed by the search alone; in a view that
                 // follows another, people may put a member in another of its layers — on the
@@ -8798,6 +8893,7 @@ export function ContextViewCanvas({
           onSaveAsView={canSaveAsView
             ? (draft) => { useNarrowStore.getState().closeComposer(); setSaveAsDraft(draft) }
             : undefined}
+          saved={savedNarrowingsProps}
         />
       )}
 
@@ -8811,12 +8907,12 @@ export function ContextViewCanvas({
           onClose={() => setLineageExport(null)}
         />
       )}
-      {exportSubsetMatches && subsetMatchesQuery && (
+      {exportMatches && (
         <ExportMatchesDialog
-          viewId={subsetMatchesQuery.viewId}
-          query={subsetMatchesQuery.query}
+          viewId={exportMatches.viewId}
+          query={exportMatches.query}
           matchCount={null}
-          onClose={() => setExportSubsetMatches(false)}
+          onClose={() => setExportMatches(null)}
         />
       )}
       {canSaveAsView && saveAsDraft && narrowViewId && scopeWsId && (

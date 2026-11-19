@@ -143,3 +143,28 @@ describe('LevelPicker', () => {
     expect(onChange).toHaveBeenCalledWith(1)
   })
 })
+
+describe('NarrowComposer — a layer, and narrowings saved with the view', () => {
+  beforeEach(() => {
+    resolveMembers.mockReset()
+    resolveMembers.mockResolvedValue(answer())
+  })
+
+  it('a layer is the view’s own: no switch to the whole data source', () => {
+    renderComposer({ draft: { spec: specFor({ query: { kind: 'layer', layerAssignment: 'gold' } as never }), seedsLabel: 'everything in Gold' } })
+    expect(screen.queryByText('Whole data source')).toBeNull()
+  })
+
+  it('lists the narrowings saved with the view — opening one closes the window', () => {
+    const onOpen = vi.fn()
+    const props = renderComposer({
+      saved: {
+        items: [{ id: 'n1', name: 'Gold upstream', savedAt: null, sentence: 'x', held: 3, canChange: false, active: false, hasCopy: false }],
+        onOpen, onCopyLink: () => 'u', onExport: vi.fn(), onDownloadCopy: vi.fn(), onRename: vi.fn(), onRemove: vi.fn(),
+      },
+    })
+    fireEvent.click(screen.getByText('Gold upstream').closest('button')!)
+    expect(props.onClose).toHaveBeenCalled()
+    expect(onOpen).toHaveBeenCalledWith('n1')
+  })
+})

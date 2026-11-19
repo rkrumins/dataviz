@@ -25,6 +25,8 @@ export interface NarrowChipProps {
   onClear: () => void
   /** The narrowing as a link; absent when it is too big to carry in one. */
   link?: () => string
+  /** Said with the link: what it leaves out (the starting points' names, past a length). */
+  linkNote?: string
   /** Ask again — offered when the answer was cut short. */
   onRetry?: () => void
   /** Keep the narrowing as a view of its own; absent when it can't be (the
@@ -134,7 +136,7 @@ function SaveForm({ sentence, anchor, trigger, onSave, onDone }: {
   )
 }
 
-export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsView, onSave, onExport }: NarrowChipProps) {
+export function NarrowChip({ applied, onEdit, onClear, link, linkNote, onRetry, onSaveAsView, onSave, onExport }: NarrowChipProps) {
   const [copied, setCopied] = useState(false)
   const [saving, setSaving] = useState<{ right: number; top: number } | null>(null)
   const saveButton = useRef<HTMLButtonElement>(null)
@@ -236,7 +238,7 @@ export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsVi
             className="flex"
             label={link ? (saved ? 'Copy its short link' : 'Copy a link to this narrowing') : 'Too long for a link'}
             detail={link
-              ? 'It opens the view narrowed the same way, on the data as it is then.'
+              ? `It opens the view narrowed the same way, on the data as it is then.${linkNote ? ` ${linkNote}` : ''}`
               : onSave ? 'Save it with the view for a short link.' : 'Narrow from a search instead: a link carries the search.'}
           >
             <button type="button" onClick={copy} disabled={!link} className={cn(quiet, 'disabled:opacity-40 disabled:pointer-events-none')} aria-label="Copy link">

@@ -37,6 +37,7 @@ import {
   type PresetId,
 } from './model'
 import type { NarrowDraft } from './narrowStore'
+import { SavedNarrowingsSection, type SavedNarrowingsSectionProps } from './SavedNarrowingsSection'
 import { useNarrowResolve } from './useNarrowResolve'
 
 export interface NarrowLayer {
@@ -58,6 +59,8 @@ export interface NarrowComposerProps {
   /** Keep what is chosen as a view of its own, without narrowing first; absent
    *  when it can't be (the preview is off, or views can't be created here). */
   onSaveAsView?: (draft: NarrowDraft) => void
+  /** The narrowings saved with this view, to open one instead. */
+  saved?: SavedNarrowingsSectionProps
 }
 
 const PRESET_ICONS: Record<PresetId, keyof typeof LucideIcons> = {
@@ -72,7 +75,7 @@ const PRESET_ICONS: Record<PresetId, keyof typeof LucideIcons> = {
 const n = (count: number, one: string, many = `${one}s`) =>
   `${count.toLocaleString()} ${count === 1 ? one : many}`
 
-export function NarrowComposer({ viewId, draft, lineageEnabled, layers, layerOf, onApply, onClose, onSaveAsView }: NarrowComposerProps) {
+export function NarrowComposer({ viewId, draft, lineageEnabled, layers, layerOf, onApply, onClose, onSaveAsView, saved }: NarrowComposerProps) {
   const [spec, setSpec] = useState<MembershipSpec>(draft.spec)
   // Sources and consumers with the Lineage trace off would only be refused: not asked.
   const lineageBlocked = !lineageEnabled && (spec.expand.upstream !== 0 || spec.expand.downstream !== 0)
@@ -171,12 +174,15 @@ export function NarrowComposer({ viewId, draft, lineageEnabled, layers, layerOf,
                       </span>
                     )}
                   </span>
-                  <Segmented
-                    label="Where to look for matches"
-                    value={spec.within}
-                    onChange={(within) => setSpec((s) => ({ ...s, within }))}
-                    options={[{ value: 'view', label: 'In this view' }, { value: 'dataSource', label: 'Whole data source' }]}
-                  />
+                  {/* A layer is the view's own: there is no layer of the whole data source. */}
+                  {(spec.seeds.query as { kind?: string } | undefined)?.kind !== 'layer' && (
+                    <Segmented
+                      label="Where to look for matches"
+                      value={spec.within}
+                      onChange={(within) => setSpec((s) => ({ ...s, within }))}
+                      options={[{ value: 'view', label: 'In this view' }, { value: 'dataSource', label: 'Whole data source' }]}
+                    />
+                  )}
                 </div>
               )}
             </Section>
@@ -275,6 +281,13 @@ export function NarrowComposer({ viewId, draft, lineageEnabled, layers, layerOf,
               />
               )}
             </Section>
+
+            {/* Or one already saved with the view — opening it closes this. */}
+            {saved && (saved.items.length > 0 || saved.error) && (
+              <div className="rounded-xl border border-glass-border overflow-hidden">
+                <SavedNarrowingsSection {...saved} onOpen={(id) => { onClose(); saved.onOpen(id) }} />
+              </div>
+            )}
           </div>
 
           {/* Footer */}

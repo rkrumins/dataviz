@@ -178,8 +178,10 @@ function num(v: unknown): number | null {
  *  50,000", or "…41,020 so far" while what it reaches is still being found. Null when the
  *  server said nothing countable. */
 export function workingText(status: MembershipStatus): string | null {
-  if (status.status !== 'updating') return null
   const d = status.detail ?? {}
+  // Its first answer met a busy graph: it is still filling in, and carries on by itself.
+  if (fillingInAfterBusy(status)) return 'Working out its members — the graph was busy, so it carries on in a moment'
+  if (status.status !== 'updating') return null
   const placed = num(d.placed)
   const members = num(d.members)
   if (d.reason === 'placing' && placed !== null && members !== null && members > 0) {
@@ -191,8 +193,16 @@ export function workingText(status: MembershipStatus): string | null {
   return members !== null && members > 0 ? `Placing its members… ${(placed ?? 0).toLocaleString()} of ${members.toLocaleString()}` : null
 }
 
+/** A view whose first answer met a busy graph: still filling in, whichever way the server says
+ *  so (`updating`, or — an older server — `pending`, with `graph_busy` and no answer yet). */
+export function fillingInAfterBusy(status: MembershipStatus): boolean {
+  return status.revision === 0 && (status.detail ?? {}).reason === 'graph_busy'
+    && (status.status === 'updating' || status.status === 'pending')
+}
+
 export function statusWords(status: MembershipStatus): StatusWords {
   const d = status.detail ?? {}
+  if (fillingInAfterBusy(status)) return { label: 'Updating…', tone: 'busy', detail: workingText(status)! }
   switch (status.status) {
     case 'ok':
       return { label: 'Up to date', tone: 'ok', detail: 'Its members follow the data: what newly matches arrives, what stops matching leaves.' }

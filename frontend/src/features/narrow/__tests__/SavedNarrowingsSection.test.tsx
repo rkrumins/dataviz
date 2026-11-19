@@ -60,4 +60,14 @@ describe('SavedNarrowingsSection', () => {
     expect(h.onOpen).toHaveBeenCalledWith('n1')
     expect(screen.queryByRole('dialog', { name: 'Saved narrowings' })).toBeNull()
   })
+
+  it('a list that couldn’t be read says so, in the header too, and asks again', () => {
+    const onRetry = vi.fn()
+    render(<SavedNarrowingsButton items={[]} {...handlers()} error="Couldn’t load the narrowings saved with this view." onRetry={onRetry} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Saved narrowings (couldn’t load)' }))
+    const panel = screen.getByRole('dialog', { name: 'Saved narrowings' })
+    expect(within(panel).getByRole('alert')).toHaveTextContent('Couldn’t load the narrowings saved with this view.')
+    fireEvent.click(within(panel).getByRole('button', { name: 'Try again' }))
+    expect(onRetry).toHaveBeenCalledOnce()
+  })
 })

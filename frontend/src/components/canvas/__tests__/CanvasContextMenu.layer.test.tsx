@@ -136,4 +136,25 @@ describe('CanvasContextMenu — layer target', () => {
     open(model({ onOpenSettings: vi.fn() }))
     expect(document.activeElement).toBe(before)
   })
+
+  it('a layer the server pages is searched and exported whole — once at a time', () => {
+    const m = model({ canEdit: false, onSearchInLayer: vi.fn(), onExportLayer: vi.fn(), exportFormats: ['csv', 'ndjson'] })
+    open(m)
+    fireEvent.click(screen.getByRole('button', { name: /Search in this layer/ }))
+    expect(m.onSearchInLayer).toHaveBeenCalledOnce()
+    cleanup()
+    open(m)
+    fireEvent.click(screen.getByRole('button', { name: /Export this layer as NDJSON/ }))
+    expect(m.onExportLayer).toHaveBeenCalledWith('ndjson')
+    cleanup()
+    open(model({ canEdit: false, onExportLayer: vi.fn(), exportFormats: ['csv'], exportingLayer: true }))
+    expect(screen.getByRole('button', { name: /Preparing its export/ })).toBeDisabled()
+  })
+
+  it('a subset’s layer is exported through a dialog that asks the format', () => {
+    const m = model({ canEdit: false, onExportLayer: vi.fn() })
+    open(m)
+    fireEvent.click(screen.getByRole('button', { name: /Export this layer…/ }))
+    expect(m.onExportLayer).toHaveBeenCalledWith(undefined)
+  })
 })

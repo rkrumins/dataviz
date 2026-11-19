@@ -7,6 +7,7 @@ import {
   chipText,
   createRequestOf,
   diffText,
+  fillingInAfterBusy,
   layoutOffers,
   meterText,
   overLimitHelp,
@@ -162,5 +163,16 @@ describe('members on the canvas', () => {
     expect(memberActionsFor({ assignedBy: 'query' })).toEqual(['include', 'exclude'])
     expect(memberActionsFor({ assignedBy: 'user' })).toEqual(['uninclude', 'exclude'])
     expect(memberActionsFor(undefined)).toEqual([])
+  })
+})
+
+describe('a first answer that met a busy graph', () => {
+  it('reads as filling in, whether the server says updating or (older) pending', () => {
+    const busy = (status: string) => ({ mode: 'live', status, revision: 0, detail: { reason: 'graph_busy' } }) as never
+    expect(fillingInAfterBusy(busy('updating'))).toBe(true)
+    expect(fillingInAfterBusy(busy('pending'))).toBe(true)
+    expect(statusWords(busy('pending'))).toMatchObject({ label: 'Updating…', tone: 'busy' })
+    expect(workingText(busy('pending'))).toMatch(/graph was busy/)
+    expect(fillingInAfterBusy({ ...busy('pending'), revision: 3 } as never)).toBe(false)
   })
 })

@@ -50,6 +50,14 @@ export interface LayerMenuModel {
     onStartEditing?: () => void
     /** Narrow the canvas to what is in this layer (and what that reaches). */
     onNarrow?: () => void
+    /** Search for what this layer holds — all of it, loaded or not. */
+    onSearchInLayer?: () => void
+    /** Export everything this layer holds to a file: in each of `exportFormats`, or — none
+     *  given — through a dialog that asks. */
+    onExportLayer?: (format?: 'csv' | 'ndjson') => void
+    exportFormats?: ReadonlyArray<'csv' | 'ndjson'>
+    /** An export of this layer is being prepared. */
+    exportingLayer?: boolean
     /** The layer's settings — its essentials and its own properties; its
      *  details, read-only, outside a draft. */
     onOpenSettings?: () => void
@@ -422,15 +430,38 @@ export function CanvasContextMenu({
                 if (adds.length > 0) adds[adds.length - 1] = { ...adds[adds.length - 1], dividerAfter: true }
                 result.push(...adds)
             }
+            const finds: ContextMenuAction[] = []
             if (m.onNarrow) {
-                result.push({
+                finds.push({
                     id: 'narrow-layer',
                     label: 'Narrow to this layer…',
                     icon: 'ScanSearch',
-                    dividerAfter: true,
                     onClick: () => { m.onNarrow?.(); onClose() },
                 })
             }
+            if (m.onSearchInLayer) {
+                finds.push({
+                    id: 'search-layer',
+                    label: 'Search in this layer',
+                    icon: 'Search',
+                    onClick: () => { m.onSearchInLayer?.(); onClose() },
+                })
+            }
+            if (m.onExportLayer) {
+                const formats = m.exportFormats?.length ? m.exportFormats : [undefined]
+                for (const format of formats) {
+                    finds.push({
+                        id: `export-layer${format ? `-${format}` : ''}`,
+                        label: m.exportingLayer ? 'Preparing its export…'
+                            : format ? `Export this layer as ${format === 'csv' ? 'CSV' : 'NDJSON'}` : 'Export this layer…',
+                        icon: 'Download',
+                        disabled: m.exportingLayer,
+                        onClick: () => { if (!m.exportingLayer) { m.onExportLayer?.(format); onClose() } },
+                    })
+                }
+            }
+            if (finds.length > 0) finds[finds.length - 1] = { ...finds[finds.length - 1], dividerAfter: true }
+            result.push(...finds)
             if (m.canEdit) {
                 result.push(
                     {

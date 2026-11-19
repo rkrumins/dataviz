@@ -42,6 +42,9 @@ export interface SavedNarrowingsSectionProps {
   onDownloadCopy: (id: string) => void
   onRename: (id: string, name: string) => void
   onRemove: (id: string) => void
+  /** The list couldn't be read: said, with a way to ask again. */
+  error?: string | null
+  onRetry?: () => void
 }
 
 const iconButton = cn(
@@ -50,7 +53,7 @@ const iconButton = cn(
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
 )
 
-export function SavedNarrowingsSection({ items, onOpen, onCopyLink, onExport, onDownloadCopy, onRename, onRemove }: SavedNarrowingsSectionProps) {
+export function SavedNarrowingsSection({ items, onOpen, onCopyLink, onExport, onDownloadCopy, onRename, onRemove, error, onRetry }: SavedNarrowingsSectionProps) {
   const [editing, setEditing] = useState<{ id: string; name: string } | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
 
@@ -75,6 +78,14 @@ export function SavedNarrowingsSection({ items, onOpen, onCopyLink, onExport, on
           <ScanSearch className="w-3 h-3" /> Saved with this view
         </span>
       </div>
+      {error && (
+        <p role="alert" className="px-3.5 pb-2 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
+          {error}
+          {onRetry && (
+            <button type="button" onClick={onRetry} className="ml-1.5 font-semibold underline underline-offset-2">Try again</button>
+          )}
+        </p>
+      )}
       <ul className="max-h-[280px] overflow-y-auto pb-1">
         {items.map((t) => {
           const isEditing = editing?.id === t.id
@@ -170,7 +181,7 @@ export function SavedNarrowingsButton(props: SavedNarrowingsSectionProps) {
     }
   }, [open])
 
-  if (props.items.length === 0) return null
+  if (props.items.length === 0 && !props.error) return null
   const toggle = () => {
     const rect = trigger.current?.getBoundingClientRect()
     if (rect) setAnchor({ right: window.innerWidth - rect.right, top: rect.bottom + 8 })
@@ -184,7 +195,7 @@ export function SavedNarrowingsButton(props: SavedNarrowingsSectionProps) {
         <button
           ref={trigger}
           type="button"
-          aria-label={`Saved narrowings (${props.items.length})`}
+          aria-label={props.error && props.items.length === 0 ? 'Saved narrowings (couldn’t load)' : `Saved narrowings (${props.items.length})`}
           aria-haspopup="dialog"
           aria-expanded={open}
           onClick={toggle}
@@ -195,7 +206,7 @@ export function SavedNarrowingsButton(props: SavedNarrowingsSectionProps) {
           )}
         >
           <ScanSearch className="w-4 h-4" strokeWidth={2.2} />
-          <span className="text-[11px] font-semibold tabular-nums">{props.items.length}</span>
+          <span className="text-[11px] font-semibold tabular-nums">{props.error && props.items.length === 0 ? '!' : props.items.length}</span>
         </button>
       </HoverTip>
       {open && anchor && createPortal(
