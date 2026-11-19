@@ -348,7 +348,25 @@ class TestAnswers:
         assert engine.provider.calls[-1][0].predicate.children[0] == EntityTypePredicate(
             values=["table"])
 
-    async def test_a_layer_lists_no_more_than_the_cap(self, on, views, post, charged, monkeypatch):
+    async def test_a_layer_pages_to_its_end_with_no_ceiling(self, on, views, post, charged):
+        """No cap by default: ``limit`` rows a page, for as many pages as the layer has —
+        each scan keeping the feed's session rows, so paging past them starts the next."""
+        ws, _base, sub, _plain = await views()
+        engine = FeedEngine()
+        engine.provider.scanned = SearchResultPage(
+            hits=_hits(1000), total_count=80_412, candidate_count=80_412, status="complete",
+            cursor="engine-cursor", elapsed_ms=1)
+        cursor = None
+        for _ in range(3):
+            page = (await post(ws, sub.id, {"layerId": "t", "limit": 1000,
+                                            **({"cursor": cursor} if cursor else {})}, engine)).json()
+            cursor = page["cursor"]
+        assert page["delivered"] == 3000 and cursor and not page["capped"]
+        query, context = engine.provider.calls[-1]
+        assert query.options.page_size == 1000
+        assert context.session_rows == get_deep_search_settings().view_feed_session_rows == 5000
+
+    async def test_an_operators_ceiling_caps_the_layer(self, on, views, post, charged, monkeypatch):
         monkeypatch.setenv("DEEP_SEARCH_VIEW_FEED_MAX_ROWS", "200")
         get_deep_search_settings.cache_clear()
         try:
@@ -423,6 +441,9 @@ class TestCache:
         one = (await post(ws, sub.id, {"layerId": "t"}, engine)).json()
         two = (await post(ws, sub.id, {"layerId": "t"}, engine)).json()
         assert one == two and [c.scan for _q, c in engine.provider.calls] == [False, True]
+        # A page of another size is another answer.
+        await post(ws, sub.id, {"layerId": "t", "limit": 500}, engine)
+        assert [q.options.page_size for q, _c in engine.provider.calls] == [200, 200, 500, 500]
 
     def test_a_recent_page_is_kept_no_longer_than_its_window_and_never_as_fallback(self):
         as_of = datetime.fromtimestamp(time.time() - 100, tz=timezone.utc).isoformat()
@@ -473,3 +494,159 @@ class TestCache:
         page._ttl_s = 7
         await cache._set("k", page, None, graph_cache_mod.ENDPOINT_VIEW_FEED)
         assert 0 < await redis.ttl("k") <= 7
+
+
+#: A view made from a query: its layers (auto, a top-level type each) and members.
+LIST_BASE = {
+    "layoutType": "reference", "content": {"entityScope": "curated", "visibleEntityTypes": []},
+    "layout": {"referenceLayout": {"layers": [
+        {"id": "L1", "name": "Datasets", "order": 0, "entityTypes": ["dataset"]},
+        {"id": "L2", "name": "Charts", "order": 1, "entityTypes": ["chart"]}], "assignments": {}}},
+    "membership": {"v": 1, "mode": "live", "sources": [{"spec": {"seeds": {"urns": ["urn:s"]}}}]},
+}
+LIST_MEMBERS = {"urn:ds1": "L1", "urn:ds2": "L1", "urn:ch1": "L2"}
+
+
+def _hit(urn, *ancestors):
+    return SearchHit(node=GraphNode(urn=urn, displayName=urn, entityType="dataset"),
+                     ancestor_path=[AncestorRef(urn=a, display_name=a, entity_type="x") for a in ancestors])
+
+
+class PagedProvider(FeedProvider):
+    """Pages by the engine's cursor: what each answers, and whether it is held (a
+    probe — ``scan`` False — finds it) or has to be scanned."""
+
+    def __init__(self, pages, *, held=()):
+        super().__init__()
+        self.pages, self.held = pages, set(held)
+
+    async def deep_search_session(self, query, *, context):
+        self.calls.append((query, context))
+        at = query.options.cursor
+        if not context.scan and at not in self.held:
+            raise NothingReusable("q")
+        return self.pages[at]
+
+
+def _page(hits, cursor=None, total=None):
+    return SearchResultPage(hits=hits, total_count=total, candidate_count=total or len(hits),
+                            status="complete", cursor=cursor, session_id="s", elapsed_ms=1)
+
+
+class TestSubsetOfAListView:
+    """Following a view made from a query: each layer is a search of the base's members
+    there, and each page is placed as the base draws it (``where.place_in_subset``) —
+    a row listed only in its layer, under the member it sits in; "Other matches" what no
+    member places."""
+
+    @pytest.fixture()
+    def list_views(self, db_session, test_client):
+        async def make():
+            from backend.app.db.repositories import view_members_repo, view_membership_repo
+
+            resp = await test_client.post("/api/v1/admin/workspaces", json={"name": "List WS", "dataSources": []})
+            ws = resp.json()["id"]
+            base = ViewORM(name="Members", workspace_id=ws, data_source_id=None, view_type="reference",
+                           config=json.dumps(LIST_BASE), visibility="workspace")
+            db_session.add(base)
+            await db_session.flush()
+            state = await view_membership_repo.ensure(db_session, base)
+            await view_members_repo.insert(db_session, [
+                {"view_id": base.id, "epoch": 1, "urn": urn, "layer_id": layer, "sort_key": urn,
+                 "ord": i, "label": "dataset", "label_ord": i, "whole": False, "covered": False}
+                for i, (urn, layer) in enumerate(LIST_MEMBERS.items())])
+            state.epoch = state.members_epoch = 1
+            state.member_count = len(LIST_MEMBERS)
+            sub = ViewORM(name="PII", workspace_id=ws, data_source_id=None, view_type="reference",
+                          config=json.dumps(_subset(base.id)), visibility="workspace")
+            db_session.add(sub)
+            await db_session.commit()
+            return ws, base, sub
+        return make
+
+    @pytest.fixture()
+    def placed(self, monkeypatch):
+        """Where the base draws each entity: its members in their layers, what is inside
+        ``urn:ds1`` under it, everything else in Other matches — answered with how many of
+        its containers each nests in, or (an answer without it) as layer and source alone."""
+        from backend.app.services.live_views import where
+
+        asked = []
+
+        async def place_in_subset(engine, eff, urns, *, admit=None, session=None):
+            asked.append((list(urns), eff, session))
+            out = {}
+            for urn in urns:
+                if urn in LIST_MEMBERS:
+                    out[urn] = (LIST_MEMBERS[urn], "member")
+                elif urn.startswith("urn:ds1/"):
+                    out[urn] = ("L1", "inside", 1)
+                else:
+                    out[urn] = (REST_LAYER_ID, "fallback", 0)
+            return out
+
+        monkeypatch.setattr(where, "place_in_subset", place_in_subset)
+        return asked
+
+    async def test_a_layer_lists_its_members_and_what_is_inside_them(self, on, list_views, post,
+                                                                     charged, placed):
+        ws, base, sub = await list_views()
+        engine = FeedEngine(PagedProvider({None: _page(
+            [_hit("urn:ch1", "urn:ds2"), _hit("urn:ds1"), _hit("urn:ds1/col", "urn:ds1"),
+             _hit("urn:x")], total=4)}))
+        page = (await post(ws, sub.id, {"layerId": "L1"}, engine)).json()
+        query, context = engine.provider.calls[-1]
+        assert sorted(query.scope.root_urns) == ["urn:ds1", "urn:ds2"], "the base's members there"
+        assert query.scope.entity_types is None, "every type inside them"
+        assert context.session_rows == 5000
+        assert [(n["urn"], n.get("inLayer")) for n in page["nodes"]] == [
+            ("urn:ds1", None), ("urn:ds1/col", 1)], "a member of another layer inside one is listed there"
+        assert (page["totalCount"], page["countStatus"]) == (2, "exact")
+        urns, eff, session = placed[-1]
+        assert urns == ["urn:ch1", "urn:ds1", "urn:ds1/col", "urn:x"], "the page's rows, placed at once"
+        assert eff.subset_members is not None and session is not None
+
+    async def test_a_base_no_longer_made_from_a_query_is_a_conflict(self, on, list_views, post,
+                                                                   charged, monkeypatch):
+        from backend.app.services.live_views import where
+
+        async def gone(engine, eff, urns, *, admit=None, session=None):
+            raise where.BaseMissing("The base view is no longer a view made from a query.")
+
+        monkeypatch.setattr(where, "place_in_subset", gone)
+        ws, _base, sub = await list_views()
+        engine = FeedEngine(PagedProvider({None: _page([_hit("urn:ds1")])}))
+        resp = await post(ws, sub.id, {"layerId": "L1"}, engine)
+        assert resp.status_code == 409 and resp.json()["detail"]["reason"] == "base_missing"
+
+    async def test_other_matches_lists_what_no_member_places(self, on, list_views, post, charged,
+                                                             placed):
+        ws, base, sub = await list_views()
+        engine = FeedEngine(PagedProvider({
+            None: _page([_hit("urn:ds1"), _hit("urn:x")], cursor="c1", total=4),
+            "c1": _page([_hit("urn:ch1"), _hit("urn:y")])}))
+        first = (await post(ws, sub.id, {"layerId": REST_LAYER_ID}, engine)).json()
+        query, _context = engine.provider.calls[-1]
+        assert len(query.scope.root_urns) == 3, "the base's whole scope, nothing narrowed"
+        assert [n["urn"] for n in first["nodes"]] == ["urn:x"]
+        assert (first["totalCount"], first["countStatus"]) == (1, "lowerBound"), "until read to its end"
+        last = (await post(ws, sub.id, {"layerId": REST_LAYER_ID, "cursor": first["cursor"]}, engine)).json()
+        assert [n["urn"] for n in last["nodes"]] == ["urn:y"] and last["cursor"] is None
+        assert (last["totalCount"], last["countStatus"], last["delivered"]) == (2, "exact", 2)
+
+    async def test_a_page_holding_none_reads_on_through_what_its_scan_holds(
+            self, on, list_views, post, charged, placed):
+        ws, base, sub = await list_views()
+        engine = FeedEngine(PagedProvider({
+            None: _page([_hit("urn:ds1")], cursor="c1"),
+            "c1": _page([_hit("urn:ds2")], cursor="c2"),
+            "c2": _page([_hit("urn:x")], cursor="c3")}, held={"c1", "c2"}))
+        page = (await post(ws, sub.id, {"layerId": REST_LAYER_ID}, engine)).json()
+        assert [n["urn"] for n in page["nodes"]] == ["urn:x"] and page["cursor"]
+        assert [(q.options.cursor, c.scan) for q, c in engine.provider.calls] == [
+            (None, False), (None, True), ("c1", False), ("c2", False)]
+        # Never into a scan: past what is held, the client is handed the cursor.
+        engine = FeedEngine(PagedProvider({None: _page([_hit("urn:ds1")], cursor="c1")}))
+        page = (await post(ws, sub.id, {"layerId": REST_LAYER_ID}, engine)).json()
+        assert page["nodes"] == [] and page["cursor"] and page["countStatus"] == "lowerBound"
+        assert [c.scan for _q, c in engine.provider.calls] == [False, True, False]

@@ -40,7 +40,7 @@ from backend.app.api.v1.view_read_scope import viewer_context
 from backend.app.auth.dependencies import get_optional_user, get_permission_claims, rbac_flag
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM, view_is_live
-from backend.app.db.repositories import view_activity_repo, view_repo, view_version_repo
+from backend.app.db.repositories import view_activity_repo, view_members_repo, view_repo, view_version_repo
 from backend.app.db.repositories.view_membership_repo import now_iso
 from backend.app.services import view_access
 from backend.app.services.feature_flags import feature_flags
@@ -56,9 +56,17 @@ from backend.app.services.search_views import (
     layers_of,
     layout_problems,
     own_layers,
+    placed_by_members,
     subset_layers,
 )
-from backend.app.services.view_scope import _collect_content_scope, _collect_reference_roots
+from backend.app.services.view_scope import (
+    HIDDEN_LAYERS_TOO_LARGE,
+    MemberLayers,
+    _collect_content_scope,
+    _collect_reference_roots,
+    hidden_members,
+    member_entries,
+)
 from backend.common.models.management import ViewCreateRequest, ViewResponse
 from backend.common.models.search_view import (
     REST_LAYER_ID,
@@ -164,12 +172,15 @@ async def _live_base(session: AsyncSession, row: ViewORM,
 
 def _unbounded(predicate, base_config: Optional[dict]) -> bool:
     """A search for a word alone where nothing bounds it: every entity of the data
-    source would be read for it, on every open."""
+    source would be read for it, on every open. A base made from a query is bounded
+    by its members."""
     from backend.app.services.advanced_search_service import _is_unbounded_text_any
     if not _is_unbounded_text_any(predicate):
         return False
     if base_config is None:
         return True
+    if isinstance(base_config.get("membership"), dict):
+        return False
     roots, types, _ = _collect_reference_roots(base_config)
     more_roots, more_types, _ = _collect_content_scope(base_config)
     return not (roots or more_roots or types or more_types)
@@ -188,8 +199,10 @@ async def search_status(session: AsyncSession, row: ViewORM, definition: SearchV
         view = ReadInView(view_id=definition.read_in, name=base.name if visible else None,
                           available=base is not None)
     missing = definition.within == "view" and base is None
+    # Following a view made from a query, its matches are placed by that view's members.
     why = (follow_placement(base_config)[1]
-           if definition.layout == "inherit" and base_config is not None else None)
+           if definition.layout == "inherit" and base_config is not None
+           and not placed_by_members(base_config) else None)
     return SearchViewStatus(
         definition=definition,
         definition_hash=definition.definition_hash(),
@@ -199,6 +212,18 @@ async def search_status(session: AsyncSession, row: ViewORM, definition: SearchV
         placed_by_type=why is not None,
         placed_by_type_reason=why,
     )
+
+
+async def _check_hidden_members(session: AsyncSession, base: ViewORM, hidden: List[str]) -> None:
+    """A subset of a view made from a query leaves its hidden layers' members out by listing
+    them: more than a search can list is a 422."""
+    base_config = config_of(base)
+    if not hidden or not placed_by_members(base_config):
+        return
+    held = MemberLayers(base.id, await view_members_repo.members_epoch(session, base.id),
+                        entries=member_entries(base_config))
+    if await hidden_members(session, held, hidden) is None:
+        raise refused(422, "hidden_layers_too_large", HIDDEN_LAYERS_TOO_LARGE)
 
 
 def _check_includes(definition: SearchViewDefinition) -> None:
@@ -337,6 +362,7 @@ async def create_view_from_search(
                    if base is not None else "Only a subset of a view hides some of its layers.")
         if problem:
             raise refused(422, "layout_not_allowed", problem)
+        await _check_hidden_members(session, base, hidden)
     definition = SearchViewDefinition(
         predicate=predicate, within=body.within, read_in=base.id if base is not None else None,
         layout=body.layout, include=body.include, hidden_layers=hidden,
@@ -479,6 +505,8 @@ async def update_view_search(
             problem = hidden_layer_problems(hidden, layers_of(config_of(base), add_rest=True)) if hidden else None
             if problem:
                 raise refused(422, "layout_not_allowed", problem)
+            if hidden:
+                await _check_hidden_members(session, base, hidden)
             updated = updated.model_copy(update={"hidden_layers": hidden})
             summary.append("Changed which of its base's layers it shows")
     if body.layers is not None and body.layout != "own":

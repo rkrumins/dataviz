@@ -48,6 +48,7 @@ from backend.app.providers.falkordb_search.plan import (
     expand_unit,
     make_plan,
     match_statement,
+    read_members,
 )
 from backend.app.providers.falkordb_search.session import (
     COMPLETE,
@@ -357,6 +358,9 @@ class _CatalogWork:
         self.stats = CatalogStats.from_json(await store.load_accumulator(self.session.sid))
 
     async def unit(self, unit: Unit, timeout_s: float):
+        unit = await read_members(unit, self.ctx)
+        if unit.kind == "members" and not unit.urns:
+            return [], [], [], [], [], [], []     # every member of its band is whole, or inside one
         clamps = self.session.clamps
         statements = [entities_statement(unit, self.ctx, clamps),
                       keys_statement(unit, self.ctx, clamps),
@@ -419,7 +423,10 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
                                   refresh: bool = False) -> Dict[str, Any]:
     """The catalog of ``scope`` (resolved by the caller): this request's
     share of the scan, answered with everything read so far. A client
-    follows it with the returned ``sessionId`` until it is complete."""
+    follows it with the returned ``sessionId`` until it is complete. A view
+    whose members are too many to list as its roots is read as a search
+    reads it: its members where they are kept (``context.members``), beside
+    its listed roots."""
     from backend.app.providers.falkordb_search.engine import (
         _GRACE_S,
         _advance,
@@ -470,7 +477,7 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
             provider, query, compiler,
             run=lambda c, p: run(c, p, max(1.0, statement_s(settings))),
             width=settings.chunk_width, walk_max=settings.walk_max,
-            timeout_s=max(0.5, deadline + _GRACE_S - time.monotonic()),
+            timeout_s=max(0.5, deadline + _GRACE_S - time.monotonic()), members=context.members,
         )
         session = Session.start(sid, query_id, context.data_version, None, 0, plan,
                                 scope_hash=context.scope_hash)
@@ -480,6 +487,7 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
         where="true", params={}, sort=SortSpec((SortKey("n.urn"),)),
         containment=_containment(provider), max_depth=int(scope.max_depth or 12),
         visible=(list(scope.visible_urns or []) if scope.scope_mode == "visible" else None),
+        members=context.members,
     )
     work = _CatalogWork(session, ctx, run, _skipped_keys())
     session = await _advance(session, created, store, work, deadline, settings,

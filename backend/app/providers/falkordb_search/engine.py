@@ -32,7 +32,7 @@ import logging
 import math
 import time
 from datetime import datetime, timezone
-from typing import Any, AsyncContextManager, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncContextManager, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from backend.app.jobs.metrics import increment
 from backend.app.providers.falkordb_deep_search import (
@@ -167,8 +167,11 @@ async def execute_session_search(
             return await provider._ro_query(cypher, params=params, timeout=timeout_s)
 
     page_size = options.page_size
-    # The rows a session keeps: whole pages, at least ``session_rows``.
-    k = page_size * max(1, math.ceil(settings.session_rows / page_size))
+    # The rows a session keeps: whole pages, at least ``session_rows`` — the
+    # caller's when it asks for more (a subset layer's feed), else the engine's.
+    # Part of the query's identity (``k``), so a session never answers another size.
+    session_rows = context.session_rows or settings.session_rows
+    k = page_size * max(1, math.ceil(session_rows / page_size))
     query_id = query_identity(query, context.scope_hash, k)
     cursor = _read_cursor(options.cursor, query_id)
     store = store_for(provider)
@@ -1036,14 +1039,17 @@ def _ancestor_bucket(urn: str, entry: Tally) -> SearchAggregateBucket:
 
 
 async def read_ancestor_counts(provider, session_id: str, urns: List[str], *,
-                               scope_hash: str) -> Dict[str, Any]:
+                               scope_hash: str,
+                               scope_hashes: FrozenSet[str] = frozenset()) -> Dict[str, Any]:
     """How many matches each of ``urns`` holds, from a search session's
     tally — any container's exact count, however many there are, not only
     the fullest ones the facet lists. ``expired`` when the session is gone
-    or was planned for another scope; ``running`` counts are so far."""
+    or was planned for a scope other than ``scope_hash`` and ``scope_hashes``
+    (``SearchRunContext.scope_hashes``: a layer filter's, in the same view);
+    ``running`` counts are so far."""
     store = store_for(provider)
     session = await store.load(session_id)
-    if session is None or session.scope_hash != scope_hash:
+    if session is None or session.scope_hash not in {scope_hash, *scope_hashes}:
         return {"status": "expired", "counts": {}}
     held = await store.read_tallies(session_id, urns)
     none: Tally = [0, "", "", {}]

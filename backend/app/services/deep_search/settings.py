@@ -105,8 +105,13 @@ class DeepSearchSettings:
     # ... how many feed scans one process runs at once (the rest are answered
     # from a recent page, or told to come back) ...
     view_feed_lane: int
-    # ... and the most rows one layer lists on the canvas; past them, a layer
-    # is searched or exported.
+    # ... the rows one feed scan keeps for later pages (``SearchRunContext.
+    # session_rows``): paging past them starts the next scan from the last
+    # row's keyset, so a long layer costs one scan per this many rows ...
+    view_feed_session_rows: int
+    # ... and, set by an operator, the most rows one layer lists on the canvas
+    # (past them, a layer is searched or exported). 0: none — a layer pages
+    # for as long as it has rows.
     view_feed_max_rows: int
 
     @classmethod
@@ -166,7 +171,8 @@ class DeepSearchSettings:
             export_ttl_seconds=max(600, min(86400, _read_int("DEEP_SEARCH_EXPORT_TTL", 86400))),
             view_feed_reuse_seconds=max(0, _read_int("DEEP_SEARCH_VIEW_FEED_REUSE", 300)),
             view_feed_lane=max(1, _read_int("DEEP_SEARCH_VIEW_FEED_LANE", 2)),
-            view_feed_max_rows=max(200, _read_int("DEEP_SEARCH_VIEW_FEED_MAX_ROWS", 2000)),
+            view_feed_session_rows=max(50, _read_int("DEEP_SEARCH_VIEW_FEED_SESSION_ROWS", 5000)),
+            view_feed_max_rows=max(0, _read_int("DEEP_SEARCH_VIEW_FEED_MAX_ROWS", 0)),
         )
 
 

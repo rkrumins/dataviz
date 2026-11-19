@@ -23,9 +23,18 @@ Built to be read by many while its graph is written to:
   answer from what is already there, or a wait on another request's scan, takes
   neither. When the lane is full a first page serves any recent answer (only
   with nothing to show is it a 429), and a scan in flight answers as it stands.
-* **Bounded.** A layer lists at most ``DEEP_SEARCH_VIEW_FEED_MAX_ROWS`` rows on
-  the canvas; past them the page says ``capped``, and the layer is searched or
-  exported instead.
+* **Paged to its end.** A layer pages for as long as it has rows (``limit`` a
+  page): a scan keeps ``DEEP_SEARCH_VIEW_FEED_SESSION_ROWS`` rows for the pages
+  after it, and paging past them starts the next scan from the last row's keyset.
+  Only a ceiling an operator sets (``DEEP_SEARCH_VIEW_FEED_MAX_ROWS``) stops it:
+  past it the page says ``capped``, and the layer is searched or exported instead.
+* **Placed by a list view's members.** A subset that follows a view made from a
+  query reads each layer from the base's members there, and places every page as
+  the base draws it (``where.place_in_subset``): a row is listed in the one layer
+  it is drawn in — under the member it sits in — and "Other matches" lists what
+  no member places. A page holding none of its rows reads on through the rows its
+  scan already holds; its count is what was listed so far (``lowerBound``) until
+  the layer is read to its end.
 """
 from __future__ import annotations
 
@@ -37,7 +46,7 @@ import hmac
 import json
 import time
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,14 +72,22 @@ from backend.app.services.deep_search import (
     get_deep_search_settings,
 )
 from backend.app.services.graph_cache import ENDPOINT_VIEW_FEED, get_graph_cache
+from backend.app.services.live_views import where
 from backend.app.services.search_views import (
     BasePlacement,
     containers_here,
     layer_condition,
     scope_types,
 )
+from backend.app.services.view_scope import HIDDEN_LAYERS_TOO_LARGE
 from backend.common.adapters import ProviderBusy
-from backend.common.models.search import SearchOptions, SearchQuery, SearchResultPage, SearchScope
+from backend.common.models.search import (
+    SearchHit,
+    SearchOptions,
+    SearchQuery,
+    SearchResultPage,
+    SearchScope,
+)
 from backend.common.models.search_view import SubsetLayer, ViewFeedPage, ViewFeedRequest
 
 router = APIRouter()
@@ -78,9 +95,9 @@ router = APIRouter()
 #: A preview: it ships off, and a flag that cannot be read means off.
 require_search_views = require_feature("searchViewsEnabled", default=False)
 
-#: Rows per page: whole pages of the engine's 1,000-row sessions, so every page
-#: size the canvas asks for shares one session.
-PAGE_SIZE = 200
+#: How long a page of a subset placed by its base's members, holding none of its rows,
+#: reads on through the rows its scan already holds.
+_FILL_S = 2.0
 
 #: How long a client is told to wait when the lane is full and nothing recent can
 #: answer.
@@ -145,14 +162,24 @@ def _write_cursor(engine_cursor: str, delivered: int, binding: str) -> str:
 
 
 def _feed_page(layer: SubsetLayer, placement: Optional[BasePlacement], page: SearchResultPage,
-               delivered_before: int, max_rows: int, reuse_s: int, binding: str) -> ViewFeedPage:
+               delivered_before: int, max_rows: int, reuse_s: int, binding: str, *,
+               placed: Optional[List[Tuple[SearchHit, int]]] = None) -> ViewFeedPage:
     """A page of ``layer``'s matches as the canvas draws them: each with where it
     sits (``ancestorPath``, root first) and how many of its nearest containers
-    sit in this layer too (``inLayer``), which the canvas draws it inside."""
-    hits = (page.hits or [])[:max(0, max_rows - delivered_before)]
-    here = containers_here(layer, placement, [hit.ancestor_path or [] for hit in hits])
+    sit in this layer too (``inLayer``), which the canvas draws it inside.
+    ``max_rows``: an operator's ceiling (0: none). ``placed``: the rows of the page
+    the layer holds, each with its ``inLayer`` — a subset placed by its base's
+    members, whose count is then what was listed, exact once the layer is read to
+    its end."""
+    filtered = placed is not None
+    if placed is None:
+        hits = page.hits or []
+        placed = list(zip(hits, containers_here(layer, placement,
+                                                [hit.ancestor_path or [] for hit in hits])))
+    if max_rows:
+        placed = placed[:max(0, max_rows - delivered_before)]
     nodes = []
-    for hit, in_layer in zip(hits, here):
+    for hit, in_layer in placed:
         node = hit.node.model_dump(mode="json", by_alias=True)
         if hit.ancestor_path:
             node["ancestorPath"] = [a.model_dump(mode="json", by_alias=True)
@@ -163,14 +190,21 @@ def _feed_page(layer: SubsetLayer, placement: Optional[BasePlacement], page: Sea
     delivered = delivered_before + len(nodes)
     running = page.status == "running"
     more = page.cursor is not None
+    capped = bool(max_rows) and more and delivered >= max_rows
+    if filtered:
+        total = delivered
+        lower = running or more
+    else:
+        total = page.total_count if page.total_count is not None else page.candidate_count
+        lower = running or page.count_status == "lowerBound"
     out = ViewFeedPage(
         layer_id=layer.id, nodes=nodes,
-        cursor=_write_cursor(page.cursor, delivered, binding) if more and delivered < max_rows else None,
-        total_count=page.total_count if page.total_count is not None else page.candidate_count,
-        count_status="lowerBound" if running or page.count_status == "lowerBound" else "exact",
+        cursor=_write_cursor(page.cursor, delivered, binding) if more and not capped else None,
+        total_count=total,
+        count_status="lowerBound" if lower else "exact",
         status="running" if running else "complete",
         session_id=page.session_id, stale=page.stale, as_of=page.as_of,
-        capped=more and delivered >= max_rows, delivered=delivered,
+        capped=capped, delivered=delivered,
         data_version=page.data_version,
     )
     if out.stale and page.as_of:
@@ -205,8 +239,9 @@ async def view_feed(
     many there are (exact once ``complete``; while ``running``, found so far —
     continue with ``sessionId``). ``stale`` with ``asOf``: a recent answer, read
     before the data last changed; ``refresh`` asks for one on the current data.
-    ``capped``: more matches than the canvas lists — search in the layer, or
-    export, for the rest. Answered from the published graph."""
+    ``limit`` rows a page, for as many pages as the layer has; ``capped`` only
+    past a ceiling an operator set — search in the layer, or export, for the
+    rest. Answered from the published graph."""
     if not ws_id:
         raise refused(400, "workspace_required", "workspace_id is required (path param ws_id)")
     capability = getattr(request.state, "view_capability", None)
@@ -225,6 +260,8 @@ async def view_feed(
             raise HTTPException(status_code=409, detail={
                 "reason": "base_missing",
                 "message": "This subset view's base view is no longer available."}) from exc
+        if detail.startswith("hidden_layers_too_large:"):
+            raise refused(422, "hidden_layers_too_large", HIDDEN_LAYERS_TOO_LARGE) from exc
         raise _map_validation_error(detail) from exc
     if eff.search is None:
         # One status per reason: 404, as GET /views/{id}/search answers it.
@@ -234,22 +271,24 @@ async def view_feed(
         raise refused(404, "no_such_layer", f"This view has no layer {body.layer_id!r}.")
 
     settings = get_deep_search_settings()
-    max_rows = settings.view_feed_max_rows
-    condition = layer_condition(layer, eff.subset_placement)
-    types = scope_types(layer, eff.entity_type_allow_list, eff.subset_placement)
+    max_rows = settings.view_feed_max_rows            # an operator's ceiling; 0: none
+    members = eff.subset_members
+    condition = layer_condition(layer, eff.subset_placement, members)
+    types = scope_types(layer, eff.entity_type_allow_list, eff.subset_placement, members)
     binding = _cursor_binding(eff.scope_hash, condition, types)
     cursor = _read_cursor(body.cursor, binding)
-    if condition is None or types == [] or cursor["d"] >= max_rows:
-        # A layer that can hold nothing here — or a client past the cap — is
+    past = bool(max_rows) and cursor["d"] >= max_rows
+    if condition is None or types == [] or past:
+        # A layer that can hold nothing here — or a client past the ceiling — is
         # answered without searching.
         return ViewFeedPage(layer_id=layer.id, total_count=0 if cursor["d"] == 0 else None,
-                            delivered=cursor["d"], capped=cursor["d"] >= max_rows)
+                            delivered=cursor["d"], capped=past)
 
     reuse_s = 0 if body.refresh else settings.view_feed_reuse_seconds
     query = SearchQuery(
         predicate=condition,
         scope=SearchScope(view_id=viewId, scope_mode="view", entity_types=types or None),
-        options=SearchOptions(results="hits", page_size=PAGE_SIZE, sort="displayName",
+        options=SearchOptions(results="hits", page_size=body.limit, sort="displayName",
                               sort_dir="asc", cursor=cursor["c"], session_id=body.session_id,
                               wait_ms=body.wait_ms, include_ancestor_path=True),
     )
@@ -272,10 +311,46 @@ async def view_feed(
             increment("view_feed_answers_total", outcome="scan")
             yield True
 
-    async def search(*, scan: bool, reuse: float) -> SearchResultPage:
-        page, _eff = await svc.search(query, run_context=SearchRunContext(
-            data_version=data_version, admit=admit, reuse_s=reuse, scan=scan, slot=feed_slot))
+    async def search(*, scan: bool, reuse: float, after: Optional[str] = None) -> SearchResultPage:
+        """A page of the layer's search — the next one after the engine's cursor ``after``
+        when given."""
+        asked = query if after is None else query.model_copy(update={
+            "options": query.options.model_copy(update={"cursor": after, "session_id": None})})
+        page, _eff = await svc.search(asked, run_context=SearchRunContext(
+            data_version=data_version, admit=admit, reuse_s=reuse, scan=scan, slot=feed_slot,
+            session_rows=settings.view_feed_session_rows))
         return page
+
+    async def placed_here(hits: List[SearchHit]) -> List[Tuple[SearchHit, int]]:
+        """The rows of ``hits`` this layer holds as the base draws them
+        (``where.place_in_subset``), each with how many of its nearest containers are
+        drawn in it too (``in_layer``, where the answer carries it)."""
+        if not hits:
+            return []
+        placed = await where.place_in_subset(engine, eff, [hit.node.urn for hit in hits],
+                                             admit=admit, session=session)
+        out = []
+        for hit in hits:
+            layer_id, _source, *nested = placed.get(hit.node.urn) or (None, "none")
+            if layer_id == layer.id:
+                out.append((hit, (nested[0] if nested else None) or 0))
+        return out
+
+    async def placed_page(page: SearchResultPage):
+        """``page``, placed: the rows this layer holds. One that holds none, with more
+        after it, reads on through the pages its scan already holds (``_FILL_S``) —
+        never into a scan: past them the client is handed the cursor."""
+        until = time.monotonic() + _FILL_S
+        kept = await placed_here(page.hits or [])
+        while not kept and page.cursor and page.status != "running" and time.monotonic() < until:
+            try:
+                nxt = await search(scan=False, reuse=reuse_s, after=page.cursor)
+            except NothingReusable:
+                break
+            if nxt.status == "running":
+                break
+            page, kept = nxt, await placed_here(nxt.hits or [])
+        return page, kept
 
     async def busy() -> SearchResultPage:
         """Every slot is scanning and nothing answers yet: anything recent at
@@ -303,8 +378,11 @@ async def view_feed(
                           outcome="stale" if page.stale else page.status or "complete")
             except NothingReusable:
                 page = await (busy() if _lane().locked() else search(scan=True, reuse=reuse_s))
+        placed = None
+        if members is not None:
+            page, placed = await placed_page(page)
         return _feed_page(layer, eff.subset_placement, page, cursor["d"], max_rows,
-                          settings.view_feed_reuse_seconds, binding)
+                          settings.view_feed_reuse_seconds, binding, placed=placed)
 
     scope = _cache_scope(engine)
     try:
@@ -321,7 +399,8 @@ async def view_feed(
             params={"scope": eff.scope_hash,
                     "condition": condition.model_dump(mode="json", by_alias=True),
                     "types": types, "cursor": cursor["c"], "delivered": cursor["d"],
-                    "rows": max_rows, "size": PAGE_SIZE},
+                    "rows": max_rows, "size": body.limit,
+                    "sessionRows": settings.view_feed_session_rows},
             compute=compute, model_cls=ViewFeedPage, on_stale=mark,
         )
         if stale_fallback:
@@ -331,5 +410,10 @@ async def view_feed(
         return page
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
+    except where.BaseMissing as exc:
+        # Its base stopped being a view made from a query between the scope and the page.
+        raise HTTPException(status_code=409, detail={
+            "reason": "base_missing",
+            "message": "This subset view's base view is no longer available."}) from exc
     except NotImplementedError as exc:
         raise _map_not_implemented(engine, exc) from exc
