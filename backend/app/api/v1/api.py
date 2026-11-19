@@ -17,7 +17,7 @@ from .endpoints import (
     insights, me, system_status, redis_config, platform_settings, profiling,
     graph_store,
     groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
-    view_membership, search_views,
+    view_membership, view_narrowings, search_views,
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
     workspace_directory, data_source_transfers,
@@ -219,6 +219,13 @@ api_router.include_router(
     view_membership.router,
     prefix="/views",
     tags=["views:membership"],
+)
+# A view's saved narrowings: `/views/{view_id}/narrowings/...`. Before views.router for the
+# same reason as the routes above.
+api_router.include_router(
+    view_narrowings.router,
+    prefix="/views",
+    tags=["views:narrowings"],
 )
 # Subset views: `/views/from-search`, `/views/{view_id}/search` and `/views/{view_id}/subsets`.
 # Before views.router for the same reason.

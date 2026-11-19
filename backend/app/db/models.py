@@ -1795,6 +1795,44 @@ class ViewSavedQueryORM(Base):
         return f"<ViewSavedQuery id={self.id!r} view_id={self.view_id!r}>"
 
 
+class ViewSavedNarrowingORM(Base):
+    """A narrowing saved with a view, for everyone who can open it: its
+    seeds and reach (``spec``, a membership spec), and what it held when it
+    was saved, so opening it again can say what changed.
+
+    ``held`` is the gzip of the sorted URNs it held, one a line. It is read
+    on its own route, never with the list."""
+    __tablename__ = "view_saved_narrowings"
+
+    id = Column(Text, primary_key=True)
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name = Column(Text, nullable=False)
+    spec = Column(Text, nullable=False)                       # JSON
+    seeds_label = Column(Text, nullable=True)
+    seed_names = Column(Text, nullable=True)                  # JSON {urn: name}
+    counts = Column(Text, nullable=True)                      # JSON
+    truncated = Column(Text, nullable=True)                   # JSON
+    data_version = Column(Text, nullable=True)
+    held_count = Column(Integer, nullable=False, default=0)
+    held_complete = Column(Boolean, nullable=False, default=True, server_default="true")
+    held = Column(LargeBinary, nullable=True)
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_by = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_vsn_view", "view_id", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewSavedNarrowing id={self.id!r} view_id={self.view_id!r}>"
+
+
 # ------------------------------------------------------------------ #
 # data_source_stats (Graph Statistics Cache)                           #
 # ------------------------------------------------------------------ #
