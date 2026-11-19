@@ -49,6 +49,9 @@ export interface ViewLibrary {
     savedQueries: SavedViewQuery[]
     /** Whether the caller may change the library (the server's own check). */
     canEdit: boolean
+    /** A view that follows another shows that view's display rules, changed there (its
+     *  name is null for a reader who can't open it). */
+    rulesFrom?: { viewId: string; name: string | null } | null
 }
 
 export const LIBRARY_PACK_FORMAT = 'synodic.view-library'

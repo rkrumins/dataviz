@@ -36,6 +36,8 @@ export interface ViewLibraryState {
     error: string | null
     /** Whether the caller may change the library (the server's own check). */
     canEdit: boolean
+    /** The view whose display rules this one shows — it follows that view — and changes there. */
+    rulesFrom: { viewId: string; name: string | null } | null
     savedQueries: SavedViewQuery[]
 
     /** Read the library of ``viewId`` on ``branchId``. A different view
@@ -58,6 +60,11 @@ export interface ViewLibraryState {
 
 
 const READ_ONLY = "You can't change this view's library — ask someone who can edit the view."
+
+/** Why a following view's rules aren't changed in it. */
+export function rulesFromText(from: { name: string | null }): string {
+    return `These rules are ${from.name ? `“${from.name}”’s` : 'the followed view’s'}: this view follows it — change them there.`
+}
 
 const currentRules = () => useReferenceModelStore.getState().displayRules
 const showRules = (rules: DisplayRuleConfig[]) => useReferenceModelStore.getState().setDisplayRules(rules)
@@ -89,7 +96,8 @@ export const useViewLibraryStore = create<ViewLibraryState>()((set, get) => {
         next: DisplayRuleConfig[],
         send: (viewId: string, branchId: string | null) => Promise<DisplayRuleConfig[]>,
     ): Promise<void> {
-        const { viewId, branchId, canEdit } = get()
+        const { viewId, branchId, canEdit, rulesFrom } = get()
+        if (rulesFrom) throw new Error(rulesFromText(rulesFrom))
         if (!viewId || !canEdit) throw new Error(READ_ONLY)
         const seq = ++writeSeq
         showRules(next)
@@ -111,6 +119,7 @@ export const useViewLibraryStore = create<ViewLibraryState>()((set, get) => {
         status: 'idle',
         error: null,
         canEdit: false,
+        rulesFrom: null,
         savedQueries: [],
 
         load: async (viewId, branchId) => {
@@ -119,7 +128,7 @@ export const useViewLibraryStore = create<ViewLibraryState>()((set, get) => {
                 if (get().viewId !== viewId) showRules([])
                 set({
                     viewId, branchId, status: viewId ? 'loading' : 'idle', error: null,
-                    ...(get().viewId !== viewId ? { canEdit: false, savedQueries: [] } : {}),
+                    ...(get().viewId !== viewId ? { canEdit: false, rulesFrom: null, savedQueries: [] } : {}),
                 })
             }
             if (!viewId) return
@@ -141,6 +150,7 @@ export const useViewLibraryStore = create<ViewLibraryState>()((set, get) => {
             showRules(library.displayRules ?? [])
             set({
                 status: 'ready', error: null, canEdit: library.canEdit,
+                rulesFrom: library.rulesFrom ?? null,
                 savedQueries: library.savedQueries ?? [],
             })
         },
@@ -210,4 +220,7 @@ export function reloadViewLibrary(viewId: string): void {
 
 
 export const useLibraryCanEdit = () => useViewLibraryStore((s) => s.canEdit)
+/** The caller may change this view's display rules: they may edit it, and it doesn't show
+ *  another view's. */
+export const useCanEditRules = () => useViewLibraryStore((s) => s.canEdit && !s.rulesFrom)
 export const useSavedViewQueries = () => useViewLibraryStore((s) => s.savedQueries)

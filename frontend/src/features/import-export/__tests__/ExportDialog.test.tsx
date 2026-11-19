@@ -15,7 +15,8 @@
  *   - a data source without version control exports its live graph, streamed, with no view or
  *     version to choose, in view mode as in edit mode;
  *   - new property columns are offered only for the spreadsheet formats;
- *   - a failure says why and can be retried.
+ *   - a failure says why and can be retried;
+ *   - a subset view's data is its search's matches: refused, the dialog offers those instead.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -324,5 +325,19 @@ describe('ExportDialog', () => {
     expect(screen.getByText(/Missing permission/)).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /Try again/ }))
     await waitFor(() => expect(triggerBrowserDownload).toHaveBeenCalledTimes(1))
+  })
+
+  it('offers a subset view’s matches where the server says its data is them', async () => {
+    vi.mocked(planExport).mockRejectedValue(Object.assign(new Error('A subset view is a search’s matches: export them from search.'),
+      { status: 422, detail: { reason: 'subset_matches_export', message: 'A subset view is a search’s matches: export them from search.' } }))
+    const onExportMatches = vi.fn()
+    const onClose = vi.fn()
+    open({ onExportMatches, onClose })
+    await userEvent.click(screen.getByRole('button', { name: /Export CSV/ }))
+    expect(await screen.findByText(/export them from search/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Try again/ })).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: /Export its matches/ }))
+    expect(onClose).toHaveBeenCalledOnce()
+    expect(onExportMatches).toHaveBeenCalledOnce()
   })
 })

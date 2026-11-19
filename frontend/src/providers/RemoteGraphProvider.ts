@@ -653,6 +653,22 @@ export class RemoteGraphProvider implements GraphDataProvider {
         })
     }
 
+    /** One layer of a view made from a query, ready to download: a token for
+     *  `viewMembersDownloadUrl` (ten minutes, for this reader) and how many rows it holds. */
+    async exportViewMembersLayer(
+        viewId: string, layerId: string,
+    ): Promise<{ downloadToken: string; rows: number; epoch: number | null }> {
+        return await this.fetch<{ downloadToken: string; rows: number; epoch: number | null }>('/view-members/export', {
+            method: 'POST',
+            extraParams: { viewId, layerId },
+        })
+    }
+
+    /** Where an exported layer downloads from. */
+    viewMembersDownloadUrl(token: string, format: 'csv' | 'ndjson' = 'csv'): string {
+        return this.buildUrl('/view-members/download', { token, format })
+    }
+
     async searchNodes(query: string, limit = 10): Promise<GraphNode[]> {
         return await this.fetch<GraphNode[]>('/search', {
             method: 'POST',

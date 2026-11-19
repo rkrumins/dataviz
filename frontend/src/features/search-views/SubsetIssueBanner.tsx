@@ -6,7 +6,7 @@
 import * as LucideIcons from 'lucide-react'
 import { Link } from 'react-router-dom'
 
-export type SubsetIssue = 'off' | 'unsupported' | 'base_missing' | 'revision'
+export type SubsetIssue = 'off' | 'unsupported' | 'base_missing' | 'revision' | 'list_revision'
 
 const WORDS: Record<SubsetIssue, { title: string; detail: string; action?: { label: string; to: string } }> = {
   off: {
@@ -20,6 +20,10 @@ const WORDS: Record<SubsetIssue, { title: string; detail: string; action?: { lab
   revision: {
     title: 'A subset view shows the graph as it is now',
     detail: 'Its layers are a search’s matches, and search reads the graph as it is now, not as it was at this revision. Go back to Published to see them.',
+  },
+  list_revision: {
+    title: 'This revision shows only what was placed by hand',
+    detail: 'This view is made from a query: its members are worked out from the graph as it is now, and are kept apart from its revisions. Go back to Published to see them.',
   },
   base_missing: {
     title: 'Its base view isn’t available',

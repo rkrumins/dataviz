@@ -70,7 +70,7 @@ import {
     type DraftSource,
     type RecentQueryEntry,
 } from '@/store/searchStore'
-import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
+import { useCanEditRules, useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { SavedViewQuery } from '@/services/viewLibraryService'
 import type { AncestorRef, Predicate, SearchQuery, SearchResultPage } from '@/types/search'
 import { unsaveableReason } from '@/features/search-views/model'
@@ -314,6 +314,8 @@ function PanelInner({
     const promoteToMine = useSearchStore((s) => s.promoteToMine)
     const saveViewQuery = useViewLibraryStore((s) => s.saveQuery)
     const canSaveToView = useLibraryCanEdit()
+    // A view that follows another shows its rules: none are made here.
+    const canMakeRules = useCanEditRules()
     const stepFocus = useSearchStore((s) => s.stepFocus)
     const setCanvasFilterMode = useSearchStore((s) => s.setCanvasFilterMode)
 
@@ -755,7 +757,7 @@ function PanelInner({
                 onRemoveRecent={removeRecent}
                 onSaveAs={setSaveTarget}
                 onLoadSaved={handleLoadSaved}
-                onMakeRule={handleMakeRule}
+                onMakeRule={canMakeRules ? handleMakeRule : undefined}
                 activeDraft={Boolean(draftPredicate)}
             >
                 <div>

@@ -72,6 +72,8 @@ export function PropertyManagerDrawer({
     const libraryStatus = useViewLibraryStore((s) => (s.viewId === viewId ? s.status : 'loading'))
     const libraryError = useViewLibraryStore((s) => s.error)
     const canEdit = useViewLibraryStore((s) => s.viewId === viewId && s.canEdit)
+    // A view that follows another shows that view's rules, changed there.
+    const rulesFrom = useViewLibraryStore((s) => (s.viewId === viewId ? s.rulesFrom : null))
     const branchId = useViewLibraryStore((s) => s.branchId)
     const saveRule = useViewLibraryStore((s) => s.saveRule)
     const removeRule = useViewLibraryStore((s) => s.removeRule)
@@ -242,9 +244,15 @@ export function PropertyManagerDrawer({
                                                 </div>
                                             ) : (
                                                 <>
+                                                    {rulesFrom && (
+                                                        <p data-rules-from className="mb-3 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-3 py-2 text-[11px] leading-snug text-ink-muted">
+                                                            <span className="font-semibold text-ink-secondary">From {rulesFrom.name ?? 'the view it follows'}</span>
+                                                            {' '}— this view follows it, so it shows its rules. Change them there.
+                                                        </p>
+                                                    )}
                                                     <DisplayRuleList
                                                         rules={rules}
-                                                        readOnly={!canEdit}
+                                                        readOnly={!canEdit || !!rulesFrom}
                                                         onNew={() => setEditor({ mode: 'new' })}
                                                         onEdit={(rule) => setEditor({ mode: 'edit', rule })}
                                                         onToggle={(id) => { toggleRule(id).catch(reportFailure('change the rule')) }}
@@ -253,7 +261,7 @@ export function PropertyManagerDrawer({
                                                         onReveal={handleRevealRule}
                                                     />
                                                     <LibraryActions
-                                                        canImport={canEdit}
+                                                        canImport={canEdit && !rulesFrom}
                                                         onExport={() => void handleExport()}
                                                         onImport={() => setImportOpen(true)}
                                                     />

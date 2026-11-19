@@ -223,6 +223,7 @@ import { buildTraceShareLink, decodeTraceShare } from '@/hooks/lib/traceShareCod
 import type { TraceShareSummary } from '@/components/canvas/trace/TraceSharePopover'
 import type { TraceKeepActions } from '@/components/canvas/trace/TraceKeepMenu'
 import { ExportLineageDialog } from '@/components/canvas/trace/ExportLineageDialog'
+import { ExportMatchesDialog } from '@/components/canvas/search/panel/ExportMatchesDialog'
 import type { SavedTraceItem, SavedTracesSectionProps } from '@/components/canvas/trace/SavedTracesSection'
 import {
   countTraceRows,
@@ -5184,15 +5185,40 @@ export function ContextViewCanvas({
       return { viewId: search.readIn, viewName: subsetStatus?.base?.name ?? 'the view it follows' }
     }
     if (search) return { reason: 'This subset has layers of its own, so there are none to follow' }
-    if (activeView.membership) return { reason: 'This view is made from a query, so there are no layers of its own to follow' }
+    if (activeView.membership) return { reason: 'This view is made from a query, so where its members sit can’t be followed — arrange the new view by type or by lineage stage instead' }
     return { viewId: narrowViewId, viewName: activeView.name ?? 'this view' }
   }, [activeView, narrowViewId, followStatus, subsetStatus])
   const [saveSearch, setSaveSearch] = useState<{ query: SearchQuery } | null>(null)
+  // A SUBSET'S MATCHES, exported: its search, where it searches — what its data is.
+  const [exportSubsetMatches, setExportSubsetMatches] = useState(false)
+  const subsetMatchesQuery = useMemo((): { viewId: string; query: SearchQuery } | null => {
+    const def = activeView?.search
+    if (!def || !narrowViewId) return null
+    const viewId = def.readIn ?? narrowViewId
+    return { viewId, query: { predicate: def.predicate, scope: { viewId, scopeMode: def.within === 'dataSource' ? 'data_source' : 'view' } } as SearchQuery }
+  }, [activeView?.search, narrowViewId])
   const searchInLayer = useCallback((layerId: string) => {
-    // In a subset view the server reads a layer filter as the layer's types, inside the view's search.
+    // In a subset view the server reads a layer filter as the layer's types, inside the view's
+    // search; in a view made from a query, as that layer's members.
     useSearchStore.getState().requestSearchRun({ kind: 'layer', layerAssignment: layerId } as Predicate, 'header')
     search.openPanel()
   }, [search])
+  // EXPORTING A LAYER of a view made from a query — every member it holds, past what the
+  // canvas lists, each with its parent and path: the server writes the file.
+  const exportLayer = useMemo(() => {
+    if (!membersFed || !graphExportEnabled || !(provider instanceof RemoteGraphProvider) || !activeView?.id) return undefined
+    const viewId = activeView.id
+    return (layerId: string) => {
+      const layer = sortedLayers.find((l) => l.id === layerId)
+      provider.exportViewMembersLayer(viewId, layerId)
+        .then(({ downloadToken, rows }) => {
+          const name = `${(activeView.name || 'view').replace(/[^\w-]+/g, '-')}-${(layer?.name ?? layerId).replace(/[^\w-]+/g, '-')}-${new Date().toISOString().slice(0, 10)}.csv`
+          triggerBrowserDownload(provider.viewMembersDownloadUrl(downloadToken, 'csv'), name)
+          notify('info', `Downloading ${rows.toLocaleString()} ${rows === 1 ? 'row' : 'rows'} of ${layer?.name ?? 'this layer'}.`)
+        })
+        .catch((err: unknown) => notify('error', err instanceof Error && err.message ? err.message : 'Couldn’t export this layer. Try again.'))
+    }
+  }, [membersFed, graphExportEnabled, provider, activeView?.id, activeView?.name, sortedLayers, notify])
   // EDITING A SUBSET'S SEARCH (`?editSubset=<id>`, from its header chip): the search
   // opens here — where its matches are looked for — with the subset's search in it,
   // and the results' save becomes "Update …".
@@ -7642,6 +7668,7 @@ export function ContextViewCanvas({
             branchId={effectiveBranchId ?? undefined}
             // At a past revision, exporting exports the graph as it was then: what is on screen.
             asOfSeq={viewExecCtx?.asOfSeq ?? null}
+            onExportMatches={subsetMatchesQuery ? () => setExportSubsetMatches(true) : undefined}
             onClose={() => setShowExportDialog(false)}
           />
         )}
@@ -8177,6 +8204,9 @@ export function ContextViewCanvas({
 
         {/* A subset view whose matches can't be listed says why, above its columns. */}
         <SubsetIssueBanner issue={subsetView ? (searchViewsOn ? subsetIssue : 'off')
+          // A view made from a query keeps its members apart from its revisions: one shows
+          // only what was placed by hand, and says so.
+          : activeView?.membership && atRevision ? 'list_revision'
           // A view that follows another shows that view's layers: none at all means it is gone.
           : followsBase && sortedLayers.length === 0 ? 'base_missing' : null} />
 
@@ -8411,7 +8441,8 @@ export function ContextViewCanvas({
                 onFeedMore={onFeedMore}
                 subsetFeed={subsetFeedByLayer.get(layer.id)}
                 emptyText={subsetView ? 'No matches' : undefined}
-                onSearchInLayer={subsetView ? searchInLayer : undefined}
+                onSearchInLayer={subsetView || membersFed ? searchInLayer : undefined}
+                onExportLayer={exportLayer}
                 onScroll={handleLayerScroll}
                 // A subset of a search's matches is placed by the search alone; in a view that
                 // follows another, people may put a member in another of its layers — on the
@@ -8780,6 +8811,14 @@ export function ContextViewCanvas({
           onClose={() => setLineageExport(null)}
         />
       )}
+      {exportSubsetMatches && subsetMatchesQuery && (
+        <ExportMatchesDialog
+          viewId={subsetMatchesQuery.viewId}
+          query={subsetMatchesQuery.query}
+          matchCount={null}
+          onClose={() => setExportSubsetMatches(false)}
+        />
+      )}
       {canSaveAsView && saveAsDraft && narrowViewId && scopeWsId && (
         <SaveAsView
           source={{ kind: 'narrowing', draft: saveAsDraft }}
@@ -8808,6 +8847,7 @@ export function ContextViewCanvas({
           boardLayers={sortedLayers}
           boardConfig={activeView ? { layout: activeView.layout } : null}
           subset={activeView?.search ? { definition: activeView.search, baseName: subsetStatus?.base?.name ?? null } : null}
+          follow={followTarget}
           canKeepLive
           canKeepList={narrowEnabled}
           onNarrowInstead={narrowEnabled

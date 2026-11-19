@@ -45,6 +45,9 @@ export interface ExportDialogProps {
   branchId?: string   // present when the user is on a working draft branch → offer to include it
   /** Published as it was at this revision: what is exported, in place of Published as it is. */
   asOfSeq?: number | null
+  /** A subset view's data is its search's matches, exported from search: offered when the
+   *  server says so (`subset_matches_export`). */
+  onExportMatches?: () => void
   onClose: () => void
 }
 
@@ -71,7 +74,7 @@ function fileStem(parts: Array<string | undefined>): string {
 const count = (n: number) => n.toLocaleString()
 
 export function ExportDialog({
-  wsId, dataSourceId, graphId, dataSourceName, viewId, viewName, branchId: draftId, asOfSeq = null, onClose,
+  wsId, dataSourceId, graphId, dataSourceName, viewId, viewName, branchId: draftId, asOfSeq = null, onExportMatches, onClose,
 }: ExportDialogProps) {
   const live = !graphId
   // At a past revision, that revision is what is exported: never a draft.
@@ -88,6 +91,8 @@ export function ExportDialog({
   const [plan, setPlan] = useState<ExportPlan | null>(null)
   const [fileName, setFileName] = useState(earlier?.fileName ?? '')
   const [error, setError] = useState<string | null>(null)
+  // The view is a subset: its matches are exported from search, not its data source's rows.
+  const [matchesInstead, setMatchesInstead] = useState(false)
   // The export the server prepares, followed app-wide: it carries on, and downloads, once this closes.
   const [jobId, setJobId] = useState<string | null>(earlier?.jobId ?? null)
   const prepared = useBackgroundExport(phase === 'server' ? jobId : null)
@@ -145,6 +150,7 @@ export function ExportDialog({
       setPhase('server')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The export could not be started.')
+      setMatchesInstead((e as { detail?: { reason?: unknown } } | null)?.detail?.reason === 'subset_matches_export')
       setPhase('failed')
     }
   }
@@ -317,7 +323,13 @@ export function ExportDialog({
               <Download className="w-4 h-4" /> Export CSV instead
             </button>
           )}
-          {(view === 'failed' || stage === 'failed' || stage === 'expired' || stage === 'lost') && (
+          {view === 'failed' && matchesInstead && onExportMatches && (
+            <button onClick={() => { onClose(); onExportMatches() }}
+              className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
+              <Download className="w-4 h-4" /> Export its matches
+            </button>
+          )}
+          {(view === 'failed' || stage === 'failed' || stage === 'expired' || stage === 'lost') && !(matchesInstead && onExportMatches) && (
             // One lost touch with is checked on again, rather than another started.
             <button onClick={() => (stage === 'lost' && prepared ? retryExport(prepared.jobId) : void run())}
               className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">

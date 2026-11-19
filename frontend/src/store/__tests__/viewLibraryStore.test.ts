@@ -56,7 +56,7 @@ async function open(over: Partial<ViewLibrary> = {}, branchId: string | null = n
 beforeEach(() => {
     for (const fn of Object.values(api)) fn.mockReset()
     useViewLibraryStore.setState({
-        viewId: null, branchId: null, status: 'idle', error: null, canEdit: false, savedQueries: [],
+        viewId: null, branchId: null, status: 'idle', error: null, canEdit: false, rulesFrom: null, savedQueries: [],
     })
     useReferenceModelStore.setState({ displayRules: [] })
 })
@@ -237,5 +237,28 @@ describe('after a restore or an import rewrote a view', () => {
         reloadViewLibrary('v2')
         expect(api.getViewLibrary).toHaveBeenCalledTimes(1)
         expect(shown()).toEqual(['a'])
+    })
+})
+
+
+describe('a view that follows another', () => {
+    it('shows that view\'s rules, changed there — never here — and keeps its own saved queries', async () => {
+        await open({ rulesFrom: { viewId: 'base', name: 'Sales lineage' } })
+        expect(shown()).toEqual(['a'])
+        expect(store().rulesFrom).toEqual({ viewId: 'base', name: 'Sales lineage' })
+        await expect(store().saveRule(rule('b'))).rejects.toThrow('These rules are “Sales lineage”’s: this view follows it — change them there.')
+        await expect(store().removeRule('a')).rejects.toThrow(/change them there/)
+        expect(api.putViewRule).not.toHaveBeenCalled()
+        expect(api.deleteViewRule).not.toHaveBeenCalled()
+        expect(shown()).toEqual(['a'])
+        api.putViewQuery.mockResolvedValueOnce(query('q2'))
+        await store().saveQuery({ name: 'Query q2', predicate: { kind: 'hasProperty', key: 'q2' } } as never)
+        expect(api.putViewQuery).toHaveBeenCalledOnce()
+    })
+
+    it('another view starts with rules of its own', async () => {
+        await open({ rulesFrom: { viewId: 'base', name: null } })
+        await open({ viewId: 'v2' })
+        expect(store().rulesFrom).toBeNull()
     })
 })

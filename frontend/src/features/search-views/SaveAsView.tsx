@@ -173,7 +173,9 @@ export function SaveAsView({
       draft={list.draft}
       sourceLayerCount={boardLayers.length}
       headerExtra={switcher}
-      follow={source.kind === 'narrowing' ? follow : undefined}
+      // Made inside a subset, a search's list is made in its base, and follows that (the
+      // sheet's own default); anywhere else it follows what this view would.
+      follow={source.kind === 'search' && subset ? undefined : follow}
       onClose={onClose}
       onSaved={onSaved}
     />
