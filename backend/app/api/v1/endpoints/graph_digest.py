@@ -80,8 +80,9 @@ async def get_digest(
       version recorded them, null where it recorded none; ``author.id`` null: the platform's own;
     * ``total``: how many versions the window holds, null when the time window is truncated;
     * ``authors`` ``{id, name, versions}``: who published the versions listed, most first;
-    * ``reviewsWaiting`` ``{id, title, url, author, at}``: live reviews into this graph asking them
-      to review, not approved by them (or approved before the draft changed again);
+    * ``reviewsWaiting`` ``{id, title, url, author, at}``: live reviews into this graph waiting on
+      them, as the review inbox's ``needs_review`` has them: asked of them or of a group of theirs,
+      not theirs, and not reviewed by them as it is now;
     * ``watchedChanged`` ``{urn, entityId, name, change, seq, at}``: the entities they watch that
       changed in the window (over the versions listed when the time window is truncated), ``change``
       ``added`` / ``changed`` / ``removed``, ``seq`` and ``at`` its last change."""

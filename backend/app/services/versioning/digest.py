@@ -5,7 +5,8 @@ path: ``main``'s versions after their seen marker, newest first and capped, each
 recorded of itself (``commits.stats``); the reviews that wait on them; and the entities they watch
 that changed. Every query is bounded and indexed: the versions a LIMIT on ``uq_commits_branch_seq``;
 the watched entities ``ix_nv_urn``, then one ``ix_nv_entity_hist`` probe each; the reviews the live
-ones (``uq_mr_live_source_branch``).
+ones asking them or a team of theirs (``ix_rr_graph``), from the review records, each decided as the
+review inbox's ``needs_review`` decides it (``review_state.waits_on``).
 
 After a publish, an undo or a restore commits (``main_activity.note`` → :func:`note`), each person
 watching the graph, or an entity the version changed, who may still read it is told in their Inbox:
@@ -22,11 +23,11 @@ from datetime import datetime, timezone
 from itertools import takewhile
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from sqlalchemy import Text, column, func, select, true, values
+from sqlalchemy import Text, and_, column, func, or_, select, true, values
 
-from . import db
+from . import db, review_state
 from .change_index import stat_changes
-from .models import BranchORM, CommitORM, GraphORM, MergeRequestORM, NodeVersionORM
+from .models import BranchORM, CommitORM, GraphORM, MergeRequestORM, NodeVersionORM, ReviewRequestORM
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,8 @@ logger = logging.getLogger(__name__)
 VERSIONS_MAX = 50
 #: The reviews waiting on someone that a digest lists.
 REVIEWS_MAX = 20
+#: The live reviews asking someone that a digest reads to find those waiting on them.
+ASKED_MAX = 200
 #: What a watcher is told of: versions a person published (a draft's, a review's or a fork's
 #: publish, an undo, a restore). Syncs, imports and writes straight to main show in the digest.
 TOLD_OF = ("squash_publish", "revert", "restore")
@@ -192,23 +195,39 @@ async def _watched_changes(s, graph_id: str, main_id: str, urns: Sequence[str], 
 
 
 async def _reviews_waiting(svc, s, graph_id: str, actor: str) -> Tuple[List[Dict[str, Any]], bool]:
-    """The live reviews into ``graph_id`` asking ``actor`` to review, which they haven't approved
-    or whose approval went stale since (``_approvals``), newest first; and whether there are more."""
+    """The live reviews into ``graph_id`` that wait on ``actor``, newest first, and whether there are
+    more: of those asking them or a team of theirs (``review_requests``), each one the review inbox's
+    ``needs_review`` would list (``review_state.waits_on``). A team is looked up only when one is
+    asked here; a failed lookup leaves their own requests."""
+    from .errors import GroupsUnavailable
+    from .service import _load_actor_groups
+
+    groups: Tuple[str, ...] = ()
+    if await s.scalar(select(ReviewRequestORM.pr_id).where(
+            ReviewRequestORM.graph_id == graph_id, ReviewRequestORM.subject_type == "group").limit(1)):
+        try:
+            groups = tuple(await _load_actor_groups(actor))
+        except GroupsUnavailable:
+            groups = ()
+    asked = and_(ReviewRequestORM.subject_type == "user", ReviewRequestORM.subject_id == actor)
+    if groups:
+        asked = or_(asked, and_(ReviewRequestORM.subject_type == "group",
+                                ReviewRequestORM.subject_id.in_(sorted(groups))))
     prs = (await s.execute(
         select(MergeRequestORM)
-        .where(MergeRequestORM.target_graph_id == graph_id,
-               MergeRequestORM.status.notin_(_ENDED),
-               MergeRequestORM.reviewers.contains([actor]))
+        .where(MergeRequestORM.target_graph_id == graph_id, MergeRequestORM.status.notin_(_ENDED),
+               MergeRequestORM.id.in_(select(ReviewRequestORM.pr_id).where(
+                   ReviewRequestORM.graph_id == graph_id, asked)))
         .order_by(MergeRequestORM.created_at.desc())
-        .limit(REVIEWS_MAX + 1))).scalars().all()
-    out = []
-    for pr in prs[:REVIEWS_MAX]:
-        if actor in (pr.approved_by or []):
-            standing, _stale = await svc._approvals(s, pr)
-            if actor in standing:
-                continue
-        out.append({"id": pr.id, "title": pr.title, "author": pr.actor, "at": pr.created_at})
-    return out, len(prs) > REVIEWS_MAX
+        .limit(ASKED_MAX + 1))).scalars().all()
+    read, more = prs[:ASKED_MAX], len(prs) > ASKED_MAX
+    requests, events = await svc._review_rows(s, [pr.id for pr in read])
+    last = await svc._last_content_seqs(s, read)
+    waiting = [pr for pr in read if review_state.waits_on(
+        actor, pr.actor, review_state.asked_of(actor, groups, requests[pr.id]),
+        review_state.standing(requests[pr.id], events[pr.id], last[pr.id]))]
+    return ([{"id": pr.id, "title": pr.title, "author": pr.actor, "at": pr.created_at}
+             for pr in waiting[:REVIEWS_MAX]], more or len(waiting) > REVIEWS_MAX)
 
 
 # ── Telling the people who watch it ───────────────────────────────────────────────────────────

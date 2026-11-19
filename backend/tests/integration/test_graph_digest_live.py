@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from backend.app.services.versioning import db, digest, models
+from backend.app.services.versioning import service as service_mod
 
 from .test_api_graph_draft_journey import _IMPORT_NDJSON, _StubCache, _StubManager
 from .test_private_draft_read import _app
@@ -215,6 +216,24 @@ async def _digest_run(monkeypatch) -> None:
             r = await c.post(f"{x.g}/branches/{d}/commit", json={}, headers=h(carol))
             assert r.status_code == 200, r.text
             assert [w["id"] for w in (await x.digest(bob))["reviewsWaiting"]] == [pr]   # stale
+
+            # A review asking a team of Bob's waits on him, as the review inbox has it, until one
+            # of the team approves it.
+            team = f"g_fin_{run}"
+
+            async def teams(actor):
+                return (team,) if actor in (alice, bob) else ()
+            with monkeypatch.context() as m:
+                m.setattr(service_mod, "_load_actor_groups", teams)
+                d2 = await x.draft(carol, (child, {"description": "Team"}), name="Team")
+                pr2 = await svc.open_draft_mr(graph_id=gid, branch_id=d2, actor=carol, title="Team owners",
+                                              reviewer_groups=[team])
+                assert [w["id"] for w in (await x.digest(bob))["reviewsWaiting"]] == [pr2, pr]
+                r = await c.get(f"{V1}/review-inbox", params={"queue": "needs_review"}, headers=h(bob))
+                assert {i["prId"] for i in r.json()["items"]} == {pr2, pr}, r.text
+                r = await c.post(f"{V1}/merge-requests/{pr2}/approve", json={}, headers=h(alice))
+                assert r.status_code == 200, r.text
+                assert [w["id"] for w in (await x.digest(bob))["reviewsWaiting"]] == [pr]
 
             # An undo tells the graph's watchers, in its own words; Carol's root was not touched.
             commit = (await x.digest(bob))["head"]["version"]
