@@ -193,7 +193,8 @@ async def plan_members(
     would start with: its count, and whether it is kept (``keep``: ``withResults``
     keeps only the layers that hold something). Above 20,000 members the counts are
     placed from the first 5,000 and say so (``estimated``). An answer that is short of
-    the truth (part of the graph not answering) says so in ``truncated``.
+    the truth (part of the graph not answering) says so in ``truncated``. The draft is
+    kept for 15 minutes: saving the same sources and layout makes these layers.
     """
     from sqlalchemy import select
 
@@ -232,8 +233,8 @@ async def plan_members(
             return JSONResponse(status_code=202, content=MembershipResolving(
                 sets=[s.model_dump(mode="json", by_alias=True, exclude_none=True) for s in sets],
             ).model_dump(mode="json", by_alias=True))
-        draft = await pipeline.draft_view(session, engine, found, definition, source_config=copied_from,
-                                          client_layers=body.layers, keep=body.keep, limit=limit)
+        draft = await pipeline.draft_cached(session, engine, found, definition, source_config=copied_from,
+                                            client_layers=body.layers, keep=body.keep, limit=limit)
     except pipeline.PipelineError as exc:
         raise HTTPException(status_code=404 if exc.kind == "source_missing" else 422,
                             detail={"reason": exc.kind, "message": str(exc)}) from exc

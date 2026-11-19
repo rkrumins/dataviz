@@ -11,6 +11,7 @@ saved; what is saved is a curated reference view, its definition, its members �
 of ``view_members`` at the epoch readers see, never entries of its config — and a state
 row saying how keeping it is going.
 """
+import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
@@ -454,6 +455,40 @@ async def test_a_preview_counts_each_layer_and_saves_nothing(
     assert after == before
 
 
+async def test_saving_what_was_previewed_makes_the_layers_the_preview_showed(
+    test_client: AsyncClient, db_session, graph, membership_on, preview, monkeypatch,
+):
+    """The preview's draft is kept: saving the same sources and layout makes the very
+    layers it showed — the same ids — and works nothing out again."""
+    import fakeredis.aioredis
+
+    from backend.app.services import graph_cache as graph_cache_mod
+
+    monkeypatch.setattr(graph_cache_mod, "_cache", graph_cache_mod.GraphCache(fakeredis.aioredis.FakeRedis()))
+    real, drafted = pipeline.draft_view, []
+
+    async def draft_view(*args, **kwargs):
+        drafted.append(kwargs)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "draft_view", draft_view)
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    engine = graph.engine = TypedEngine()
+    engine._workspace_id = ws
+    planned = await preview(ws, src, plan_body(src), engine)
+    assert planned.status_code == 200, planned.text
+    resp = await test_client.post(URL, json=body(ws, src))
+    assert resp.status_code == 201, resp.text
+    layers = (await made(db_session, resp.json()["view"]["id"]))["layout"]["referenceLayout"]["layers"]
+    assert [l["id"] for l in layers] == [l["id"] for l in planned.json()["layers"] if l["kept"]]
+    assert len(drafted) == 1, "worked out once, for the preview"
+
+    other = await test_client.post(URL, json=body(ws, src, keep="all"))
+    assert other.status_code == 201 and len(drafted) == 2, "another question, worked out afresh"
+    assert drafted[1]["estimate_above"] == pipeline.SAMPLE, "a save places at most a sample"
+
+
 async def test_a_preview_over_the_limit_says_so(
     test_client: AsyncClient, membership_on, preview, monkeypatch,
 ):
@@ -502,25 +537,110 @@ async def test_while_the_sources_resolve_nothing_is_made_and_the_key_waits_for_t
     assert (replay.status_code, replay.json()["view"]["id"]) == (200, made_.json()["view"]["id"])
 
 
-async def test_a_view_too_large_for_one_request_is_made_updating_and_opening_finishes_it(
+async def test_a_view_larger_than_its_first_turn_is_made_updating_and_says_how_far_it_got(
     test_client: AsyncClient, db_session, graph, membership_on, monkeypatch,
 ):
+    """Saving answers after a first short turn: the view is made, its first pages placed,
+    and it says ``updating`` with how far it got — as its status does, and a retry with
+    the same key does, while it is under way. Opening it carries the rest on."""
+    real = pipeline.read_page
+
+    async def slow(*args, **kwargs):
+        await asyncio.sleep(0.2)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "PAGE", 2)
+    monkeypatch.setattr(pipeline, "CREATE_TURN_SECS", 0.3)
+    monkeypatch.setattr(pipeline, "read_page", slow)
     ws = await workspace(test_client)
     src = await source_view(test_client, ws)
-    monkeypatch.setattr(routes, "_budget_s", lambda: 0.0)
-    resp = await test_client.post(URL, json=body(ws, src))
+    headers = {"Idempotency-Key": "turn-1"}
+    resp = await test_client.post(URL, json=body(ws, src), headers=headers)
     assert resp.status_code == 201, resp.text
     view_id = resp.json()["view"]["id"]
-    assert resp.json()["membership"]["status"] == "updating"
+    membership = resp.json()["membership"]
+    detail = membership["detail"]
+    assert (membership["status"], detail["reason"], detail["placed"], detail["members"]) == (
+        "updating", "placing", 2, 6), "one page of two placed: the next would not fit the turn"
+    assert [s["status"] for s in detail["sets"]] == ["complete"]
     state = (await db_session.execute(select(ViewMembershipStateORM).where(
-        ViewMembershipStateORM.view_id == view_id))).scalar_one()
-    assert state.members_epoch is None, "nothing placed yet: readers see no half answer"
+        ViewMembershipStateORM.view_id == view_id).execution_options(populate_existing=True))).scalar_one()
+    assert state.members_epoch is None, "nothing applied yet: readers see no half answer"
+    assert state.lease_owner is None, "its turn let go: the next request carries it on"
 
-    monkeypatch.setattr(routes, "_budget_s", lambda: 30.0)
+    status = (await test_client.get(f"/api/v1/views/{view_id}/membership")).json()
+    assert (status["status"], status["detail"]) == ("updating", detail)
+    replay = await test_client.post(URL, json=body(ws, src), headers=headers)
+    assert (replay.status_code, replay.json()["view"]["id"]) == (200, view_id)
+    assert (replay.json()["membership"]["status"], replay.json()["membership"]["detail"]) == ("updating", detail)
+
+    monkeypatch.setattr(pipeline, "read_page", real)
     opened = await test_client.post(f"/api/v1/views/{view_id}/membership/refresh", params={"trigger": "open"})
     assert (opened.status_code, opened.json()["outcome"]) == (200, "applied")
     assert len(await members_of(db_session, view_id)) == 6
     assert opened.json()["membership"]["status"] == "ok"
+
+
+async def test_a_turn_cut_off_lets_go_of_the_view_at_once_and_the_next_carries_it_on(
+    test_client: AsyncClient, db_session, db_engine, graph, membership_on, monkeypatch,
+):
+    """A request cut off mid-page (its tier, or its client gone) frees its lease straight
+    away — on a session of its own — keeping how far it got: the next request takes the
+    run over at the same epoch rather than wait the lease out."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    monkeypatch.setattr(pipeline, "_own_session", async_sessionmaker(bind=db_engine, expire_on_commit=False))
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    view_id = (await test_client.post(URL, json=body(ws, src))).json()["view"]["id"]
+    graph.engine = TypedEngine(gone={"col_b1"})
+    real, reading, calls = pipeline.read_page, asyncio.Event(), {"n": 0}
+
+    async def read_page(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            reading.set()
+            await asyncio.Event().wait()            # the graph never answers this one
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "read_page", read_page)
+    scope = app_engine_scope()
+    turn = asyncio.create_task(pipeline.refresh(view_id, session=db_session, engine_scope=scope, owner="cut",
+                                                budget_s=30, page_size=2))
+    await reading.wait()
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    await asyncio.gather(*pipeline._letting_go)
+    state = (await db_session.execute(select(ViewMembershipStateORM).where(
+        ViewMembershipStateORM.view_id == view_id).execution_options(populate_existing=True))).scalar_one()
+    assert (state.lease_owner, state.lease_until, state.status) == (None, None, "updating")
+    assert json.loads(state.materialize)["placing"]["placed"] == 2, "its first page stands"
+
+    monkeypatch.setattr(pipeline, "read_page", real)
+    out = await pipeline.refresh(view_id, session=db_session, engine_scope=scope, owner="next", budget_s=30,
+                                 page_size=2)
+    assert (out.outcome, out.diff["removed"]) == ("applied", 1), "taken over at once, not refused as busy"
+    after = (await db_session.execute(select(ViewMembershipStateORM).where(
+        ViewMembershipStateORM.view_id == view_id).execution_options(populate_existing=True))).scalar_one()
+    assert after.members_epoch == state.epoch, "carried on at its epoch"
+    assert set(await members_of(db_session, view_id)) == {"dom", "tbl_a", "tbl_b", "col_a1", "col_a2"}
+
+
+def app_engine_scope():
+    from backend.app.main import app
+
+    return app.dependency_overrides[routes.get_engine_scope]()
+
+
+def test_a_turn_and_applying_it_end_inside_the_tier_a_views_request_is_cut_off_at(monkeypatch):
+    from backend.app.main import _TimeoutMiddleware
+
+    monkeypatch.delenv("HTTP_TIMEOUT_DEFAULT_SECS", raising=False)
+    tier = _TimeoutMiddleware(lambda *a: None)._resolve_timeout("/api/v1/views/v-1/membership/refresh")
+    assert tier == 30
+    assert routes._budget_s() + pipeline.APPLY_RESERVE_S < tier
+    assert pipeline.CREATE_TURN_SECS <= routes._budget_s()
 
 
 async def test_a_preview_waits_on_its_sets_too(test_client: AsyncClient, membership_on, preview):

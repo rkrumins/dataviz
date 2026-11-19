@@ -7,6 +7,7 @@ whose members are not worked out yet holds none.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -155,6 +156,68 @@ async def test_one_page_is_one_read_of_the_table_and_three_graph_statements(on, 
     engine = MembersEngine()
     await post(ws, view.id, {"layerId": "L1"}, engine)
     assert [kind for kind, _ in engine.calls] == ["nodes", "chains", "nodes"]
+
+
+async def test_a_pages_nodes_and_their_paths_are_read_side_by_side(on, views, post):
+    class SideBySide(MembersEngine):
+        """Answers neither the page's nodes nor their paths until both are asked."""
+
+        def __init__(self):
+            super().__init__()
+            self.both = asyncio.Barrier(2)
+
+        async def get_nodes_query(self, query):
+            if "urn:db" not in query.urns:
+                await asyncio.wait_for(self.both.wait(), 2)
+            return await super().get_nodes_query(query)
+
+        async def get_ancestor_chains(self, urns):
+            await asyncio.wait_for(self.both.wait(), 2)
+            return await super().get_ancestor_chains(urns)
+
+    ws, view, _ = await views()
+    resp = await post(ws, view.id, {"layerId": "L1"}, SideBySide())
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["nodes"]) == 4
+
+
+async def test_only_containers_neither_on_the_page_nor_named_before_are_named(on, views, post, monkeypatch):
+    """A container that is a member on the page is named from it — from the member table
+    when the graph no longer holds it — and one named before, on the same data, from
+    this process: neither is read again."""
+    from collections import OrderedDict
+
+    async def version(engine):
+        return "v1"
+
+    monkeypatch.setattr(feed, "_search_data_version", version)
+    monkeypatch.setattr(feed, "_NAMES", OrderedDict())
+
+    class InsideBeta(MembersEngine):
+        def __init__(self, gone=()):
+            super().__init__()
+            self.gone = set(gone)
+
+        async def get_nodes_query(self, query):
+            return [n for n in await super().get_nodes_query(query) if n.urn not in self.gone]
+
+        async def get_ancestor_chains(self, urns):
+            self.calls.append(("chains", list(urns)))
+            return {u: ["urn:db"] if u == "urn:1" else ["urn:1", "urn:db"] for u in urns}
+
+    ws, view, _ = await views()
+    first = InsideBeta()
+    page = (await post(ws, view.id, {"layerId": "L1"}, first)).json()
+    assert first.calls[2] == ("nodes", ["urn:db"]), "urn:1 is on the page"
+    path = {n["urn"]: n["ancestorPath"] for n in page["nodes"]}["urn:3"]
+    assert path == [{"urn": "urn:db", "displayName": "db", "entityType": "database"},
+                    {"urn": "urn:1", "displayName": "beta", "entityType": "table"}]
+
+    again = InsideBeta(gone={"urn:1"})
+    page = (await post(ws, view.id, {"layerId": "L1"}, again)).json()
+    assert [kind for kind, _ in again.calls] == ["nodes", "chains"], "urn:db named before, on this data"
+    assert {n["urn"]: n["ancestorPath"] for n in page["nodes"]}["urn:3"][1] == {
+        "urn": "urn:1", "displayName": "beta", "entityType": "table"}, "as the member table knows it"
 
 
 async def test_a_cursor_is_signed(on, views, post):

@@ -7,6 +7,9 @@ mid-page — its request gone — is carried on by the next request at the same 
 run overtaken writes nothing more. What is tested here is the member table across those
 steps: what readers see, what each epoch holds, and that the page size changes nothing.
 """
+import json
+from contextlib import asynccontextmanager
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import func, select, update
@@ -123,7 +126,7 @@ async def test_readers_see_the_last_answer_until_a_run_carried_on_at_its_epoch_s
     after = await state_of(db_session, view_id)
     assert after.epoch == mid.epoch == after.members_epoch, "carried on, never started again"
     assert set(await members_of(db_session, view_id)) == {"dom", "tbl_a", "tbl_b", "col_a1", "col_a2"}
-    assert await at(db_session, view_id, first) == 0, "the last answer is let go once the new one is in"
+    assert await at(db_session, view_id, first) == 6, "the last answer is the sweeper's to let go, a while after"
     assert after.materialize is None and after.revision == revision + 1
 
 
@@ -164,7 +167,10 @@ async def test_nothing_changed_keeps_the_epoch_and_lets_the_new_rows_go(
     assert out.outcome == "unchanged"
     state = await state_of(db_session, view_id)
     assert state.members_epoch == first and state.epoch == first + 1
-    assert await at(db_session, view_id, state.epoch) == 0
+    while await sweeper.sweep_once(db_session):
+        await db_session.commit()
+    assert await at(db_session, view_id, state.epoch) == 0, "an answer nobody reads is swept at once"
+    assert await at(db_session, view_id, first) == 6
 
 
 async def test_what_a_member_is_drawn_inside_is_a_change_of_its_own(
@@ -254,6 +260,112 @@ async def test_a_snapshot_keeps_its_members(test_client: AsyncClient, db_session
     assert "col_b1" in await members_of(db_session, view_id)
 
 
+# ── Applying an answer: a step of its own ──────────────────────────────────
+
+
+async def test_applying_is_the_next_turns_when_placing_leaves_too_little_of_this_one(
+    test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
+):
+    view_id = await make(test_client)
+    first = (await state_of(db_session, view_id)).members_epoch
+    graph.engine = TypedEngine(gone={"col_b1"})
+    monkeypatch.setattr(pipeline, "APPLY_RESERVE_S", 1000)        # more than any turn has left
+    out = await run(db_session, view_id)
+    assert (out.outcome, out.detail["reason"], out.detail["placed"], out.detail["members"]) == (
+        "running", "placing", 5, 5)
+    state = await state_of(db_session, view_id)
+    assert (state.members_epoch, state.lease_owner) == (first, None), "placed, not applied, and let go"
+
+    monkeypatch.setattr(pipeline, "APPLY_RESERVE_S", 0)
+    real, reads = pipeline.read_page, []
+
+    async def read_page(*args, **kwargs):
+        reads.append(1)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "read_page", read_page)
+    out = await run(db_session, view_id)
+    assert (out.outcome, out.diff["removed"], reads) == ("applied", 1, []), "this turn only applies it"
+    assert (await state_of(db_session, view_id)).members_epoch == state.epoch
+
+
+async def test_the_answer_is_measured_before_anything_is_locked_and_kept_with_the_run(
+    test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
+):
+    """The change from the last answer is measured holding no lock, and kept with the run:
+    a turn that stops as it takes the lock leaves it there, and the next only swaps it in."""
+    from backend.app.db.repositories import view_members_repo, view_membership_repo
+
+    view_id = await make(test_client)
+    graph.engine = TypedEngine(gone={"col_b1"})
+    order = []
+    real_diff, real_lock = view_members_repo.diff, view_membership_repo.locked_if_mine
+
+    async def diff(*args, **kwargs):
+        order.append("diff")
+        return await real_diff(*args, **kwargs)
+
+    async def dies_taking_the_lock(*args, **kwargs):
+        order.append("lock")
+        raise Crash()
+
+    monkeypatch.setattr(view_members_repo, "diff", diff)
+    monkeypatch.setattr(view_membership_repo, "locked_if_mine", dies_taking_the_lock)
+    with pytest.raises(Crash):
+        await run(db_session, view_id)
+    await db_session.rollback()
+    assert order == ["diff", "lock"]
+    applying = json.loads((await state_of(db_session, view_id)).materialize)["applying"]
+    assert (applying["diff"]["removed"], sum(applying["perLayer"].values())) == (1, 5)
+
+    monkeypatch.setattr(view_membership_repo, "locked_if_mine", real_lock)
+    await let_go(db_session, view_id)
+    order.clear()
+    out = await run(db_session, view_id)
+    assert (out.outcome, out.diff["removed"], order) == ("applied", 1, []), "measured once"
+    assert set(await members_of(db_session, view_id)) == {"dom", "tbl_a", "tbl_b", "col_a1", "col_a2"}
+
+
+# ── Opening a view that is up to date ──────────────────────────────────────
+
+
+async def test_opening_a_view_that_is_up_to_date_opens_no_engine(
+    test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
+):
+    """The data's version from the graph cache and the physical graph this process last
+    saw behind the data source: no admission, connection or token for a view that needs
+    nothing. Not known here, the engine says, as before."""
+    from backend.app.db.models import ViewORM
+    from backend.app.services import graph_reads
+    from backend.app.services.graph_cache import CacheScope
+
+    class Cache:
+        async def content_generation(self, scope):
+            return "7"
+
+    monkeypatch.setattr(graph_reads, "get_graph_cache", lambda: Cache())
+    view_id = await make(test_client)
+    ws = (await db_session.execute(select(ViewORM.workspace_id).where(ViewORM.id == view_id))).scalar_one()
+    await db_session.execute(update(ViewMembershipStateORM).where(ViewMembershipStateORM.view_id == view_id)
+                             .values(data_version="7.ns1"))
+    await db_session.commit()
+    assert await graph_reads.data_version(CacheScope(workspace_id=ws, graph_ns="ns1")) == "7.ns1"
+    assert await graph_reads.known_data_version(ws, None) == "7.ns1", "a read named the graph behind it"
+
+    @asynccontextmanager
+    async def no_engine(*args):
+        raise AssertionError("an engine was opened")
+        yield
+
+    out = await pipeline.refresh(view_id, session=db_session, engine_scope=no_engine, owner="open", budget_s=30,
+                                 only_if_changed=True)
+    assert (out.outcome, out.detail) == ("current", {"reason": "up_to_date"})
+    graph_reads._GRAPH_NS.pop((ws, ""))
+    with pytest.raises(AssertionError, match="an engine was opened"):
+        await pipeline.refresh(view_id, session=db_session, engine_scope=no_engine, owner="open", budget_s=30,
+                               only_if_changed=True)
+
+
 # ── The page size changes nothing ───────────────────────────────────────────
 
 
@@ -286,7 +398,7 @@ async def test_any_page_size_places_the_same_rows(
 
 
 async def test_the_sweeper_deletes_epochs_nobody_reads_or_works_on(
-    test_client: AsyncClient, db_session: AsyncSession, graph,
+    test_client: AsyncClient, db_session: AsyncSession, graph, monkeypatch,
 ):
     view_id = await make(test_client)
     state = await state_of(db_session, view_id)
@@ -295,14 +407,21 @@ async def test_the_sweeper_deletes_epochs_nobody_reads_or_works_on(
              "label_ord": 0, "whole": False, "covered": False}
     from backend.app.db.repositories import view_members_repo
 
-    await view_members_repo.insert(db_session, [{**stray, "epoch": current - 1}, {**stray, "epoch": current + 5}])
+    await view_members_repo.insert(db_session, [{**stray, "epoch": e} for e in (current - 2, current - 1, current + 5)])
     state.epoch, state.materialize = current + 5, '{"epoch": %d}' % (current + 5)
     await db_session.commit()
     while await sweeper.sweep_once(db_session):
         await db_session.commit()
-    assert await at(db_session, view_id, current - 1) == 0, "an answer since replaced"
+    assert await at(db_session, view_id, current - 1) == 1, (
+        "the answer before, kept a while after the last: a reader may be reading through it")
+    assert await at(db_session, view_id, current - 2) == 0, "one before that"
     assert await at(db_session, view_id, current + 5) == 1, "the run working on it now keeps its rows"
     assert await at(db_session, view_id, current) == 6, "what readers see is kept"
+    monkeypatch.setattr(sweeper, "EPOCH_GRACE_S", 0)
+    while await sweeper.sweep_once(db_session):
+        await db_session.commit()
+    assert await at(db_session, view_id, current - 1) == 0, "an answer since replaced, once the while is over"
+    assert await at(db_session, view_id, current + 5) == 1
     state.materialize = None
     await db_session.commit()
     while await sweeper.sweep_once(db_session):

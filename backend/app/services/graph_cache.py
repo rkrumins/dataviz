@@ -270,6 +270,8 @@ ENDPOINT_NODES_DEGREE = "nodes-degree"
 ENDPOINT_MEMBERS = "members"
 # A page of one layer of a subset view (POST /graph/search/view-feed): its matches, as nodes.
 ENDPOINT_VIEW_FEED = "view-feed"
+# A list view worked out before it is saved: the preview's, which the save that follows reuses.
+ENDPOINT_MEMBERS_DRAFT = "members-draft"
 
 _ENABLED_ENDPOINTS = {
     ENDPOINT_CHILDREN: _flag("GRAPH_CACHE_ENABLED_CHILDREN", default=True),
@@ -286,6 +288,7 @@ _ENABLED_ENDPOINTS = {
     ENDPOINT_NODES_DEGREE: _flag("GRAPH_CACHE_ENABLED_NODES_DEGREE", default=True),
     ENDPOINT_MEMBERS: _flag("GRAPH_CACHE_ENABLED_MEMBERS", default=True),
     ENDPOINT_VIEW_FEED: _flag("GRAPH_CACHE_ENABLED_VIEW_FEED", default=True),
+    ENDPOINT_MEMBERS_DRAFT: _flag("GRAPH_CACHE_ENABLED_MEMBERS", default=True),
 }
 
 #: The endpoints whose answer is read out of the ``:AGGREGATED`` rollup layer,

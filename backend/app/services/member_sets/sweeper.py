@@ -11,8 +11,9 @@ for ever, and it cannot be deleted in one transaction either. Each pass:
   itself once both are gone;
 * else up to ``_BATCH`` of one view's members at an epoch nobody needs any more — one
   its answer was swapped away from, or one a run left behind (nothing changed, it
-  started placing again, it was overtaken) — which the run itself did not finish
-  deleting. A view keeps the epoch its readers see and the one a run is placing.
+  started placing again, it was overtaken). A view keeps the epoch its readers see and
+  the one a run is placing — and, for ``EPOCH_GRACE_S`` after its last answer, the one
+  before: a reader that read it just before the swap reads on through it.
 
 Each pass is its own short transaction under an advisory lock (``db/advisory.py``),
 so replicas take turns rather than contend for the same rows, and it drains greedily:
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from sqlalchemy import and_, delete, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,13 +40,16 @@ from backend.app.db.models import (
     ViewMembershipStateORM,
 )
 from backend.app.db.repositories import view_members_repo
-from backend.app.db.repositories.view_membership_repo import now_iso
+from backend.app.db.repositories.view_membership_repo import later_iso, now_iso
 from backend.app.services.member_sets import store as sets
 
 logger = logging.getLogger(__name__)
 
 # Rows (or edges) deleted per transaction: bounded, so a pass never holds a long one.
 _BATCH = 50_000
+
+#: How long a view keeps the answer before the one its readers see, after its last answer.
+EPOCH_GRACE_S: float = float(os.getenv("LIVE_VIEW_EPOCH_GRACE_SECS", "600"))
 
 # A running set is let go after 15 minutes untouched: sweeping every few minutes
 # keeps that promise without the sweep showing up anywhere.
@@ -87,15 +92,22 @@ async def _sweep_view_members(session: AsyncSession, *, batch: int) -> int:
     with index ranges around the epochs it keeps (one per state row: a view made from
     a query), never by reading its members."""
     m, s = ViewMemberORM, ViewMembershipStateORM
+    recent = later_iso(-EPOCH_GRACE_S)
     states = (await session.execute(
-        select(s.view_id, s.epoch, s.members_epoch, s.materialize.is_not(None)).order_by(s.view_id))).all()
-    for view_id, epoch, members_epoch, running in states:
+        select(s.view_id, s.epoch, s.members_epoch, s.materialize.is_not(None), s.last_applied_at)
+        .order_by(s.view_id))).all()
+    for view_id, epoch, members_epoch, running, applied_at in states:
         keep = sorted({e for e in (members_epoch, epoch if running else None) if e is not None})
         if not keep:
             other = true()
         else:
             other = or_(m.epoch < keep[0], m.epoch > keep[-1],
                         and_(m.epoch > keep[0], m.epoch < keep[-1]))
+        if members_epoch is not None and (applied_at or "") > recent:
+            before = (await session.execute(select(func.max(m.epoch)).where(
+                m.view_id == view_id, m.epoch < members_epoch))).scalar()
+            if before is not None:
+                other = and_(other, m.epoch != before)
         orphan = (await session.execute(
             select(m.epoch).where(m.view_id == view_id, other).limit(1))).scalar_one_or_none()
         if orphan is not None:

@@ -10,11 +10,17 @@ wrappers over these, so its callers and their tests are unchanged.
 """
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from backend.app.services.graph_cache import CacheScope, get_graph_cache, graph_ns_hash
+
+#: The physical graph behind each (workspace, data source) a read named lately, and when:
+#: what lets ``known_data_version`` answer without opening an engine.
+_GRAPH_NS: Dict[Tuple[str, str], Tuple[str, float]] = {}
+GRAPH_NS_TTL_S = 60.0
 
 
 def resolve_physical_graph_id(provider: Any, _depth: int = 0) -> Optional[str]:
@@ -113,6 +119,8 @@ async def data_version(scope: Optional[CacheScope], cache: Any = None) -> str:
     if scope is None:
         return ""
     published = replace(scope, branch_id="")
+    if published.graph_ns:
+        _GRAPH_NS[(published.workspace_id, published.data_source_id)] = (published.graph_ns, time.monotonic())
     generation = await (cache or get_graph_cache()).content_generation(published)
     return f"{generation}.{published.graph_ns}"
 
@@ -120,3 +128,15 @@ async def data_version(scope: Optional[CacheScope], cache: Any = None) -> str:
 async def search_data_version(engine: Any) -> str:
     """``data_version`` of the engine's own scope."""
     return await data_version(cache_scope(engine))
+
+
+async def known_data_version(workspace_id: str, data_source_id: Optional[str], cache: Any = None) -> Optional[str]:
+    """``data_version`` of a data source's published graph with no engine open: its
+    generation, and the physical graph a read in this process named in the last
+    ``GRAPH_NS_TTL_S``. None when none did, or the generation can't be read."""
+    seen = _GRAPH_NS.get((workspace_id, data_source_id or ""))
+    if seen is None or time.monotonic() - seen[1] > GRAPH_NS_TTL_S:
+        return None
+    generation = await (cache or get_graph_cache()).content_generation(
+        CacheScope(workspace_id=workspace_id, data_source_id=data_source_id or ""))
+    return f"{generation}.{seen[0]}" if generation else None
