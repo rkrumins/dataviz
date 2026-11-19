@@ -3,17 +3,19 @@ query: its members, in name order, as the nodes the canvas draws.
 
 A view made from a query holds up to a quarter of a million members (``view_members``), so the
 canvas never loads them at once: each layer lists its members a page at a time, as a subset
-view's layers list their matches (``graph_view_feed``), in the same shape (``ViewFeedPage``).
-The members are the ones readers see (``members_epoch``): a run working out the next answer
-is never half seen. Mounted under the graph prefix behind the data-source-or-view gate, as
-every graph read is; a share link reads its own view only.
+view's layers list their matches (``graph_view_feed``), in the same shape (``ViewFeedPage``),
+for as long as it has members — every one of them, unless an operator sets a ceiling
+(``VIEW_MEMBERS_FEED_MAX_ROWS``). The members are the ones readers see (``members_epoch``): a
+run working out the next answer is never half seen. Mounted under the graph prefix behind the
+data-source-or-view gate, as every graph read is; a share link reads its own view only.
 
 One page is one keyset read of the member table (``idx_vm_feed``: layer, then name), its
 count (kept in this process per view, answer and layer), then three graph statements, each
 admitted on its own: the members' nodes, where they sit (their containers, the canvas draws
 around them — as many of the nearest as ``inLayer`` says), and those containers' names. A
 page is cached under the view, the answer it reads, the layer, the cursor and the data's
-version.
+version. What people placed in the layer themselves ("Always include") is in its count; the
+canvas loads those from the view's layout.
 """
 from __future__ import annotations
 
@@ -45,17 +47,19 @@ from backend.app.db.models import ViewMembershipStateORM, ViewORM, view_is_live
 from backend.app.db.repositories import view_members_repo
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.graph_cache import ENDPOINT_VIEW_FEED, get_graph_cache
-from backend.app.services.live_views.pipeline import config_of
+from backend.app.services.live_views import layouts
+from backend.app.services.live_views.pipeline import config_of, layout_of, source_config
+from backend.app.services.search_views import in_followed_layers
 from backend.common.models.graph import GraphNode, NodeQuery
 from backend.common.models.search_view import ViewFeedPage, ViewMembersRequest
-from backend.common.models.view_membership import read_definition
+from backend.common.models.view_membership import MACHINE, MembershipDefinition, read_definition
 
 router = APIRouter()
 
 
-#: Members a layer lists on the canvas; past them a page says ``capped`` (search in the layer,
-#: or export the view, for the rest).
-VIEW_MEMBERS_FEED_MAX_ROWS: int = int(os.getenv("VIEW_MEMBERS_FEED_MAX_ROWS", "5000"))
+#: An operator's ceiling on the members a layer lists on the canvas — past it a page says
+#: ``capped`` (search in the layer, or export it, for the rest). 0: none, every member.
+VIEW_MEMBERS_FEED_MAX_ROWS: int = int(os.getenv("VIEW_MEMBERS_FEED_MAX_ROWS", "0"))
 
 #: Layer counts kept in this process: (view, its answer, the view's last edit, layer) → count.
 _COUNTS: "OrderedDict[Tuple[str, int, str, str], int]" = OrderedDict()
@@ -79,6 +83,26 @@ async def _count(session: AsyncSession, view: ViewORM, epoch: int, layer_id: str
 #: Container names kept in this process: (physical graph, data version, URN) → (name, type).
 _NAMES: "OrderedDict[Tuple[str, str, str], Tuple[str, str]]" = OrderedDict()
 _NAMES_MAX = 50_000
+
+
+async def layers_of(session: AsyncSession, view: ViewORM, config: dict,
+                    definition: MembershipDefinition) -> Optional[List[dict]]:
+    """The layers the view shows: its own, or — following a view — that view's (None
+    once that view is gone)."""
+    if definition.layout.kind != "follow":
+        return layout_of(config)[0]
+    base = await source_config(session, definition, view.workspace_id)
+    return layouts.followed(base) if base is not None else None
+
+
+def pinned(config: dict, definition: MembershipDefinition, layers: Optional[List[dict]],
+           layer_id: str) -> Dict[str, dict]:
+    """What people placed in the layer themselves ("Always include", never members) —
+    following a view, each in the layer it is served there (``in_followed_layers``)."""
+    own = {u: e for u, e in layout_of(config)[1].items() if e.get("assignedBy") != MACHINE}
+    if definition.layout.kind == "follow":
+        own = in_followed_layers(own, layers or [])
+    return {u: e for u, e in own.items() if e.get("layerId") == layer_id}
 
 
 def _tag(payload: str, binding: str, key: str) -> str:
@@ -127,13 +151,14 @@ async def _read(admit, call):
 
 
 async def _nodes(engine: ContextEngine, rows: List[Any], admit, *, graph_ns: str = "",
-                 data_version: str = "") -> List[Dict[str, Any]]:
+                 data_version: str = "", gone: bool = True) -> List[Dict[str, Any]]:
     """The page's members as the canvas draws them: each node, where it sits
     (``ancestorPath``, root first: every container, a name not found ``""``, so
     ``inLayer`` counts the right ones) and how many of its nearest containers sit in its
     layer too (``inLayer``), which the canvas draws it inside. A reader with no
     containment walk ships them without a path. A member the graph no longer holds is
-    drawn from what the member table knows of it, until the next update takes it out.
+    drawn from what the member table knows of it, until the next update takes it out —
+    or, without ``gone``, left out.
 
     The nodes and their paths are read side by side, each statement admitted on its own;
     then the names of the containers neither on the page nor named on this data before
@@ -156,6 +181,8 @@ async def _nodes(engine: ContextEngine, rows: List[Any], admit, *, graph_ns: str
         if isinstance(got, BaseException):
             raise got
     by_urn = {n.urn: n for n in found}
+    if not gone:
+        rows = [r for r in rows if r.urn in by_urn]
     drawn = {r.urn: by_urn.get(r.urn) or GraphNode(urn=r.urn, entityType=r.type or r.label or "",
                                                    displayName=r.name or r.urn) for r in rows}
     names: Dict[str, Tuple[str, str]] = {u: (n.display_name, n.entity_type) for u, n in drawn.items()}
@@ -210,10 +237,11 @@ async def view_members(
     can_read_view=Depends(_view_reader),
 ) -> ViewFeedPage:
     """One page of a layer's members, in name order, with exactly how many the layer holds
-    (``totalCount``). ``cursor`` continues from the page before (it is signed: one this
-    server didn't issue for this layer is a 400). ``capped``: the layer holds more members
-    than the canvas lists (``VIEW_MEMBERS_FEED_MAX_ROWS``) — search in it, or export the
-    view, for the rest. A view whose members are not worked out yet holds none."""
+    (``totalCount``: its members, and what people placed in it themselves). ``cursor``
+    continues from the page before for as long as members remain (it is signed: one this
+    server didn't issue for this layer is a 400). ``capped``: an operator's ceiling
+    (``VIEW_MEMBERS_FEED_MAX_ROWS``) was reached — search in the layer, or export it, for
+    the rest. A view whose members are not worked out yet holds none of its own."""
     if not ws_id:
         raise refused(400, "workspace_required", "workspace_id is required (path param ws_id)")
     capability = getattr(request.state, "view_capability", None)
@@ -223,37 +251,46 @@ async def view_members(
         select(ViewORM).where(ViewORM.id == viewId, view_is_live()))).scalar_one_or_none()
     if view is None or view.workspace_id != ws_id or not await can_read_view(view):
         raise refused(404, "view_not_found", f"View '{viewId}' not found")
-    if read_definition(config_of(view)) is None:
+    config = config_of(view)
+    definition = read_definition(config)
+    if definition is None:
         raise refused(404, "not_made_from_a_query", "This view isn't made from a query.")
     epoch = (await session.execute(select(ViewMembershipStateORM.members_epoch).where(
         ViewMembershipStateORM.view_id == view.id))).scalar_one_or_none()
     binding = _binding(view.id, body.layer_id)
     cursor = _read_cursor(body.cursor, binding)
     max_rows = VIEW_MEMBERS_FEED_MAX_ROWS
+
+    async def entries() -> int:
+        return len(pinned(config, definition, await layers_of(session, view, config, definition), body.layer_id))
+
     if epoch is None:
+        total = await entries()
         await session.commit()
-        return ViewFeedPage(layer_id=body.layer_id, total_count=0, delivered=cursor["d"])
+        return ViewFeedPage(layer_id=body.layer_id, total_count=total, delivered=cursor["d"])
     data_version = await _search_data_version(engine)
     admit = _statement_admission(engine)
 
     async def compute() -> ViewFeedPage:
         delivered = cursor["d"]
-        take = max(0, min(body.limit, max_rows - delivered))
+        take = body.limit if max_rows <= 0 else max(0, min(body.limit, max_rows - delivered))
         after = (cursor["k"], cursor["u"]) if cursor["k"] is not None else None
         rows = await view_members_repo.page(session, view.id, epoch, body.layer_id, after, take + 1)
-        total = await _count(session, view, epoch, body.layer_id)
+        members = await _count(session, view, epoch, body.layer_id)
+        total = members + await entries()
         await session.commit()                 # nothing held while the graph answers
         more = len(rows) > take
         rows = rows[:take]
         nodes = await _nodes(engine, rows, admit, graph_ns=scope.graph_ns if scope is not None else "",
                              data_version=data_version)
         delivered += len(rows)
+        ceiling = max_rows > 0 and delivered >= max_rows
         return ViewFeedPage(
             layer_id=body.layer_id, nodes=nodes,
             cursor=_write_cursor(rows[-1].sort_key, rows[-1].urn, delivered, binding)
-            if more and rows and delivered < max_rows else None,
+            if more and rows and not ceiling else None,
             total_count=total, count_status="exact", status="complete",
-            capped=total > max_rows and delivered >= max_rows, delivered=delivered, data_version=data_version,
+            capped=ceiling and members > delivered, delivered=delivered, data_version=data_version,
         )
 
     scope = _cache_scope(engine)

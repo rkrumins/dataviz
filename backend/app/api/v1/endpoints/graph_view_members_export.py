@@ -1,15 +1,18 @@
 """``/{ws_id}/graph/view-members/export`` and ``/download`` — one layer of a view made from a
 query, as a file.
 
-A layer lists at most 5,000 of its members on the canvas (``/view-members``); the file holds
-every one. ``POST /view-members/export`` checks the caller as the feed does and answers with
-how many rows the file holds and a token for them — this layer, at the answer readers see
-now (``members_epoch``), for this caller, for ten minutes. ``GET /view-members/download``
-streams it: a keyset page of 5,000 members a short read (``idx_vm_feed``: name order), each
-read in a session of its own, then where each sits — its parent and its path — from the
+A layer lists its members on the canvas a page at a time (``/view-members``); the file holds
+every one, and what people placed in the layer themselves ("Always include"). ``POST
+/view-members/export`` checks the caller as the feed does and answers with how many rows the
+file holds and a token for them — this layer, at the answer readers see now
+(``members_epoch``), for this caller, for ten minutes. ``GET /view-members/download`` checks
+the caller again and streams it: a keyset page of 5,000 members a short read (``idx_vm_feed``:
+name order), each read in a session of its own, then the entries, their names read from the
+graph 1,000 at a time; each row with where it sits — its parent and its path — from the
 graph's containment chains, as a member set's file has them (``member_sets.download``), CSV
 cells defused the same way. A file asked for after the view's members were worked out again
-is still the answer the token names while its rows are kept, else 410.
+is still the answer the token names while its rows are kept, else the answer readers see now
+— ``X-Members-Epoch`` says which.
 
 Mounted under the graph prefix behind the data-source-or-view gate, and behind the export
 switch, as a member set's download is.
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -34,6 +38,7 @@ from backend.app.api.v1.endpoints.graph import (
 )
 from backend.app.api.v1.endpoints.graph_export import ExportStreamResponse, take_turn
 from backend.app.api.v1.endpoints.graph_member_sets import row_sessions
+from backend.app.api.v1.endpoints.graph_view_members import layers_of, pinned
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.refusal import refusal_responses, refused
 from backend.app.auth.dependencies import get_optional_user, get_permission_claims
@@ -41,12 +46,12 @@ from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.db.models import ViewMemberORM, ViewORM, view_is_live
 from backend.app.db.repositories import view_members_repo
 from backend.app.services import view_access
-from backend.app.services.live_views import layouts
-from backend.app.services.live_views.pipeline import config_of, layout_of, source_config
+from backend.app.services.live_views.pipeline import config_of
 from backend.app.services.member_sets import download
 from backend.app.services.search_downloads import VIEW_MEMBERS, mint_download_token, read_download_token
+from backend.common.models.graph import NodeQuery
 from backend.common.models.search_view import ViewMembersExport
-from backend.common.models.view_membership import MembershipDefinition, read_definition
+from backend.common.models.view_membership import read_definition
 
 router = APIRouter()
 
@@ -62,16 +67,6 @@ COLUMNS = ("urn", "name", "type", "layer", "via", "hops", "whole",
 FORMATS = ("csv", "ndjson")
 
 _EXPIRED = "This download link has expired. Export the layer again."
-
-
-async def _layers(session: AsyncSession, view: ViewORM, config: dict,
-                  definition: MembershipDefinition) -> Optional[List[dict]]:
-    """The layers the view shows: its own, or — following a view — that view's (None
-    once that view is gone)."""
-    if definition.layout.kind != "follow":
-        return layout_of(config)[0]
-    base = await source_config(session, definition, view.workspace_id)
-    return layouts.followed(base) if base is not None else None
 
 
 def _name(layers: List[dict], layer_id: str) -> Optional[str]:
@@ -113,9 +108,9 @@ async def export_view_members(
     can_read_view=Depends(_view_reader),
     user=Depends(get_optional_user),
 ) -> ViewMembersExport:
-    """How many members the layer holds now (``rows``), the answer they are read at
-    (``epoch``), and a ``downloadToken`` for ``GET /view-members/download`` — for this
-    caller, for ten minutes."""
+    """How many rows the layer's file holds now (``rows``: its members, and what people
+    placed in it themselves), the answer its members are read at (``epoch``), and a
+    ``downloadToken`` for ``GET /view-members/download`` — for this caller, for ten minutes."""
     from backend.auth_service.core import config as auth_config
 
     view = await _list_view(request, session, ws_id, viewId, can_read_view)
@@ -123,33 +118,55 @@ async def export_view_members(
     definition = read_definition(config)
     if definition is None:
         raise refused(404, "not_made_from_a_query", "This view isn't made from a query.")
-    layers = await _layers(session, view, config, definition)
+    layers = await layers_of(session, view, config, definition)
     if layers is None:
         raise refused(409, "base_missing", "The view this one follows is no longer available.")
     if _name(layers, layerId) is None:
         raise refused(404, "no_such_layer", f"This view has no layer {layerId!r}.")
     epoch = await view_members_repo.members_epoch(session, view.id)
-    rows = await view_members_repo.count(session, view.id, epoch, layerId)
+    rows = (await view_members_repo.count(session, view.id, epoch, layerId)
+            + len(pinned(config, definition, layers, layerId)))
     await session.commit()
     token = mint_download_token(view.id, json.dumps([epoch, layerId]), _principal(user), auth_config.JWT_SECRET_KEY,
                                 ttl_s=EXPORT_TOKEN_SECONDS, purpose=VIEW_MEMBERS)
     return ViewMembersExport(download_token=token, rows=rows, epoch=epoch)
 
 
+async def _entries(entries: Dict[str, dict], layer: str, engine: Any, admit: Any) -> List[Dict[str, Any]]:
+    """What people placed in the layer, as the file's rows, in name order: each one's name
+    and type from the graph, ``download.LOOKUP`` to a statement, each admitted on its own."""
+    urns = sorted(entries)
+    records: List[Dict[str, Any]] = []
+    for i in range(0, len(urns), download.LOOKUP):
+        batch = urns[i:i + download.LOOKUP]
+        async with (admit() if admit is not None else nullcontext()):
+            nodes = await engine.get_nodes_query(NodeQuery(urns=batch, limit=len(batch), include_child_count=False))
+        by_urn = {n.urn: n for n in nodes}
+        for urn in batch:
+            node = by_urn.get(urn)
+            records.append({"urn": urn, "name": node.display_name if node is not None else None,
+                            "type": node.entity_type if node is not None else None, "layer": layer,
+                            "via": "entry", "hops": None,
+                            "whole": entries[urn].get("inheritsChildren") is not False,
+                            "parentUrn": None, "parentName": None, "parentType": None, "path": None,
+                            "pathUrns": None})
+    records.sort(key=lambda r: view_members_repo.sort_key(r["name"], r["urn"]))
+    return records
+
+
 async def _file(sessions, view_id: str, epoch: Optional[int], layer_id: str, layer: str, fmt: str,
-                engine: Any, admit: Any) -> AsyncIterator[bytes]:
-    """The layer's members in name order, a page at a time, each with where it sits."""
+                engine: Any, admit: Any, entries: Dict[str, dict]) -> AsyncIterator[bytes]:
+    """The layer's members in name order, a page at a time, then what people placed in it
+    themselves — each with where it sits."""
     if fmt == "csv":
         yield download._header(COLUMNS)
-    if epoch is None:
-        return
     known: Dict[str, Any] = {}
     after = None
-    while True:
+    while epoch is not None:
         async with sessions() as session:
             rows = await view_members_repo.page(session, view_id, epoch, layer_id, after, PAGE)
         if not rows:
-            return
+            break
         after = (rows[-1].sort_key, rows[-1].urn)
         # A member whose type was not read (an answer restored, until its next update) has
         # its label's, as the feed draws it.
@@ -159,13 +176,18 @@ async def _file(sessions, view_id: str, epoch: Optional[int], layer_id: str, lay
         await download._place(records, engine, admit, known)
         yield await asyncio.to_thread(download._encode, records, fmt, COLUMNS, True)
         if len(rows) < PAGE:
-            return
+            break
+    records = await _entries(entries, layer, engine, admit)
+    for i in range(0, len(records), PAGE):
+        chunk = records[i:i + PAGE]
+        await download._place(chunk, engine, admit, known)
+        yield await asyncio.to_thread(download._encode, chunk, fmt, COLUMNS, True)
 
 
 @router.get(
     "/view-members/download",
     summary="One layer of a view made from a query, as a file",
-    responses=refusal_responses(400, 403, 404, 410, 422, 429),
+    responses=refusal_responses(400, 403, 404, 422, 429),
     dependencies=[Depends(require_export)],
 )
 async def download_view_members(
@@ -186,9 +208,11 @@ async def download_view_members(
     sessions=Depends(row_sessions),
 ):
     """The layer the token names, streamed as it is read, at the answer it names — for the
-    person it was issued to, for ten minutes after. 403 ``link_expired``: the token is
-    expired, someone else's, or not one this server issued. 410 ``epoch_gone``: the view's
-    members were worked out again since, and that answer is no longer kept."""
+    person it was issued to, for ten minutes after, while they can still read the view (an
+    API key's selection holds too: the token names the view, the key must reach it). 403
+    ``link_expired``: the token is expired, someone else's, or not one this server issued.
+    The view's members worked out again since, and that answer no longer kept, the file is
+    the answer readers see now. ``X-Members-Epoch``: the answer it holds."""
     from backend.auth_service.core import config as auth_config
 
     vouched = read_download_token(token, _principal(user),
@@ -214,12 +238,12 @@ async def download_view_members(
     definition = read_definition(config)
     if definition is None:
         raise refused(404, "not_made_from_a_query", "This view isn't made from a query.")
-    layer = _name(await _layers(session, view, config, definition) or [], layer_id) or layer_id
-    if epoch is not None and epoch != await view_members_repo.members_epoch(session, view.id) and (
-            await session.execute(select(ViewMemberORM.urn).where(
-                ViewMemberORM.view_id == view.id, ViewMemberORM.epoch == epoch).limit(1))).first() is None:
-        raise refused(410, "epoch_gone", "This view's members were worked out again since the layer was "
-                                         "exported. Export it again.")
+    layers = await layers_of(session, view, config, definition)
+    layer = _name(layers or [], layer_id) or layer_id
+    current = await view_members_repo.members_epoch(session, view.id)
+    if epoch is None or (epoch != current and (await session.execute(select(ViewMemberORM.urn).where(
+            ViewMemberORM.view_id == view.id, ViewMemberORM.epoch == epoch).limit(1))).first() is None):
+        epoch = current     # the answer it names is no longer kept: the one readers see now
     engine = await get_context_engine(ws_id=ws_id, dataSourceId=dataSourceId, connectionId=None, branchId=None,
                                       asOfSeq=None, _admission=None, session=session, user=user, claims=claims)
     await session.commit()
@@ -227,5 +251,7 @@ async def download_view_members(
     await gate.commit()
     turn = await take_turn()
     return ExportStreamResponse(
-        _file(sessions, view.id, epoch, layer_id, layer, fmt, engine, _statement_admission(engine)),
-        turn=turn, fmt=fmt, filename=f"{view.name or 'view'}-{layer}")
+        _file(sessions, view.id, epoch, layer_id, layer, fmt, engine, _statement_admission(engine),
+              pinned(config, definition, layers, layer_id)),
+        turn=turn, fmt=fmt, filename=f"{view.name or 'view'}-{layer}",
+        headers={"X-Members-Epoch": str(epoch)} if epoch is not None else None)

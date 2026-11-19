@@ -1,10 +1,12 @@
 """``POST /{ws_id}/graph/view-placements`` — where a view the server places draws each entity.
 
-The trace overlay asks it for the views it can't place itself: one made from a query (its
-members are rows of their own table, its config holds none) and a subset view (its matches
-are found by search). Each URN gets a layer and why: its member row (``member``), an entry
-a person placed (``entry``), inside something kept whole (``whole``), the layout
-(``layout``), the layer what nothing places waits in (``fallback``), or nowhere (``none``).
+The canvas asks it for the views it can't place itself: one made from a query (its members
+are rows of their own table, its config holds none) and a subset view (its matches are
+found by search). Each URN gets a layer and why: its member row (``member``), an entry a
+person placed (``entry``), inside something kept whole (``whole``), under the member it
+sits in (``inside``), the layout (``layout``), the layer what nothing places waits in
+(``fallback``), or nowhere (``none``) — with how many of its containers it is drawn inside
+(``inLayer``), and, asked for, its node as its layer's pages list it.
 
 The graph is ``fixtures/membership_graph``: ``dom ⊃ tbl_a ⊃ {col_a1, col_a2}``,
 ``dom ⊃ tbl_b ⊃ col_b1``, ``tbl_up ⊃ col_up``, lineage ``src3 → src2 → src1 → col_a1 →
@@ -59,7 +61,7 @@ def place(test_client: AsyncClient, db_session):
     from backend.app.api.v1.endpoints.graph import get_context_engine
     from backend.app.main import app
 
-    async def _place(ws, view_id, urns, engine=None):
+    async def _place(ws, view_id, urns, engine=None, **extra):
         engine = engine or CountingEngine()
         engine._db_session = db_session
 
@@ -69,7 +71,7 @@ def place(test_client: AsyncClient, db_session):
         app.dependency_overrides[get_context_engine] = _engine
         try:
             return await test_client.post(f"/api/v1/{ws}/graph/view-placements?viewId={view_id}",
-                                          json={"urns": urns})
+                                          json={"urns": urns, **extra})
         finally:
             app.dependency_overrides.pop(get_context_engine, None)
 
@@ -79,6 +81,17 @@ def place(test_client: AsyncClient, db_session):
 def where(resp) -> dict:
     assert resp.status_code == 200, resp.text
     return {u: (p["layerId"], p["source"]) for u, p in resp.json()["placements"].items()}
+
+
+def nested(resp) -> dict:
+    """Each URN's placement with how many of its containers it is drawn inside."""
+    assert resp.status_code == 200, resp.text
+    return {u: (p["layerId"], p["source"], p["inLayer"]) for u, p in resp.json()["placements"].items()}
+
+
+TYPE_LAYERS = [{"id": "c_dom", "name": "Domains", "entityTypes": ["domain"]},
+               {"id": "c_tbl", "name": "Tables", "entityTypes": ["table"]},
+               {"id": "c_col", "name": "Columns", "entityTypes": ["column"]}]
 
 
 async def make(client: AsyncClient, ws: str, src: str, **overrides) -> str:
@@ -235,6 +248,103 @@ async def test_a_member_is_where_its_layer_feed_serves_it(
     assert {source for _layer, source in placed.values()} == {"member"}
 
 
+async def test_inside_a_member_it_is_drawn_under_it_in_its_layer(
+    test_client: AsyncClient, db_session, graph, membership_on, place,
+):
+    """What sits inside a member, and is no member itself, is drawn under the nearest
+    member it is in — in that member's layer, not where its type would go — nested in
+    each container between (``inLayer``). Kept out, it is placed by the layout. An entry
+    of a person's own, and a container kept whole, still come first."""
+    ws = await workspace(test_client)
+    view_id = await make(test_client, ws, "", layers=TYPE_LAYERS, layout={"kind": "custom"},
+                         sources=[{"spec": {"seeds": {"urns": ["dom", "tbl_up"]}}}], exclude=["col_b1"])
+
+    def people(config):
+        config["layout"]["referenceLayout"]["assignments"] = {
+            "col_a2": {"layerId": "c_col", "inheritsChildren": False, "assignedBy": "user"},
+        }
+    await write_config(db_session, view_id, people)
+    assert nested(await place(ws, view_id, ["dom", "tbl_a", "col_a1", "col_a2", "col_b1", "col_up", "src1"])) == {
+        "dom": ("c_dom", "member", 0),
+        "tbl_a": ("c_dom", "inside", 1),          # under dom, in its layer: not with the tables
+        "col_a1": ("c_dom", "inside", 2),         # under tbl_a, under dom
+        "col_a2": ("c_col", "entry", 0),          # a person's own entry comes first
+        "col_b1": ("c_col", "layout", 0),         # kept out: where its type goes
+        "col_up": ("c_tbl", "inside", 1),
+        "src1": (None, "none", None),
+    }
+
+    # tbl_up kept whole: what is inside it comes with it.
+    await db_session.execute(update(ViewMemberORM).where(ViewMemberORM.view_id == view_id,
+                                                         ViewMemberORM.urn == "tbl_up").values(whole=True))
+    await db_session.commit()
+    assert nested(await place(ws, view_id, ["col_up"]))["col_up"] == ("c_tbl", "whole", 1)
+
+
+async def test_a_members_nesting_is_its_rows(test_client: AsyncClient, db_session, graph, membership_on, place):
+    """A member says what its row says (the run counted it); moved by a person to another
+    layer, it is counted there."""
+    ws = await workspace(test_client)
+    view_id = await make(test_client, ws, "", layers=TYPE_LAYERS, layout={"kind": "custom"},
+                         sources=[{"spec": {"seeds": {"urns": ["dom"]}, "expand": {"children": 2}}}])
+    await db_session.execute(update(ViewMemberORM).where(ViewMemberORM.view_id == view_id,
+                                                         ViewMemberORM.urn == "col_a1").values(in_layer=7))
+    await db_session.commit()
+
+    def moved(config):
+        config["membership"]["overrides"] = {"col_a2": {"layerId": "c_dom", "at": "2026-01-01T00:00:00+00:00"}}
+    await write_config(db_session, view_id, moved)
+    placed = nested(await place(ws, view_id, ["col_a1", "col_a2", "tbl_a"]))
+    assert placed["col_a1"] == ("c_col", "member", 7)
+    assert placed["col_a2"] == ("c_dom", "member", 0), "tbl_a is drawn with the tables, not in Domains"
+    assert placed["tbl_a"][:2] == ("c_tbl", "member")
+
+
+async def test_with_nodes_each_one_drawn_comes_as_its_layer_lists_it(
+    test_client: AsyncClient, db_session, graph, membership_on, place,
+):
+    ws = await workspace(test_client)
+    view_id = await make(test_client, ws, "", layers=[*TYPE_LAYERS, {"id": "c_rest", "name": "Rest", "entityTypes": []}],
+                         layout={"kind": "custom", "fallbackLayerId": "c_rest"},
+                         sources=[{"spec": {"seeds": {"urns": ["dom"]}}}])
+    resp = await place(ws, view_id, ["col_a1", "dom", "src1", "urn:nowhere"], nodes=True)
+    assert nested(resp) == {"col_a1": ("c_dom", "inside", 2), "dom": ("c_dom", "member", 0),
+                            "src1": ("c_rest", "fallback", 0), "urn:nowhere": ("c_rest", "fallback", 0)}
+    nodes = resp.json()["nodes"]
+    assert set(nodes) == {"col_a1", "dom", "src1"}, "one the graph doesn't hold has no node"
+    assert nodes["col_a1"] == {
+        **{k: v for k, v in nodes["col_a1"].items() if k not in ("ancestorPath", "inLayer")},
+        "urn": "col_a1", "displayName": "col_a1", "entityType": "column", "inLayer": 2,
+        "ancestorPath": [{"urn": "dom", "displayName": "dom", "entityType": "domain"},
+                         {"urn": "tbl_a", "displayName": "tbl_a", "entityType": "table"}],
+    }
+    assert nodes["dom"]["ancestorPath"] == [] and "inLayer" not in nodes["dom"]
+
+    # The same shape a layer's page lists: the member's node, entry for entry.
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+    from backend.app.main import app
+
+    engine = TypedEngine()
+    engine._db_session = db_session
+    app.dependency_overrides[get_context_engine] = lambda: engine
+    try:
+        page = (await test_client.post(f"/api/v1/{ws}/graph/view-members?viewId={view_id}",
+                                       json={"layerId": "c_dom"})).json()
+    finally:
+        app.dependency_overrides.pop(get_context_engine, None)
+    assert page["nodes"] == [nodes["dom"]]
+    assert (await place(ws, view_id, ["dom"])).json()["nodes"] is None, "asked without nodes: none"
+
+
+async def test_nodes_for_at_most_five_hundred(test_client: AsyncClient, db_session, graph, membership_on, place):
+    ws = await workspace(test_client)
+    view_id = await make(test_client, ws, await source_view(test_client, ws))
+    over = await place(ws, view_id, [f"u{i}" for i in range(501)], nodes=True)
+    assert (over.status_code, over.json()["detail"]["reason"]) == (422, "too_many_nodes")
+    assert len(where(await place(ws, view_id, [f"u{i}" for i in range(500)], nodes=True))) == 500
+    assert len(where(await place(ws, view_id, [f"u{i}" for i in range(501)]))) == 501
+
+
 # ── Subset views ───────────────────────────────────────────────────────────
 
 
@@ -288,6 +398,78 @@ async def test_a_subset_with_its_own_layers_places_by_type(
     no_rest = await subset(test_client, ws, src, layout="own",
                            layers=[{"name": "Tables", "entityTypes": ["table"]}], rest=None)
     assert where(await place(ws, no_rest, ["col_up"])) == {"col_up": (None, "none")}
+
+
+async def test_a_subset_says_what_its_matches_are_drawn_inside(
+    test_client: AsyncClient, db_session, subsets_on, place,
+):
+    ws = await workspace(test_client)
+    src = await source_view(test_client, ws)
+    by_type = await subset(test_client, ws, src, layout="own", rest="Everything else",
+                           layers=[{"name": "Data", "entityTypes": ["table", "column"]}])
+    placed = nested(await place(ws, by_type, ["col_a1", "tbl_a", "dom"]))
+    assert {u: p[2] for u, p in placed.items()} == {"col_a1": 1, "tbl_a": 0, "dom": 0}, \
+        "a column under its table, both of the layer's types; the domain in another"
+    following_base = await subset(test_client, ws, src)
+    placed = nested(await place(ws, following_base, ["col_a1", "tbl_a"]))
+    assert placed == {"col_a1": ("s_col", "layout", 0), "tbl_a": ("s_tbl", "layout", 0)}
+
+
+# ── A subset of a view made from a query: placed by its base's member rows ──
+
+
+async def _subset_of_list(test_client: AsyncClient, db_session):
+    """A view made from a query — ``dom`` and ``tbl_up`` its members, in layers by type —
+    and its scope as a subset of it resolves it, the tables' layer hidden."""
+    from types import SimpleNamespace
+
+    from backend.app.services.search_views import layers_of
+    from backend.app.services.view_scope import MemberLayers
+
+    ws = await workspace(test_client)
+    base = await make(test_client, ws, "", layers=TYPE_LAYERS, layout={"kind": "custom"},
+                      sources=[{"spec": {"seeds": {"urns": ["dom", "tbl_up"]}}}])
+    epoch = (await db_session.execute(select(ViewMembershipStateORM.members_epoch).where(
+        ViewMembershipStateORM.view_id == base))).scalar_one()
+    shown = [layer for layer in layers_of(await made(db_session, base), add_rest=True) if layer.id != "c_tbl"]
+    eff = SimpleNamespace(scope_hash="boundary", subset_layers=tuple(shown), subset_placement=None,
+                          subset_members=MemberLayers(view_id=base, epoch=epoch))
+    return base, epoch, eff
+
+
+async def test_a_subset_of_a_view_made_from_a_query_is_placed_by_its_members(
+    test_client: AsyncClient, db_session, graph, membership_on,
+):
+    """Each shown layer holds what its base draws there — its members, its entries and
+    what is inside its members, under them — and "Other matches" the rest; what the base
+    draws in a layer the subset hides is nowhere."""
+    from backend.app.services.live_views import where as served
+
+    base, epoch, eff = await _subset_of_list(test_client, db_session)
+
+    def people(config):
+        config["layout"]["referenceLayout"]["assignments"] = {
+            "src2": {"layerId": "c_col", "inheritsChildren": True, "assignedBy": "user"}}
+    await write_config(db_session, base, people)
+    engine = TypedEngine()
+    engine._db_session = db_session
+    placed = await served.place_in_subset(
+        engine, eff, ["dom", "tbl_a", "col_a1", "tbl_up", "col_up", "src2", "src1"], session=db_session)
+    assert placed == {
+        "dom": ("c_dom", "member", 0),
+        "tbl_a": ("c_dom", "inside", 1),
+        "col_a1": ("c_dom", "inside", 2),
+        "tbl_up": (None, "none", None),          # its layer is hidden here
+        "col_up": (None, "none", None),          # and so is what is inside it
+        "src2": ("c_col", "entry", 0),
+        "src1": ("other-matches", "fallback", 0),
+    }
+
+    # Its base's answer is in what decides placing, so a cached answer turns over.
+    later = type(eff)(**{**vars(eff), "subset_members": type(eff.subset_members)(view_id=base, epoch=epoch + 1)})
+    assert served.subset_digest(later) != served.subset_digest(eff)
+    with pytest.raises(ValueError):
+        await served.place_in_subset(engine, eff, ["dom"])
 
 
 # ── Refusals, links and the cache ──────────────────────────────────────────
@@ -361,8 +543,11 @@ async def test_an_answer_is_cached_under_what_decides_it(
     assert first.reads and again.reads == 0, "the same URNs, however asked: one answer"
     endpoint, params = cache.asked[0]
     assert endpoint == "view.placements"
-    assert set(params) == {"view", "epoch", "updated_at", "digest", "urns", "data_version"}
-    assert params["view"] == view_id and params["epoch"] is not None
+    assert set(params) == {"view", "epoch", "updated_at", "digest", "urns", "nodes", "data_version"}
+    assert params["view"] == view_id and params["epoch"] is not None and params["nodes"] is False
+    with_nodes = CountingEngine()
+    await place(ws, view_id, ["tbl_up", "dom"], with_nodes, nodes=True)
+    assert with_nodes.reads and cache.asked[-1][1]["nodes"] is True, "with nodes: an answer of its own"
 
     # The view's members worked out again (to none, here): another answer.
     await db_session.execute(update(ViewMembershipStateORM).where(ViewMembershipStateORM.view_id == view_id)
