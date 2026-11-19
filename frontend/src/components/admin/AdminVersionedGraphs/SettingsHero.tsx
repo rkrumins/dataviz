@@ -2,7 +2,7 @@
  * The top of a settings page: where its settings stand, and the ways in.
  *
  *   SettingsHero   the DashboardHero pattern, in a card with a contained halo: an eyebrow (the
- *                  page and the level), a headline counted from the values ("5 of 46 settings
+ *                  page and the level), a headline counted from the values ("5 of 48 settings
  *                  changed from the default"), the server's reads posture under it, a pill while
  *                  changes are staged (to Review), a chip for what this platform's facts suggest,
  *                  the page's actions (or, for a viewer who may only read, why not), the compass at

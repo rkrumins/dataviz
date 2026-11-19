@@ -173,6 +173,43 @@ The panel shows:
 - **Lineage** — its **Data Sources** and **Data Consumers**;
 - **History** — its recorded changes, when version control is turned on.
 
+**Properties** are grouped into sections, one per folder (a key such as
+`Technical/Physical path` sits in **Technical**). Properties outside any folder
+come first, under **General**. Each section header shows how many properties
+it holds and what a draft changed in it. A long list opens its first two
+sections, and the drawer remembers which ones you open for each type of
+entity.
+
+Values are shown as what they are:
+
+- numbers grouped (*1,250,000*), in their unit where the key names one
+  (*50 MB*);
+- *Yes* / *No*, a date as a date, and a time as *2h ago*, with the exact time
+  on hover;
+- a link as its site and page, with the full address on hover;
+- a person as the person, an id as a chip that copies, and tags as chips;
+- anything empty as **Not set**.
+
+Long text uses the panel's full width. It shows a few lines, then
+**Show more**, then **Show all**, or **Full screen**.
+
+**View** next to the search box switches between **Sections** and **Flat**
+(every key in full). In the Technical view it also switches text between
+**Formatted** and **Markdown** as stored. A property shown at a glance isn't
+listed again: a line under the properties names it and leads up to it. To
+feature any property at a glance, use ✦ on its row.
+
+**History** lists each revision under its day: who made it, what kind of change
+it was (*published*, *revert*, *import*…), its message and why. Open a revision
+to see:
+
+- **What changed**: the revision's own changes;
+- **As it was**: the entity as that revision left it;
+- **Compared with now**: what has changed since.
+
+**See history** in the drawer's footer goes straight there. If the view hides
+History, it is shown for that drawer.
+
 The Business view opens on **At a glance**, then **Properties**,
 **Classifications** and **Lineage**; the Technical view shows every section
 except **At a glance**, and adds the **JSON** tab with the entity's raw data.

@@ -1,14 +1,20 @@
 """The drafts and reviews policy of a data source: the level a new draft starts at, the levels a
-draft may have, and whether the person who opened a review may approve it, or merge it.
+draft may have, whether the person who opened a review may approve it, or merge it, how many
+approvals a review needs, and whether open threads hold its merge.
 
 Each field is a setting in the settings store (``config/versioned_graph_settings.py``:
-``drafts.defaultVisibility``, ``drafts.levels``, ``drafts.selfApproval``, ``drafts.selfMerge``), and
-resolves on its own, most specific first: the data source's graph's value (a fork's: its root's),
-then its workspace's, then the platform's, then the built-in default. Drafts start public, may be
-either level, and the opener may approve and merge. A level that is the only one allowed is also
-where a new draft starts (the resolver derives it). The policy is read where a draft is created,
-changes level, or a review is read, approved, merged or published. It is read fresh every time
-(``strict``), so a tightened rule holds from the next such request.
+``drafts.defaultVisibility``, ``drafts.levels``, ``drafts.selfApproval``, ``drafts.selfMerge``,
+``drafts.requiredApprovals``, ``drafts.threadsHold``), and resolves on its own, most specific first:
+the data source's graph's value (a fork's: its root's), then its workspace's, then the platform's,
+then the built-in default. Drafts start public, may be either level, the opener may approve and
+merge, a review needs everyone asked to approve it, and open threads don't hold it. A level that is
+the only one allowed is also where a new draft starts (the resolver derives it). The policy is read
+where a draft is created, changes level, or a review is read, reviewed, approved, merged or
+published. It is read fresh every time (``strict``), so a tightened rule holds from the next such
+request.
+
+The store spells "everyone asked" as the word ``"everyone"``; this policy, the old columns and the
+old endpoints as ``0`` (``resolver.encode`` and ``decode``).
 
 :func:`resolve` is the same rule over the old columns (``WorkspaceORM``, ``WorkspaceDataSourceORM``),
 which one release keeps writing (``settings.legacy``) and compares against.
@@ -31,10 +37,13 @@ FIELDS = (
     ("draft_levels", "levels", "any"),
     ("review_self_approval", "selfApproval", True),
     ("review_self_merge", "selfMerge", True),
+    ("review_required_approvals", "requiredApprovals", 0),
+    ("review_threads_hold", "threadsHold", False),
 )
 #: Each API field's setting in the settings store.
 KEYS = {"defaultVisibility": "drafts.defaultVisibility", "levels": "drafts.levels",
-        "selfApproval": "drafts.selfApproval", "selfMerge": "drafts.selfMerge"}
+        "selfApproval": "drafts.selfApproval", "selfMerge": "drafts.selfMerge",
+        "requiredApprovals": "drafts.requiredApprovals", "threadsHold": "drafts.threadsHold"}
 #: Where a value came from, as the resolver names it, in this policy's words: the platform's, the
 #: environment's and the built-in one are all ``default``.
 _SOURCES = {"graph": SOURCE_DATA_SOURCE, "workspace": SOURCE_WORKSPACE}
@@ -48,6 +57,10 @@ class EffectiveDraftsPolicy:
     levels: str = "any"
     self_approval: bool = True
     self_merge: bool = True
+    #: Approvals a review needs: 0, everyone asked; N, any N that stand.
+    required_approvals: int = 0
+    #: Open threads hold a review's merge.
+    threads_hold: bool = False
     #: ``(API field, data_source | workspace | default)`` pairs.
     sources: tuple = ()
 
@@ -55,9 +68,17 @@ class EffectiveDraftsPolicy:
         """Whether a new draft may have this level."""
         return self.levels == "any" or self.levels == f"{visibility}_only"
 
+    @property
+    def rule(self):
+        """What a review must have to merge (``review_state.ReviewRule``)."""
+        from backend.app.services.versioning.review_state import ReviewRule
+
+        return ReviewRule(required_approvals=self.required_approvals, threads_hold=self.threads_hold)
+
     def as_dict(self) -> dict:
         return {"defaultVisibility": self.default_visibility, "levels": self.levels,
                 "selfApproval": self.self_approval, "selfMerge": self.self_merge,
+                "requiredApprovals": self.required_approvals, "threadsHold": self.threads_hold,
                 "sources": dict(self.sources)}
 
 
@@ -85,6 +106,7 @@ def resolve(workspace: Any = None, data_source: Any = None) -> EffectiveDraftsPo
     return EffectiveDraftsPolicy(
         default_visibility=values["defaultVisibility"], levels=values["levels"],
         self_approval=bool(values["selfApproval"]), self_merge=bool(values["selfMerge"]),
+        required_approvals=int(values["requiredApprovals"]), threads_hold=bool(values["threadsHold"]),
         sources=tuple(sorted(sources.items())))
 
 
@@ -100,10 +122,12 @@ async def effective(workspace_id: Optional[str] = None, data_source_id: Optional
     values, sources = {}, {}
     for api, key in KEYS.items():
         found = resolver.resolve(ctx, key, target)
-        values[api], sources[api] = found["effective"], _SOURCES.get(found["source"], SOURCE_DEFAULT)
+        values[api] = resolver.encode(ctx.settings[key], found["effective"])
+        sources[api] = _SOURCES.get(found["source"], SOURCE_DEFAULT)
     return EffectiveDraftsPolicy(
         default_visibility=values["defaultVisibility"], levels=values["levels"],
         self_approval=bool(values["selfApproval"]), self_merge=bool(values["selfMerge"]),
+        required_approvals=int(values["requiredApprovals"]), threads_hold=bool(values["threadsHold"]),
         sources=tuple(sorted(sources.items())))
 
 
@@ -122,12 +146,14 @@ async def load(session, data_source_id: str) -> EffectiveDraftsPolicy:
 
 async def own(session, scope: str, scope_id: str) -> Dict[str, Any]:
     """What a workspace (``scope`` ``workspace``) or a data source's graph (``graph``) chose itself
-    in the settings store, by API field; None where it chose nothing."""
-    from backend.app.services.settings import registry, store
+    in the settings store, by API field in the old endpoints' spelling; None where it chose
+    nothing."""
+    from backend.app.services.settings import registry, resolver, store
 
-    held = {r.key: r.value for r in await store.read_scope(session, registry().DOMAIN, scope,
-                                                           scope_id)}
-    return {api: held.get(key) for api, key in KEYS.items()}
+    reg = registry()
+    held = {r.key: r.value for r in await store.read_scope(session, reg.DOMAIN, scope, scope_id)}
+    return {api: (resolver.encode(reg.BY_KEY[key], held[key]) if held.get(key) is not None
+                  else None) for api, key in KEYS.items()}
 
 
 async def save(session, scope: str, scope_id: str, changes: dict, *, actor: Optional[str],
@@ -136,17 +162,21 @@ async def save(session, scope: str, scope_id: str, changes: dict, *, actor: Opti
     graph, through the settings store as an old endpoint saves (``settings.legacy.save``, which
     runs ``check`` first: ``settings.service.checker`` for who saves, against the platform's limits
     and locks). When a field changed, ``record(session, before, after)`` runs in the same
-    transaction with what the fields that changed were and became, by API field. Commits."""
-    from backend.app.services.settings import legacy
+    transaction with what the fields that changed were and became, by API field in the old
+    endpoints' spelling. Commits."""
+    from backend.app.services.settings import legacy, registry, resolver
 
     field_of = {key: api for api, key in KEYS.items()}
+    settings = registry().BY_KEY
 
     async def recorded(s, change_set) -> None:
-        await record(s, {field_of[a.key]: a.before_value for a in change_set.applied},
-                     {field_of[a.key]: a.after_value for a in change_set.applied})
+        await record(s, {field_of[a.key]: resolver.encode(settings[a.key], a.before_value)
+                         for a in change_set.applied},
+                     {field_of[a.key]: resolver.encode(settings[a.key], a.after_value)
+                      for a in change_set.applied})
 
     await legacy.save(session, scope, scope_id,
-                      {KEYS[api]: None if value == "inherit" else value
+                      {KEYS[api]: None if value == "inherit" else resolver.decode(settings[KEYS[api]], value)
                        for api, value in changes.items()}, actor=actor, record=recorded,
                       check=check)
 

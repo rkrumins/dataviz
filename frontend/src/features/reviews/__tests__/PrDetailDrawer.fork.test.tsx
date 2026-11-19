@@ -1,15 +1,14 @@
 /**
  * PrDetailDrawer on a fork's review (from a fork's main into its parent's):
- *   • a review a job is merging (`merging`) shows that it is merging, with nothing to press — the
- *     server refuses another merge, closing it or approving it meanwhile;
+ *   • a review a job is merging (`merging`) says it is merging, with nothing to press — the server
+ *     refuses another merge, closing it or approving it meanwhile;
  *   • merged — at once or by its job, the merge followed to its end — the drawer stays and reads as
  *     merged (a fork's review has no view to go back to), and the receipt is the parent's, where the
  *     merge landed;
  *   • a fork behind its parent says to update it first, and offers Update from parent, not a
  *     draft's "pull latest";
- *   • with forks off it offers neither Approve nor Merge, and says why; it can still be dismissed.
- * A draft's review still closes after merging, and lands on the view it came from. Merged, it names
- * its commit and offers "Revert this merge" only when the merge landed on main (`resultingCommitSeq`).
+ *   • with forks off it offers neither a verdict nor Merge, and says why.
+ * A draft's review still closes after merging, and lands on the view it came from.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -25,25 +24,43 @@ const idle = { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }
 let forksOn = true
 let pr: Record<string, unknown>
 
+const { invalidateQueries } = vi.hoisted(() => ({ invalidateQueries: vi.fn() }))
+vi.mock('@tanstack/react-query', async (orig) => ({
+  ...(await orig<typeof import('@tanstack/react-query')>()),
+  useQueryClient: () => ({ invalidateQueries }),
+}))
+vi.mock('../decisions/useReviewDecisions', () => ({
+  DECISION_KEYS: { all: (...a: unknown[]) => ['reviewDecisions', ...a] },
+  useReviewDecisionSummary: () => ({ data: undefined }),
+  useDecideChanges: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+}))
+vi.mock('../comments/ReviewDiscussion', () => ({ ReviewDiscussion: () => null }))
+vi.mock('../comments/useReviewComments', () => ({ useReviewCommentCounts: () => ({ data: undefined }) }))
+vi.mock('../../versioning/components/ChangeList', () => ({ ChangeList: () => null }))
+vi.mock('../../versioning/components/ChangeTreePanel', () => ({ ChangeTreePanel: () => null }))
 vi.mock('../../versioning/hooks/useVersioning', () => ({
   useMergeRequest: () => ({ data: pr, isLoading: false, refetch }),
-  usePullRequestDiff: () => ({ data: undefined }),
+  useChangeSummary: () => ({ data: undefined, isFetching: false }),
+  usePrDiffSummary: () => ({ data: undefined, isFetching: false }),
+  VERSIONING_KEYS: {
+    changeList: (...a: unknown[]) => ['changeList', ...a],
+    prDiffSummary: (...a: unknown[]) => ['prDiffSummary', ...a],
+  },
   usePullLatestDraft: () => idle,
   useCommitLog: () => ({ data: undefined }),
   useApproveMergeRequest: () => idle,
   useCloseMergeRequest: () => idle,
   useMergeMergeRequest: () => ({ ...idle, mutateAsync: mergeMutateAsync }),
   useUpdateMergeRequest: () => idle,
+  useSubmitReview: () => idle,
+  useWithdrawChangesRequest: () => idle,
+  useDiscardRejected: () => idle,
   useBranchViewChanges: () => ({ data: undefined }),
   useRevertCommit: () => idle,
 }))
 vi.mock('../../versioning/components/UpdateFromParentButton', () => ({
   UpdateFromParentButton: ({ forkGraphId, onUpdated }: { forkGraphId: string; onUpdated?: (r: unknown) => void }) =>
     <button data-fork={forkGraphId} onClick={() => onUpdated?.({ upToDate: false })}>Update from parent</button>,
-}))
-vi.mock('../../versioning/components/RollbackDialogs', () => ({
-  RevertDialog: ({ open, graphId, commit }: { open: boolean; graphId: string; commit: { commit_id: string } }) =>
-    open ? <div data-testid="revert" data-graph={graphId} data-commit={commit.commit_id} /> : null,
 }))
 vi.mock('@/store/auth', () => ({
   usePermission: () => true,
@@ -83,12 +100,12 @@ beforeEach(() => {
 
 describe('PrDetailDrawer — a fork’s review', () => {
   it('shows a review its job is merging as in progress, with nothing to press', () => {
-    pr = forkPr({ status: 'merging' })
+    pr = forkPr({ status: 'merging', reviewers: ['u_me'] })
     renderDrawer()
-    expect(screen.getByRole('status')).toHaveTextContent(/merging in the background/i)
-    expect(screen.queryByRole('button', { name: /^Merge$/ })).toBeNull()
-    expect(screen.queryByRole('button', { name: /Approve/ })).toBeNull()
-    expect(screen.queryByRole('button', { name: /Dismiss/ })).toBeNull()
+    expect(screen.getByText('Merging in the background')).toBeInTheDocument()
+    expect(screen.getByText(/Nothing can change it meanwhile/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Merge|Approve|Dismiss/ })).toBeNull()
+    expect(screen.queryByRole('link', { name: /Finish your review/ })).toBeNull()
   })
 
   it('stays open once merged, and the receipt is the parent’s', async () => {
@@ -106,31 +123,27 @@ describe('PrDetailDrawer — a fork’s review', () => {
     renderDrawer()
     fireEvent.click(screen.getByRole('button', { name: /^Merge$/ }))
     expect(await screen.findByText(/behind its parent by 4 changes/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Update from parent' })).toHaveAttribute('data-fork', 'g_f')
+    // What's next offers it, and it is the next thing to do.
+    const updates = screen.getAllByRole('button', { name: 'Update from parent' })
+    expect(updates).toHaveLength(2)
+    for (const u of updates) expect(u).toHaveAttribute('data-fork', 'g_f')
     expect(screen.queryByRole('button', { name: /Pull latest/ })).toBeNull()
     expect(notify).not.toHaveBeenCalledWith('error', expect.stringMatching(/pull the latest/))
     expect(refetch).toHaveBeenCalled()
     // Updated: nothing left to say, and Merge is the next step.
-    fireEvent.click(screen.getByRole('button', { name: 'Update from parent' }))
+    fireEvent.click(updates.at(-1)!)
     expect(screen.queryByText(/behind its parent/)).toBeNull()
     expect(screen.getByRole('button', { name: /^Merge$/ })).toBeEnabled()
   })
 
-  it('reverts a merged fork review on the parent, where the merge landed', () => {
-    pr = forkPr({ status: 'merged', resultingCommitId: 'c9', mergedBy: 'u_me' })
-    renderDrawer()
-    fireEvent.click(screen.getByRole('button', { name: /Revert this merge/ }))
-    expect(screen.getByTestId('revert')).toHaveAttribute('data-graph', 'g1')
-  })
-
-  it('with forks off, offers neither Approve nor Merge, says why, and can still be dismissed', () => {
+  it('with forks off, offers neither a verdict nor Merge, and says why', () => {
     forksOn = false
     pr = forkPr({ reviewers: ['u_me'] })
     renderDrawer()
-    expect(screen.getByText(/Forks are turned off for this deployment/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^Merge$/ })).toBeNull()
-    expect(screen.queryByRole('button', { name: /Approve/ })).toBeNull()
-    expect(screen.getByRole('button', { name: /Dismiss/ })).toBeInTheDocument()
+    expect(screen.getByText('Forks are turned off')).toBeInTheDocument()
+    expect(screen.getByText(/can be read but not approved or merged/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Merge|Approve/ })).toBeNull()
+    expect(screen.queryByRole('link', { name: /Finish your review/ })).toBeNull()
   })
 })
 
@@ -142,24 +155,5 @@ describe('PrDetailDrawer — a draft’s review, for contrast', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled())
     expect(setReceipt).toHaveBeenCalledWith(expect.objectContaining({ graphId: 'g1' }))
     expect(switchToMain).toHaveBeenCalled()
-  })
-
-  it('names its merge’s commit, and offers to revert it, only when the merge landed on main', () => {
-    const merged = (over: Record<string, unknown>) => ({
-      ...forkPr(), graphId: 'g1', targetGraphId: 'g1', sourceBranchId: 'br_1', status: 'merged',
-      mergedBy: 'u_me', userNames: { u_me: 'Ana' }, ...over,
-    })
-    // Merged on an older server, changing nothing: it recorded its draft's own head, not on main.
-    pr = merged({ resultingCommitId: 'cmt_drafthead', resultingCommitSeq: null })
-    const { unmount } = renderDrawer()
-    expect(screen.getByText('Merged by Ana')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Revert this merge/ })).toBeNull()
-    unmount()
-
-    pr = merged({ resultingCommitId: 'cmt_squash1', resultingCommitSeq: 12 })
-    renderDrawer()
-    expect(screen.getByText('Merged by Ana · cmt_squa')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /Revert this merge/ }))
-    expect(screen.getByTestId('revert')).toHaveAttribute('data-commit', 'cmt_squash1')
   })
 })

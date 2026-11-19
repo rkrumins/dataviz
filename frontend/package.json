@@ -24,6 +24,7 @@
     "harness:settings": "node scripts/settings-shot.mjs",
     "harness:versioned-graphs": "node scripts/versioned-graphs-shot.mjs",
     "harness:digest": "node scripts/digest-shot.mjs",
+    "harness:scale": "node scripts/scale-shot.mjs",
     "probe:drawer": "node scripts/app-probe-drawer.mjs",
     "probe:fold": "node scripts/app-probe-fold.mjs",
     "probe:ghosts": "node scripts/app-probe-ghosts.mjs"
@@ -96,6 +97,7 @@
     "eslint": "^10.12.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.7",
+    "fake-indexeddb": "^6.2.8",
     "fast-check": "^3.23.2",
     "globals": "^15.14.0",
     "jsdom": "^29.1.1",

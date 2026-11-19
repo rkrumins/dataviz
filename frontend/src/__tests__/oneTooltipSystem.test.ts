@@ -65,6 +65,8 @@ const SCOPE = [
   'features/versioning/components',
   'components/admin/AdminVersionedGraphs',
   'components/settings',
+  'features/reviews/page',
+  'features/reviews/components',
 ]
 
 /**

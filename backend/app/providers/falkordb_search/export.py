@@ -55,6 +55,7 @@ from backend.app.providers.falkordb_search.plan import (
     expand_unit,
     make_plan,
     match_statement,
+    read_members,
 )
 from backend.app.providers.falkordb_search.relevance import display_name_expr
 from backend.app.providers.falkordb_search.session import (
@@ -256,6 +257,7 @@ class _ExportWork:
         answered first (``engine.unit_context``)."""
         from backend.app.providers.falkordb_search.engine import unit_context
 
+        unit = await read_members(unit, self.ctx)
         ctx = dataclasses.replace(self.ctx, clamp_depths=tuple(self.session.clamp_depths))
         ctx = await unit_context(unit, ctx, self.run, timeout_s)
         columns = self.manifest.columns
@@ -447,6 +449,7 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
                      if query.scope.scope_mode == "visible" else None),
             within_hops=hops, hop_parts=hop_parts, tail=tuple(compiler.tail),
             raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
+            members=context.members,
         )
     query_id = _query_id(query, context.scope_hash, fmt, cols)
     sid = session_id_of(query_id, context.data_version, None)
@@ -470,6 +473,7 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
                 run=lambda c, p: run(c, p, max(1.0, statement_s(settings))),
                 width=settings.chunk_width, walk_max=settings.walk_max,
                 timeout_s=max(0.5, deadline + _GRACE_S - time.monotonic()),
+                members=context.members,
             )
             plan.units = _page_sized(plan.units)
         session = Session.start(sid, query_id, context.data_version, None, 0, plan,

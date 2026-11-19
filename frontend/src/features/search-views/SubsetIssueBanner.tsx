@@ -24,7 +24,7 @@ const WORDS: Record<SubsetIssue, { title: string; detail: string; action?: { lab
   base_missing: {
     title: 'Its base view isn’t available',
     // Deleted — or, for a view brought in from another environment, never here.
-    detail: 'This view shows a search’s matches inside another view, which was deleted or isn’t in this workspace. Restored, it shows its matches again: deleted views are kept under Deleted in the Explorer, and a workspace admin can restore one.',
+    detail: 'This view is a subset of another view — its layers are that view’s — which was deleted or isn’t in this workspace. It keeps what it holds, and restored, it shows it in those layers again: deleted views are kept under Deleted in the Explorer, and a workspace admin can restore one.',
     action: { label: 'Open deleted views', to: '/explorer?category=deleted' },
   },
 }

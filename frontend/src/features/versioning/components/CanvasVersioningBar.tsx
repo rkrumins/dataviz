@@ -56,6 +56,7 @@ import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
 import { ReadRouteChip } from './ReadRouteChip'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
+import { changeListSource, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 import { ContributorsStack } from './ContributorsStack'
 import { OthersSavedChip } from './OthersSavedChip'
 import { CommitDialog } from './CommitDialog'
@@ -170,9 +171,14 @@ export function CanvasVersioningBar({
     return diffQ.data ? fromDiffVsMain(diffQ.data, branchId) : EMPTY_CHANGE_SET
   }, [branchId, large, indexQ.data, countsQ.data, diffQ.data])
   const changeCount = changeSet.counts.added + changeSet.counts.modified + changeSet.counts.removed
+  // On the canvas, the counts step through what they count.
+  const canStep = useChangeNavigatorStore((s) => s.canReveal)
   // New entities a curated view could not draw: it draws a page of what the draft created.
   const createdNotLoaded = useCanvasStore((s) => s.createdRootsNotLoaded)
   const loadingChanges = diffQ.isLoading || (large && (indexQ.isLoading || countsQ.isLoading))
+  // A busy or timed-out count is not "no changes": it says so, with a retry.
+  const changesFailed = large ? indexQ.isError || countsQ.isError : diffQ.isError
+  const retryChanges = () => { if (large) { void indexQ.refetch(); void countsQ.refetch() } else void diffQ.refetch() }
   // A draft's rings are its own diff's: whatever replaced them (a revision closed, a highlight
   // cleared) gives way to them again.
   const activeChangeSet = useBranchStore((s) => s.activeChangeSet)
@@ -417,7 +423,8 @@ export function CanvasVersioningBar({
         {isDraft && branchId && (
           <div className="flex items-center gap-2 text-ink-muted">
             {loadingChanges ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              // A large draft's index takes a moment: say it is being counted.
+              <span className="text-xs inline-flex items-center gap-1.5"><Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />Counting changes…</span>
             ) : (
               <>
                 {/* The distinction the whole draft model hinges on — saved to
@@ -427,13 +434,30 @@ export function CanvasVersioningBar({
                   <HoverTip
                     className="inline-flex"
                     label={`Saved to this ${BRANCH_VOCAB.draft.toLowerCase()}, not published yet`}
-                    detail={`${BRANCH_VOCAB.publish} sends them to the version everyone sees`}
+                    detail={canStep
+                      ? `${BRANCH_VOCAB.publish} sends them to the version everyone sees. Click to step through them on the canvas.`
+                      : `${BRANCH_VOCAB.publish} sends them to the version everyone sees`}
                   >
-                    <span className="flex items-center gap-1.5">
-                      <ChangeCountChips changeSet={changeSet} />
-                      <span className="text-[11px] text-ink-muted/80">in branch</span>
-                    </span>
+                    {canStep && workspaceId && graphId && branchId ? (
+                      <button type="button" onClick={() => useChangeNavigatorStore.getState().start(
+                        changeListSource(workspaceId, graphId, { branchId }), { scope: 'saved' })}
+                        aria-label="Step through the saved changes on the canvas"
+                        className="flex items-center gap-1.5 rounded-lg px-1 -mx-1 hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+                        <ChangeCountChips changeSet={changeSet} />
+                        <span className="text-[11px] text-ink-muted/80">in branch</span>
+                      </button>
+                    ) : (
+                      <span className="flex items-center gap-1.5">
+                        <ChangeCountChips changeSet={changeSet} />
+                        <span className="text-[11px] text-ink-muted/80">in branch</span>
+                      </span>
+                    )}
                   </HoverTip>
+                ) : changesFailed ? (
+                  <button type="button" onClick={retryChanges}
+                    className="text-xs font-medium text-amber-600 dark:text-amber-400 hover:underline">
+                    Couldn’t count the changes — try again
+                  </button>
                 ) : uncommitted === 0 && viewChangeCount === 0 ? (
                   <span className="text-xs">No changes yet</span>
                 ) : null}
@@ -517,7 +541,9 @@ export function CanvasVersioningBar({
 
             {/* The most consequential control in the bar, and the only one in
                 its cluster that said nothing on hover. */}
-            {!readOnlyDraft && (
+            {/* Offered once there is something to publish: changes saved on the draft, views it
+                changes, or edits still staged (the dialog then offers to save them first). */}
+            {!readOnlyDraft && (loadingChanges || changeCount > 0 || viewChangeCount > 0 || uncommitted > 0) && (
             <HoverTip
               className="inline-flex"
               label={`Send this draft to the ${BRANCH_VOCAB.published.toLowerCase()} version everyone sees`}

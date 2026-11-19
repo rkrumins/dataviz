@@ -3,6 +3,7 @@ import type { Node, Edge, Viewport } from '@xyflow/react'
 import type { HydrationPhase, HydrationStatus } from '@/hooks/useGraphHydration'
 import { useStagedChangesStore } from './stagedChangesStore'
 import { opensDetailsOnSelect } from './detailsOnSelect'
+import { gatheringNodeUpdates, registerNodeUpdateWriter } from './nodeUpdateBatch'
 import { filterIncomingEdges, overlayOnReplace } from './stagedOverlay'
 import { toCanvasEdge, toCanvasNode } from '@/lib/canvasNodeMapper'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
@@ -157,6 +158,9 @@ export interface SearchFeedState {
   capped: boolean
   /** Rows listed so far. */
   delivered: number
+  /** Which server feed lists it: the view's stored search (absent), or — a view
+   *  made from a query — its members, read from the server's member table. */
+  source?: 'members'
 }
 
 /** New roots a draft created that a curated view loads by URN: a page of them. They have no
@@ -390,6 +394,8 @@ interface CanvasState {
 
   // Node/Edge CRUD (Manual)
   updateNode: (id: string, data: Partial<LineageNode['data']>) => void
+  /** `updateNode` for many nodes, in one write. */
+  updateNodes: (updates: ReadonlyMap<string, Partial<LineageNode['data']>>) => void
   /** Replace the server-owned fields (name, description, properties, `version`, …) of the nodes
    *  the canvas holds with the server's — after a save, so the canvas shows exactly what was
    *  stored and the next edit's token is current. Client state (position, pending flags) and the
@@ -906,11 +912,25 @@ export const useCanvasStore = create<CanvasState>()(
       setEditing: (isEditing) => set({ isEditing }),
 
       // Node/Edge CRUD (Manual)
-      updateNode: (id, data) => set((state) => ({
-        nodes: state.nodes.map((n) =>
-          n.id === id ? { ...n, data: { ...n.data, ...data } } : n
-        )
-      })),
+      updateNode: (id, data) => {
+        // Inside a batch (an Undo of many edits), gathered and written once.
+        const batch = gatheringNodeUpdates()
+        if (batch) { batch.set(id, { ...batch.get(id), ...data }); return }
+        set((state) => ({
+          nodes: state.nodes.map((n) =>
+            n.id === id ? { ...n, data: { ...n.data, ...data } } : n
+          )
+        }))
+      },
+      updateNodes: (updates) => set((state) => {
+        if (updates.size === 0) return state
+        return {
+          nodes: state.nodes.map((n) => {
+            const data = updates.get(n.id)
+            return data ? { ...n, data: { ...n.data, ...data } } : n
+          }),
+        }
+      }),
       applyServerNodes: (fresh) => set((state) => {
         if (fresh.length === 0) return state
         const byUrn = new Map(fresh.map((g) => [g.urn, g]))
@@ -1056,6 +1076,9 @@ export const useCanvasStore = create<CanvasState>()(
     }
   )
 )
+
+// A burst of hooks (an Undo of a bulk edit) writes its node updates here, once.
+registerNodeUpdateWriter((updates) => useCanvasStore.getState().updateNodes(updates as ReadonlyMap<string, Partial<LineageNode['data']>>))
 
 /**
  * Fill in what the store is MISSING about a node it already holds.

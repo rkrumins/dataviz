@@ -27,6 +27,7 @@ vi.mock('@/services/versioningApiService', async (importOriginal) => ({
 }))
 
 import { ChangeList } from '../ChangeList'
+import { useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 
 const NONE = { added: 0, modified: 0, removed: 0 }
 
@@ -79,7 +80,7 @@ describe('ChangeList', () => {
     expect(screen.getByText('Column')).toBeInTheDocument()
     // The second page was asked for from where the first ended.
     expect(api.getChangeEntries).toHaveBeenNthCalledWith(2, 'ws1', 'g1', { branchId: 'br_1' },
-      expect.objectContaining({ kind: 'node' }), 1, 100)
+      expect.objectContaining({ kind: 'node' }), 1, 100, true, false)
     expect(screen.getByText('4 entities')).toBeInTheDocument()
   })
 
@@ -92,12 +93,12 @@ describe('ChangeList', () => {
 
     await user.click(screen.getByRole('radio', { name: /Relationships/ }))
     await waitFor(() => expect(api.getChangeEntries).toHaveBeenLastCalledWith(
-      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge' }), 0, 100))
+      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge' }), 0, 100, true, false))
 
     const statuses = screen.getByRole('group', { name: /Show changes that were/ })
     await user.click(within(statuses).getByRole('button', { name: /Added/ }))
     await waitFor(() => expect(api.getChangeEntries).toHaveBeenLastCalledWith(
-      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge', statuses: ['added'] }), 0, 100))
+      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge', statuses: ['added'] }), 0, 100, true, false))
   })
 
   it('opens a row to its before and after, fetched for that row alone', async () => {
@@ -124,6 +125,32 @@ describe('ChangeList', () => {
     expect(await screen.findByText('About 300,000 changes')).toBeInTheDocument()
     expect(screen.getByText(/more than a list here shows/)).toBeInTheDocument()
     expect(api.getChangeEntries).not.toHaveBeenCalled()
+  })
+
+  it('shows an entity on the canvas, where there is one, and not one that was removed', async () => {
+    useChangeNavigatorStore.setState({ canReveal: true, active: false })
+    api.getChangeSummary.mockResolvedValue(summary())
+    api.getChangeEntries.mockResolvedValue(page([row('t1', 'modified', 'Table', 'customers'), row('c1', 'removed', 'Column', 'amount')], 0, 2))
+    const user = userEvent.setup()
+    wrap(<ChangeList wsId="ws1" graphId="g1" origin={{ branchId: 'br_1' }} />)
+    await user.click(await screen.findByRole('button', { name: 'Show customers on canvas' }))
+    expect(screen.queryByRole('button', { name: 'Show amount on canvas' })).not.toBeInTheDocument()
+    const nav = useChangeNavigatorStore.getState()
+    expect(nav.active).toBe(true)
+    expect(nav.index).toBe(0)
+    // The navigator reads what this list lists that is still there, a page at a time, with names.
+    await waitFor(() => expect(nav.source?.at(0)).toMatchObject({ id: 'urn:customers', name: 'customers', saved: true }))
+    expect(api.getChangeEntries).toHaveBeenLastCalledWith('ws1', 'g1', { branchId: 'br_1' },
+      expect.objectContaining({ kind: 'node', statuses: ['added', 'modified'] }), 0, 500)
+    useChangeNavigatorStore.setState({ canReveal: false, active: false })
+  })
+
+  it('offers no canvas where there is none to show it on', async () => {
+    api.getChangeSummary.mockResolvedValue(summary())
+    api.getChangeEntries.mockResolvedValue(page([row('t1', 'modified', 'Table', 'customers')], 0, 1))
+    wrap(<ChangeList wsId="ws1" graphId="g1" origin={{ branchId: 'br_1' }} />)
+    await screen.findByText('customers')
+    expect(screen.queryByRole('button', { name: /on canvas/ })).not.toBeInTheDocument()
   })
 
   it('says so when nothing changed', async () => {

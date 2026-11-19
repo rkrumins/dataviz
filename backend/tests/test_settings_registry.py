@@ -72,7 +72,8 @@ _CONTRACT_KEYS = (
     "residency.capacityIntervalSecs",
     "database.readTimeoutMs", "database.readsPerGraph", "database.readsPerProcess",
     "drafts.keepClosedDays", "drafts.idleCloseDays", "drafts.defaultVisibility", "drafts.levels",
-    "drafts.selfApproval", "drafts.selfMerge", "forks.maxPerGraph", "trash.restoreDays",
+    "drafts.selfApproval", "drafts.selfMerge", "drafts.requiredApprovals", "drafts.threadsHold",
+    "forks.maxPerGraph", "trash.restoreDays",
     "imports.identifier", "imports.replaceGuard", "imports.guardMinLive",
     "imports.guardDeleteShare", "imports.guardCreateShare", "imports.minMatchShare",
     "imports.maxRefusedRows", "imports.maxMatchingProperties",
@@ -219,7 +220,7 @@ def test_the_registry_holds_the_contracts_settings():
     """The store, the API and the app are built against these keys: renaming or adding one is a
     change to the contract, made there first."""
     assert tuple(_KEYS) == _CONTRACT_KEYS
-    assert len(BY_KEY) == len(SETTINGS) == 46
+    assert len(BY_KEY) == len(SETTINGS) == 48
 
 
 def test_categories_are_seven_and_every_setting_sits_in_one_of_their_sections():
@@ -398,10 +399,10 @@ def test_defaults_and_recommendations_are_values_the_setting_takes(key: str):
             assert re.fullmatch(r"entity_id|urn|prop\.[^,]+(,urn)?", value), key
         elif s.kind == "refusal_budget":
             assert re.fullmatch(r"unlimited|\d+|\d+(\.\d+)?%", value), key
-        elif value not in ("unlimited", "forever"):
+        elif value not in ("unlimited", "forever", "everyone"):
             assert s.range and s.range[0] <= value <= s.range[1], f"{key}: {value!r} out of range"
         else:
-            assert s.kind.endswith(("_or_unlimited", "_or_forever")), key
+            assert s.kind.endswith(("_or_unlimited", "_or_forever", "_or_everyone")), key
 
 
 def test_build_policy_wires_each_belong_to_one_setting_with_the_codes_range():
@@ -443,12 +444,21 @@ def test_residency_wires_each_belong_to_one_setting_with_the_codes_range_and_col
     assert tuple(c.id for c in BY_KEY["residency.class"].choices) == _literal(path, "CLASSES")
 
 
+def _old_spelling(s, value):
+    """A value as its old column spells it (``resolver.encode``, read without importing it)."""
+    word = {"zero_is_unlimited": "unlimited", "zero_is_forever": "forever",
+            "zero_is_everyone": "everyone"}.get(s.legacy.encode if s.legacy else None)
+    return 0 if word is not None and value == word else value
+
+
 def test_drafts_and_import_columns_each_belong_to_one_setting():
     drafts = _literal(_APP / "services" / "drafts_policy.py", "FIELDS")
     for column, _api, default in drafts:
         owners = [s for s in SETTINGS if s.legacy and s.legacy.workspace_column == column]
         assert len(owners) == 1 and owners[0].legacy.data_source_column == column, column
-        assert owners[0].default.code == default, f"{column}: drafts_policy defaults to {default!r}"
+        # The store's spelling ("everyone"), as the old columns spell it (0).
+        assert _old_spelling(owners[0], owners[0].default.code) == default, (
+            f"{column}: drafts_policy defaults to {default!r}")
     assert tuple(c.id for c in BY_KEY["drafts.levels"].choices) == _literal(
         _APP / "services" / "drafts_policy.py", "LEVELS")
     assert tuple(c.id for c in BY_KEY["drafts.defaultVisibility"].choices) == _literal(
@@ -668,7 +678,7 @@ def _value_problem(s, value):
 
 def _number(value):
     """A value compared by a rule, as the resolver compares it: the words are infinite."""
-    if value in ("unlimited", "forever"):
+    if value in ("unlimited", "forever", "everyone"):
         return math.inf
     return None if isinstance(value, bool) or not isinstance(value, (int, float)) else float(value)
 

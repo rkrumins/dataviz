@@ -1,5 +1,5 @@
 /**
- * useEntityChangeDecoration — the single source of truth for "how has this entity changed?",
+ * useEntityDecoration — the single source of truth for "how has this entity changed?",
  * shared by every canvas surface (graph nodes, the context tree) so they speak ONE visual
  * language. It merges two layers:
  *
@@ -13,7 +13,6 @@
  * (unsaved), solid = committed (not merged); COLOR encodes the change — emerald=added,
  * amber=modified, rose=removed. This is what makes "saved vs not" unmistakable at a glance.
  */
-import { useMemo } from 'react'
 import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangesStore, type StagedChange, type StagedChangeType } from '@/store/stagedChangesStore'
 import type { ChangeStatus } from '../model/changeModel'
@@ -32,6 +31,12 @@ const COMMITTED: Record<ChangeStatus, EntityDecoration> = {
   modified: { state: 'committed', status: 'modified' },
   removed: { state: 'committed', status: 'removed' },
 }
+// Interned, as the committed ones are: a row's decoration is the same object until it changes.
+const STAGED: Record<ChangeStatus, EntityDecoration> = {
+  added: { state: 'staged', status: 'added' },
+  modified: { state: 'staged', status: 'modified' },
+  removed: { state: 'staged', status: 'removed' },
+}
 
 // Every node and row on the canvas runs this hook, so nothing in it may cost the size of the change
 // set: each one used to build its own map of every committed change — at 100,000 changes and a few
@@ -46,7 +51,7 @@ function stagedLookup(staged: readonly StagedChange[]): Map<string, EntityDecora
     m = new Map()
     // Keyed by both id and urn so canvas urns and temp ids both resolve; the last edit wins.
     for (const sc of staged) {
-      const d: EntityDecoration = { state: 'staged', status: stagedStatus(sc.type) }
+      const d = STAGED[stagedStatus(sc.type)]
       if (sc.targetUrn) m.set(sc.targetUrn, d)
       if (sc.targetId) m.set(sc.targetId, d)
     }
@@ -55,27 +60,19 @@ function stagedLookup(staged: readonly StagedChange[]): Map<string, EntityDecora
   return m
 }
 
-export function useEntityChangeDecoration() {
-  const committedHidden = useBranchStore((s) => s.committedDiffHidden)
-  const changeSet = useBranchStore((s) => s.activeChangeSet)
-  const stagedChanges = useStagedChangesStore((s) => s.changes)
-  const staged = useMemo(() => stagedLookup(stagedChanges), [stagedChanges])
-
-  return {
-    /** Whether any committed change exists for this branch (drives the show/hide toggle's relevance). */
-    hasCommitted: !!changeSet && changeSet.changes.length > 0,
-    committedHidden,
-    /** The decoration for a node urn / edge id, or undefined when unchanged / hidden. Staged
-     *  (unsaved) edits take precedence over committed ones, which show unless hidden. */
-    for: (entityId?: string | null): EntityDecoration | undefined => {
-      if (!entityId) return undefined
-      const s = staged.get(entityId)
-      if (s) return s
-      if (committedHidden || !changeSet) return undefined
-      const c = changeSet.byEntityId.get(entityId)
-      return c ? COMMITTED[c.status] : undefined
-    },
-  }
+/**
+ * One entity's decoration, for a node or row that shows one: it subscribes to that entity's answer
+ * alone, so a staged edit re-renders the rows it changes — not every row on the canvas, as reading
+ * the whole staged list did.
+ */
+export function useEntityDecoration(entityId?: string | null): EntityDecoration | undefined {
+  const staged = useStagedChangesStore((s) => (entityId ? stagedLookup(s.changes).get(entityId) : undefined))
+  const committed = useBranchStore((s) => {
+    if (!entityId || s.committedDiffHidden || !s.activeChangeSet) return undefined
+    const c = s.activeChangeSet.byEntityId.get(entityId)
+    return c ? COMMITTED[c.status] : undefined
+  })
+  return staged ?? committed
 }
 
 // ── Tailwind-literal class maps (JIT can't see interpolated class names) ─────────────────────────

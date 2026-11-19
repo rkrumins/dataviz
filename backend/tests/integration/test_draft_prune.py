@@ -99,8 +99,12 @@ async def _cases(svc, monkeypatch):
     waiting = await svc.open_draft(graph_id=gid, owner="alice")
     await svc.apply_ops(graph_id=gid, branch_id=waiting, actor="alice", message="wait",
                         ops=[_upd("M", description="waiting")])
-    await svc.open_draft_mr(graph_id=gid, branch_id=waiting, actor="alice")
-    await svc.abandon_draft(graph_id=gid, branch_id=waiting, actor="alice")
+    waiting_mr = await svc.open_draft_mr(graph_id=gid, branch_id=waiting, actor="alice")
+    # Abandoned with its review still open, as an earlier release left one (abandoning a draft now
+    # closes its review, and the idle sweep passes over a draft under review).
+    async with db.graphver_session() as s:
+        await s.execute(update(BranchORM).where(BranchORM.id == waiting).values(status="abandoned"))
+    assert (await svc.get_pr(waiting_mr))["status"] not in ("merged", "closed")
     open_draft = await svc.open_draft(graph_id=gid, owner="alice")
     await svc.apply_ops(graph_id=gid, branch_id=open_draft, actor="alice", message="open",
                         ops=[_upd("K", description="open")])

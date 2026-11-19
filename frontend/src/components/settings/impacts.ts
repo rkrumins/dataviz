@@ -58,7 +58,7 @@ export function changeImpacts(s: Setting, from: SettingValue, to: SettingValue):
 
 /** Whether a change raises the value (true), lowers it (false), or can't say (null). */
 function rises(from: SettingValue, to: SettingValue): boolean | null {
-    const big = (v: SettingValue) => (v === 'unlimited' || v === 'forever' ? Infinity : typeof v === 'boolean' ? Number(v) : Number(v))
+    const big = (v: SettingValue) => (v === 'unlimited' || v === 'forever' || v === 'everyone' ? Infinity : typeof v === 'boolean' ? Number(v) : Number(v))
     const a = big(from)
     const b = big(to)
     if (Number.isNaN(a) || Number.isNaN(b) || a === b) return null

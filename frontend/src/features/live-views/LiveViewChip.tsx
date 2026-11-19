@@ -224,6 +224,15 @@ function LiveViewPanel({ view, status, canEdit }: { view: View; status: Membersh
               : <span className="text-red-600 dark:text-red-400">a view that’s gone</span>}
           </p>
         )}
+        {status.follows && (
+          <p className="mt-1 text-[12px] text-ink-muted" data-live-follows>
+            Follows{' '}
+            {status.follows.available
+              ? <span className="text-ink font-medium">{status.follows.name ?? 'a view you can’t open'}</span>
+              : <span className="text-red-600 dark:text-red-400">a view that’s gone</span>}
+            {' '}— its layers, each member where it places it
+          </p>
+        )}
         <p className="mt-2 text-[12px] text-ink-muted leading-snug">{words.detail}</p>
       </div>
 

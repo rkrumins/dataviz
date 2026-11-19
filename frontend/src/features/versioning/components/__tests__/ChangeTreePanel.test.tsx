@@ -69,6 +69,32 @@ describe('ChangeTreePanel', () => {
     expect(await screen.findByText('amount')).toBeInTheDocument()
   })
 
+  it('lists what changed one line each — a container’s own change and each change inside it open only when asked', async () => {
+    const own: DiffSummaryResponse = { ...summary, groups: [{ ...summary.groups[0], status: 'modified',
+      before: { displayName: 'Sales', description: 'old' }, after: { displayName: 'Sales', description: 'new' } }] }
+    const fetchChildren = vi.fn().mockResolvedValue(children)
+    render(<ChangeTreePanel summary={own} fetchChildren={fetchChildren} origin={origin} />)
+    fireEvent.click(screen.getByText('Sales'))
+    expect(await screen.findByText('amount')).toBeInTheDocument()
+    // Every affected entity is listed; no field is open yet.
+    expect(screen.getByText('Its own change')).toBeInTheDocument()
+    expect(screen.queryByText('old')).not.toBeInTheDocument()
+    expect(screen.queryByText('amount_usd')).not.toBeInTheDocument()
+    // Drilled into on demand.
+    fireEvent.click(screen.getByText('Its own change'))
+    expect(screen.getByText('old')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('amount'))
+    expect(screen.getByText('amount_usd')).toBeInTheDocument()
+  })
+
+  it('says a large set is still being prepared while it is asked for again', () => {
+    const { rerender } = render(<ChangeTreePanel isLoading fetchChildren={vi.fn()} origin={origin} />)
+    expect(screen.getByText(/Computing changes/)).toBeInTheDocument()
+    expect(screen.queryByText(/Still preparing these changes/)).not.toBeInTheDocument()
+    rerender(<ChangeTreePanel isLoading preparing fetchChildren={vi.fn()} origin={origin} />)
+    expect(screen.getByRole('status')).toHaveTextContent(/Still preparing these changes/)
+  })
+
   it('shows the empty hint when there are no groups', () => {
     render(
       <ChangeTreePanel
@@ -113,5 +139,19 @@ describe('ChangeTreePanel', () => {
       wsId: 'ws1', graphId: 'g1', origin: { branchId: 'br_1' },
     }))
     expect(screen.queryByText(/too many to lay out here/)).not.toBeInTheDocument()
+  })
+
+  it('says the tree failed, offers to try again and lists the changes — never "nothing here"', () => {
+    listed.mockClear()
+    const onRetry = vi.fn()
+    render(
+      <ChangeTreePanel summary={undefined} error={new Error('timeout')} onRetry={onRetry} fetchChildren={vi.fn()}
+        origin={origin} emptyHint="Nothing here." list={{ wsId: 'ws1', graphId: 'g1', origin: { branchId: 'br_1' } }} />,
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent(/Couldn’t lay these changes out as a tree/)
+    expect(screen.getByText('the change list')).toBeInTheDocument()
+    expect(screen.queryByText('Nothing here.')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Try again/ }))
+    expect(onRetry).toHaveBeenCalledTimes(1)
   })
 })

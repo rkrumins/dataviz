@@ -29,6 +29,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     PrimaryKeyConstraint,
     Text,
     UniqueConstraint,
@@ -261,6 +262,9 @@ class MergeRequestORM(VersioningBase):
     # content commit after it makes the approval stale (GraphVersioningService._approvals).
     approvals = Column(JSONB, nullable=True)
     approval_status = Column(Text, nullable=True)
+    # A reviewer sent it back for changes: {by, at, reason, headCommitId, headSeq}. It holds until a
+    # content commit lands on the draft after headSeq (the author changed it), or they withdraw it.
+    changes_requested = Column(JSONB, nullable=True)
     checks_status = Column(JSONB, nullable=True)          # ontology re-validation etc.
     resulting_commit_id = Column(Text, nullable=True)
     actor = Column(Text, nullable=True)                   # who raised it
@@ -278,6 +282,9 @@ class MergeRequestORM(VersioningBase):
         Index("ix_mr_graph", "graph_id"),
         Index("ix_mr_source", "source_graph_id"),
         Index("ix_mr_status", "status"),
+        # A workspace's live reviews (the review inbox): its graphs', not merged or closed
+        # (20261119_1200_gv_review_seen).
+        Index("ix_mr_target_status", "target_graph_id", "status"),
         # ONE LIVE PR PER SOURCE BRANCH. A PR points at a branch and its diff is computed live from
         # that branch, so commits made after it was raised are already in it — a second PR from the
         # same branch is a duplicate, not a new proposal. Merging either marks the branch `merged`,
@@ -295,6 +302,161 @@ class MergeRequestORM(VersioningBase):
             name="ck_mr_status",
         ),
     )
+
+
+class ReviewCommentORM(VersioningBase):
+    """A comment on a review: on one change (``entity_id``), on one field or property of it
+    (``path``), or on the review as a whole (neither). A thread is its first comment and the replies
+    that name it (``thread_id`` — a first comment names itself); resolving is the first comment's.
+    ``entity_hash`` is the draft's content hash of the entity when it was written: a later edit to
+    it marks the thread outdated. Deleting keeps the row (``deleted_at``), so a thread's replies
+    still read in order (20261117_1200_gv_review_comments)."""
+
+    __tablename__ = "review_comments"
+
+    id = Column(Text, primary_key=True, default=lambda: prefixed_id("rc"))
+    pr_id = Column(Text, nullable=False)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    thread_id = Column(Text, nullable=False)
+    entity_id = Column(Text, nullable=True)
+    path = Column(Text, nullable=True)
+    body = Column(Text, nullable=False)
+    mentions = Column(JSONB, nullable=True)
+    author = Column(Text, nullable=False)
+    entity_hash = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    edited_at = Column(Text, nullable=True)
+    deleted_at = Column(Text, nullable=True)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+
+    __table_args__ = _plain(
+        Index("ix_rc_pr_entity", "pr_id", "entity_id"),
+        Index("ix_rc_thread", "thread_id"),
+        Index("ix_rc_graph", "graph_id"),
+    )
+
+
+class ReviewDecisionORM(VersioningBase):
+    """A reviewer's verdict on one change of a draft's review: ``accepted`` or ``rejected`` (with
+    why). ``content_hash`` is the draft's hash of the entity when it was decided: the verdict holds
+    only while it still matches — an edit since makes it stale. ``implied_by`` names the change it
+    was decided with (accepting a new edge accepts the new entities it joins); ``None`` for one
+    decided on its own (20261117_1300_gv_decisions)."""
+
+    __tablename__ = "review_decisions"
+
+    pr_id = Column(Text, primary_key=True)
+    entity_id = Column(Text, primary_key=True)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    verdict = Column(Text, nullable=False)               # accepted | rejected
+    reason = Column(Text, nullable=True)
+    content_hash = Column(Text, nullable=True)
+    implied_by = Column(Text, nullable=True)
+    actor = Column(Text, nullable=False)
+    decided_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        CheckConstraint("verdict IN ('accepted', 'rejected')", name="ck_rd_verdict"),
+        Index("ix_rd_graph", "graph_id"),
+    )
+
+
+#: A review's subjects: a person, or a workspace group any of whose members answers for it.
+REVIEW_SUBJECT_TYPES = ("user", "group")
+#: What can happen on a review (``ck_re_kind``): who is asked changes, someone gives their review
+#: (with its verdict), or takes their verdict back. WIDEN-ONLY.
+REVIEW_EVENT_KINDS = ("requested", "unrequested", "re_requested", "reviewed", "withdrew")
+REVIEW_VERDICTS = ("approve", "request_changes", "comment")
+
+
+class ReviewRequestORM(VersioningBase):
+    """Who a review asks to review it: a person, or a group (any member answers for it). Asked
+    again, ``requested_at`` moves on, so the review is back in their queue. ``merge_requests.reviewers``
+    mirrors the people asked, for the reads that check who may see a private draft
+    (20261118_1000_gv_review_records)."""
+
+    __tablename__ = "review_requests"
+
+    pr_id = Column(Text, primary_key=True)
+    subject_type = Column(Text, primary_key=True)        # user | group
+    subject_id = Column(Text, primary_key=True)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    requested_by = Column(Text, nullable=True)
+    requested_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        CheckConstraint("subject_type IN (" + ",".join(f"'{v}'" for v in REVIEW_SUBJECT_TYPES) + ")",
+                        name="ck_rr_subject_type"),
+        Index("ix_rr_subject", "subject_type", "subject_id"),
+        Index("ix_rr_graph", "graph_id"),
+    )
+
+
+class ReviewEventORM(VersioningBase):
+    """What happened on a review, in order, never rewritten: who was asked (``subjects``), who gave
+    their review — a verdict (approve, request changes, or a comment), a summary (``body``), the
+    draft's head they reviewed, the group requests an approval answers for, and what they did
+    (``tally``) — and who took their verdict back. A reviewer's standing (``review_state``) is read
+    from their latest verdict against the draft's head (20261118_1000_gv_review_records)."""
+
+    __tablename__ = "review_events"
+
+    id = Column(Text, primary_key=True, default=lambda: prefixed_id("rev"))
+    pr_id = Column(Text, nullable=False)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    actor = Column(Text, nullable=False)
+    kind = Column(Text, nullable=False)
+    verdict = Column(Text, nullable=True)
+    body = Column(Text, nullable=True)
+    head_commit_id = Column(Text, nullable=True)
+    head_seq = Column(BigInteger, nullable=True)
+    subjects = Column(JSONB, nullable=True)              # [{type, id}] who was asked / not
+    groups = Column(JSONB, nullable=True)                # an approval: the group requests it answers
+    tally = Column(JSONB, nullable=True)                 # {accepted, rejected, threads} at the time
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        CheckConstraint("kind IN (" + ",".join(f"'{v}'" for v in REVIEW_EVENT_KINDS) + ")", name="ck_re_kind"),
+        CheckConstraint("verdict IS NULL OR verdict IN (" + ",".join(f"'{v}'" for v in REVIEW_VERDICTS) + ")",
+                        name="ck_re_verdict"),
+        Index("ix_re_pr", "pr_id", "created_at"),
+        Index("ix_re_graph", "graph_id"),
+    )
+
+
+class ChangeSetORM(VersioningBase):
+    """A change list built once and kept for every process to read (``change_sets.py``): a draft's
+    changes as of its head, a window of ``main``'s revisions, the containment tree of either, or
+    one revision's changes with each entity as it was before and after — what any two revisions
+    compared are composed from. ``key`` names exactly what it is of (a draft's head, a window's two
+    revisions, the containment types it was laid out by); ``origin`` groups a draft's versions, so
+    a newer one replaces the older (20261119_1100_gv_change_sets)."""
+
+    __tablename__ = "change_sets"
+
+    graph_id = Column(Text, primary_key=True)
+    key = Column(Text, primary_key=True)
+    origin = Column(Text, nullable=False)                # draft:<branch> | window | revision
+    built_at = Column(Text, nullable=False, default=_now)
+    size = Column(Integer, nullable=False)               # its entries
+    body = Column(LargeBinary, nullable=False)           # zlib-compressed JSON (change_sets.py)
+
+    __table_args__ = _plain(Index("ix_cs_origin", "graph_id", "origin", "built_at"))
+
+
+class ReviewSeenORM(VersioningBase):
+    """When each person last looked at a review: anything others did on it since is unread to them
+    (20261119_1200_gv_review_seen)."""
+
+    __tablename__ = "review_seen"
+
+    pr_id = Column(Text, primary_key=True)
+    user_id = Column(Text, primary_key=True)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    seen_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(Index("ix_rs_graph", "graph_id"))
 
 
 class ProjectionStateORM(VersioningBase):
@@ -445,7 +607,7 @@ class ProjectionStateORM(VersioningBase):
 # An import that holds its draft (``uq_jobs_ingest_active``).
 _INGEST_ACTIVE = "job_type = 'ingest' AND status IN ('pending','running')"
 JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish", "purge",
-             "package_inspect", "fork_update", "fork_merge")
+             "package_inspect", "fork_update", "fork_merge", "save")
 
 
 class ProjectionQuarantineORM(VersioningBase):
@@ -1059,6 +1221,15 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261018_1000_gv_mr_approvals.
     _bounded_step(conn, "merge_requests.approvals was not added",
                   lambda: ensure_mr_approvals_column(conn), required=True)
+    # 20261117_1500_gv_mr_sendback.
+    _bounded_step(conn, "merge_requests.changes_requested was not added",
+                  lambda: ensure_mr_changes_requested_column(conn), required=True)
+    # 20261118_1000_gv_review_records. Required: until a review's approvals are carried over, its
+    # merge gate would not see them.
+    _bounded_step(conn, "the review records were not carried over",
+                  lambda: ensure_review_records(conn), required=True)
+    # 20261119_1200_gv_review_seen (``review_seen`` is a new table: ``create_all`` makes it).
+    _bounded_step(conn, "ix_mr_target_status was not built", lambda: ensure_mr_target_status_index(conn))
     # 20261018_1100_gv_ps_retired.
     _bounded_step(conn, "the retired_keys column was not added",
                   lambda: ensure_ps_retired_keys_column(conn), required=True)
@@ -1399,6 +1570,17 @@ def ensure_branch_visibility(conn) -> None:
             f"CREATE INDEX IF NOT EXISTS ix_bm_subject ON {members} (subject_type, subject_id)"))
 
 
+def ensure_mr_changes_requested_column(conn) -> None:
+    """Add ``merge_requests.changes_requested``: a reviewer's request for changes. A no-op without
+    the table, and once it is there. ``conn`` is a synchronous connection."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("merge_requests", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if "changes_requested" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."merge_requests" ADD COLUMN IF NOT EXISTS changes_requested JSONB'))
+
+
 def ensure_mr_approvals_column(conn) -> None:
     """Add ``merge_requests.approvals``, the head each approval was of. A no-op without the table,
     and once it is there (an ALTER takes the table's ACCESS EXCLUSIVE lock even when it adds
@@ -1409,6 +1591,65 @@ def ensure_mr_approvals_column(conn) -> None:
     if "approvals" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."merge_requests" ADD COLUMN IF NOT EXISTS approvals JSONB'))
+
+
+def ensure_review_records(conn) -> None:
+    """Carry every review's reviewers, approvals and request for changes from the columns that held
+    them (``reviewers``, ``approved_by``/``approvals``, ``changes_requested``) into
+    ``review_requests`` and ``review_events``, which hold them from now on. Idempotent: each
+    carried event has an id derived from what it carries, and a review that already has a
+    request-kind event keeps the reviewers it has — someone removed since is not brought back. A
+    no-op without the tables. ``conn`` is a synchronous connection."""
+    inspector = sa_inspect(conn)
+    if not (inspector.has_table("merge_requests", schema=_SCHEMA)
+            and inspector.has_table("review_requests", schema=_SCHEMA)
+            and inspector.has_table("review_events", schema=_SCHEMA)):
+        return
+    mr, rr, re_ = (f'"{_SCHEMA}"."{t}"' for t in ("merge_requests", "review_requests", "review_events"))
+    untouched = (f"NOT EXISTS (SELECT 1 FROM {re_} e WHERE e.pr_id = m.id "
+                 "AND e.kind IN ('requested', 'unrequested', 're_requested'))")
+    # A list column may hold JSON null, or anything at all: only an array's elements are read (SQL
+    # does not promise to test the type first, so each read is guarded on its own).
+    def arr(col: str) -> str:
+        return f"(CASE WHEN jsonb_typeof({col}) = 'array' THEN {col} ELSE '[]'::jsonb END)"
+    asked = f"jsonb_array_length({arr('m.reviewers')}) > 0"
+    conn.execute(text(
+        f"INSERT INTO {rr} (pr_id, subject_type, subject_id, graph_id, requested_by, requested_at) "
+        f"SELECT m.id, 'user', r.value #>> '{{}}', m.target_graph_id, m.actor, m.created_at "
+        f"FROM {mr} m CROSS JOIN LATERAL jsonb_array_elements({arr('m.reviewers')}) r "
+        f"WHERE {asked} AND {untouched} ON CONFLICT DO NOTHING"))
+    conn.execute(text(
+        f"INSERT INTO {re_} (id, pr_id, graph_id, actor, kind, subjects, created_at) "
+        f"SELECT 'rev_' || md5(m.id || '/legacy-requested'), m.id, m.target_graph_id, "
+        f"coalesce(m.actor, 'system'), 'requested', "
+        f"(SELECT jsonb_agg(jsonb_build_object('type', 'user', 'id', r.value #>> '{{}}')) "
+        f" FROM jsonb_array_elements({arr('m.reviewers')}) r), m.created_at "
+        f"FROM {mr} m WHERE {asked} AND {untouched} ON CONFLICT (id) DO NOTHING"))
+    conn.execute(text(
+        f"INSERT INTO {re_} (id, pr_id, graph_id, actor, kind, verdict, head_commit_id, head_seq, created_at) "
+        f"SELECT 'rev_' || md5(m.id || ':' || (a.value #>> '{{}}') || '/legacy-approve'), m.id, "
+        f"m.target_graph_id, a.value #>> '{{}}', 'reviewed', 'approve', "
+        f"m.approvals -> (a.value #>> '{{}}') ->> 'headCommitId', "
+        f"(m.approvals -> (a.value #>> '{{}}') ->> 'headSeq')::bigint, "
+        f"coalesce(m.approvals -> (a.value #>> '{{}}') ->> 'at', m.updated_at) "
+        f"FROM {mr} m CROSS JOIN LATERAL jsonb_array_elements({arr('m.approved_by')}) a "
+        f"ON CONFLICT (id) DO NOTHING"))
+    conn.execute(text(
+        f"INSERT INTO {re_} (id, pr_id, graph_id, actor, kind, verdict, body, head_commit_id, head_seq, created_at) "
+        f"SELECT 'rev_' || md5(m.id || ':' || (m.changes_requested ->> 'by') || '/legacy-changes'), m.id, "
+        f"m.target_graph_id, m.changes_requested ->> 'by', 'reviewed', 'request_changes', "
+        f"m.changes_requested ->> 'reason', m.changes_requested ->> 'headCommitId', "
+        f"(m.changes_requested ->> 'headSeq')::bigint, coalesce(m.changes_requested ->> 'at', m.updated_at) "
+        f"FROM {mr} m WHERE m.changes_requested ->> 'by' IS NOT NULL "
+        f"ON CONFLICT (id) DO NOTHING"))
+
+
+def ensure_mr_target_status_index(conn) -> None:
+    """``ix_mr_target_status``: a workspace's live reviews, read by the review inbox. A no-op
+    without the table, and once the index is there."""
+    if sa_inspect(conn).has_table("merge_requests", schema=_SCHEMA):
+        conn.execute(text(f'CREATE INDEX IF NOT EXISTS ix_mr_target_status ON "{_SCHEMA}"."merge_requests" '
+                          "(target_graph_id, status)"))
 
 
 #: ``commits``' provenance columns (``20261110_1000_gv_commit_prov``): nullable, so adding one is a

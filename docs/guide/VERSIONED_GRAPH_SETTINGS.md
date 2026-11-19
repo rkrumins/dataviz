@@ -1438,6 +1438,8 @@ How long drafts and deleted data last, who sees drafts, and who approves and mer
 | [Draft levels allowed](#drafts-levels) | Public or private | Platform, Workspace, Graph |
 | [People may approve their own reviews](#drafts-selfapproval) | On | Platform, Workspace, Graph |
 | [People may merge their own reviews](#drafts-selfmerge) | On | Platform, Workspace, Graph |
+| [Approvals a review needs](#drafts-requiredapprovals) | Everyone asked | Platform, Workspace, Graph |
+| [Open threads hold the merge](#drafts-threadshold) | Off | Platform, Workspace, Graph |
 | [Forks per graph](#forks-maxpergraph) | 10 forks | Platform, Workspace, Graph |
 | [Restore deleted data sources for](#trash-restoredays) | 30 days | Platform, Workspace |
 
@@ -1695,6 +1697,88 @@ Off, someone other than the person who opened a review merges it, and no draft i
 **Problems it answers:** People publish without review; Publishing says a review is required.
 
 **Also searched as:** self merge, direct publish, review required.
+
+### `drafts-requiredApprovals`
+
+**Approvals a review needs.** How many approvals a review needs before it can merge.
+
+*Asked as:* How many approvals does a review need before it can merge?
+
+| Fact | Value |
+|---|---|
+| Key | `drafts.requiredApprovals` |
+| Kind | Everyone asked, or a whole number, 1 to 10 approvals |
+| Default | Everyone asked · built in |
+| Set at | Platform (system administrators), Workspace (workspace administrators), Graph (workspace administrators) |
+| Limits | A system administrator can set a lock. |
+| Takes effect | The next merge: an open review is held to the new rule from then on. |
+
+Everyone asked: every person or group asked to review must approve, and a review that asks no one needs no approval. A number: at least that many approvals, from anyone who may approve, whoever was asked. Either way, an approval counts only while the draft hasn't changed since it was given, and a request for changes holds the merge until the draft changes.
+
+**What it changes**
+
+| Dimension | Raising it | Lowering it | Weight |
+|---|---|---|---|
+| Consistency | Better: More people check each change before it merges. | Worse: Fewer people check each change. | Medium |
+| Update speed | Worse: Merges wait for more approvals. | Better: Changes merge sooner. | Medium |
+
+**When to change it**
+
+- A rule says two people must approve every change, whoever they are: set 2.
+- Reviews wait on someone who was asked but is away: set a number, so any approvers will do.
+
+**Recommended:** Everyone asked. Everyone you ask has a say; set a number where any approvers will do, or a rule needs a set count.
+
+**Risk:** Low. With a number, a review merges once that many approve, even if someone asked hasn't.
+
+**Example:** Every person or group asked must approve before a review merges.
+
+**Evidence:** drafts_policy.EffectiveDraftsPolicy.rule gives review_state.ReviewRule its required_approvals (everyone asked is 0); service.\_review_gate raises ApprovalRequired before any merge work, then ChangesRequested (409 changes_requested) and ThreadsOpen. Read at every merge, never cached.
+
+**Problems it answers:** A review is approved but won't merge; A merge waits for one reviewer.
+
+**Also searched as:** required approvals, approvals, two approvals, reviewers.
+
+### `drafts-threadsHold`
+
+**Open threads hold the merge.** Whether a review with open threads waits for them to be resolved before it can merge.
+
+*Asked as:* Should open threads stop a review merging until they are resolved?
+
+| Fact | Value |
+|---|---|
+| Key | `drafts.threadsHold` |
+| Kind | On or off |
+| Default | Off · built in |
+| Set at | Platform (system administrators), Workspace (workspace administrators), Graph (workspace administrators) |
+| Limits | A system administrator can set a lock. |
+| Takes effect | The next merge. |
+
+On, a review can't merge while any of its threads is open: someone resolves each one first. Off, threads are for discussion and don't hold the merge.
+
+**What it changes**
+
+| Dimension | Turning it on | Turning it off | Weight |
+|---|---|---|---|
+| Consistency | Better: Every question raised is answered before a change lands. | Worse: A change can land with questions still open. | Medium |
+| Update speed | Worse: Merges wait for every thread to be resolved. | Better: Merges don't wait for discussion. | Low |
+
+**When to change it**
+
+- Questions raised in a review must be answered before a change lands: turn it on.
+- Threads hold notes that needn't block a merge: keep it off.
+
+**Recommended:** Off. Threads stay a place to talk without blocking; turn it on where every question must be answered first.
+
+**Risk:** Low. On, a forgotten thread holds a review until someone resolves it.
+
+**Example:** Open threads don't hold a review's merge.
+
+**Evidence:** drafts_policy.EffectiveDraftsPolicy.rule gives review_state.ReviewRule its threads_hold; service.\_review_gate raises ThreadsOpen (409 threads_open, with how many are open) before any merge work. Read at every merge, never cached.
+
+**Problems it answers:** A review won't merge because of open threads; Changes merge with questions unanswered.
+
+**Also searched as:** open threads, unresolved comments, threads hold.
 
 ### `forks-maxPerGraph`
 
@@ -2358,8 +2442,8 @@ The endpoints that saved these settings before keep working for one more release
 | `POST /api/v1/admin/versioning/residency-policy/preview` | `POST /api/v1/admin/versioning/settings/preview?mode=full` | What a change would unload and load, as part of its impact. |
 | `GET`, `PUT /api/v1/admin/versioning/draft-retention` | `GET`, `PATCH /api/v1/admin/versioning/settings` | [Keep closed drafts' changes for](#drafts-keepcloseddays) |
 | `PUT /api/v1/admin/versioning/graphs/{graph}/read-mode` | `PATCH /api/v1/{ws}/versioning/graphs/{graph}/settings` | [Read mode](#reads-mode) |
-| `GET`, `PUT /api/v1/{ws}/versioning/drafts-policy` | `GET`, `PATCH /api/v1/{ws}/versioning/settings` | [New drafts start](#drafts-defaultvisibility), [Draft levels allowed](#drafts-levels), [People may approve their own reviews](#drafts-selfapproval), [People may merge their own reviews](#drafts-selfmerge) |
-| `GET`, `PUT /api/v1/{ws}/versioning/data-sources/{dataSource}/drafts-policy` | `GET`, `PATCH /api/v1/{ws}/versioning/graphs/{graph}/settings` | [New drafts start](#drafts-defaultvisibility), [Draft levels allowed](#drafts-levels), [People may approve their own reviews](#drafts-selfapproval), [People may merge their own reviews](#drafts-selfmerge) |
+| `GET`, `PUT /api/v1/{ws}/versioning/drafts-policy` | `GET`, `PATCH /api/v1/{ws}/versioning/settings` | [New drafts start](#drafts-defaultvisibility), [Draft levels allowed](#drafts-levels), [People may approve their own reviews](#drafts-selfapproval), [People may merge their own reviews](#drafts-selfmerge), [Approvals a review needs](#drafts-requiredapprovals), [Open threads hold the merge](#drafts-threadshold) |
+| `GET`, `PUT /api/v1/{ws}/versioning/data-sources/{dataSource}/drafts-policy` | `GET`, `PATCH /api/v1/{ws}/versioning/graphs/{graph}/settings` | [New drafts start](#drafts-defaultvisibility), [Draft levels allowed](#drafts-levels), [People may approve their own reviews](#drafts-selfapproval), [People may merge their own reviews](#drafts-selfmerge), [Approvals a review needs](#drafts-requiredapprovals), [Open threads hold the merge](#drafts-threadshold) |
 | `GET`, `PUT /api/v1/{ws}/versioning/graphs/{graph}/import-settings` | `GET`, `PATCH /api/v1/{ws}/versioning/graphs/{graph}/settings` | [Match rows by](#imports-identifier), [Guard graphs of at least](#imports-guardminlive), [Stop a replace that deletes](#imports-guarddeleteshare), [And makes again](#imports-guardcreateshare), [Stop early below a match share of](#imports-minmatchshare) |
 
 A residency policy `PUT` that changes `defaultResidency` is refused. It used to set the class a new graph started with; [Residency class](#residency-class) is now the class every graph inherits, unless its workspace or the graph sets its own.

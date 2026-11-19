@@ -14,6 +14,8 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import type { ChangeKind, ChangeSet, ChangeStatus, GraphChange } from '../model/changeModel'
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
+import { ChangeSummary } from './ChangeSummary'
+import { fieldsOfChange, summarizeFields } from '../model/fieldDiff'
 
 const STATUS_ORDER: ChangeStatus[] = ['added', 'modified', 'removed']
 const KIND_TITLE: Record<ChangeKind, string> = { node: 'Entities', edge: 'Relationships' }
@@ -40,22 +42,27 @@ function ChangeRow({
   change: GraphChange
   onDiscard?: (stagedChangeId: string) => void
 }) {
-  const [open, setOpen] = useState(false)
+  // Closed, a summary; open, the key differences; then all of them.
+  const [level, setLevel] = useState<0 | 1 | 2>(0)
+  const open = level > 0
   const meta = STATUS_META[change.status]
   const canDiscard = onDiscard && change.origin.source === 'staged'
+  const summary = useMemo(() => summarizeFields(fieldsOfChange(change)), [change])
   return (
     <div className={cn('rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent)}>
-      <div className="flex items-center gap-2 px-2.5 py-1.5">
+      <div className="flex items-start gap-2 px-2.5 py-1.5">
         <button
-          onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-1.5 min-w-0 flex-1 text-left group"
+          onClick={() => setLevel((l) => (l === 0 ? 1 : 0))}
+          aria-expanded={open}
+          className="flex items-start gap-1.5 min-w-0 flex-1 text-left group"
         >
           <ChevronRight
-            className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')}
+            className={cn('w-3.5 h-3.5 mt-0.5 text-ink-muted/60 motion-safe:transition-transform shrink-0', open && 'rotate-90')}
           />
-          <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} />
-          <span className="text-sm text-ink truncate group-hover:text-ink" title={change.label}>
-            {change.label}
+          <meta.Icon className={cn('w-3.5 h-3.5 mt-0.5 shrink-0', meta.text)} />
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm text-ink truncate group-hover:text-ink">{change.label}</span>
+            <ChangeSummary summary={summary} status={change.status} kind={change.kind} className="mt-0.5" />
           </span>
         </button>
         {canDiscard && (
@@ -76,7 +83,7 @@ function ChangeRow({
       </div>
       {open && (
         <div className="px-2.5 pb-2 pl-7">
-          <EntityDiff change={change} />
+          <EntityDiff change={change} depth={level === 1 ? 'key' : 'all'} onShowAll={() => setLevel(2)} />
         </div>
       )}
     </div>

@@ -12,12 +12,17 @@ mention is kept. Removing a property therefore has to be said explicitly:
 
 A patch composed with another keeps its removals; a patch applied onto a real
 value drops them; a full payload (a create) never carries one.
+
+Every property written through here that holds a date or a moment is stored one way
+(``backend.common.moments``): a date as ``YYYY-MM-DD``, a moment in UTC as
+``YYYY-MM-DDTHH:MM:SSZ`` — however a client, a spreadsheet or the API wrote it.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 from backend.app.services.versioning.typed_merge import preserve_stored_type
+from backend.common.moments import canonical, canonical_props
 
 __all__ = [
     "PROP_DELETE",
@@ -117,22 +122,27 @@ def _merge_props(base: Mapping, patch: Mapping) -> dict:
     before = base.get("properties") or {}
     merged = dict(before)
     for k, v in (patch.get("properties") or {}).items():
+        v = canonical(v) if isinstance(v, str) else v          # a date or moment, stored one way
         merged[k] = preserve_stored_type(before[k], v) if k in before else v
     return merged
 
 
 def strip_deletes(payload: Optional[Mapping]):
-    """A full payload with any removal marker dropped (a create has nothing to remove).
+    """A full payload with any removal marker dropped (a create has nothing to remove), and each
+    date or moment in its stored form.
 
-    Returns the same object when there is nothing to strip.
+    Returns the same object when there is nothing to change.
     """
     if not payload:
         return payload
     props = payload.get("properties")
-    if not isinstance(props, Mapping) or not any(_is_delete(v) for v in props.values()):
+    if not isinstance(props, Mapping):
+        return payload
+    kept = canonical_props(props)
+    if kept is props and not any(_is_delete(v) for v in props.values()):
         return payload
     out = dict(payload)
-    out["properties"] = {k: v for k, v in props.items() if not _is_delete(v)}
+    out["properties"] = {k: v for k, v in kept.items() if not _is_delete(v)}
     return out
 
 

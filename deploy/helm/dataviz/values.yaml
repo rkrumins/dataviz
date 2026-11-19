@@ -288,6 +288,22 @@ dbInit:
 #     --reuse-values
 upgrade:
   enabled: true
+  # Always, not image.pullPolicy's IfNotPresent: with the mutable `latest` tag, a node that has
+  # pulled the upgrade image once would keep running that copy, and with it an older migration
+  # chain than the one deployed.
+  pullPolicy: Always
+  # Others use this database: the Job migrates it only from an image built from a commit on main
+  # (deploy/build-images.sh records where an image was built from; one that records nothing is
+  # let through, with a warning). false for a database of the release's own, a branch's say.
+  sharedDatabase: true
+  # A database another build stamped, which no lineage places: estimate where it stands, and
+  # correct the estimate from what the schema lacks. Off, the Job stops instead with nothing
+  # changed and says how to place it (`upgrade --rewind-to`). For dev, never for production:
+  # values-dev.yaml turns it on.
+  recoverForeignStamps: false
+  # The Job's lock and statement timeouts come from the environment (dataviz-config):
+  # MIGRATION_LOCK_TIMEOUT (10s; a migration waiting longer rolls back and is tried again) and
+  # MIGRATION_STATEMENT_TIMEOUT (none).
   command: upgrade              # upgrade | downgrade
   targetRevision: ""            # empty -> "head" for upgrade; required for downgrade
   checkWaitSecs: 60             # how long each backend Pod's initContainer polls
@@ -296,6 +312,33 @@ upgrade:
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
+
+# ── Pre-upgrade database backup (synodic-upgrade backup) ─────────────
+# A pg_dump of the database just before the schema upgrade changes it, as a pre-upgrade hook
+# (templates/db-backup.yaml): only when the upgrade would run a migration, so a deploy that
+# migrates nothing costs nothing. Restoring the dump is the rollback for a bad migration.
+# Raise `helm upgrade --timeout` (5m by default) for a database that takes longer to dump.
+backup:
+  enabled: true
+  keep: 5                       # dumps kept on the volume
+  timeoutSeconds: 3600
+  resources: {}
+  # A volume of its own, kept on uninstall. Needs a default StorageClass, or storageClass here.
+  # The upgrade that first creates it has nowhere to write yet: it skips, unless a bucket is set.
+  volume:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  # Also copy each dump to an S3-compatible bucket (GCS: endpointUrl https://storage.googleapis.com
+  # and HMAC keys). existingSecret holds AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY; retention is the
+  # bucket's lifecycle rule. A pooler-fronted MANAGEMENT_DB_URL: add BACKUP_DATABASE_URL, a direct
+  # connection, to the Secret.
+  bucket:
+    name: ""
+    prefix: synodic-db-backups
+    endpointUrl: ""
+    region: ""
+    existingSecret: ""
 
 # ── Boot ordering ─────────────────────────────────────────────────────
 # Adds a wait-for-controlplane initContainer to viz/worker/stats so the

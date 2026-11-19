@@ -16,6 +16,7 @@ import { writeBusinessLabel } from '@/lib/nodeFields'
 import { useBranchStore } from '@/store/branchStore'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { getDeleteImpact } from '@/services/versioningApiService'
+import { mapWithConcurrency } from '@/lib/concurrency'
 import { validateDrawnEdge } from '@/services/ontologyPreflightService'
 import { judgePairs, type LinkPair, type PairVerdict } from '@/lib/bulkLinks'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
@@ -195,6 +196,59 @@ function edgeCreateChange(sourceUrn: string, targetUrn: string, edgeType: string
     return { optimistic, change }
 }
 
+
+/** Delete-impact previews read at once when several entities are deleted together. */
+const DELETE_IMPACT_CONCURRENCY = 6
+
+/** What a delete takes with it, as the delete-impact preview says. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Cascade = { nodes: any[]; edges: any[]; nodeTotal: number; edgeTotal: number; descUrns: string[] }
+
+const labelOf = (node: LineageNode) => (node.data?.label as string) ?? node.id
+
+function deleteSummary(label: string, cascade?: Cascade): string {
+    const more = cascade && (cascade.nodeTotal > 1 || cascade.edgeTotal > 0)
+    return more
+        ? `Delete '${label}' — also removes ${cascade!.nodeTotal - 1} contained `
+          + `${cascade!.nodeTotal === 2 ? 'entity' : 'entities'}, `
+          + `${cascade!.edgeTotal} relationship${cascade!.edgeTotal === 1 ? '' : 's'}`
+        : `Delete '${label}'`
+}
+
+/** The staged delete of `node`. Its hooks read the cascade from `holder`, so one filled in after
+ *  staging (several deleted at once) is what Undo and Redo restore and mark. */
+function stagedDeleteOf(node: LineageNode, holder: { cascade?: Cascade }): Omit<StagedChange, 'id' | 'timestamp'> {
+    const nodeId = node.id
+    const cascade = holder.cascade
+    return {
+        type: 'delete_entity',
+        targetId: nodeId,
+        targetUrn: (node.data?.urn as string) ?? nodeId,
+        // `cascade` carries the full impact preview so the staged-changes review can
+        // itemise exactly what will be removed (CascadeImpactList).
+        before: {
+            node: { ...node },
+            cascade: cascade
+                ? { nodes: cascade.nodes, edges: cascade.edges, nodeTotal: cascade.nodeTotal, edgeTotal: cascade.edgeTotal }
+                : undefined,
+        },
+        after: null,
+        summary: deleteSummary(labelOf(node), cascade),
+        apply: async () => {
+            useCanvasStore.getState().removeNode(nodeId)
+        },
+        discard: () => {
+            useCanvasStore.getState().updateNode(nodeId, { isPending: undefined })
+            holder.cascade?.descUrns.forEach(id => useCanvasStore.getState().updateNode(id, { isPending: undefined }))
+        },
+        // Redo marks it (and what it takes with it) for deletion again.
+        reapply: () => {
+            useCanvasStore.getState().updateNode(nodeId, { isPending: 'delete' })
+            holder.cascade?.descUrns.forEach(id => useCanvasStore.getState().updateNode(id, { isPending: 'delete' }))
+        },
+    }
+}
+
 export function useCanvasInteractions(
     options: UseCanvasInteractionsOptions = {}
 ): UseCanvasInteractionsResult {
@@ -342,44 +396,14 @@ export function useCanvasInteractions(
         }
 
         const urn = (node.data?.urn as string) ?? nodeId
-        const label = (node.data?.label as string) ?? nodeId
         // Mark visually as pending-delete; actual removal happens on Save.
         useCanvasStore.getState().updateNode(nodeId, { isPending: 'delete' })
 
         // Stage the (single) root delete. The backend cascades the containment subtree +
         // all incident edges authoritatively; `cascade` (from the delete-impact preview)
         // lets the staged-changes panel showcase exactly what will be removed.
-        const stageDelete = (
-            cascade?: { nodes: any[]; edges: any[]; nodeTotal: number; edgeTotal: number; descUrns: string[] },
-        ) => {
-            const more = cascade && (cascade.nodeTotal > 1 || cascade.edgeTotal > 0)
-            const summary = more
-                ? `Delete '${label}' — also removes ${cascade!.nodeTotal - 1} contained `
-                  + `${cascade!.nodeTotal === 2 ? 'entity' : 'entities'}, `
-                  + `${cascade!.edgeTotal} relationship${cascade!.edgeTotal === 1 ? '' : 's'}`
-                : `Delete '${label}'`
-            stagedChanges.stage({
-                type: 'delete_entity',
-                targetId: nodeId,
-                targetUrn: urn,
-                // `cascade` carries the full impact preview so the staged-changes review can
-                // itemise exactly what will be removed (CascadeImpactList).
-                before: {
-                    node: { ...node },
-                    cascade: cascade
-                        ? { nodes: cascade.nodes, edges: cascade.edges, nodeTotal: cascade.nodeTotal, edgeTotal: cascade.edgeTotal }
-                        : undefined,
-                },
-                after: null,
-                summary,
-                apply: async () => {
-                    useCanvasStore.getState().removeNode(nodeId)
-                },
-                discard: () => {
-                    useCanvasStore.getState().updateNode(nodeId, { isPending: undefined })
-                    cascade?.descUrns.forEach(id => useCanvasStore.getState().updateNode(id, { isPending: undefined }))
-                },
-            })
+        const stageDelete = (cascade?: Cascade) => {
+            stagedChanges.stage(stagedDeleteOf(node, { cascade }))
             onNodeDeleted?.(nodeId)
         }
 
@@ -458,6 +482,9 @@ export function useCanvasInteractions(
             discard: () => {
                 useCanvasStore.getState().addEdges([snapshot])
             },
+            reapply: () => {
+                useCanvasStore.getState().removeEdge(edgeId)
+            },
         })
         onEdgeDeleted?.(edgeId)
     }, [onEdgeDeleted])
@@ -498,6 +525,10 @@ export function useCanvasInteractions(
             discard: () => {
                 useCanvasStore.getState().removeEdge(reversedId)
                 useCanvasStore.getState().addEdges([{ ...edge }])
+            },
+            reapply: () => {
+                useCanvasStore.getState().removeEdge(edgeId)
+                useCanvasStore.getState().addEdges([reversed])
             },
         })
     }, [notify])
@@ -576,14 +607,70 @@ export function useCanvasInteractions(
         useCanvasStore.getState().nodes.forEach(n => selectNode(n.id, true))
     }, [selectNode])
     
+    // Several entities deleted at once: staged together (one write, one Undo step), then what each
+    // takes with it is read a few at a time and filled in with one update — not a request per
+    // entity all at once, and a write per answer.
+    const deleteMany = useCallback((nodeIds: readonly string[]) => {
+        if (nodeIds.length <= 1) { nodeIds.forEach(id => deleteNode(id)); return }
+        const canvas = useCanvasStore.getState()
+        const byId = new Map(canvas.nodes.map(n => [n.id, n]))
+        const store = useStagedChangesStore.getState()
+        const createOf = new Map<string, string>()
+        for (const c of store.changes) if (c.type === 'create_entity') createOf.set(c.targetId, c.id)
+        const discards: string[] = []
+        const roots: LineageNode[] = []
+        for (const id of nodeIds) {
+            const node = byId.get(id)
+            if (!node) continue
+            const create = createOf.get(id)
+            if (create) discards.push(create)
+            else roots.push(node)
+        }
+        if (discards.length) store.discardMany(discards)
+        canvas.updateNodes(new Map(roots.map(n => [n.id, { isPending: 'delete' as const }])))
+        const holders = roots.map(() => ({} as { cascade?: Cascade }))
+        const staged: StagedChange[] = roots.map((node, i) => ({ ...stagedDeleteOf(node, holders[i]), id: generateId('staged'), timestamp: Date.now() }))
+        useStagedChangesStore.getState().stageMany(staged)
+        nodeIds.forEach(id => onNodeDeleted?.(id))
+
+        const bs = useBranchStore.getState()
+        if (!(bs.currentBranchId && bs.graphId && bs.dataSourceId && bs.workspaceId) || staged.length === 0) return
+        const { workspaceId, dataSourceId, currentBranchId } = bs
+        void mapWithConcurrency(staged, DELETE_IMPACT_CONCURRENCY, (c) => getDeleteImpact(workspaceId, dataSourceId, currentBranchId, c.targetUrn!))
+            .then(results => {
+                const marks = new Map<string, { isPending: 'delete' }>()
+                const summaries = new Map<string, string>()
+                // A delete undone while its preview was read marks nothing.
+                const live = new Set(useStagedChangesStore.getState().changes.map(c => c.id))
+                results.forEach((r, i) => {
+                    if (r.status !== 'fulfilled') return
+                    const impact = r.value
+                    const urn = staged[i].targetUrn
+                    const descUrns = impact.nodes.map(n => String(n.urn ?? n.entityId ?? '')).filter(id => id && id !== urn)
+                    const cascade: Cascade = { nodes: impact.nodes, edges: impact.edges, nodeTotal: impact.nodeTotal, edgeTotal: impact.edgeTotal, descUrns }
+                    holders[i].cascade = cascade
+                    // In place, as `patchAfter` does: the Undo history holds this same change.
+                    ;(staged[i].before as { cascade?: unknown }).cascade = { nodes: cascade.nodes, edges: cascade.edges, nodeTotal: cascade.nodeTotal, edgeTotal: cascade.edgeTotal }
+                    summaries.set(staged[i].id, deleteSummary(labelOf(roots[i]), cascade))
+                    if (live.has(staged[i].id)) for (const d of descUrns) marks.set(d, { isPending: 'delete' })
+                })
+                useCanvasStore.getState().updateNodes(marks)
+                if (summaries.size) {
+                    useStagedChangesStore.setState(s => ({
+                        changes: s.changes.map(c => (summaries.has(c.id) ? { ...c, summary: summaries.get(c.id)! } : c)),
+                    }))
+                }
+            })
+    }, [deleteNode, onNodeDeleted])
+
     const deleteSelected = useCallback(() => {
         // Route through the staged-delete helpers so keyboard Delete shows up
         // in the staged-changes panel just like context-menu Delete does.
         const { selectedNodeIds, selectedEdgeIds } = useCanvasStore.getState()
-        selectedNodeIds.forEach(id => deleteNode(id))
+        deleteMany(selectedNodeIds)
         selectedEdgeIds.forEach(id => deleteEdge(id))
         clearSelection()
-    }, [deleteNode, deleteEdge, clearSelection])
+    }, [deleteMany, deleteEdge, clearSelection])
     
     // Each selected entity once — never one that sits inside another selected one, whose copy
     // already carries it (copying both made two copies of the same child).

@@ -75,6 +75,8 @@ def _show(s, value) -> str:
         return "Unlimited"
     if value == "forever":
         return "Forever"
+    if value == "everyone":
+        return "Everyone asked"
     if s.kind == "bool":
         return "On" if value else "Off"
     if s.kind == "choice":
@@ -105,6 +107,8 @@ def _kind(s) -> str:
         "bool": "On or off",
         "count": f"A whole number, {lo:,} to {hi:,}" + (f" {s.unit}" if s.unit else "") if s.range else "",
         "count_or_unlimited": f"A whole number, {lo:,} to {hi:,}, or unlimited" if s.range else "",
+        "count_or_everyone": (f"Everyone asked, or a whole number, {lo:,} to {hi:,}"
+                              + (f" {s.unit}" if s.unit else "")) if s.range else "",
         "ratio": ((f"A share, {_share(lo)} to {_share(hi)}" if s.unit == "share" else
                    f"A multiple of the write's time, {lo:g} to {hi:g}") if s.range else ""),
         "percent": f"A percentage, {lo}% to {hi}%" if s.range else "",

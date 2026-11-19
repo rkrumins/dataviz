@@ -5,8 +5,9 @@ whose members come from one or more queries (``config.membership``, the contract
 ``backend/common/models/view_membership.py``). An auto-updating one keeps them in
 step with the data; a snapshot keeps them as they were.
 
-* ``POST /views/from-members`` — make one. Its members are worked out before it is
-  saved: over the limit, nothing is made and the answer says by how much.
+* ``POST /views/from-members`` — make one. What its sources reach is worked out before
+  it is saved (202 while it is: ask again): over the limit, nothing is made and the
+  answer says by how much. Its members are then placed, a page at a time.
 * ``GET /views/{id}/membership`` — the definition and how keeping it is going
   (an ETag, so a poll costs a 304).
 * ``PUT /views/{id}/membership`` — change the queries, freeze or resume, against the
@@ -25,12 +26,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional, Set
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,25 +53,29 @@ from backend.app.config import resilience
 from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.db.engine import get_db_session, get_graph_read_session
 from backend.app.db.models import ViewORM, view_is_live
-from backend.app.db.repositories import view_activity_repo, view_membership_repo, view_repo, view_version_repo
+from backend.app.db.repositories import (
+    view_activity_repo, view_members_repo, view_membership_repo, view_repo, view_version_repo,
+)
 from backend.app.db.repositories.view_membership_repo import dumps, loads, now_iso
 from backend.app.jobs.metrics import increment
 from backend.app.providers.manager import provider_manager
 from backend.app.services import template_access, view_access
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.graph_cache import ENDPOINT_TRACE_CLOSURE
-from backend.app.services.live_views import pipeline
+from backend.app.services.live_views import layouts, pipeline
 from backend.app.services.live_views.ownership import MemberOpError, apply_member_ops, layer_ids_of
 from backend.app.services.live_views.pipeline import EngineScope, PipelineError
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.view_transfer.sources import engine_for
 from backend.common.adapters import ProviderUnavailable
 from backend.common.models.management import ViewCreateRequest, ViewResponse
+from backend.common.models.member_set import MemberSetStatus
 from backend.common.models.view_membership import (
     MACHINE,
     FromMembersRequest,
     MemberOps,
     MembershipDefinition,
+    MembershipResolving,
     MembershipSource,
     MembershipStatus,
     MembershipUpdate,
@@ -148,12 +155,13 @@ async def _check_views(
     self_id: Optional[str] = None,
 ) -> Optional[dict]:
     """Every view the definition names — the ones its queries are searched in, and
-    the one whose layers it copies — readable by the caller, in the same workspace
-    and data source, and none of them the view itself. Returns the config of the
-    view whose layers are copied."""
+    the one whose layers it copies or follows — readable by the caller, in the same
+    workspace and data source, none of them the view itself, and a followed one a view
+    that can be followed (``pipeline.follow_refusal``). Returns the config of the view
+    whose layers are copied or followed."""
     names: Set[str] = {s.read_in for s in definition.sources if s.read_in}
     layout = definition.layout
-    if layout.kind == "source":
+    if layout.kind in ("source", "follow"):
         if not layout.source_view_id:
             raise refused(422, "source_view_required", "Name the view whose layers to copy (sourceViewId).")
         names.add(layout.source_view_id)
@@ -174,6 +182,9 @@ async def _check_views(
             raise refused(422, "view_other_data_source", "That view shows a different data source.")
         if view_id == layout.source_view_id:
             copied = pipeline.config_of(other)
+            refusal = pipeline.follow_refusal(copied) if layout.kind == "follow" else None
+            if refusal:
+                raise refused(422, *refusal)
     return copied
 
 
@@ -181,20 +192,32 @@ async def membership_status(
     session: AsyncSession, row: ViewORM, definition: MembershipDefinition,
     ctx: Optional[view_access.ViewerContext] = None,
 ) -> MembershipStatus:
-    """How keeping ``row`` up to date stands. The name of a view searched in is shown
-    only to someone who can open it."""
+    """How keeping ``row`` up to date stands. The name of a view searched in, or
+    followed, is shown only to someone who can open it."""
     state = await view_membership_repo.get(session, row.id)
     _, assignments = pipeline.layout_of(pipeline.config_of(row))
+    people = sorted(u for u, e in assignments.items() if e.get("assignedBy") != MACHINE)
     read_in: List[ReadInView] = []
     for view_id, other in (await pipeline.read_in_views(session, definition)).items():
         visible = other is not None and (ctx is None or not rbac_flag("RBAC_ENFORCE_VIEWS")
                                          or await view_access.can_read_view(session, ctx, other))
         read_in.append(ReadInView(view_id=view_id, name=other.name if visible else None,
                                   available=other is not None))
-    if definition.mode != "live":
+    follows: Optional[ReadInView] = None
+    if definition.layout.kind == "follow":
+        base = (await session.execute(select(ViewORM).where(
+            ViewORM.id == definition.layout.source_view_id, view_is_live()))).scalar_one_or_none()
+        if base is not None and base.workspace_id != row.workspace_id:
+            base = None
+        visible = base is not None and (ctx is None or not rbac_flag("RBAC_ENFORCE_VIEWS")
+                                        or await view_access.can_read_view(session, ctx, base))
+        follows = ReadInView(view_id=definition.layout.source_view_id, name=base.name if visible else None,
+                             available=base is not None)
+    if definition.mode != "live" and _running(state, definition) is None:
         status = "frozen"
     else:
         status = state.status if state is not None and state.status != "frozen" else "pending"
+    members = state.member_count if state is not None and state.members_epoch is not None else 0
     return MembershipStatus(
         mode=definition.mode,
         status=status,
@@ -203,15 +226,22 @@ async def membership_status(
         definition=definition,
         definition_hash=definition.definition_hash(),
         counts=loads(state.counts) if state is not None else None,
-        keys=len(assignments),
+        keys=members + len(people),
         limit=pipeline.entry_limit(),
         last_applied_at=state.last_applied_at if state is not None else None,
         last_diff=loads(state.last_diff) if state is not None else None,
         truncated=(loads(state.truncated) or []) if state is not None else [],
         read_in=read_in,
-        always_included=sorted(u for u, e in assignments.items() if e.get("assignedBy") != MACHINE),
+        follows=follows,
+        always_included=people,
         excluded=list(definition.exclude),
     )
+
+
+def _running(state, definition: MembershipDefinition) -> Optional[dict]:
+    """The run working the view out now, if any: one a request before left ``running``
+    (or a new view's first answer), which the next request carries on."""
+    return view_membership_repo.in_progress(state, definition.resolution_hash())
 
 
 async def _view(
@@ -286,7 +316,10 @@ async def _record_update(session: AsyncSession, row: ViewORM, outcome: Optional[
 @router.post(
     "/from-members", response_model=ViewWithMembership, response_model_by_alias=True, status_code=201,
     summary="Make a list view of a narrowing's members",
-    responses=refusal_responses(403, 404, 409, 422, 429, 503),
+    responses={202: {"description": "What the sources reach is still being worked out: nothing was made. "
+                                    "Send the same request again (the same Idempotency-Key too) to carry on.",
+                     "model": MembershipResolving},
+               **refusal_responses(403, 404, 409, 422, 429, 501, 503)},
     dependencies=[Depends(require_membership)],
 )
 async def create_view_from_members(
@@ -305,17 +338,29 @@ async def create_view_from_members(
     are arranged: like the view they came from (``source``: its layers, kept only
     where they hold something unless ``keep`` is ``all``), by a template's rules or
     the client's own layers (``template``, ``custom``: send ``layers``), by
-    top-level type (``auto``) or by lineage distance (``stages``).
+    top-level type (``auto``), by lineage distance (``stages``), or in the layers of
+    a view it follows (``follow``: that view's as it has them now, each member where
+    it places it — a subset of that view, listed among its subsets; a view that is a
+    subset itself, or made from a query, can't be followed: 422 ``base_is_subset``,
+    ``base_is_list``).
 
     ``mode`` ``live`` (the default) keeps the members in step with the data;
-    ``snapshot`` keeps them as they are now. Members are worked out before the view
-    is saved: past the limit (``limit``, entries including the containers drawn
-    around members) nothing is made and the 422 says by how much; when the graph
-    cannot answer in full in time, nothing is made and the 503 says when to retry.
+    ``snapshot`` keeps them as they are now. What the sources reach is worked out in
+    full before anything is saved, a step at a time: while it is, the answer is 202
+    ``{"status": "resolving", "sets": [...]}`` (each source's member set, as
+    ``POST /graph/member-sets`` answers it) after ``waitMs``, and nothing is made —
+    send the same request again to carry on. Past the limit (``limit``: members; the
+    containers around them are drawn from their paths) nothing is made and the 422
+    says by how much; when the graph cannot answer in full, nothing is made and the
+    503 says when to retry. The view is made (201) once that is known; a view of
+    more members than one request can place says ``updating``, and opening it — or
+    *Refresh now* — carries its first answer on.
 
     ``Idempotency-Key`` makes a retry safe: the same caller sending the same key
-    gets the view the first attempt made (200), never a second one.
+    gets the view the first attempt made (200), never a second one. A 202 records
+    nothing against it.
     """
+    started = time.monotonic()
     actor = _user_id(user)
     request_id = f"fm:{actor}:{idempotency_key}" if idempotency_key else None
     if request_id:
@@ -346,27 +391,30 @@ async def create_view_from_members(
     limit = pipeline.entry_limit()
     try:
         async with engine_scope(body.workspace_id, body.data_source_id, actor) as engine:
-            resolved = await pipeline.gather(
-                engine, definition.sources, definition.layout, definition.exclude,
-                workspace_id=body.workspace_id, data_source_id=body.data_source_id,
-                budget_s=_budget_s(), limit=limit,
+            found = await pipeline.resolve_sets(
+                session, engine, definition.sources, workspace_id=body.workspace_id,
+                data_source_id=body.data_source_id, wait_s=body.wait_ms / 1000.0,
             )
-        if resolved.retryable:
-            raise HTTPException(status_code=503, headers={"Retry-After": str(int(pipeline.RETRY_SECS))}, detail={
-                "reason": "short_answer", "truncated": resolved.retryable,
-                "message": "The graph couldn't answer in full in time, so nothing was saved. Try again in a moment.",
-            })
-        draft = pipeline.draft_view(definition, resolved, source_config=copied_from, client_layers=body.layers,
-                                    keep=body.keep, limit=limit)
+            if not found.complete:
+                return _resolving(await pipeline.statuses(session, found))
+            if found.retryable:
+                await pipeline.retire_short(session, found)
+                raise HTTPException(status_code=503, headers={"Retry-After": str(int(pipeline.RETRY_SECS))}, detail={
+                    "reason": "short_answer", "truncated": found.retryable,
+                    "message": "The graph couldn't answer in full, so nothing was saved. Try again in a moment.",
+                })
+            draft = await pipeline.draft_view(
+                session, engine, found, definition, source_config=copied_from, client_layers=body.layers,
+                keep=body.keep, limit=limit, place_sample=body.layout.kind not in ("template", "custom", "follow"))
     except PipelineError as exc:
         raise _refused(exc) from exc
-    if draft.plan.over_cap:
-        p = draft.plan
+    except NotImplementedError as exc:
+        raise refused(501, "unsupported", str(exc) or "This graph can't work out what the query reaches.") from exc
+    if draft.over_cap:
         raise HTTPException(status_code=422, detail={
-            "reason": "over_cap", "keys": p.keys, "members": p.members, "containers": p.containers,
-            "limit": p.limit,
-            "message": f"This would hold {p.keys:,} entries — {p.members:,} entities and the {p.containers:,} "
-                       f"containers around them — and a view holds at most {p.limit:,}.",
+            "reason": "over_cap", "keys": draft.members, "members": draft.members, "containers": 0,
+            "limit": limit,
+            "message": f"This would hold {draft.members:,} members, and a view holds at most {limit:,}.",
         })
 
     # Saved in one transaction, everything checked again: the data source is held in its
@@ -389,6 +437,8 @@ async def create_view_from_members(
     ), ontology_digest=await _compute_ontology_digest(session, body.workspace_id, body.data_source_id),
         user_id=actor)
     row = (await session.execute(select(ViewORM).where(ViewORM.id == view.id))).scalar_one()
+    if body.layout.kind == "follow":
+        row.subset_of = body.layout.source_view_id      # among that view's subsets, served its layers
     version, created = await view_version_repo.checkpoint(
         session, row, source="create", actor=actor, request_id=request_id,
         provenance={"madeFrom": draft.definition.provenance.model_dump(by_alias=True, exclude_none=True)},
@@ -401,17 +451,30 @@ async def create_view_from_members(
         if replayed is None:
             raise refused(409, "made_by_another_request", "This view was just made by another request.")
         return replayed
-    state = await view_membership_repo.ensure(session, row)
-    status = "frozen" if draft.definition.mode != "live" else ("partial" if resolved.truncated() else "ok")
-    for key, value in pipeline.applied_values(draft.plan, resolved, draft.definition, status=status).items():
-        setattr(state, key, value)
-    state.revision = 1
+    owner = f"web:{uuid.uuid4().hex[:12]}"
+    await pipeline.start(session, row, draft.definition, found, owner=owner)
     await view_activity_repo.record_view_activity(
         session, view_id=row.id, workspace_id=row.workspace_id, action="created", actor=actor,
         summary=f'Created "{row.name}" from a query',
     )
-    await session.flush()
+    await session.commit()                 # made: its members are placed after, a page at a time
+
+    try:
+        await pipeline.carry_on(row.id, session=session, engine_scope=engine_scope, owner=owner,
+                                budget_s=max(0.0, _budget_s() - (time.monotonic() - started)), actor=actor)
+    except (PipelineError, ProviderUnavailable):
+        # Made all the same: its members are worked out when it is next opened.
+        await session.rollback()
+    row = (await session.execute(select(ViewORM).where(ViewORM.id == view.id)
+                                 .execution_options(populate_existing=True))).scalar_one()
+    view = await view_repo.get_view_enriched(session, row.id, user_id=actor)
     return ViewWithMembership(view=view, membership=await membership_status(session, row, draft.definition))
+
+
+def _resolving(found: List[MemberSetStatus]) -> JSONResponse:
+    """202: what the sources reach is still being worked out, and nothing was made."""
+    body = MembershipResolving(sets=[s.model_dump(mode="json", by_alias=True, exclude_none=True) for s in found])
+    return JSONResponse(status_code=202, content=body.model_dump(mode="json", by_alias=True))
 
 
 # ── How keeping it is going ──────────────────────────────────────────────────
@@ -509,27 +572,31 @@ async def update_view_membership(
                            self_id=row.id)
 
     config = pipeline.config_of(row)
+    state = await view_membership_repo.ensure(session, row)
     if body.exclude is not None:
         ref = config.setdefault("layout", {}).setdefault("referenceLayout", {})
         _, assignments = pipeline.layout_of(config)
         gone = sorted(set(body.exclude) - set(definition.exclude))
         back = sorted(set(definition.exclude) - set(body.exclude))
         try:
-            ref["assignments"], _ = apply_member_ops(
-                assignments, definition.exclude, MemberOps(exclude=gone, unexclude=back),
+            ref["assignments"], _, out = apply_member_ops(
+                assignments, definition.exclude, MemberOps(exclude=gone, unexclude=back), members={},
                 layer_ids=layer_ids_of(ref), now=now_iso())
         except MemberOpError as exc:
             raise refused(422, "invalid_member_ops", str(exc)) from exc
+        state.member_count -= await view_members_repo.drop(session, row.id, state.members_epoch, out)
     config["membership"] = updated.model_dump(mode="json", by_alias=True, exclude_none=True)
     row.config = json.dumps(config)
     row.updated_by = actor
 
-    state = await view_membership_repo.ensure(session, row)
     work_out = updated.mode == "live" and (
         updated.resolution_hash() != definition.resolution_hash() or definition.mode != "live"
         or updated.layout != definition.layout or bool(set(definition.exclude) - set(updated.exclude)))
     if updated.mode != "live":
         state.status, state.status_detail, state.held = "frozen", None, None
+        if definition.mode == "live":
+            # A run working it out now is overtaken: its members stay as they are.
+            state.epoch, state.materialize, state.lease_owner, state.lease_until = state.epoch + 1, None, None, None
     elif work_out:
         state.status = "pending"
         state.status_detail = dumps({"reason": "definition_changed"})
@@ -584,11 +651,21 @@ async def change_view_members(
     config = pipeline.config_of(row)
     ref = config.setdefault("layout", {}).setdefault("referenceLayout", {})
     _, assignments = pipeline.layout_of(config)
+    state = await view_membership_repo.ensure(session, row)
+    members = await view_members_repo.placements(session, view_id, state.members_epoch,
+                                                 [item.urn for item in body.include])
+    layer_ids = layer_ids_of(ref)
+    if definition.layout.kind == "follow":
+        # It stores no layers: its own are the ones it is served (none, the view it follows gone).
+        base = await pipeline.source_config(session, definition, row.workspace_id)
+        layer_ids = layouts.layer_ids(layouts.followed(base)) if base is not None else []
     try:
-        ref["assignments"], exclude = apply_member_ops(
-            assignments, definition.exclude, body, layer_ids=layer_ids_of(ref), now=now_iso())
+        ref["assignments"], exclude, gone = apply_member_ops(
+            assignments, definition.exclude, body, members=members, layer_ids=layer_ids, now=now_iso())
     except MemberOpError as exc:
         raise refused(422, "invalid_member_ops", str(exc)) from exc
+    # Kept out, or a person's own entry now: out of the members at once.
+    state.member_count -= await view_members_repo.drop(session, view_id, state.members_epoch, gone)
     config.setdefault("content", {})["entityScope"] = "curated"
     updated = definition.model_copy(update={"exclude": exclude})
     config["membership"] = updated.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -626,7 +703,10 @@ def _ops_summary(ops: MemberOps) -> str:
 @router.post(
     "/{view_id}/membership/refresh", response_model=RefreshResult, response_model_by_alias=True,
     summary="Work a list view's members out again",
-    responses={202: {"description": "Another request is updating it now: `outcome` is `busy`, and the status answers as it stands.", "model": RefreshResult}, **refusal_responses(403, 404, 409, 429, 503)},
+    responses={202: {"description": "Still being worked out (`outcome`: `running` — ask again to carry it on) "
+                                    "or another request is updating it now (`busy`); the status answers as it "
+                                    "stands.", "model": RefreshResult},
+               **refusal_responses(403, 404, 409, 429, 503)},
     dependencies=[Depends(require_membership)],
 )
 async def refresh_view_membership(
@@ -644,36 +724,43 @@ async def refresh_view_membership(
     """Work the view's members out again now and apply them.
 
     ``outcome`` says what happened: ``applied`` (with ``diff``), ``unchanged``,
-    ``held`` — an update would remove at least half the view's members (and at least
-    50), so it waits; send ``confirmRemovals=true`` to apply it — ``over_cap``,
-    ``deferred`` (the graph answered short; the view kept its members), or ``busy``
-    (another update is working on it: 202). At most once every 30 seconds per view;
-    a 429 says when.
+    ``running`` — a large view is worked out a step at a time, and this request's turn
+    is spent: ask again (202) to carry it on — ``held`` — an update would remove at
+    least half the view's members (and at least 50), so it waits; send
+    ``confirmRemovals=true`` to apply it — ``over_cap``, ``deferred`` (the graph
+    answered short; the view kept its members), or ``busy`` (another request is working
+    on it: 202). At most once every 30 seconds per view, except to carry a run on or
+    confirm a held one; a 429 says when.
 
     ``trigger=open`` — the view was opened. It applies the view's own query and
     changes nothing about the view, so anyone who can read it may ask: nothing is
     read from the graph unless the data or the query changed since it was last
-    worked out, a held removal stays held, and within 30 seconds of the last update
-    it answers ``current`` rather than a 429."""
+    worked out (or a run is still working it out, which this carries on), a held
+    removal stays held, and within 30 seconds of the last update it answers
+    ``current`` rather than a 429."""
     actor = _user_id(user)
     opened = trigger == "open"
     row, ctx = await _view(session, view_id, user, claims, edit=not opened)
     definition = _definition_of(row)
     state = await view_membership_repo.get(session, view_id)
+    running = _running(state, definition) is not None
     if opened:
         confirm_removals = False
-        reason = ("snapshot" if definition.mode != "live"
-                  else "recent" if state is not None and not _older_than(state.last_started_at,
-                                                                         REFRESH_MIN_INTERVAL_SECS)
+        reason = ("snapshot" if definition.mode != "live" and not running
+                  else "recent" if state is not None and not running and not _older_than(
+                      state.last_started_at, REFRESH_MIN_INTERVAL_SECS)
                   else None)
         if reason:
             increment("live_view_refresh_total", outcome="current", trigger="open")
             return RefreshResult(outcome="current", detail={"reason": reason},
                                  membership=await membership_status(session, row, definition, ctx))
-    # A change waiting to be worked out, or a held update being confirmed, goes straight
-    # ahead; one already running answers busy below.
-    elif state is not None and not _older_than(state.last_started_at, REFRESH_MIN_INTERVAL_SECS) and not (
-            state.status in ("pending", "updating") or (state.status == "held" and confirm_removals)):
+    elif definition.mode != "live" and not running:
+        raise HTTPException(status_code=409, detail={"reason": "frozen", "message": (
+            "This view is a snapshot: its members stay as they are. Resume updates to refresh it.")})
+    # A change waiting to be worked out, a run to carry on, or a held update being
+    # confirmed goes straight ahead; one another request is running answers busy below.
+    elif state is not None and not running and not _older_than(state.last_started_at, REFRESH_MIN_INTERVAL_SECS) \
+            and not (state.status in ("pending", "updating") or (state.status == "held" and confirm_removals)):
         wait = REFRESH_MIN_INTERVAL_SECS
         try:
             started = datetime.fromisoformat(state.last_started_at)
@@ -683,9 +770,6 @@ async def refresh_view_membership(
         increment("live_view_refresh_total", outcome="too_soon", trigger="manual")
         raise HTTPException(status_code=429, headers={"Retry-After": str(wait)}, detail={
             "reason": "too_soon", "message": f"This view was just updated. Try again in {wait} seconds."})
-    if definition.mode != "live":
-        raise HTTPException(status_code=409, detail={"reason": "frozen", "message": (
-            "This view is a snapshot: its members stay as they are. Resume updates to refresh it.")})
     await session.commit()
     try:
         outcome = await pipeline.refresh(
@@ -697,7 +781,7 @@ async def refresh_view_membership(
         raise _refused(exc) from exc
     await _record_update(session, row, outcome, actor)
     increment("live_view_refresh_total", outcome=outcome.outcome, trigger="open" if opened else "manual")
-    if outcome.outcome == "busy":
+    if outcome.outcome in ("busy", "running"):
         response.status_code = 202
     row, ctx = await _view(session, view_id, user, claims, edit=False)
     return RefreshResult(

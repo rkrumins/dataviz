@@ -52,6 +52,11 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
     "dashboard":  ("Dashboard",     NavSpecAlways()),
     "explore":    ("Explore",       NavSpecAlways()),
     "workspaces": ("Workspaces",    NavSpecAlways()),
+    # The open workspace's review inbox: whoever may read a workspace's data
+    # sources may read its reviews (the `/review-inbox` gate). The sidebar also
+    # wants the `versioningEnabled` flag on and a workspace open, since a flag is
+    # not a permission.
+    "reviews":    ("Reviews",       NavSpecWorkspaceAny(perm="workspace:datasource:read")),
     # Layout templates: everyone has some (the built-ins); what each person
     # may change is decided per template, not by the page.
     "templates":  ("Templates",     NavSpecAlways()),

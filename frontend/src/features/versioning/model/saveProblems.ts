@@ -30,11 +30,16 @@ function keysOf(c: StagedChange): string[] {
 }
 
 export function mapSaveProblems(violations: readonly Violation[], changes: readonly StagedChange[]): SaveProblem[] {
+  // Appended in place: copying each list on every add was quadratic in a 10,000-change save.
   const byKey = new Map<string, StagedChange[]>()
   for (const c of changes) {
-    for (const k of keysOf(c)) byKey.set(k, [...(byKey.get(k) ?? []), c])
+    for (const k of keysOf(c)) {
+      const list = byKey.get(k)
+      if (list) list.push(c)
+      else byKey.set(k, [c])
+    }
   }
-  const problems = new Map<string, SaveProblem>()
+  const problems = new Map<string, { name: string; reason: string; ids: Set<string> }>()
   for (const v of violations) {
     const reason = v.reason || 'This change breaks a rule of the ontology.'
     const sent = v.ref ?? v.entity_id
@@ -45,11 +50,8 @@ export function mapSaveProblems(violations: readonly Violation[], changes: reado
     const name = (typeof known === 'string' && known) || v.name || (matched[0]?.summary ?? v.entity_id ?? 'An entity')
     const key = `${reason}::${v.entity_id ?? ''}`
     const prior = problems.get(key)
-    problems.set(key, {
-      name,
-      reason,
-      changeIds: [...new Set([...(prior?.changeIds ?? []), ...matched.map((c) => c.id)])],
-    })
+    if (prior) { prior.name = name; for (const c of matched) prior.ids.add(c.id) }
+    else problems.set(key, { name, reason, ids: new Set(matched.map((c) => c.id)) })
   }
-  return [...problems.values()]
+  return [...problems.values()].map(({ name, reason, ids }) => ({ name, reason, changeIds: [...ids] }))
 }

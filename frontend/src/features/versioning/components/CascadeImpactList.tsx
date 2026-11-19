@@ -30,11 +30,15 @@ const short = (id?: string) => {
   return s.length > 30 ? `…${s.slice(-28)}` : s || '—'
 }
 
+/** Rows listed of each before "+ N more": a cascade of 10,000 is counted, not drawn. */
+const LISTED = 100
+
 export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; rootUrn?: string }) {
   if (impact.nodeTotal <= 1 && impact.edgeTotal === 0) return null
-  const childNodes = impact.nodes.filter((n) => (n.urn ?? n.entityId) !== rootUrn)
-  const moreNodes = impact.nodeTotal - impact.nodes.length
-  const moreEdges = impact.edgeTotal - impact.edges.length
+  const childNodes = impact.nodes.filter((n) => (n.urn ?? n.entityId) !== rootUrn).slice(0, LISTED)
+  const edges = impact.edges.slice(0, LISTED)
+  const moreNodes = Math.max(0, impact.nodeTotal - 1 - childNodes.length)
+  const moreEdges = impact.edgeTotal - edges.length
 
   return (
     <div className="mt-2 rounded-lg border border-rose-500/20 bg-rose-500/[0.04] p-2.5 space-y-2.5">
@@ -59,16 +63,16 @@ export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; 
                 {n.entityType && <span className="text-[10px] text-ink-muted shrink-0">· {String(n.entityType)}</span>}
               </li>
             ))}
-            {moreNodes > 0 && <li className="text-[11px] text-ink-muted/80 pl-1">+ {moreNodes} more…</li>}
+            {moreNodes > 0 && <li className="text-[11px] text-ink-muted/80 pl-1">+ {moreNodes.toLocaleString()} more…</li>}
           </ul>
         </div>
       )}
 
-      {impact.edges.length > 0 && (
+      {edges.length > 0 && (
         <div>
           <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/70 mb-1">Relationships</p>
           <ul className="space-y-0.5 max-h-44 overflow-y-auto">
-            {impact.edges.map((e) => (
+            {edges.map((e) => (
               <li key={String(e.entityId)} className="flex items-center gap-1.5 text-[11px] text-ink-muted min-w-0">
                 <NodeDiffBadge status="removed" />
                 <span className="font-medium text-ink/80 shrink-0">{String(e.edgeType ?? 'edge')}</span>
@@ -77,7 +81,7 @@ export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; 
                 <span className="font-mono truncate" title={String(e.targetEntityId ?? '')}>{short(e.targetEntityId)}</span>
               </li>
             ))}
-            {moreEdges > 0 && <li className="text-[11px] text-ink-muted/80 pl-1">+ {moreEdges} more…</li>}
+            {moreEdges > 0 && <li className="text-[11px] text-ink-muted/80 pl-1">+ {moreEdges.toLocaleString()} more…</li>}
           </ul>
         </div>
       )}

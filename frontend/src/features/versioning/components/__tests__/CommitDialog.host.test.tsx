@@ -64,7 +64,7 @@ describe('CommitDialog — inside another dialog', () => {
     openMrMutate.mockImplementation((_v, opts) => opts.onSuccess({ prId: 'pr_7' }))
     const { onClose, onLeave, onPublished } = renderDialog()
     fireEvent.click(screen.getByRole('button', { name: /Submit for review/ }))
-    expect(screen.getByTestId('location')).toHaveTextContent('/workspaces/ws1/reviews?pr=pr_7')
+    expect(screen.getByTestId('location')).toHaveTextContent('/workspaces/ws1/reviews/pr_7')
     expect(onClose).toHaveBeenCalled()
     expect(onLeave).toHaveBeenCalledTimes(1)
     expect(onPublished).not.toHaveBeenCalled()

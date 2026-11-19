@@ -9,12 +9,13 @@
  * removed from all — is staged as each entity's own edit through
  * `stageNodeEdit`, so a node still has at most one staged change (an earlier
  * edit of it merges in), an entity the edit leaves as it was stages nothing,
- * and Review & Save sends the lot as one batch. Undo puts the staged changes
- * and the canvas back as they were before.
+ * and Review & Save sends the lot as one batch — staged in one write, as one
+ * Undo step (`stageNodeEdits`), so 10,000 entities are edited as fast as ten.
+ * Undo puts the staged changes and the canvas back as they were before.
  */
 import { applyNodePatch, userProperties } from '@/lib/nodeFields'
-import { stageNodeEdit } from '@/features/versioning/model/stageNodeEdit'
-import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { stageNodeEdits } from '@/features/versioning/model/stageNodeEdit'
+import type { LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 
 type Data = Record<string, unknown>
@@ -65,26 +66,20 @@ export const isEmptyBulkEdit = (edit: BulkEdit) =>
   edit.description === undefined && Object.keys(edit.set).length === 0 && edit.unset.length === 0
 
 /**
- * Stage `edit` on every node, each as its own edit. Returns how to undo it:
- * the staged changes and each node's data as they were.
+ * Stage `edit` on every node, each as its own edit, as one action. Returns how
+ * to undo it: the Undo step it made — while it is still the last thing done.
  */
 export function stageBulkEdit(nodes: readonly LineageNode[], edit: BulkEdit): () => void {
-  const before = useStagedChangesStore.getState().changes
-  const originals = nodes.map((n) => [n.id, n.data] as const)
   const payload: Data = {}
   if (edit.description !== undefined) payload.description = edit.description
   if (Object.keys(edit.set).length > 0) payload.properties = edit.set
-  for (const node of nodes) {
-    const current = node.data as Data
-    stageNodeEdit(node.id, node.data, applyNodePatch(current, payload, edit.unset) as LineageNode['data'])
-  }
+  const step = stageNodeEdits(nodes.map((node) => ({
+    nodeId: node.id,
+    current: node.data,
+    after: applyNodePatch(node.data as Data, payload, edit.unset) as LineageNode['data'],
+  })))
   return () => {
-    useStagedChangesStore.setState({ changes: before })
-    const { updateNode } = useCanvasStore.getState()
-    // `updateNode` merges: a field the edit added where there was none is
-    // written back as absent, not left behind.
-    for (const [id, data] of originals) {
-      updateNode(id, { ...data, description: data.description, businessLabel: data.businessLabel })
-    }
+    const s = useStagedChangesStore.getState()
+    if (step && s.past[s.past.length - 1]?.id === step) s.undo()
   }
 }

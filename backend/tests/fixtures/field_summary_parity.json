@@ -1,0 +1,18 @@
+[
+  {"name": "edited and added properties, a named field first",
+   "kind": "node",
+   "before": {"displayName": "orders", "description": "x", "properties": {"owner": "ana", "tier": "silver", "Biz/region": "eu"}},
+   "after": {"displayName": "Orders", "description": "x", "properties": {"owner": "bo", "steward": "cy", "Biz/region": "us"}},
+   "expect": {"changed": 3, "added": 1, "removed": 1, "total": 5,
+              "top": ["Name", "owner", "region", "steward", "tier"]}},
+  {"name": "a relationship re-typed",
+   "kind": "edge",
+   "before": {"edgeType": "FEEDS", "sourceEntityId": "a", "targetEntityId": "b", "properties": {"note": "n"}},
+   "after": {"edgeType": "DERIVES", "sourceEntityId": "a", "targetEntityId": "b"},
+   "expect": {"changed": 1, "added": 0, "removed": 1, "total": 2, "top": ["Relationship", "note"]}},
+  {"name": "a new entity lists what it has",
+   "kind": "node",
+   "before": null,
+   "after": {"displayName": "Refunds", "entityType": "Table", "properties": {"owner": "ana"}},
+   "expect": {"changed": 0, "added": 3, "removed": 0, "total": 3, "top": ["Name", "Type", "owner"]}}
+]

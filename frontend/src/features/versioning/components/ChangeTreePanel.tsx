@@ -3,17 +3,23 @@
  * business reader: an impact summary header ("2 datasets · 17 tables · 40 columns affected")
  * over a containment tree where each change sits under its real container. Expanding a
  * container loads its direct children on demand (bounded, paged), so a draft touching
- * thousands of entities stays a handful of rows until you drill in. Leaves expand to the
- * same `EntityDiff` the flat ChangesPanel uses.
+ * thousands of entities stays a handful of rows until you drill in. Every change — a leaf, or a
+ * container's own — reads as one line until opened, then its key differences, then all of them
+ * (the same `EntityDiff` the flat ChangesPanel uses).
  */
 import { useMemo, useState } from 'react'
-import { ChevronRight, Loader2, AlertCircle, Folder, Boxes, Spline } from 'lucide-react'
+import { ChevronRight, Loader2, AlertCircle, Folder, Boxes, Spline, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChangeOrigin } from '../model/changeModel'
-import type { ChangeListOrigin, DiffSummaryResponse, DiffTreeNode } from '@/services/versioningApiService'
+import { changeListExportUrl, type ChangeListOrigin, type DiffSummaryResponse, type DiffTreeNode } from '@/services/versioningApiService'
+import { triggerBrowserDownload } from '@/services/importExportApiService'
 import { ChangeList } from './ChangeList'
+import { PreparingNote } from './PreparingNote'
+import { ExportMenu } from './ExportMenu'
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
+import { ChangeSummary } from './ChangeSummary'
+import { fieldsOfChange, summarizeFields } from '../model/fieldDiff'
 import { entityTypeStyle } from '@/components/canvas/property-manager/entityTypeStyles'
 import { treeLeafToChange } from '../model/changeTreeModel'
 import { useChangeTreeExpansion, type FetchChildren } from '../hooks/useChangeTreeExpansion'
@@ -103,13 +109,17 @@ function Indent({ depth }: { depth: number }) {
 }
 
 function LeafRow({ node, depth, origin }: { node: DiffTreeNode; depth: number; origin: ChangeOrigin }) {
-  const [open, setOpen] = useState(false)
+  // Closed, a summary; open, the key differences; then all of them.
+  const [level, setLevel] = useState<0 | 1 | 2>(0)
+  const open = level > 0
   const status = node.status && node.status !== 'unchanged' ? node.status : 'modified'
   const meta = STATUS_META[status]
   const change = useMemo(() => treeLeafToChange(node, origin), [node, origin])
+  const summary = useMemo(() => summarizeFields(fieldsOfChange(change)), [change])
   return (
     <div className={cn('rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent)}>
-      <button onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-1.5 px-2 py-1.5 text-left group">
+      <button onClick={() => setLevel((l) => (l === 0 ? 1 : 0))} aria-expanded={open}
+        className="w-full flex items-center gap-1.5 px-2 py-1.5 text-left group">
         <Indent depth={depth} />
         <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
         <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} />
@@ -118,11 +128,37 @@ function LeafRow({ node, depth, origin }: { node: DiffTreeNode; depth: number; o
         ) : node.entityType ? (
           <span className="w-2 h-2 rounded-full shrink-0" style={{ background: entityTypeStyle(node.entityType).ring }} />
         ) : null}
-        <span className="text-sm text-ink truncate flex-1" title={node.label}>{node.label}</span>
+        <span className="min-w-0 flex-1 flex items-baseline gap-2">
+          <span className="text-sm text-ink truncate">{node.label}</span>
+          <ChangeSummary summary={summary} status={status} kind={node.entityKind === 'edge' ? 'edge' : 'node'} className="min-w-0" />
+        </span>
       </button>
       {open && (
         <div className="px-2.5 pb-2" style={{ paddingLeft: depth * 14 + 28 }}>
-          <EntityDiff change={change} />
+          <EntityDiff change={change} depth={level === 1 ? 'key' : 'all'} onShowAll={() => setLevel(2)} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** A container's own change, at the top of what it holds: one line saying what changed, opened
+ *  on demand to its key differences, then to all of them — as each change inside it reads. */
+function OwnChange({ change, depth, kind }: { change: ReturnType<typeof treeLeafToChange>; depth: number; kind: 'node' | 'edge' }) {
+  const [level, setLevel] = useState<0 | 1 | 2>(0)
+  const open = level > 0
+  const summary = useMemo(() => summarizeFields(fieldsOfChange(change)), [change])
+  return (
+    <div className="pr-2.5 pb-1" style={{ paddingLeft: depth * 14 + 28 }}>
+      <button onClick={() => setLevel((l) => (l === 0 ? 1 : 0))} aria-expanded={open}
+        className="w-full flex items-center gap-1.5 py-1 text-left rounded-md hover:bg-black/[0.02] dark:hover:bg-white/[0.03]">
+        <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
+        <span className="text-[12px] font-medium text-ink-secondary shrink-0">Its own change</span>
+        <ChangeSummary summary={summary} status={change.status} kind={kind} className="min-w-0" />
+      </button>
+      {open && (
+        <div className="pl-5 pt-1">
+          <EntityDiff change={change} depth={level === 1 ? 'key' : 'all'} onShowAll={() => setLevel(2)} />
         </div>
       )}
     </div>
@@ -172,9 +208,7 @@ function GroupRow({
       {open && (
         <div className="pb-1.5 space-y-1 pt-0.5">
           {selfChange && (
-            <div className="px-2.5 pb-1" style={{ paddingLeft: depth * 14 + 28 }}>
-              <EntityDiff change={selfChange} />
-            </div>
+            <OwnChange change={selfChange} depth={depth} kind={node.entityKind === 'edge' ? 'edge' : 'node'} />
           )}
           {isLoading && !st && (
             <p className="flex items-center gap-1.5 text-[11px] text-ink-muted py-1.5" style={{ paddingLeft: depth * 14 + 28 }}>
@@ -225,15 +259,23 @@ function TreeRow(props: {
 export function ChangeTreePanel({
   summary,
   isLoading,
+  error,
+  onRetry,
   fetchChildren,
   origin,
   emptyHint = 'No changes yet.',
   className,
   summaryFirst = false,
   list,
+  preparing = false,
 }: {
   summary?: DiffSummaryResponse
   isLoading?: boolean
+  /** The summary is being asked for again while the server prepares it: said, so a wait reads as one. */
+  preparing?: boolean
+  /** The summary could not be read (a timeout, a busy server): said as such — never as "no changes". */
+  error?: unknown
+  onRetry?: () => void
   fetchChildren: FetchChildren
   origin: ChangeOrigin
   emptyHint?: string
@@ -253,8 +295,35 @@ export function ChangeTreePanel({
 
   if (isLoading && !summary) {
     return (
-      <div className="flex items-center gap-2 text-sm text-ink-muted py-8 justify-center">
-        <Loader2 className="w-4 h-4 animate-spin" /> Computing changes…
+      <div className="flex flex-col items-center gap-1.5 py-8">
+        <span className="flex items-center gap-2 text-sm text-ink-muted">
+          <Loader2 className="w-4 h-4 animate-spin" /> Computing changes…
+        </span>
+        {preparing && <PreparingNote />}
+      </div>
+    )
+  }
+  if (error && !summary) {
+    // What failed, a way to try again, and — where one exists — the same changes a page at a time,
+    // which reads them from the change index and not the tree.
+    return (
+      <div className={cn('space-y-2.5', className)}>
+        <div role="alert" className="rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-3 flex items-start gap-2.5">
+          <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" aria-hidden />
+          <div className="min-w-0 flex-1">
+            <p className="text-[12.5px] font-semibold text-ink">Couldn’t lay these changes out as a tree</p>
+            <p className="text-[11.5px] text-ink-muted mt-0.5 leading-relaxed">
+              {list ? 'They are listed below, a page at a time.' : 'The server took too long or was busy.'}
+            </p>
+          </div>
+          {onRetry && (
+            <button type="button" onClick={onRetry}
+              className="shrink-0 inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]">
+              <RefreshCw className="w-3.5 h-3.5" aria-hidden /> Try again
+            </button>
+          )}
+        </div>
+        {list && <ChangeList wsId={list.wsId} graphId={list.graphId} origin={list.origin} emptyHint={emptyHint} />}
       </div>
     )
   }
@@ -284,7 +353,15 @@ export function ChangeTreePanel({
 
   return (
     <div className={cn('space-y-2.5', className)}>
-      <ImpactHeader summary={summary} />
+      <div className="flex items-start gap-2">
+        <div className="flex-1 min-w-0"><ImpactHeader summary={summary} /></div>
+        {/* The same changes as a list exist: they export as CSV, streamed by the server. */}
+        {list && (
+          <ExportMenu count={totalChanges} onExport={(detail) => triggerBrowserDownload(
+            changeListExportUrl(list.wsId, list.graphId, list.origin, {}, detail),
+            `changes${detail === 'properties' ? '-properties' : ''}.csv`)} />
+        )}
+      </div>
       {summaryFirst && (
         <button
           onClick={() => setTreeOpen(!isOpen)}

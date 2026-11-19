@@ -48,3 +48,45 @@ async def test_its_tree_has_no_children_to_page(test_client, versioning):
     assert r.status_code == 409, r.text
     assert r.json()["detail"]["type"] == "too_large_for_tree"
     assert (r.json()["detail"]["changed"], r.json()["detail"]["limit"]) == (5, 3)
+
+
+class _Exporting(_Versioning):
+    def __init__(self, too_large=False):
+        self.too_large = too_large
+
+    async def change_export_rows(self, **kw):
+        from backend.app.services.versioning.service import ChangeListTooLarge
+        if self.too_large:
+            raise ChangeListTooLarge({"changed": 300000, "limit": 250000})
+        assert kw["detail"] == "properties" and kw["statuses"] == ("modified",)
+        yield [["Entity", "Edited", "Table", "Orders", "", "urn:o", "e1", "", "", "Name", "", "orders", "Orders"]]
+        yield [["Entity", "Edited", "Table", "Sales", "", "urn:s", "e2", "", "", "owner", "", "'=1", "bo"]]
+
+
+async def test_a_change_list_exports_as_csv_page_by_page(test_client):
+    from backend.app.main import app
+
+    app.dependency_overrides[get_versioning_service] = lambda: _Exporting()
+    try:
+        r = await test_client.get("/api/v1/ws1/versioning/graphs/g1/diff/export.csv",
+                                  params={"branchId": "br_1", "status": "modified", "detail": "properties"})
+    finally:
+        app.dependency_overrides.pop(get_versioning_service, None)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/csv")
+    assert 'filename="changes-draft-br_1-properties.csv"' in r.headers["content-disposition"]
+    lines = r.text.lstrip("﻿").splitlines()
+    assert lines[0].startswith("Kind,Change,Type,Name") and lines[0].endswith("Field,Folder,Before,After")
+    assert lines[1].endswith("Name,,orders,Orders") and lines[2].endswith("owner,,'=1,bo")
+
+
+async def test_a_change_list_too_large_to_list_is_refused_before_any_byte(test_client):
+    from backend.app.main import app
+
+    app.dependency_overrides[get_versioning_service] = lambda: _Exporting(too_large=True)
+    try:
+        r = await test_client.get("/api/v1/ws1/versioning/graphs/g1/diff/export.csv", params={"branchId": "br_1"})
+    finally:
+        app.dependency_overrides.pop(get_versioning_service, None)
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == {"type": "too_large_to_list", "changed": 300000, "limit": 250000}

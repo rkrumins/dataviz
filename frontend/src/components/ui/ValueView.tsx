@@ -57,6 +57,15 @@ const STATUS_TONE: Record<string, BadgeTone> = {
     running: 'info', queued: 'info', pending: 'neutral',
 }
 
+/** Whether a text value is one this view draws as what it is — an instant, a person, an id or a
+ *  status word — rather than as words. A property list asks before handing a value over. */
+export function drawsAsRecord(value: string, keyHint = ''): boolean {
+    const v = value.trim()
+    return ISO_INSTANT.test(v) || PERSON_ID.test(v) || ENTITY_ID.test(v) || UUID.test(v)
+        || (ID_KEY.test(keyHint) && v.length <= 128 && !/\s/.test(v))
+        || Object.prototype.hasOwnProperty.call(STATUS_TONE, v)
+}
+
 /** Names the record already knows for the ids in it, so a chip can say what it points at. */
 export type KnownNames = Record<string, string>
 

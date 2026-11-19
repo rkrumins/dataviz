@@ -40,9 +40,9 @@ export function ConflictChoices({ change }: { change: StagedChange }) {
   if (conflict.current.deleted) {
     return (
       <div className="mt-2.5 rounded-xl border border-rose-400/30 bg-rose-500/[0.08] px-3 py-2.5">
-        <p className="text-[12px] text-rose-100/90">It was deleted meanwhile — there is nothing left to edit.</p>
+        <p className="text-[12px] text-rose-800 dark:text-rose-100/90">It was deleted meanwhile — there is nothing left to edit.</p>
         <button type="button" onClick={() => resolveConflict(change.id, {})}
-          className="mt-2 px-2.5 py-1 rounded-lg text-[11.5px] font-semibold text-rose-100 bg-rose-500/20 border border-rose-400/30 hover:bg-rose-500/30 transition-colors">
+          className="mt-2 px-2.5 py-1 rounded-lg text-[11.5px] font-semibold text-rose-800 dark:text-rose-100 bg-rose-500/20 border border-rose-400/30 hover:bg-rose-500/30 transition-colors">
           Drop this change
         </button>
       </div>
@@ -52,17 +52,17 @@ export function ConflictChoices({ change }: { change: StagedChange }) {
   return (
     <div className="mt-2.5 rounded-xl border border-amber-400/30 bg-amber-500/[0.07] px-3 py-2.5" data-testid="conflict-choices">
       <div className="flex items-center gap-2">
-        <GitMerge className="w-3.5 h-3.5 text-amber-300 flex-shrink-0" aria-hidden />
-        <p className="text-[12px] font-semibold text-amber-100">
+        <GitMerge className="w-3.5 h-3.5 text-amber-600 dark:text-amber-300 flex-shrink-0" aria-hidden />
+        <p className="text-[12px] font-semibold text-amber-800 dark:text-amber-100">
           {conflict.fields.length === 1 ? '1 field' : `${conflict.fields.length} fields`} changed by someone else
         </p>
         <div className="ml-auto flex items-center gap-1">
           <button type="button" onClick={() => setAll('mine')}
-            className="px-2 py-0.5 rounded-md text-[10.5px] font-semibold text-white/60 hover:text-white hover:bg-white/[0.08] transition-colors">
+            className="px-2 py-0.5 rounded-md text-[10.5px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors">
             Keep all mine
           </button>
           <button type="button" onClick={() => setAll('theirs')}
-            className="px-2 py-0.5 rounded-md text-[10.5px] font-semibold text-white/60 hover:text-white hover:bg-white/[0.08] transition-colors">
+            className="px-2 py-0.5 rounded-md text-[10.5px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors">
             Use all theirs
           </button>
         </div>
@@ -71,10 +71,10 @@ export function ConflictChoices({ change }: { change: StagedChange }) {
         {conflict.fields.map((f, i) => {
           const name = `${baseId}-${i}`
           return (
-            <li key={f.key} className="rounded-lg bg-black/25 border border-white/[0.06] px-2.5 py-2">
+            <li key={f.key} className="rounded-lg bg-canvas-elevated border border-glass-border px-2.5 py-2">
               <div className="flex items-baseline justify-between gap-2">
-                <span className="text-[12px] font-semibold text-white/90 truncate" title={f.key}>{labelOf(f.path)}</span>
-                <span className="text-[10.5px] text-white/40 truncate" title={show(f.base)}>was {show(f.base)}</span>
+                <span className="text-[12px] font-semibold text-ink truncate" title={f.key}>{labelOf(f.path)}</span>
+                <span className="text-[10.5px] text-ink-muted truncate" title={show(f.base)}>was {show(f.base)}</span>
               </div>
               <div role="radiogroup" aria-label={`Keep which value of ${labelOf(f.path)}`} className="mt-1.5 grid grid-cols-2 gap-1.5">
                 {(['mine', 'theirs'] as const).map((side) => {
@@ -82,19 +82,19 @@ export function ConflictChoices({ change }: { change: StagedChange }) {
                   return (
                     <label key={side} className={cn(
                       'flex items-start gap-2 rounded-lg border px-2 py-1.5 cursor-pointer transition-colors',
-                      on ? 'border-amber-300/60 bg-amber-400/[0.12]' : 'border-white/[0.08] hover:bg-white/[0.04]',
+                      on ? 'border-amber-300/60 bg-amber-400/[0.12]' : 'border-glass-border hover:bg-black/[0.03] dark:hover:bg-white/[0.04]',
                     )}>
                       <input type="radio" name={name} value={side} checked={on} className="sr-only"
                         onChange={() => setChoices((c) => ({ ...c, [f.key]: side }))} />
                       <span className={cn('mt-0.5 w-3.5 h-3.5 rounded-full border flex items-center justify-center flex-shrink-0',
-                        on ? 'border-amber-300 bg-amber-300' : 'border-white/30')}>
+                        on ? 'border-amber-300 bg-amber-300' : 'border-black/30 dark:border-white/30')}>
                         {on && <Check className="w-2.5 h-2.5 text-black" strokeWidth={3} />}
                       </span>
                       <span className="min-w-0">
-                        <span className="block text-[10px] uppercase tracking-[0.08em] font-bold text-white/45">
+                        <span className="block text-[10px] uppercase tracking-[0.08em] font-bold text-ink-muted">
                           {side === 'mine' ? 'Yours' : 'Theirs'}
                         </span>
-                        <span className="block text-[11.5px] text-white/85 break-words">{show(side === 'mine' ? f.mine : f.theirs, f.base)}</span>
+                        <span className="block text-[11.5px] text-ink break-words">{show(side === 'mine' ? f.mine : f.theirs, f.base)}</span>
                       </span>
                     </label>
                   )

@@ -11,7 +11,7 @@ import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { openDraft } from '@/services/versioningApiService'
 import { buildSnapshot } from '@/features/canvas-drafts/useStagedDraftPersistence'
-import { clearSnapshot, readSnapshot, writeSnapshot } from '@/features/canvas-drafts/stagedDraftPersistence'
+import { clearSnapshot, readSnapshotAsync, writeSnapshotAsync } from '@/features/canvas-drafts/stagedDraftPersistence'
 import { invalidateVersioningCaches } from './ensureDraftOpen'
 import { clearPendingSave } from './saveStagedChangesToDraft'
 
@@ -25,14 +25,14 @@ export async function copyStagedToNewDraft(fromBranchId: string, viewId: string 
   // to Published they are only in the closed draft's own snapshot.
   const snapshot = useStagedChangesStore.getState()._scopeKey === fromKey
     ? buildSnapshot(fromKey, fromBranchId)
-    : readSnapshot(fromKey)
+    : await readSnapshotAsync(fromKey)
   if (!snapshot) throw new Error('There are no unsaved changes to copy.')
 
   const { branchId } = await openDraft(workspaceId, graphId, { originatingViewId: viewId ?? undefined })
   // Copy is offered only after the save was refused, so nothing was committed: the edits arrive as
   // unsaved ones, without the closed draft's save key.
-  writeSnapshot({ ...snapshot, scopeKey: scopeKey(branchId), branchId, phase: 'staged', pendingSave: undefined })
-  if (!readSnapshot(scopeKey(branchId))) {
+  await writeSnapshotAsync({ ...snapshot, scopeKey: scopeKey(branchId), branchId, phase: 'staged', pendingSave: undefined })
+  if (!(await readSnapshotAsync(scopeKey(branchId)))) {
     throw new Error('Couldn’t copy your unsaved changes — they are still on the closed draft.')
   }
   clearSnapshot(fromKey)

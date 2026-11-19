@@ -16,6 +16,9 @@ export interface DrawerLayout {
   hidden: DrawerSectionId[]
 }
 
+/** A change list top-down under its containers (`tree`), or one list by kind and type. */
+export type ChangeListLayout = 'tree' | 'list'
+
 /** Visual density of list/grid items in the Explorer page. */
 export type ExplorerDensity = 'compact' | 'comfortable' | 'spacious'
 
@@ -120,6 +123,8 @@ interface PreferencesState {
   // section never arrives hidden and an older stored map never hides one.
   drawerSectionsCollapsed: Record<string, boolean>
   toggleDrawerSection: (key: string) => void
+  /** Set one, when what it starts as is not simply open (a property list's later sections). */
+  setDrawerSectionCollapsed: (key: string, collapsed: boolean) => void
   // Entity drawer — whether the identifier and name properties are shown in
   // full under the URN. Unlike a section, CLOSED by default: the URN alone is
   // the identifier most readers need, and one line says the rest.
@@ -281,6 +286,11 @@ interface PreferencesState {
   explorerDensity: ExplorerDensity
   setExplorerDensity: (density: ExplorerDensity) => void
 
+  /** How change lists lay out: top-down under their containers, or one list. Null until the
+   *  reader chooses: the persona's default (Business top-down, Technical the list). */
+  changeListLayout: ChangeListLayout | null
+  setChangeListLayout: (layout: ChangeListLayout) => void
+
   // Context View display settings — control canvas-side rendering density,
   // zoom, and visual chrome from the header's Display Settings popover.
   canvasZoom: number
@@ -430,6 +440,9 @@ export const usePreferencesStore = create<PreferencesState>()(
           [key]: !state.drawerSectionsCollapsed[key],
         },
       })),
+      setDrawerSectionCollapsed: (key, collapsed) => set((state) => ({
+        drawerSectionsCollapsed: { ...state.drawerSectionsCollapsed, [key]: collapsed },
+      })),
       drawerIdentityDetailsOpen: false,
       toggleDrawerIdentityDetails: () => set((state) => ({ drawerIdentityDetailsOpen: !state.drawerIdentityDetailsOpen })),
       openDetailsOnSelect: { business: false, technical: true },
@@ -553,6 +566,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       // Explorer density
       explorerDensity: 'comfortable',
       setExplorerDensity: (explorerDensity) => set({ explorerDensity }),
+
+      changeListLayout: null,
+      setChangeListLayout: (changeListLayout) => set({ changeListLayout }),
 
       // Context View display settings
       canvasZoom: 1,

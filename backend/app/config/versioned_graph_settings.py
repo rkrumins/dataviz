@@ -2699,6 +2699,108 @@ _DRAFTS = (
         ),
     ),
     Setting(
+        key="drafts.requiredApprovals",
+        category="drafts",
+        label="Approvals a review needs",
+        kind="count_or_everyone",
+        default=Default("everyone"),
+        scopes=_PWG,
+        takes_effect=("next_review_action", "The next merge: an open review is held to the new rule "
+                                            "from then on."),
+        audience="business",
+        question="How many approvals does a review need before it can merge?",
+        section="reviews",
+        range=(1, 10),
+        unit="approvals",
+        limitable=("lock",),
+        freshness="strict",
+        legacy=Legacy(workspace_column="review_required_approvals",
+                      data_source_column="review_required_approvals", encode="zero_is_everyone"),
+        guidance=Guidance(
+            summary="How many approvals a review needs before it can merge.",
+            means=("Everyone asked: every person or group asked to review must approve, and a "
+                   "review that asks no one needs no approval. A number: at least that many "
+                   "approvals, from anyone who may approve, whoever was asked. Either way, an "
+                   "approval counts only while the draft hasn't changed since it was given, and a "
+                   "request for changes holds the merge until the draft changes."),
+            effects=(
+                Effect("consistency", "More people check each change before it merges.",
+                       "Fewer people check each change.", "medium", "better"),
+                Effect("update_speed", "Merges wait for more approvals.",
+                       "Changes merge sooner.", "medium", "worse"),
+            ),
+            change_when=(
+                "A rule says two people must approve every change, whoever they are: set 2.",
+                "Reviews wait on someone who was asked but is away: set a number, so any approvers "
+                "will do.",
+            ),
+            recommended=Recommendation("everyone", "Everyone you ask has a say; set a number where "
+                                                   "any approvers will do, or a rule needs a set "
+                                                   "count."),
+            risk="low",
+            risk_note=("With a number, a review merges once that many approve, even if someone "
+                       "asked hasn't."),
+            symptoms=("A review is approved but won't merge", "A merge waits for one reviewer"),
+            example=lambda values, facts: (
+                "Every person or group asked must approve before a review merges."
+                if _v(values, "drafts.requiredApprovals") in (None, "everyone") else
+                f"A review merges once {_v(values, 'drafts.requiredApprovals')} approvals stand, "
+                f"from anyone who may approve."),
+            evidence=(
+                "drafts_policy.EffectiveDraftsPolicy.rule gives review_state.ReviewRule its "
+                "required_approvals (everyone asked is 0); service._review_gate raises "
+                "ApprovalRequired before any merge work, then ChangesRequested (409 "
+                "changes_requested) and ThreadsOpen. Read at every merge, never cached."),
+            aliases=("required approvals", "approvals", "two approvals", "reviewers"),
+        ),
+    ),
+    Setting(
+        key="drafts.threadsHold",
+        category="drafts",
+        label="Open threads hold the merge",
+        kind="bool",
+        default=Default(False),
+        scopes=_PWG,
+        takes_effect=("next_review_action", "The next merge."),
+        audience="business",
+        question="Should open threads stop a review merging until they are resolved?",
+        section="reviews",
+        limitable=("lock",),
+        freshness="strict",
+        legacy=Legacy(workspace_column="review_threads_hold", data_source_column="review_threads_hold"),
+        guidance=Guidance(
+            summary="Whether a review with open threads waits for them to be resolved before it "
+                    "can merge.",
+            means=("On, a review can't merge while any of its threads is open: someone resolves "
+                   "each one first. Off, threads are for discussion and don't hold the merge."),
+            effects=(
+                Effect("consistency", "Every question raised is answered before a change lands.",
+                       "A change can land with questions still open.", "medium", "better"),
+                Effect("update_speed", "Merges wait for every thread to be resolved.",
+                       "Merges don't wait for discussion.", "low", "worse"),
+            ),
+            change_when=(
+                "Questions raised in a review must be answered before a change lands: turn it on.",
+                "Threads hold notes that needn't block a merge: keep it off.",
+            ),
+            recommended=Recommendation(False, "Threads stay a place to talk without blocking; turn "
+                                              "it on where every question must be answered first."),
+            risk="low",
+            risk_note="On, a forgotten thread holds a review until someone resolves it.",
+            symptoms=("A review won't merge because of open threads",
+                      "Changes merge with questions unanswered"),
+            example=lambda values, facts: (
+                "A review with an open thread waits until every thread is resolved."
+                if _v(values, "drafts.threadsHold") else
+                "Open threads don't hold a review's merge."),
+            evidence=(
+                "drafts_policy.EffectiveDraftsPolicy.rule gives review_state.ReviewRule its "
+                "threads_hold; service._review_gate raises ThreadsOpen (409 threads_open, with how "
+                "many are open) before any merge work. Read at every merge, never cached."),
+            aliases=("open threads", "unresolved comments", "threads hold"),
+        ),
+    ),
+    Setting(
         key="forks.maxPerGraph",
         category="drafts",
         label="Forks per graph",

@@ -111,7 +111,7 @@ adds, nothing shows there. **Check sync** lists such missing items, and
 
 ```mermaid
 flowchart LR
-  A["Edit an entity<br/>or relationship"] --> B["Stage changes"]
+  A["Edit an entity<br/>or relationship"] --> B["Staged"]
   B --> C["Review & Save"]
   C --> D["Your draft"]
   D --> E["Submit for review"]
@@ -123,9 +123,12 @@ flowchart LR
 
 1. **Edit** — in a draft, change an entity or relationship in its drawer, or
    add and connect entities on the canvas.
-2. **Stage changes** — keep the edit for review. Nothing is saved yet.
-3. **Review & Save** — check your staged edits and save them to the draft as
-   one save point.
+2. **Staged** — an entity's edits are staged as you make them (press `Enter` or
+   click away); a relationship's or a layer's with **Stage changes**. Nothing
+   is saved yet.
+3. **Review & Save** — check your staged edits, in words or on a map, and save
+   them to the draft as one save point — then, if you choose, go straight on
+   to publishing or a review in the same dialog.
 4. **Publish** your draft — **Submit for review**, or **Publish now** if you
    don't need a review.
 5. **Review Center** — a reviewer checks the changes, pulls in newer published
@@ -152,8 +155,8 @@ Read these in order the first time; afterwards, jump to what you need.
 | --- | --- |
 | **Published** | The live version of the graph that everyone sees |
 | **Draft** | A working copy where your changes wait until they're published |
-| **Stage changes** | Keep an edit for **Review & Save** — nothing is saved yet |
-| **Review & Save** | Save your staged edits to your draft |
+| **Stage changes** | Keep a relationship's or a layer's edit for **Review & Save** — an entity's edits are staged as you make them. Nothing is saved yet |
+| **Review & Save** | Save your staged edits to your draft — and, if you choose, publish or send for review |
 | **Publish** | Send your draft to **Published** — through a review, or directly |
 | Review request / merge request | A draft submitted for someone to check and merge |
 | **Merge** | Apply a reviewed request to **Published** |
@@ -365,7 +368,11 @@ history**, for every data source in it:
   only**. Turning private drafts off leaves existing private drafts as they are;
 - **People may approve their own reviews**;
 - **People may merge their own reviews**. With it off, drafts are published only
-  through a review someone else merges.
+  through a review someone else merges;
+- **Approvals a review needs** — **Everyone asked**, or a set number (see [How
+  many approvals a review needs](/guide/review-center#how-many-approvals-a-review-needs));
+- **Open threads hold the merge**. With it on, a review merges only once every
+  thread on it is resolved.
 
 A data source can set its own: on its **Versioning** tab, **Open settings** opens
 its settings, where each one is its own or follows the workspace's (**Use the

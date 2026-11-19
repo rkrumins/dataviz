@@ -293,3 +293,62 @@ async def test_every_effective_value_is_the_one_the_old_storage_resolves_to(
     # The store reads them as not set (``20261116_1100_settings_import``): the platform's holds.
     assert hand_made == [("imports.identifier", "ds_b", "", "entity_id"),
                          ("imports.identifier", "ds_c", "inherit", "entity_id")]
+
+
+#: The revision before the review rules' import (``20261119_1700_review_rules_store``).
+BEFORE_REVIEW_RULES = "20261119_1600_merge_settings"
+
+
+def test_the_review_rules_saved_on_the_old_columns_are_copied_in_once(monkeypatch):
+    """Main's review rules (``review_required_approvals``, ``review_threads_hold``) saved before
+    they were settings: each value set is copied into the store once, an old 0 approvals as
+    ``"everyone"``, with ``migration`` history and its marker; a fork's are skipped; the import
+    run again changes nothing."""
+    monkeypatch.delenv("GRAPHVER_DB_URL", raising=False)
+    with scratch_database("review_rules") as name:
+        upgrade_cli(name, "upgrade")
+        upgrade_cli(name, "downgrade", "--revision", BEFORE_REVIEW_RULES)
+        assert "legacy_review_rules" not in _markers(name)
+        seed(name,
+             workspace("ws_a", review_required_approvals=0, review_threads_hold=True),
+             workspace("ws_b", review_threads_hold=False),
+             workspace("ws_c"),
+             provider(),
+             data_source("ds_a", "ws_a", review_required_approvals=3),
+             data_source("ds_b", "ws_b"),
+             # A fork's are copies of its parent's: never its own.
+             data_source("dsfork_a", "ws_a", fork_of="ds_a", review_required_approvals=3,
+                         review_threads_hold=True))
+        upgrade_cli(name, "upgrade")
+        copied = {("drafts.requiredApprovals", "workspace", "ws_a"): "everyone",
+                  ("drafts.threadsHold", "workspace", "ws_a"): True,
+                  ("drafts.threadsHold", "workspace", "ws_b"): False,
+                  ("drafts.requiredApprovals", "graph", "ds_a"): 3}
+        assert _values(name) == copied
+        assert {(r.updated_by, r.version) for r in query(
+            name, "SELECT updated_by, version FROM setting_values")} == {(None, 1)}
+        markers = _markers(name)
+        assert markers["legacy_review_rules"][1] == {"values": {"workspace": 3, "graph": 1},
+                                                     "inserted": 4}
+        history = query(name, "SELECT change_set, key, scope_id, before_value, after_value, "
+                              "source, reason FROM setting_changes")
+        assert {(h.key, h.scope_id, h.after_value) for h in history} == {
+            (key, scope_id, value) for (key, _scope, scope_id), value in copied.items()}
+        assert len({h.change_set for h in history}) == 1
+        assert {(h.source, h.before_value, h.reason) for h in history} == {
+            ("migration", None, "Copied from where it was saved before the settings store")}
+
+        # Saved in the store since, then the import again: nothing is copied twice, and the
+        # store's value stands.
+        engine = create_engine(db_url(name, "psycopg2"))
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE setting_values SET value = '2', version = 2, "
+                              "rev = nextval('setting_values_rev_seq') "
+                              "WHERE key = 'drafts.requiredApprovals' AND scope_id = 'ws_a'"))
+        engine.dispose()
+        alembic_stamp(name, BEFORE_REVIEW_RULES)
+        upgrade_cli(name, "upgrade")
+        assert _values(name) == {**copied, ("drafts.requiredApprovals", "workspace", "ws_a"): 2}
+        assert len(query(name, "SELECT 1 FROM setting_changes")) == len(history)
+        assert _markers(name) == markers
+        assert "Schema matches the ORM" in upgrade_cli(name, "verify-schema")

@@ -34,7 +34,7 @@ import { InlineNodeEditor } from './InlineNodeEditor'
 import { CommandPalette } from './CommandPalette'
 import { SearchMatchBadge } from './search/SearchMatchBadge'
 import { useSearchHighlight } from './search/useSearchHighlight'
-import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
+import { useEntityDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
@@ -125,7 +125,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 
   // Edit Mode State (shared across canvases). `surface` distinguishes the
   // 400px rail from the wider Build Mode panel — only one mounts at a time.
-  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
+  const builderMounted = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
+  // The builder holds the rail unless it stepped aside for an entity's details (it stays mounted, hidden).
+  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail' && !s.suspended)
   const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build')
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
 
@@ -532,7 +534,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         {/* Right rail — mutual exclusion: creation takes the rail (an
             explicit action), so the builder is never hidden behind an
             inspector the user left open. Mirrors GraphCanvas. */}
-        {builderOpen && (
+        {builderMounted && (
           <HierarchyBuilderPanel
             onClose={() => useHierarchyBuilderStore.getState().close()}
             onEntityStaged={(_tempUrn, parentUrn) => {
@@ -729,7 +731,7 @@ function HierarchyContainer({
     isHidden: isHiddenByCanvasFilter,
   } = useSearchHighlight(node.urn ?? node.id, { isSelected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
-  const changeDeco = useEntityChangeDecoration().for(node.urn ?? node.id)
+  const changeDeco = useEntityDecoration(node.urn ?? node.id)
 
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)

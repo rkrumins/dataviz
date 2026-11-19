@@ -20,6 +20,7 @@ vi.mock('../../useDrawerHistoryScope', () => ({
   useDrawerHistoryScope: () => ({ wsId: undefined, graphId: null, mainBranchId: null, branchId: null }),
 }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+  useChangeEntry: () => ({ data: undefined }),
   useEntitySummary: () => ({ data: undefined, isLoading: false }),
   useProjectionWatermark: () => ({ data: undefined }),
   useBranches: () => ({ data: [] }),
@@ -93,6 +94,18 @@ describe('EntityDrawer — the Business view', () => {
     expect(screen.getAllByText('urn:orders').length).toBeGreaterThan(0)
     expect(screen.getByText('2 entities')).toBeInTheDocument()
     expect(screen.getByText('Owner')).toBeInTheDocument()
+  })
+
+  it('does not repeat what is shown at a glance among the properties, and features one from its row', async () => {
+    const user = userEvent.setup()
+    render(<EntityDrawer />)
+    const props = screen.getByRole('region', { name: 'Properties' })
+    expect(within(props).getByText('sla')).toBeInTheDocument()
+    expect(within(props).queryByText('owner')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Owner — shown at a glance/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Show sla at a glance' }))
+    expect(usePreferencesStore.getState().drawerPinnedProperties.dataset).toEqual(['owner', 'sla'])
+    expect(screen.getByRole('button', { name: /Owner, Sla — shown at a glance/ })).toBeInTheDocument()
   })
 
   it('leaves the identifier block, placement, history, Copy URN and JSON to the Technical view', () => {

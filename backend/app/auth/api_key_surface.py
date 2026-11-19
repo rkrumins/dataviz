@@ -204,7 +204,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "get_change_summary", "get_change_entries", "get_change_entry", "get_change_index",
         "get_history_months", "get_revision",
         "get_restore_preview",
-        "get_entity_history", "get_entity_summary",
+        "get_entity_history", "get_entity_summary", "get_entity_revision",
         "create_graph", "resolve_graph_open",
         "bulk_ingest", "sync_ingest", "publish", "get_publish_job",
         "list_imports", "import_template", "import_schema", "create_import",

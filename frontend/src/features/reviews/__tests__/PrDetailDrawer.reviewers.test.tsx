@@ -1,25 +1,47 @@
 /**
- * PrDetailDrawer — the requested reviewers, who has approved, and whose approval went stale. A
- * requested reviewer who did not raise the review is offered Approve; nobody else is.
+ * PrDetailDrawer — how many of the requested reviewers have approved, and whom it waits on (an
+ * approval gone stale is awaited again); each, where they stand, is the review page's. A requested
+ * reviewer who did not raise the review is offered Finish your review; nobody else is.
  */
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const approveMutate = vi.fn()
 const idle = { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }
 let me = 'u_me'
 let pr: Record<string, unknown>
 
+const { invalidateQueries } = vi.hoisted(() => ({ invalidateQueries: vi.fn() }))
+vi.mock('@tanstack/react-query', async (orig) => ({
+  ...(await orig<typeof import('@tanstack/react-query')>()),
+  useQueryClient: () => ({ invalidateQueries }),
+}))
+vi.mock('../decisions/useReviewDecisions', () => ({
+  DECISION_KEYS: { all: (...a: unknown[]) => ['reviewDecisions', ...a] },
+  useReviewDecisionSummary: () => ({ data: undefined }),
+  useDecideChanges: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+}))
+vi.mock('../comments/ReviewDiscussion', () => ({ ReviewDiscussion: () => null }))
+vi.mock('../comments/useReviewComments', () => ({ useReviewCommentCounts: () => ({ data: undefined }) }))
+vi.mock('../../versioning/components/ChangeList', () => ({ ChangeList: () => null }))
+vi.mock('../../versioning/components/ChangeTreePanel', () => ({ ChangeTreePanel: () => null }))
 vi.mock('../../versioning/hooks/useVersioning', () => ({
   useMergeRequest: () => ({ data: pr, isLoading: false }),
-  usePullRequestDiff: () => ({ data: undefined }),
+  useChangeSummary: () => ({ data: undefined, isFetching: false }),
+  usePrDiffSummary: () => ({ data: undefined, isFetching: false }),
+  VERSIONING_KEYS: {
+    changeList: (...a: unknown[]) => ['changeList', ...a],
+    prDiffSummary: (...a: unknown[]) => ['prDiffSummary', ...a],
+  },
   usePullLatestDraft: () => idle,
   useCommitLog: () => ({ data: undefined }),
-  useApproveMergeRequest: () => ({ ...idle, mutate: approveMutate }),
+  useApproveMergeRequest: () => idle,
   useCloseMergeRequest: () => idle,
   useMergeMergeRequest: () => idle,
   useUpdateMergeRequest: () => idle,
+  useSubmitReview: () => idle,
+  useWithdrawChangesRequest: () => idle,
+  useDiscardRejected: () => idle,
   useBranchViewChanges: () => ({ data: undefined }),
   useRevertCommit: () => idle,
 }))
@@ -42,7 +64,6 @@ const renderDrawer = () =>
   render(<MemoryRouter><PrDetailDrawer wsId="ws1" prId="pr_1" onClose={vi.fn()} /></MemoryRouter>)
 
 beforeEach(() => {
-  approveMutate.mockClear()
   me = 'u_me'
   pr = {
     prId: 'pr_1', graphId: 'g1', sourceBranchId: 'br_1', targetBranch: 'main', status: 'mergeable',
@@ -54,28 +75,26 @@ beforeEach(() => {
 })
 
 describe('PrDetailDrawer — reviewers', () => {
-  it('shows each requested reviewer: approved, stale, or still to approve', () => {
+  it('says how many have approved, and whom it waits on — an approval gone stale among them', () => {
     renderDrawer()
-    expect(screen.getByTitle('Carol Chen approved')).toHaveTextContent(/Carol Chen/)
-    expect(screen.getByTitle(/^Dan Dorn approved an earlier version/)).toHaveTextContent(/stale/i)
-    expect(screen.getByTitle('Me Myself has not approved yet')).toBeInTheDocument()
+    expect(screen.getByText('1 of 3 approvals')).toBeInTheDocument()
+    expect(screen.getByText('Waiting on Me Myself and Dan Dorn')).toBeInTheDocument()
   })
 
-  // Regression guard: a requested reviewer was already offered Approve (as was every manager).
-  it('offers Approve to a requested reviewer who did not raise it', () => {
+  // Regression guard: a requested reviewer was already offered a verdict (as was every manager).
+  it('offers Finish your review to a requested reviewer who did not raise it', () => {
     renderDrawer()
-    fireEvent.click(screen.getByRole('button', { name: /Approve/ }))
-    expect(approveMutate).toHaveBeenCalledWith({ prId: 'pr_1', graphId: 'g1' }, expect.anything())
+    expect(screen.getByRole('link', { name: /Finish your review/ })).toHaveAttribute('href', '/workspaces/ws1/reviews/pr_1?finish=1')
   })
 
-  it('does not offer Approve to someone who was not asked, or to the author', () => {
+  it('does not offer it to someone who was not asked, or to the author', () => {
     me = 'u_other'
     const { unmount } = renderDrawer()
-    expect(screen.queryByRole('button', { name: /Approve/ })).toBeNull()
+    expect(screen.queryByRole('link', { name: /Finish your review/ })).toBeNull()
     unmount()
     me = 'u_author'
     pr = { ...pr, reviewers: ['u_author', 'u_carol'] }
     renderDrawer()
-    expect(screen.queryByRole('button', { name: /Approve/ })).toBeNull()
+    expect(screen.queryByRole('link', { name: /Finish your review/ })).toBeNull()
   })
 })

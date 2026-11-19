@@ -13,9 +13,11 @@
  */
 import {
   applyGraphChanges, BranchClosedError, DraftRoleRequiredError, GraphNotWritableError, IntegrityError,
-  MainWriteForbiddenError, MergeConflictError, NotDraftOwnerError, OntologyViolationError,
-  type EntityView, type GraphChangeOp, type GraphChangesResult,
+  MainWriteForbiddenError, MergeConflictError, NotDraftOwnerError, OntologyViolationError, SAVE_IN_PARTS_ABOVE,
+  saveGraphChangesInParts, type EntityView, type GraphChangeOp, type GraphChangesResult,
 } from '@/services/versioningApiService'
+import { useBranchStore } from '@/store/branchStore'
+import { useSaveProgressStore } from '@/store/saveProgressStore'
 import { newRequestId } from '@/services/viewTransferApiService'
 import type { GraphDataProvider, GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
@@ -75,13 +77,26 @@ const refused = (e: unknown) => {
     || (typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429)
 }
 
+/** One save's request: as one request, or — past `SAVE_IN_PARTS_ABOVE` ops — in parts, written as one
+ *  commit by a job (its progress in `useSaveProgressStore`). The same key either way, so a save that
+ *  went one way and is retried the other still lands once. */
+function sendSave(wsId: string, dataSourceId: string, branchId: string, ops: GraphChangeOp[],
+  message: string | undefined, key: string): Promise<GraphChangesResult> {
+  const graphId = useBranchStore.getState().graphId
+  const inParts = !!graphId && ops.length > SAVE_IN_PARTS_ABOVE
+  if (!inParts) return applyGraphChanges(wsId, dataSourceId, branchId, ops, message, key)
+  const progress = useSaveProgressStore.getState()
+  return saveGraphChangesInParts(wsId, graphId!, branchId, ops, message, key, progress.set)
+    .finally(() => progress.set(null))
+}
+
 /** Send a save that may have reached the server again, exactly as it went, under its key: the server
  *  answers with what it did if it committed, and applies it if it never arrived — never twice. A
  *  refusal means it was not applied, so there is nothing to settle; any other failure keeps the key. */
 async function settle(save: PendingSave, scope: string | null): Promise<{ res: GraphChangesResult; sent: Record<string, string> } | null> {
   const [wsId, dsId, branchId, ops, message] = JSON.parse(save.body) as [string, string, string, GraphChangeOp[], string | null]
   try {
-    const res = await applyGraphChanges(wsId, dsId, branchId, ops, message ?? undefined, save.key)
+    const res = await sendSave(wsId, dsId, branchId, ops, message ?? undefined, save.key)
     pendingSaves.delete(scope)
     return { res, sent: save.sent ?? {} }
   } catch (e) {
@@ -164,11 +179,12 @@ export async function saveStagedChangesToDraft(
     const key = prior?.body === body ? prior.key : newRequestId()
     const save: PendingSave = { body, key, sent: Object.fromEntries(rest.map((c) => [c.id, JSON.stringify(c.after ?? null)])) }
     pendingSaves.set(scope, save)
-    // The key rides in the crash snapshot before the request leaves, so a reload mid-save keeps it.
-    if (scope) markSnapshotCommitting(scope, save)
+    // The key rides in the crash snapshot before the request leaves, so a reload mid-save keeps it
+    // (a large snapshot's is written to IndexedDB: the request waits until it is durable).
+    if (scope) await markSnapshotCommitting(scope, save)
     let next: GraphChangesResult
     try {
-      next = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message, key)
+      next = await sendSave(target.wsId, target.dataSourceId, target.branchId, ops, target.message, key)
     } catch (e) {
       // Refused: not applied, so never resent later — the next save sends the edits as they are then.
       if (refused(e)) pendingSaves.delete(scope)

@@ -58,6 +58,9 @@ export interface TraceCard {
   expanded: boolean
   /** Min lineage hop from the focus subtree (null = host only). */
   hop: number | null
+  /** The same, one side at a time (null = not on that side). */
+  hopUp: number | null
+  hopDown: number | null
   /** `'focus'` is the focus SIDE — the focus and everything inside it, which
    *  is what the reader is looking at rather than something the lineage led
    *  to. Never a partner: never counted, never scoped away. */
@@ -404,6 +407,8 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
         ...((residuals.get(urn) ?? 0) > 0 ? { approx: residuals.get(urn)! } : {}),
         expanded: i.traceExpansion.has(urn),
         hop: hopOf(urn),
+        hopUp: hopUpBy.get(urn) ?? null,
+        hopDown: hopDownBy.get(urn) ?? null,
         role: roleBy.get(urn) ?? 'host',
         data: dataOf(urn),
       })

@@ -74,6 +74,9 @@ def test_import_routes_get_the_larger_cap():
     )
     assert mw._cap_for("/api/v1/admin/providers") == 1_000
     assert mw._cap_for("/api/v1/ws_1/graph/save") == 100_000
+    # A draft's save is one commit of every staged change: tens of thousands of ops.
+    assert mw._cap_for("/api/v1/ws_1/graph/changes") == 100_000
+    assert mw._cap_for("/api/v1/ws_1/graph/nodes") == 1_000, "only the save lifts the cap"
     assert mw._cap_for("/api/v1/versioning/graphs/g1/commit") == 100_000
     # An import's file, whole or as a run of an upload's parts, may be as
     # large as one import can be — but a JSON or Excel file sent whole is

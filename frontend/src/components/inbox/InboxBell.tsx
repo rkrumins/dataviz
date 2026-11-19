@@ -34,6 +34,7 @@ import {
     LayoutTemplate,
     Lock,
     Megaphone,
+    MessageSquare,
     Share2,
     RotateCcw,
     ShieldAlert,
@@ -254,6 +255,38 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: Eye,
         icon: 'text-indigo-500',
         tile: 'bg-indigo-500/10',
+    },
+    // A review you are part of: you were asked to review it, it was
+    // approved, sent back for changes, commented on, merged, or closed.
+    'review.requested': {
+        Icon: GitPullRequestArrow,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'review.approved': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'review.changes_requested': {
+        Icon: RotateCcw,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'review.commented': {
+        Icon: MessageSquare,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'review.merged': {
+        Icon: GitMerge,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'review.closed': {
+        Icon: XCircle,
+        icon: 'text-slate-500',
+        tile: 'bg-slate-500/10',
     },
     'reconcile.suspended': {
         Icon: ShieldAlert,

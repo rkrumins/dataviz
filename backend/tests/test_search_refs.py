@@ -296,3 +296,41 @@ class TestService:
         result = await svc.resolve(SearchResolveRequest.model_validate({
             "scope": {"viewId": "v"}, "refs": [{"path": ["Product", "United Kingdom"]}]}))
         assert result.results[0].count == 0
+
+
+class TestMembersPastTheCap:
+    async def test_a_share_link_names_what_a_view_too_large_to_list_holds(self):
+        """Its members aren't among its roots: a share link may name one, and what
+        lies under an entry people placed — nothing else, and nothing is kept for
+        a later answer of its members."""
+        from backend.app.providers.falkordb_search import refs as refs_mod
+
+        ids = {"urn:m": 1, "urn:out": 2, "urn:in": 3, "urn:root": 9}
+
+        async def run(cypher, params):
+            if "WHERE r.urn IN $_urns" in cypher:                   # by urn
+                rows = [[ids[u]] for u in params["_urns"] if u in ids]
+            elif "RETURN ID(_n), _n.urn" in cypher:                 # which urn each is
+                rows = [[i, u] for u, i in ids.items() if i in params["_ids"]]
+            elif "WHERE ID(_s) IN $_roots" in cypher:               # under the roots
+                rows = [[3]] if 3 in params["_ids"] and params["_roots"] == [9] else []
+            else:
+                rows = []
+            return SimpleNamespace(result_set=rows)
+
+        async def labels(cypher, params=None, timeout=None):
+            return SimpleNamespace(result_set=[["A"]])
+
+        class _Held:
+            async def holds(self, urns):
+                return {u for u in urns if u == "urn:m"}
+
+        provider = SimpleNamespace(_ro_query=labels, _get_containment_edge_types=lambda: ["CONTAINS"],
+                                   _graph_name="g")
+        cached = len(refs_mod._RESOLVED)
+        answers = await refs_mod.resolve_refs(
+            provider, SearchScope(view_id="v", scope_mode="view", root_urns=["urn:root"]),
+            [NodeRef(urn=u) for u in ("urn:m", "urn:out", "urn:in")],
+            run=run, data_version="1", confined=True, members=_Held())
+        assert [a["urns"] for a in answers] == [["urn:m"], [], ["urn:in"]]
+        assert len(refs_mod._RESOLVED) == cached

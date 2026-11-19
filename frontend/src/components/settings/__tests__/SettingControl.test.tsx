@@ -1,8 +1,8 @@
 /**
  * SettingControl draws the right input for each kind, offers only the choices allowed at the
  * scope, shows an inherited value as inherited, and reports values in the stored shape: words
- * ("unlimited", "forever") as words, identifiers and refusal budgets in their syntax. Labels come
- * from the registry's catalogue.
+ * ("unlimited", "forever", "everyone") as words, identifiers and refusal budgets in their syntax.
+ * Labels come from the registry's catalogue.
  */
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -163,6 +163,22 @@ describe('SettingControl', () => {
         expect(within(group).getByRole('radio', { name: 'Forever' })).toHaveAttribute('aria-checked', 'true')
         await userEvent.click(within(group).getByRole('radio', { name: 'For a set time' }))
         expect(onChange).toHaveBeenLastCalledWith(30)
+    })
+
+    it('count or everyone: "Everyone asked" is a word, not 0; a set number starts at one', async () => {
+        const onChange = setup('drafts.requiredApprovals', PLATFORM_VALUES, 'platform')
+        const group = screen.getByRole('radiogroup', { name: S['drafts.requiredApprovals'].label })
+        expect(within(group).getByRole('radio', { name: 'Everyone asked' })).toHaveAttribute('aria-checked', 'true')
+        await userEvent.click(within(group).getByRole('radio', { name: 'A set number' }))
+        expect(onChange).toHaveBeenLastCalledWith(1)
+    })
+
+    it('count or everyone: a set number reads in approvals, and Everyone asked goes back to the word', async () => {
+        const onChange = setup('drafts.requiredApprovals', PLATFORM_VALUES, 'platform', 2)
+        expect(screen.getByRole('spinbutton', { name: `${S['drafts.requiredApprovals'].label}, approvals` }))
+            .toHaveAttribute('aria-valuetext', '2 approvals')
+        await userEvent.click(screen.getByRole('radio', { name: 'Everyone asked' }))
+        expect(onChange).toHaveBeenLastCalledWith('everyone')
     })
 
     it('count or unlimited: Unlimited is a word, not -1', async () => {

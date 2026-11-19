@@ -360,8 +360,11 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
 // ── On a base view: the subsets made from it ────────────────────────────────
 
 export function SubsetsChip({ view }: { view: View }) {
-  const enabled = useFeature('searchViewsEnabled')
-  const ordinary = !isSubsetConfig(view.config as { search?: unknown }) && !view.draftBranchId
+  // A subset is made from a search, or from a query (a trace, a narrowing) that follows this view.
+  const searchOn = useFeature('searchViewsEnabled')
+  const membershipOn = useFeature('viewMembershipEnabled')
+  const enabled = searchOn || membershipOn
+  const ordinary = !isSubsetConfig(view.config as { search?: unknown }) && !view.config?.membership && !view.draftBranchId
   const { data } = useQuery({
     queryKey: [SUBSETS_QUERY_KEY, view.id],
     queryFn: () => listSubsets(view.id),
@@ -392,7 +395,7 @@ export function SubsetsChip({ view }: { view: View }) {
         >
           <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted/80">Subset views made from this view</p>
           <p className="mt-1 text-[12px] text-ink-muted leading-snug">
-            They show a search’s matches here, in this view’s layers. Changing its layers changes theirs; deleting it leaves them waiting.
+            They show part of what is here — a search’s matches, or what a trace or narrowing reaches — in this view’s layers. Changing its layers changes theirs; deleting it leaves them waiting.
           </p>
           <ul className="mt-2.5 max-h-56 overflow-y-auto custom-scrollbar divide-y divide-glass-border/50 rounded-lg border border-glass-border/70">
             {data.items.map((item) => (

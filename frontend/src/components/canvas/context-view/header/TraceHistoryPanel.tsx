@@ -21,6 +21,7 @@ import { ArrowUpLeft, ArrowDownRight, Check, GitBranch, History, Link2, Trash2 }
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { relativeTime } from '@/lib/relativeTime'
+import { SavedTracesSection, type SavedTracesSectionProps } from '@/components/canvas/trace/SavedTracesSection'
 
 export interface TraceHistoryPanelEntry {
   /** Index into the underlying history STACK (not the display order). */
@@ -45,6 +46,8 @@ export interface TraceHistoryPanelProps {
    *  is nothing to link to. Absent = no share action on the rows, which is
    *  what a host that cannot build links gets. */
   onCopyLink?: (index: number) => string | null
+  /** The traces this reader saved in this view. Absent = no section. */
+  saved?: SavedTracesSectionProps
 }
 
 const MODE_GLYPH = {
@@ -60,6 +63,7 @@ export function TraceHistoryPanel({
   onClose,
   triggerRef,
   onCopyLink,
+  saved,
 }: TraceHistoryPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null)
   /** Which row just yielded a link, and whether the clipboard took it. The
@@ -132,6 +136,15 @@ export function TraceHistoryPanel({
           Pick up where you left off
         </span>
       </div>
+
+      {saved && saved.items.length > 0 && (
+        <div className="border-b border-glass-border/40">
+          <SavedTracesSection
+            {...saved}
+            onOpen={(id) => { onClose(); saved.onOpen(id) }}
+          />
+        </div>
+      )}
 
       {entries.length === 0 ? (
         <p className="px-3.5 py-3 text-xs leading-relaxed text-ink-muted">

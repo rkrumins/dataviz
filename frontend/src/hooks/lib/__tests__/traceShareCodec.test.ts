@@ -15,7 +15,15 @@
  * depth — returns null and the view opens normally.
  */
 import { describe, it, expect } from 'vitest'
-import { encodeTraceShare, decodeTraceShare, TRACE_SHARE_OPEN_CAP } from '../traceShareCodec'
+import {
+  buildTraceShareLink,
+  decodeTraceShare,
+  encodeTraceShare,
+  TRACE_SHARE_MAX_SEEDS,
+  TRACE_SHARE_OPEN_CAP,
+  TRACE_SHARE_URL_MAX,
+} from '../traceShareCodec'
+import { MAX_TRACE_SEEDS } from '../../useCanvasTraceWalk'
 
 const state = {
   urn: 'urn:li:dashboard:customer_360_de06a1ba',
@@ -112,5 +120,68 @@ describe('a link from outside can never break the canvas', () => {
     const decoded = decodeTraceShare(btoa(JSON.stringify({ v: 1, ...state, label: { evil: true } })))
     expect(decoded?.urn).toBe(state.urn)
     expect(decoded?.label).toBeUndefined()
+  })
+})
+
+// A COMBINED TRACE travels whole: every seed, so the recipient traces the
+// picture the sender had — never its first entity alone.
+describe('a combined trace', () => {
+  const seeds = ['urn:li:dataset:orders', 'urn:li:dataset:sales', 'urn:li:dataset:returns']
+  const combined = { ...state, urn: seeds[0]!, urns: seeds }
+
+  it('round-trips every seed, the first as its focus', () => {
+    expect(decodeTraceShare(encodeTraceShare(combined))).toEqual({ v: 2, ...state, urn: seeds[0], urns: seeds })
+  })
+
+  it('one seed is still the v1 token, byte for byte — links already handed out keep working', () => {
+    expect(encodeTraceShare({ ...state, urns: [state.urn] })).toBe(encodeTraceShare(state))
+    expect(decodeTraceShare(encodeTraceShare({ ...state, urns: [state.urn] }))?.v).toBe(1)
+  })
+
+  it('carries no more seeds than the walk can trace', () => {
+    expect(TRACE_SHARE_MAX_SEEDS).toBe(MAX_TRACE_SEEDS)
+    const many = Array.from({ length: TRACE_SHARE_MAX_SEEDS + 5 }, (_, i) => `urn:x:${i}`)
+    const decoded = decodeTraceShare(encodeTraceShare({ ...state, urn: many[0]!, urns: many }))
+    expect(decoded?.v === 2 && decoded.urns).toHaveLength(TRACE_SHARE_MAX_SEEDS)
+  })
+
+  it('rejects a hand-written seed list it could never have written', () => {
+    const rejects = (urns: unknown) =>
+      expect(decodeTraceShare(btoa(JSON.stringify({ v: 2, ...state, urns })))).toBeNull()
+    rejects(undefined)
+    rejects('urn:x')
+    rejects(['only-one'])
+    rejects(['a', ''])
+    rejects(['a', 42])
+    rejects(['a', 'a'])
+    rejects(Array.from({ length: TRACE_SHARE_MAX_SEEDS + 1 }, (_, i) => `urn:x:${i}`))
+  })
+})
+
+describe('the link', () => {
+  const href = 'https://app.example/views/v1?lens=abc&keep=1'
+
+  it('names the trace, drops a Lens token and keeps everything else', () => {
+    const { url, pictureDropped } = buildTraceShareLink(state, href)
+    const parsed = new URL(url)
+    expect(decodeTraceShare(parsed.searchParams.get('trace') ?? '')).toMatchObject({ urn: state.urn })
+    expect(parsed.searchParams.get('lens')).toBeNull()
+    expect(parsed.searchParams.get('keep')).toBe('1')
+    expect(pictureDropped).toBe(false)
+  })
+
+  it('leaves the open cards out rather than hand over a link too long to open', () => {
+    const open = Array.from({ length: TRACE_SHARE_OPEN_CAP }, (_, i) => `urn:li:dataset:a_rather_long_table_name_${i}`)
+    const { url, pictureDropped } = buildTraceShareLink({ ...state, open }, href)
+    expect(pictureDropped).toBe(true)
+    expect(url.length).toBeLessThanOrEqual(TRACE_SHARE_URL_MAX)
+    expect(decodeTraceShare(new URL(url).searchParams.get('trace') ?? '')?.open).toEqual([])
+  })
+
+  it('a full combined trace fits without its picture', () => {
+    const urns = Array.from({ length: TRACE_SHARE_MAX_SEEDS }, (_, i) =>
+      `urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.warehouse.fact_table_number_${i},PROD)`)
+    const { url } = buildTraceShareLink({ ...state, urn: urns[0]!, urns, open: [] }, href)
+    expect(url.length).toBeLessThanOrEqual(TRACE_SHARE_URL_MAX)
   })
 })

@@ -205,6 +205,21 @@ jobs:
           path: backend/graph-copy-report.json
           if-no-files-found: ignore
 
+      # Everything a set of seeds reaches, at the size the trace dock's "Everything
+      # it reaches…" and a view of a quarter of a million members exist for: fifty
+      # thousand members resolved across many short requests, downloaded and kept as a
+      # view, exactly.
+      - name: Member sets and the views made from them, against the real engine
+        if: ${{ !cancelled() }}
+        working-directory: backend
+        env:
+          RUN_FALKOR_LIVE: "1"
+          FALKORDB_HOST: localhost
+          FALKORDB_PORT: "6379"
+        run: |
+          python -m pytest tests/integration/test_member_sets_live.py \
+            tests/integration/test_member_views_live.py -q
+
   versioning-e2e:
     # The versioned graph against real Postgres, FalkorDB and Redis.
     #

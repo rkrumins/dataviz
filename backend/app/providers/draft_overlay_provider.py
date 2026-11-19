@@ -1259,6 +1259,10 @@ class DraftOverlayProvider:
     def supports_search_sessions(self) -> bool:
         return bool(getattr(self._base, "supports_search_sessions", False))
 
+    @property
+    def supports_member_scope(self) -> bool:
+        return bool(getattr(self._base, "supports_member_scope", False))
+
     async def deep_search_session(self, query, *, context):
         """The uncapped engine, on the base — the draft's edits are not
         searched, for the reason :meth:`deep_search` gives."""

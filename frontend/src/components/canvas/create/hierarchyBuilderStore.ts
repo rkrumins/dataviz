@@ -13,6 +13,10 @@
  * first stage would discard it. Centralizing the guard here means every
  * caller gets it for free instead of remembering to call it themselves. With
  * no draft (editing paused, no :manage) it does not open, so nothing is staged on main.
+ *
+ * Clicking an entity that is already there while adding is a look at it: the builder steps aside
+ * (`suspend` — kept as it was, hidden) for that entity's details, and `resume` (Continue adding,
+ * or Add inside it) brings it back where it was, or scoped to that entity.
  */
 import { create } from 'zustand'
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
@@ -48,6 +52,10 @@ interface HierarchyBuilderState {
    * reset on `close()`. Drives the "N added this session" footer line.
    */
   sessionAddedCount: number
+  /** Stepped aside for an entity's details: kept as it was, hidden, until `resume`. */
+  suspended: boolean
+  /** Where the next entity goes once resumed (Add inside), until the panel takes it. */
+  pendingRetarget: string | null
   open: (opts?: {
     parentUrn?: string
     layerId?: string
@@ -64,6 +72,13 @@ interface HierarchyBuilderState {
     template?: string[]
   }) => void
   close: () => void
+  /** Step aside for an entity's details (the panel stays mounted, hidden). */
+  suspend: () => void
+  /** Take the rail back from the details — a drawer move, held while the drawer has edits not
+   *  staged yet — adding inside `parentUrn` when given. */
+  resume: (opts?: { parentUrn?: string }) => void
+  /** The retarget `resume` asked for, once. */
+  takeRetarget: () => string | null
   /** Registers a freshly staged temp urn into the current batch + session tally. */
   registerBatchUrn: (urn: string) => void
 }
@@ -79,6 +94,8 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
   batchId: 0,
   batchUrns: [],
   sessionAddedCount: 0,
+  suspended: false,
+  pendingRetarget: null,
 
   // The builder takes the right rail from the drawer — a drawer move, held while the drawer has
   // edits not staged yet.
@@ -95,6 +112,8 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
         surface: opts?.surface ?? 'rail',
         batchId: s.batchId + 1,
         batchUrns: [],
+        suspended: false,
+        pendingRetarget: null,
       }))
     })
   }),
@@ -111,7 +130,21 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
       initialTemplate: null,
       surface: 'rail',
       sessionAddedCount: 0,
+      suspended: false,
+      pendingRetarget: null,
     }),
+
+  suspend: () => set({ suspended: true }),
+
+  resume: (opts) => useCanvasStore.getState().requestDrawerMove(() => {
+    set({ suspended: false, pendingRetarget: opts?.parentUrn ?? null })
+  }),
+
+  takeRetarget: () => {
+    const to = get().pendingRetarget
+    if (to) set({ pendingRetarget: null })
+    return to
+  },
 
   registerBatchUrn: (urn) =>
     set((s) => ({ batchUrns: [...s.batchUrns, urn], sessionAddedCount: s.sessionAddedCount + 1 })),

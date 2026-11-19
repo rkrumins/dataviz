@@ -615,3 +615,103 @@ async def test_the_catalog_is_every_property_exactly(provider, scope_name):
         tags.update(entity_tags)
     assert out["tagged"] == tagged
     assert {t["tag"]: t["count"] for t in out["tags"]} == dict(tags)
+
+
+class _Members:
+    """A view's members as ``view_members_repo.SearchMembers`` reads them, kept
+    here: ``(urn, label, whole, covered)`` in the order found."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.count = len(rows)
+        # ``label_ord``: dense within each label, in the order found.
+        self.ord, seen = {}, {}
+        for urn, label, _, _ in rows:
+            self.ord[urn] = seen[label] = seen.get(label, -1) + 1
+
+    def _searched(self):
+        return [(u, lbl, self.ord[u]) for u, lbl, whole, covered in self.rows
+                if not whole and not covered]
+
+    async def counts(self):
+        out = {}
+        for _, lbl, i in self._searched():
+            n, end = out.get(lbl, (0, 0))
+            out[lbl] = (n + 1, max(end, i + 1))
+        return out
+
+    async def read(self, label, lo, hi):
+        return [u for u, lbl, i in sorted(self._searched(), key=lambda r: r[2])
+                if lbl == label and lo <= i < hi]
+
+    async def holds(self, urns):
+        every = {u for u, *_ in self.rows}
+        return {u for u in urns if u in every}
+
+
+async def test_a_views_members_past_the_cap_are_each_read_once(provider, monkeypatch):
+    """A view too large to list its members as roots: its members, read a band at a
+    time, and its listed roots — an entry people placed, the members kept whole —
+    walked as ever. Every match once, whatever overlaps: members inside a whole one
+    (``covered``), inside the entry, and the entry itself a member too."""
+    from backend.app.providers.falkordb_search import plan as plan_mod
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.app.providers.falkordb_search.engine import (
+        execute_count_session, execute_session_search)
+
+    monkeypatch.setattr(plan_mod, "MEMBER_CHUNK", 25)
+    whole = URNS["Container"][:2]
+    entry = URNS["Dataset"][0]
+    labels = {r[0]: r[1] for r in (await provider._ro_query(
+        "MATCH (n) WHERE n.urn IS NOT NULL RETURN n.urn, labels(n)[0]", params={},
+        timeout=60)).result_set}
+    inside = {r[0] for r in (await provider._ro_query(
+        "MATCH (r) WHERE r.urn IN $_r MATCH (r)-[:CONTAINS*0..12]->(n) RETURN DISTINCT n.urn",
+        params={"_r": whole}, timeout=60)).result_set}
+    near_entry = {r[0] for r in (await provider._ro_query(
+        "MATCH (r {urn: $_r})-[:CONTAINS*0..12]->(n) RETURN DISTINCT n.urn",
+        params={"_r": entry}, timeout=60)).result_set}
+    picked = URNS["Column"][::9] + URNS["Dataset"][::4] + sorted(near_entry)
+    rows = [(u, labels[u], True, False) for u in whole]
+    rows += [(u, labels[u], False, u in inside) for u in dict.fromkeys(picked) if u not in whole]
+    members = _Members(rows)
+    assert any(c for *_, c in rows) and entry in members.ord, "the overlaps are there"
+    scope_urns = sorted({u for u, *_ in rows} | inside | near_entry)
+
+    outsider = next(u for u in URNS["Column"] if u not in scope_urns)
+    named = {"kind": "is", "refs": [{"urn": u} for u in (
+        URNS["Column"][9], next(u for u, *_, c in rows if c), sorted(near_entry)[-1], outsider)]}
+    for predicate in ("name", "owner-in", "not-pii", "named"):
+        q = _query(PREDICATES.get(predicate, named),
+                   {"scopeMode": "view", "rootUrns": [*whole, entry]}, sort="displayName")
+        want = await _expected(provider, q.model_copy(update={"scope": q.scope.model_copy(
+            update={"scope_mode": "visible", "visible_urns": scope_urns, "root_urns": None})}))
+        seen, cursor, first = [], None, None
+        for _ in range(500):
+            page = await execute_session_search(
+                provider, q.model_copy(update={"options": q.options.model_copy(
+                    update={"cursor": cursor})}),
+                context=SearchRunContext(data_version="1", scope_hash="m", members=members))
+            assert page.status == "complete"
+            first = first or page
+            seen += [h.node.urn for h in page.hits]
+            cursor = page.cursor
+            if not cursor:
+                break
+        assert seen == want and want and outsider not in seen, predicate
+        assert first.total_count == len(want), predicate
+        # Said whenever the members are read a band at a time (entities the query
+        # names are read by ID, and checked against the members).
+        assert predicate == "named" or any("members: the search reads the members" in n
+                                           for n in first.scope_diagnostics.notes)
+        counted = await execute_count_session(
+            provider, q, context=SearchRunContext(data_version="1", scope_hash="m",
+                                                  members=members))
+        assert counted["count"] == len(want), predicate
+    # A band is the canvas's lookup — the label's urn index — then a walk up.
+    head, params = plan_mod.match_statement(
+        plan_mod.Unit("members", "Column", 0, 2, urns=URNS["Column"][:2], outside=0),
+        plan_mod.Context("true", {}, None, ("CONTAINS",), 12), [[0]])
+    text = " | ".join(line.strip() for line in
+                      (await provider._graph.explain(f"{head} RETURN n", params)).plan)
+    assert "All Node Scan" not in text and "Node By Index Scan" in text

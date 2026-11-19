@@ -249,7 +249,8 @@ async def export_view_package(
                   for row, number, may_seal in requests]
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    if req.scope == "view" and await asyncio.to_thread(export_scope_of, sealed[0].definition, []) is None:
+    if req.scope == "view" and await asyncio.to_thread(
+            export_scope_of, await package.package_design(session, sealed[0].definition, sealed[0].row), []) is None:
         raise HTTPException(status_code=422, detail=package.NO_PLACEMENTS)
     for item in sealed:
         await view_activity_repo.record_view_activity(

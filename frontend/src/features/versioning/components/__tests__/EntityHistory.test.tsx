@@ -4,7 +4,9 @@
  * what it changed property by property, as the server reports it; a revision published after the
  * draft began is marked; older revisions load on demand, a page at a time.
  */
-import { render, screen } from '@testing-library/react'
+import { render as rtlRender, screen } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { ReactElement, ReactNode } from 'react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -18,6 +20,8 @@ const h = vi.hoisted(() => ({
   hasNextPage: false,
   fetchNextPage: vi.fn(),
   lastOpts: undefined as Record<string, unknown> | undefined,
+  revision: { data: undefined, isLoading: false, isError: false, refetch: vi.fn() } as Record<string, unknown>,
+  summary: { data: undefined, isLoading: false, isError: false, refetch: vi.fn() } as Record<string, unknown>,
 }))
 
 vi.mock('../../hooks/useVersioning', () => ({
@@ -28,9 +32,16 @@ vi.mock('../../hooks/useVersioning', () => ({
       hasNextPage: h.hasNextPage, isFetchingNextPage: false, fetchNextPage: h.fetchNextPage, refetch: vi.fn(),
     }
   },
+  useEntityRevision: () => h.revision,
+  useEntitySummary: () => h.summary,
 }))
 
 import { EntityHistory } from '../EntityHistory'
+
+// A person is named by the chip that names people, which reads through react-query.
+const render = (ui: ReactElement) => rtlRender(ui, {
+  wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={new QueryClient()}>{children}</QueryClientProvider>,
+})
 
 beforeEach(() => {
   h.hasNextPage = false
@@ -64,11 +75,29 @@ describe('EntityHistory', () => {
     expect(h.lastOpts?.branchId).toBeNull()
   })
 
-  it('shows what each revision changed, property by property', () => {
+  it('says in one line what each revision changed, and opens to the values', async () => {
     render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId="draft1" />)
-    expect(screen.getByText('owner')).toBeInTheDocument()
+    // Collapsed: the summary names what changed, the values wait.
+    expect(screen.getAllByText(/Edited owner/).length).toBeGreaterThan(0)
+    expect(screen.queryByText('ana')).not.toBeInTheDocument()
+    const [first] = screen.getAllByRole('button', { expanded: false })
+    await userEvent.click(first)
     expect(screen.getByText('ana')).toBeInTheDocument()
     expect(screen.getByText('bo')).toBeInTheDocument()
+  })
+
+  it('opens every revision shown, and moves between them by keyboard', async () => {
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId="draft1" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Expand all' }))
+    expect(screen.getAllByRole('button', { expanded: true }).length).toBeGreaterThan(1)
+    await userEvent.click(screen.getByRole('button', { name: 'Collapse all' }))
+    expect(screen.queryAllByRole('button', { expanded: true })).toHaveLength(0)
+    const rows = screen.getAllByRole('button', { expanded: false })
+    rows[0].focus()
+    await userEvent.keyboard('j')
+    expect(rows[1]).toHaveFocus()
+    await userEvent.keyboard('{ArrowRight}')
+    expect(rows[1]).toHaveAttribute('aria-expanded', 'true')
   })
 
   it('marks a revision published after the draft began, with its commit message', () => {
@@ -79,7 +108,7 @@ describe('EntityHistory', () => {
 
   it('resolves an actor via userNames and names a platform write "system"', () => {
     render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
-    expect(screen.getByText(/by Alice Anderson/)).toBeInTheDocument()
+    expect(screen.getByText('Alice Anderson')).toBeInTheDocument()
     expect(screen.getByText('by system')).toBeInTheDocument()
     expect(screen.queryByText(/usr_alice123/)).not.toBeInTheDocument()
   })
@@ -95,5 +124,94 @@ describe('EntityHistory', () => {
     h.pages = [{ versions: [], hasMore: false }]
     render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
     expect(screen.getByText(/No history for this entity yet/)).toBeInTheDocument()
+  })
+})
+
+describe('EntityHistory — each revision, richer', () => {
+  const node = (props: Record<string, unknown>) => ({ kind: 'node', version: 'v', node: { id: 'n', urn: 'n', displayName: 'Orders', entityType: 'dataset', properties: props } })
+
+  it('asks for the relationship history of a relationship', () => {
+    render(<EntityHistory wsId="w" graphId="g" entityId="e" mainBranchId="main" branchId={null} kind="edge" />)
+    expect(h.lastOpts?.kind).toBe('edge')
+  })
+
+  it('says what kind of change it was and why, under a heading for its day', () => {
+    h.pages = [{ versions: [rev({ commit_id: 'p1', op: 'update', actor: 'system', created_at: '2024-03-05T10:00:00Z',
+      commit_kind: 'squash_publish', change_reason: 'Quarterly certification', changes: [] })], hasMore: false }]
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
+    expect(screen.getByText('published')).toBeInTheDocument()
+    expect(screen.getByText('Why: Quarterly certification')).toBeInTheDocument()
+    expect(screen.getByText(new Date('2024-03-05T10:00:00Z').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }))).toBeInTheDocument()
+  })
+
+  it('shows the entity as it was after a revision', async () => {
+    h.revision = { data: { id: 'm1', value: node({ owner: 'ana', tier: 'gold' }), userNames: {} }, isLoading: false, isError: false, refetch: vi.fn() }
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
+    await userEvent.click(screen.getAllByRole('button', { expanded: false })[0])
+    await userEvent.click(screen.getByRole('radio', { name: 'As it was' }))
+    expect(screen.getByText(/As of/)).toBeInTheDocument()
+    expect(screen.getByText('Orders')).toBeInTheDocument()
+    expect(screen.getByText('owner')).toBeInTheDocument()
+    expect(screen.getByText('gold')).toBeInTheDocument()
+  })
+
+  it('compares a revision with now — or says nothing has changed since', async () => {
+    h.revision = { data: { id: 'm1', value: node({ owner: 'ana' }) }, isLoading: false, isError: false, refetch: vi.fn() }
+    h.summary = { data: { value: node({ owner: 'bo' }) }, isLoading: false, isError: false, refetch: vi.fn() }
+    const { unmount } = render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
+    await userEvent.click(screen.getAllByRole('button', { expanded: false })[0])
+    await userEvent.click(screen.getByRole('radio', { name: 'Compared with now' }))
+    expect(screen.getByText(/then → now/)).toBeInTheDocument()
+    expect(screen.getByText('ana')).toBeInTheDocument()
+    expect(screen.getByText('bo')).toBeInTheDocument()
+    unmount()
+
+    h.summary = { data: { value: node({ owner: 'ana' }) }, isLoading: false, isError: false, refetch: vi.fn() }
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
+    await userEvent.click(screen.getAllByRole('button', { expanded: false })[0])
+    await userEvent.click(screen.getByRole('radio', { name: 'Compared with now' }))
+    expect(screen.getByText(/Identical to now/)).toBeInTheDocument()
+  })
+
+  it('offers Try again when a revision cannot be read', async () => {
+    const refetch = vi.fn()
+    h.revision = { data: undefined, isLoading: false, isError: true, refetch }
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
+    await userEvent.click(screen.getAllByRole('button', { expanded: false })[0])
+    await userEvent.click(screen.getByRole('radio', { name: 'As it was' }))
+    await userEvent.click(screen.getByRole('button', { name: /Try again/ }))
+    expect(refetch).toHaveBeenCalled()
+  })
+
+  it('a deletion shows what it removed — to copy, or restore where the drawer can', async () => {
+    const onRestore = vi.fn()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    h.pages = [{ versions: [
+      rev({ commit_id: 'x2', op: 'delete', actor: 'system', created_at: '2024-03-06T10:00:00Z',
+        changes: [{ path: ['properties', 'owner'], kind: 'removed', before: 'ana', after: null }] }),
+      rev({ commit_id: 'x1', op: 'create', actor: 'system', created_at: '2024-03-05T10:00:00Z', changes: [] }),
+    ], hasMore: false }]
+    h.revision = { data: { id: 'x2', value: { kind: 'node', version: null, deleted: true }, last_value: node({ owner: 'ana', tier: 'gold' }) },
+      isLoading: false, isError: false, refetch: vi.fn() }
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} onRestore={onRestore} />)
+    await userEvent.click(screen.getAllByRole('button', { expanded: false })[0])
+    await userEvent.click(screen.getByRole('radio', { name: 'As it was' }))
+    expect(screen.getByText(/Deleted in this revision\. This is what it held just before/)).toBeInTheDocument()
+    expect(screen.getByText('gold')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Copy values' }))
+    expect(JSON.parse(writeText.mock.calls[0][0])).toMatchObject({ displayName: 'Orders', properties: { owner: 'ana', tier: 'gold' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Restore it' }))
+    expect(onRestore).toHaveBeenCalled()
+  })
+
+  it('offers no Restore without a way back, and says when what was deleted is no longer on record', async () => {
+    h.pages = [{ versions: [rev({ commit_id: 'x2', op: 'delete', actor: 'system', created_at: '2024-03-06T10:00:00Z', changes: [] })], hasMore: false }]
+    h.revision = { data: { id: 'x2', value: { kind: 'node', version: null, deleted: true }, last_value: null },
+      isLoading: false, isError: false, refetch: vi.fn() }
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
+    await userEvent.click(screen.getByRole('radio', { name: 'As it was' }))
+    expect(screen.getByText(/no longer on record/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Restore it' })).not.toBeInTheDocument()
   })
 })

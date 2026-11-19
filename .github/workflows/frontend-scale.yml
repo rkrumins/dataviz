@@ -1,0 +1,54 @@
+# Holds the change review surfaces to their budgets at volume, in a real browser:
+# Review & Save on 50,000 staged changes (open, step, scroll, filter, the Map), a
+# 100,000-change list, the canvas navigator — `npm run harness:scale`, which fails
+# past a budget (shown in under 1 s, no task over 200 ms while in use).
+#
+# Not required: a shared runner's timing is noisier than a developer's machine, so
+# a red run here is a prompt to look (its screenshots and report are uploaded),
+# not a merge block. The pure budgets (indexing 50,000 changes, undo of 5,000) run
+# in the required vitest suite.
+name: frontend-scale
+
+on:
+  pull_request:
+    paths:
+      - "frontend/src/features/versioning/**"
+      - "frontend/src/features/reviews/**"
+      - "frontend/src/components/canvas/context-view/**"
+      - "frontend/src/store/**"
+      - "frontend/src/harness/scaleHarness.tsx"
+      - "frontend/scripts/scale-shot.mjs"
+  workflow_dispatch:
+
+concurrency:
+  group: frontend-scale-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scale:
+    name: Change review at scale
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"      # the driver speaks DevTools over Node's own WebSocket
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: frontend
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci
+      - name: Run the scale harness
+        working-directory: frontend
+        env:
+          CHROMIUM_PATH: /usr/bin/google-chrome
+        run: npm run harness:scale
+      - name: Keep the screenshots and timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scale-harness
+          path: frontend/.harness/scale-*

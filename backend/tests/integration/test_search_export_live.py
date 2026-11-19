@@ -217,7 +217,7 @@ def _cell(value) -> str:
     return str(value)
 
 
-async def _export(provider, objects, predicate, scope, fmt, tag):
+async def _export(provider, objects, predicate, scope, fmt, tag, members=None):
     """Follow an export a request at a time to the end, then download it."""
     from backend.app.providers.falkordb_search.export import (
         execute_export_session,
@@ -228,7 +228,7 @@ async def _export(provider, objects, predicate, scope, fmt, tag):
 
     query = SearchQuery.model_validate({"predicate": predicate,
                                         "scope": {"viewId": "v", **scope}})
-    context = SearchRunContext(data_version=f"export-{tag}", scope_hash=tag)
+    context = SearchRunContext(data_version=f"export-{tag}", scope_hash=tag, members=members)
     sid, requests, out = None, 0, None
     while requests < 400:
         out = await execute_export_session(provider, query, context=context, fmt=fmt,
@@ -313,6 +313,26 @@ async def test_a_views_roots_bound_the_export_walked_or_clamped(provider, object
         assert not walks
     else:
         assert len(walks) > 2
+
+
+async def test_a_views_members_past_the_cap_are_exported_once_each(provider, objects, monkeypatch):
+    """A view too large to list its members as roots: its members, a band at a time,
+    and what lies under the entry people placed — the entry and some of what is inside
+    it members too, each exported once."""
+    from backend.app.providers.falkordb_search import plan as plan_mod
+    from tests.integration.test_search_engine_live import _Members
+
+    monkeypatch.setattr(plan_mod, "MEMBER_CHUNK", 25)
+    entry = "urn:dataset:7"
+    picked = [u for i, u in enumerate(NODES) if i % 6 == 0] + sorted(_subtree([entry]))
+    members = _Members([(u, NODES[u]["label"], False, False) for u in dict.fromkeys(picked)])
+    predicate = PREDICATES["owner-finance"]
+    answer, text, _ = await _export(provider, objects, predicate,
+                                    {"scopeMode": "view", "rootUrns": [entry]}, "ndjson",
+                                    "members", members=members)
+    want = _expected(predicate, set(picked) | _subtree([entry]))
+    assert len(want) > 25
+    _check(answer, text, "ndjson", want)
 
 
 async def test_the_canvas_urns_bound_a_visible_export(provider, objects):

@@ -301,7 +301,7 @@ export function buildDiagnostics(snap: SystemStatusSnapshot): Insight[] {
         }
         if (reasons.some(r => r.includes('schema'))) {
             why.push('The schema-upgrade job hasn’t applied the newest migration (readiness reports schema_at_head = false).')
-            resolution.push('Run the upgrade one-shot (alembic upgrade head) and restart the service.')
+            resolution.push('See Database schema below for what the upgrade would do; run the upgrade Job (synodic-upgrade upgrade), then restart the service.')
         }
         if (svc.key === 'aggregationWorker' && reasons.some(r => r.includes('stuck'))) {
             why.push('Jobs are marked running but their executor heartbeat has gone stale — a worker died mid-job. The reconciler will fail or auto-resume them.')

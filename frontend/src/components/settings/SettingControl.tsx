@@ -206,8 +206,15 @@ function QuantityControl({ c, units, unitNames }: { c: Common; units: typeof BYT
     )
 }
 
-/** A number, or a word that is a value of its own ("unlimited", "forever"). */
-function OrWordControl({ c, word, quantity, noun }: { c: Common; word: 'unlimited' | 'forever'; quantity?: boolean; noun?: string }) {
+/** Each word's two modes: a number, or the word the kind takes instead. */
+const WORD_MODES = {
+    unlimited: { limit: 'Up to a limit', word: 'Unlimited' },
+    forever: { limit: 'For a set time', word: 'Forever' },
+    everyone: { limit: 'A set number', word: 'Everyone asked' },
+} as const
+
+/** A number, or a word that is a value of its own ("unlimited", "forever", "everyone"). */
+function OrWordControl({ c, word, quantity, noun }: { c: Common; word: keyof typeof WORD_MODES; quantity?: boolean; noun?: string }) {
     const shown = c.value ?? c.inherit.value
     const isWord = shown === word
     // A limit starts at the nearest number on hand: this scope's, the inherited one, this platform's
@@ -232,8 +239,8 @@ function OrWordControl({ c, word, quantity, noun }: { c: Common; word: 'unlimite
                 value={mode}
                 onChange={(m) => c.onChange(m === 'word' ? word : start)}
                 options={[
-                    { value: 'limit', label: word === 'forever' ? 'For a set time' : 'Up to a limit', disabled: c.disabled },
-                    { value: 'word', label: word === 'forever' ? 'Forever' : 'Unlimited', disabled: c.disabled },
+                    { value: 'limit', label: WORD_MODES[word].limit, disabled: c.disabled },
+                    { value: 'word', label: WORD_MODES[word].word, disabled: c.disabled },
                 ]}
             />
             {mode === 'limit' && (quantity ? <QuantityControl c={sub} units={BYTE_UNITS} /> : <CountControl c={sub} noun={noun} />)}
@@ -358,6 +365,7 @@ export function SettingControl({
         case 'bytes': return <QuantityControl c={c} units={BYTE_UNITS} />
         case 'days_or_forever': return <OrWordControl c={c} word="forever" noun="days" />
         case 'count_or_unlimited': return <OrWordControl c={c} word="unlimited" noun={unit} />
+        case 'count_or_everyone': return <OrWordControl c={c} word="everyone" noun={unit} />
         case 'bytes_or_unlimited': return <OrWordControl c={c} word="unlimited" quantity />
         case 'identifier': return <IdentifierControl c={c} />
         case 'refusal_budget': return <RefusalBudgetControl c={c} />

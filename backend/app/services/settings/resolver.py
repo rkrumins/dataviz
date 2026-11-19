@@ -29,11 +29,11 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 from backend.app.config.settings_types import SCOPES, Requirement, Setting, Why
 from backend.app.services.versioning.import_export import identifier as identifiers
 
-UNLIMITED, FOREVER = "unlimited", "forever"
+UNLIMITED, FOREVER, EVERYONE = "unlimited", "forever", "everyone"
 SYSTEM_ADMIN, WORKSPACE_ADMIN = "system_admin", "workspace_admin"
 #: The word a kind takes besides a number.
 WORDS = {"count_or_unlimited": UNLIMITED, "bytes_or_unlimited": UNLIMITED,
-         "days_or_forever": FOREVER}
+         "days_or_forever": FOREVER, "count_or_everyone": EVERYONE}
 #: Kinds whose numbers are whole.
 _WHOLE = ("count", "percent", "ms", "seconds", "bytes", "days", *WORDS)
 
@@ -124,7 +124,8 @@ def _means(value: Any, n: int) -> bool:
 
 def decode(setting: Setting, old: Any) -> Any:
     """A value in its old spelling (the environment's, or a column's) as the store keeps it:
-    ``-1`` or ``0`` as ``"unlimited"`` or ``"forever"``, as the setting's ``legacy.encode`` says."""
+    ``-1`` or ``0`` as ``"unlimited"``, ``"forever"`` or ``"everyone"``, as the setting's
+    ``legacy.encode`` says."""
     encode = setting.legacy.encode if setting.legacy else None
     if encode == "minus_one_is_unlimited" and _means(old, -1):
         return UNLIMITED
@@ -132,6 +133,8 @@ def decode(setting: Setting, old: Any) -> Any:
         return UNLIMITED
     if encode == "zero_is_forever" and _means(old, 0):
         return FOREVER
+    if encode == "zero_is_everyone" and _means(old, 0):
+        return EVERYONE
     return old
 
 
@@ -143,6 +146,8 @@ def encode(setting: Setting, value: Any) -> Any:
     if encoding == "zero_is_unlimited" and value == UNLIMITED:
         return 0
     if encoding == "zero_is_forever" and value == FOREVER:
+        return 0
+    if encoding == "zero_is_everyone" and value == EVERYONE:
         return 0
     return value
 
@@ -196,8 +201,9 @@ def value_error(setting: Setting, value: Any, *, ranged: bool = True) -> Optiona
 
 
 def as_number(value: Any) -> Optional[float]:
-    """A value as a number to compare: the words are infinite; None for anything else."""
-    if value in (UNLIMITED, FOREVER):
+    """A value as a number to compare: the words are infinite (``"everyone"`` asks the most of a
+    review: every person asked); None for anything else."""
+    if value in (UNLIMITED, FOREVER, EVERYONE):
         return math.inf
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None

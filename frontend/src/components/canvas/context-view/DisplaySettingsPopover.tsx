@@ -292,8 +292,9 @@ export function DisplaySettingsSections({
   const toggleEntityIcons = usePreferencesStore((s) => s.toggleCanvasEntityIcons)
   const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
   const toggleMemoryUsage = usePreferencesStore((s) => s.toggleMemoryUsage)
-  // Only a subset view draws its matches inside their containers.
-  const subsetView = useSchemaStore((s) => !!s.getActiveView()?.search)
+  // Only a view whose members the server places — a subset, or one made from a query —
+  // draws them inside their containers.
+  const subsetView = useSchemaStore((s) => { const v = s.getActiveView(); return !!v?.search || !!v?.membership })
   const showWhereTheySit = usePreferencesStore((s) => s.showWhereTheySit) ?? true
   const toggleWhereTheySit = usePreferencesStore((s) => s.toggleWhereTheySit)
   const togglesOn = [showEntityIcons, showTypeBadge, subtleTreeLines, showMemoryUsage,
@@ -410,8 +411,8 @@ export function DisplaySettingsSections({
           <ToggleRow
             label="Show where they sit"
             description={showWhereTheySit
-              ? 'Each match inside the containers its base view draws it in'
-              : 'Each match a row of its own, naming where it sits'}
+              ? 'Each member inside the containers drawn in its layer'
+              : 'Each member a row of its own, naming where it sits'}
             icon={FolderTree}
             active={showWhereTheySit}
             onClick={toggleWhereTheySit}

@@ -147,6 +147,7 @@ The API server: what it accepts and serves, and which part of the backend each p
 
 | Variable | Default | Read in |
 |---|---|---|
+| `GRAPHVER_SAVE_MAX_OPS` | `200000` | `backend/app/api/v1/endpoints/versioning.py` |
 | `GUNICORN_WORKERS` | (empty) | `backend/app/services/settings/facts.py` |
 | `GZIP_COMPRESSLEVEL` | `1` | `backend/app/main.py` |
 | `HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS` | `120` | `backend/app/main.py` |
@@ -163,7 +164,7 @@ The Postgres database that holds users, workspaces, views and settings. Per-role
 | Variable | Default | Description | Read in |
 |---|---|---|---|
 | `CREDENTIAL_ENCRYPTION_KEY` | — (secret, set your own) | Fernet key that encrypts the credentials stored for data sources and identity providers. Unset, credentials are stored unencrypted, except with `ENV=production`, where saving one fails instead. | `backend/app/db/repositories/connection_repo.py` |
-| `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:***@localhost:5432/synodic` / required / — *(differs by call site)* | Address of the management database: a Postgres URL starting with `postgresql+asyncpg://`. Unset, processes fall back to the local development database. | `backend/alembic/env.py`, `backend/alembic/versions/20261116_1100_settings_import.py`, `backend/app/db/engine.py` +5 more |
+| `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:***@localhost:5432/synodic` / required / — *(differs by call site)* | Address of the management database: a Postgres URL starting with `postgresql+asyncpg://`. Unset, processes fall back to the local development database. | `backend/alembic/env.py`, `backend/alembic/versions/20261116_1100_settings_import.py`, `backend/app/db/engine.py` +6 more |
 
 ### Internal tuning
 
@@ -179,6 +180,12 @@ The Postgres database that holds users, workspaces, views and settings. Per-role
 | `DB_POOL_SIZE` | — | `backend/app/db/engine.py` |
 | `DB_POOL_TIMEOUT_SECS` | `10` | `backend/app/db/engine.py` |
 | `DB_STARTUP_RETRY_TIMEOUT_SECS` | `60` | `backend/app/db/engine.py` |
+| `MIGRATION_LOCK_TIMEOUT` | `10s` | `backend/alembic/env.py` |
+| `MIGRATION_SQL_LOG` | — | `backend/alembic/env.py` |
+| `MIGRATION_STATEMENT_TIMEOUT` | `0` | `backend/alembic/env.py` |
+| `SYNODIC_BUILD_ON_MAIN` | — | `backend/app/db/schema_plan.py` |
+| `SYNODIC_BUILD_REF` | `?` / — *(differs by call site)* | `backend/app/db/migration_records.py`, `backend/app/db/schema_plan.py` |
+| `SYNODIC_BUILD_SHA` | — | `backend/app/db/migration_records.py`, `backend/app/db/schema_plan.py` |
 | `VIEWS_BATCH_ENRICH` | `true` | `backend/app/db/repositories/view_repo.py` |
 
 ## Redis
@@ -252,7 +259,12 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `GRAPH_SOURCE_HOLD_SECS` | `1.5` | how long a source keeps its reserve after its last request started or finished | `backend/app/providers/manager.py` |
 | `GRAPH_STORE_TOPOLOGY_CACHE_TTL_S` | `30` | one reading of every node serves every viewer this long | `backend/app/services/graph_store/topology.py` |
 | `GRAPH_STORE_TOPOLOGY_DEADLINE_S` | `8` | deadline per wave of 8 nodes; the sweep scales with the fleet, capped at 60s | `backend/app/services/graph_store/topology.py` |
+| `LIVE_VIEW_MAX_MEMBERS` | `250000` | Members one view made from a query may hold (the entities people place in it themselves aside). Past it the view keeps its last good members and says `over_cap`; a new one is not made. Each member is a row of `view_members` in the management database, twice while an update is worked out. | `backend/app/services/live_views/pipeline.py` |
 | `LOCAL_DEV_FALKORDB_OVERRIDE` | (empty) | Local development only: set `true` when the backend runs on your machine and FalkorDB in Docker, so `FALKORDB_HOST` and `FALKORDB_PORT` replace the host and port stored on graph data sources. | `backend/app/providers/manager.py` |
+| `MEMBER_SET_MAX_DURATION_S` | `7200` | Seconds one member set may take, from when it started, however many requests move it on. Past it the set is complete with what it has, and says `deadline`. | `backend/app/services/member_sets/stepper.py` |
+| `MEMBER_SET_MAX_EDGES` | `2000000` | Lineage relationships one member set keeps when asked for its edges. Past it the set keeps finding members, and says `edge_cap`. | `backend/app/services/member_sets/stepper.py` |
+| `MEMBER_SET_MAX_MEMBERS` | `1000000` | Members one member set (`POST /graph/member-sets`) may hold. Past it the set is complete and says `member_cap`. Each member is a row in the management database while the set is kept. | `backend/app/services/member_sets/stepper.py` |
+| `MEMBER_SET_TTL_HOURS` | `24` | Hours a complete member set is kept to be listed and downloaded. Then it is expired and its rows deleted in batches; asking again resolves it afresh. A set nobody moves on is let go after 15 minutes. | `backend/app/services/member_sets/stepper.py` |
 | `NATIVE_QUERY_CONCURRENCY` | `2` | runs at once per data source, per API process | `backend/app/services/native_query/settings.py` |
 | `NATIVE_QUERY_DEFAULT_ROWS` | `200` | rows shown when a run doesn't say | `backend/app/services/native_query/settings.py` |
 | `NATIVE_QUERY_DEFAULT_TIMEOUT_MS` | `10000` | how long a run may take when it doesn't say | `backend/app/services/native_query/settings.py` |
@@ -267,6 +279,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `PROVIDER_SOURCE_RESERVED` | `0` | what any one source may always take | `backend/app/providers/manager.py` |
 | `TOP_LEVEL_MATERIALIZE_LIMIT` | `1000` | nodes captured per top-level materialization (complete window => filtered serving) | `backend/app/services/top_level_cache.py` |
 | `TOP_LEVEL_SERVE_MIN_NODES` | — | node-count floor for serving materialized top-level pages | `backend/app/services/top_level_cache.py` |
+| `VIEW_MEMBERS_FEED_MAX_ROWS` | `5000` | Members one layer of a view made from a query lists on the canvas (`POST /graph/view-members`); past them its page says `capped`, and the layer is searched or exported for the rest. | `backend/app/api/v1/endpoints/graph_view_members.py` |
 
 ### Internal tuning
 
@@ -730,6 +743,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_REBUILD_LOCK_TTL` | `120` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_RESYNC_MAX_ENTITIES` | `250000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_REVISION_SETS_INLINE_FACTOR` | `0.5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_ROLLUP_NET_MAX_CELLS` | `200000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_ROLLUP_REASK_SECS` | `300` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SCHEMA` | `graphver` | `backend/app/services/versioning/config.py` |
@@ -892,6 +906,7 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | Variable | Default | Read in |
 |---|---|---|
 | `AGG_CONTROL_PLANE` | `http://localhost:8091` | `backend/scripts/rematerialize_all_graphs.py` |
+| `BACKUP_DATABASE_URL` | — | `backend/scripts/upgrade.py` |
 | `DATAVIZ_SKIP_LOAD_SIGNAL` | — | `backend/scripts/signal_data_changed.py` |
 | `FALKORDB_GRAPH_NAME` | `nexus_lineage` / `nexus` *(differs by call site)* | `backend/scripts/add_column_lineage.py`, `backend/scripts/docker_seed.py`, `backend/scripts/optimize_falkordb.py` +1 more |
 | `LINEAGE_IMPORT_CHUNK` | `10000` | `backend/scripts/import_layered_lineage.py` |
@@ -912,6 +927,8 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | `SYNODIC_BASE_URL` | `http://localhost:8000` | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_EMAIL` | — | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_PASSWORD` | — (secret, set your own) | `backend/scripts/bench_versioning.py`, `backend/scripts/publish_view_library.py` |
+| `SYNODIC_SHARED_DATABASE` | — | `backend/scripts/upgrade.py` |
+| `SYNODIC_UPGRADE_RECOVER` | — | `backend/scripts/upgrade.py` |
 | `SYNODIC_USER` | `admin@synodic.local` | `backend/scripts/bench_versioning.py` |
 | `WORKSPACE_ID` | `dev` | `backend/scripts/check_trace_query_plans.py` |
 

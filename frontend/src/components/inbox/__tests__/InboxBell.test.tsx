@@ -163,3 +163,36 @@ describe('a graph you watch', () => {
         await waitFor(() => expect(navigate).toHaveBeenCalledWith('/workspaces/ws_1?ds=ds_1&dstab=versioning'))
     })
 })
+
+describe('what happened to a review you are part of', () => {
+    it.each([
+        ['review.requested', 'lucide-git-pull-request-arrow', 'bg-sky-500/10'],
+        ['review.approved', 'lucide-circle-check', 'bg-emerald-500/10'],
+        ['review.changes_requested', 'lucide-rotate-ccw', 'bg-amber-500/10'],
+        ['review.commented', 'lucide-message-square', 'bg-sky-500/10'],
+        ['review.merged', 'lucide-git-merge', 'bg-emerald-500/10'],
+        ['review.closed', 'lucide-circle-x', 'bg-slate-500/10'],
+    ])('shows %s with its own icon and tone', async (kind, icon, tile) => {
+        mockList.mockResolvedValue({
+            items: [message({ kind, title: '"Tidy owners"', link: '/workspaces/ws1/reviews/pr_1', resourceType: 'review', resourceId: 'pr_1' })],
+            unread: 1,
+        })
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        const row = (await screen.findByText('"Tidy owners"')).closest('[role="button"]')!
+        expect(row.querySelector(`.${icon}`)).not.toBeNull()
+        expect(row.querySelector('.lucide-bell')).toBeNull()
+        expect(row.firstElementChild?.className).toContain(tile)
+    })
+
+    it('opens the review’s page', async () => {
+        mockList.mockResolvedValue({
+            items: [message({ kind: 'review.requested', title: 'You were asked to review "Tidy owners"', link: '/workspaces/ws1/reviews/pr_1' })],
+            unread: 1,
+        })
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        fireEvent.click(await screen.findByText(/asked to review/))
+        expect(navigate).toHaveBeenCalledWith('/workspaces/ws1/reviews/pr_1')
+    })
+})

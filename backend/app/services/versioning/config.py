@@ -404,6 +404,11 @@ CHANGE_LIST_MAX: int = int(os.getenv("GRAPHVER_CHANGE_LIST_MAX", "250000"))
 # Entries the change lists a web process keeps may hold together: the least recently read go
 # first, the newest is kept whatever its size. About 90 MB at the default.
 CHANGE_INDEX_CACHE_ENTRIES: int = int(os.getenv("GRAPHVER_CHANGE_INDEX_CACHE_ENTRIES", "300000"))
+# Two revisions compared are composed from each revision's own changes, kept once built
+# (change_sets.py). When some aren't kept yet, they are built then — unless what they recorded
+# comes to more than this share of the window's own rows: then the window is read directly, and
+# the missing revisions are kept in the background, for the next compare.
+REVISION_SETS_INLINE_FACTOR: float = float(os.getenv("GRAPHVER_REVISION_SETS_INLINE_FACTOR", "0.5"))
 # Longest one statement building a change list or the history calendar may run before Postgres
 # cancels it and the reader is told to try again. Each is an index range that finishes well inside
 # a second at 100k changes; one that runs this long has a bad plan, and a web process should not
