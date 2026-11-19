@@ -22,6 +22,8 @@ import math
 import re
 from typing import Any
 
+from backend.common.moments import same_moment
+
 _INT_TEXT = re.compile(r"-?\d+")
 
 
@@ -82,7 +84,8 @@ def preserve_stored_type(stored: Any, incoming: Any) -> Any:
     if isinstance(stored, float):
         return stored if _same_float(stored, incoming) else incoming
     if isinstance(stored, str):
-        return stored if _same_text(stored, incoming) else incoming
+        # The same date or moment written another way keeps the stored text.
+        return stored if _same_text(stored, incoming) or same_moment(stored, incoming) else incoming
     if isinstance(stored, list) and isinstance(incoming, list) and len(stored) == len(incoming):
         return [preserve_stored_type(s, i) for s, i in zip(stored, incoming)]
     if isinstance(stored, dict) and isinstance(incoming, dict):

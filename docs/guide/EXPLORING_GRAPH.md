@@ -4,7 +4,8 @@
 lineage of an entity as far as it goes: everything that feeds it (upstream) and
 everything it feeds (downstream) — its blast radius. This page shows you how to
 find an entity inside a view, trace it (or several at once), narrow and read the
-result, and hand the trace to someone else as a link.
+result, hand the trace to someone else as a link, take it away as a file or a
+view, and keep it in your browser.
 
 > **Before you start:** open a view from the [Explorer](/guide/browsing-views).
 > The steps below are for a **Context View**, the canvas with one column per
@@ -22,6 +23,7 @@ flowchart LR
   B --> C["Trace Lineage or T"]
   C --> D["Read and narrow in the dock"]
   D --> E["Share the trace"]
+  D --> G["Export & save"]
   D --> F["Exit Trace or Esc"]
 ```
 
@@ -128,8 +130,8 @@ it away.
 
 - The first 25 entities are traced. Select more and a message says *Tracing the
   first 25 of N selected entities.*
-- A trace of several entities can't be shared as a link: the dock has no
-  **Share** button for it, and it has no link icon in your trace history.
+- A trace of several entities is shared like any other: its link carries every
+  entity in it, and your reader traces them all together.
 - **Focus all N** in the bar (or `F`) opens the
   [Lineage Lens](/guide/lineage-lens) on the selection as a whole.
 - **Clear** in the bar empties the selection.
@@ -143,7 +145,7 @@ dashboard*, *what breaks if I drop this column* — so you can hand it over as a
 link rather than a screenshot.
 
 1. In the trace dock, click **Share**. The **Share this trace** panel names the
-   entity, the direction and the hop limits the link will carry.
+   entity (or *N entities*), the direction and the hop limits the link will carry.
 2. If you've opened cards, choose whether the link carries them with **Include
    the open cards** (on by default).
 3. Click **Copy link**. It changes to **Link copied**.
@@ -156,6 +158,11 @@ link rather than a screenshot.
 > **If your browser blocks the clipboard:** the panel shows the link with *copy
 > it by hand* — select it and copy it yourself.
 
+> **A very large picture:** if the open cards would make the link too long to
+> open, they are left out and the panel says *Open cards left out — the link
+> would be too long to open*. The entities, direction and hop limits always
+> travel.
+
 Opening the link starts the trace on your reader's own canvas, so **it re-runs
 against today's lineage** — it is a question, not a frozen snapshot, and it takes
 as long as that trace takes. Anyone who can open the view can open the trace;
@@ -165,6 +172,48 @@ one click away after they close it.
 To share a trace you ran earlier without opening it again, click the arrow
 beside **Trace Lineage** and, under **Pick up where you left off**, click the
 link icon on its row (**Copy a link to this trace**).
+
+## Take a trace with you
+
+**Export & save** in the trace dock is everything you can do with a trace
+besides reading it. Its panel says first what a file would hold: *What the
+trace shows — N rows, open or not*, or, while the trace is still landing,
+*Waiting for the trace to finish landing…*.
+
+| Choice | What you get |
+| --- | --- |
+| **CSV** | One row per entity the trace shows — seed, upstream, downstream or both, its hops each way, the layer it is drawn in, where it sits, and which of your seeds reach it. Where it sits is its parent (`parentUrn`, `parentName`, `parentType`) and every container from the top down to it (`path` as names, `A / B`; `pathUrns` as URNs, `a; b`); both are empty for an entity at the top of the graph. Closed cards are included; the containers are each row's path, not rows of their own. Opens in any spreadsheet. |
+| **JSON** | The same entities and the flows between them, with the question that found them (the seeds and how far each way), so a script can ask it again. |
+| **Everything it reaches…** | The complete trace, worked out on the server: your starting entities and what is inside them (two levels down), every source and consumer, inside this view or not, however many, each with its parent and path as in the CSV above (not its layer: it may not be in this view). Choose CSV, NDJSON or JSON, and **Include the flows between them** if you want the lineage itself as well (a second file, or part of the JSON). The panel shows how far it has got; close it and ask again later, and it carries on where it was. |
+| **Save as view…** | A view of its own of what the trace shows — your starting entities with everything inside them, and everything they reach on the sides you're reading — as a subset of the view you traced in: its layers, each entity where that view places it, including what someone placed there by hand. See [Keep a narrowing as a view](#keep-a-narrowing-as-a-view). |
+| **Save trace** | Keeps the trace in this browser, with what it found. |
+
+- The CSV and JSON hold what is on the board: the sides you're reading and the
+  hop limits you set. Chains this view can't place are not in them, and the
+  panel says how many. **Everything it reaches…** includes them.
+- If the trace paused at its memory limit, the CSV and JSON hold *what has been
+  walked so far*; **Everything it reaches…** has the rest.
+- **Everything it reaches…** needs **Export** to be on in **Administration →
+  Features**, and works on data sources whose lineage the server can follow
+  (FalkorDB today).
+
+### Saved traces
+
+A saved trace keeps its entities, direction and hop limits — and a copy of what
+it found — in this browser, for you, in this view. Find them under **Saved in
+this browser** in the dock's **Export & save** panel, or, with no trace running,
+under the arrow beside **Trace Lineage**.
+
+- Click a saved trace to open it: it runs again against today's lineage. Once it
+  has landed, a chip in the dock says what moved since you saved it (*+N new ·
+  −M gone since saved*); click it to download the changes as a CSV.
+- The spreadsheet and braces icons download the saved results as CSV or JSON,
+  without running the trace.
+- The link icon copies a link to it; the pencil renames it; the bin removes it.
+- Saving the same entities again refreshes the saved copy. A browser keeps up to
+  100 saved traces in each view. When it runs short of space, the oldest keep
+  only how to run them again, and the panel says so. In a private window they
+  last for that visit only.
 
 ## Go back to an earlier trace
 
@@ -271,7 +320,7 @@ top:
   Offered when the narrowing starts from a search, keeps everything inside the
   matches or nothing inside them, and follows lineage one step at most either
   way.
-- **As a list · up to 5,000**: the view keeps a list of its members. Chosen
+- **As a list of its members**: the view keeps a list of its members. Chosen
   entities, a number of levels inside, two or more lineage steps, and what is
   inside the sources and consumers are kept this way. When **Live** isn't
   offered, the panel says why.
@@ -283,35 +332,50 @@ Kept as a list, the panel offers:
    its data changed, what newly matches arrives and what stops matching leaves.
    Turn it off for a **snapshot**, which keeps the members it has now.
 3. **Layout** sets the layers the view starts with:
-   - **Like** the view you are in: its layers, each entity placed where that
-     view places it. **With results** keeps only the layers something lands
-     in; **All** keeps every layer.
+   - **Follow** the view you are in: the new view is a *subset* of it. Its
+     layers are that view's, as they change there — a rename, a new layer or
+     a new order shows in it too — and each entity is placed where that view
+     places it. Chosen for a trace. In a subset view, it follows that view's
+     base. Not offered in a view that is itself made from a query, or in a
+     subset with layers of its own; the panel says why.
+   - **Like** the view you are in: a copy of its layers, each entity placed
+     where that view places it, yours to change from then on. **With
+     results** keeps only the layers something lands in; **All** keeps every
+     layer.
    - **From a template**: a layout template's layers, fitted to this data.
    - **By type**: a layer for each kind of top-level entity.
    - **Lineage stages**: Sources · Feeds · Starting points · Consumers ·
      Impact. Offered when the narrowing reaches sources or consumers.
 
    **Show where they sit** draws each entity inside the containers it lives in.
-4. **Preview** shows each layer the view would start with and how many entries
-   land in it, against the most a view can hold (5,000).
+4. **Preview** shows each layer the view would start with and how many
+   members land in it, against the most a view can hold (250,000 unless your
+   administrator changed it). A large set is worked out on the server first:
+   the preview says *Working out everything it reaches — N entities so far…*
+   until it is done. Above 20,000 members the layer counts are estimated from
+   the first 5,000.
 5. **Who can see it**: only you, or the workspace. To share it with everyone,
    publish it from the view once it's saved.
 
 Press **Save view** (or `⌘`/`Ctrl` + `Enter`). The new view opens, and
-**Undo** on the message deletes it again.
+**Undo** on the message deletes it again. A view that follows another reads
+*Subset of <view> · Auto-updating · N* in its header, and is listed under
+**Subsets** on the view it follows.
 
-**The limit.** A view keeps up to 5,000 entries: the entities, the containers
-drawn around them, and anything you always include. It is a limit on what the
-view lists, not on how big the graph is. A starting point with **everything
-inside** it is one entry, however much is inside. Over the limit, the panel
-says by how much and what would help, and nothing is saved. It might suggest:
-- turning off **Show where they sit**;
-- choosing **everything inside** instead of a number of levels;
-- narrowing the search.
+**The limit.** A view keeps up to 250,000 members (your administrator can
+change it with `LIVE_VIEW_MAX_MEMBERS`). Only the members count: the containers
+drawn around them by **Show where they sit** don't. A starting point with
+**everything inside** it is one member, however much is inside. Over the limit,
+the panel says by how much and what would help, and nothing is saved.
 
-A narrowing that starts from a search uses the search's first 5,000 matches,
-and the panel says so before you save. Looking after the view once it exists
-is in [Managing Views](/guide/managing-views#views-made-from-a-query).
+Saving waits while a large set is worked out — **Save view** says how far it
+has got — and the view opens once its members are in. On the canvas each layer
+lists its members a page at a time as you scroll, up to 5,000 a layer; search
+in the view, or export it, for the rest.
+
+The narrowing on your canvas starts from a search's first 5,000 matches; a view
+saved from it starts from every match. Looking after the view once it exists is
+in [Managing Views](/guide/managing-views#views-made-from-a-query).
 
 ## Change how lines are drawn
 

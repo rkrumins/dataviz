@@ -1,6 +1,6 @@
 /**
  * CommitDialog — the author can ask workspace members to review: the people they pick go out with
- * the review as `reviewers`, so it cannot merge until they approve.
+ * the review as `reviewers`, and the groups as `reviewerGroups`, so it cannot merge until they approve.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const openMrMutate = vi.fn()
 const listReviewerCandidates = vi.fn()
+const listReviewerGroups = vi.fn()
 
 vi.mock('../../hooks/useVersioning', () => ({
   useDataSourceDraftsPolicy: () => ({ data: undefined }),
@@ -19,6 +20,7 @@ vi.mock('../../hooks/useVersioning', () => ({
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/versioningApiService')>()),
   listReviewerCandidates: (wsId: string, dataSourceId?: string | null) => listReviewerCandidates(wsId, dataSourceId),
+  listReviewerGroups: (wsId: string) => listReviewerGroups(wsId),
 }))
 vi.mock('@/store/auth', () => ({ usePermission: () => true }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
@@ -43,6 +45,8 @@ beforeEach(() => {
     { userId: 'u_carol', displayName: 'Carol Chen', email: 'carol@example.com' },
     { userId: 'u_dave', displayName: 'Dave Diaz', email: 'dave@example.com' },
   ])
+  listReviewerGroups.mockReset()
+  listReviewerGroups.mockResolvedValue([{ groupId: 'g_fin', name: 'Finance stewards', memberCount: 4 }])
 })
 
 describe('CommitDialog — reviewers', () => {
@@ -58,6 +62,19 @@ describe('CommitDialog — reviewers', () => {
     fireEvent.click(screen.getByRole('button', { name: /submit for review/i }))
     expect(openMrMutate).toHaveBeenCalledTimes(1)
     expect(openMrMutate.mock.calls[0][0]).toMatchObject({ branchId: 'br_1', reviewers: ['u_carol'] })
+    expect(openMrMutate.mock.calls[0][0].reviewerGroups).toBeUndefined()
+  })
+
+  it('sends the groups picked with the review', async () => {
+    render(
+      <MemoryRouter>
+        <CommitDialog workspaceId="ws1" graphId="g1" branchId="br_1" dataSourceId="ds1" changeSet={changeSet} onClose={() => {}} />
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /add reviewers/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /Finance stewards/ }))
+    fireEvent.click(screen.getByRole('button', { name: /submit for review/i }))
+    expect(openMrMutate.mock.calls[0][0]).toMatchObject({ branchId: 'br_1', reviewerGroups: ['g_fin'] })
   })
 
   it('sends no reviewers when none are picked', () => {

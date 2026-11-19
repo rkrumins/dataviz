@@ -680,7 +680,25 @@ class ImportWorker:
                                         summary={**summary, "replaceGuard": guard} if guard else summary):
             raise Superseded(f"import job {job_id} (epoch {self._lease.epoch}) was taken over "
                              "before it could finish")
+        await self._keep_change_list(graph_id, branch_id)
         return summary
+
+    async def _keep_change_list(self, graph_id: str, branch_id: str) -> None:
+        """What the import changed, built now and kept for whoever opens it next
+        (``change_sets.py``): a draft's change list and its tree, as its Changes tab and its review
+        open them; on ``main``, its newest revisions. Best-effort: the import is done either way."""
+        if not hasattr(self._svc, "keep_change_sets"):
+            return
+        async with db.graphver_session() as s:
+            branch = await s.get(BranchORM, branch_id)
+        if branch is None:
+            return
+        if branch.kind == "main":
+            await self._svc.keep_recent_revisions(graph_id)
+        else:
+            await self._svc.keep_change_sets(
+                graph_id=graph_id, branch_id=branch_id,
+                containment_edge_types=(self._ontology or {}).get("containment") or [])
 
     # ------------------------------------------------------------------ #
     async def _job(self, job_id: str) -> Dict[str, Any]:

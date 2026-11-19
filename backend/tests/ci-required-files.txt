@@ -19,6 +19,7 @@ tests/test_activity_catalogue.py
 tests/test_activity_context.py
 tests/test_activity_retention.py
 tests/test_additive_migrations_mirror.py
+tests/test_admin_schema_status.py
 tests/test_advanced_search.py
 tests/test_advanced_search_stub.py
 tests/test_advanced_search_view_scope.py
@@ -178,6 +179,9 @@ tests/test_live_views_writes.py
 tests/test_loadtest_manifests.py
 tests/test_loadtest_protection_gate.py
 tests/test_loadtest_retry_model.py
+tests/test_member_sets.py
+tests/test_member_sets_api.py
+tests/test_membership_request_contract.py
 tests/test_metrics_backend.py
 tests/test_native_query_api.py
 tests/test_native_query_cells.py
@@ -362,6 +366,9 @@ tests/test_view_layout_rules_preserved.py
 tests/test_view_library.py
 tests/test_view_library_schema.py
 tests/test_view_live_filter.py
+tests/test_view_members_feed_api.py
+tests/test_view_members_migration.py
+tests/test_view_members_pipeline.py
 tests/test_view_membership_api.py
 tests/test_view_membership_resolver.py
 tests/test_view_membership_status_api.py

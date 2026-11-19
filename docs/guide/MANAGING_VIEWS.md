@@ -277,7 +277,7 @@ Choose the chip to see:
 
 - what the view is made from, and the view its search runs in (**Searches
   in**). Readers who can't open that view see that it exists, not its name;
-- how many entities and containers it holds, against the 5,000 it can;
+- how many members it holds, against the 250,000 it can;
 - when it last updated, and what that changed: **3 new, 1 left**;
 - how keeping it up to date is going, and what to do about it.
 
@@ -311,11 +311,50 @@ What the chip can say:
 | **Up to date, within limits** | The last update reached a limit; what it reached is shown |
 | **Waiting to update** | A change waits to be worked out, or the graph didn't answer in full last time. **Refresh now** |
 | **An update is waiting for you** | An update would remove a lot, and waits for an editor to **Apply** it or **Keep as is** |
-| **Too many to keep** | The query now reaches more than 5,000 entries. The view keeps its last members until the query is narrowed |
+| **Too many to keep** | The query now reaches more than 250,000 members. The view keeps its last members until the query is narrowed |
 | **Couldn't update** | The graph couldn't be read. The view keeps its last members |
 | **Can't search** | The view its search runs in has gone. The view keeps its last members |
 | **Snapshot** | Its members stay as they are |
 | **Updates paused** | Views that keep themselves up to date are turned off. It shows the members it last had, and catches up the next time it's opened once they're on again |
+
+### One that follows another view
+
+Saved with **Follow** (the choice for a trace), a view made from a query is a
+subset of the view it follows. Its header reads *Subset of Sales overview ·
+Auto-updating · 6*, and the chip says **Follows Sales overview**.
+
+- **Its layers are that view's**, as they change there: rename, add or reorder a
+  layer in the view it follows and this one shows it. They are not changed in
+  this view, so the layer menus offer no renaming, adding or deleting.
+- **Each member is where that view places it**, including what someone placed
+  there by hand: an entity moved to another layer, or one whose contents go with
+  it, sits there in this view too. What that view places nowhere is in
+  **Other matches**, unless it has a layer of its own for that.
+- **You can place members yourself, on top of that.** If you can edit the view,
+  drag a member to another of its layers, or right-click one → **Always
+  include**; **Keep out of this view** works too. What you place stays through
+  every update and every change to the view it follows. If that view deletes the
+  layer you put something in, it moves to **Other matches**. Adding entities,
+  groups and a custom order aren't offered, and on a draft members can't be
+  moved yet.
+- **When that view changes how it places things** — a type moved to another
+  layer, a rule changed, a layer removed — the chip says **Waiting to update**:
+  *The view it follows changed where it places things.* The members move to
+  match the next time the view is opened, or choose **Refresh now**. A rename
+  shows straight away and needs no update.
+- **Search in it** by layer: a layer filter finds what is drawn in that layer —
+  where the view it follows places it, or where you put it.
+- **Show where they sit** (in **Display**) draws each member inside the
+  containers drawn in its layer.
+- It is listed under **Subsets** on the view it follows, beside subset views
+  made from a search.
+- **If that view is deleted**, the chip says **Its view is gone**, the canvas
+  says why there are no layers, and the view keeps its members. Restore that
+  view and it shows them again.
+
+A view can follow an ordinary view only. To save from a subset, it follows that
+subset's base; a view made from a query, or a subset with layers of its own,
+can't be followed, and the panel says so.
 
 An update changes the view's data, not its design: it doesn't count as an edit,
 and doesn't add a version. Restoring a version of the view, or importing it
@@ -441,7 +480,7 @@ can open it.
   most 1,000 entities placed by hand, and rules that compare properties up to
   about thirty. Past that it places its matches by type, and the sheet and the
   chip say why. The sheet then offers **Keep their places as a list**: a list
-  of members, up to 5,000, each placed where the base places it.
+  of members, up to 250,000, each placed where the base places it.
 - Its own layout, and a subset of the whole data source, place matches by type.
 - A subset places its matches by the shared placement rule. The base's canvas
   uses it too only with **One placement rule for every view surface** on. With it
@@ -544,7 +583,7 @@ See [Ways of Working](/guide/ways-of-working) for conventions and cadence.
 | A subset view says **Subset views are turned off** | The preview is off | Ask your administrator: **Administration → Features → Subset views: a search's matches as a view** |
 | A view made from a query says **Updates paused** | Views that keep themselves up to date are turned off | Nothing to do: it keeps its last members, and catches up once your administrator turns **Narrow: chosen entities and what they reach** back on |
 | "Someone changed this view's search. Review it and try again." | Another editor changed the view after you opened its chip | The chip now shows their change. Check it, then try again |
-| The **Save as a view** panel says it's more than a view can hold | Kept as a list, a view holds at most 5,000 entries | Narrow the query, reach everything inside rather than a number of levels, or turn off **Show where they sit**. A subset view (**Live · any size**) has no limit. See [Troubleshooting](/guide/troubleshooting#save-as-view-says-more-than-a-view-can-hold) |
+| The **Save as a view** panel says it's more than a view can hold | Kept as a list, a view holds at most 250,000 members | Narrow the query, or reach everything inside rather than a number of levels. A subset view (**Live · any size**) has no limit. See [Troubleshooting](/guide/troubleshooting#save-as-view-says-more-than-a-view-can-hold) |
 
 More in [Troubleshooting](/guide/troubleshooting).
 

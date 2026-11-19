@@ -12,8 +12,12 @@ import { useSchemaStore } from '@/store/schema'
 import { useViewEntityType } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
+import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
+import { lastStagedFor, stagedIndexOf } from '@/store/stagedIndex'
+import { useEntityDecoration } from '@/features/versioning/canvas/useDiffDecoration'
+import { ChangePeek } from '../ChangePeek'
+import { useBranchStore } from '@/store/branchStore'
+import type { ChangeSet } from '@/features/versioning/model/changeModel'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
@@ -127,6 +131,24 @@ interface FlatTreeItemProps {
 // Row tint by change state × type. STAGED keeps the loved saturated wash (green/orange/rose) and
 // adds a dashed halo = "unsaved"; COMMITTED uses the same colours in a lighter, solid-ring form =
 // "saved to the branch, not merged". Same colour language as the graph canvas.
+/** Per change set, the entities that got a new child link saved on the draft — an import's new
+ *  rows under a table not opened yet still say so on the table. Built once per change set. */
+const NEW_CHILD_LINKS = new WeakMap<ChangeSet, Set<string>>()
+function parentsWithNewLinks(cs: ChangeSet): Set<string> {
+  let out = NEW_CHILD_LINKS.get(cs)
+  if (!out) {
+    out = new Set()
+    const containment = new Set((useSchemaStore.getState().schema?.containmentEdgeTypes ?? []).map(t => t.toUpperCase()))
+    for (const c of cs.changes) {
+      if (c.kind !== 'edge' || c.status !== 'added' || !c.sourceUrn) continue
+      const type = String(c.after?.edgeType ?? c.after?.type ?? '').toUpperCase()
+      if (containment.has(type)) out.add(c.sourceUrn)
+    }
+    NEW_CHILD_LINKS.set(cs, out)
+  }
+  return out
+}
+
 const FLAT_ROW_STYLE: Record<string, string> = {
   'staged-added': 'bg-gradient-to-r from-green-500/25 via-green-500/15 to-green-500/5 ring-2 ring-green-400/70 shadow-lg shadow-green-500/20 outline-dashed outline-1 -outline-offset-[3px] outline-green-300/70',
   'staged-modified': 'bg-gradient-to-r from-orange-500/25 via-orange-500/15 to-orange-500/5 ring-2 ring-orange-400/70 shadow-lg shadow-orange-500/20 outline-dashed outline-1 -outline-offset-[3px] outline-orange-300/70',
@@ -134,6 +156,25 @@ const FLAT_ROW_STYLE: Record<string, string> = {
   'committed-added': 'bg-green-500/[0.10] ring-1 ring-inset ring-green-500/60',
   'committed-modified': 'bg-orange-500/[0.10] ring-1 ring-inset ring-orange-500/60',
   'committed-removed': 'bg-rose-500/[0.12] ring-1 ring-inset ring-rose-500/60 opacity-90',
+}
+
+/** Whether anything under `node` is staged — walked once per version of the staged list (and
+ *  never when nothing is staged), however often the row asks. */
+const descendantAnswers = new WeakMap<HierarchyNode, { changes: readonly StagedChange[]; has: boolean }>()
+function hasStagedDescendant(node: HierarchyNode, changes: readonly StagedChange[]): boolean {
+  if (changes.length === 0 || !node.children || node.children.length === 0) return false
+  const was = descendantAnswers.get(node)
+  if (was && was.changes === changes) return was.has
+  const { last } = stagedIndexOf(changes)
+  let has = false
+  const stack = [...node.children]
+  while (stack.length && !has) {
+    const n = stack.pop()!
+    has = last.has(n.id) || (!!n.urn && last.has(n.urn))
+    if (n.children) stack.push(...n.children)
+  }
+  descendantAnswers.set(node, { changes, has })
+  return has
 }
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
@@ -192,22 +233,26 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // Staged-change indicator: a *direct* match wins, but if any descendant is
   // staged the row also tints (lighter) so the user can spot pending work
   // anywhere in the tree without expanding every container.
-  const directChange = useStagedChangesStore(s => {
-    const matches = s.changes.filter(c => c.targetId === node.id || c.targetUrn === node.urn)
-    return matches.length > 0 ? matches[matches.length - 1] : undefined
-  })
+  // Both read the shared staged index (map lookups, not a scan of every change), and give the
+  // same answer until this row's changes — so an edit re-renders the rows it touches.
+  const directChange = useStagedChangesStore(s => lastStagedFor(s.changes, node.id, node.urn))
   // Cascade detection — check if any descendant URN is staged.
-  const hasDescendantChange = useStagedChangesStore(s => {
-    if (directChange) return false
+  const hasDescendantChange = useStagedChangesStore(s => !directChange && hasStagedDescendant(node, s.changes))
+  // The same for changes SAVED on the draft (by hand, or by an import): a closed container says it
+  // holds some — including children it gained that are not loaded yet.
+  const hasDescendantCommitted = useBranchStore(s => {
+    const cs = s.activeChangeSet
+    if (directChange || hasDescendantChange || s.committedDiffHidden || !cs || cs.changes.length === 0) return false
+    const urn = node.urn ?? node.id
+    if (parentsWithNewLinks(cs).has(urn) && !cs.byEntityId.has(urn)) return true
     if (!node.children || node.children.length === 0) return false
-    const descendantIds = new Set<string>()
-    const collect = (n: HierarchyNode) => {
-      descendantIds.add(n.id)
-      if (n.urn) descendantIds.add(n.urn)
-      n.children?.forEach(collect)
+    const stack = [...node.children]
+    while (stack.length) {
+      const n = stack.pop()!
+      if (cs.byEntityId.has(n.urn ?? n.id) || parentsWithNewLinks(cs).has(n.urn ?? n.id)) return true
+      if (n.children) stack.push(...n.children)
     }
-    node.children.forEach(collect)
-    return s.changes.some(c => descendantIds.has(c.targetId) || (c.targetUrn ? descendantIds.has(c.targetUrn) : false))
+    return false
   })
 
   // Pulse-on-arrival from a jump-to-node reveal. Backed by a Set so
@@ -219,7 +264,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // the branch, not merged). Dashed = staged, solid = committed; color = type — the SAME vocabulary
   // as the graph canvas, so "saved vs not" reads identically everywhere. Cascade (a descendant has a
   // staged change) keeps its muted left stripe.
-  const directDeco = useEntityChangeDecoration().for(node.urn ?? node.id)
+  const directDeco = useEntityDecoration(node.urn ?? node.id)
   // How the view's display rules paint this card: a tint and a frame, each
   // from the first rule in the list that matches. A change decoration
   // (staged or committed) paints the same channels, and wins.
@@ -229,9 +274,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     ?? (directDeco?.state === 'committed' ? `${directDeco.status} vs main` : undefined)
     ?? (directDeco?.state === 'staged' ? `${directDeco.status} · unsaved` : undefined)
     ?? (hasDescendantChange ? 'Contains staged changes' : undefined)
+    ?? (hasDescendantCommitted ? 'Contains changes saved on this draft' : undefined)
   const stagedRowClass = directDeco
     ? FLAT_ROW_STYLE[`${directDeco.state}-${directDeco.status}`]
-    : (hasDescendantChange ? 'border-l-[3px] border-l-amber-400/50' : '')
+    : hasDescendantChange ? 'border-l-[3px] border-l-amber-400/50'
+    : hasDescendantCommitted ? 'border-l-[3px] border-l-emerald-500/45' : ''
   const entityType = useViewEntityType(node.typeId)
   const visual = entityType?.visual
   const nodeColor = visual?.color ?? layer.color
@@ -820,7 +867,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // `*:mt-0` drops the gaps the stacked layout puts between them.
           minimal ? "items-center gap-1.5 *:mt-0" : "flex-col justify-center",
         )}
-        title={stagedSummary ?? displayName}
+        // A changed row's name opens what changed (ChangePeek); the rest say their name, or what is inside.
+        title={directDeco ? undefined : (stagedSummary ?? displayName)}
       >
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
@@ -840,7 +888,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // its one line and truncates instead.
           minimal ? "truncate" : "line-clamp-3 break-words"
         )}>
-          {displayName}
+          {directDeco
+            ? <ChangePeek entityId={node.urn ?? node.id} deco={directDeco} staged={directChange}>{displayName}</ChangePeek>
+            : displayName}
           {lineEnd && !minimal && <LineEndTag end={lineEnd} className="ml-1.5 align-[1px]" />}
         </span>
         {/* A truncated name's ellipsis would take a tag set inside it, so

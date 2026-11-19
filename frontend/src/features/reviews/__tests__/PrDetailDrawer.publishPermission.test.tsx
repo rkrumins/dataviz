@@ -1,7 +1,7 @@
 /**
  * Merging a review advances main, which needs the publish permission on the workspace. A reviewer
- * who can manage but not publish sees Merge disabled, with the reason, and is not offered
- * "Revert this merge" either.
+ * who can manage but not publish sees Merge disabled, with the reason. Merged, the peek offers
+ * nothing to press: reverting the merge is the review page's.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -12,6 +12,20 @@ const idle = { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }
 let canPublish = false
 let status = 'open'
 
+const { invalidateQueries } = vi.hoisted(() => ({ invalidateQueries: vi.fn() }))
+vi.mock('@tanstack/react-query', async (orig) => ({
+  ...(await orig<typeof import('@tanstack/react-query')>()),
+  useQueryClient: () => ({ invalidateQueries }),
+}))
+vi.mock('../decisions/useReviewDecisions', () => ({
+  DECISION_KEYS: { all: (...a: unknown[]) => ['reviewDecisions', ...a] },
+  useReviewDecisionSummary: () => ({ data: undefined }),
+  useDecideChanges: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+}))
+vi.mock('../comments/ReviewDiscussion', () => ({ ReviewDiscussion: () => null }))
+vi.mock('../comments/useReviewComments', () => ({ useReviewCommentCounts: () => ({ data: undefined }) }))
+vi.mock('../../versioning/components/ChangeList', () => ({ ChangeList: () => null }))
+vi.mock('../../versioning/components/ChangeTreePanel', () => ({ ChangeTreePanel: () => null }))
 vi.mock('../../versioning/hooks/useVersioning', () => ({
   useMergeRequest: () => ({
     data: {
@@ -21,13 +35,21 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
     },
     isLoading: false,
   }),
-  usePullRequestDiff: () => ({ data: undefined }),
+  useChangeSummary: () => ({ data: undefined, isFetching: false }),
+  usePrDiffSummary: () => ({ data: undefined, isFetching: false }),
+  VERSIONING_KEYS: {
+    changeList: (...a: unknown[]) => ['changeList', ...a],
+    prDiffSummary: (...a: unknown[]) => ['prDiffSummary', ...a],
+  },
   usePullLatestDraft: () => idle,
   useCommitLog: () => ({ data: undefined }),
   useApproveMergeRequest: () => idle,
   useCloseMergeRequest: () => idle,
   useMergeMergeRequest: () => ({ ...idle, mutateAsync: mergeMutateAsync }),
   useUpdateMergeRequest: () => idle,
+  useSubmitReview: () => idle,
+  useWithdrawChangesRequest: () => idle,
+  useDiscardRejected: () => idle,
   useBranchViewChanges: () => ({ data: undefined }),
   useRevertCommit: () => idle,
 }))
@@ -62,7 +84,9 @@ describe('PrDetailDrawer — publish permission', () => {
     renderDrawer()
     const merge = screen.getByRole('button', { name: /Merge/ })
     expect(merge).toBeDisabled()
-    expect(merge.getAttribute('title')).toMatch(/needs the publish permission/i)
+    // What's next says why.
+    expect(screen.getByText('You can’t merge this')).toBeInTheDocument()
+    expect(screen.getByText(/needs the publish permission/i)).toBeInTheDocument()
     fireEvent.click(merge)
     expect(mergeMutateAsync).not.toHaveBeenCalled()
   })
@@ -74,14 +98,11 @@ describe('PrDetailDrawer — publish permission', () => {
     expect(mergeMutateAsync).toHaveBeenCalledTimes(1)
   })
 
-  it('offers "Revert this merge" only to a publisher', () => {
+  it('merged, offers nothing to press: reverting it is the review page’s', () => {
     status = 'merged'
-    canPublish = false
-    const { unmount } = render(<MemoryRouter><PrDetailDrawer wsId="ws1" prId="pr_1" onClose={vi.fn()} /></MemoryRouter>)
-    expect(screen.queryByRole('button', { name: /Revert this merge/ })).toBeNull()
-    unmount()
     canPublish = true
     renderDrawer()
-    expect(screen.getByRole('button', { name: /Revert this merge/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Merge|Revert/ })).toBeNull()
+    expect(screen.getByRole('link', { name: /Open review/ })).toHaveAttribute('href', '/workspaces/ws1/reviews/pr_1')
   })
 })

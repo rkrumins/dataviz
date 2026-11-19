@@ -76,8 +76,9 @@ import type {
     NativeQueryResponse,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
-import type { MembershipPlan, MembershipRequest, MembershipResult, PlanRequest } from '@/types/membership'
-import type { ViewFeedPage, ViewFeedRequest } from '@/types/searchView'
+import type { MembershipPlan, MembershipRequest, MembershipResolving, MembershipResult, PlanRequest } from '@/types/membership'
+import type { MemberSetFormat, MemberSetRequest, MemberSetStatus } from '@/types/memberSet'
+import type { ViewFeedPage, ViewFeedRequest, ViewMembersRequest } from '@/types/searchView'
 
 // Wire shape from POST /trace/v2 — `upstreamUrns`/`downstreamUrns` arrive as
 // JSON arrays (Pydantic serializes Set as list); we re-hydrate to Set on read.
@@ -595,9 +596,10 @@ export class RemoteGraphProvider implements GraphDataProvider {
         viewId: string,
         request: PlanRequest,
         opts?: { signal?: AbortSignal },
-    ): Promise<MembershipPlan> {
-        // The plan resolves the sources first: budgeted like a trace.
-        return await this.fetch<MembershipPlan>('/members/plan', {
+    ): Promise<MembershipPlan | MembershipResolving> {
+        // The plan resolves the sources first: budgeted like a trace. A large set
+        // answers 202 with its progress until it is worked out (usePlanPreview).
+        return await this.fetch<MembershipPlan | MembershipResolving>('/members/plan', {
             method: 'POST',
             body: JSON.stringify(request),
             extraParams: { viewId },
@@ -613,6 +615,21 @@ export class RemoteGraphProvider implements GraphDataProvider {
     ): Promise<ViewFeedPage> {
         // A page waits at most its waitMs on the scan, plus hydration: a search's budget.
         return await this.fetch<ViewFeedPage>('/search/view-feed', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            extraParams: { viewId },
+            timeoutMs: TIMEOUTS.TRACE_MS,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
+        })
+    }
+
+    async viewMembersPage(
+        viewId: string,
+        request: ViewMembersRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<ViewFeedPage> {
+        // One keyset read of the member table, then the page's nodes and chains.
+        return await this.fetch<ViewFeedPage>('/view-members', {
             method: 'POST',
             body: JSON.stringify(request),
             extraParams: { viewId },
@@ -752,6 +769,35 @@ export class RemoteGraphProvider implements GraphDataProvider {
     searchExportDownloadUrl(sessionId: string, token: string): string {
         return this.buildUrl(
             `/search/exports/${encodeURIComponent(sessionId)}/download`, { token })
+    }
+
+    /**
+     * Everything a membership spec reaches, resolved on the server a step at
+     * a time — POST /member-sets, read in ``viewId``. A large set takes
+     * several calls: send its ``setId`` back until it is complete
+     * (``services/memberSetExport.ts``); that answer carries a download token.
+     */
+    async memberSet(
+        viewId: string | null, body: MemberSetRequest, opts?: { signal?: AbortSignal },
+    ): Promise<MemberSetStatus> {
+        return await this.fetch<MemberSetStatus>('/member-sets', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            ...(viewId ? { extraParams: { viewId } } : {}),
+            // A step walks lineage as a trace does: the request waits its waitMs plus one step.
+            timeoutMs: TIMEOUTS.TRACE_MS,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
+        })
+    }
+
+    /** Where a complete set downloads from: its members, or the flows between them. */
+    memberSetDownloadUrl(
+        setId: string, token: string, format: MemberSetFormat,
+        part: 'nodes' | 'edges' = 'nodes', columns: readonly string[] = [],
+    ): string {
+        return this.buildUrl(`/member-sets/${encodeURIComponent(setId)}/download`, {
+            token, format, part, ...(columns.length ? { columns: columns.join(',') } : {}),
+        })
     }
 
     /**

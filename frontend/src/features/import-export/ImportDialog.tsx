@@ -30,7 +30,8 @@ export interface ImportDialogProps {
   viewId?: string
   onClose: () => void
   onReviewChanges?: (branchId: string) => void
-  onImported?: () => void
+  /** The import committed to the draft — with what it did. */
+  onImported?: (summary: ImportSummary | null) => void
 }
 
 type Phase = 'choose' | 'running' | 'done' | 'failed'
@@ -157,7 +158,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
       } else {
         setJob(done)
         setPhase('done')
-        onImported?.()
+        onImported?.((done.summary as ImportSummary | undefined) ?? null)
         // Pull a sample of the resolved CHANGES so the dialog can preview exactly what was staged
         // (added / updated / deleted) and surface anything that couldn't be applied, with reasons.
         const sum = done.summary as ImportSummary

@@ -22,9 +22,9 @@ import os
 
 import pytest
 
-from backend.app.services.versioning import db, models
+from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.models import BranchORM, CommitORM
-from backend.app.services.versioning.service import GraphVersioningService
+from backend.app.services.versioning.service import DiffTooLarge, GraphVersioningService
 from backend.tests.integration.test_versioning_bounded_reads import _del, _edge, _node, _upd
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
@@ -226,6 +226,34 @@ async def _a_fork_of_a_fork_reads_and_merges_through_both(svc):
     assert now["N5"] is None and now["E4"] is None and now["E5"] is None and now["C5"] is None, now
 
 
+async def _a_fork_review_too_large_is_counted_and_listed(svc):
+    """A fork's review past the tree's cap is counted, not merged in the request: its diff refuses
+    with the window of the fork's main its changes are listed from, and its summary counts them
+    from that window's change index — never a full merge per open, per inbox row."""
+    pg, _pmain = await _parent(svc)
+    fg = (await svc.fork_graph(parent_graph_id=pg, workspace_id="ws1", actor="bob"))["graph_id"]
+    await _publish(svc, fg, "bob", [_upd("N1", "one"), _upd("N2", "two"), _node("X")], "fork work")
+    pr = await svc.open_pr(source_graph_id=fg, actor="bob")
+    small = await svc.diff_pr_summary(pr_id=pr, containment_edge_types=CONT)
+    assert "tooLarge" not in small and small["counts"]["modified"] == 2, small
+
+    limit = config.DIFF_TREE_MAX_CHANGES
+    config.DIFF_TREE_MAX_CHANGES = 2
+    try:
+        with pytest.raises(DiffTooLarge) as refused:
+            await svc.diff_pr(pr_id=pr)
+        window = refused.value.listing
+        assert window["graphId"] == fg and window["toSeq"] > window["fromSeq"], window
+        big = await svc.diff_pr_summary(pr_id=pr, containment_edge_types=CONT)
+        assert big["tooLarge"] == {"changed": 3, "limit": 2} and big["groups"] == [], big
+        assert big["list"] == window, big
+        assert big["counts"] == {"added": 1, "modified": 2, "removed": 0}, big
+        with pytest.raises(DiffTooLarge):
+            await svc.diff_pr_children(pr_id=pr, container_key="S", containment_edge_types=CONT)
+    finally:
+        config.DIFF_TREE_MAX_CHANGES = limit
+
+
 async def _run(case) -> None:
     await models.create_schema_and_partitions()
     try:
@@ -248,3 +276,7 @@ def test_a_fork_review_reads_only_what_the_fork_changed():
 
 def test_a_fork_of_a_fork_reads_and_merges_through_both():
     asyncio.run(_run(_a_fork_of_a_fork_reads_and_merges_through_both))
+
+
+def test_a_fork_review_too_large_is_counted_and_listed():
+    asyncio.run(_run(_a_fork_review_too_large_is_counted_and_listed))

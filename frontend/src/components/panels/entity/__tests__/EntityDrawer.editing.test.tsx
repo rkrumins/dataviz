@@ -24,6 +24,7 @@ vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) =
     useEntityEditing: () => editing,
 }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+  useChangeEntry: () => ({ data: undefined }),
     useResolveGraph: () => ({ data: undefined, isError: false }),
     useEntitySummary: () => ({ data: undefined, isLoading: false }),
     useProjectionWatermark: () => ({ data: undefined }),
@@ -60,11 +61,11 @@ describe('EntityDrawer — editing is kept only in a draft', () => {
         await user.click(screen.getByRole('tab', { name: 'Edit' }))
         const name = screen.getByPlaceholderText('Entity name…')
         await user.clear(name)
-        await user.type(name, 'Orders v2')
-        await user.click(screen.getByRole('button', { name: /Stage changes/ }))
+        // Enter stages it — there is no separate Stage step.
+        await user.type(name, 'Orders v2{Enter}')
 
         expect(useStagedChangesStore.getState().changes).toHaveLength(1)
-        expect(screen.getByText(/Review & Save to keep it/)).toBeInTheDocument()
+        expect(screen.getByText('Not saved yet')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Review & Save' })).toBeInTheDocument()
         expect(screen.queryByText(/saved successfully/)).not.toBeInTheDocument()
     })

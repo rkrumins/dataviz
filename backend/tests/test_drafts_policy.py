@@ -34,7 +34,8 @@ _EVENT = "workspace.versioning.drafts_policy_updated"
 
 
 def _row(**values):
-    columns = ("draft_default_visibility", "draft_levels", "review_self_approval", "review_self_merge")
+    columns = ("draft_default_visibility", "draft_levels", "review_self_approval", "review_self_merge",
+               "review_required_approvals", "review_threads_hold")
     return SimpleNamespace(**{c: values.get(c) for c in columns})
 
 
@@ -45,7 +46,8 @@ def test_each_field_resolves_on_its_own():
     assert (policy.default_visibility, policy.levels, policy.self_approval, policy.self_merge) == (
         "private", "any", True, False)
     assert dict(policy.sources) == {"defaultVisibility": "workspace", "levels": "default",
-                                    "selfApproval": "data_source", "selfMerge": "data_source"}
+                                    "selfApproval": "data_source", "selfMerge": "data_source",
+                                    "requiredApprovals": "default", "threadsHold": "default"}
     built_in = drafts_policy.resolve(None, None)
     assert (built_in.default_visibility, built_in.levels, built_in.self_approval,
             built_in.self_merge) == ("public", "any", True, True)
@@ -127,14 +129,16 @@ async def test_a_workspace_sets_its_policy_and_a_change_is_recorded_once(
     start = await test_client.get(base)
     assert start.status_code == 200, start.text
     assert start.json()["settings"] == {"defaultVisibility": None, "levels": None,
-                                        "selfApproval": None, "selfMerge": None}
+                                        "selfApproval": None, "selfMerge": None,
+                                        "requiredApprovals": None, "threadsHold": None}
     assert start.json()["effective"]["defaultVisibility"] == "public"
 
     changed = await test_client.put(base, json={"defaultVisibility": "private", "selfApproval": False})
     assert changed.status_code == 200, changed.text
     body = changed.json()
     assert body["settings"] == {"defaultVisibility": "private", "levels": None,
-                                "selfApproval": False, "selfMerge": None}
+                                "selfApproval": False, "selfMerge": None,
+                                "requiredApprovals": None, "threadsHold": None}
     assert (body["effective"]["defaultVisibility"], body["effective"]["selfApproval"],
             body["effective"]["sources"]["selfApproval"]) == ("private", False, "workspace")
     [event] = await _recorded(db_session)
@@ -330,3 +334,21 @@ def test_every_draft_the_app_opens_is_opened_at_its_policys_level():
             if needed not in keywords:
                 missing.append(f"{path.relative_to(app)}:{node.lineno} {name}")
     assert missing == [], missing
+
+
+def test_a_review_rule_resolves_like_the_rest_and_true_is_not_one_approval():
+    workspace = _row(review_required_approvals=2)
+    source = _row(review_threads_hold=True)
+    policy = drafts_policy.resolve(workspace, source)
+    assert (policy.required_approvals, policy.threads_hold) == (2, True)
+    assert (policy.rule.required_approvals, policy.rule.threads_hold) == (2, True)
+    assert drafts_policy.resolve(None, None).rule.required_approvals == 0
+    from pydantic import ValidationError
+    from backend.app.api.v1.endpoints.versioning import DraftsPolicySettings
+    assert DraftsPolicySettings.model_validate({"requiredApprovals": 3}).required_approvals == 3
+    for bad in (True, 11, -1):
+        try:
+            DraftsPolicySettings.model_validate({"requiredApprovals": bad})
+        except ValidationError:
+            continue
+        raise AssertionError(f"{bad!r} was taken as a number of approvals")

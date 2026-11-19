@@ -49,7 +49,9 @@ const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
 const num = (v: unknown) => (typeof v === 'number' ? v : 0)
 
 export function StatChips({ stats }: { stats: Record<string, unknown> }) {
-  const added = num(stats.create)
+  // An import or the initial revision records what it wrote as `{nodes, edges}`: all of it added.
+  const loaded = stats.create === undefined && stats.update === undefined && stats.delete === undefined
+  const added = loaded ? num(stats.nodes) + num(stats.edges) : num(stats.create)
   const modified = num(stats.update)
   const removed = num(stats.delete)
   if (added + modified + removed === 0) return null
@@ -336,6 +338,9 @@ export function CommitRow({
           <ChangeTreePanel
             summary={summaryQ.data}
             isLoading={summaryQ.isLoading}
+            preparing={summaryQ.failureCount > 0}
+            error={summaryQ.error}
+            onRetry={() => void summaryQ.refetch()}
             fetchChildren={fetchChildren}
             origin={{ source: 'commit', commitId }}
             emptyHint="No changes in this commit."

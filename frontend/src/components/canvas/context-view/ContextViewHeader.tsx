@@ -34,11 +34,11 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { BranchSwitcher } from '@/features/versioning/components/BranchSwitcher'
-import { usePersonaMode } from '@/store/persona'
 import { HeaderSearch } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import type { ViewFileActions } from './header/ImportExportMenu'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
+import type { SavedTracesSectionProps } from '@/components/canvas/trace/SavedTracesSection'
 import { EditorActions } from './header/EditorActions'
 import { ToolbarFoldProvider, useToolbarFold } from './header/toolbarFold'
 
@@ -90,6 +90,8 @@ export interface ContextViewHeaderProps {
   onResumeTraceHistory?: (index: number) => void
   onClearTraceHistory?: () => void
   onCopyTraceHistoryLink?: (index: number) => string | null
+  /** Saved traces, listed in the same launcher. Optional. */
+  savedTraces?: SavedTracesSectionProps
   /** Open the Lineage Lens on the current selection. Optional. */
   onOpenLens?: () => void
 
@@ -125,6 +127,8 @@ export interface ContextViewHeaderProps {
 
   /** Number of staged changes pending review/save — drives Review & Save. */
   pendingChangeCount?: number
+  /** Changes already saved on the draft (Review & Save then offers to publish them). */
+  draftChangeCount?: number
   /** Opens the staged-changes review panel (Review & Save click). */
   onOpenStagedChanges?: () => void
   /** Opens the bulk-import dialog (Edit mode). */
@@ -186,6 +190,7 @@ export function ContextViewHeader({
   onResumeTraceHistory,
   onClearTraceHistory,
   onCopyTraceHistoryLink,
+  savedTraces,
   onOpenLens,
   isDraft,
   canManage,
@@ -199,6 +204,7 @@ export function ContextViewHeader({
   syncStatus,
   onRetrySync,
   pendingChangeCount = 0,
+  draftChangeCount = 0,
   onOpenStagedChanges,
   onImport,
   onExport,
@@ -229,9 +235,8 @@ export function ContextViewHeader({
   const leadRef = useRef<HTMLDivElement>(null)
   const actionsRef = useRef<HTMLDivElement>(null)
   const fold = useToolbarFold(rowRef, leadRef, actionsRef)
-  const technical = usePersonaMode() === 'technical'
   // The switcher's drafts manager, held here so the Business view's More can
-  // open it on Published, where the switcher itself is hidden.
+  // open it too ("Your drafts…").
   const [draftsOpen, setDraftsOpen] = useState(false)
 
   // Shared comprehension cluster — identical in both modes (see
@@ -272,6 +277,7 @@ export function ContextViewHeader({
     onResumeTraceHistory,
     onClearTraceHistory,
     onCopyTraceHistoryLink,
+    savedTraces,
     onOpenLens,
     onTogglePropertyManager,
     propertyManagerOpen,
@@ -327,14 +333,13 @@ export function ContextViewHeader({
             CanvasVersioningBar) and the blueprint-sync signal that used to
             ride the title's subline. */}
         <div ref={leadRef} className="flex items-center gap-2 min-w-0">
-          {/* The Business view reads the published view and shows no switcher
-              there; in a draft it says which draft this is. Hidden, never
-              unmounted: the switcher is what hands the canvas this view's
+          {/* Every view shows the switcher: on Published it says which drafts are
+              open — anyone's work in progress, a click away — and in a draft
+              which draft this is. It is also what hands the canvas this view's
               versioned graph, which Edit waits for, and what opens a shared
               link to a draft. */}
           {branchWorkspaceId && (
-            // `contents` only while shown: a display utility would override `hidden`.
-            <div hidden={!(technical || isDraft)} className={technical || isDraft ? 'contents min-w-0' : undefined}>
+            <div className="contents min-w-0">
               <BranchSwitcher
                 workspaceId={branchWorkspaceId}
                 dataSourceId={branchDataSourceId ?? null}
@@ -405,6 +410,7 @@ export function ContextViewHeader({
                 onUndo={onUndo}
                 onRedo={onRedo}
                 pendingChangeCount={pendingChangeCount}
+                draftChangeCount={draftChangeCount}
                 onOpenStagedChanges={onOpenStagedChanges}
                 onExitEdit={onExitEdit}
                 connectToolOn={connectToolOn}

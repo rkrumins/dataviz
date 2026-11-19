@@ -79,4 +79,30 @@ describe('stageBulkEdit', () => {
     expect(nodes().find((n) => n.id === 'orders')!.data.description).toBe('Orders')
     expect(nodes().find((n) => n.id === 'refunds')!.data.description).toBeUndefined()
   })
+
+  it('stages 5,000 entities in one write and one Undo step — and Undo takes it back in one', () => {
+    const many = Array.from({ length: 5000 }, (_, i) => node(`n${i}`, { properties: { owner: 'ana' } }))
+    useCanvasStore.setState({ nodes: structuredClone(many), _nodeIndex: new Set(many.map((n) => n.id)) } as never)
+    useStagedChangesStore.setState({ changes: [], past: [], redoStack: [] } as never)
+    let writes = 0
+    const unsub = useStagedChangesStore.subscribe(() => { writes++ })
+    const t = performance.now()
+    const undo = stageBulkEdit(nodes(), { set: { steward: 'finance' }, unset: [] })
+    expect(performance.now() - t).toBeLessThan(2000)
+    expect(writes).toBe(1)
+    expect(changes()).toHaveLength(5000)
+    expect(useStagedChangesStore.getState().past).toHaveLength(1)
+    expect(nodes()[4999].data.properties).toMatchObject({ steward: 'finance' })
+    undo()
+    unsub()
+    expect(changes()).toEqual([])
+    expect(nodes()[4999].data.properties).toEqual({ owner: 'ana' })
+  })
+
+  it('Undo does nothing once something else was done since', () => {
+    const undo = stageBulkEdit(nodes(), { description: 'Sales records', set: {}, unset: [] })
+    stageNodeEdit('orders', nodes()[0].data, { ...nodes()[0].data, label: 'Orders v2' })
+    undo()
+    expect(changes()).toHaveLength(3)
+  })
 })

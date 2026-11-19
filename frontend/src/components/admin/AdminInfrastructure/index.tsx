@@ -26,6 +26,7 @@ import { useFleetCapacity } from '../shared/useAggregationCapacity'
 import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { BootstrapJobsPanel } from './BootstrapJobsPanel'
 import { VersionedGraphSettingsPanel } from './VersionedGraphSettingsPanel'
+import { SchemaPanel } from './SchemaPanel'
 import { ReseedProviderDialog } from './ReseedProviderDialog'
 import { compactNum, formatAgeMs } from './meta'
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -290,6 +291,8 @@ function InfrastructureHealth() {
 
                     {/* Diagnostics & remediation — what's wrong, why, how to fix */}
                     <DiagnosticsPanel snapshot={data} />
+
+                    <SchemaPanel />
 
                     <BootstrapJobsPanel jobs={data.bootstrapJobs} />
                     <ProjectionPanel

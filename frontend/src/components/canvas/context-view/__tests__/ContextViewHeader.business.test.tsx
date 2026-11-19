@@ -89,18 +89,17 @@ describe('ContextViewHeader — Business view', () => {
     expect(screen.getByRole('button', { name: 'More tools' })).toBeInTheDocument()
   })
 
-  it('tucks Select, Properties, Import / Export, trace history and the branch switcher away', () => {
+  it('tucks Select, Properties, Import / Export and trace history away', () => {
     renderHeader(baseProps())
     expect(screen.queryByRole('button', { name: 'Select' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Properties' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Import / Export' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Trace history' })).not.toBeInTheDocument()
-    expect(screen.getByTestId('branch-switcher')).not.toBeVisible()
   })
 
-  it('keeps the hidden switcher mounted — it hands the canvas the graph Edit waits for', () => {
+  it('shows the branch switcher on Published, as the Technical view does — open drafts are a click away', () => {
     renderHeader(baseProps())
-    expect(screen.getByTestId('branch-switcher')).toBeInTheDocument()
+    expect(screen.getByTestId('branch-switcher')).toBeVisible()
   })
 
   it('holds what it tucks away in More', async () => {

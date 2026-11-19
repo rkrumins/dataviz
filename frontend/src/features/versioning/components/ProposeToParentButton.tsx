@@ -82,7 +82,7 @@ function ProposeDialog({ wsId, forkGraphId, parentDataSourceId, behind, onClose 
 
   const goTo = (prId: string) => {
     close()
-    navigate(`/workspaces/${wsId}/reviews?pr=${prId}`)
+    navigate(`/workspaces/${wsId}/reviews/${prId}`)
   }
 
   const submit = async () => {

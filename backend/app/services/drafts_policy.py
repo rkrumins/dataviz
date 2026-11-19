@@ -1,5 +1,6 @@
 """The drafts and reviews policy of a data source: the level a new draft starts at, the levels a
-draft may have, and whether the person who opened a review may approve it, or merge it.
+draft may have, whether the person who opened a review may approve it, or merge it, how many
+approvals a review needs, and whether open threads hold its merge.
 
 Each field is a setting in the settings store (``config/versioned_graph_settings.py``:
 ``drafts.defaultVisibility``, ``drafts.levels``, ``drafts.selfApproval``, ``drafts.selfMerge``), and
@@ -31,6 +32,8 @@ FIELDS = (
     ("draft_levels", "levels", "any"),
     ("review_self_approval", "selfApproval", True),
     ("review_self_merge", "selfMerge", True),
+    ("review_required_approvals", "requiredApprovals", 0),
+    ("review_threads_hold", "threadsHold", False),
 )
 #: Each API field's setting in the settings store.
 KEYS = {"defaultVisibility": "drafts.defaultVisibility", "levels": "drafts.levels",
@@ -48,6 +51,10 @@ class EffectiveDraftsPolicy:
     levels: str = "any"
     self_approval: bool = True
     self_merge: bool = True
+    #: Approvals a review needs: 0, everyone asked; N, any N that stand.
+    required_approvals: int = 0
+    #: Open threads hold a review's merge.
+    threads_hold: bool = False
     #: ``(API field, data_source | workspace | default)`` pairs.
     sources: tuple = ()
 
@@ -55,9 +62,17 @@ class EffectiveDraftsPolicy:
         """Whether a new draft may have this level."""
         return self.levels == "any" or self.levels == f"{visibility}_only"
 
+    @property
+    def rule(self):
+        """What a review must have to merge (``review_state.ReviewRule``)."""
+        from backend.app.services.versioning.review_state import ReviewRule
+
+        return ReviewRule(required_approvals=self.required_approvals, threads_hold=self.threads_hold)
+
     def as_dict(self) -> dict:
         return {"defaultVisibility": self.default_visibility, "levels": self.levels,
                 "selfApproval": self.self_approval, "selfMerge": self.self_merge,
+                "requiredApprovals": self.required_approvals, "threadsHold": self.threads_hold,
                 "sources": dict(self.sources)}
 
 
@@ -85,6 +100,7 @@ def resolve(workspace: Any = None, data_source: Any = None) -> EffectiveDraftsPo
     return EffectiveDraftsPolicy(
         default_visibility=values["defaultVisibility"], levels=values["levels"],
         self_approval=bool(values["selfApproval"]), self_merge=bool(values["selfMerge"]),
+        required_approvals=int(values["requiredApprovals"]), threads_hold=bool(values["threadsHold"]),
         sources=tuple(sorted(sources.items())))
 
 

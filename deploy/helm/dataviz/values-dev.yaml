@@ -1,0 +1,12 @@
+# Dev preset for the dataviz chart: layer it over values.yaml, never in production.
+#
+#   helm upgrade --install dataviz deploy/helm/dataviz -f deploy/helm/dataviz/values-dev.yaml ...
+#   helm upgrade dataviz deploy/helm/dataviz --reuse-values -f deploy/helm/dataviz/values-dev.yaml
+#
+# Only what dev does differently from production. docs/MIGRATIONS.md explains each setting.
+
+upgrade:
+  # A database another build stamped, which no lineage places: the upgrade Job estimates where it
+  # stands, and corrects the estimate from what the schema lacks, instead of stopping with nothing
+  # changed. values.yaml leaves it off.
+  recoverForeignStamps: true

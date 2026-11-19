@@ -895,7 +895,7 @@ describe('ViewWizard — importing into a draft', () => {
     expect(screen.queryByRole('button', { name: /for review/ })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Open review' })[0])
-    expect(screen.getByTestId('location')).toHaveTextContent(/^\/workspaces\/ws1\/reviews\?pr=pr_/)
+    expect(screen.getByTestId('location')).toHaveTextContent(/^\/workspaces\/ws1\/reviews\/pr_/)
   })
 })
 

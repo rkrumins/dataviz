@@ -21,6 +21,7 @@ vi.mock('../../useDrawerHistoryScope', () => ({
   useDrawerHistoryScope: () => ({ wsId: undefined, graphId: null, mainBranchId: null, branchId: null }),
 }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+  useChangeEntry: () => ({ data: undefined }),
   useEntitySummary: () => ({ data: undefined, isLoading: false }),
   useProjectionWatermark: () => ({ data: undefined }),
   useBranches: () => ({ data: [] }),
@@ -97,8 +98,8 @@ describe('EntityDrawer — an edit in a draft', () => {
     render(<EntityDrawer canEdit />)
     await user.click(screen.getByRole('tab', { name: /^Edit/ }))
     const slaRow = screen.getByText('sla').closest('.group') as HTMLElement
-    await user.click(within(slaRow).getByTitle('Delete'))
-    await user.click(screen.getByRole('button', { name: /Stage changes/ }))
+    // Staged as it is made — there is no separate Stage step.
+    await user.click(within(slaRow).getByRole('button', { name: /^Delete / }))
 
     expect(ops()).toEqual([{
       op: 'update', kind: 'node', id: 'urn:orders', baseVersion: 'v1', payload: {}, unsetProperties: ['sla'],
@@ -120,8 +121,8 @@ describe('EntityDrawer — an edit in a draft', () => {
     expect(retention).toHaveValue('90')
     await user.clear(retention)
     await user.type(retention, '30')
-    await user.type(screen.getByPlaceholderText('Business-friendly name…'), 'Customer orders')
-    await user.click(screen.getByRole('button', { name: /Stage changes/ }))
+    // Leaving Retention staged it; Enter stages the business label into the same change.
+    await user.type(screen.getByPlaceholderText('Business-friendly name…'), 'Customer orders{Enter}')
 
     const [op] = ops()
     expect(op.payload).toEqual({ properties: { retention: '30', businessLabel: 'Customer orders' } })
@@ -254,8 +255,7 @@ describe("EntityDrawer — the source's own name and identity properties", () =>
     await user.click(screen.getByRole('tab', { name: /^Edit/ }))
     const name = screen.getByPlaceholderText('Entity name…')
     await user.clear(name)
-    await user.type(name, 'Sales')
-    await user.click(screen.getByRole('button', { name: /Stage changes/ }))
+    await user.type(name, 'Sales{Enter}')
     await user.click(screen.getByRole('tab', { name: /^View/ }))
     return screen.getByLabelText('How this data source identifies and names entities')
   }

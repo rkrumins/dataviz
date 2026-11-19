@@ -68,6 +68,23 @@ describe('the request a narrowing becomes', () => {
     expect(layoutOffers(specFor({ urns: ['a'] }, { upstream: 1 }), 0, false).map((o) => [o.choice, o.available]))
       .toEqual([['source', false], ['template', false], ['auto', true], ['stages', true]])
   })
+
+  it('offers following the view first, as a subset of it — or says why it can’t be', () => {
+    const offers = layoutOffers(urnSpec, 3, true, { available: true })
+    expect(offers[0]).toEqual({ choice: 'follow', available: true, reason: undefined })
+    expect(layoutOffers(urnSpec, 0, true, { available: false, reason: 'No layers of its own' })[0])
+      .toMatchObject({ choice: 'follow', available: false, reason: 'No layers of its own' })
+    expect(layoutOffers(urnSpec, 3, true).some((o) => o.choice === 'follow')).toBe(false)
+  })
+
+  it('a view that follows sends the view it follows, which may be the base of the one it was made in', () => {
+    const follow: SaveChoices = { choice: 'follow', keep: 'all', nest: true }
+    expect(planRequestOf(urnSpec, 'v1', follow).layout).toEqual({ kind: 'follow', sourceViewId: 'v1', nest: true })
+    expect(planRequestOf(urnSpec, 'subset1', { ...follow, layoutViewId: 'base' }).layout)
+      .toEqual({ kind: 'follow', sourceViewId: 'base', nest: true })
+    // Its query is still read in the view it was made in.
+    expect(planRequestOf(querySpec, 'subset1', { ...follow, layoutViewId: 'base' }).sources[0]).toMatchObject({ readIn: 'subset1' })
+  })
 })
 
 describe('the meter', () => {
@@ -100,6 +117,7 @@ describe('how keeping it is going', () => {
       .toBe('An update would remove 812 of 1,020. Apply it, or keep the view as it is.')
     expect(statusWords(status({ status: 'over_cap', detail: { keys: 6200, limit: 5000 } })).detail).toMatch(/6,200 entries/)
     expect(statusWords(status({ status: 'pending', detail: { reason: 'short_answer' } })).detail).toMatch(/didn’t answer in full/)
+    expect(statusWords(status({ status: 'pending', detail: { reason: 'base_changed' } })).detail).toMatch(/view it follows changed/)
   })
 
   it('reads the chip as auto-updating with its count, or a snapshot with its date', () => {
@@ -107,6 +125,17 @@ describe('how keeping it is going', () => {
     const snap = chipText(status({ mode: 'snapshot', status: 'frozen', lastAppliedAt: '2026-11-03T10:00:00Z' }), new Date('2026-12-01'))
     expect(snap).toMatch(/^Snapshot · /)
     expect(snap).not.toMatch(/2026/)
+  })
+
+  it('a view that follows another says so first, and says when that view is gone', () => {
+    const base = { viewId: 'b', name: 'Sales overview', available: true }
+    expect(chipText(status({ follows: base, counts: { members: 6 } }))).toBe('Subset of Sales overview · Auto-updating · 6')
+    expect(chipText(status({ follows: { ...base, name: null }, counts: { members: 6 } }))).toBe('Subset · Auto-updating · 6')
+    expect(chipText(status({ follows: { ...base, available: false }, counts: { members: 6 } })))
+      .toBe('Subset · its view is gone · Auto-updating · 6')
+    const gone = statusWords(status({ status: 'source_missing', follows: { ...base, available: false } }))
+    expect(gone).toMatchObject({ label: 'Its view is gone', tone: 'problem' })
+    expect(gone.detail).toMatch(/keeps its members/)
   })
 
   it('says what an update changed', () => {

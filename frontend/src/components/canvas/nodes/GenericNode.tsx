@@ -15,7 +15,7 @@ import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
 
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
-import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
+import { useEntityDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
@@ -203,7 +203,7 @@ export const GenericNode = memo(function GenericNode({
   const schemaForBadge = useSchemaStore((s) => s.schema)
   const search = useSearchHighlight(searchUrn, { isSelected: !!selected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
-  const changeDeco = useEntityChangeDecoration().for(searchUrn)
+  const changeDeco = useEntityDecoration(searchUrn)
   // The view's display rules: a tint and a frame for this card. A trace, a
   // focus or a change decoration paints the same card, and wins.
   const ruleLook = useDisplayRuleLook(

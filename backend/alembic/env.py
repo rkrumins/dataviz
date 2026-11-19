@@ -196,14 +196,6 @@ def _translate_renamed_alembic_version(connection) -> None:
         "20260712_1730_view_activity_data_changed": "20260712_1730_val_data_changed",
         # 38 chars — over the default VARCHAR(32); shortened 2026-07-21.
         "20260719_1200_rebrand_default_branding": "20260719_1200_rebrand_branding",
-        # Renumbered 2026-11-12, when 20261112_1700_gv_ps_pressure was put
-        # before it: the served column's migration is now
-        # 20261112_1800_gv_ps_served. A database an image of that morning
-        # stamped with the old id holds the served column but not the
-        # pressure one, so it resumes from the parent both share, not from
-        # 1800: 1700_gv_ps_pressure adds the column it lacks, and
-        # 1800_gv_ps_served finds its own already there.
-        "20261112_1700_gv_ps_served": "20261112_1600_import_settings",
     }
     renamed_to = _RENAMED_REVISIONS.get(current_version)
     if renamed_to:
@@ -229,12 +221,57 @@ def _translate_renamed_alembic_version(connection) -> None:
             f"alembic_version records '{current_version}', which this image's "
             "migration chain does not contain. That means the database was "
             "migrated by newer code, or by a branch this image was not built "
-            "from — deploy the image that owns that revision. Do NOT stamp "
+            "from. Run `synodic-upgrade upgrade` (backend/scripts/upgrade.py), "
+            "which places such a database on this image's chain before Alembic "
+            "reads it; a bare `alembic` command can't. Do NOT stamp "
             "back to a baseline: the schema would be left untouched and the "
             "whole chain would replay over live data. If the schema really is "
             "at head and only the pointer is wrong, run "
             "`synodic-upgrade repair`, which verifies that before stamping."
         ) from exc
+
+
+def _set_timeouts(connection) -> None:
+    """A migration that waits for a lock longer than ``MIGRATION_LOCK_TIMEOUT`` (10s) fails, and
+    rolls back, instead of queueing the application's queries behind it for as long as it waits;
+    the Job's retries try again. ``MIGRATION_STATEMENT_TIMEOUT`` bounds how long one statement may
+    run: none by default, since a long backfill on a large table is legitimate and a timeout would
+    fail it on every retry."""
+    import re
+
+    from sqlalchemy import text
+
+    for setting, variable, value in (
+            ("lock_timeout", "MIGRATION_LOCK_TIMEOUT", os.getenv("MIGRATION_LOCK_TIMEOUT", "10s")),
+            ("statement_timeout", "MIGRATION_STATEMENT_TIMEOUT", os.getenv("MIGRATION_STATEMENT_TIMEOUT", "0"))):
+        value = value.strip()
+        if not re.fullmatch(r"\d+\s*(ms|s|min|h|d)?", value):
+            raise RuntimeError(f"{variable}={value!r}: give a duration, like 30s or 15min (0 for none)")
+        connection.execute(text(f"SET {setting} = '{value}'"))
+    connection.commit()
+
+
+class _SqlLog:
+    """``MIGRATION_SQL_LOG``: the statements each migration runs, as SQL, appended to that file
+    under its revision, for a linter (``schema.yml`` runs squawk over a pull request's). Alembic's
+    own bookkeeping, and reads, are left out."""
+
+    def __init__(self, path: str):
+        import re
+
+        self.path, self.pending = path, []
+        self.skip = re.compile(r"^\s*(SELECT|SHOW|SET)\b|alembic_(version|lineage|history)", re.IGNORECASE)
+
+    def before_cursor_execute(self, conn, cursor, statement, parameters, context, executemany):
+        if executemany or self.skip.search(statement):
+            return
+        sql = cursor.mogrify(statement, parameters).decode() if parameters else statement
+        self.pending.append(sql.strip().rstrip(";") + ";")
+
+    def flush(self, revision: str) -> None:
+        with open(self.path, "a", encoding="utf-8") as out:
+            out.write(f"-- {revision}\n" + "".join(f"{s}\n" for s in self.pending))
+        self.pending = []
 
 
 def run_migrations_online() -> None:
@@ -254,7 +291,13 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
         connect_args={"connect_timeout": connect_timeout},
     )
+    try:
+        context.get_revision_argument()
+        migrating = True                    # upgrade, downgrade, stamp
+    except KeyError:
+        migrating = False                   # current: reads only
     with connectable.connect() as connection:
+        _set_timeouts(connection)
         # Size version_num BEFORE the migration body runs — otherwise
         # alembic's own UPDATE alembic_version at the end of a long-id
         # revision crashes with StringDataRightTruncation and silently
@@ -265,13 +308,39 @@ def run_migrations_online() -> None:
         # and fail loudly on one that cannot be resolved at all.
         _translate_renamed_alembic_version(connection)
 
+        from backend.app.db import migration_records
+
+        if migrating:
+            migration_records.ensure(connection)
+            connection.commit()
+        sql_log_path = os.getenv("MIGRATION_SQL_LOG")
+        sql_log = _SqlLog(sql_log_path) if sql_log_path else None
+        if sql_log:
+            from sqlalchemy import event
+
+            event.listen(connection, "before_cursor_execute", sql_log.before_cursor_execute)
+
+        def on_version_apply(ctx, step, heads, run_args):
+            # In the migration's own transaction: its history row commits, or not, with it.
+            kind = "stamped" if step.is_stamp else "ran" if step.is_upgrade else "downgraded"
+            for revision in (step.up_revision_ids if step.is_stamp else [step.up_revision_id]):
+                path = context.script.get_revision(revision).path if kind != "downgraded" else None
+                migration_records.record_step(ctx.connection, revision, kind, path)
+            if sql_log:
+                sql_log.flush(step.up_revision_id)
+
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
             transaction_per_migration=True,
+            on_version_apply=on_version_apply if migrating else (),
         )
         with context.begin_transaction():
             context.run_migrations()
+        if migrating:
+            # This build's chain, kept in the database, so a build that doesn't have the
+            # revision it stamped can still tell what the database ran.
+            migration_records.record_chain(connection, context.script)
         # SQLAlchemy 2.0: explicit commit required when not using engine.begin().
         # Without this the alembic_version row write rolls back on close.
         connection.commit()

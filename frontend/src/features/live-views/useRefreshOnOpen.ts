@@ -8,8 +8,10 @@
 import { useEffect } from 'react'
 
 import { useAppNotifications } from '@/components/ui/notifications'
+import { SUBSET_FOLLOW_MAX_MS, SUBSET_FOLLOW_MIN_MS } from '@/hooks/useGraphHydration'
 import { refreshMembership } from '@/services/liveViewsApi'
 import { getView, viewToViewConfig, type View } from '@/services/viewApiService'
+import { useCanvasStore } from '@/store/canvas'
 import { useFeature } from '@/store/features'
 import { useSchemaStore } from '@/store/schema'
 
@@ -30,14 +32,29 @@ export function useRefreshOnOpen(view: View | null | undefined): void {
   useEffect(() => {
     if (!enabled || !live || !viewId) return
     let cancelled = false
-    refreshMembership(viewId, false, 'open')
-      .then(async (out) => {
-        if (cancelled || out.outcome !== 'applied') return
-        await showLatest(viewId)
-        notify('info', `Brought up to date · ${diffText(out.diff)}`)
-      })
-      // How it stands is the chip's to say: opening a view never fails on this.
-      .catch(() => {})
-    return () => { cancelled = true }
+    let timer: number | undefined
+    // A large view is worked out a step at a time: while the server says it is
+    // still running, ask again — backing off, jittered, so a view opened by
+    // hundreds is not asked in a loop — until it lands.
+    const ask = (round: number) => {
+      refreshMembership(viewId, false, 'open')
+        .then(async (out) => {
+          if (cancelled) return
+          if (out.outcome === 'running') {
+            const wait = Math.min(SUBSET_FOLLOW_MAX_MS, SUBSET_FOLLOW_MIN_MS * 2 ** round)
+            timer = window.setTimeout(() => ask(round + 1), wait * (0.75 + Math.random() * 0.5))
+            return
+          }
+          if (out.outcome !== 'applied') return
+          await showLatest(viewId)
+          // Its layers page their members from the server: read them again.
+          useCanvasStore.getState().refreshSubsetFeeds()
+          notify('info', `Brought up to date · ${diffText(out.diff)}`)
+        })
+        // How it stands is the chip's to say: opening a view never fails on this.
+        .catch(() => {})
+    }
+    ask(0)
+    return () => { cancelled = true; window.clearTimeout(timer) }
   }, [enabled, live, viewId, notify])
 }

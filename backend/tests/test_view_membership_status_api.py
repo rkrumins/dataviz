@@ -20,8 +20,8 @@ from backend.common.models.view_membership import MACHINE
 from backend.tests.test_view_versions import _as, _user
 from backend.tests.test_views_from_members_api import (  # noqa: F401 — fixtures
     TypedEngine,
-    assignments_of,
     body,
+    entries_of,
     graph,
     made,
     membership_on,
@@ -53,7 +53,7 @@ async def status(client: AsyncClient, view_id: str) -> dict:
 
 
 async def entries(db_session: AsyncSession, view_id: str) -> dict:
-    return assignments_of(await made(db_session, view_id))
+    return await entries_of(db_session, view_id)
 
 
 async def refresh(client: AsyncClient, view_id: str, *, confirm: bool = False):
@@ -102,7 +102,7 @@ async def test_the_status_has_an_etag_and_a_poll_that_finds_it_unchanged_costs_a
     first = await test_client.get(url(saved["id"]))
     assert first.status_code == 200
     out = first.json()
-    assert (out["mode"], out["status"], out["keys"], out["limit"]) == ("live", "ok", 6, 5000)
+    assert (out["mode"], out["status"], out["keys"], out["limit"]) == ("live", "ok", 6, pipeline.LIVE_VIEW_MAX_MEMBERS)
     assert out["alwaysIncluded"] == [] and out["excluded"] == []
     again = await test_client.get(url(saved["id"]), headers={"If-None-Match": first.headers["etag"]})
     assert again.status_code == 304
@@ -156,7 +156,8 @@ async def test_changing_the_query_works_the_members_out_again(
     })
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "ok"
-    assert set(await entries(db_session, saved["id"])) == {"dom", "tbl_b", "col_b1"}
+    # Its members only: the domain they sit in is drawn from their paths, not held.
+    assert set(await entries(db_session, saved["id"])) == {"tbl_b", "col_b1"}
     row = (await db_session.execute(select(ViewORM).where(ViewORM.id == saved["id"]))).scalar_one()
     assert json.loads(row.config)["membership"]["sources"][0]["spec"]["seeds"]["urns"] == ["tbl_b"]
 
@@ -262,10 +263,14 @@ async def test_where_people_put_members_survives_an_update(
     config = await made(db_session, view_id)
     layout = config["layout"]["referenceLayout"]
     tables = next(l["id"] for l in layout["layers"] if l["name"] == "Tables")
-    moved = {**layout["assignments"], "col_a1": {**layout["assignments"]["col_a1"], "layerId": tables}}
+    # The canvas writes an entry for the member it moved (its marker rewritten, as it does).
+    moved = {"col_a1": {"layerId": tables, "inheritsChildren": True, "assignedBy": "user"}}
     put = await test_client.put(f"/api/v1/views/{view_id}/layout", json={
         "referenceLayout": {"layers": layout["layers"], "assignments": moved}})
     assert put.status_code == 200, put.text
+    assert (await entries(db_session, view_id))["col_a1"] == {
+        "layerId": tables, "inheritsChildren": False, "assignedBy": MACHINE}, "moved at once, still a member"
+    assert (await made(db_session, view_id))["layout"]["referenceLayout"]["assignments"] == {}
 
     await settle(db_session, view_id)
     graph.engine = TypedEngine(gone={"col_b1"})
@@ -398,3 +403,32 @@ async def test_opening_a_snapshot_changes_nothing(test_client: AsyncClient, db_s
     resp = await open_view(test_client, view_id)
     assert (resp.json()["outcome"], resp.json()["detail"]) == ("current", {"reason": "snapshot"})
     assert "col_b1" in await entries(db_session, view_id)
+
+
+# ── A large view: worked out across requests ────────────────────────────────
+
+
+async def test_a_refresh_too_large_for_one_request_runs_on_and_opening_carries_it_on(
+    test_client: AsyncClient, db_session, saved, graph, monkeypatch,
+):
+    from backend.app.api.v1.endpoints import view_membership as routes
+
+    view_id = saved["id"]
+    await settle(db_session, view_id)
+    graph.engine = TypedEngine(gone={"col_b1"})
+    monkeypatch.setattr(routes, "_budget_s", lambda: 0.0)
+    running = await refresh(test_client, view_id)
+    assert (running.status_code, running.json()["outcome"]) == (202, "running")
+    assert running.json()["membership"]["status"] == "updating"
+    assert running.json()["membership"]["limit"] == pipeline.LIVE_VIEW_MAX_MEMBERS == 250_000
+    epoch = (await state_of(db_session, view_id)).epoch
+    again = await refresh(test_client, view_id)
+    assert (again.status_code, again.json()["outcome"]) == (202, "running"), (
+        "carrying a run on is never refused as too soon")
+    assert "col_b1" in await entries(db_session, view_id), "readers keep the last answer meanwhile"
+
+    monkeypatch.setattr(routes, "_budget_s", lambda: 30.0)
+    opened = await open_view(test_client, view_id)
+    assert opened.json()["outcome"] == "applied", "opened while it runs: carried on, never 'current'"
+    assert (await state_of(db_session, view_id)).epoch == epoch, "at the run's own epoch"
+    assert "col_b1" not in await entries(db_session, view_id)

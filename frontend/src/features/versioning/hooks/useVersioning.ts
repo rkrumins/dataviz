@@ -4,9 +4,10 @@
  * history in sync after a save / publish / merge.
  */
 import { useCallback } from 'react'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, PullRequest, ResolutionMap, ReviewInboxParams, StageOp, Watermark } from '@/services/versioningApiService'
+import { INBOX_QUERY_KEY } from '@/hooks/useInbox'
 import { workspaceService } from '@/services/workspaceService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
@@ -39,8 +40,10 @@ export const VERSIONING_KEYS = {
   commitLog: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'commits', ws, gid, bid ?? 'all'] as const,
   // Under 'entity' so one invalidation of an entity's key prefix covers its summary and history.
-  entityHistory: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, scope?: string) =>
-    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'history', bid ?? 'main', scope ?? 'all'] as const,
+  entityHistory: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, scope?: string, kind?: string) =>
+    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'history', bid ?? 'main', scope ?? 'all', kind ?? 'any'] as const,
+  entityRevision: (ws?: string, gid?: string | null, eid?: string | null, vid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'revision', vid, bid ?? 'main'] as const,
   entitySummary: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, withValue?: boolean) =>
     [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'summary', bid ?? 'main', withValue ? 'value' : 'meta'] as const,
   mergeRequests: (ws?: string, gid?: string | null) =>
@@ -52,6 +55,9 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'forkSources', ws] as const,
   mergeRequest: (ws?: string, prId?: string | null) =>
     [...VERSIONING_KEYS.all, 'mr', ws, prId] as const,
+  // Under the review's own key, so whatever refreshes the review refreshes its history too.
+  reviewEvents: (ws?: string, prId?: string | null) =>
+    [...VERSIONING_KEYS.mergeRequest(ws, prId), 'events'] as const,
   prDiff: (ws?: string, prId?: string | null) =>
     [...VERSIONING_KEYS.all, 'prDiff', ws, prId] as const,
   prPreview: (ws?: string, prId?: string | null) =>
@@ -78,6 +84,11 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'dataSourcePrs', ws, dsId, status ?? 'all'] as const,
   viewPrCounts: (ws?: string, viewId?: string | null) =>
     [...VERSIONING_KEYS.all, 'viewPrCounts', ws, viewId] as const,
+  // A queue's pages and the counts alone, under one prefix, so whatever changes a review refreshes both.
+  reviewInbox: (ws?: string, params?: ReviewInboxParams) =>
+    [...VERSIONING_KEYS.all, 'reviewInbox', ws, params ?? {}] as const,
+  reviewInboxCounts: (ws?: string | null) =>
+    [...VERSIONING_KEYS.all, 'reviewInbox', ws, 'counts'] as const,
   viewCommitLog: (ws?: string, gid?: string | null, viewId?: string | null, graphWide?: boolean, limit?: number) =>
     [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, viewId, !!graphWide, limit ?? 'default'] as const,
   // Under 'viewCommits', so every publish, merge, revert and restore that refreshes the history
@@ -378,7 +389,7 @@ export function useEntityHistoryPages(
 ) {
   const { branchId, scope = 'all', kind, enabled = true } = opts
   return useInfiniteQuery({
-    queryKey: VERSIONING_KEYS.entityHistory(wsId, graphId, entityId, branchId, scope),
+    queryKey: VERSIONING_KEYS.entityHistory(wsId, graphId, entityId, branchId, scope, kind),
     queryFn: ({ pageParam }) => api.getEntityHistoryPage(wsId!, graphId!, entityId!, {
       branchId, scope, kind, limit: ENTITY_HISTORY_PAGE, before: pageParam,
     }),
@@ -386,6 +397,24 @@ export function useEntityHistoryPages(
     getNextPageParam: (last) => (last.hasMore ? last.nextBefore ?? null : null),
     enabled: enabled && !!wsId && !!graphId && !!entityId,
     staleTime: 30_000,
+  })
+}
+
+/** One revision of an entity with the entity as it left it — read when asked for (a revision's
+ *  "As it was"), and kept: a revision does not change. */
+export function useEntityRevision(
+  wsId: string | undefined,
+  graphId: string | null | undefined,
+  entityId: string | null | undefined,
+  versionId: string | null | undefined,
+  opts: { branchId?: string | null; kind?: 'node' | 'edge'; enabled?: boolean } = {},
+) {
+  const { branchId, kind, enabled = true } = opts
+  return useQuery({
+    queryKey: VERSIONING_KEYS.entityRevision(wsId, graphId, entityId, versionId, branchId),
+    queryFn: () => api.getEntityRevision(wsId!, graphId!, entityId!, versionId!, { branchId, kind }),
+    enabled: enabled && !!wsId && !!graphId && !!entityId && !!versionId,
+    staleTime: Infinity,
   })
 }
 
@@ -495,10 +524,12 @@ export function usePreviewMergeRequest(wsId?: string, prId?: string | null) {
 /** Top-level groups of a PR's hierarchical Files Changed (children load lazily). */
 export function usePrDiffSummary(wsId?: string, prId?: string | null, limit?: number) {
   return useQuery({
-    queryKey: VERSIONING_KEYS.prDiffSummary(wsId, prId),
+    // The limit is part of the answer: an inbox row's count (1 group) is not the drawer's tree.
+    queryKey: [...VERSIONING_KEYS.prDiffSummary(wsId, prId), limit ?? null],
     queryFn: () => api.getMergeRequestDiffSummary(wsId!, prId!, limit),
     enabled: !!wsId && !!prId,
     staleTime: 15_000,
+    ...CHANGE_LIST_RETRY,
   })
 }
 
@@ -511,6 +542,7 @@ export function useBranchDiffSummary(
     queryFn: () => api.getBranchDiffSummary(wsId!, graphId!, branchId!, limit),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
+    ...CHANGE_LIST_RETRY,
   })
 }
 
@@ -532,17 +564,33 @@ export function useCommitDiffSummary(wsId?: string, graphId?: string | null, com
     queryFn: () => api.getCommitDiffSummary(wsId!, graphId!, commitId!),
     enabled: !!wsId && !!graphId && !!commitId,
     staleTime: 60_000,   // a commit is immutable
+    ...CHANGE_LIST_RETRY,
   })
 }
 
 // ── Change lists: a draft's changes, or main's between two revisions, at any size ──────────────
 
 /** A draft's lists move with it; main between two revisions is fixed for good. */
-const changeListStale = (origin?: ChangeListOrigin | null) =>
+export const changeListStale = (origin?: ChangeListOrigin | null) =>
   origin && !('branchId' in origin) ? Infinity : 10_000
 
 /** Rows a change list page holds. */
 export const CHANGE_LIST_PAGE = 100
+
+/** A change list the server is still preparing answers busy (503) or outlasts the request (504),
+ *  or the connection drops ("Failed to fetch") — and the server goes on building it, then keeps
+ *  it for every reader. So it is asked again, for up to about three minutes, rather than shown as
+ *  failed; anything else is asked once more, as every query is. */
+export function changeListRetry(failureCount: number, error: unknown): boolean {
+  const status = (error as { status?: number } | null)?.status
+  const preparing = status === 503 || status === 504 || error instanceof TypeError
+  return failureCount < (preparing ? 24 : 1)
+}
+
+export const changeListRetryDelay = (attempt: number) => Math.min(8_000, 1_000 * 2 ** attempt)
+
+/** How the change-list queries retry (:func:`changeListRetry`). */
+export const CHANGE_LIST_RETRY = { retry: changeListRetry, retryDelay: changeListRetryDelay } as const
 
 /** A change list's counts by kind, status and type (the same index its pages come from). */
 export function useChangeSummary(wsId?: string, graphId?: string | null, origin?: ChangeListOrigin | null) {
@@ -551,22 +599,27 @@ export function useChangeSummary(wsId?: string, graphId?: string | null, origin?
     queryFn: () => api.getChangeSummary(wsId!, graphId!, origin!),
     enabled: !!wsId && !!graphId && !!origin,
     staleTime: changeListStale(origin),
+    ...CHANGE_LIST_RETRY,
   })
 }
 
-/** A change list a page at a time, narrowed by `filter`; `fetchNextPage` follows the server's offset. */
+/** A change list a page at a time, narrowed by `filter`; `fetchNextPage` follows the server's offset.
+ *  `summary`: each row says what it changed; `paths`: where it sits. */
 export function useChangeEntries(
   wsId: string | undefined, graphId: string | null | undefined, origin: ChangeListOrigin | null | undefined,
-  filter: ChangeListFilter = {}, { enabled = true }: { enabled?: boolean } = {},
+  filter: ChangeListFilter = {},
+  { enabled = true, summary = false, paths = false }: { enabled?: boolean; summary?: boolean; paths?: boolean } = {},
 ) {
   return useInfiniteQuery({
     queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'entries', filter.kind ?? 'all',
-      (filter.statuses ?? []).join(','), filter.type ?? '', (filter.q ?? '').trim()],
-    queryFn: ({ pageParam }) => api.getChangeEntries(wsId!, graphId!, origin!, filter, pageParam, CHANGE_LIST_PAGE),
+      (filter.statuses ?? []).join(','), filter.type ?? '', (filter.q ?? '').trim(), summary ? 'summary' : 'plain',
+      paths ? 'paths' : 'flat'],
+    queryFn: ({ pageParam }) => api.getChangeEntries(wsId!, graphId!, origin!, filter, pageParam, CHANGE_LIST_PAGE, summary, paths),
     initialPageParam: 0,
     getNextPageParam: (last) => (last.hasMore ? last.offset + last.entries.length : undefined),
     enabled: enabled && !!wsId && !!graphId && !!origin,
     staleTime: changeListStale(origin),
+    ...CHANGE_LIST_RETRY,
   })
 }
 
@@ -589,6 +642,7 @@ export function useChangeIndex(wsId?: string, graphId?: string | null, origin?: 
     queryFn: () => api.getChangeIndex(wsId!, graphId!, origin!),
     enabled: !!wsId && !!graphId && !!origin,
     staleTime: changeListStale(origin),
+    ...CHANGE_LIST_RETRY,
   })
 }
 
@@ -628,9 +682,53 @@ export function useDataSourcePullRequests(
       : api.listDataSourcePullRequests(wsId!, dataSourceId!, status ? { status } : {}),
     enabled: !!wsId && !!dataSourceId && enabled,
     staleTime: 15_000,
-    // A 404 is terminal (the data source has no versioned graph); the review inbox reads every
-    // data source in the workspace, versioned or not.
+    // A 404 is terminal (the data source has no versioned graph).
     retry: (n, e) => !/404|not found/i.test(String((e as Error)?.message)) && n < 1,
+  })
+}
+
+/** Reviews the review inbox reads per page. */
+export const REVIEW_INBOX_PAGE = 25
+
+/** One queue of the review inbox, page by page ("Load more"), searched and filtered on the server.
+ *  While another queue or filter loads, the last one stays on screen. */
+export function useReviewInbox(wsId: string | undefined, params: Omit<ReviewInboxParams, 'limit' | 'offset'>) {
+  return useInfiniteQuery({
+    queryKey: VERSIONING_KEYS.reviewInbox(wsId, params),
+    queryFn: ({ pageParam }) => api.getReviewInbox(wsId!, { ...params, limit: REVIEW_INBOX_PAGE, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((n, p) => n + p.items.length, 0)
+      return last.items.length > 0 && loaded < last.total ? loaded : undefined
+    },
+    enabled: !!wsId && !!params.queue,
+    placeholderData: keepPreviousData,
+    staleTime: 15_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
+/** Each review-inbox queue's count and unread count — the Reviews badge — read again every minute. */
+export function useReviewInboxCounts(wsId?: string | null, enabled = true) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.reviewInboxCounts(wsId),
+    queryFn: () => api.getReviewInboxCounts(wsId!),
+    enabled: !!wsId && enabled,
+    staleTime: 15_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
+/** The reader looked at a review: the inbox, its counts and the bell are read again. */
+export function useMarkReviewSeen(wsId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (prId: string) => api.markReviewSeen(wsId, prId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'reviewInbox'] })
+      qc.invalidateQueries({ queryKey: INBOX_QUERY_KEY })
+    },
   })
 }
 
@@ -971,6 +1069,7 @@ function invalidatePrScopes(qc: ReturnType<typeof useQueryClient>, wsId: string,
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrCounts'] })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'reviewInbox'] })
 }
 
 export function usePublishBranch(wsId: string, graphId: string) {
@@ -1102,8 +1201,10 @@ export function useReconcileProjection(wsId: string, graphId: string) {
 export function useOpenMergeRequest(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (v: { branchId: string; title?: string; description?: string; reviewers?: string[] }) =>
-      api.openMergeRequest(wsId, graphId, v.branchId, { title: v.title, description: v.description, reviewers: v.reviewers }),
+    mutationFn: (v: { branchId: string; title?: string; description?: string; reviewers?: string[]; reviewerGroups?: string[] }) =>
+      api.openMergeRequest(wsId, graphId, v.branchId, {
+        title: v.title, description: v.description, reviewers: v.reviewers, reviewerGroups: v.reviewerGroups,
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
@@ -1190,6 +1291,87 @@ export function useCloseMergeRequest(wsId: string) {
   })
 }
 
+export function useWithdrawChangesRequest(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string }) => api.withdrawChangesRequest(wsId, v.prId),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+// A review given, who reviews it, and what happened on it.
+
+/** Give your review — a verdict and a summary, of the head the reviewer saw. */
+export function useSubmitReview(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; verdict: api.ReviewVerdict; body?: string | null; expectedHeadCommitId?: string | null }) =>
+      api.submitReview(wsId, v.prId, { verdict: v.verdict, body: v.body, expectedHeadCommitId: v.expectedHeadCommitId }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** Who reviews it: each list given replaces its kind. */
+export function useSetReviewers(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; users?: string[]; groups?: string[] }) =>
+      api.setReviewers(wsId, v.prId, { users: v.users, groups: v.groups }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** Ask people and groups already asked to review it again. */
+export function useReRequestReviewers(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; users?: string[]; groups?: string[] }) =>
+      api.reRequestReviewers(wsId, v.prId, { users: v.users ?? [], groups: v.groups ?? [] }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** What happened on a review, oldest first. */
+export function useReviewEvents(wsId?: string, prId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.reviewEvents(wsId, prId),
+    queryFn: () => api.listReviewEvents(wsId!, prId!),
+    enabled: !!wsId && !!prId,
+    staleTime: 10_000,
+  })
+}
+
+/** Discard saved changes from a draft (one restore commit); its change lists and canvas read again.
+ *  `dryRun` asks what it would take, changing nothing. */
+export function useRestoreDraftChanges(wsId: string, graphId: string, branchId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: Parameters<typeof api.restoreDraftChanges>[3]) => api.restoreDraftChanges(wsId, graphId, branchId, body),
+    onSuccess: (out) => {
+      if (out.dryRun || !out.commitId) return
+      // The draft against main — its change lists, its canvas tints — and the draft itself.
+      void qc.invalidateQueries({ queryKey: VERSIONING_KEYS.diffVsMain(wsId, graphId, branchId) })
+      void qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
+      void qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'commits'] })
+      void qc.invalidateQueries({ queryKey: ['reviewDecisions', wsId] })
+    },
+  })
+}
+
+/** Discard what a draft's review rejected from the draft — its author taking the review's answer. */
+export function useDiscardRejected(wsId: string) {
+  const qc = useQueryClient()
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; branchId: string }) => api.discardRejectedChanges(wsId, v.prId),
+    onSuccess: (_r, v) => {
+      invalidate(v.prId, v.graphId)
+      void qc.invalidateQueries({ queryKey: VERSIONING_KEYS.diffVsMain(wsId, v.graphId, v.branchId) })
+      void qc.invalidateQueries({ queryKey: ['reviewDecisions', wsId, v.prId] })
+    },
+  })
+}
+
 /** Edit a PR's title/description in place. */
 export function useUpdateMergeRequest(wsId: string) {
   const invalidate = useInvalidatePr(wsId)
@@ -1207,8 +1389,11 @@ export function useMergeMergeRequest(wsId: string) {
   const invalidate = useInvalidatePr(wsId)
   const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
   return useMutation({
-    mutationFn: (v: { prId: string; graphId: string; message: string; resolutions?: ResolutionMap }) =>
-      api.mergeMergeRequest(wsId, v.prId, { message: v.message, resolutions: v.resolutions }),
+    mutationFn: (v: {
+      prId: string; graphId: string; message: string; resolutions?: ResolutionMap; mode?: 'all' | 'accepted'; discardRejected?: boolean
+    }) => api.mergeMergeRequest(wsId, v.prId, {
+      message: v.message, resolutions: v.resolutions, mode: v.mode, ...(v.discardRejected ? { discardRejected: true } : {}),
+    }),
     onSuccess: (_r, v) => {
       invalidate(v.prId, v.graphId)
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiff(wsId, v.prId) })

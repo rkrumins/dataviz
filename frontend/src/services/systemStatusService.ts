@@ -360,9 +360,45 @@ export interface SystemStatusSnapshot {
     outbox: OutboxSection | null
 }
 
+/** What an upgrade with this server's build would do (the upgrade Job's own decision). */
+export interface SchemaPlan {
+    verdict: 'up_to_date' | 'upgrade' | 'fresh_install' | 'refused'
+    reason: string
+    heads: string[]
+    stamps: string[]
+    placement: { foreign: string[]; stamps: string[]; how: string } | null
+    wouldRun: string[]
+    warnings: string[]
+}
+
+/** One step of ``alembic_history``: a migration run or stamped, a placement and its check, a
+ *  changed migration reported, a reference-data reconciliation. */
+export interface SchemaHistoryEntry {
+    id: number
+    revision: string
+    kind: 'ran' | 'stamped' | 'downgraded' | 'changed' | 'placed' | 'verified' | 'restored' | 'seeded' | string
+    at: string | null
+    build: string | null
+    detail: Record<string, unknown> | null
+}
+
+export interface SchemaStatus {
+    generatedAt: string
+    applied: string[]
+    expected: string[]
+    atHead: boolean
+    build: { from: string; onMain: boolean | null; version?: string }
+    plan: SchemaPlan
+    history: SchemaHistoryEntry[]
+    lastSeeded: SchemaHistoryEntry | null
+}
+
 export const systemStatusService = {
     get: (): Promise<SystemStatusSnapshot> =>
         authFetch<SystemStatusSnapshot>('/api/v1/admin/system/status'),
+    /** The database schema, read live: where it stands, what an upgrade would do, its history. */
+    getSchema: (): Promise<SchemaStatus> =>
+        authFetch<SchemaStatus>('/api/v1/admin/system/schema'),
     /** Reseed every versioned graph on a FalkorDB provider from Postgres
      *  (after its instance was restored). ``dryRun`` only counts them. */
     resetWatermarks: (provider: string, opts?: { dryRun?: boolean }): Promise<{

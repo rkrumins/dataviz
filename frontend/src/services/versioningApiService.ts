@@ -15,6 +15,7 @@
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { remember, sendNdjsonInParts } from './importExportApiService'
 import { pollJob } from './importExportApiService'
 import { useHealthStore } from '@/store/health'
 import { readJsonLossless } from '@/lib/losslessJson'
@@ -424,6 +425,8 @@ export interface DiffSummaryResponse {
   impact: Record<string, number>
   /** A draft with more changes than the tree lists: counts only, no groups. */
   tooLarge?: { changed: number; limit: number }
+  /** A fork's review past the cap: the window of the fork's main its changes are listed from. */
+  list?: { graphId: string; fromSeq: number; toSeq: number }
 }
 
 export interface DiffChildrenResponse {
@@ -612,6 +615,9 @@ export interface PullRequest {
   /** Reviewers whose approval went stale (the draft changed since): they must approve again. */
   staleApprovedBy?: string[] | null
   approvalStatus?: string | null
+  /** A reviewer sent it back for changes, while that holds: it merges once the draft changes, or
+   *  once they withdraw it. */
+  changesRequested?: { by: string; at: string; reason?: string | null; headCommitId?: string | null } | null
   checksStatus?: Record<string, unknown> | null
   actor?: string | null          // who raised it
   createdAt: string              // when raised
@@ -620,14 +626,62 @@ export interface PullRequest {
   mergedBy?: string | null
   /** HOW it merged: 'review' (through this PR) or 'direct_publish' (a manager published the source
    *  branch straight to Published, which lands the same changes and so resolves this PR). */
-  mergedVia?: 'review' | 'direct_publish' | null
+  mergedVia?: 'review' | 'review_partial' | 'direct_publish' | null
   closedAt?: string | null       // when + who closed
   closedBy?: string | null
   /** every actor id this PR references (actor/reviewers/approvedBy/mergedBy/closedBy/
    *  sourceBranchOwner) → resolved display name; unresolvable ids are absent. */
   userNames?: Record<string, string>
+  /** Every group id it names (a reviewer that is a group) → its name. */
+  groupNames?: Record<string, string>
   /** The single-PR read only: what the reader may do with it, and why not. */
   viewerCan?: ReviewViewerCan | null
+  /** The single-PR read: where its review stands — approvals, each reviewer, changes asked for,
+   *  open threads, and the reader's own part in it. Absent from servers that predate it. */
+  review?: ReviewState | null
+  /** The review inbox's rows only: something someone else did on it is unread to the reader. */
+  unread?: boolean
+  /** The review inbox's rows only: when anything last happened on it. */
+  lastActivityAt?: string
+  /** The review inbox's rows only: the data source it merges into. */
+  targetDataSourceId?: string
+}
+
+/** Where a review stands, as the server counts it. */
+export interface ReviewState {
+  /** How many approvals it needs; 0: everyone asked must approve. */
+  requiredApprovals: number
+  approvals: { required: number; have: number; satisfied: boolean }
+  reviewers: ReviewerState[]
+  /** Changes asked for, each with whether it still holds (the draft has not changed since). */
+  changeRequests: Array<{ by: string; at: string; reason?: string | null; holds: boolean }>
+  /** Open threads, and whether they hold the merge until resolved. */
+  threads: { open: number; holdMerge: boolean }
+  /** Each person's latest review, and whether it is of the draft as it is now. */
+  reviews?: Array<{ by: string; verdict: ReviewVerdict; at: string; current: boolean }>
+  /** The reader's own part. */
+  you?: {
+    requested: boolean
+    needsReview: boolean
+    /** It changed since they last reviewed it. */
+    updatedSinceReviewed: boolean
+    verdict?: 'approve' | 'request_changes' | 'comment' | null
+    reviewedAt?: string | null
+  }
+}
+
+/** One reviewer asked, and where they stand: approved (an earlier version, when it changed since),
+ *  asked for changes, commented, or not yet. */
+export interface ReviewerState {
+  type: 'user' | 'group'
+  id: string
+  /** A group's name. */
+  name?: string | null
+  state: 'approved' | 'approved_earlier' | 'changes_requested' | 'commented' | 'waiting'
+  /** Who answered: for a group, the member whose review answers for it. */
+  by?: string | null
+  at?: string | null
+  requestedAt: string
 }
 
 /** Whether a review's reader may approve it and merge it, decided as the server decides; a reason
@@ -639,6 +693,41 @@ export interface ReviewViewerCan {
   merge: boolean
   approveReason: string | null
   mergeReason: string | null
+  /** Whether the reader may take part in its discussion (a person may; a key may not). */
+  comment?: boolean
+  commentReason?: string | null
+  /** Whether the reader may remove what others wrote (they manage the data source). */
+  moderate?: boolean
+  /** Whether the reader may accept and reject its changes one by one (whoever may approve it, on
+   *  a draft's review), and why not: `fork_review` or an approve refusal. */
+  decide?: boolean
+  decideReason?: string | null
+  /** Whether the reader may ask for changes, and why not. */
+  requestChanges?: boolean
+  requestChangesReason?: string | null
+  /** Whether the reader may change who reviews it. */
+  editReviewers?: boolean
+  /** Whether the reader may withdraw the changes they asked for. */
+  withdraw?: boolean
+}
+
+/** A review decided change by change, refused: `decision_conflict` (it would reverse a decision
+ *  on a change it takes with it — `overrides`), `review_incomplete` (what is accepted `needs`
+ *  more), `changes_rejected`, `nothing_accepted`, `partial_merge_unsupported` (`reason`). */
+export type ReviewDecisionRefusal =
+  | 'decision_conflict' | 'review_incomplete' | 'changes_rejected' | 'nothing_accepted' | 'partial_merge_unsupported'
+const REVIEW_DECISION_REFUSALS = new Set<string>([
+  'decision_conflict', 'review_incomplete', 'changes_rejected', 'nothing_accepted', 'partial_merge_unsupported',
+])
+export class ReviewDecisionError extends Error {
+  type: ReviewDecisionRefusal
+  detail: Record<string, unknown>
+  constructor(type: ReviewDecisionRefusal, message: string, detail: Record<string, unknown>) {
+    super(message)
+    this.name = 'ReviewDecisionError'
+    this.type = type
+    this.detail = detail
+  }
 }
 
 /** Map of entityId → resolved payload (or `null` to delete) for conflict resolution. */
@@ -652,13 +741,20 @@ export class MergeConflictError extends Error {
   conflicts: Array<Record<string, unknown>>
   /** A draft save's conflicts: each conflicting entity as it is now — what an edit rebases onto. */
   current: Record<string, EntityView>
-  constructor(conflicts: Array<Record<string, unknown>>, current: Record<string, EntityView> = {}) {
+  /** A review's merge: each conflicting entity's own value on the draft — a resolution's base. */
+  seeds: Record<string, Record<string, unknown> | undefined>
+  constructor(
+    conflicts: Array<Record<string, unknown>>,
+    current: Record<string, EntityView> = {},
+    seeds: Record<string, Record<string, unknown> | undefined> = {},
+  ) {
     super(Object.keys(current).length > 0
       ? `Someone else changed ${conflicts.length === 1 ? 'a field' : 'fields'} you edited.`
       : 'Main has moved — there are conflicting changes to resolve.')
     this.name = 'MergeConflictError'
     this.conflicts = conflicts
     this.current = current
+    this.seeds = seeds
   }
 }
 
@@ -971,13 +1067,21 @@ type RefusalDetail = string | {
   actors?: string[]
   /** How many entities a change too large to read whole here changes (`too_large_for_tree`). */
   changed?: number
+  /** Where a fork's review lists those changes a page at a time (`too_large_for_tree`). */
+  list?: { graphId: string; fromSeq: number; toSeq: number }
 } | null | undefined
 
 /** A change too large to read whole here (409 `too_large_for_tree`): a tree's children, or a
  *  review's itemised diff, past `GRAPHVER_DIFF_TREE_MAX_CHANGES`. List it with a change list. */
 export class DiffTooLargeError extends Error {
   readonly status = 409
-  constructor(readonly changed: number, readonly limit: number, message?: string) {
+  constructor(
+    readonly changed: number,
+    readonly limit: number,
+    message?: string,
+    /** A fork's review: the window of the fork's main its changes are listed from. */
+    readonly listing?: { graphId: string; fromSeq: number; toSeq: number },
+  ) {
     super(message ?? `${changed} changes — more than ${limit} are listed a page at a time`)
     this.name = 'DiffTooLargeError'
   }
@@ -988,7 +1092,8 @@ export class DiffTooLargeError extends Error {
 function versioningError(status: number, detail: RefusalDetail, fallback: string): Error {
   const d = typeof detail === 'object' && detail ? detail : undefined
   if (status === 409 && d?.type === 'merge_conflict') {
-    return new MergeConflictError(d.conflicts ?? [], (d.current ?? {}) as Record<string, EntityView>)
+    return new MergeConflictError(d.conflicts ?? [], (d.current ?? {}) as Record<string, EntityView>,
+      (d.seeds ?? {}) as Record<string, Record<string, unknown> | undefined>)
   }
   if (status === 409 && d?.type === 'integrity') {
     return new IntegrityError(d.message)
@@ -1030,7 +1135,7 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
     return new ReviewRequiredError(d)
   }
   if (status === 409 && d?.type === 'too_large_for_tree') {
-    return new DiffTooLargeError(d.changed ?? 0, d.limit ?? 0, d.message)
+    return new DiffTooLargeError(d.changed ?? 0, d.limit ?? 0, d.message, d.list)
   }
   if (status === 409 && d?.type === 'graph_not_writable') {
     return new GraphNotWritableError(d.message)
@@ -1051,7 +1156,14 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   if (status === 409 && (d?.type === 'stale_decision' || d?.type === 'not_awaiting_decision')) {
     return new BootstrapDecisionError(d.type, d.message)
   }
+  if ((status === 409 || status === 422) && d?.type && REVIEW_DECISION_REFUSALS.has(d.type)) {
+    return new ReviewDecisionError(d.type as ReviewDecisionRefusal, d.message ?? fallback, d as Record<string, unknown>)
+  }
   if (status === 401) return new Error('Session expired')
+  if (status === 413) {
+    // Nothing was written: the request was larger than the server takes in one go.
+    return Object.assign(new Error('This is too large to send in one go — nothing was saved. Save part of it, then the rest.'), { status })
+  }
   const msg =
     typeof detail === 'string'
       ? detail
@@ -1495,6 +1607,10 @@ export interface DraftsPolicySettings {
   levels: DraftLevels | null
   selfApproval: boolean | null
   selfMerge: boolean | null
+  /** How many approvals a review needs: 0, everyone asked; N, any N that still stand. */
+  requiredApprovals: number | null
+  /** Whether open threads hold a review's merge until they are resolved. */
+  threadsHold: boolean | null
 }
 
 /** What holds, with the level each field came from (`data_source`, `workspace` or `default`). */
@@ -1503,6 +1619,8 @@ export interface EffectiveDraftsPolicy {
   levels: DraftLevels
   selfApproval: boolean
   selfMerge: boolean
+  requiredApprovals: number
+  threadsHold: boolean
   sources: Partial<Record<keyof DraftsPolicySettings, 'data_source' | 'workspace' | 'default'>>
 }
 
@@ -1758,6 +1876,69 @@ export function applyGraphChanges(
   })
 }
 
+/** Past this many ops a save goes in parts (``saveGraphChangesInParts``): one request of them would
+ *  outlast the request timeout, or the request size limit. */
+export const SAVE_IN_PARTS_ABOVE = 20_000
+
+/** How far a save sent in parts has got. */
+export type SaveProgress =
+  | { phase: 'preparing' }
+  | { phase: 'uploading'; sent: number; total: number }
+  | { phase: 'saving' }
+
+interface SaveJob {
+  jobId: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  phase?: string | null
+  error?: { status: number; detail: RefusalDetail } | null
+  result?: GraphChangesResult | null
+}
+
+/**
+ * ``applyGraphChanges`` for a batch too large for one request: its ops go up as NDJSON in parts
+ * (resumable — the same key picks the upload up after a failure or a reload), then the server writes
+ * them as ONE commit in a job, followed here until it ends. Same answer, same refusals (typed as a
+ * one-request save's), and the same Idempotency-Key: a save tried in one request first lands once.
+ */
+export async function saveGraphChangesInParts(
+  wsId: string,
+  graphId: string,
+  branchId: string,
+  ops: GraphChangeOp[],
+  message: string | undefined,
+  idempotencyKey: string,
+  onProgress?: (p: SaveProgress) => void,
+): Promise<GraphChangesResult> {
+  onProgress?.({ phase: 'preparing' })
+  const file = new File(ops.map((op) => `${JSON.stringify(op)}\n`), 'save.ndjson',
+    { type: 'application/x-ndjson', lastModified: 0 })
+  const uploadKey = `save-upload:${idempotencyKey}`
+  const upload = await sendNdjsonInParts(wsId, graphId, file, {
+    key: uploadKey, onProgress: (sent, total) => onProgress?.({ phase: 'uploading', sent, total }),
+  })
+  onProgress?.({ phase: 'saving' })
+  let job = await vfetch<SaveJob>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/saves`, {
+    method: 'POST',
+    body: JSON.stringify({ uploadId: upload.uploadId, message }),
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
+  // Followed until it ends; a poll that fails (a blip) is asked again, a few times.
+  for (let delay = 500, misses = 0; job.status === 'pending' || job.status === 'running';) {
+    await new Promise((r) => setTimeout(r, delay))
+    try {
+      job = await vfetch<SaveJob>(`${base(wsId)}/graphs/${graphId}/save-jobs/${job.jobId}`)
+      delay = Math.min(delay * 1.5, 3000)
+      misses = 0
+    } catch (e) {
+      if (++misses >= 5) throw e
+    }
+  }
+  remember(uploadKey, null)
+  if (job.status === 'completed' && job.result) return job.result
+  throw versioningError(job.error?.status ?? 500, job.error?.detail ?? 'The save did not finish. Save again.',
+    'The save did not finish. Save again.')
+}
+
 /**
  * Stage a batch of ops and fold them into one commit — the staged-changes "Save".
  * Returns the `assigned` temp-id→real-id map (from staging) and the new commit id.
@@ -1849,6 +2030,43 @@ export function getEntityHistoryPage(
   const qs = sp.toString()
   return vfetch<EntityHistoryResponse>(
     `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/history${qs ? `?${qs}` : ''}`,
+  )
+}
+
+/** One revision of an entity, with the entity as that revision left it. */
+export interface EntityRevisionValue {
+  id: string
+  commit_id: string
+  commit_seq: number
+  branch_id: string
+  op: 'create' | 'update' | 'delete'
+  actor?: string | null
+  change_reason?: string | null
+  created_at: string
+  commit_kind?: string | null
+  commit_message?: string | null
+  on_draft: boolean
+  /** The entity as it was (a deletion's: `deleted`). */
+  value?: EntityView | null
+  /** A deletion's: the entity just before it was deleted, when on record. */
+  last_value?: EntityView | null
+  userNames?: Record<string, string>
+}
+
+/** One revision of an entity — a history row, by its `id` — with the entity as it left it. */
+export function getEntityRevision(
+  wsId: string,
+  graphId: string,
+  entityId: string,
+  versionId: string,
+  params: { branchId?: string | null; kind?: 'node' | 'edge' } = {},
+): Promise<EntityRevisionValue> {
+  const sp = new URLSearchParams()
+  if (params.branchId) sp.set('branchId', params.branchId)
+  if (params.kind) sp.set('kind', params.kind)
+  const qs = sp.toString()
+  return vfetch<EntityRevisionValue>(
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/revisions/${encodeURIComponent(versionId)}${qs ? `?${qs}` : ''}`,
   )
 }
 
@@ -2046,6 +2264,27 @@ export interface ChangeListRow {
   targetEntityId?: string | null
   sourceName?: string | null
   targetName?: string | null
+  /** Asked for with `summary`: what it changed — counts, and its first few fields with their values. */
+  fields?: ChangeFieldSummary | null
+  /** Asked for with `paths`: its containers' names, top down. */
+  path?: string[] | null
+}
+
+/** A change's fields at a glance, as the server summarizes them (`change_csv.field_summary`). */
+export interface ChangeFieldSummary {
+  changed: number
+  added: number
+  removed: number
+  total: number
+  top: Array<{
+    label: string
+    folder?: string | null
+    kind: 'added' | 'changed' | 'removed'
+    before?: unknown
+    after?: unknown
+    /** A value was cut short to travel with the row. */
+    clipped?: boolean
+  }>
 }
 
 export interface ChangeListPage {
@@ -2101,10 +2340,26 @@ export function getChangeSummary(
   return vfetch<ChangeListSummary>(`${base(wsId)}/graphs/${graphId}/diff/summary?${changeOriginParams(origin)}`)
 }
 
-/** A page of a change list in its fixed order (entities, relationships, structure; by type, then name). */
+/** Where a change list downloads as CSV — streamed by the server, with the list's filters, in its
+ *  order: one row per change, or (`properties`) one per changed field and property. */
+export function changeListExportUrl(
+  wsId: string, graphId: string, origin: ChangeListOrigin, filter: ChangeListFilter = {},
+  detail: 'changes' | 'properties' = 'changes',
+): string {
+  const sp = changeOriginParams(origin)
+  if (filter.kind) sp.set('kind', filter.kind)
+  if (filter.statuses?.length) sp.set('status', filter.statuses.join(','))
+  if (filter.type) sp.set('type', filter.type)
+  if (filter.q?.trim()) sp.set('q', filter.q.trim())
+  sp.set('detail', detail)
+  return `${base(wsId)}/graphs/${graphId}/diff/export.csv?${sp}`
+}
+
+/** A page of a change list in its fixed order (entities, relationships, structure; by type, then name).
+ *  `summary`: each row says what it changed; `paths`: where it sits. */
 export function getChangeEntries(
   wsId: string, graphId: string, origin: ChangeListOrigin, filter: ChangeListFilter = {},
-  offset = 0, limit = 100,
+  offset = 0, limit = 100, summary = false, paths = false,
 ): Promise<ChangeListPage> {
   const sp = changeOriginParams(origin)
   if (filter.kind) sp.set('kind', filter.kind)
@@ -2113,7 +2368,61 @@ export function getChangeEntries(
   if (filter.q?.trim()) sp.set('q', filter.q.trim())
   sp.set('offset', String(offset))
   sp.set('limit', String(limit))
+  if (summary) sp.set('summary', 'true')
+  if (paths) sp.set('paths', 'true')
   return vfetch<ChangeListPage>(`${base(wsId)}/graphs/${graphId}/diff/entries?${sp}`)
+}
+
+/** What sits directly in a container of a change list laid out top-down: a change, or a container
+ *  no change touched — with how many changes are under it. */
+export interface ChangeTreeItem {
+  id: string
+  inside: { added: number; modified: number; removed: number }
+  hasChildren: boolean
+  /** It changed: its row (in a review, with its decision). */
+  change?: ChangeListRow | ReviewChangeRow
+  /** It did not: what it is called. */
+  name?: string
+  type?: string | null
+}
+
+export interface ChangeTreeLevel {
+  items: ChangeTreeItem[]
+  total: number
+  offset: number
+  limit: number
+  hasMore: boolean
+  /** The containers down to this one, named. */
+  path: Array<{ id: string; name: string }>
+}
+
+/** One level of a change list top-down (the top when `parent` is null), most-changed first. */
+export function getChangeTreeLevel(
+  wsId: string, graphId: string, origin: ChangeListOrigin, parent: string | null,
+  offset = 0, limit = 100, summary = false,
+): Promise<ChangeTreeLevel> {
+  const sp = changeOriginParams(origin)
+  if (parent) sp.set('parent', parent)
+  sp.set('offset', String(offset))
+  sp.set('limit', String(limit))
+  if (summary) sp.set('summary', 'true')
+  return vfetch<ChangeTreeLevel>(`${base(wsId)}/graphs/${graphId}/diff/tree?${sp}`)
+}
+
+/** Where a change sits: its containers from the top down, and where each (and it) sits among its
+ *  container's children (`at`) — what revealing it in the tree opens. */
+export interface ChangeTreePath {
+  entityId: string
+  at: number | null
+  path: Array<{ id: string; name: string; at: number | null }>
+}
+
+export function getChangeTreePath(
+  wsId: string, graphId: string, origin: ChangeListOrigin, entityId: string,
+): Promise<ChangeTreePath> {
+  const sp = changeOriginParams(origin)
+  sp.set('entityId', entityId)
+  return vfetch(`${base(wsId)}/graphs/${graphId}/diff/tree/path?${sp}`)
 }
 
 /** One entity's value before and after, for the same origin as its list. */
@@ -2355,7 +2664,8 @@ export function openMergeRequest(
   wsId: string,
   graphId: string,
   branchId: string,
-  data: { title?: string; description?: string; reviewers?: string[] } = {},
+  /** `reviewerGroups`: groups asked to review it (`listReviewerGroups`); any member answers for one. */
+  data: { title?: string; description?: string; reviewers?: string[]; reviewerGroups?: string[] } = {},
 ): Promise<{ prId: string }> {
   return vfetch<{ prId: string }>(
     `${base(wsId)}/graphs/${graphId}/branches/${branchId}/merge-requests`,
@@ -2375,6 +2685,202 @@ export interface ReviewerCandidate {
 export function listReviewerCandidates(wsId: string, dataSourceId?: string | null): Promise<ReviewerCandidate[]> {
   const q = dataSourceId ? `?dataSourceId=${encodeURIComponent(dataSourceId)}` : ''
   return vfetch<ReviewerCandidate[]>(`${base(wsId)}/reviewers${q}`)
+}
+
+// ============================================
+// A review's discussion
+// ============================================
+
+/** One comment of a review's discussion. A deleted one keeps its place, with no body. */
+export interface ReviewComment {
+  id: string
+  /** The thread's first comment — itself, for a first comment. */
+  threadId: string
+  /** The change it is on; none for a comment on the review as a whole. */
+  entityId: string | null
+  /** The field or property of that change ("Description", "Technical/Owner"). */
+  path: string | null
+  body: string
+  /** People mentioned (ids), each told. */
+  mentions: string[]
+  author: string
+  createdAt: string
+  editedAt: string | null
+  deleted: boolean
+  resolvedAt: string | null
+  resolvedBy: string | null
+}
+
+/** A thread: its first comment, its replies in order, and whether its change was edited since. */
+export interface ReviewThread extends ReviewComment {
+  replies: ReviewComment[]
+  outdated: boolean
+}
+
+export interface ReviewThreadPage {
+  threads: ReviewThread[]
+  total: number
+  offset: number
+  limit: number
+  hasMore: boolean
+  /** Authors and people mentioned, by name. */
+  userNames: Record<string, string>
+}
+
+export interface ReviewCommentCounts {
+  /** Threads per change with any: open, and in all. */
+  entities: Record<string, { open: number; total: number }>
+  general: { open: number; total: number }
+  open: number
+}
+
+export interface ReviewThreadFilter {
+  entityId?: string
+  general?: boolean
+  threadId?: string
+  state?: 'open' | 'resolved' | 'all'
+}
+
+// ============================================
+// A draft's review decided change by change
+// ============================================
+
+export type DecisionVerdict = 'accepted' | 'rejected'
+export type DecisionState = 'undecided' | 'accepted' | 'rejected' | 'stale'
+
+/** A change's decision: who decided what, why (a rejection), what it came with, and whether the
+ *  change was edited since (`stale`: it no longer holds). */
+export interface ReviewDecision {
+  verdict: DecisionVerdict
+  reason: string | null
+  actor: string
+  decidedAt: string
+  /** The change it was decided with (accepting a new edge accepts the new entity it joins). */
+  impliedBy: string | null
+  stale: boolean
+}
+
+export interface ReviewChangeRow extends ChangeListRow {
+  decision: ReviewDecision | null
+}
+
+export interface ReviewChangePage extends Omit<ChangeListPage, 'entries'> {
+  entries: ReviewChangeRow[]
+}
+
+export interface ReviewDecisionSummary {
+  total: number
+  accepted: number
+  rejected: number
+  stale: number
+  undecided: number
+  /** Changes what is accepted needs that are not accepted: Merge accepted waits for them. */
+  missing: number
+  missingIds: string[]
+  headCommitId: string | null
+}
+
+export interface DecisionOutcome {
+  decided: number
+  /** What was decided with them (up to 200), and how many in all. */
+  implied: Array<{ entityId: string; impliedBy: string }>
+  impliedCount: number
+  /** Decisions it reverses (or would): changes it takes with it that were decided otherwise. */
+  overrides: Array<{ entityId: string; verdict: DecisionVerdict; impliedBy: string | null }>
+  overrideCount: number
+  dryRun: boolean
+}
+
+export type DecisionFilter = ChangeListFilter & { decision?: DecisionState }
+
+/** A page of a draft review's changes, each with its decision. */
+export function listReviewChanges(
+  wsId: string, prId: string, filter: DecisionFilter = {}, offset = 0, limit = 100, summary = false, paths = false,
+): Promise<ReviewChangePage> {
+  const sp = new URLSearchParams()
+  if (filter.decision) sp.set('decision', filter.decision)
+  if (filter.kind) sp.set('kind', filter.kind)
+  if (filter.statuses?.length) sp.set('status', filter.statuses.join(','))
+  if (filter.type) sp.set('type', filter.type)
+  if (filter.q?.trim()) sp.set('q', filter.q.trim())
+  sp.set('offset', String(offset))
+  sp.set('limit', String(limit))
+  if (summary) sp.set('summary', 'true')
+  if (paths) sp.set('paths', 'true')
+  return vfetch<ReviewChangePage>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/changes?${sp}`)
+}
+
+/** A draft review's changes top-down (as {@link getChangeTreeLevel}), each with its decision. */
+export function getReviewChangeTreeLevel(
+  wsId: string, prId: string, parent: string | null, offset = 0, limit = 100, summary = false,
+): Promise<ChangeTreeLevel> {
+  const sp = new URLSearchParams()
+  if (parent) sp.set('parent', parent)
+  sp.set('offset', String(offset))
+  sp.set('limit', String(limit))
+  if (summary) sp.set('summary', 'true')
+  return vfetch<ChangeTreeLevel>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/tree?${sp}`)
+}
+
+export function getReviewDecisionSummary(wsId: string, prId: string): Promise<ReviewDecisionSummary> {
+  return vfetch<ReviewDecisionSummary>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/decisions/summary`)
+}
+
+/** Accept or reject changes — by id, or every change a filter lists — or clear them (`verdict`
+ *  null). What they need is decided with them; `dryRun` says what would be. */
+export function decideReviewChanges(wsId: string, prId: string, body: {
+  verdict: DecisionVerdict | null
+  entityIds?: string[]
+  filter?: DecisionFilter
+  reason?: string | null
+  expectedHeadCommitId?: string | null
+  dryRun?: boolean
+  force?: boolean
+}): Promise<DecisionOutcome> {
+  return vfetch<DecisionOutcome>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/decisions`,
+    { method: 'PUT', body: JSON.stringify(body) })
+}
+
+const commentsBase = (wsId: string, prId: string) => `${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/comments`
+
+/** A page of a review's threads, newest first. */
+export function listReviewThreads(
+  wsId: string, prId: string, filter: ReviewThreadFilter, offset = 0, limit = 20,
+): Promise<ReviewThreadPage> {
+  const sp = new URLSearchParams({ offset: String(offset), limit: String(limit), state: filter.state ?? 'all' })
+  if (filter.threadId) sp.set('threadId', filter.threadId)
+  else if (filter.entityId) sp.set('entityId', filter.entityId)
+  else if (filter.general) sp.set('general', 'true')
+  return vfetch<ReviewThreadPage>(`${commentsBase(wsId, prId)}?${sp}`)
+}
+
+/** Threads per change, and on the review — what a change list badges. */
+export function getReviewCommentCounts(wsId: string, prId: string): Promise<ReviewCommentCounts> {
+  return vfetch<ReviewCommentCounts>(`${commentsBase(wsId, prId)}/counts`)
+}
+
+/** Who can be mentioned in a review's discussion. */
+export function listReviewCommentPeople(wsId: string, prId: string): Promise<ReviewerCandidate[]> {
+  return vfetch<ReviewerCandidate[]>(`${commentsBase(wsId, prId)}/people`)
+}
+
+/** A new thread (on a change, a field of it, or the review) or, with `threadId`, a reply. */
+export function postReviewComment(wsId: string, prId: string, data: {
+  body: string; entityId?: string | null; path?: string | null; threadId?: string | null; mentions?: string[]
+}): Promise<ReviewThread & { userNames: Record<string, string> }> {
+  return vfetch(commentsBase(wsId, prId), jsonBody(data))
+}
+
+export function editReviewComment(wsId: string, prId: string, commentId: string, body: string): Promise<ReviewComment> {
+  return vfetch(`${commentsBase(wsId, prId)}/${encodeURIComponent(commentId)}`, { method: 'PATCH', body: JSON.stringify({ body }) })
+}
+
+export function deleteReviewComment(wsId: string, prId: string, commentId: string): Promise<void> {
+  return vfetch(`${commentsBase(wsId, prId)}/${encodeURIComponent(commentId)}`, { method: 'DELETE' })
+}
+
+export function setReviewThreadResolved(wsId: string, prId: string, threadId: string, resolved: boolean): Promise<ReviewComment> {
+  return vfetch(`${commentsBase(wsId, prId)}/${encodeURIComponent(threadId)}/${resolved ? 'resolve' : 'reopen'}`, jsonBody({}))
 }
 
 export function listMergeRequests(wsId: string, graphId: string): Promise<PullRequest[]> {
@@ -2401,10 +2907,114 @@ export function closeMergeRequest(wsId: string, prId: string): Promise<PullReque
   return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}/close`, jsonBody({}))
 }
 
+export function withdrawChangesRequest(wsId: string, prId: string): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/request-changes`, { method: 'DELETE' })
+}
+
+// ── A review given, who reviews, and what happened ──────────────────────────
+
+/** A reviewer's verdict: approve, ask for changes, or comment (feedback, with a summary). */
+export type ReviewVerdict = 'approve' | 'request_changes' | 'comment'
+
+/** Give your review: a verdict and a summary, of the head the reviewer saw ({@link HeadMovedError}
+ *  when the draft has moved on since). It replaces their earlier verdict. Refused 403 with the
+ *  `viewerCan` reason, 422 `summary_required` for a comment with no summary. */
+export function submitReview(
+  wsId: string, prId: string, body: { verdict: ReviewVerdict; body?: string | null; expectedHeadCommitId?: string | null },
+): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/reviews`, jsonBody(body))
+}
+
+/** Who reviews it: each list given replaces its kind (one left out is untouched). Those newly asked
+ *  are told. 422 `unknown_group` for a group that may not review here. */
+export function setReviewers(wsId: string, prId: string, body: { users?: string[]; groups?: string[] }): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/reviewers`, {
+    method: 'PUT', body: JSON.stringify(body),
+  })
+}
+
+/** Ask people and groups already asked to review it again: it is back in their queue, and they are told. */
+export function reRequestReviewers(wsId: string, prId: string, body: { users: string[]; groups: string[] }): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/reviewers/re-request`, jsonBody(body))
+}
+
+/** A group that may be asked to review here, and how many people are in it. */
+export interface ReviewerGroup {
+  groupId: string
+  name: string
+  description?: string | null
+  memberCount: number
+}
+
+/** The groups that may be asked to review in this workspace. */
+export function listReviewerGroups(wsId: string): Promise<ReviewerGroup[]> {
+  return vfetch<ReviewerGroup[]>(`${base(wsId)}/reviewer-groups`)
+}
+
+/** One thing that happened on a review: opened; who was asked (`subjects`), asked again, no longer
+ *  asked; a review given (`verdict`, `body` its summary, `tally` what the reviewer did, `groups` the
+ *  groups an approval answers for); a verdict taken back (`withdrew`); merged; closed. */
+export interface ReviewEvent {
+  kind: 'opened' | 'requested' | 'unrequested' | 're_requested' | 'reviewed' | 'withdrew' | 'merged' | 'closed'
+  actor?: string | null
+  at?: string | null
+  verdict?: ReviewVerdict | null
+  body?: string | null
+  headCommitId?: string | null
+  subjects: Array<{ type: 'user' | 'group'; id: string }>
+  groups: string[]
+  tally?: { accepted: number; rejected: number; threads: number } | null
+}
+
+export interface ReviewEvents {
+  events: ReviewEvent[]
+  userNames: Record<string, string>
+  groupNames: Record<string, string>
+}
+
+/** A review's history, oldest first, with the names of the people and groups in it. */
+export function listReviewEvents(wsId: string, prId: string): Promise<ReviewEvents> {
+  return vfetch<ReviewEvents>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/events`)
+}
+
+/** What discarding a draft's saved changes did (or, `dryRun`, would do): how many it puts back,
+ *  and which of them came with the ones chosen (what holds them together). */
+export interface RestoreOutcome {
+  restored: number
+  chosen: number
+  implied: Array<{ entityId: string; impliedBy: string }>
+  impliedCount: number
+  dryRun: boolean
+  commitId: string | null
+  headCommitId?: string | null
+}
+
+/** Discard saved changes from a draft — by id, or every change a filter lists — as one restore
+ *  commit that puts each back where the draft began. */
+export function restoreDraftChanges(wsId: string, graphId: string, branchId: string, body: {
+  entityIds?: string[]
+  filter?: ChangeListFilter
+  expectedHeadCommitId?: string | null
+  dryRun?: boolean
+}): Promise<RestoreOutcome> {
+  const { filter, ...rest } = body
+  return vfetch<RestoreOutcome>(`${base(wsId)}/graphs/${graphId}/branches/${encodeURIComponent(branchId)}/restore`, jsonBody({
+    ...rest,
+    ...(filter ? { filter: { kind: filter.kind, statuses: filter.statuses ?? [], type: filter.type, q: filter.q?.trim() || undefined } } : {}),
+  }))
+}
+
+/** Discard what a draft's review rejected from the draft — its author taking the review's answer. */
+export function discardRejectedChanges(wsId: string, prId: string): Promise<RestoreOutcome> {
+  return vfetch<RestoreOutcome>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/discard-rejected`, jsonBody({}))
+}
+
 export async function mergeMergeRequest(
   wsId: string,
   prId: string,
-  data: { message: string; resolutions?: ResolutionMap },
+  /** `mode: 'accepted'`: a draft's review merges only its accepted changes; the draft keeps the rest
+   *  — less what it rejected, with `discardRejected`. */
+  data: { message: string; resolutions?: ResolutionMap; mode?: 'all' | 'accepted'; discardRejected?: boolean },
 ): Promise<PublishResult> {
   return followPublish(wsId, await vfetch<PublishResult | QueuedPublish>(
     `${base(wsId)}/merge-requests/${prId}/merge`, jsonBody(data)))
@@ -2459,6 +3069,64 @@ export function openForkPullRequest(
  *  unified ChangesPanel. Counts match {@link previewMergeRequest}. */
 export function getMergeRequestDiff(wsId: string, prId: string): Promise<DiffVsMainResponse> {
   return vfetch<DiffVsMainResponse>(`${base(wsId)}/merge-requests/${prId}/diff`)
+}
+
+// ============================================
+// The review inbox — a workspace's reviews in the queues the reader works by
+// ============================================
+
+/** `needs_review`: asked of the reader (or a group of theirs) and not reviewed as it is now; the
+ *  reader's own — `waiting`, `sent_back`, `ready`; `open`: every live review they may see; `done`:
+ *  merged or closed. */
+export type ReviewInboxQueue = 'needs_review' | 'waiting' | 'sent_back' | 'ready' | 'open' | 'done'
+
+/** Each queue's count, and how many in it are unread (`done`'s unread is always 0). `capped`: more
+ *  than 1,000 live reviews, the oldest left out. */
+export interface ReviewInboxCounts {
+  counts: Record<ReviewInboxQueue, number>
+  unread: Record<ReviewInboxQueue, number>
+  capped: boolean
+}
+
+/** A page of one queue, with every queue's counts (filtered as the page is). */
+export interface ReviewInboxPage extends ReviewInboxCounts {
+  queue: ReviewInboxQueue
+  items: PullRequest[]
+  total: number
+}
+
+export interface ReviewInboxParams {
+  queue?: ReviewInboxQueue
+  /** Searches the title, the description and the id. */
+  q?: string
+  dataSourceId?: string | null
+  author?: string | null
+  sort?: 'activity' | 'created'
+  limit?: number
+  offset?: number
+}
+
+export function getReviewInbox(wsId: string, params: ReviewInboxParams = {}): Promise<ReviewInboxPage> {
+  const sp = new URLSearchParams()
+  if (params.queue) sp.set('queue', params.queue)
+  if (params.q?.trim()) sp.set('q', params.q.trim())
+  if (params.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
+  if (params.author) sp.set('author', params.author)
+  if (params.sort) sp.set('sort', params.sort)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return vfetch<ReviewInboxPage>(`${base(wsId)}/review-inbox${qs ? `?${qs}` : ''}`)
+}
+
+/** Each queue's count and unread count, no rows: what the Reviews badge shows. */
+export function getReviewInboxCounts(wsId: string): Promise<ReviewInboxCounts> {
+  return vfetch<ReviewInboxCounts>(`${base(wsId)}/review-inbox/counts`)
+}
+
+/** The reader looked at a review: it stops being unread, and their notifications of it are read. */
+export function markReviewSeen(wsId: string, prId: string): Promise<void> {
+  return vfetch<void>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/seen`, jsonBody({}))
 }
 
 // ============================================

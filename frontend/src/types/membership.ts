@@ -6,6 +6,7 @@
  * limit the resolution reached. The canvas calls the feature Narrow.
  */
 import type { Predicate } from './search'
+import type { MemberSetStatus } from './memberSet'
 
 /** Levels or hops; `'all'` is the whole way. */
 export type Depth = number | 'all'
@@ -42,7 +43,7 @@ export interface MemberEntry {
   hops?: number | null
 }
 
-export type TruncationReason = 'seed_cap' | 'member_cap' | 'trace_cap' | 'deadline' | 'incomplete' | 'chains_cap'
+export type TruncationReason = 'seed_cap' | 'member_cap' | 'trace_cap' | 'deadline' | 'incomplete' | 'chains_cap' | 'edge_cap'
 
 export interface MembershipTruncation {
   reason: TruncationReason
@@ -84,8 +85,10 @@ export interface MembershipRequest {
 
 /** `live` keeps the members in step with the data; `snapshot` keeps them as they are. */
 export type MembershipMode = 'live' | 'snapshot'
-export type LayoutKind = 'source' | 'template' | 'auto' | 'stages' | 'custom'
-export type MembershipOrigin = 'narrow' | 'search' | 'savedQuery' | 'wizard' | 'api'
+/** `follow`: a subset of `sourceViewId` — its layers served from that view as they change
+ *  there, each member placed where it places it. */
+export type LayoutKind = 'source' | 'template' | 'auto' | 'stages' | 'custom' | 'follow'
+export type MembershipOrigin = 'narrow' | 'search' | 'savedQuery' | 'wizard' | 'api' | 'trace'
 
 /** One query a view's members come from — a query seed is searched in `readIn`. */
 export interface MembershipSource {
@@ -132,6 +135,17 @@ export interface PlanRequest {
   exclude?: string[]
 }
 
+/** The server is still working out what the sources reach (202): ask again,
+ *  the same way, to carry on — nothing is made until they are complete. */
+export interface MembershipResolving {
+  status: 'resolving'
+  sets: MemberSetStatus[]
+}
+
+export function isResolving(answer: unknown): answer is MembershipResolving {
+  return typeof answer === 'object' && answer !== null && (answer as { status?: unknown }).status === 'resolving'
+}
+
 export interface PlanLayer {
   id: string
   name: string
@@ -149,6 +163,8 @@ export interface MembershipPlan {
   included: number
   limit: number
   overCap: boolean
+  /** Layer counts placed from a sample of a large set, not every member. */
+  estimated?: boolean
   layers: PlanLayer[]
   fallback: number
   truncated: MembershipTruncation[]
@@ -186,6 +202,8 @@ export interface ReadInView {
 export interface MembershipStatus {
   mode: MembershipMode
   status: MembershipStatusKind
+  /** The view it follows (layout `follow`); its name only for a reader who can open it. */
+  follows?: ReadInView | null
   detail?: Record<string, unknown> | null
   revision: number
   definition: MembershipDefinition
@@ -218,6 +236,8 @@ export interface MemberOps {
 
 export type RefreshOutcome =
   | 'applied' | 'unchanged' | 'current' | 'held' | 'over_cap' | 'deferred' | 'busy' | 'fenced' | 'source_missing' | 'failed'
+  /** A large set still being worked out: ask again to carry on. */
+  | 'running'
 
 export interface RefreshResult {
   outcome: RefreshOutcome

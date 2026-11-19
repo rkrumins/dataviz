@@ -28,7 +28,7 @@
  */
 import { useCallback } from 'react'
 import { useCanvasStore, type LineageEdge } from '@/store/canvas'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { useStageEntityCreation } from '@/components/canvas/create/useStageEntityCreation'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useViewIsContainmentEdge } from '@/hooks/useViewSchema'
@@ -103,10 +103,13 @@ interface DuplicateSnapshot {
   originalParentUrn: string | undefined
 }
 
+/** One copy made: the original it copies, and the copy's staged urn. */
+export interface NodeCopy { originalId: string; originalUrn: string; copyUrn: string }
+
 export interface UseDuplicateSubtreeOptions {
-  /** Fired per staged copy (root + every descendant) as it is created, so a
-   *  layered canvas can assign each copy to its original's layer. */
-  onNodeCopied?: (originalId: string, originalUrn: string, copyUrn: string) => void
+  /** Every staged copy (root + every descendant), told once when the copy is staged, so a layered
+   *  canvas can assign each to its original's layer in one layout write. */
+  onNodesCopied?: (copies: NodeCopy[]) => void
 }
 
 export interface UseDuplicateSubtreeResult {
@@ -127,7 +130,7 @@ export interface UseDuplicateSubtreeResult {
 }
 
 export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDuplicateSubtreeResult {
-  const { stageEntity } = useStageEntityCreation()
+  const { entityBatch } = useStageEntityCreation()
   const { loadChildren } = useGraphHydration()
   const isContainmentEdge = useViewIsContainmentEdge()
   const provider = useGraphProvider()
@@ -308,6 +311,10 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
     const plan = planDuplicate(prepared.nodeId, childMap, nodeData, lineageEdges, choice)
     if (plan.nodes.length > DUPLICATE_MAX) return null
 
+    // The whole copy is one action: every entity and relationship drawn at once and staged in one
+    // write — one Undo step takes it all back.
+    const batch = entityBatch()
+    const copied: NodeCopy[] = []
     const stagedUrns = new Map<string, string>() // originalId -> staged urn
     let rootCopyUrn: string | null = null
     for (const step of plan.nodes) {
@@ -320,7 +327,7 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
       // description would read empty. The planner carries the description in the bag; it leaves
       // it here.
       const { description, ...properties } = step.properties
-      const stagedUrn = stageEntity({
+      const stagedUrn = batch.add({
         entityType: step.entityType,
         displayName: isRoot && choice.name?.trim() ? choice.name.trim() : step.displayName,
         parentUrn,
@@ -332,14 +339,18 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
       })
       stagedUrns.set(step.originalId, stagedUrn)
       if (isRoot) rootCopyUrn = stagedUrn
-      opts?.onNodeCopied?.(step.originalId, step.originalUrn, stagedUrn)
+      copied.push({ originalId: step.originalId, originalUrn: step.originalUrn, copyUrn: stagedUrn })
     }
+    const entityChanges = batch.finish()
 
     // Edges — AFTER all nodes are staged, so every copied endpoint exists. A
     // boundary edge keeps its original partner at one end. Recreated directly
     // as a staged create_edge: each copies an edge that already passed the
     // ontology between the same two types (see CreateLinkPopover for the
     // user-drawn path that DOES need the draw-time gate).
+    // One canvas write and one staged write for every copied relationship (one Undo step).
+    const copies: LineageEdge[] = []
+    const edgeChanges: StagedChange[] = []
     for (const edgeStep of plan.edges) {
       const src = edgeStep.keeps === 'source' ? edgeStep.sourceOriginalId : stagedUrns.get(edgeStep.sourceOriginalId)
       const tgt = edgeStep.keeps === 'target' ? edgeStep.targetOriginalId : stagedUrns.get(edgeStep.targetOriginalId)
@@ -354,8 +365,10 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
         // Unsaved, as a drawn link is: a collapse keeps it, the save redraws it under its real id.
         data: { edgeType: edgeStep.edgeType, relationship: edgeStep.edgeType.toLowerCase(), isPending: 'create' },
       }
-      useCanvasStore.getState().addEdges([copy])
-      useStagedChangesStore.getState().stage({
+      copies.push(copy)
+      edgeChanges.push({
+        id: generateId('staged'),
+        timestamp: Date.now(),
         type: 'create_edge',
         targetId: tempId,
         after: { edgeType: edgeStep.edgeType, source: src, target: tgt },
@@ -371,9 +384,12 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
         reapply: () => useCanvasStore.getState().addEdges([copy]),   // redo draws it again
       })
     }
+    if (copies.length) useCanvasStore.getState().addEdges(copies)
+    useStagedChangesStore.getState().stageMany([...entityChanges, ...edgeChanges])
+    opts?.onNodesCopied?.(copied)
 
     return rootCopyUrn
-  }, [stageEntity, opts?.onNodeCopied])
+  }, [entityBatch, opts?.onNodesCopied])
 
   const duplicateSubtree = useCallback(async (nodeId: string, choice: DuplicateChoice = QUICK_DUPLICATE): Promise<string | null> => {
     const prepared = await prepareDuplicate(nodeId, { boundary: choice.incoming || choice.outgoing })

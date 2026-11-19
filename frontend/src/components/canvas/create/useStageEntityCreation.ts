@@ -17,7 +17,7 @@
 import { useCallback } from 'react'
 import { useCanvasStore, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useContainmentEdgeTypes } from '@/store/schema'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { toCanvasNode } from '@/lib/canvasNodeMapper'
 import { generateId } from '@/lib/utils'
 
@@ -61,9 +61,10 @@ export function useStageEntityCreation() {
   const containmentEdgeTypes = useContainmentEdgeTypes()
   const stageChange = useStagedChangesStore((s) => s.stage)
 
-  /** Stage a new entity. Returns its optimistic temp urn. */
-  const stageEntity = useCallback(
-    (input: StageEntityInput): string => {
+  /** A new entity, built but not yet drawn or staged: its optimistic node (and containment link)
+   *  and its staged change. `parentOf` finds a parent among the nodes drawn — or about to be. */
+  const buildEntity = useCallback(
+    (input: StageEntityInput, parentOf: (urn: string) => LineageNode | undefined) => {
       const tags = input.tags ?? []
       const properties = input.properties ?? {}
       const fields = nodeFieldsOf(input)
@@ -74,11 +75,7 @@ export function useStageEntityCreation() {
       // the hierarchy. When the parent isn't a node, create at the root and let
       // layer assignment place it.
       const parentUrnRaw = input.parentUrn || undefined
-      const parentNode = parentUrnRaw
-        ? useCanvasStore.getState().nodes.find(
-            (n) => n.id === parentUrnRaw || (n.data?.urn as string) === parentUrnRaw,
-          )
-        : undefined
+      const parentNode = parentUrnRaw ? parentOf(parentUrnRaw) : undefined
       const parentUrn = parentNode ? parentUrnRaw : undefined
       const parentLabel = (parentNode?.data?.label as string) || undefined
 
@@ -89,7 +86,7 @@ export function useStageEntityCreation() {
       const containmentEdgeType = input.containmentEdgeType || containmentEdgeTypes[0]
       const containmentEdgeId = parentUrn && containmentEdgeType ? `contains-${parentUrn}-${tempUrn}` : null
 
-      addNodes([{
+      const node: LineageNode = {
         id: tempUrn,
         type: 'generic',
         position: { x: 0, y: 0 },
@@ -102,20 +99,20 @@ export function useStageEntityCreation() {
           isPending: 'create',
           properties,
         },
-      }])
-
-      if (containmentEdgeId && parentUrn && containmentEdgeType) {
-        addEdges([{
-          id: containmentEdgeId,
-          source: parentUrn,
-          target: tempUrn,
-          type: 'containment',
-          // `isPending:'create'` marks this as optimistic/unsaved so the collapse
-          // cleanup never drops it (no server re-fetch path) — keeps the hierarchy
-          // intact through collapse/expand before Save.
-          data: { edgeType: containmentEdgeType, relationship: containmentEdgeType.toLowerCase(), isPending: 'create' },
-        }])
       }
+
+      const edge: LineageEdge | null = containmentEdgeId && parentUrn && containmentEdgeType
+        ? {
+            id: containmentEdgeId,
+            source: parentUrn,
+            target: tempUrn,
+            type: 'containment',
+            // `isPending:'create'` marks this as optimistic/unsaved so the collapse
+            // cleanup never drops it (no server re-fetch path) — keeps the hierarchy
+            // intact through collapse/expand before Save.
+            data: { edgeType: containmentEdgeType, relationship: containmentEdgeType.toLowerCase(), isPending: 'create' },
+          }
+        : null
 
       let undone: { node?: LineageNode; edge?: LineageEdge } = {}
 
@@ -129,7 +126,7 @@ export function useStageEntityCreation() {
         ...(parentUrn && containmentEdgeType ? { containmentEdgeType, parentLabel } : {}),
       }
 
-      stageChange({
+      const change: Omit<StagedChange, 'id' | 'timestamp'> = {
         type: 'create_entity',
         targetId: tempUrn,
         targetUrn: tempUrn,
@@ -200,12 +197,59 @@ export function useStageEntityCreation() {
           if (undone.node) addNodes([undone.node])
           if (undone.edge) addEdges([undone.edge])
         },
-      })
+      }
 
-      return tempUrn
+      return { tempUrn, node, edge, change }
     },
-    [addNodes, addEdges, removeNode, removeEdge, containmentEdgeTypes, stageChange],
+    [addNodes, addEdges, removeNode, removeEdge, containmentEdgeTypes],
   )
+
+  /** Stage a new entity. Returns its optimistic temp urn. */
+  const stageEntity = useCallback(
+    (input: StageEntityInput): string => {
+      const built = buildEntity(input, (urn) => useCanvasStore.getState().nodes.find(
+        (n) => n.id === urn || (n.data?.urn as string) === urn,
+      ))
+      addNodes([built.node])
+      if (built.edge) addEdges([built.edge])
+      stageChange(built.change)
+      return built.tempUrn
+    },
+    [buildEntity, addNodes, addEdges, stageChange],
+  )
+
+  /**
+   * Many new entities as one action (a duplicated tree): `add` builds each — a child may name a
+   * parent added before it — and `finish` draws them all in one canvas write and returns their
+   * changes, for the caller to stage in one `stageMany` (one Undo step) with anything else the
+   * action stages. The canvas is indexed once, not scanned per entity.
+   */
+  const entityBatch = useCallback(() => {
+    const byId = new Map<string, LineageNode>()
+    for (const n of useCanvasStore.getState().nodes) {
+      byId.set(n.id, n)
+      if (typeof n.data?.urn === 'string') byId.set(n.data.urn, n)
+    }
+    const nodes: LineageNode[] = []
+    const edges: LineageEdge[] = []
+    const changes: StagedChange[] = []
+    const now = Date.now()
+    return {
+      add: (input: StageEntityInput): string => {
+        const built = buildEntity(input, (urn) => byId.get(urn))
+        byId.set(built.tempUrn, built.node)
+        nodes.push(built.node)
+        if (built.edge) edges.push(built.edge)
+        changes.push({ ...built.change, id: generateId('staged'), timestamp: now + changes.length })
+        return built.tempUrn
+      },
+      finish: (): StagedChange[] => {
+        if (nodes.length) addNodes(nodes)
+        if (edges.length) addEdges(edges)
+        return changes
+      },
+    }
+  }, [buildEntity, addNodes, addEdges])
 
   /**
    * Edit a still-staged `create_entity` row in place (Hierarchy Builder rename/details).
@@ -262,5 +306,5 @@ export function useStageEntityCreation() {
     [],
   )
 
-  return { stageEntity, updateStagedEntity }
+  return { stageEntity, entityBatch, updateStagedEntity }
 }

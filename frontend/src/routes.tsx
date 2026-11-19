@@ -70,6 +70,7 @@ const WorkspacesPage = lazyWithRetry(() => import('@/pages/WorkspacesPage').then
 const TemplatesPage = lazyWithRetry(() => import('@/pages/TemplatesPage').then(m => ({ default: m.TemplatesPage })))
 const WorkspaceDetailPage = lazyWithRetry(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const WorkspaceReviewsPage = lazyWithRetry(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
+const WorkspaceReviewPage = lazyWithRetry(() => import('@/pages/WorkspaceReviewPage').then(m => ({ default: m.WorkspaceReviewPage })))
 const OntologySchemaPage = lazyWithRetry(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 const MyAccessPage = lazyWithRetry(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
 const MyIdentitiesPage = lazyWithRetry(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
@@ -221,6 +222,7 @@ export const router = createBrowserRouter([
       // Reviews are a versioning surface — the whole route disappears (redirects
       // to the workspace) when the admin turns version control off.
       { path: 'workspaces/:wsId/reviews', element: <RequireFeature feature="versioningEnabled" explain title="Reviews are turned off" message="Reviews are part of version control, which an administrator hasn't enabled for this deployment. With it on, changes are drafted, reviewed, and merged like a pull request." guideSlug="versioning-change-control"><Lazy><WorkspaceReviewsPage /></Lazy></RequireFeature> },
+      { path: 'workspaces/:wsId/reviews/:prId', element: <RequireFeature feature="versioningEnabled" explain title="Reviews are turned off" message="Reviews are part of version control, which an administrator hasn't enabled for this deployment. With it on, changes are drafted, reviewed, and merged like a pull request." guideSlug="versioning-change-control"><Lazy><WorkspaceReviewPage /></Lazy></RequireFeature> },
 
       // The layout template library — everyone has some (the built-ins); what
       // each person may change is decided per template, not by the page.

@@ -727,6 +727,9 @@ function EdgeCard({
             discard: () => {
                 useCanvasStore.getState().addEdges([snapshot])
             },
+            reapply: () => {
+                useCanvasStore.getState().removeEdge(snapshot.id)
+            },
         })
     }
 

@@ -109,8 +109,10 @@ export function ViewVersioningPanel({
 
   // Request the backend max of top-level groups so "all branch changes" is genuinely complete —
   // the truncation advisory only appears past it (far beyond any real schema's top-level containers).
-  const summaryQ = useBranchDiffSummary(wsId, graphId, branchId ?? null, 1000)
-  const viewChangesQ = useBranchViewChanges(wsId, graphId, branchId ?? null)
+  // Read only while the Changes tab shows them: History or Reviews never wait on a draft's diff.
+  const onChanges = tab === 'changes'
+  const summaryQ = useBranchDiffSummary(wsId, graphId, onChanges ? branchId ?? null : null, 1000)
+  const viewChangesQ = useBranchViewChanges(wsId, graphId, onChanges ? branchId ?? null : null)
   const fetchChildren = useCallback(
     (key: string, offset: number) =>
       api.getBranchDiffChildren(wsId, graphId, branchId!, key, { offset, limit: 50 }),
@@ -188,6 +190,9 @@ export function ViewVersioningPanel({
                   <ChangeTreePanel
                     summary={summaryQ.data}
                     isLoading={summaryQ.isLoading}
+            preparing={summaryQ.failureCount > 0}
+                    error={summaryQ.error}
+                    onRetry={() => void summaryQ.refetch()}
                     fetchChildren={fetchChildren}
                     origin={{ source: 'branch', branchId }}
                     emptyHint="Nothing committed to this branch yet — saved canvas edits show up here."

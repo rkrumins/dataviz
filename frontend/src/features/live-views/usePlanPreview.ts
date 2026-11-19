@@ -9,11 +9,11 @@ import { useCallback, useEffect, useState } from 'react'
 
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
 import { useGraphProvider } from '@/providers'
-import type { MembershipPlan, PlanRequest } from '@/types/membership'
+import { isResolving, type MembershipPlan, type MembershipResolving, type PlanRequest } from '@/types/membership'
 
 export type PlanState =
   | { status: 'idle' }
-  | { status: 'loading'; last: MembershipPlan | null }
+  | { status: 'loading'; last: MembershipPlan | null; resolving?: MembershipResolving | null }
   | { status: 'ready'; plan: MembershipPlan }
   | { status: 'error'; message: string }
 
@@ -27,6 +27,7 @@ type Settled =
 export function usePlanPreview(viewId: string | null, request: PlanRequest | null) {
   const provider = useGraphProvider()
   const [settled, setSettled] = useState<Settled | null>(null)
+  const [resolving, setResolving] = useState<{ key: string; answer: MembershipResolving } | null>(null)
   const [attempt, setAttempt] = useState(0)
   const key = request ? JSON.stringify(request) : null
 
@@ -35,13 +36,21 @@ export function usePlanPreview(viewId: string | null, request: PlanRequest | nul
     if (!key || !viewId || !plan) return
     const body = JSON.parse(key) as PlanRequest
     const controller = new AbortController()
-    const timer = window.setTimeout(() => {
+    const ask = () => {
+      // The server's own wait applies (10 s, then 202 with its progress): no client
+      // sends one, so a server from before it took a wait still answers.
       plan(viewId, body, { signal: controller.signal })
-        .then((answer) => { if (!controller.signal.aborted) setSettled({ key, attempt, plan: answer }) })
+        .then((answer: MembershipPlan | MembershipResolving) => {
+          if (controller.signal.aborted) return
+          // Still working out what the sources reach: say how far, and carry on.
+          if (isResolving(answer)) { setResolving({ key, answer }); ask(); return }
+          setSettled({ key, attempt, plan: answer })
+        })
         .catch((err) => {
           if (!controller.signal.aborted) setSettled({ key, attempt, message: narrowErrorText(err) })
         })
-    }, DEBOUNCE_MS)
+    }
+    const timer = window.setTimeout(ask, DEBOUNCE_MS)
     return () => {
       window.clearTimeout(timer)
       controller.abort()
@@ -53,7 +62,13 @@ export function usePlanPreview(viewId: string | null, request: PlanRequest | nul
   else if (!provider.planMembers) state = { status: 'error', message: 'This data source can’t save views from a query.' }
   else if (settled && settled.key === key && settled.attempt === attempt) {
     state = 'plan' in settled ? { status: 'ready', plan: settled.plan } : { status: 'error', message: settled.message }
-  } else state = { status: 'loading', last: settled && 'plan' in settled ? settled.plan : null }
+  } else {
+    state = {
+      status: 'loading',
+      last: settled && 'plan' in settled ? settled.plan : null,
+      resolving: resolving?.key === key ? resolving.answer : null,
+    }
+  }
 
   const retry = useCallback(() => setAttempt((n) => n + 1), [])
   return { state, retry }

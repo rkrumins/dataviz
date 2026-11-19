@@ -6,6 +6,17 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { StagedChangesPanel } from '../StagedChangesPanel'
+
+// jsdom has no layout: lay every row of the virtualized list out.
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: (opts: { count: number; getItemKey?: (i: number) => string | number }) => ({
+    getVirtualItems: () => Array.from({ length: opts.count }, (_, index) => ({
+      index, key: opts.getItemKey ? opts.getItemKey(index) : index, start: index * 52, size: 52,
+    })),
+    getTotalSize: () => opts.count * 52,
+    scrollToIndex: () => undefined,
+  }),
+}))
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 
 const change = (id: string): StagedChange => ({
@@ -54,7 +65,7 @@ describe('Review & Save while a save is running', () => {
 
     expect(screen.getByRole('button', { name: 'Discard all' })).toHaveProperty('disabled', true)
     fireEvent.click(screen.getByRole('button', { name: 'Discard all' }))
-    for (const b of screen.getAllByRole('button', { name: 'Discard change' })) fireEvent.click(b)
+    for (const b of screen.getAllByRole('button', { name: /^Discard (the change to|\d+ changes to)/ })) fireEvent.click(b)
     fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
     fireEvent.click(screen.getByRole('button', { name: 'Redo' }))
     expect(state().changes.map((c) => c.id)).toEqual(['a', 'b'])

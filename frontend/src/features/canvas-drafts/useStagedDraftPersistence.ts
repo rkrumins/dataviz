@@ -21,6 +21,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useCanvasStore } from '@/store/canvas'
+import { useNotificationStore } from '@/components/ui/notifications'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { overlayOnReplace, type MoveAfter } from '@/store/stagedOverlay'
 import type { LineageEdge, LineageNode } from '@/store/canvas'
@@ -31,16 +32,21 @@ import { clearPendingSave, getPendingSave, resumePendingSave } from '@/features/
 import {
   clearSnapshot,
   markSnapshotCommitting,
-  readSnapshot,
+  readSnapshotAsync,
   reconcileSnapshot,
   toSerializableChange,
   writeSnapshot,
+  writeSnapshotAsync,
   type SerializableChange,
   type StagedDraftSnapshot,
 } from './stagedDraftPersistence'
 
 const SNAPSHOT_VERSION = 1
 const WRITE_DEBOUNCE_MS = 600
+/** A burst of edits still writes the snapshot this often: typing on never leaves it minutes old. */
+const WRITE_MAX_WAIT_MS = 4000
+
+const TOO_LARGE = 'These unsaved changes are too large to keep across a reload — save them to the draft to keep them.'
 
 /** Rebuild the per-change discard closure a restored change lost to JSON — the same undo the
  *  live change had, so discarding restored work puts the canvas back exactly as it does before a
@@ -121,62 +127,86 @@ export function useStagedDraftPersistence(
     if (!scopeKey || !hydrationComplete) return
     if (restoredForKeyRef.current === scopeKey) return
     restoredForKeyRef.current = scopeKey
-
-    const snapshot = readSnapshot(scopeKey)
-    const verdict = reconcileSnapshot(snapshot, currentBranchId)
-    if (verdict === 'discard') {
-      clearSnapshot(scopeKey)
-      return
-    }
-    if (verdict === 'noop' || !snapshot) return
-    // A save that was in flight (or never answered): saving this batch again reuses its key.
-    if (snapshot.pendingSave) resumePendingSave(snapshot.pendingSave, scopeKey)
-
-    // Lay the unsaved work ON TOP of the hydrated (committed) canvas by the same rule every later
-    // load follows (stagedOverlay): the snapshot's copies win for what the work touches (a new node,
-    // an edited one), and what it removed stays removed. Then the review op-log, so Save + the
-    // review panel see the same changes — and every later reload keeps all of it.
-    const changes = snapshot.changes.map(hydrateChange)
-    const cs = useCanvasStore.getState()
-    const { nodes, edges } = overlayOnReplace(
-      { nodes: cs.nodes, edges: cs.edges },
-      { nodes: snapshot.pendingNodes, edges: snapshot.pendingEdges },
-      changes,
-    )
-    useCanvasStore.setState({
-      nodes, edges, _nodeIndex: new Set(nodes.map((n) => n.id)), _edgeIndex: new Set(edges.map((e) => e.id)),
+    // A large snapshot is read from IndexedDB: restore when it arrives, if this is still the draft.
+    void readSnapshotAsync(scopeKey).then((snapshot) => {
+      if (restoredForKeyRef.current === scopeKey) restore(snapshot)
     })
-    useStagedChangesStore.setState({
-      changes,
-      redoStack: [],
-      applyStatus: 'idle',
-      lastApplyResult: null,
-    })
-    // Unsaved top-level entities get their column back (see StagedDraftSnapshot.pins).
-    const writer = layoutWriter()
-    const pins = Object.entries(snapshot.pins ?? {})
-    if (writer && pins.length > 0) {
-      let layout = writer.current()
-      for (const [urn, layerId] of pins) {
-        if (!layout.assignments[urn] && layout.layers.some((l) => l.id === layerId)) {
-          layout = assignEntities(layout, [urn], layerId)
-        }
+
+    function restore(snapshot: Awaited<ReturnType<typeof readSnapshotAsync>>) {
+      if (!scopeKey) return
+      const verdict = reconcileSnapshot(snapshot, currentBranchId)
+      if (verdict === 'discard') {
+        clearSnapshot(scopeKey)
+        return
       }
-      if (layout !== writer.current()) writer.persist(layout)
+      if (verdict === 'noop' || !snapshot) return
+      // A save that was in flight (or never answered): saving this batch again reuses its key.
+      if (snapshot.pendingSave) resumePendingSave(snapshot.pendingSave, scopeKey)
+
+      // Lay the unsaved work ON TOP of the hydrated (committed) canvas by the same rule every later
+      // load follows (stagedOverlay): the snapshot's copies win for what the work touches (a new node,
+      // an edited one), and what it removed stays removed. Then the review op-log, so Save + the
+      // review panel see the same changes — and every later reload keeps all of it.
+      const changes = snapshot.changes.map(hydrateChange)
+      const cs = useCanvasStore.getState()
+      const { nodes, edges } = overlayOnReplace(
+        { nodes: cs.nodes, edges: cs.edges },
+        { nodes: snapshot.pendingNodes, edges: snapshot.pendingEdges },
+        changes,
+      )
+      useCanvasStore.setState({
+        nodes, edges, _nodeIndex: new Set(nodes.map((n) => n.id)), _edgeIndex: new Set(edges.map((e) => e.id)),
+      })
+      useStagedChangesStore.setState({
+        changes,
+        redoStack: [],
+        applyStatus: 'idle',
+        lastApplyResult: null,
+      })
+      // Unsaved top-level entities get their column back (see StagedDraftSnapshot.pins).
+      const writer = layoutWriter()
+      const pins = Object.entries(snapshot.pins ?? {})
+      if (writer && pins.length > 0) {
+        let layout = writer.current()
+        for (const [urn, layerId] of pins) {
+          if (!layout.assignments[urn] && layout.layers.some((l) => l.id === layerId)) {
+            layout = assignEntities(layout, [urn], layerId)
+          }
+        }
+        if (layout !== writer.current()) writer.persist(layout)
+      }
+      setRestoredCount(snapshot.changes.length)
     }
-    setRestoredCount(snapshot.changes.length)
   }, [scopeKey, currentBranchId, hydrationComplete])
 
   // Persist on change; mark committing during a save; clear when empty.
   const writeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (!scopeKey) return
+    // The first edit the pending write holds, for the max wait; and whether the warning was given.
+    let pendingSince: number | null = null
+    let warned = false
+    // Written when the browser is idle: building and cloning tens of thousands of changes must
+    // not land in the middle of typing.
+    const idle = (fn: () => void) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 1000 }) : setTimeout(fn, 0))
+    const write = () => idle(() => {
+      pendingSince = null
+      const snapshot = buildSnapshot(scopeKey, currentBranchId)
+      if (!snapshot) { clearSnapshot(scopeKey); return }
+      void writeSnapshotAsync(snapshot).then((kept) => {
+        if (kept) { warned = false; return }
+        if (!warned) {
+          warned = true
+          useNotificationStore.getState().add({ type: 'warning', message: TOO_LARGE })
+        }
+      })
+    })
 
     const unsub = useStagedChangesStore.subscribe((state, prev) => {
       // A save going in-flight: mark the snapshot 'committing' (the save adds
       // its Idempotency-Key before the request leaves — see StagedDraftSnapshot).
       if (state.applyStatus === 'applying' && prev.applyStatus !== 'applying') {
-        markSnapshotCommitting(scopeKey)
+        void markSnapshotCommitting(scopeKey)
         return
       }
       // A save that settles with its changes still staged (it failed) rewrites the snapshot as
@@ -184,16 +214,15 @@ export function useStagedDraftPersistence(
       if (state.changes === prev.changes && state.applyStatus === prev.applyStatus) return
       if (state.changes.length === 0) {
         if (writeTimerRef.current) clearTimeout(writeTimerRef.current)
+        pendingSince = null
         clearSnapshot(scopeKey)
         clearPendingSave(scopeKey)   // saved or discarded: a save of discarded edits is never sent
         return
       }
       if (writeTimerRef.current) clearTimeout(writeTimerRef.current)
-      writeTimerRef.current = setTimeout(() => {
-        const snapshot = buildSnapshot(scopeKey, currentBranchId)
-        if (snapshot) writeSnapshot(snapshot)
-        else clearSnapshot(scopeKey)
-      }, WRITE_DEBOUNCE_MS)
+      const now = Date.now()
+      pendingSince ??= now
+      writeTimerRef.current = setTimeout(write, Math.max(0, Math.min(WRITE_DEBOUNCE_MS, pendingSince + WRITE_MAX_WAIT_MS - now)))
     })
 
     // Flush synchronously on unload so edits still inside the debounce window

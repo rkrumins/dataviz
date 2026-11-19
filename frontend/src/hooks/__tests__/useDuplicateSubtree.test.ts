@@ -140,10 +140,11 @@ describe('useDuplicateSubtree', () => {
     expect(useCanvasStore.getState().edges.find((e) => e.id === link.targetId)?.data?.isPending).toBe('create')
   })
 
-  it('fires onNodeCopied once per staged node (root + every descendant), with (originalId, originalUrn, copyUrn)', async () => {
+  it('tells onNodesCopied every staged copy (root + every descendant) at once, with (originalId, originalUrn, copyUrn)', async () => {
     const calls: Array<[string, string, string]> = []
+    let told = 0
     const { result } = renderHook(() => useDuplicateSubtree({
-      onNodeCopied: (originalId, originalUrn, copyUrn) => calls.push([originalId, originalUrn, copyUrn]),
+      onNodesCopied: (copies) => { told++; for (const c of copies) calls.push([c.originalId, c.originalUrn, c.copyUrn]) },
     }))
 
     let rootCopyUrn: string | null = null
@@ -151,7 +152,8 @@ describe('useDuplicateSubtree', () => {
       rootCopyUrn = await result.current.duplicateSubtree('r')
     })
 
-    // Subtree is r -> c1, c2: one callback per staged node.
+    // Subtree is r -> c1, c2: one call, naming every staged node.
+    expect(told).toBe(1)
     expect(calls).toHaveLength(3)
 
     const byOriginalId = new Map(calls.map(([originalId, originalUrn, copyUrn]) => [originalId, { originalUrn, copyUrn }]))
@@ -167,5 +169,21 @@ describe('useDuplicateSubtree', () => {
     )
     expect(byOriginalId.get('c1')?.copyUrn).toBe(byDisplayName.get('Child1')!.targetUrn)
     expect(byOriginalId.get('c2')?.copyUrn).toBe(byDisplayName.get('Child2')!.targetUrn)
+  })
+
+  it('stages the whole copy as one action: one write, one Undo step, entities and links together', async () => {
+    const { result } = renderHook(() => useDuplicateSubtree())
+    useStagedChangesStore.setState({ past: [], redoStack: [] } as never)
+    let writes = 0
+    const unsub = useStagedChangesStore.subscribe(() => { writes++ })
+    await act(async () => { await result.current.duplicateSubtree('r') })
+    unsub()
+    const s = useStagedChangesStore.getState()
+    expect(writes).toBe(1)
+    expect(s.past).toHaveLength(1)
+    expect(s.changes.filter((c) => c.type === 'create_entity')).toHaveLength(3)
+    act(() => { s.undo() })
+    expect(useStagedChangesStore.getState().changes).toHaveLength(0)
+    expect(useCanvasStore.getState().nodes.some((n) => n.data?.isPending === 'create')).toBe(false)
   })
 })

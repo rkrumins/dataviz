@@ -46,6 +46,9 @@ export interface ExportMatchesDialogProps {
     /** How many matches the search found, when it has counted them. */
     matchCount: number | null
     onClose: () => void
+    /** Export the matches with what they feed and are fed by instead — the
+     *  server works out the lineage (ExportLineageDialog). Absent: not offered. */
+    onWithLineage?: () => void
 }
 
 
@@ -79,7 +82,7 @@ type Phase =
     | { kind: 'failed'; message: string }
 
 
-export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: ExportMatchesDialogProps) {
+export function ExportMatchesDialog({ viewId, query, matchCount, onClose, onWithLineage }: ExportMatchesDialogProps) {
     const provider = useGraphProvider()
     // A Connections search exports edges: its columns are edge properties,
     // which discovery knows; the view's property catalog isn't read.
@@ -343,6 +346,19 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: Expo
                                     )}
                                 </div>
                             </section>
+                            {onWithLineage && !connections && (
+                                <button
+                                    type="button"
+                                    onClick={onWithLineage}
+                                    data-export-with-lineage
+                                    className="text-left rounded-xl border border-dashed border-violet-500/40 px-3 py-2 hover:bg-violet-500/10 transition-colors"
+                                >
+                                    <div className="text-[12px] font-semibold text-ink">With their sources &amp; consumers…</div>
+                                    <div className="text-[11px] text-ink-muted leading-snug">
+                                        The matches and everything upstream and downstream of them, as far as you choose — worked out on the server, however many.
+                                    </div>
+                                </button>
+                            )}
                             {phase.kind === 'failed' && (
                                 <p role="alert" className="text-[11.5px] text-rose-400">{phase.message}</p>
                             )}

@@ -49,6 +49,10 @@ class _Versioning:
         # turn forks on.
         return {"pr_id": pr_id, "target_graph_id": "g1", "source_branch_id": "br_big", "actor": self.opener}
 
+    async def refuse_if_rejected(self, *, pr_id):
+        # A review with no rejected change merges whole (``mode="accepted"`` is its other way).
+        return None
+
 
 class _Jobs:
     def __init__(self):

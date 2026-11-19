@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Download,
   Share2,
   X,
 } from 'lucide-react'
@@ -21,6 +22,7 @@ import { TraceRecentPopover } from './TraceRecentPopover'
 import { TraceModeIndicator, deriveTraceMode } from './TraceModeIndicator'
 import { TraceSharePopover, type TraceShareSummary } from './TraceSharePopover'
 import { TraceSeedsPopover, type TraceSeed } from './TraceSeedsPopover'
+import { TraceKeepMenu, type TraceKeepActions } from './TraceKeepMenu'
 
 export interface TraceDockTitleBarProps {
   trace: UseUnifiedTraceResult
@@ -49,6 +51,11 @@ export interface TraceDockTitleBarProps {
    *  "Tracing N entities", which lists them and drops one on request. */
   seeds?: readonly TraceSeed[]
   onRemoveSeed?: (urn: string) => void
+  /** Export, save as view, keep in this browser. Absent = no control. */
+  keep?: TraceKeepActions
+  /** What changed since the saved copy of this trace, once its walk has
+   *  settled — a chip that downloads the difference. */
+  sinceSaved?: { added: number; removed: number; onExport: () => void } | null
 }
 
 type Direction = 'up' | 'both' | 'down'
@@ -88,10 +95,14 @@ export function TraceDockTitleBar({
   focusLabel,
   seeds,
   onRemoveSeed,
+  keep,
+  sinceSaved,
 }: TraceDockTitleBarProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const recentTriggerRef = useRef<HTMLButtonElement>(null)
   const shareTriggerRef = useRef<HTMLButtonElement>(null)
+  const keepTriggerRef = useRef<HTMLButtonElement>(null)
+  const [keepOpen, setKeepOpen] = useState(false)
   const seedsTriggerRef = useRef<HTMLButtonElement>(null)
   const [recentOpen, setRecentOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
@@ -435,6 +446,59 @@ export function TraceDockTitleBar({
           >
             <ArrowRight className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {/* SINCE SAVED — this trace was opened from a saved copy, and the
+          lineage moved since: say by how much, and hand over the difference. */}
+      {sinceSaved && (sinceSaved.added > 0 || sinceSaved.removed > 0) && (
+        <button
+          type="button"
+          data-trace-control
+          data-since-saved
+          onClick={sinceSaved.onExport}
+          title="Download what changed since this trace was saved (CSV)"
+          className={cn(
+            'inline-flex items-center gap-1.5 px-2.5 h-7 rounded-lg text-[11px] font-semibold tabular-nums shrink-0',
+            'bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30 hover:bg-amber-500/20',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40',
+          )}
+        >
+          +{sinceSaved.added.toLocaleString()} new · −{sinceSaved.removed.toLocaleString()} gone since saved
+        </button>
+      )}
+
+      {/* EXPORT & SAVE — the trace as a file, a view, or a copy kept here. */}
+      {keep && (
+        <div className="relative shrink-0">
+          <button
+            ref={keepTriggerRef}
+            type="button"
+            data-trace-control
+            aria-haspopup="dialog"
+            aria-expanded={keepOpen}
+            aria-label="Export and save this trace"
+            title="Download, save as a view, or keep this trace"
+            onClick={() => setKeepOpen(v => !v)}
+            className={cn(
+              'inline-flex items-center gap-2 px-3.5 h-9 rounded-xl text-sm font-semibold',
+              'transition-all duration-200',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+              keepOpen
+                ? 'bg-accent-lineage text-white border border-accent-lineage shadow-lg shadow-accent-lineage/30'
+                : 'bg-white/[0.08] border border-white/[0.15] text-ink hover:bg-white/[0.14] hover:border-white/[0.25]',
+            )}
+          >
+            <Download className="w-4 h-4" strokeWidth={2.4} />
+            <span className="hidden md:inline tracking-tight">Export &amp; save</span>
+          </button>
+          {keepOpen && (
+            <TraceKeepMenu
+              {...keep}
+              onClose={() => { setKeepOpen(false); keepTriggerRef.current?.focus() }}
+              triggerRef={keepTriggerRef}
+            />
+          )}
         </div>
       )}
 

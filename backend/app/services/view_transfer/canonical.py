@@ -72,9 +72,8 @@ def _canonical_reference_layout(raw: dict) -> dict:
     return out
 
 
-def _kept_up_to_date(config: dict) -> bool:
-    membership = config.get("membership")
-    return isinstance(membership, dict) and membership.get("mode", "live") == "live"
+def _made_from_a_query(config: dict) -> bool:
+    return isinstance(config.get("membership"), dict)
 
 
 def portable_definition(config: Any, view_type: Optional[str] = None) -> dict:
@@ -96,11 +95,12 @@ def portable_definition(config: Any, view_type: Optional[str] = None) -> dict:
     raw = _raw_reference_layout(source)
     if raw is not None:
         layout["referenceLayout"] = _canonical_reference_layout(raw)
-        if _kept_up_to_date(source):
-            # A view made from a query and kept up to date: its server entries are
-            # data, not design — they follow the graph, so they are not part of the
-            # view's history or files, and an update never makes the view "changed".
-            # Where people put them is (``membership.overrides``).
+        if _made_from_a_query(source):
+            # A view made from a query: its members are data, not design — they follow
+            # the graph (a snapshot's are frozen) in a table of their own, so they are
+            # not part of the view's history or files, and an update never makes the
+            # view "changed". Where people put them is (``membership.overrides``). A
+            # file from before they had a table still carries them as entries: not here.
             assignments = layout["referenceLayout"]["assignments"]
             layout["referenceLayout"]["assignments"] = {
                 urn: entry for urn, entry in assignments.items() if entry.get("assignedBy") != MACHINE

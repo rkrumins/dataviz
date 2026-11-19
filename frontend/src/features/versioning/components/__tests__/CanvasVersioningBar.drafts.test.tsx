@@ -16,6 +16,8 @@ let branchesData: unknown[] = []
 let freshness: Record<string, unknown> | undefined
 let freshnessError: unknown = null
 let branchData: Record<string, unknown> | undefined
+/** Edits staged on the canvas — something to publish (after saving it). */
+let stagedCount = 0
 const useBranches = vi.fn((..._args: unknown[]) => ({ data: branchesData, isFetching: false }))
 const guard = vi.fn()
 
@@ -39,7 +41,7 @@ vi.mock('@/store/branchStore', () => ({
 }))
 // The ?rev= link reads the router, which this bar is never rendered without in the app.
 vi.mock('../../hooks/useRevisionDeepLink', () => ({ useRevisionDeepLink: () => {} }))
-vi.mock('@/store/stagedChangesStore', () => ({ useStagedChangeCount: () => 0 }))
+vi.mock('@/store/stagedChangesStore', () => ({ useStagedChangeCount: () => stagedCount }))
 vi.mock('../../hooks/useVersioning', () => ({
   useResolveGraph: () => ({ data: { graphId: 'g1', mainHeadCommitSeq: 5, kind: 'bootstrap' }, isLoading: false }),
   useBranches: (...args: unknown[]) => useBranches(...args),
@@ -86,6 +88,7 @@ describe('CanvasVersioningBar on a draft', () => {
     freshness = { behind: false, behindBy: 0, mainHeadCommitSeq: 5, baseCommitSeq: 5, status: 'open' }
     freshnessError = null
     branchData = undefined
+    stagedCount = 0
   })
 
   it('puts the draft’s rings back when something else cleared them (a revision closed, a highlight cleared)', () => {
@@ -128,6 +131,7 @@ describe('CanvasVersioningBar on a draft', () => {
 
   it('offers Publish and Discard on the user\'s own draft', () => {
     branchesData = [draft({})]
+    stagedCount = 1
     render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
     expect(screen.getByRole('button', { name: /Publish/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Discard draft' })).toBeInTheDocument()
@@ -141,8 +145,16 @@ describe('CanvasVersioningBar on a draft', () => {
     expect(screen.getByText(/Bob Stone’s draft · view only/)).toBeInTheDocument()
   })
 
+  it('offers no Publish on a draft with nothing to publish yet', () => {
+    branchesData = [draft({})]
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+    expect(screen.queryByRole('button', { name: /Publish/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Discard draft' })).toBeInTheDocument()
+  })
+
   it('offers an editor of a shared draft Publish but not Discard; a maintainer both', () => {
     branchesData = [draft({ owner: 'bob', isShared: true, myRole: 'editor' })]
+    stagedCount = 1
     const { unmount } = render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
     expect(screen.getByRole('button', { name: /Publish/ })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Discard draft' })).not.toBeInTheDocument()

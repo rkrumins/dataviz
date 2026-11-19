@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { twoSeedEstate } from '@/test/fixtures/traceEstates'
 import { useCanvasStore } from '@/store/canvas'
+import { decodeTraceShare, encodeTraceShare } from '@/hooks/lib/traceShareCodec'
 
 /** Each seed answers with its OWN walk, as the server walks each on its own. */
 const estate = () => {
@@ -42,12 +43,35 @@ describe('a combined trace of two entities', () => {
     for (const partner of ['ledger', 'audit', 'dash', 'crm']) expect(cards).toContain(partner)
     // Wires on each seed's side, not just the first's.
     expect(wireKeys(h)).toEqual(['audit>ledger', 'ledger>orders.amt', 'sales.amt>dash', 'sales>crm'])
-    // The dock names the trace for what it is, and offers no link that
-    // would carry only the first seed.
+    // The dock names the trace for what it is.
     expect(h.dockFocus()).toBe('2 entities')
     expect(screen.getByRole('button', { name: /tracing 2 entities/i })).toBeTruthy()
-    expect(document.querySelector('[aria-label="Share this trace"]')).toBeNull()
     expect(h.storeWrites()).toBe(0)
+  }, 30000)
+
+  // A link carries the WHOLE seed set: handing over a combined trace must
+  // never quietly hand over its first seed's trace as if it were the picture.
+  it('shares a link that carries every seed', async () => {
+    const h = await renderCanvasWithTrace(estate(), { focus: 'orders' })
+    await h.startTraceMany(['orders', 'sales'])
+    await h.openShare()
+    expect(h.shareSummary()).toMatch(/2 entities/)
+
+    const shared = decodeTraceShare(new URL(await h.copyShareLink()).searchParams.get('trace') ?? '')
+    expect(shared).toMatchObject({ v: 2, urn: 'orders', urns: ['orders', 'sales'], up: true, down: true })
+  }, 30000)
+
+  it('a combined link opens on every seed it carries', async () => {
+    const token = encodeTraceShare({
+      urn: 'orders', urns: ['orders', 'sales'], up: true, down: true, depthUp: 25, depthDown: 25, open: [],
+    })
+    const h = await renderCanvasWithTrace(estate(), { focus: 'orders', search: `?trace=${token}` })
+    await h.waitForCard('dash')
+
+    expect(h.isTracing()).toBe(true)
+    expect(focusRows()).toEqual(['orders', 'sales'])
+    expect(h.dockFocus()).toBe('2 entities')
+    expect(window.location.search).toBe('')
   }, 30000)
 
   it('T with two entities selected traces both of them', async () => {
@@ -128,7 +152,7 @@ describe('a combined trace of two entities', () => {
     expect(h.visibleCardIds()).not.toContain('ledger.amt')
   }, 30000)
 
-  it('the trace history offers no link for a combined entry, which no link can carry', async () => {
+  it('the trace history offers a link for every entry, combined ones included', async () => {
     const h = await renderCanvasWithTrace(estate(), { focus: 'orders' })
     await h.startTraceMany(['orders', 'sales'])
     h.pressEscape()
@@ -143,8 +167,9 @@ describe('a combined trace of two entities', () => {
       share: !!row.querySelector('[data-history-share]'),
     }))
     expect(rows).toHaveLength(2)
-    expect(rows.find(r => r.label.includes('+ 1 more'))?.share).toBe(false)
-    expect(rows.find(r => !r.label.includes('+ 1 more'))?.share).toBe(true)
+    expect(rows.every(r => r.share)).toBe(true)
+    const link = await h.shareTraceHistory('orders + 1 more')
+    expect(decodeTraceShare(new URL(link).searchParams.get('trace') ?? '')).toMatchObject({ urns: ['orders', 'sales'] })
   }, 30000)
 
   it('Escape closes the seed list first, then leaves the trace', async () => {

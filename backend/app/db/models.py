@@ -833,10 +833,14 @@ class WorkspaceORM(Base):
     #                              may have. Drafts that already exist keep theirs.
     #   review_self_approval     — whether the person who opened a review may approve it.
     #   review_self_merge        — whether they may merge it, and publish a draft without one.
+    #   review_required_approvals — approvals a review needs: 0, everyone asked; N, any N.
+    #   review_threads_hold      — whether open threads hold a review's merge.
     draft_default_visibility = Column(Text, nullable=True)
     draft_levels = Column(Text, nullable=True)
     review_self_approval = Column(Boolean, nullable=True)
     review_self_merge = Column(Boolean, nullable=True)
+    review_required_approvals = Column(Integer, nullable=True)
+    review_threads_hold = Column(Boolean, nullable=True)
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -870,6 +874,10 @@ class WorkspaceORM(Base):
         CheckConstraint(
             "draft_levels IS NULL OR draft_levels IN ('any', 'public_only', 'private_only')",
             name="ck_workspaces_draft_levels",
+        ),
+        CheckConstraint(
+            "review_required_approvals IS NULL OR review_required_approvals BETWEEN 0 AND 10",
+            name="ck_workspaces_required_approvals",
         ),
     )
 
@@ -924,6 +932,8 @@ class WorkspaceDataSourceORM(Base):
     draft_levels = Column(Text, nullable=True)
     review_self_approval = Column(Boolean, nullable=True)
     review_self_merge = Column(Boolean, nullable=True)
+    review_required_approvals = Column(Integer, nullable=True)
+    review_threads_hold = Column(Boolean, nullable=True)
     # This source's import settings (``backend.app.services.import_settings``): what an import's rows
     # find their entities by when it names no identifier (``entity_id``, ``urn``, ``prop.<name>`` or
     # ``prop.<name>,urn``), and the replace guard's limits. NULL = the platform's
@@ -1030,6 +1040,10 @@ class WorkspaceDataSourceORM(Base):
         CheckConstraint(
             "draft_levels IS NULL OR draft_levels IN ('any', 'public_only', 'private_only')",
             name="ck_ds_draft_levels",
+        ),
+        CheckConstraint(
+            "review_required_approvals IS NULL OR review_required_approvals BETWEEN 0 AND 10",
+            name="ck_ds_required_approvals",
         ),
         CheckConstraint(
             "aggregation_status IN ('none', 'pending', 'running', 'ready', 'failed', 'skipped')",
@@ -1585,13 +1599,15 @@ class ViewMembershipStateORM(Base):
 
     RUNTIME state, never design: it is not exported, not versioned and not part of
     the view's content hash — the definition is ``config.membership``, and the
-    members themselves are the view's ``assignedBy: "query"`` entries. One row per
-    such view, gone with the view.
+    members themselves are rows of ``view_members`` (``members_epoch`` names the
+    ones readers see). One row per such view, gone with the view.
 
     The refresh is fenced: a run claims the row (``lease_owner``/``lease_until``,
     ``epoch + 1``) and may apply only while the epoch is still its own, so a run
     that lost its lease — or was overtaken by an edit — can never write over a
-    newer answer. Timestamps are ISO text, as everywhere in this schema.
+    newer answer. A run too large for one request records how far it got in
+    ``materialize``, and the next request carries it on at the same epoch.
+    Timestamps are ISO text, as everywhere in this schema.
     """
     __tablename__ = "view_membership_state"
 
@@ -1622,6 +1638,10 @@ class ViewMembershipStateORM(Base):
     last_applied_at = Column(Text, nullable=True)
     last_read_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
+    # The epoch of ``view_members`` readers see (None until the first answer is applied),
+    # and how far the run at ``epoch`` has got (JSON: its member sets, its place in them).
+    members_epoch = Column(Integer, nullable=True)
+    materialize = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -1635,6 +1655,182 @@ class ViewMembershipStateORM(Base):
 
     def __repr__(self) -> str:
         return f"<ViewMembershipState view_id={self.view_id!r} {self.status} r{self.revision}>"
+
+
+class ViewMemberORM(Base):
+    """One member of a view made from a query, at one epoch of its answer.
+
+    The members are data, not design, and a view holds up to a quarter of a million,
+    so they live here rather than in ``views.config`` (which every list of views
+    reads). A run writes the members it works out at its own epoch, a page at a time;
+    readers see ``view_membership_state.members_epoch`` until the run swaps it, so
+    they never see half an answer. ``sort_key`` (lower name, then URN) orders a
+    layer's members by name for the canvas's pages; ``ord`` numbers an epoch's
+    members densely in the order they were found, ``label_ord`` within their graph
+    label. ``whole``: everything inside it is in the view too; ``covered``: it sits
+    inside such a member placed in another layer. Placement (``layer_id``,
+    ``order_key``, ``logical_node_id``) is the canvas's, as an assignment entry's;
+    ``in_layer``, how many of its nearest containers are drawn in its layer too (the
+    canvas draws it inside them).
+    """
+    __tablename__ = "view_members"
+
+    view_id = Column(Text, ForeignKey("views.id", ondelete="CASCADE"), primary_key=True)
+    epoch = Column(Integer, primary_key=True)
+    urn = Column(Text, primary_key=True)
+    layer_id = Column(Text, nullable=False)
+    # Byte order on Postgres, so the keyset and its index agree whatever the locale.
+    sort_key = Column(Text().with_variant(Text(collation="C"), "postgresql"), nullable=False)
+    ord = Column(Integer, nullable=False)
+    label = Column(Text, nullable=False, default="")
+    label_ord = Column(Integer, nullable=False)
+    via = Column(Text, nullable=True)
+    hops = Column(Integer, nullable=True)
+    whole = Column(Boolean, nullable=False, default=False)
+    covered = Column(Boolean, nullable=False, default=False)
+    name = Column(Text, nullable=True)
+    type = Column(Text, nullable=True)
+    assigned_at = Column(Text, nullable=True)
+    order_key = Column(Text, nullable=True)
+    logical_node_id = Column(Text, nullable=True)
+    in_layer = Column(Integer, nullable=False, default=0, server_default="0")
+
+    __table_args__ = (
+        Index("idx_vm_feed", "view_id", "epoch", "layer_id", "sort_key", "urn"),
+        Index("idx_vm_ord", "view_id", "epoch", "ord"),
+        Index("idx_vm_label", "view_id", "epoch", "label", "label_ord"),
+        # A search's roots in the view: the few members kept whole.
+        Index("idx_vm_whole", "view_id", "epoch", "ord",
+              postgresql_where=text("whole"), sqlite_where=text("whole")),
+    )
+
+
+# ------------------------------------------------------------------ #
+# member_sets (everything a set of seeds reaches, resolved in steps)  #
+# ------------------------------------------------------------------ #
+
+#: Where a member set is. See ``services/member_sets``.
+MEMBER_SET_STATUSES = ("running", "complete", "failed", "expired")
+MEMBER_SET_STAGES = ("seeds", "inside", "upstream", "downstream", "partnerInside", "done")
+
+
+class MemberSetORM(Base):
+    """One membership spec resolved in full, on one graph's data, so it can be read
+    page by page and downloaded whole.
+
+    A resolution of millions of entities outlasts any one request, so it is kept
+    here and moved on a step at a time by whichever request holds its lease: each
+    step is one graph statement and one short transaction, fenced by ``step`` and
+    ``lease_owner`` so a request that lost its lease can never write over a newer
+    step. ``key`` is the question's identity (the graph it reads, the spec, the
+    boundary a query seed is searched in, the data version): everyone asking the
+    same question shares one set. Runtime data, never design: a set expires and
+    is swept (``services/member_sets/sweeper.py``). Timestamps are ISO text.
+    """
+    __tablename__ = "member_sets"
+
+    id = Column(Text, primary_key=True)
+    key = Column(Text, nullable=False, unique=True)
+    workspace_id = Column(Text, nullable=False)
+    data_source_id = Column(Text, nullable=True)
+    branch_id = Column(Text, nullable=True)
+    read_in = Column(Text, nullable=True)                         # the view a query seed is searched in
+    spec = Column(Text, nullable=False)                           # JSON: the canonical MembershipSpec
+    spec_hash = Column(Text, nullable=False)
+    data_version = Column(Text, nullable=False, default="")
+    include_edges = Column(Boolean, nullable=False, default=False)
+    status = Column(Text, nullable=False, default="running")
+    stage = Column(Text, nullable=False, default="seeds")
+    state = Column(Text, nullable=True)                           # JSON: where the current stage is
+    counts = Column(Text, nullable=True)                          # JSON: MembershipCounts
+    truncated = Column(Text, nullable=True)                       # JSON: [MembershipTruncation]
+    member_count = Column(Integer, nullable=False, default=0)
+    edge_count = Column(Integer, nullable=False, default=0)
+    next_seq = Column(Integer, nullable=False, default=0)
+    step = Column(Integer, nullable=False, default=0)
+    # The fence.
+    lease_owner = Column(Text, nullable=True)
+    lease_until = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now)
+    completed_at = Column(Text, nullable=True)
+    expires_at = Column(Text, nullable=True)
+    last_read_at = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_member_sets_expiry", "status", "expires_at"),
+        Index("idx_member_sets_workspace", "workspace_id"),
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in MEMBER_SET_STATUSES) + ")",
+            name="ck_member_sets_status",
+        ),
+        CheckConstraint(
+            "stage IN (" + ", ".join(f"'{s}'" for s in MEMBER_SET_STAGES) + ")",
+            name="ck_member_sets_stage",
+        ),
+    )
+
+
+class MemberSetRowORM(Base):
+    """One entity in a member set, and the walk's state on it.
+
+    ``seq`` is the order it joined (pages are read by it); ``via`` the first reason
+    it is in. Per direction: ``hops_*`` its nearest lineage distance from the seeds,
+    ``walked_*`` the depth it has been walked to (``2**30`` stands for "all"),
+    ``queued_*`` waiting to be walked, ``cursor_*`` a hub's next page ("" once paged
+    to the end). ``whole``: everything inside it is in the set, not enumerated.
+    """
+    __tablename__ = "member_set_rows"
+
+    set_id = Column(Text, ForeignKey("member_sets.id", ondelete="CASCADE"), primary_key=True)
+    urn = Column(Text, primary_key=True)
+    seq = Column(Integer, nullable=False)
+    via = Column(Text, nullable=False)
+    hops_up = Column(Integer, nullable=True)
+    hops_down = Column(Integer, nullable=True)
+    walked_up = Column(Integer, nullable=True)
+    walked_down = Column(Integer, nullable=True)
+    queued_up = Column(Boolean, nullable=False, default=False)
+    queued_down = Column(Boolean, nullable=False, default=False)
+    cursor_up = Column(Text, nullable=True)
+    cursor_down = Column(Text, nullable=True)
+    whole = Column(Boolean, nullable=False, default=False)
+    name = Column(Text, nullable=True)
+    type = Column(Text, nullable=True)
+    qualified_name = Column(Text, nullable=True)
+    nearest_seed = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_msr_seq", "set_id", "seq"),
+        # What is left to walk, nearest first; and the hubs still being paged. Partial on
+        # both dialects (a bare postgresql_where is dropped on SQLite, where tests run).
+        Index("idx_msr_queued_up", "set_id", "hops_up", "seq",
+              postgresql_where=text("queued_up"), sqlite_where=text("queued_up")),
+        Index("idx_msr_queued_down", "set_id", "hops_down", "seq",
+              postgresql_where=text("queued_down"), sqlite_where=text("queued_down")),
+        Index("idx_msr_cursor_up", "set_id", "seq",
+              postgresql_where=text("cursor_up <> ''"), sqlite_where=text("cursor_up <> ''")),
+        Index("idx_msr_cursor_down", "set_id", "seq",
+              postgresql_where=text("cursor_down <> ''"), sqlite_where=text("cursor_down <> ''")),
+    )
+
+
+class MemberSetEdgeORM(Base):
+    """A lineage relationship between two members of a set, kept when the set was
+    asked for with its edges (``include_edges``)."""
+    __tablename__ = "member_set_edges"
+
+    set_id = Column(Text, ForeignKey("member_sets.id", ondelete="CASCADE"), primary_key=True)
+    source_urn = Column(Text, primary_key=True)
+    target_urn = Column(Text, primary_key=True)
+    edge_type = Column(Text, primary_key=True)
+    seq = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        Index("idx_mse_seq", "set_id", "seq"),
+    )
 
 
 # ------------------------------------------------------------------ #

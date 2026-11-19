@@ -165,7 +165,8 @@ async def _run_head_bound_approvals() -> None:
     d4, mr4 = await reviewed([_node("L")])
     async with db.graphver_session() as s:
         await s.execute(__import__("sqlalchemy").text(
-            "UPDATE graphver.merge_requests SET approvals = NULL WHERE id = :id"), {"id": mr4})
+            "UPDATE graphver.review_events SET head_commit_id = NULL, head_seq = NULL "
+            "WHERE pr_id = :id AND kind = 'reviewed'"), {"id": mr4})
     with pytest.raises(ApprovalRequired) as ei:
         await svc.merge_mr(mr_id=mr4, actor="alice", message="merge")
     assert ei.value.stale == ["carol"]
@@ -193,7 +194,9 @@ async def _run_head_bound_approvals() -> None:
         await svc.checkpoint(graph_id=gid, branch_id=d5, actor="alice")
     async with db.graphver_session() as s:
         rec = (await s.execute(__import__("sqlalchemy").text(
-            "SELECT approvals->'carol' FROM graphver.merge_requests WHERE id = :id"), {"id": mr5})).scalar_one()
+            "SELECT jsonb_build_object('headCommitId', head_commit_id, 'headSeq', head_seq) "
+            "FROM graphver.review_events WHERE pr_id = :id AND actor = 'carol' AND verdict = 'approve'"),
+            {"id": mr5})).scalar_one()
         seq = (await s.execute(__import__("sqlalchemy").text(
             "SELECT commit_seq FROM graphver.commits WHERE id = :id"), {"id": seen})).scalar_one()
     assert rec["headCommitId"] == seen and rec["headSeq"] == seq, rec

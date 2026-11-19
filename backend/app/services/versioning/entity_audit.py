@@ -34,6 +34,7 @@ __all__ = [
     "entity_views",
     "entity_summary",
     "entity_history_page",
+    "entity_revision",
 ]
 
 HISTORY_DEFAULT_LIMIT = 50
@@ -334,3 +335,44 @@ async def entity_history_page(
         next_before = encode_cursor(rows[-1].created_at, rows[-1].id) if has_more and rows else None
         return {"entityId": entity_id, "kind": kind, "versions": versions,
                 "hasMore": has_more, "nextBefore": next_before}
+
+
+async def entity_revision(
+    svc, *, graph_id: str, entity_id: str, version_id: str, branch_id: Optional[str] = None,
+    kind: Optional[str] = None,
+) -> Optional[dict]:
+    """One row of an entity's history with the entity as that revision left it (``value``, in the
+    reader shape the summary's value has; a deletion's is the deleted view). A deletion also says
+    what it removed (``last_value``: the entity just before, found by the value it was made from) —
+    so a deleted entity can still be read, and retrieved. Only a revision on ``main`` or the draft
+    being viewed, never another user's draft — else ``None``."""
+    async with svc._session() as s:
+        _graph, main_id, draft_id, _base_seq = await _line_of(s, svc, graph_id, branch_id)
+        kind = await _kind_of(s, graph_id, entity_id, kind)
+        model = _MODELS[kind]
+        r = (await s.execute(select(model).where(
+            model.graph_id == graph_id, model.id == version_id, model.entity_id == entity_id,
+            model.branch_id.in_(history_branches("all", main_id, draft_id))))).scalars().first()
+        if r is None:
+            return None
+        ckind, message = (await s.execute(select(CommitORM.kind, CommitORM.message).where(
+            CommitORM.graph_id == graph_id, CommitORM.id == r.commit_id))).first() or (None, None)
+        line = draft_id or main_id
+
+        async def view(payload: Optional[dict]) -> dict:
+            urns = await _edge_endpoint_urns(s, svc, graph_id, line, payload) if kind == "edge" else {}
+            return entity_views({entity_id: (kind, payload)}, urns)[0][entity_id]
+
+        last = None
+        if r.op == "delete" and r.prev_content_hash:
+            # A deletion's row holds no value: what it removed is the value it was made from.
+            last = await s.scalar(select(model.payload).where(
+                model.graph_id == graph_id, model.entity_id == entity_id,
+                model.content_hash == r.prev_content_hash, model.payload.is_not(None)).limit(1))
+        return {
+            "id": r.id, "commit_id": r.commit_id, "commit_seq": r.commit_seq, "branch_id": r.branch_id,
+            "op": r.op, "actor": r.actor, "change_reason": r.change_reason, "created_at": r.created_at,
+            "commit_kind": ckind, "commit_message": message, "on_draft": r.branch_id != main_id,
+            "value": await view(r.payload),
+            "last_value": await view(last) if last is not None else None,
+        }

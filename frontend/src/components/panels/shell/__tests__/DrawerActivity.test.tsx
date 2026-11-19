@@ -3,12 +3,13 @@
  * same in both drawers; a change on the published graph since the draft began called out; the
  * live graph's catch-up shown while it happens.
  */
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EntitySummary, Watermark } from '@/services/versioningApiService'
 
 const h = vi.hoisted(() => ({ watermark: undefined as Watermark | undefined }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+  useChangeEntry: () => ({ data: undefined }),
   useProjectionWatermark: () => ({ data: h.watermark }),
 }))
 
@@ -50,5 +51,14 @@ describe('DrawerActivity', () => {
   it('says so when nothing has changed', () => {
     render(<DrawerActivity summary={summary({ updated: null })} loading={false} wsId="ws" graphId="g" inDraft={false} />)
     expect(screen.getByText('Updated').closest('div')).toHaveTextContent('No changes yet')
+  })
+
+  it('leads to its history, saying how many revisions it has', () => {
+    const onSeeHistory = vi.fn()
+    const { rerender } = render(<DrawerActivity summary={summary()} loading={false} wsId="ws" graphId="g" inDraft onSeeHistory={onSeeHistory} />)
+    fireEvent.click(screen.getByRole('button', { name: /See history · 3 revisions/ }))
+    expect(onSeeHistory).toHaveBeenCalled()
+    rerender(<DrawerActivity summary={summary()} loading={false} wsId="ws" graphId="g" inDraft />)
+    expect(screen.queryByRole('button', { name: /See history/ })).not.toBeInTheDocument()
   })
 })

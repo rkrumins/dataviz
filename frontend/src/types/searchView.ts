@@ -150,6 +150,14 @@ export interface ViewFeedRequest {
   refresh?: boolean
 }
 
+/** One page of one layer of a view made from a query (`POST /view-members`):
+ *  its members, in name order, from the server's member table. */
+export interface ViewMembersRequest {
+  layerId: string
+  cursor?: string
+  limit?: number
+}
+
 export interface AncestorStep {
   urn: string
   displayName: string

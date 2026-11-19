@@ -49,6 +49,10 @@ export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpe
     explore:    { kind: 'always' },
     templates:  { kind: 'always' },
     workspaces: { kind: 'always' },
+    // The open workspace's review inbox — the `/review-inbox` gate. The sidebar
+    // also wants the `versioningEnabled` flag on and a workspace open (a flag is
+    // not a permission).
+    reviews:    { kind: 'workspaceAny', perm: 'workspace:datasource:read' },
     // Phase 18: Ingestion + Semantic Layers open to workspace-bound
     // readers via the new workspace:provider:read /
     // workspace:ontology:read perms; pages render filtered results and
