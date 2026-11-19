@@ -43,6 +43,9 @@ export interface TraceBottomDockProps {
   outsideView?: number
   /** Entities a view the server places hasn't said where to draw yet. */
   placing?: number
+  /** Entities it couldn't be asked about, after its retries, and asking them again. */
+  placeFailed?: number
+  onRetryPlacing?: () => void
   /** Everything the title bar's Share control needs. Absent = no control. */
   share?: TraceShareSummary
   /** The traced entity's name, resolved by the host (see the title bar). */
@@ -103,6 +106,8 @@ export function TraceBottomDock({
   nativeMode = false,
   outsideView = 0,
   placing = 0,
+  placeFailed = 0,
+  onRetryPlacing,
   share,
   focusLabel,
   seeds,
@@ -334,6 +339,8 @@ export function TraceBottomDock({
                     onJumpToUrn={onJumpToUrn}
                     outsideView={outsideView}
                     placing={placing}
+                    placeFailed={placeFailed}
+                    onRetryPlacing={onRetryPlacing}
                     nativeMode={nativeMode}
                     // The native `retrace` MEANS "this walk did not finish":
                     // continue past the checkpoint, or retry the failed step.

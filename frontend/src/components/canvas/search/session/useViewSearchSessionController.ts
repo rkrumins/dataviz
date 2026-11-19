@@ -174,6 +174,14 @@ export interface ViewSearchSessionOptions {
     /** Warm a hit's spine without expanding anything, so the reveal that
      *  follows does not pay the round-trip. */
     prefetchHit: (urn: string, ancestorPath: AncestorRef[]) => Promise<void>
+    /** A view the server places (made from a query, or a subset view): where it draws each
+     *  entity, as the server answers — undefined until it has — and how to ask for a page's
+     *  hits. With them, a hit's layer is the server's, not the layout's. */
+    served?: {
+        layerOf: (urn: string) => string | null | undefined
+        version: number
+        place: (urns: string[]) => void
+    }
 }
 
 export interface ViewSearchSession {
@@ -231,8 +239,9 @@ export interface ViewSearchSession {
      */
     resultMatchesQuick: boolean
 
-    /** Which layer column a hit badges under, for this view's layout. */
-    resolveLayer: (hit: SearchHit) => string | null
+    /** Which layer column a hit badges under, for this view's layout — null for none, and
+     *  undefined while a view the server places is still being asked. */
+    resolveLayer: (hit: SearchHit) => string | null | undefined
     /** The view's layer columns, in board order. `resolveLayer` answers
      *  WHICH layer; the panel's grouping also needs the name and the
      *  order to render, and reading the layout a second time from the
@@ -273,7 +282,7 @@ export interface ViewSearchSession {
 
 
 export function useViewSearchSessionController(
-    { viewId, layers, assignments, placementSpec, curated, revealHit, prefetchHit }: ViewSearchSessionOptions,
+    { viewId, layers, assignments, placementSpec, curated, revealHit, prefetchHit, served }: ViewSearchSessionOptions,
 ): ViewSearchSession {
     const advanced = useAdvancedSearch(viewId, { clearOnUnmount: false })
     const [quick, setQuickState] = useState<QuickQuery>(DEFAULT_QUICK)
@@ -404,17 +413,31 @@ export function useViewSearchSessionController(
     // Hoisted: `resolveHitLayer`'s only O(assignments) step, paid once per
     // result page instead of once per hit.
     const isCurated = useMemo(() => curated ?? Object.keys(assignments).length > 0, [curated, assignments])
-    const resolveLayer = useCallback((hit: SearchHit) => (placementSpec ? placeHit(
-        hit.node,
-        hit.ancestorPath ?? [],
-        placementSpec,
-    ) : resolveHitLayer(
-        hit.node,
-        hit.ancestorPath ?? [],
-        assignments,
-        layers,
-        isCurated,
-    )), [assignments, layers, isCurated, placementSpec])
+    const servedLayerOf = served?.layerOf
+    const servedVersion = served?.version ?? 0
+    const resolveLayer = useCallback((hit: SearchHit): string | null | undefined => {
+        // The server's word, read again whenever it has answered more (`servedVersion`).
+        void servedVersion
+        if (servedLayerOf) return servedLayerOf(hit.node.urn)
+        return placementSpec ? placeHit(
+            hit.node,
+            hit.ancestorPath ?? [],
+            placementSpec,
+        ) : resolveHitLayer(
+            hit.node,
+            hit.ancestorPath ?? [],
+            assignments,
+            layers,
+            isCurated,
+        )
+    }, [assignments, layers, isCurated, placementSpec, servedLayerOf, servedVersion])
+    // Each page of hits is asked about as it lands: where the server draws them.
+    const servedPlace = served?.place
+    const pageHits = advanced.view.kind === 'results' ? advanced.view.result.hits : undefined
+    useEffect(() => {
+        if (!servedPlace || !pageHits?.length) return
+        servedPlace(pageHits.map((h) => h.node.urn).filter(Boolean))
+    }, [servedPlace, pageHits])
 
     // The columns' slice. Every scoped field collapses to a constant
     // while the search is view-wide, so this whole object keeps its

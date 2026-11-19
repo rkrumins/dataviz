@@ -61,6 +61,8 @@ export interface NarrowComposerProps {
   onSaveAsView?: (draft: NarrowDraft) => void
   /** The narrowings saved with this view, to open one instead. */
   saved?: SavedNarrowingsSectionProps
+  /** A view the server places: ask where it draws a preview's members (`layerOf` then knows). */
+  placeMembers?: (urns: string[]) => void
 }
 
 const PRESET_ICONS: Record<PresetId, keyof typeof LucideIcons> = {
@@ -75,12 +77,18 @@ const PRESET_ICONS: Record<PresetId, keyof typeof LucideIcons> = {
 const n = (count: number, one: string, many = `${one}s`) =>
   `${count.toLocaleString()} ${count === 1 ? one : many}`
 
-export function NarrowComposer({ viewId, draft, lineageEnabled, layers, layerOf, onApply, onClose, onSaveAsView, saved }: NarrowComposerProps) {
+export function NarrowComposer({ viewId, draft, lineageEnabled, layers, layerOf, onApply, onClose, onSaveAsView, saved, placeMembers }: NarrowComposerProps) {
   const [spec, setSpec] = useState<MembershipSpec>(draft.spec)
   // Sources and consumers with the Lineage trace off would only be refused: not asked.
   const lineageBlocked = !lineageEnabled && (spec.expand.upstream !== 0 || spec.expand.downstream !== 0)
   const { state, retry } = useNarrowResolve(viewId, lineageBlocked ? null : spec)
   const result = state.status === 'ready' ? state.result : state.status === 'loading' ? state.last : null
+  // Where the view draws what the preview holds, asked as each answer lands.
+  const answered = state.status === 'ready' ? state.result : null
+  useEffect(() => {
+    if (!placeMembers || !answered) return
+    placeMembers([...new Set([...answered.members.map((m) => m.urn), ...answered.wholeSubtree])])
+  }, [placeMembers, answered])
   const loading = state.status === 'loading'
   const urns = spec.seeds.urns
   const label = urns

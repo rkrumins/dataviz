@@ -223,3 +223,38 @@ describe('TraceDockMetricStrip — sources outside this view', () => {
     expect(metric('Downstream').querySelector('.bg-lineage-out')).not.toBeNull()
   })
 })
+
+/**
+ * A view the server places says where each card goes. What it couldn't be asked about, after
+ * its retries, is said out loud with a way to ask again — never left reading "Placing…".
+ */
+describe('TraceDockMetricStrip — entities it couldn’t place', () => {
+  const strip = (placeFailed: number, onRetryPlacing?: () => void) => render(
+    <TraceDockMetricStrip
+      result={null}
+      focusNode={null}
+      totalNodes={6}
+      totalEdges={5}
+      upstreamCount={4}
+      downstreamCount={2}
+      placing={2}
+      placeFailed={placeFailed}
+      onRetryPlacing={onRetryPlacing}
+      resolveEdgeColor={() => '#fff'}
+    />,
+  )
+
+  it('names the count beside what is still placing, and Retry asks again', () => {
+    const retry = vi.fn()
+    strip(40, retry)
+    expect(screen.getByText('Placing 2…')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Couldn’t place 40')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it('says nothing when every one was asked', () => {
+    strip(0, vi.fn())
+    expect(screen.queryByText(/Couldn’t place/)).not.toBeInTheDocument()
+  })
+})

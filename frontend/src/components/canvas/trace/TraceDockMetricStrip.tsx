@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { ArrowUp, ArrowDown, GitBranch, Network, Hash, Copy, Check, EyeOff } from 'lucide-react'
+import { ArrowUp, ArrowDown, GitBranch, Network, Hash, Copy, Check, EyeOff, AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import type { TraceResult } from '@/hooks/useUnifiedTrace'
@@ -20,6 +20,9 @@ export interface TraceDockMetricStripProps {
   outsideView?: number
   /** Entities a view the server places hasn't said where to draw yet. */
   placing?: number
+  /** Entities it couldn't be asked about, after its retries: "Couldn't place N · Retry". */
+  placeFailed?: number
+  onRetryPlacing?: () => void
   resolveEdgeColor: (edgeType: string) => string
 }
 
@@ -39,6 +42,8 @@ export function TraceDockMetricStrip({
   downstreamCount,
   outsideView = 0,
   placing = 0,
+  placeFailed = 0,
+  onRetryPlacing,
   resolveEdgeColor,
 }: TraceDockMetricStripProps) {
   const [copied, setCopied] = useState(false)
@@ -130,6 +135,30 @@ export function TraceDockMetricStrip({
           )}
         >
           <span className="text-[11px] font-semibold text-ink tabular-nums">{`Placing ${placing.toLocaleString()}…`}</span>
+        </div>
+      )}
+
+      {placeFailed > 0 && (
+        <div
+          role="alert"
+          className={cn(
+            'flex items-center gap-2 pl-3 pr-1 h-8 rounded-lg self-start',
+            'bg-white/[0.06] border border-white/[0.15]',
+          )}
+        >
+          <AlertTriangle className="w-3.5 h-3.5 text-ink-muted shrink-0" strokeWidth={2.2} aria-hidden />
+          <span className="text-[11px] font-semibold text-ink tabular-nums">
+            {`Couldn’t place ${placeFailed.toLocaleString()}`}
+          </span>
+          {onRetryPlacing && (
+            <button
+              type="button"
+              onClick={onRetryPlacing}
+              className="h-6 px-2 rounded-md text-[11px] font-semibold text-ink hover:bg-white/[0.1] focus-visible:outline focus-visible:outline-2"
+            >
+              Retry
+            </button>
+          )}
         </div>
       )}
 

@@ -116,3 +116,18 @@ describe('NarrowChip — saved with the view', () => {
     expect(onExport).toHaveBeenCalledOnce()
   })
 })
+
+describe('NarrowChip — loading its members', () => {
+  it('says how loading goes, and how many the view draws nowhere once done', () => {
+    const { rerender } = render(<NarrowChip applied={applied()} onEdit={vi.fn()} onClear={vi.fn()}
+      loading={{ done: 12000, total: 50980, outside: 320, finished: false }} />)
+    const chip = screen.getByRole('status', { name: 'The canvas is narrowed' })
+    expect(chip).toHaveTextContent('Loading 12,000 of 50,980 · 320 not in this view')
+    rerender(<NarrowChip applied={applied()} onEdit={vi.fn()} onClear={vi.fn()}
+      loading={{ done: 50660, total: 50980, outside: 320, finished: true }} />)
+    expect(chip).toHaveTextContent('320 not in this view')
+    rerender(<NarrowChip applied={applied()} onEdit={vi.fn()} onClear={vi.fn()}
+      loading={{ done: 50980, total: 50980, outside: 0, finished: true }} />)
+    expect(chip).toHaveTextContent('orders, everything inside it and everything upstream')
+  })
+})

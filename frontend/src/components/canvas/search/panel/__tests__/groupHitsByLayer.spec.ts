@@ -213,3 +213,12 @@ describe('an appended page moves rows that are already on screen', () => {
         expect(keyOf(after, 'c')).toBe(keyOf(before, 'c'))
     })
 })
+
+describe('groupHitsByLayer — a view the server places', () => {
+    it('files a hit the server hasn’t placed yet under Placing…, after the layers and before Not on this canvas', () => {
+        const where: Record<string, string | null | undefined> = { a: 'L2', b: undefined, c: null }
+        const groups = groupHitsByLayer(HITS, (h) => where[h.node.urn], new Map(), LAYERS)
+        expect(groups.map((g) => g.layerName)).toEqual(['Curated', 'Placing…', 'Not on this canvas'])
+        expect(groups[1]).toMatchObject({ placing: true, layerId: null })
+    })
+})

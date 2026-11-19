@@ -48,6 +48,8 @@ import { VirtualizedHitList } from './VirtualizedHitList'
  *  It is a real answer — the match exists, the canvas just doesn't show
  *  that part of the graph — so it gets a group instead of being dropped. */
 const OFF_CANVAS_LAYER_NAME = 'Not on this canvas'
+/** Where the view draws them is still being asked (a view the server places). */
+const PLACING_LAYER_NAME = 'Placing…'
 
 /** Per-kind row heights for the virtualizer's first pass. It measures the
  *  painted row afterwards; these only need to be close enough that the
@@ -74,8 +76,10 @@ export interface ContainerGroup {
 }
 
 export interface LayerGroup {
-    /** Null for {@link OFF_CANVAS_LAYER_NAME}. */
+    /** Null for {@link OFF_CANVAS_LAYER_NAME} — and for {@link PLACING_LAYER_NAME}, with `placing`. */
     layerId: string | null
+    /** Where the view draws these is still being asked. */
+    placing?: boolean
     layerName: string
     /** Σ of the containers' counts. */
     count: number
@@ -103,7 +107,8 @@ export type Row =
  */
 export function groupHitsByLayer(
     hits: SearchHit[],
-    resolveLayer: (hit: SearchHit) => string | null,
+    /** Undefined: not answered yet (a view the server places) — grouped as placing. */
+    resolveLayer: (hit: SearchHit) => string | null | undefined,
     ancestorMatchCounts: ReadonlyMap<string, number>,
     layers: ViewLayerConfig[],
 ): LayerGroup[] {
@@ -111,13 +116,16 @@ export function groupHitsByLayer(
     const order: string[] = []
 
     for (const hit of hits) {
-        const layerId = resolveLayer(hit)
-        const layerKey = `L:${layerId ?? '__off-canvas'}`
+        const resolved = resolveLayer(hit)
+        const placing = resolved === undefined
+        const layerId = resolved ?? null
+        const layerKey = placing ? 'L:__placing' : `L:${layerId ?? '__off-canvas'}`
         let group = byLayer.get(layerKey)
         if (!group) {
             group = {
                 layerId,
-                layerName: layerId === null
+                ...(placing ? { placing: true } : {}),
+                layerName: placing ? PLACING_LAYER_NAME : layerId === null
                     ? OFF_CANVAS_LAYER_NAME
                     : (layers.find((l) => l.id === layerId)?.name ?? layerId),
                 count: 0,
@@ -169,6 +177,7 @@ export function groupHitsByLayer(
     // view no longer declares sorts after the ones it does — it is still
     // a real placement, just not one with a column.
     const rank = (g: LayerGroup) => {
+        if (g.placing) return Number.MAX_SAFE_INTEGER - 1
         if (g.layerId === null) return Number.MAX_SAFE_INTEGER
         const i = layers.findIndex((l) => l.id === g.layerId)
         return i < 0 ? layers.length : i

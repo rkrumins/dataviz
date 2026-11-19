@@ -53,6 +53,7 @@ function run(opts: {
   expandedNodes?: Set<string>
   parentMap?: Record<string, string>
   hidden?: string[]
+  served?: Record<string, string | null>
 }) {
   const layers = opts.layers ?? {
     L1: [hNode('r1'), hNode('r2')],
@@ -85,6 +86,7 @@ function run(opts: {
     promotedAnchors: new Map([['X', 'L1'], ['Y', 'L2']]),
     ancestorChains: opts.chains ? new Map(Object.entries(opts.chains)) : undefined,
     hiddenEdgeTypes: opts.hidden ? new Set(opts.hidden) : undefined,
+    servedLayerOf: opts.served ? (u: string) => opts.served![u] : undefined,
   }))
   return {
     ...result.current,
@@ -245,5 +247,15 @@ describe('useEdgeProjection — counting', () => {
     })
     expect(drilled.lines).toEqual([])
     expect(drilled.hiddenInsideCollapsedCount).toBe(1)
+  })
+})
+
+describe('useEdgeProjection — a view the server places', () => {
+  it('files a partner the server places in a layer, not loaded yet, under that column — and one it places nowhere as outside', () => {
+    const inView = run({ edges: [edge('e1', 'r1', 'member-far-down')], served: { 'member-far-down': 'L3' } })
+    expect(inView.offCanvasByNode.get('r1')?.out ?? 0).toBe(0)
+    expect(inView.offCanvasByNode.get('r1')?.columns?.get('L3')?.out).toBe(1)
+    const outside = run({ edges: [edge('e1', 'r1', 'stranger')], served: { stranger: null } })
+    expect(outside.offCanvasByNode.get('r1')?.out).toBe(1)
   })
 })

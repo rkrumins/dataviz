@@ -28,7 +28,7 @@ import {
   useViewRelationshipTypes,
   useViewEntityTypes,
 } from '@/hooks/useViewSchema'
-import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
+import { FEED_PAGE_ROWS, isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
 import { useSaveProblemsStore } from '@/store/saveProblemsStore'
@@ -51,7 +51,10 @@ import { canShareNarrow, decodeNarrowShare, narrowLink } from '@/features/narrow
 import { useNarrowStore, type NarrowDraft } from '@/features/narrow/narrowStore'
 import type { SavedNarrowingsSectionProps } from '@/features/narrow/SavedNarrowingsSection'
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
+import { useNarrowServedLoad } from '@/features/narrow/useNarrowServedLoad'
 import { useSavedNarrowingCopies } from '@/features/narrow/useSavedNarrowingCopies'
+import { ServedPlacementProvider, useServedLayerOf, useServedPlacementsService, useServedVersion } from '@/features/served-placement/ServedPlacementContext'
+import { useFeedLookahead } from '@/hooks/useFeedLookahead'
 import {
   deleteNarrowing, getNarrowing, listNarrowings, NARROWINGS_QUERY_KEY, narrowingSince, newNarrowingId,
   packHeld, readHeld, saveNarrowing, type SavedNarrowing,
@@ -83,7 +86,7 @@ import { useGraphProvider } from '@/providers'
 import type { AggregatedEdgeInfo, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { layerClaimedTypes, subsetFeedKey, useGraphHydration } from '@/hooks/useGraphHydration'
-import { useServedPlacements } from '@/hooks/useServedPlacements'
+import { useServedPlacementsState } from '@/hooks/useServedPlacements'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown, Loader2 } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
@@ -513,10 +516,32 @@ function takeRail(open: () => void) {
   })
 }
 
+/** A layer the server pages comes in name order: sorting it otherwise would reorder only what
+ *  has loaded. */
+const FED_SORT_MODES: LayerNodeSortMode[] = ['alpha-asc']
+
 /** Entities one membership change takes (the server's `EXCLUDE_MAX`). */
 const MEMBER_OPS_MAX = 2000
 
-export function ContextViewCanvas({
+/** The canvas — with, for a view the server places (made from a query, or a subset view), the
+ *  one service everything reads where the view draws an entity from: search results, Show on
+ *  canvas, Narrow, lineage cues and the trace. Asked afresh when the view's members or what it
+ *  is made of change. */
+export function ContextViewCanvas(props: ContextViewCanvasProps) {
+  const activeView = useSchemaStore((s) => s.getActiveView())
+  const provider = useGraphProvider()
+  const atRevision = (useViewExecutionContext()?.asOfSeq ?? null) != null
+  const feedNonce = useCanvasStore((s) => s.subsetRefreshNonce)
+  const madeOf = activeView?.search ?? activeView?.membership ?? null
+  const resetKey = useMemo(() => `${feedNonce}|${JSON.stringify(madeOf)}`, [feedNonce, madeOf])
+  return (
+    <ServedPlacementProvider viewId={activeView?.id} fedView={!atRevision && madeOf !== null} resetKey={resetKey} provider={provider}>
+      <ContextViewCanvasBody {...props} />
+    </ServedPlacementProvider>
+  )
+}
+
+function ContextViewCanvasBody({
   className,
   layers = defaultReferenceModelLayers,
   showLineageFlow: initialShowLineageFlow = true
@@ -2132,6 +2157,21 @@ export function ContextViewCanvas({
     await prefetchSpine(urn, ancestorPath)
   }, [prefetchSpine, traceWriteLocked])
 
+  // WHERE THE VIEW DRAWS IT — for a view the server places (made from a query, or a subset
+  // view), the server's word, shared by search, Show on canvas, Narrow and lineage cues. None
+  // where it can't place for this view: the canvas then places as it always has.
+  const servedService = useServedPlacementsService()
+  const servedVersion = useServedVersion()
+  const servedLayerOf = useServedLayerOf()
+  const served = servedService && !servedService.unavailable ? servedService : null
+  const placeSearchHits = useCallback((urns: string[]) => {
+    if (served) served.placeOf(urns, { priority: 'now' }).catch(() => { /* asked again on the next page */ })
+  }, [served])
+  const servedForSearch = useMemo(
+    () => (served ? { layerOf: servedLayerOf, version: servedVersion, place: placeSearchHits } : undefined),
+    [served, servedLayerOf, servedVersion, placeSearchHits],
+  )
+
   // The canvas's ONE search session: the header box, the layer columns and
   // the results panel all read it back off the context below, so they can
   // no longer disagree about what was searched. Both inputs are memoised
@@ -2145,6 +2185,7 @@ export function ContextViewCanvas({
     curated: activeEntityScope === 'curated',
     revealHit: revealHitForSearch,
     prefetchHit: prefetchSearchHitSpine,
+    served: servedForSearch,
   })
   // Search, from the command palette: a question in plain words, or the
   // panel opened out into Search Studio.
@@ -2569,12 +2610,13 @@ export function ContextViewCanvas({
   // (or the view it follows) puts them. Asked again when its members or data move.
   const feedNonce = useCanvasStore((s) => s.subsetRefreshNonce)
   const traceUrns = useMemo(() => (traceModel ? traceModel.nodes.map((n) => n.urn) : []), [traceModel])
-  const servedPlacement = useServedPlacements({
+  const servedPlacementState = useServedPlacementsState({
     viewId: activeView?.id ?? null,
     active: traceActive && fedView,
     urns: traceUrns,
     resetKey: `${feedNonce}|${activeView?.membership ? 'members' : ''}|${JSON.stringify(activeView?.search ?? null)}`,
   })
+  const servedPlacement = servedPlacementState.placements
   const overlayPlacement = useMemo(() => ({
     backendAssignments: new Map(
       [...effectiveAssignments].map(([nodeId, a]) => [nodeId, a.layerId] as const),
@@ -4312,6 +4354,22 @@ export function ContextViewCanvas({
     const types = feedTypesByLayer.get(layerId)
     if (types && types.length > 0) void loadMoreFeeds(types)
   }, [feedTypesByLayer, loadMoreFeeds, traceWriteLocked])
+  // A layer the server pages is read a page or two ahead of the reader, one page at a time
+  // across the canvas, while the tab is looked at — never drained in the background.
+  const narrowedNow = useNarrowStore((st) => st.applied !== null)
+  const lookahead = useFeedLookahead({ enabled: fedView && !traceActive && !narrowedNow, loadMoreFeeds })
+  // A layer whose page failed says so, on the layer, with a way to ask again.
+  const feedFailures = useCanvasStore((s) => s.feedFailures)
+  const feedFailedByLayer = useMemo(() => {
+    const out = new Map<string, { message: string; onRetry: () => void }>()
+    if (!fedView) return out
+    for (const layer of sortedLayers) {
+      const key = subsetFeedKey(layer.id)
+      const failure = feedFailures[key]
+      if (failure) out.set(layer.id, { message: failure.message, onRetry: () => { void loadMoreFeeds([key]) } })
+    }
+    return out
+  }, [fedView, sortedLayers, feedFailures, loadMoreFeeds])
 
   // Arming a connection is the first step of staging an edge: the next click
   // resolves a target, the picker opens, and confirming writes a create_edge
@@ -4627,6 +4685,8 @@ export function ContextViewCanvas({
   })
   // The partner reveal, built far below with the chains it reads.
   const revealPartnersRef = useRef<ReturnType<typeof useRevealPartners> | null>(null)
+  // The served reveal, built just below.
+  const revealSearchHitBrowseRef = useRef<RevealSearchHit | null>(null)
   const revealOnCanvas = useCallback(async (nodeId: string, revealOpts?: RevealOptions) => {
     if (traceWriteLocked()) {
       // Drawing: open the overlay's own chain. Still walking: there is
@@ -4640,9 +4700,19 @@ export function ContextViewCanvas({
     // its pager at the NEXT page. Its path can, as selecting a card brings
     // its partners in. Anything else takes the walk, which then only
     // focuses a row this brought in.
+    // In a view the server places, an entity not drawn yet is loaded where the view draws it
+    // — however far down its layer's pages — or said to be outside the view.
+    if (served && !isDrawnRow(nodeId)) {
+      const outcome = await revealSearchHitBrowseRef.current?.(nodeId, [])
+      if (outcome?.landedOn === 'hit') return 'revealed'
+      if (outcome?.landedOn === 'outside') {
+        useNotificationStore.getState().add({ type: 'info', message: `${canvasDisplayName(nodeId)} isn't in this view.` })
+        return 'unavailable'
+      }
+    }
     if (!isDrawnRow(nodeId)) await revealPartnersRef.current?.([nodeId], { anchoredOnly: true })
     return revealAndFocus(nodeId, revealOpts)
-  }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked, isDrawnRow])
+  }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked, isDrawnRow, served])
 
   // Multi-locate (T24 F5): reveal each target (expanding collapsed
   // ancestors), then walk each one through the SAME virtualizer-aware
@@ -4682,7 +4752,9 @@ export function ContextViewCanvas({
     provider,
     scrollIntoView: scrollHitIntoView,
     markFirstPageHandled,
+    served,
   })
+  useEffect(() => { revealSearchHitBrowseRef.current = revealSearchHitBrowse }, [revealSearchHitBrowse])
   const revealSearchHit = useCallback<RevealSearchHit>(async (urn, ancestorPath) => {
     if (traceWriteLocked()) {
       // Drawing: the overlay opens its own chain. Still walking: there is
@@ -4958,9 +5030,26 @@ export function ContextViewCanvas({
     [sortedLayers],
   )
   const narrowLayerOf = useCallback(
-    (urn: string) => nodeLayerMap.get(urnToIdMap.get(urn) ?? urn),
-    [nodeLayerMap, urnToIdMap],
+    (urn: string): string | undefined => {
+      // A view the server places draws its members where the server says, loaded or not.
+      void servedVersion
+      if (served) return servedLayerOf(urn) ?? undefined
+      return nodeLayerMap.get(urnToIdMap.get(urn) ?? urn)
+    },
+    [nodeLayerMap, urnToIdMap, served, servedLayerOf, servedVersion],
   )
+  const placeNarrowMembers = useMemo(
+    () => (served ? (urns: string[]) => { served.placeOf(urns, { priority: 'background' }).catch(() => { /* the spread says so far */ }) } : undefined),
+    [served],
+  )
+  // A narrowing in a view the server places loads every member it holds into its layer.
+  const narrowLoad = useNarrowServedLoad({
+    served: narrowEnabled ? served : null,
+    provider,
+    result: narrowApplied?.result ?? null,
+    containmentEdgeTypes,
+    lineageEdgeTypes,
+  })
   // SAVE AS VIEW (features/live-views) — a narrowing kept as a view of its own,
   // on the same data. Offered to whoever may create views in this workspace.
   const canCreateViews = usePermission('workspace:view:create', scopeWsId ?? undefined)
@@ -5932,6 +6021,44 @@ export function ContextViewCanvas({
     }
     return chains
   }, [ancestorChains, searchEdges])
+  // A SEARCH'S MATCHES NOT LOADED YET, in a view the server places: counted in the layer it
+  // draws each in, with the ways to them — narrow to them, or export them.
+  const searchMatchUrns = useSearchStore((st) => st.matchUrnSet)
+  useEffect(() => {
+    if (!served || searchMatchUrns.size === 0) return
+    const ask = [...searchMatchUrns].filter((u) => !urnToIdMap.has(u) && served.stateOf(u) === 'unknown').slice(0, 5000)
+    if (ask.length) served.placeOf(ask, { priority: 'background' }).catch(() => { /* asked again with the next answer */ })
+  }, [served, searchMatchUrns, urnToIdMap])
+  const notLoadedMatchesByLayer = useMemo(() => {
+    const out = new Map<string, number>()
+    if (!served || searchMatchUrns.size === 0) return out
+    void servedVersion
+    for (const urn of searchMatchUrns) {
+      if (urnToIdMap.has(urn)) continue
+      const layerId = servedLayerOf(urn)
+      if (typeof layerId === 'string') out.set(layerId, (out.get(layerId) ?? 0) + 1)
+    }
+    return out
+  }, [served, searchMatchUrns, urnToIdMap, servedLayerOf, servedVersion])
+  const searchResultsQuery = search.advanced.view.kind === 'results' ? search.advanced.view.query : null
+
+  // Where the view draws the partners the canvas hasn't loaded: asked behind the reader, a
+  // couple of thousand at a time, and read again as the answers land.
+  const servedEndLayerOf = useMemo(
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read as the server answers more
+    () => (served ? (urn: string) => servedLayerOf(urn) : undefined), [served, servedLayerOf, servedVersion])
+  useEffect(() => {
+    if (!served || overlay.active) return
+    const ends: string[] = []
+    for (const e of edges) {
+      if (isContainmentEdge(normalizeEdgeType(e))) continue
+      for (const end of [e.source, e.target]) {
+        if (!urnToIdMap.has(end) && served.stateOf(end) === 'unknown') ends.push(end)
+      }
+      if (ends.length >= 2000) break
+    }
+    if (ends.length) served.placeOf([...new Set(ends)].slice(0, 2000), { priority: 'background' }).catch(() => { /* asked again later */ })
+  }, [served, edges, urnToIdMap, overlay.active, isContainmentEdge])
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
@@ -5956,6 +6083,8 @@ export function ContextViewCanvas({
     // A view open to its whole data source holds every partner somewhere.
     openScope: activeEntityScope === 'all',
     searchEdges,
+    // A view the server places: a partner further down a layer's pages is in the view.
+    servedLayerOf: servedEndLayerOf,
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation
@@ -6390,6 +6519,7 @@ export function ContextViewCanvas({
     openScope: activeEntityScope === 'all',
     containmentEdgeTypes,
     lineageEdgeTypes,
+    served,
   })
   useEffect(() => { revealPartnersRef.current = revealPartners })
   // Per selection: the partners done with, out now, and missed once (held
@@ -7458,7 +7588,11 @@ export function ContextViewCanvas({
               seeds={traceSeeds}
               onRemoveSeed={removeTraceSeed}
               outsideView={overlay.view?.outsideView ?? 0}
-              placing={overlay.view?.pending ?? 0}
+              // The view's own count while all is well; once some couldn't be asked, the service's,
+              // which leaves those out — they are counted, with Retry, beside it.
+              placing={servedPlacementState.failed > 0 ? servedPlacementState.pending : (overlay.view?.pending ?? 0)}
+              placeFailed={servedPlacementState.failed}
+              onRetryPlacing={servedPlacementState.retryFailed}
               keep={traceKeepActions}
               sinceSaved={sinceSaved}
             />
@@ -7515,6 +7649,7 @@ export function ContextViewCanvas({
             onExport={canExportNarrowing
               ? () => setLineageExport({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel })
               : undefined}
+            loading={narrowLoad}
           />
         )}
 
@@ -8532,10 +8667,24 @@ export function ContextViewCanvas({
                 groupDestinations={groupDestinations}
                 onMoveGroupContents={isDraft && !traceActive && !serverPlaced ? moveGroupContentsInLayer : undefined}
                 onUngroup={isDraft && !traceActive && !serverPlaced ? ungroupInLayer : undefined}
-                feedMore={feedMoreByLayer.get(layer.id)}
+                feedMore={fedView && feedMoreByLayer.get(layer.id)
+                  ? { ...feedMoreByLayer.get(layer.id)!, pageRows: FEED_PAGE_ROWS, failed: feedMoreByLayer.get(layer.id)!.failed || feedFailedByLayer.has(layer.id) }
+                  : feedMoreByLayer.get(layer.id)}
                 onFeedMore={onFeedMore}
                 subsetFeed={subsetFeedByLayer.get(layer.id)}
-                emptyText={subsetView ? 'No matches' : undefined}
+                emptyText={subsetView ? 'No matches' : membersFed ? 'No members' : undefined}
+                feedPending={fedView && !subsetFeedByLayer.has(layer.id) && !feedFailedByLayer.has(layer.id) && isHydratingInitial}
+                feedFailed={feedFailedByLayer.get(layer.id)}
+                sortModesOffered={fedView ? FED_SORT_MODES : undefined}
+                largeLayer={fedView && lookahead.softMaxReached ? { loaded: subsetFeedByLayer.get(layer.id)?.delivered ?? 0 } : undefined}
+                onVisibleRows={fedView ? lookahead.reportVisible : undefined}
+                notLoadedMatches={notLoadedMatchesByLayer.get(layer.id) ? {
+                  count: notLoadedMatchesByLayer.get(layer.id)!,
+                  onNarrow: narrowEnabled && searchResultsQuery ? () => narrowFromSearch(searchResultsQuery) : undefined,
+                  onExport: graphExportEnabled && searchResultsQuery && narrowViewId
+                    ? () => setExportMatches({ viewId: narrowViewId, query: searchResultsQuery })
+                    : undefined,
+                } : undefined}
                 onSearchInLayer={subsetView || membersFed ? searchInLayer : undefined}
                 onExportLayer={exportLayer ?? exportSubsetLayer}
                 onScroll={handleLayerScroll}
@@ -8894,6 +9043,7 @@ export function ContextViewCanvas({
             ? (draft) => { useNarrowStore.getState().closeComposer(); setSaveAsDraft(draft) }
             : undefined}
           saved={savedNarrowingsProps}
+          placeMembers={placeNarrowMembers}
         />
       )}
 

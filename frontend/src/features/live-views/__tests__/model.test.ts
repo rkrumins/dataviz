@@ -173,6 +173,6 @@ describe('a first answer that met a busy graph', () => {
     expect(fillingInAfterBusy(busy('pending'))).toBe(true)
     expect(statusWords(busy('pending'))).toMatchObject({ label: 'Updating…', tone: 'busy' })
     expect(workingText(busy('pending'))).toMatch(/graph was busy/)
-    expect(fillingInAfterBusy({ ...busy('pending'), revision: 3 } as never)).toBe(false)
+    expect(fillingInAfterBusy({ mode: 'live', status: 'pending', revision: 3, detail: { reason: 'graph_busy' } } as never)).toBe(false)
   })
 })

@@ -81,3 +81,31 @@ export async function loadIntoCanvas(
   const notLanded = result.nodes.map((b) => b.node.urn).filter((u) => !landed.has(u))
   return { loaded, outside: result.outside, failed: [...result.failed, ...notLanded] }
 }
+
+/**
+ * The rows to open, top-down, so an entity loaded into its layer is drawn: the containers it
+ * nests in there — a loaded row of that layer, or the row drawn for it — as many as its
+ * `inLayer` says. Empty for one at the top of its layer, or not loaded into one.
+ */
+export function rowsToOpen(urn: string): { open: string[]; hosts: string[] } {
+  const { nodes } = useCanvasStore.getState()
+  const byId = new Map(nodes.map((n) => [n.id, n]))
+  const node = byId.get(urn)
+  const layerId = node?.data?.feedLayerId
+  if (!node || typeof layerId !== 'string') return { open: [], hosts: [] }
+  const path = (node.data.ancestorPath as Array<{ urn: string }> | undefined) ?? []
+  const depth = Math.min(Number(node.data.inLayer) || 0, path.length)
+  const open: string[] = []
+  const hosts: string[] = []
+  for (let i = path.length - 1; i >= path.length - depth; i--) {
+    const step = path[i]
+    const host = byId.get(step.urn)
+    if (host && host.data?.feedLayerId === layerId) {
+      hosts.push(step.urn)
+      open.unshift(step.urn)
+    } else {
+      open.unshift(`logical:context:${layerId}:${step.urn}`)
+    }
+  }
+  return { open, hosts }
+}

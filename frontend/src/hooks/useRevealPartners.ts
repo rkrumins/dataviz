@@ -40,6 +40,8 @@ import { primeRevealSpine } from '@/lib/primeRevealSpine'
 import { primeLineageFor } from '@/lib/primeLineageFor'
 import { appearsWithin } from './useLocateManyOnCanvas'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
+import { loadIntoCanvas, rowsToOpen } from '@/features/served-placement/loadIntoCanvas'
+import type { ServedPlacements } from '@/features/served-placement/servedPlacements'
 
 /** How many partners one reveal brings in at most: a page of a column. */
 export const REVEAL_PARTNERS_CAP = 100
@@ -64,6 +66,9 @@ export interface UseRevealPartnersOptions {
   lineageEdgeTypes: readonly string[]
   /** How long to wait for the partners to be drawn. */
   settleMs?: number
+  /** A view the server places: only the partners it draws come in, each into its layer — a
+   *  partner it draws nowhere (not one of a subset's matches) never becomes a row. */
+  served?: ServedPlacements | null
 }
 
 export interface RevealPartnersOutcome {
@@ -96,6 +101,24 @@ export function useRevealPartners(
 
     const wanted = partners.filter(p => !isVisible(p))
     if (wanted.length === 0) return outcome()
+
+    const served = optsRef.current.served
+    if (served && !served.unavailable && !scope?.anchoredOnly) {
+      const landed = await loadIntoCanvas(served, provider, wanted.slice(0, REVEAL_PARTNERS_CAP), {
+        containmentEdgeTypes: [...containmentEdgeTypes], lineageEdgeTypes: [...lineageEdgeTypes], priority: 'now',
+      }).catch(() => null)
+      if (landed) {
+        const opens = new Set<string>()
+        for (const urn of landed.loaded) {
+          const { open, hosts } = rowsToOpen(urn)
+          open.forEach((id) => opens.add(id))
+          hosts.forEach((h) => markFirstPageHandled(h))
+        }
+        if (opens.size > 0) setExpandedNodes((prev) => new Set([...prev, ...opens]))
+        await appearsWithin(() => landed.loaded.every((p) => optsRef.current.isVisible(p)), settleMs)
+        return outcome()
+      }
+    }
 
     const chains = new Map<string, readonly string[]>()
     const unknown: string[] = []

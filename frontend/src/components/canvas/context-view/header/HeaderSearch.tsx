@@ -326,6 +326,7 @@ function HeaderSearchBox() {
       // near-miss that says nothing reads as a click that did nothing.
       // A pick that DID land clears any standing note: it describes a
       // canvas the reader has since left.
+      if (outcome.landedOn === 'outside') { noteLanding(`${hit.node.displayName} isn't in this view`); return }
       if (outcome.landedOn !== 'ancestor') { noteLanding(null); return }
       noteLanding(outcome.displayName
         ? `Showing ${outcome.displayName} — ${hit.node.displayName} couldn't be opened`
@@ -667,7 +668,7 @@ function StatusLine({ landingNote }: { landingNote: string | null }) {
     const layers = new Set(
       (result.hits ?? [])
         .map((hit) => s.resolveLayer(hit))
-        .filter((id): id is string => id !== null),
+        .filter((id): id is string => typeof id === 'string'),
     )
     // The plus means "more than this", so it belongs only to a count that
     // is a floor — a run the server truncated AND could not count. With

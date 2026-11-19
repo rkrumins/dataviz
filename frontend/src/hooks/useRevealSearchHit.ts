@@ -36,6 +36,8 @@ import { usePreferencesStore } from '@/store/preferences'
 import { primeLineageFor } from '@/lib/primeLineageFor'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import type { AncestorRef } from '@/types/search'
+import type { ServedPlacements } from '@/features/served-placement/servedPlacements'
+import { loadIntoCanvas, rowsToOpen } from '@/features/served-placement/loadIntoCanvas'
 
 
 /** How long one level of the spine holds the screen before the next opens. */
@@ -108,6 +110,10 @@ export interface UseRevealSearchHitDeps {
      *  Implementations typically rAF-poll the DOM because the row may
      *  not have re-rendered yet after the spine expansion. */
     scrollIntoView?: (nodeId: string) => void
+    /** A view the server places: where it draws the hit. The hit is loaded into that layer,
+     *  under the containers it nests in there — however far down its pages it is — instead of
+     *  walking a spine the view doesn't draw. */
+    served?: ServedPlacements | null
 }
 
 /**
@@ -121,7 +127,8 @@ export interface UseRevealSearchHitDeps {
  * watched happen.
  */
 export interface RevealOutcome {
-    landedOn: 'hit' | 'ancestor'
+    /** `outside`: the view draws it nowhere (a view the server places said so). */
+    landedOn: 'hit' | 'ancestor' | 'outside'
     urn: string
     displayName: string
 }
@@ -137,12 +144,35 @@ export const LANDED_NOWHERE: RevealOutcome = { landedOn: 'ancestor', urn: '', di
 
 
 
-export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView, markFirstPageHandled }: UseRevealSearchHitDeps): RevealSearchHit {
+export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView, markFirstPageHandled, served }: UseRevealSearchHitDeps): RevealSearchHit {
     const selectNode = useCanvasStore((s) => s.selectNode)
     const containmentEdgeTypes = useViewContainmentEdgeTypes()
     const lineageEdgeTypes = useViewLineageEdgeTypes()
 
     return useCallback(async (urn: string, ancestorPath: AncestorRef[]): Promise<RevealOutcome> => {
+        // A view the server places: loaded where it draws it, then opened down to it.
+        if (served && !served.unavailable) {
+            const landed = await loadIntoCanvas(served, provider, [urn], { containmentEdgeTypes, lineageEdgeTypes, priority: 'now' })
+                .catch(() => null)
+            if (landed?.outside.includes(urn)) return { landedOn: 'outside', urn, displayName: canvasDisplayName(urn) }
+            if (landed?.loaded.includes(urn) && served.get(urn)?.layerId) {
+                // The containers it nests in, in its layer, opened top-down.
+                const { open: opens, hosts } = rowsToOpen(urn)
+                for (const host of hosts) markFirstPageHandled?.(host)
+                if (opens.length) {
+                    setExpandedNodes((prev) => {
+                        const next = new Set(prev)
+                        for (const id of opens) next.add(id)
+                        return next
+                    })
+                }
+                await nextFrame()
+                selectNode(urn)
+                scrollIntoView?.(urn)
+                return { landedOn: 'hit', urn, displayName: canvasDisplayName(urn) }
+            }
+            // Couldn't be asked about: the walk below does what it can.
+        }
         // Prime the spine: its missing nodes and its containment edges, so
         // each level the walk opens holds the child that leads onward.
         const spineUrns = [...ancestorPath.map((a) => a.urn), urn]
@@ -219,7 +249,7 @@ export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView,
         selectNode(landed.urn)
         scrollIntoView?.(landed.urn)
         return { landedOn: 'ancestor', urn: landed.urn, displayName: landed.displayName }
-    }, [setExpandedNodes, provider, selectNode, scrollIntoView, containmentEdgeTypes, markFirstPageHandled])
+    }, [setExpandedNodes, provider, selectNode, scrollIntoView, containmentEdgeTypes, lineageEdgeTypes, markFirstPageHandled, served])
 }
 
 

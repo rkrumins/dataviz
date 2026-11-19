@@ -121,6 +121,9 @@ export interface UseEdgeProjectionOptions {
    * unknown: never outside, never a stub.
    */
   openScope?: boolean
+  /** A view the server places: where it draws an end the canvas hasn't loaded — a layer (in
+   *  the view, its row not loaded yet), null (outside it), or undefined (not answered yet). */
+  servedLayerOf?: (urn: string) => string | null | undefined
   /**
    * A Connections search's matched edges. Each lights the line that draws it
    * (`searchMatches` on the line) and adds nothing to it; see section D.
@@ -308,6 +311,7 @@ export function useEdgeProjection({
   promotedAnchors,
   holderEdges,
   openScope,
+  servedLayerOf,
   searchEdges,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number, offCanvasByNode: ReadonlyMap<string, OffCanvasLineage> } {
 
@@ -514,6 +518,10 @@ export function useEdgeProjection({
       if (row) return { at: 'row', id: row }
       const column = promotedAnchors?.get(end)
       if (column) return { at: 'column', layerId: column }
+      // The server's word for a view it places: a member further down a layer is in the view.
+      const servedAt = servedLayerOf?.(end)
+      if (typeof servedAt === 'string') return { at: 'column', layerId: servedAt }
+      if (servedAt === null) return OUTSIDE
       if (!ancestorChains) return nowhere
       const chain = ancestorChains.get(end)
       if (!chain) return PENDING
@@ -1104,7 +1112,7 @@ export function useEdgeProjection({
     const offCanvasResult: ReadonlyMap<string, OffCanvasLineage> = offCanvas.size > 0 ? offCanvas : NO_OFF_CANVAS
     if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
     return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap, holderEdges, expandedNodes, loadedChildCounts, openScope, layerOfNode, searchEdges])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap, holderEdges, expandedNodes, loadedChildCounts, openScope, layerOfNode, searchEdges, servedLayerOf])
 
   const projectedEdges = projection.edges
 

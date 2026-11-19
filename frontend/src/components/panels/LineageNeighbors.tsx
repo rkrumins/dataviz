@@ -324,6 +324,13 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
     try {
       const outcome = await withTimeout(onRevealPath(urn, pathOf(urn)), TIMEOUTS.LINEAGE_FOCUS_MS, 'lineage.revealPath')
       if (outcome.landedOn === 'hit') return
+      if (outcome.landedOn === 'outside') {
+        useNotificationStore.getState().add({
+          type: 'info',
+          message: `${name} isn't in this view. Trace or the Focus Lens will walk to it.`,
+        })
+        return
+      }
       if (!outcome.urn) {
         setUnreachable(urn)
         return

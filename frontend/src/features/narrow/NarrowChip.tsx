@@ -37,6 +37,9 @@ export interface NarrowChipProps {
   onSave?: (name: string) => Promise<void>
   /** Export everything it shows, with every entity's parent and path. */
   onExport?: () => void
+  /** A view the server places: its members being loaded into their layers, and how many the
+   *  view draws nowhere. */
+  loading?: { done: number; total: number; outside: number; finished: boolean } | null
 }
 
 const quiet = cn(
@@ -136,7 +139,14 @@ function SaveForm({ sentence, anchor, trigger, onSave, onDone }: {
   )
 }
 
-export function NarrowChip({ applied, onEdit, onClear, link, linkNote, onRetry, onSaveAsView, onSave, onExport }: NarrowChipProps) {
+/** How loading a narrowing's members is going, in words — none once they are all in. */
+function loadingText(loading: NonNullable<NarrowChipProps['loading']>): string | null {
+  const outside = loading.outside > 0 ? ` · ${loading.outside.toLocaleString()} not in this view` : ''
+  if (!loading.finished) return `Loading ${loading.done.toLocaleString()} of ${loading.total.toLocaleString()}${outside}`
+  return outside ? outside.slice(3) : null
+}
+
+export function NarrowChip({ applied, onEdit, onClear, link, linkNote, onRetry, onSaveAsView, onSave, onExport, loading }: NarrowChipProps) {
   const [copied, setCopied] = useState(false)
   const [saving, setSaving] = useState<{ right: number; top: number } | null>(null)
   const saveButton = useRef<HTMLButtonElement>(null)
@@ -186,7 +196,7 @@ export function NarrowChip({ applied, onEdit, onClear, link, linkNote, onRetry, 
               Narrowed to <strong className="font-semibold tabular-nums">{total.toLocaleString()}</strong> {total === 1 ? 'entity' : 'entities'}
             </span>
             <span className="block mt-0.5 text-[10.5px] text-ink-muted leading-tight truncate" data-narrow-saved={saved ? saved.id : undefined}>
-              {saved ? savedText(saved) : sentence}
+              {(loading && loadingText(loading)) ?? (saved ? savedText(saved) : sentence)}
             </span>
           </span>
         </HoverTip>
