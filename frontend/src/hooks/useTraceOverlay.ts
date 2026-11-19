@@ -294,7 +294,7 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // object too, and depending on it would undo the whole point.
   const { model, focusUrn, layers, assignments, viewIsCurated } = a
   const { showUpstream, showDownstream, depthUp, depthDown } = a
-  const { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, spec } = a.placement ?? {}
+  const { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, spec, served } = a.placement ?? {}
   // The seeds by VALUE, for the same reason: a list equal to the last one
   // must not rebuild anything.
   const seedKey = a.focusUrns?.length ? a.focusUrns.join('\u0000') : null
@@ -356,10 +356,10 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   const seedNow = useMemo(() => (
     focusInModel
       ? seedExpansion({ model, focusUrn, focusUrns, layers, assignments, viewIsCurated, showUpstream, showDownstream, depthUp, depthDown,
-        placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, spec } })
+        placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, spec, served } })
       : EMPTY_EXPANSION
   ), [model, focusUrn, focusUrns, layers, assignments, viewIsCurated, showUpstream, showDownstream, depthUp, depthDown,
-    backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, spec, focusInModel])
+    backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, spec, served, focusInModel])
   const closed = seed.closed
   const traceExpansion = useMemo(() => {
     let next: Set<string> | null = null
@@ -385,12 +385,12 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
       ? buildTraceView({
         model, focusUrn, focusUrns, layers, assignments, viewIsCurated, traceExpansion,
         showUpstream, showDownstream, depthUp, depthDown,
-        placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, spec },
+        placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, spec, served },
       })
       : null
   ), [active, model, focusUrn, focusUrns, layers, assignments, viewIsCurated, traceExpansion,
     showUpstream, showDownstream, depthUp, depthDown,
-    backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, spec])
+    backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, spec, served])
 
   const toggle = useCallback((id: string) => setSeed(prev => {
     const next = new Set(prev.set)

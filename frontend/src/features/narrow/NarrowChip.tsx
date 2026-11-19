@@ -7,7 +7,8 @@
  * narrowing can be changed, saved with the view (a short link, and what is new and
  * gone each time it is opened), exported, handed to someone else as a link, or put away.
  */
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 
@@ -60,12 +61,25 @@ function nameFor(sentence: string): string {
   return name.length > 120 ? `${name.slice(0, 119)}…` : name
 }
 
-function SaveForm({ sentence, onSave, onDone }: {
+/** Drawn over everything, under the Save button: the chip sits below the canvas's columns. */
+function SaveForm({ sentence, anchor, trigger, onSave, onDone }: {
   sentence: string
+  anchor: { right: number; top: number }
+  trigger: React.RefObject<HTMLButtonElement | null>
   onSave: (name: string) => Promise<void>
   onDone: () => void
 }) {
   const [name, setName] = useState(() => nameFor(sentence))
+  const panel = useRef<HTMLDivElement>(null)
+  // A click anywhere else puts it away; the Save button toggles it.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as Node | null
+      if (target && !panel.current?.contains(target) && !trigger.current?.contains(target)) onDone()
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [onDone, trigger])
   const [state, setState] = useState<{ kind: 'idle' } | { kind: 'saving' } | { kind: 'failed'; message: string }>({ kind: 'idle' })
   const save = async () => {
     if (!name.trim()) return
@@ -77,12 +91,15 @@ function SaveForm({ sentence, onSave, onDone }: {
       setState({ kind: 'failed', message: err instanceof Error && err.message ? err.message : 'Couldn’t save it. Try again.' })
     }
   }
-  return (
+  return createPortal(
     <div
+      ref={panel}
       role="dialog"
       aria-label="Save this narrowing"
+      data-canvas-interactive
+      style={{ position: 'fixed', right: anchor.right, top: anchor.top, zIndex: 1000 }}
       className={cn(
-        'pointer-events-auto absolute right-0 top-[calc(100%+6px)] w-[300px] p-3 rounded-xl text-left',
+        'w-[300px] p-3 rounded-xl text-left',
         'bg-white dark:bg-neutral-900 ring-1 ring-black/10 dark:ring-white/10 shadow-xl',
       )}
       onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onDone() } }}
@@ -112,13 +129,20 @@ function SaveForm({ sentence, onSave, onDone }: {
           </button>
         </div>
       </form>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
 export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsView, onSave, onExport }: NarrowChipProps) {
   const [copied, setCopied] = useState(false)
-  const [saving, setSaving] = useState(false)
+  const [saving, setSaving] = useState<{ right: number; top: number } | null>(null)
+  const saveButton = useRef<HTMLButtonElement>(null)
+  const closeSave = useCallback(() => setSaving(null), [])
+  const toggleSave = () => {
+    const rect = saveButton.current?.getBoundingClientRect()
+    setSaving((open) => (open || !rect ? null : { right: window.innerWidth - rect.right, top: rect.bottom + 8 }))
+  }
   const total = applied.result.counts.total
   const notes = truncationNotes(applied.result)
   const sentence = describeNarrow(applied.spec, applied.seedsLabel)
@@ -185,12 +209,12 @@ export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsVi
           {onSave && !saved && (
             <span className="relative flex">
               <HoverTip className="flex" label="Save this narrowing" detail="Keep it with this view for everyone who can open it, under a short link.">
-                <button type="button" onClick={() => setSaving((o) => !o)} className={quiet} aria-expanded={saving}>
+                <button ref={saveButton} type="button" onClick={toggleSave} className={quiet} aria-expanded={!!saving}>
                   <LucideIcons.Bookmark className="w-3 h-3 text-accent-lineage" aria-hidden="true" />
                   Save
                 </button>
               </HoverTip>
-              {saving && <SaveForm sentence={sentence} onSave={onSave} onDone={() => setSaving(false)} />}
+              {saving && <SaveForm sentence={sentence} anchor={saving} trigger={saveButton} onSave={onSave} onDone={closeSave} />}
             </span>
           )}
           {onSaveAsView && (
