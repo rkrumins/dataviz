@@ -387,6 +387,11 @@ the columns the tables have, so on a database whose schema is short of what its 
 copies what is there, and runs again once `--recover` has made the rest. The downgrade forgets the
 marker.
 
+**`20261119_1800_merge_graph_watch` joins `20261116_1200_graph_watch` to that head.** The watch
+revision (`graph_seen`, `graph_watches`: new tables only) came off `20261116_1100_settings_import`,
+and environments deployed from its branch ran it, so it keeps the parent it was pushed with (the
+lineage record lists it). The merge revision runs nothing.
+
 **Rolling back.** For one release, every save through the store writes the old storage too:
 New-version builds' JSON, the `platform_settings` columns, a workspace's and a data source's
 columns (a data source's forks' as well), and a graph's `projection_state.read_mode`. Each graph's
