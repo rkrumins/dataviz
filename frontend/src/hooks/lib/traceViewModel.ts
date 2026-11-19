@@ -112,6 +112,11 @@ export interface TraceViewInputs {
      *  it alone places the walk — the backend answer and the fallback above
      *  are not read. */
     spec?: CompiledPlacementSpec
+    /** Where a view the server places (made from a query, or a search's matches) draws
+     *  each entity, as the server answered it: a layer, or null — not in this view. When
+     *  set it alone places the walk; an entity not answered yet is pending — neither drawn
+     *  nor counted outside the view. */
+    served?: ReadonlyMap<string, string | null>
   }
 }
 
@@ -125,6 +130,8 @@ export interface TraceView {
    *  each unplaceable chain, so a warehouse whose six columns are all outside
    *  the view counts once. Computed before direction/depth scoping. */
   outsideView: number
+  /** Participants whose place the server hasn't said yet (`placement.served`). */
+  pending: number
   counts: { up: number; down: number }
 }
 
@@ -289,7 +296,33 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
   // the unplaceable chain, and counted BEFORE scoping — what the view cannot
   // show does not depend on which direction toggle is currently on.
   const anchorlessChains = new Set<string>()
-  if (i.placement?.spec) {
+  let pending = 0
+  if (i.placement?.served) {
+    // A view the server places: its answer for each participant and its containers, anchored at
+    // the top of the participant's run of same-layer ancestors — the canvas's visual-root rule.
+    const served = i.placement.served
+    const parentOf = (urn: string): string | null => sg.nodes.get(urn)?.parent ?? null
+    for (const p of participants) {
+      if (!served.has(p)) { pending += 1; continue }
+      const layer = served.get(p) ?? null
+      let anchor = p
+      let top = p
+      let contiguous = true
+      const guard = new Set([p])
+      for (let up = parentOf(p); up && !guard.has(up); up = parentOf(up)) {
+        guard.add(up)
+        top = up
+        if (contiguous && layer !== null && served.get(up) === layer) anchor = up
+        else contiguous = false
+      }
+      if (layer === null) {
+        anchorlessChains.add(top)
+        continue
+      }
+      anchorOf.set(p, anchor)
+      laneOfAnchor.set(anchor, layer)
+    }
+  } else if (i.placement?.spec) {
     // ONE PLACEMENT CONTRACT (flag-on): every walk node placed by lib/placement
     // over the walk's own containment (the closure ships each participant's
     // ancestors), and a participant anchors at the TOP of its run of
@@ -455,7 +488,7 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
     ledger: buildLedger(i.model, i.completePairs, sg.lineageEdges),
   })
 
-  return { lanes, visible, wires, outsideView: anchorlessChains.size, counts: { up, down } }
+  return { lanes, visible, wires, outsideView: anchorlessChains.size, pending, counts: { up, down } }
 }
 
 /** The GRAPH's child count, at face value. `?? 0` and never `children.length`:

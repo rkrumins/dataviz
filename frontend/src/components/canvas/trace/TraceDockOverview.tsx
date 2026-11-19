@@ -13,6 +13,7 @@ export interface TraceDockOverviewProps {
   onJumpToUrn: (urn: string) => void
   /** Chains this view cannot place — see `TraceDockMetricStrip`. */
   outsideView?: number
+  placing?: number
   /** See `TraceDockNoticeStrip`. */
   nativeMode?: boolean
   onContinue?: () => void
@@ -32,6 +33,7 @@ export function TraceDockOverview({
   onReduceDepth,
   onJumpToUrn,
   outsideView = 0,
+  placing = 0,
   nativeMode,
   onContinue,
 }: TraceDockOverviewProps) {
@@ -63,6 +65,7 @@ export function TraceDockOverview({
         upstreamCount={trace.upstreamCount}
         downstreamCount={trace.downstreamCount}
         outsideView={outsideView}
+        placing={placing}
         resolveEdgeColor={resolveEdgeColor}
       />
     </motion.div>

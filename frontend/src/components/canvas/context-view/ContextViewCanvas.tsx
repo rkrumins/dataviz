@@ -74,6 +74,7 @@ import { useGraphProvider } from '@/providers'
 import type { AggregatedEdgeInfo, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { layerClaimedTypes, subsetFeedKey, useGraphHydration } from '@/hooks/useGraphHydration'
+import { useServedPlacements } from '@/hooks/useServedPlacements'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown, Loader2 } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
@@ -2550,6 +2551,17 @@ export function ContextViewCanvas({
   // anchors exactly where the canvas behind it would place the same node.
   const branchCreatedUrns = useBranchCreatedDelta()
   const viewIsCurated = activeEntityScope === 'curated'
+  // A view the server places — made from a query, or a search's matches — says itself where
+  // each entity a trace reaches is drawn: its members where they sit, the rest where its layout
+  // (or the view it follows) puts them. Asked again when its members or data move.
+  const feedNonce = useCanvasStore((s) => s.subsetRefreshNonce)
+  const traceUrns = useMemo(() => (traceModel ? traceModel.nodes.map((n) => n.urn) : []), [traceModel])
+  const servedPlacement = useServedPlacements({
+    viewId: activeView?.id ?? null,
+    active: traceActive && fedView,
+    urns: traceUrns,
+    resetKey: `${feedNonce}|${activeView?.membership ? 'members' : ''}|${JSON.stringify(activeView?.search ?? null)}`,
+  })
   const overlayPlacement = useMemo(() => ({
     backendAssignments: new Map(
       [...effectiveAssignments].map(([nodeId, a]) => [nodeId, a.layerId] as const),
@@ -2559,7 +2571,8 @@ export function ContextViewCanvas({
       : sortedLayers.find(l => l.showUnassigned === true)?.id,
     branchCreatedUrns,
     ...(placementSpec ? { spec: placementSpec } : {}),
-  }), [effectiveAssignments, viewIsCurated, sortedLayers, branchCreatedUrns, placementSpec])
+    ...(servedPlacement ? { served: servedPlacement } : {}),
+  }), [effectiveAssignments, viewIsCurated, sortedLayers, branchCreatedUrns, placementSpec, servedPlacement])
   const overlay = useTraceOverlay({
     model: traceModel,
     focusUrn: canvasTrace.tracedUrn,
@@ -7181,6 +7194,7 @@ export function ContextViewCanvas({
               seeds={traceSeeds}
               onRemoveSeed={removeTraceSeed}
               outsideView={overlay.view?.outsideView ?? 0}
+              placing={overlay.view?.pending ?? 0}
               keep={traceKeepActions}
               sinceSaved={sinceSaved}
             />

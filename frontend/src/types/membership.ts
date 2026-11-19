@@ -251,3 +251,13 @@ export interface RefreshResult {
   diff?: { added: number; removed: number; moved: number } | null
   membership: MembershipStatus
 }
+
+/** `POST /{ws}/graph/view-placements` — where a view the server places draws each of these
+ *  entities: a member where its row is, anything else where the view's layout (or the view
+ *  it follows) would put it, or nowhere (`layerId: null`). At most 2,000 a request. */
+export interface ViewPlacementsAnswer {
+  placements: Record<string, { layerId: string | null; source: 'member' | 'entry' | 'whole' | 'layout' | 'fallback' | 'none' }>
+  epoch: number | null
+  dataVersion: string | null
+  digest: string
+}

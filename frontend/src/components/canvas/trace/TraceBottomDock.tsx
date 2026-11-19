@@ -41,6 +41,8 @@ export interface TraceBottomDockProps {
   /** Chains the view cannot place anywhere (see `TraceView.outsideView`).
    *  Surfaced in the Overview strip; hidden at 0. */
   outsideView?: number
+  /** Entities a view the server places hasn't said where to draw yet. */
+  placing?: number
   /** Everything the title bar's Share control needs. Absent = no control. */
   share?: TraceShareSummary
   /** The traced entity's name, resolved by the host (see the title bar). */
@@ -100,6 +102,7 @@ export function TraceBottomDock({
   canHistoryForward = false,
   nativeMode = false,
   outsideView = 0,
+  placing = 0,
   share,
   focusLabel,
   seeds,
@@ -330,6 +333,7 @@ export function TraceBottomDock({
                     onReduceDepth={handleReduceDepth}
                     onJumpToUrn={onJumpToUrn}
                     outsideView={outsideView}
+                    placing={placing}
                     nativeMode={nativeMode}
                     // The native `retrace` MEANS "this walk did not finish":
                     // continue past the checkpoint, or retry the failed step.

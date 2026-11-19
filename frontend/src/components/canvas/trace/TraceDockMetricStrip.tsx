@@ -18,6 +18,8 @@ export interface TraceDockMetricStripProps {
    *  what the overlay rebuild exists to stop. The number is the honest
    *  answer to "why is this trace smaller than I expected". */
   outsideView?: number
+  /** Entities a view the server places hasn't said where to draw yet. */
+  placing?: number
   resolveEdgeColor: (edgeType: string) => string
 }
 
@@ -36,6 +38,7 @@ export function TraceDockMetricStrip({
   upstreamCount,
   downstreamCount,
   outsideView = 0,
+  placing = 0,
   resolveEdgeColor,
 }: TraceDockMetricStripProps) {
   const [copied, setCopied] = useState(false)
@@ -117,6 +120,18 @@ export function TraceDockMetricStrip({
           accent="lineage"
         />
       </div>
+
+      {placing > 0 && (
+        <div
+          role="status"
+          className={cn(
+            'flex items-center gap-2 px-3 h-8 rounded-lg self-start',
+            'bg-white/[0.06] border border-white/[0.15]',
+          )}
+        >
+          <span className="text-[11px] font-semibold text-ink tabular-nums">{`Placing ${placing.toLocaleString()}…`}</span>
+        </div>
+      )}
 
       {outsideView > 0 && (
         <div

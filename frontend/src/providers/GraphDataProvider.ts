@@ -888,6 +888,16 @@ export interface GraphDataProvider {
     ): Promise<ViewFeedPage>
 
     /**
+     * Where a view the server places (made from a query, or a search's matches) draws each
+     * of `urns` (at most 2,000) — what a trace in it is drawn by. Optional capability.
+     */
+    viewPlacements?(
+        viewId: string,
+        urns: string[],
+        opts?: { signal?: AbortSignal },
+    ): Promise<import('@/types/membership').ViewPlacementsAnswer>
+
+    /**
      * Search nodes by text query
      */
     searchNodes(query: string, limit?: number): Promise<GraphNode[]>
