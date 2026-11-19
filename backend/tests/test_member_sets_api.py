@@ -184,15 +184,36 @@ async def test_where_a_member_sits_is_blank_when_the_graph_cannot_say(client):
     table = rows((await client.get(f"{BASE}/{body['setId']}/download",
                                    params={"token": body["downloadToken"]})).text)
     assert table[1][9:] == ["", "", "", "", ""]
+    lineage = (await resolve(client, LINEAGE, includeEdges=True)).json()
+    edges = rows((await client.get(f"{BASE}/{lineage['setId']}/download",
+                                   params={"token": lineage["downloadToken"], "part": "edges"})).text)
+    into_seed = next(e for e in edges[1:] if e[:2] == ["src1", "col_a1"])
+    # Each end's name and type are the set's own; where it sits, the graph couldn't say.
+    assert into_seed[3:5] == ["src1", "thing"] and into_seed[10:12] == ["col_a1", "thing"]
+    assert into_seed[12:] == ["", "", "", "", ""]
+
+
+END = ["Name", "Type", "ParentUrn", "ParentName", "ParentType", "Path", "PathUrns"]
 
 
 async def test_edges_are_their_own_part(client):
+    """Each flow with both its ends — what each is, and where it sits — so it reads
+    without a join; ``source, target, type`` first, as before."""
     body = (await resolve(client, LINEAGE, includeEdges=True)).json()
     url, token = f"{BASE}/{body['setId']}/download", body["downloadToken"]
     edges = rows((await client.get(url, params={"token": token, "part": "edges"})).text)
-    assert edges[0] == ["source", "target", "type"]
-    assert sorted(map(tuple, edges[1:])) == [("src1", "col_a1", "FLOWS_TO"), ("src2", "src1", "FLOWS_TO"),
-                                             ("src3", "src2", "FLOWS_TO")]
+    assert edges[0] == ["source", "target", "type", *(f"source{c}" for c in END), *(f"target{c}" for c in END)]
+    assert sorted(tuple(e[:3]) for e in edges[1:]) == [("src1", "col_a1", "FLOWS_TO"), ("src2", "src1", "FLOWS_TO"),
+                                                       ("src3", "src2", "FLOWS_TO")]
+    into_seed = next(e for e in edges[1:] if e[:2] == ["src1", "col_a1"])
+    # src1 is at the top of the graph; col_a1 is in tbl_a, in dom.
+    assert into_seed[3:] == ["src1", "thing", "", "", "", "", "",
+                             "col_a1", "thing", "tbl_a", "tbl_a", "thing", "dom / tbl_a", "dom; tbl_a"]
+    lines = (await client.get(url, params={"token": token, "part": "edges", "format": "ndjson"})).text.splitlines()
+    flow = next(json.loads(line) for line in lines if json.loads(line)["target"] == "col_a1")
+    assert (flow["targetPath"], flow["targetPathUrns"], flow["sourcePath"]) == (["dom", "tbl_a"], ["dom", "tbl_a"], [])
+    doc = (await client.get(url, params={"token": token, "format": "json"})).json()
+    assert next(e for e in doc["edges"] if e["target"] == "col_a1")["targetParentName"] == "tbl_a"
     refused = await client.get(url, params={"token": token, "part": "edges", "format": "json"})
     assert refused.status_code == 422
 

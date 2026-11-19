@@ -143,6 +143,10 @@ export function overLimitHelp(plan: MembershipPlan, spec: MembershipSpec, nest: 
   if (typeof spec.expand.children === 'number' && spec.expand.children > 0) {
     help.push('Reach “everything inside” instead of a number of levels: each starting point is then a single entry, however much is inside it.')
   }
+  if (spec.expand.partnerHosts && spec.expand.partnerChildren === 1) {
+    help.push('Choose “Everything” inside the tables it reaches instead of one level: each table is then a single entry, however much is inside it.')
+  }
+  if (spec.expand.partnerLineage) help.push('Turn off “Their lineage too”: it traces from everything inside those tables as well.')
   help.push('Narrow the query, or start from fewer entities.')
   return help
 }

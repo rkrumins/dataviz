@@ -22,6 +22,12 @@ describe('narrowErrorText', () => {
     }))).toBe('Subset views are turned off.')
   })
 
+  it('a request the server refuses field by field names the field — an older server, a choice it doesn’t know yet', () => {
+    expect(narrowErrorText(refused(422, [
+      { type: 'extra_forbidden', loc: ['body', 'sources', 0, 'spec', 'expand', 'partnerHosts'], msg: 'Extra inputs are not permitted', input: true },
+    ]))).toBe('Extra inputs are not permitted (partnerHosts)')
+  })
+
   it("reads the graph provider's errors too, which carry the body in the message", () => {
     const err = Object.assign(new Error('API Error 409: {"detail":{"reason":"base_missing","message":"Its base view is gone."}}'),
       { status: 409 })

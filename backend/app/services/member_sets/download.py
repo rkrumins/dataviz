@@ -8,7 +8,8 @@ its rows. Where each sits — its parent and its path — is the graph's contain
 chains, read ``LOOKUP`` members to a statement as the page goes out (two short
 statements a thousand rows), and so are any other ``columns``: each statement under
 its own admission and never held across a yield, so a client that reads slowly
-holds no graph slot.
+holds no graph slot. Its flows (``part=edges``) carry both their ends the same way:
+each end's name and type from the set's rows, where it sits from the graph.
 
 Formats: ``csv`` (a header, then every value as text: exact digits for an integer,
 a path as the trace dock's file writes one (``A / B``; its URNs ``a; b``), JSON for
@@ -37,11 +38,16 @@ BASE_COLUMNS = ("urn", "name", "type", "qualifiedName", "via", "hops", "hopsUp",
                 "parentUrn", "parentName", "parentType", "path", "pathUrns")
 #: How a path is one CSV cell, as the trace dock's own file writes it: names read
 #: ``A / B``, URNs (which may hold a ``/``) ``a; b``. NDJSON and JSON keep lists.
-_JOINED = {"path": " / ", "pathUrns": "; "}
+_JOINED = {"path": " / ", "pathUrns": "; ", "sourcePath": " / ", "sourcePathUrns": "; ",
+           "targetPath": " / ", "targetPathUrns": "; "}
 #: Container names kept for one download, so each is read once however many rows
 #: sit in it; past it a name is read again rather than held.
 _NAMES_MAX = 100_000
-EDGE_COLUMNS = ("source", "target", "type")
+#: A flow, with both its ends and where each sits — the members' own columns, so a flow
+#: reads without a join (``source, target, type`` first, as before).
+_END = ("Name", "Type", "ParentUrn", "ParentName", "ParentType", "Path", "PathUrns")
+EDGE_COLUMNS = ("source", "target", "type",
+                *(f"source{c}" for c in _END), *(f"target{c}" for c in _END))
 #: Rows per read of the set; members per node query for extra columns.
 PAGE = 5_000
 LOOKUP = 1_000
@@ -171,9 +177,9 @@ async def _place(records: List[Dict[str, Any]], engine, admit, known: Dict[str, 
 
 
 async def _rows(sessions: Sessions, set_id: str, fmt: str, columns: Sequence[str], engine, admit,
-                first: bool = True) -> AsyncIterator[bytes]:
+                first: bool = True, known: Optional[Dict[str, Tuple[str, str]]] = None) -> AsyncIterator[bytes]:
     names = list(BASE_COLUMNS) + list(columns)
-    known: Dict[str, Tuple[str, str]] = {}
+    known = {} if known is None else known
     after = -1
     while True:
         rows = await _page(sessions, MemberSetRowORM, set_id, after)
@@ -191,14 +197,47 @@ async def _rows(sessions: Sessions, set_id: str, fmt: str, columns: Sequence[str
             return
 
 
-async def _edges(sessions: Sessions, set_id: str, fmt: str, first: bool = True) -> AsyncIterator[bytes]:
+async def _ends(sessions: Sessions, set_id: str, urns: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    """The members ``urns`` name, as a flow's ends: name and type, ``LOOKUP`` at a time (a
+    set keeps a flow only between two of its members)."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for i in range(0, len(urns), LOOKUP):
+        async with sessions() as session:
+            for urn, name, kind in (await session.execute(
+                    select(MemberSetRowORM.urn, MemberSetRowORM.name, MemberSetRowORM.type)
+                    .where(MemberSetRowORM.set_id == set_id, MemberSetRowORM.urn.in_(urns[i:i + LOOKUP])))).all():
+                out[urn] = {"urn": urn, "name": name, "type": kind}
+    for urn in urns:
+        out.setdefault(urn, {"urn": urn, "name": None, "type": None})
+    for r in out.values():
+        r.update(parentUrn=None, parentName=None, parentType=None, path=None, pathUrns=None)
+    return out
+
+
+async def _edges(sessions: Sessions, set_id: str, fmt: str, engine=None, admit=None,
+                 known: Optional[Dict[str, Tuple[str, str]]] = None, first: bool = True) -> AsyncIterator[bytes]:
+    """The set's flows, a page at a time, each with both its ends and where each sits —
+    their chains read once per page for every end it holds (``_place``)."""
+    known = {} if known is None else known
     after = -1
     while True:
         edges = await _page(sessions, MemberSetEdgeORM, set_id, after)
         if not edges:
             return
         after = edges[-1].seq
-        records = [{"source": e.source_urn, "target": e.target_urn, "type": e.edge_type} for e in edges]
+        ends = await _ends(sessions, set_id, sorted({u for e in edges for u in (e.source_urn, e.target_urn)}))
+        if engine is not None:
+            await _place(list(ends.values()), engine, admit, known)
+        records = []
+        for e in edges:
+            record = {"source": e.source_urn, "target": e.target_urn, "type": e.edge_type}
+            for side, urn in (("source", e.source_urn), ("target", e.target_urn)):
+                end = ends[urn]
+                record.update({f"{side}Name": end["name"], f"{side}Type": end["type"],
+                               f"{side}ParentUrn": end["parentUrn"], f"{side}ParentName": end["parentName"],
+                               f"{side}ParentType": end["parentType"], f"{side}Path": end["path"],
+                               f"{side}PathUrns": end["pathUrns"]})
+            records.append(record)
         yield await asyncio.to_thread(_encode, records, fmt, EDGE_COLUMNS, first)
         first = False
         if len(edges) < PAGE:
@@ -218,17 +257,19 @@ async def stream(sessions: Sessions, set_id: str, *, fmt: str, part: str = "node
     if part == "edges":
         if fmt == "csv":
             yield _header(EDGE_COLUMNS)
-        async for chunk in _edges(sessions, set_id, fmt):
+        async for chunk in _edges(sessions, set_id, fmt, engine, admit):
             yield chunk
         return
     if fmt == "csv":
         yield _header(list(BASE_COLUMNS) + columns)
     if fmt == "json":
         yield ('{"meta":' + json.dumps(meta or {}, ensure_ascii=False) + ',"nodes":[').encode("utf-8")
-    async for chunk in _rows(sessions, set_id, fmt, columns, engine, admit):
+    # One document reads each container's name once, for its nodes and its flows alike.
+    known: Dict[str, Tuple[str, str]] = {}
+    async for chunk in _rows(sessions, set_id, fmt, columns, engine, admit, known=known):
         yield chunk
     if fmt == "json":
         yield b'],"edges":['
-        async for chunk in _edges(sessions, set_id, fmt):
+        async for chunk in _edges(sessions, set_id, fmt, engine, admit, known=known):
             yield chunk
         yield b"]}"

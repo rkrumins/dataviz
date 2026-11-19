@@ -18,7 +18,7 @@ import { fitTemplate } from '@/components/templates/templateFit'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { Kbd } from '@/components/ui/Kbd'
 import { Segmented } from '@/components/ui/Segmented'
-import { describeNarrow, truncationNotes } from '@/features/narrow/model'
+import { describeNarrow, truncationNotes, usesLineage, withPartnerReach } from '@/features/narrow/model'
 import type { NarrowDraft } from '@/features/narrow/narrowStore'
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
 import { useLayoutTemplates, useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
@@ -83,10 +83,25 @@ function saveErrorText(err: unknown): string {
   return narrowErrorText(err)
 }
 
+/** What is inside the tables a trace reaches, as the sheet offers it. */
+type Inside = 'none' | 'one' | 'all'
+const INSIDE_HINTS: Record<Inside, string> = {
+  none: 'Only what carries the lineage, drawn inside the tables around it',
+  one: 'Every column of each table it reaches, each one counted',
+  all: 'Each table it reaches whole: everything inside comes with it',
+}
+
 export function SaveAsViewSheet({
   viewId, viewName, workspaceId, dataSourceId, draft, sourceLayerCount, headerExtra, follow, onClose, onSaved,
 }: SaveAsViewSheetProps) {
-  const spec = draft.spec
+  // A trace reaches tables through the columns that carry its lineage: it can bring in what
+  // is inside those tables — and their own lineage — too.
+  const reaches = draft.origin === 'trace' && usesLineage(draft.spec.expand)
+  const [inside, setInside] = useState<Inside>('none')
+  const [theirLineage, setTheirLineage] = useState(false)
+  const spec = reaches
+    ? withPartnerReach(draft.spec, inside === 'none' ? 0 : inside === 'one' ? 1 : 'all', theirLineage)
+    : draft.spec
   const sentence = describeNarrow(spec, draft.seedsLabel)
   const templatesEnabled = useLayoutTemplatesEnabled()
   // The view its layers are taken from: the one it is made in, or — made inside a
@@ -229,6 +244,27 @@ export function SaveAsViewSheet({
             </span>
             <Switch checked={live} onChange={setLive} labelledBy="save-as-view-live" />
           </div>
+
+          {/* Inside what it reaches */}
+          {reaches && (
+            <Section title="Inside what it reaches">
+              <div className="space-y-2.5">
+                <OptionRow title="The tables it reaches" hint={INSIDE_HINTS[inside]}>
+                  <Segmented
+                    label="What is inside the tables it reaches"
+                    value={inside}
+                    onChange={setInside}
+                    options={[{ value: 'none', label: 'Lineage only' }, { value: 'one', label: 'One level' }, { value: 'all', label: 'Everything' }]}
+                  />
+                </OptionRow>
+                {inside !== 'none' && (
+                  <OptionRow title="Their lineage too" hint="Trace from everything inside those tables as well. A much wider walk; it can take a while.">
+                    <Switch checked={theirLineage} onChange={setTheirLineage} label="Their lineage too" />
+                  </OptionRow>
+                )}
+              </div>
+            </Section>
+          )}
 
           {/* Layout */}
           <Section title="Layout">

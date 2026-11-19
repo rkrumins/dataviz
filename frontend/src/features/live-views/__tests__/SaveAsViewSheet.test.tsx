@@ -2,7 +2,7 @@
  * SaveAsViewSheet — a narrowing kept as a view of its own: the layout it starts
  * with, previewed layer by layer against the limit, and saved only when it fits.
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { FromMembersRequest, MembershipPlan, MembershipResolving, PlanRequest } from '@/types/membership'
@@ -161,6 +161,34 @@ describe('SaveAsViewSheet', () => {
     expect(planMembers.mock.calls.at(-1)![1].layout).toEqual({ kind: 'follow', sourceViewId: 'base', nest: true })
     fireEvent.click(screen.getByRole('radio', { name: /Like “Sales overview”/ }))
     await waitFor(() => expect(planMembers.mock.calls.at(-1)![1].layout).toEqual({ kind: 'source', sourceViewId: 'base', nest: true }))
+  })
+
+  it('a trace can bring in what is inside the tables it reaches, and their lineage too — each a new preview', async () => {
+    renderSheet({ draft: traceDraft, follow: { viewId: 'v1', viewName: 'Sales overview' } })
+    await screen.findAllByText('6 entities of 5,000')
+    // By default it asks as ever: nothing new in the request.
+    expect(planMembers.mock.calls.at(-1)![1].sources[0]!.spec.expand).toEqual(traceDraft.spec.expand)
+    expect(screen.queryByRole('switch', { name: 'Their lineage too' })).toBeNull()
+    fireEvent.click(screen.getByRole('radio', { name: 'One level' }))
+    await waitFor(() => expect(planMembers.mock.calls.at(-1)![1].sources[0]!.spec.expand)
+      .toEqual({ ...traceDraft.spec.expand, partnerChildren: 1, partnerHosts: true }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Their lineage too' }))
+    await waitFor(() => expect(planMembers.mock.calls.at(-1)![1].sources[0]!.spec.expand)
+      .toMatchObject({ partnerChildren: 1, partnerHosts: true, partnerLineage: true }))
+    expect(screen.getByText(/their lineage too/)).toBeInTheDocument()
+  })
+
+  it('a narrowing has no such choice; an older server refusing one says which field', async () => {
+    renderSheet()
+    await screen.findAllByText('6 entities of 5,000')
+    expect(screen.queryByText('Inside what it reaches')).toBeNull()
+    planMembers.mockRejectedValue(Object.assign(new Error('x'), {
+      status: 422, detail: [{ type: 'extra_forbidden', loc: ['body', 'sources', 0, 'spec', 'expand', 'partnerHosts'], msg: 'Extra inputs are not permitted' }],
+    }))
+    cleanup()
+    renderSheet({ draft: traceDraft })
+    fireEvent.click(await screen.findByRole('radio', { name: 'Everything' }))
+    expect(await screen.findByText(/Extra inputs are not permitted \(partnerHosts\)/)).toBeInTheDocument()
   })
 
   it('when there is nothing to follow, says why and starts a trace with its lineage stages', async () => {

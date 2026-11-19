@@ -220,6 +220,8 @@ import {
   traceExportEdges,
   traceExportFilename,
   traceExportRows,
+  traceFlowCsvLines,
+  traceFlowRows,
   traceJsonParts,
   traceMembershipSpec,
   type TraceExportEdge,
@@ -3145,6 +3147,12 @@ export function ContextViewCanvas({
       },
     }
   }, [overlay.view, traceModel, canvasTrace, traceShowUpstream, traceShowDownstream, traceLayerName, activeView?.id, activeView?.name, dataSourceId, traceSeeds, traceDepthUp, traceDepthDown, tracePhase, tracePartial])
+  // The CSV is two files: the entities, and the flows between them with both ends' place —
+  // a table each, as a spreadsheet or a graph tool reads them. No flows, no second file.
+  const downloadTraceCsv = useCallback((label: string, rows: readonly TraceExportRow[], edges: readonly TraceExportEdge[], at?: Date) => {
+    downloadCsv(traceExportFilename(label, 'csv', at), traceCsvLines(rows))
+    if (edges.length) downloadCsv(traceExportFilename(label, 'csv', at, 'flows'), traceFlowCsvLines(traceFlowRows(rows, edges)))
+  }, [])
   const downloadTraceJson = useCallback((label: string, meta: TraceExportMeta, rows: readonly TraceExportRow[], edges: readonly TraceExportEdge[]) => {
     const spec = traceMembershipSpec({
       urns: meta.seeds.map(t => t.urn),
@@ -3234,7 +3242,7 @@ export function ContextViewCanvas({
         if (!t) return
         void savedTraces.results(id).then((r) => {
           if (!r) { notifyTraceKeep('warning', 'The saved results of this trace are no longer in this browser.'); return }
-          if (format === 'csv') { downloadCsv(traceExportFilename(t.name, 'csv', new Date(t.savedAt)), traceCsvLines(r.rows)); return }
+          if (format === 'csv') { downloadTraceCsv(t.name, r.rows, r.edges, new Date(t.savedAt)); return }
           const seeds = traceEntrySeeds(t.recipe)
           downloadTraceJson(t.name, {
             view: { id: activeView?.id ?? null, name: activeView?.name ?? null },
@@ -3267,7 +3275,7 @@ export function ContextViewCanvas({
       onRename: savedTraces.rename,
       onRemove: savedTraces.remove,
     }
-  }, [savedTraces, traceActive, traceSeedSetKey, openSavedById, notifyTraceKeep, downloadTraceJson, activeView?.id, activeView?.name, dataSourceId])
+  }, [savedTraces, traceActive, traceSeedSetKey, openSavedById, notifyTraceKeep, downloadTraceCsv, downloadTraceJson, activeView?.id, activeView?.name, dataSourceId])
   const traceKeep = useMemo<TraceKeepActions | undefined>(() => {
     if (!traceActive || !traceModel) return undefined
     const label = tracedLabel ?? 'trace'
@@ -3280,7 +3288,7 @@ export function ContextViewCanvas({
       outsideView: overlay.view?.outsideView ?? 0,
       exportCsv: () => {
         const file = buildTraceFile()
-        if (file) downloadCsv(traceExportFilename(label, 'csv'), traceCsvLines(file.rows))
+        if (file) downloadTraceCsv(label, file.rows, file.edges)
       },
       exportJson: () => {
         const file = buildTraceFile()
@@ -3309,7 +3317,7 @@ export function ContextViewCanvas({
       },
       savedList,
     }
-  }, [traceActive, traceModel, tracedLabel, overlay.view, canvasTrace.tracedUrns, traceShowUpstream, traceShowDownstream, traceWalking, tracePartial, buildTraceFile, downloadTraceJson, savedForTrace, currentTraceRecipe, savedTraces, traceSeeds, savedList])
+  }, [traceActive, traceModel, tracedLabel, overlay.view, canvasTrace.tracedUrns, traceShowUpstream, traceShowDownstream, traceWalking, tracePartial, buildTraceFile, downloadTraceCsv, downloadTraceJson, savedForTrace, currentTraceRecipe, savedTraces, traceSeeds, savedList])
 
   const dockTrace = useMemo<UseUnifiedTraceResult>(() => {
     if (!traceActive || !traceModel || !tracedNodeId) return trace

@@ -66,6 +66,21 @@ export function presetOf(expand: MembershipExpand): PresetId | null {
 export function sameExpand(a: MembershipExpand, b: MembershipExpand): boolean {
   return a.children === b.children && a.upstream === b.upstream
     && a.downstream === b.downstream && a.partnerChildren === b.partnerChildren
+    && !!a.partnerHosts === !!b.partnerHosts && !!a.partnerLineage === !!b.partnerLineage
+}
+
+/** What is inside the tables a reach comes to — none beyond the lineage (`0`), one level, or
+ *  everything — and, with either, their lineage too. `0` is the spec as it was, with nothing
+ *  new in it, so a server that predates these answers it as ever. */
+export function withPartnerReach(spec: MembershipSpec, inside: 0 | 1 | 'all', lineage: boolean): MembershipSpec {
+  const expand = { ...spec.expand }
+  delete expand.partnerHosts
+  delete expand.partnerLineage
+  if (inside === 0) return { ...spec, expand: { ...expand, partnerChildren: 0 } }
+  return {
+    ...spec,
+    expand: { ...expand, partnerChildren: inside, partnerHosts: true, ...(lineage ? { partnerLineage: true as const } : {}) },
+  }
 }
 
 export function usesLineage(expand: MembershipExpand): boolean {
@@ -85,7 +100,8 @@ export function canonicalSpec(spec: MembershipSpec): MembershipSpec {
 export function specKey(spec: MembershipSpec): string {
   const c = canonicalSpec(spec)
   return JSON.stringify([c.v, c.within, c.seeds.urns ?? null, c.seeds.query ?? null,
-    c.expand.children, c.expand.upstream, c.expand.downstream, c.expand.partnerChildren])
+    c.expand.children, c.expand.upstream, c.expand.downstream, c.expand.partnerChildren,
+    !!c.expand.partnerHosts, !!c.expand.partnerLineage])
 }
 
 // ── Words ──────────────────────────────────────────────────────────────────
@@ -113,7 +129,9 @@ export function expansionPhrases(expand: MembershipExpand, plural = true): strin
     if (down) out.push(down === 'all' ? 'everything downstream' : `what ${plural ? 'they feed' : 'it feeds'} ${steps(down)} down`)
   }
   if ((up || down) && expand.partnerChildren) {
-    out.push(expand.partnerChildren === 'all' ? 'everything inside those' : 'what sits directly inside those')
+    const those = expand.partnerHosts ? 'the tables they reach' : 'those'
+    out.push(expand.partnerChildren === 'all' ? `everything inside ${those}` : `what sits directly inside ${those}`)
+    if (expand.partnerHosts && expand.partnerLineage) out.push('their lineage too')
   }
   return out
 }

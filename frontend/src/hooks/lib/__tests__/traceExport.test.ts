@@ -9,10 +9,13 @@
 import { describe, it, expect } from 'vitest'
 import { buildTraceView, type TraceViewInputs } from '../traceViewModel'
 import {
+  TRACE_FLOW_COLUMNS,
   traceCsvLines,
   traceExportEdges,
   traceExportFilename,
   traceExportRows,
+  traceFlowCsvLines,
+  traceFlowRows,
   traceJsonParts,
   traceMembershipSpec,
   type TraceExportMeta,
@@ -131,10 +134,31 @@ describe('the files', () => {
     const doc = JSON.parse(traceJsonParts(meta, spec, rows, edges).join(''))
     expect(doc.meta).toEqual(meta)
     expect(doc.nodes).toHaveLength(rows.length)
-    // Only flows between rows of the file, and never a rollup.
-    expect(doc.edges).toEqual([{ source: 'ledger.amt', target: 'orders.amt', type: 'TRANSFORMS' }, { source: 'sales.amt', target: 'dash.amt', type: 'TRANSFORMS' }])
+    // Only flows between rows of the file, and never a rollup — each with where both ends sit.
+    expect(doc.edges.map((e: { source: string; target: string; type: string }) => [e.source, e.target, e.type]))
+      .toEqual([['ledger.amt', 'orders.amt', 'TRANSFORMS'], ['sales.amt', 'dash.amt', 'TRANSFORMS']])
+    expect(doc.edges[0]).toMatchObject({ sourceParentName: 'ledger', targetParentName: 'orders', sourcePath: ['FIN', 'ledger'] })
     // The seeds with everything inside them, as the trace shows them.
     expect(doc.spec.expand).toEqual({ children: 'all', upstream: 1, downstream: 'all', partnerChildren: 0 })
+  })
+
+  it('flows: each with both ends — what it is, its layer, its parent and every container down to it', () => {
+    const rows = rowsOf()
+    const flows = traceFlowRows(rows, traceExportEdges(two.model, rows))
+    expect(flows.find(f => f.source === 'ledger.amt' && f.target === 'orders.amt')).toMatchObject({
+      type: 'TRANSFORMS',
+      sourceName: 'ledger.amt', sourceType: 'schemaField', sourceLayer: 'Warehouse',
+      sourceParentUrn: 'ledger', sourceParentName: 'ledger', sourceParentType: 'dataset',
+      sourcePath: ['FIN', 'ledger'], sourcePathUrns: ['FIN', 'ledger'],
+      targetName: 'orders.amt', targetParentUrn: 'orders', targetParentName: 'orders', targetParentType: 'dataset',
+      targetPath: ['RAW', 'orders'], targetPathUrns: ['RAW', 'orders'],
+    })
+    const lines = traceFlowCsvLines([...flows, { ...flows[0]!, sourceName: '@SUM(1)' }])
+    expect(lines[0]).toBe(`${TRACE_FLOW_COLUMNS.join(',')}\r\n`)
+    expect(lines[0]).toMatch(/^source,target,type,sourceName,/)
+    expect(lines).toHaveLength(flows.length + 2)
+    expect(lines[1]).toContain('FIN / ledger')
+    expect(lines.at(-1)).toContain(`'@SUM(1)`)
   })
 
   it('an empty trace is still a valid document', () => {
@@ -153,5 +177,6 @@ describe('the files', () => {
   it('names the file for what it holds', () => {
     expect(traceExportFilename('2 entities', 'csv', new Date('2026-11-18T10:00:00Z'))).toBe('trace-2-entities-2026-11-18.csv')
     expect(traceExportFilename('***', 'json', new Date('2026-11-18T10:00:00Z'))).toBe('trace-trace-2026-11-18.json')
+    expect(traceExportFilename('2 entities', 'csv', new Date('2026-11-18T10:00:00Z'), 'flows')).toBe('trace-2-entities-2026-11-18-flows.csv')
   })
 })

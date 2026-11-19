@@ -141,14 +141,14 @@ export function TraceKeepMenu(props: TraceKeepMenuProps) {
           <FileSpreadsheet className="w-4 h-4 mt-0.5 text-emerald-600 dark:text-emerald-400 flex-shrink-0" />
           <span className="min-w-0">
             <span className="block text-[12.5px] font-medium text-ink">CSV</span>
-            <span className="block text-[10.5px] text-ink-muted">One row per entity — role, hops, its layer, parent and path, which seeds reach it</span>
+            <span className="block text-[10.5px] text-ink-muted">One row per entity — role, hops, its layer, parent and path, which seeds reach it — and a file of the flows between them, each end with where it sits</span>
           </span>
         </button>
         <button type="button" className={item} disabled={walking} onClick={() => { exportJson(); onClose() }} data-keep="json">
           <FileJson className="w-4 h-4 mt-0.5 text-sky-600 dark:text-sky-400 flex-shrink-0" />
           <span className="min-w-0">
             <span className="block text-[12.5px] font-medium text-ink">JSON</span>
-            <span className="block text-[10.5px] text-ink-muted">The entities and the flows between them, with the question that found them</span>
+            <span className="block text-[10.5px] text-ink-muted">The entities and the flows between them — each end with where it sits — and the question that found them</span>
           </span>
         </button>
         {exportEverything && (

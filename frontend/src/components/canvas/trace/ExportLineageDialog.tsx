@@ -23,7 +23,7 @@ import { createPortal } from 'react-dom'
 
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ProgressBar } from '@/components/ui/ProgressBar'
-import { describeNarrow, truncationNotes } from '@/features/narrow/model'
+import { describeNarrow, truncationNotes, usesLineage, withPartnerReach } from '@/features/narrow/model'
 import { cn } from '@/lib/utils'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
@@ -93,14 +93,16 @@ export function ExportLineageDialog({ viewId, spec: initial, seedsLabel, adjusta
   const [withDescription, setWithDescription] = useState(true)
   const [upstream, setUpstream] = useState<Depth>(adjustable ? 1 : initial.expand.upstream)
   const [downstream, setDownstream] = useState<Depth>(adjustable ? 1 : initial.expand.downstream)
-  const [inside, setInside] = useState(adjustable ? false : initial.expand.partnerChildren !== 0)
+  // What is inside the tables it reaches — their columns, a level in (a file lists rows, so
+  // never "everything") — and their own lineage too.
+  const [inside, setInside] = useState(false)
+  const [theirLineage, setTheirLineage] = useState(false)
   const [phase, setPhase] = useState<Phase>({ kind: 'choose' })
   const running = useRef<AbortController | null>(null)
   useEffect(() => () => running.current?.abort(), [])
 
-  const spec: MembershipSpec = adjustable
-    ? { ...initial, expand: { ...initial.expand, upstream, downstream, partnerChildren: inside ? 1 : 0 } }
-    : initial
+  const reach: MembershipSpec = adjustable ? { ...initial, expand: { ...initial.expand, upstream, downstream } } : initial
+  const spec = usesLineage(reach.expand) ? withPartnerReach(reach, inside ? 1 : 0, inside && theirLineage) : reach
   const sentence = describeNarrow(spec, seedsLabel)
 
   const start = () => {
@@ -184,10 +186,20 @@ export function ExportLineageDialog({ viewId, spec: initial, seedsLabel, adjusta
                   <section aria-label="How far" className="grid grid-cols-2 gap-3">
                     <ReachSelect label="Sources (upstream)" value={upstream} onChange={setUpstream} />
                     <ReachSelect label="Consumers (downstream)" value={downstream} onChange={setDownstream} />
-                    <label className="col-span-2 inline-flex items-center gap-2 text-[12px] text-ink">
-                      <input type="checkbox" checked={inside} onChange={e => setInside(e.target.checked)} />
-                      With what is inside those sources and consumers (their columns)
+                  </section>
+                )}
+                {usesLineage(reach.expand) && (
+                  <section aria-label="Inside what it reaches" className="flex flex-col gap-1.5 text-[12px] text-ink">
+                    <label className="inline-flex items-center gap-2">
+                      <input type="checkbox" checked={inside} onChange={e => setInside(e.target.checked)} data-reach-inside />
+                      With every column of the tables it reaches, a level in
                     </label>
+                    {inside && (
+                      <label className="inline-flex items-center gap-2 pl-5">
+                        <input type="checkbox" checked={theirLineage} onChange={e => setTheirLineage(e.target.checked)} data-reach-lineage />
+                        Their lineage too — traced from everything inside those tables; a much wider walk
+                      </label>
+                    )}
                   </section>
                 )}
                 <div role="radiogroup" aria-label="Format" className="grid grid-cols-3 gap-1.5">
@@ -213,7 +225,7 @@ export function ExportLineageDialog({ viewId, spec: initial, seedsLabel, adjusta
                 <div className="flex flex-col gap-1.5 text-[12px] text-ink">
                   <label className="inline-flex items-center gap-2">
                     <input type="checkbox" checked={withFlows} onChange={e => setWithFlows(e.target.checked)} data-include-flows />
-                    Include the flows between them
+                    Include the flows between them — each with its source and target, and where each sits
                   </label>
                   <label className="inline-flex items-center gap-2">
                     <input type="checkbox" checked={withDescription} onChange={e => setWithDescription(e.target.checked)} />

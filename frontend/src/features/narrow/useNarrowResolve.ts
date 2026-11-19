@@ -25,6 +25,14 @@ const DEBOUNCE_MS = 250
 /** A refusal's own words in a body's `detail`: the text itself, or its `message`. */
 function detailMessage(detail: unknown): string | null {
   if (typeof detail === 'string') return detail.trim() || null
+  // A request the server's models refuse: its first word on it, naming the field — what a
+  // server older than the browser says of a choice it doesn't know yet.
+  if (Array.isArray(detail)) {
+    const first = detail[0] as { msg?: unknown; loc?: unknown } | undefined
+    if (typeof first?.msg !== 'string') return null
+    const field = Array.isArray(first.loc) ? first.loc.at(-1) : undefined
+    return typeof field === 'string' || typeof field === 'number' ? `${first.msg} (${field})` : first.msg
+  }
   if (detail && typeof detail === 'object') {
     const message = (detail as { message?: unknown }).message
     if (typeof message === 'string' && message.trim()) return message

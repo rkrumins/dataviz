@@ -39,6 +39,9 @@ const choose = async (panel: HTMLElement, what: string) => {
   await act(async () => { fireEvent.click(panel.querySelector<HTMLButtonElement>(`[data-keep="${what}"]`)!) })
 }
 const csvUrns = (text: string) => text.replace(/^﻿/, '').trim().split('\r\n').slice(1).map(l => l.split(',')[0])
+/** The CSV is two files, told apart by their headers: the entities, and the flows between them. */
+const entitiesFile = () => files.find(f => f.replace(/^\uFEFF/, '').startsWith('urn,'))!
+const flowsFile = () => files.find(f => f.replace(/^\uFEFF/, '').startsWith('source,'))!
 
 describe('Export & save on a combined trace', () => {
   it('the CSV holds every entity the trace shows, open or not, and no host', async () => {
@@ -48,13 +51,17 @@ describe('Export & save on a combined trace', () => {
     expect(panel.querySelector('[data-keep-holds]')?.textContent).toMatch(/What the trace shows/)
 
     await choose(panel, 'csv')
-    await waitFor(() => expect(files).toHaveLength(1))
-    const urns = csvUrns(files[0]!)
+    await waitFor(() => expect(files).toHaveLength(2))
+    const urns = csvUrns(entitiesFile())
     for (const u of ['orders', 'sales', 'ledger.amt', 'audit.amt', 'dash.amt']) expect(urns).toContain(u)
     // Containers are paths, not rows.
     for (const host of ['RAW', 'FIN', 'MART']) expect(urns).not.toContain(host)
     // Closed cards are still in the file.
     expect(h.visibleCardIds()).not.toContain('audit.amt')
+    // The flows between them, each end with where it sits.
+    const flows = flowsFile().replace(/^\uFEFF/, '').trim().split('\r\n')
+    expect(flows[0]).toMatch(/^source,target,type,sourceName,sourceType,sourceLayer,sourceParentUrn,sourceParentName,sourceParentType,sourcePath,sourcePathUrns,targetName/)
+    expect(flows.find(l => l.startsWith('ledger.amt,orders.amt,'))).toContain('FIN / ledger')
   }, 30000)
 
   it('the JSON carries the seeds, the question that found them and the flows', async () => {
@@ -81,8 +88,9 @@ describe('Export & save on a combined trace', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Download the saved results of 2 entities as CSV/ }))
     })
-    await waitFor(() => expect(files).toHaveLength(1))
-    expect(csvUrns(files[0]!)).toContain('dash.amt')
+    await waitFor(() => expect(files).toHaveLength(2))
+    expect(csvUrns(entitiesFile())).toContain('dash.amt')
+    expect(flowsFile()).toContain('sourceParentName')
     expect(h.providerCalls()).toBe(calls)
 
     // A new visit: the list is read back from IndexedDB.

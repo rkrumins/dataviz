@@ -77,10 +77,29 @@ describe('ExportLineageDialog', () => {
       adjustable: true,
     })
     fireEvent.change(screen.getByLabelText(/Sources \(upstream\)/), { target: { value: 'all' } })
-    fireEvent.click(screen.getByLabelText(/With what is inside those/))
+    fireEvent.click(screen.getByLabelText(/every column of the tables it reaches/))
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Export$/ })) })
     await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]!.spec).toMatchObject({ within: 'dataSource', expand: { upstream: 'all', downstream: 1, partnerChildren: 1 } })
+    // The tables the sources and consumers sit in, a level in: their columns.
+    expect(bodies[0]!.spec).toMatchObject({ within: 'dataSource', expand: { upstream: 'all', downstream: 1, partnerChildren: 1, partnerHosts: true } })
+    expect(bodies[0]!.spec.expand).not.toHaveProperty('partnerLineage')
+  })
+
+  it('a trace’s file can bring in the tables it reaches, and their lineage too — and asks as ever by default', async () => {
+    mount(provider([done(), done()]))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Export$/ })) })
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]!.spec.expand).toEqual({ children: 0, upstream: 'all', downstream: 3, partnerChildren: 0 })
+  })
+
+  it('their lineage too, only once their columns are asked for', async () => {
+    mount(provider([done()]))
+    expect(screen.queryByLabelText(/Their lineage too/)).toBeNull()
+    fireEvent.click(screen.getByLabelText(/every column of the tables it reaches/))
+    fireEvent.click(screen.getByLabelText(/Their lineage too/))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Export$/ })) })
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]!.spec.expand).toMatchObject({ partnerChildren: 1, partnerHosts: true, partnerLineage: true })
   })
 
   it('every limit the server reached is said', async () => {

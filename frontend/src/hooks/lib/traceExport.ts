@@ -214,6 +214,92 @@ export function traceExportEdges(
   return edges
 }
 
+/** One end of a flow: the entity, the layer it is drawn in, and where it sits. */
+interface FlowEnd {
+  name: string
+  type: string
+  layer: string
+  parentUrn: string | null
+  parentName: string | null
+  parentType: string | null
+  path: string[]
+  pathUrns: string[]
+}
+
+/** A flow of the file, with both its ends — what each is, the layer it is drawn in, its
+ *  parent and every container down to it — so lineage can be read flow by flow: what feeds
+ *  an entity are the flows whose `target` it is, what it feeds those whose `source` it is. */
+export interface TraceFlowRow {
+  source: string
+  target: string
+  type: string | null
+  sourceName: string
+  sourceType: string
+  sourceLayer: string
+  sourceParentUrn: string | null
+  sourceParentName: string | null
+  sourceParentType: string | null
+  sourcePath: string[]
+  sourcePathUrns: string[]
+  targetName: string
+  targetType: string
+  targetLayer: string
+  targetParentUrn: string | null
+  targetParentName: string | null
+  targetParentType: string | null
+  targetPath: string[]
+  targetPathUrns: string[]
+}
+
+export const TRACE_FLOW_COLUMNS = [
+  'source', 'target', 'type',
+  'sourceName', 'sourceType', 'sourceLayer', 'sourceParentUrn', 'sourceParentName', 'sourceParentType', 'sourcePath', 'sourcePathUrns',
+  'targetName', 'targetType', 'targetLayer', 'targetParentUrn', 'targetParentName', 'targetParentType', 'targetPath', 'targetPathUrns',
+] as const
+
+/** Each flow with its two ends as the file's rows say them (`traceExportEdges` keeps only
+ *  flows between rows, so both ends have one). */
+export function traceFlowRows(rows: readonly TraceExportRow[], edges: readonly TraceExportEdge[]): TraceFlowRow[] {
+  const byUrn = new Map(rows.map(r => [r.urn, r]))
+  const end = (urn: string): FlowEnd => {
+    const r = byUrn.get(urn)
+    return {
+      name: r?.name ?? urn, type: r?.type ?? '', layer: r?.layer ?? '',
+      parentUrn: r?.parentUrn ?? null, parentName: r?.parentName ?? null, parentType: r?.parentType ?? null,
+      path: r?.path ?? [], pathUrns: r?.pathUrns ?? [],
+    }
+  }
+  return edges.map((e) => {
+    const s = end(e.source)
+    const t = end(e.target)
+    return {
+      source: e.source, target: e.target, type: e.type,
+      sourceName: s.name, sourceType: s.type, sourceLayer: s.layer,
+      sourceParentUrn: s.parentUrn, sourceParentName: s.parentName, sourceParentType: s.parentType,
+      sourcePath: s.path, sourcePathUrns: s.pathUrns,
+      targetName: t.name, targetType: t.type, targetLayer: t.layer,
+      targetParentUrn: t.parentUrn, targetParentName: t.parentName, targetParentType: t.parentType,
+      targetPath: t.path, targetPathUrns: t.pathUrns,
+    }
+  })
+}
+
+/** The flows file's lines: a header, then a flow each — paths and URN lists written as the
+ *  rows' are (`A / B`, `a; b`). */
+export function traceFlowCsvLines(flows: readonly TraceFlowRow[]): string[] {
+  const lines = [csvLine(TRACE_FLOW_COLUMNS)]
+  for (const f of flows) {
+    lines.push(csvLine([
+      f.source, f.target, f.type,
+      f.sourceName, f.sourceType, f.sourceLayer, f.sourceParentUrn, f.sourceParentName, f.sourceParentType,
+      f.sourcePath.join(' / '), f.sourcePathUrns,
+      f.targetName, f.targetType, f.targetLayer, f.targetParentUrn, f.targetParentName, f.targetParentType,
+      f.targetPath.join(' / '), f.targetPathUrns,
+    ]))
+  }
+  return lines
+}
+
 export interface TraceExportMeta {
   view: { id: string | null; name: string | null }
   dataSourceId: string | null
@@ -257,7 +343,8 @@ export function traceMembershipSpec(t: {
 }
 
 /** The JSON file, as Blob parts: `{meta, spec, nodes:[…], edges:[…]}`, one
- *  row per part so no single string holds the whole trace. */
+ *  row per part so no single string holds the whole trace. Each edge is a flow
+ *  with both its ends (`traceFlowRows`). */
 export function traceJsonParts(
   meta: TraceExportMeta,
   spec: MembershipSpec,
@@ -267,13 +354,14 @@ export function traceJsonParts(
   const parts = [`{"meta":${JSON.stringify(meta)},"spec":${JSON.stringify(spec)},"nodes":[`]
   rows.forEach((r, n) => parts.push(`${n === 0 ? '' : ','}${JSON.stringify(r)}`))
   parts.push('],"edges":[')
-  edges.forEach((e, n) => parts.push(`${n === 0 ? '' : ','}${JSON.stringify(e)}`))
+  traceFlowRows(rows, edges).forEach((f, n) => parts.push(`${n === 0 ? '' : ','}${JSON.stringify(f)}`))
   parts.push(']}')
   return parts
 }
 
-/** A file name a person can tell apart in their downloads folder. */
-export function traceExportFilename(label: string, ext: 'csv' | 'json', at = new Date()): string {
+/** A file name a person can tell apart in their downloads folder; `-flows` for the flows
+ *  that go with a CSV. */
+export function traceExportFilename(label: string, ext: 'csv' | 'json', at = new Date(), part?: 'flows'): string {
   const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'trace'
-  return `trace-${slug}-${at.toISOString().slice(0, 10)}.${ext}`
+  return `trace-${slug}-${at.toISOString().slice(0, 10)}${part ? `-${part}` : ''}.${ext}`
 }

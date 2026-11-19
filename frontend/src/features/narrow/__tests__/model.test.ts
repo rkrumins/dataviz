@@ -10,12 +10,14 @@ import {
   NO_EXPANSION,
   PRESETS,
   presetOf,
+  sameExpand,
   seedsLabel,
   specFor,
   specKey,
   truncationNotes,
   usesLineage,
   visibilityOf,
+  withPartnerReach,
 } from '../model'
 
 function result(partial: Partial<MembershipResult> = {}): MembershipResult {
@@ -79,6 +81,28 @@ describe('the sentence', () => {
   it('names one seed by name and several by count', () => {
     expect(seedsLabel(['urn:1'], () => 'orders')).toBe('orders')
     expect(seedsLabel(['a', 'b', 'c'], () => 'x')).toBe('3 entities')
+  })
+})
+
+describe('what is inside the tables a reach comes to', () => {
+  const trace = specFor({ urns: ['orders'] }, { children: 'all', upstream: 'all', downstream: 3 })
+
+  it('none beyond the lineage is the spec as it was, nothing new in it — whatever else was asked', () => {
+    expect(withPartnerReach(trace, 0, true)).toEqual(trace)
+    expect(withPartnerReach(withPartnerReach(trace, 1, true), 0, false)).toEqual(trace)
+  })
+
+  it('a level in, or everything, of the tables it reaches — and their lineage only when asked', () => {
+    expect(withPartnerReach(trace, 1, false).expand).toEqual({ ...trace.expand, partnerChildren: 1, partnerHosts: true })
+    expect(withPartnerReach(trace, 'all', true).expand)
+      .toEqual({ ...trace.expand, partnerChildren: 'all', partnerHosts: true, partnerLineage: true })
+  })
+
+  it('says so in the sentence, and is its own question', () => {
+    expect(describeNarrow(withPartnerReach(trace, 1, true), 'orders')).toMatch(/what sits directly inside the tables they reach.*their lineage too/)
+    expect(describeNarrow(withPartnerReach(trace, 'all', false), 'orders')).toMatch(/everything inside the tables they reach/)
+    expect(specKey(withPartnerReach(trace, 1, false))).not.toBe(specKey(withPartnerReach(trace, 1, true)))
+    expect(sameExpand(withPartnerReach(trace, 1, false).expand, { ...trace.expand, partnerChildren: 1 })).toBe(false)
   })
 })
 

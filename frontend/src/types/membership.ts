@@ -19,6 +19,12 @@ export interface MembershipExpand {
   downstream: Depth
   /** What is inside the sources and consumers found: 0, 1 level, or everything. */
   partnerChildren: Depth
+  /** The sources and consumers found include the tables they sit in (a column's table), so
+   *  `partnerChildren` reads inside those. Sent only when chosen. */
+  partnerHosts?: true
+  /** Those tables are traced too — from everything inside them that carries lineage, as far
+   *  as the hops allow. Needs `partnerHosts`. Sent only when chosen. */
+  partnerLineage?: true
 }
 
 export interface MembershipSeeds {
