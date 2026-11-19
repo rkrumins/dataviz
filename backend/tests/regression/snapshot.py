@@ -38,9 +38,13 @@ def _snapshot_root(provider: str) -> Path:
 
 
 def _stabilize(value: Any) -> Any:
-    """Sort lists of dicts on a stable key, walk recursively."""
+    """Sort lists of dicts on a stable key, walk recursively. A node's or
+    edge's ``version`` (its OCC token, added after these snapshots were
+    taken) is left out while unset: the fixture is never written through
+    version control, so a provider reading it has none to give."""
     if isinstance(value, dict):
-        return {k: _stabilize(v) for k, v in sorted(value.items())}
+        return {k: _stabilize(v) for k, v in sorted(value.items())
+                if not (k == "version" and v is None)}
     if isinstance(value, (list, tuple)):
         items = [_stabilize(v) for v in value]
         # When every element is a dict that has a stable id, sort on it.

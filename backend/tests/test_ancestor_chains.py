@@ -96,11 +96,18 @@ async def test_the_batch_is_bounded(test_client: AsyncClient, urns):
 
 
 async def test_a_reader_with_no_containment_walk_says_so(test_client: AsyncClient):
-    """A draft on a stale projection has no ancestors at all: an honest 501,
-    as for its other unsupported reads, never an AttributeError 500."""
+    """A reader that can't walk containment — here a draft, whose chains come
+    from its version store, on a store that has no walk — answers an honest
+    501, as for its other unsupported reads, never an AttributeError 500."""
+    from types import SimpleNamespace
+
     from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
 
-    overlay = DraftOverlayProvider(_BaseWithoutClosure(), svc=None, graph_id="g1", branch_id="draft1")
+    async def _no_walk(**_kwargs):
+        raise NotImplementedError("no containment walk here")
+
+    overlay = DraftOverlayProvider(_BaseWithoutClosure(), svc=SimpleNamespace(ancestor_chains=_no_walk),
+                                   graph_id="g1", branch_id="draft1")
     resp = await _post(test_client, ContextEngine(provider=overlay), {"urns": [LEAF]})
     assert resp.status_code == 501
 

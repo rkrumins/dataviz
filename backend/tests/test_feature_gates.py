@@ -37,6 +37,22 @@ def _fresh():
     feature_flags.invalidate()
 
 
+@pytest.fixture(autouse=True)
+async def _ds_x(db_session):
+    """The data source the graph routes below name, in their workspace. The router's
+    capability gate answers 404 for one it can't find, before any route's feature gate
+    runs: without it, "refused when disabled" never reached the gate it tests, and
+    "passes when enabled" passed on a 404."""
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
+
+    db_session.add(WorkspaceORM(id=WS, name=WS))
+    db_session.add(ProviderORM(id="prov_gate", name="prov_gate", provider_type="mock",
+                               permitted_workspaces="[]"))
+    await db_session.flush()
+    db_session.add(WorkspaceDataSourceORM(id="ds_x", workspace_id=WS, provider_id="prov_gate"))
+    await db_session.commit()
+
+
 @pytest.fixture(autouse=True, scope="module")
 def _dispose_graphver_engine():
     """Hand the next test file a clean graphver engine (see test_versioning_feature_gate)."""
