@@ -120,5 +120,5 @@ export function useSavedNarrowingCopies(userId: string): SavedNarrowingCopies {
   }, [persistent, userId, commit])
 
   const ids = useMemo(() => new Set(entries.map((e) => e.id)), [entries])
-  return { ids, keep, download, drop }
+  return useMemo(() => ({ ids, keep, download, drop }), [ids, keep, download, drop])
 }
