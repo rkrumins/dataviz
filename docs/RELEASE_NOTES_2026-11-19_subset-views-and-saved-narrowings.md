@@ -110,6 +110,17 @@ placed the rest; the final members are exact.
 3. Trace inside it: cards land in its columns, and the dock's files are not empty.
 4. Save a narrowing, open its short link in another session, and read *+N new · −M gone*.
 
+### Measured in the browser (dev stack, FalkorDB, 51k entities)
+
+| Journey | Result |
+|---|---|
+| Save a 50,980-member narrowing as a lineage-stages view | `201` in 5.0–5.4 s; opens at once with *Placing its members… 48,000 of 50,980*; members drawn 0.4–0.7 s after the banner goes, never blank after |
+| Trace from a seed inside that list view | 2,581 rows placed: Starting points 1, Consumers 7, Impact 2,567, Other 6 |
+| Trace inside a follow view (50,980 members) | 385 rows, every one in its layer |
+| A capped layer (50,820 members) | Reached its 5,000-row cap by scrolling; **Search in this layer** finds exactly 50,820; **Export** downloads 50,820 rows, each with its path |
+| Save a narrowing, open its short link in another session | Saved (`201`, 2,557 held); reopened reads *+1 new · −2 gone since 19 Nov* against a planted difference |
+| Export from the Narrowed bar | 2,557 rows; every row but the seed's top container has a parent |
+
 ## 6. Known limitations
 
 - A cancellation between claiming and starting a turn, or during an epoch change, isn't released
