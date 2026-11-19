@@ -148,6 +148,8 @@ export interface ViewFeedRequest {
   sessionId?: string
   waitMs?: number
   refresh?: boolean
+  /** Rows a page (≤ 1,000). Sent only to a server that takes it: an older one refuses it. */
+  limit?: number
 }
 
 /** One page of one layer of a view made from a query (`POST /view-members`):

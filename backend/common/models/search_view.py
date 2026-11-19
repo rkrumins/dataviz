@@ -330,6 +330,8 @@ class ViewFeedRequest(_Base):
     session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
     wait_ms: int = Field(0, alias="waitMs", ge=0, le=FEED_WAIT_MS_MAX)
     refresh: bool = False
+    #: Rows a page: the first page small, so a layer shows at once; later ones larger.
+    limit: int = Field(200, ge=1, le=1000)
 
 
 class ViewMembersRequest(_Base):
@@ -338,7 +340,7 @@ class ViewMembersRequest(_Base):
     continues the page before; ``limit`` rows a page."""
     layer_id: str = Field(alias="layerId", min_length=1, max_length=200)
     cursor: Optional[str] = Field(None, max_length=4096)
-    limit: int = Field(200, ge=1, le=500)
+    limit: int = Field(200, ge=1, le=1000)
 
 
 class ViewFeedPage(_Base):
@@ -348,9 +350,10 @@ class ViewFeedPage(_Base):
     matches found so far, already in their final order, and ``totalCount``
     counts what was found so far (``countStatus`` ``lowerBound``); continue
     with ``sessionId``. ``stale``: the answer is a recent one, read before the
-    data last changed (``asOf``) — a fresh one is on its way. ``capped``: the
-    layer has more matches than the canvas lists; search in the layer, or
-    export, for the rest."""
+    data last changed (``asOf``) — a fresh one is on its way. A layer pages for
+    as long as it has rows: ``capped`` only when an operator set a ceiling
+    (``VIEW_MEMBERS_FEED_MAX_ROWS`` / ``DEEP_SEARCH_VIEW_FEED_MAX_ROWS``) and it
+    was reached — search in the layer, or export, for the rest."""
     layer_id: str = Field(alias="layerId")
     nodes: List[Dict[str, Any]] = Field(default_factory=list)
     cursor: Optional[str] = None
@@ -389,24 +392,31 @@ class ViewFeedPage(_Base):
         return not self.stale
 
 
-#: URNs one ``POST /view-placements`` asks about.
+#: URNs one ``POST /view-placements`` asks about — and with their nodes (``nodes: true``).
 VIEW_PLACEMENTS_MAX = 2000
+VIEW_PLACEMENT_NODES_MAX = 500
 
 #: Why a view draws an entity where it does: a member of a view made from a query (where a
-#: person put it on top), an entry a person placed, inside a member kept whole, where the
-#: view's layout places it, the layer what nothing places waits in — or nowhere.
-PlacementSource = Literal["member", "entry", "whole", "layout", "fallback", "none"]
+#: person put it on top), an entry a person placed, inside a member kept whole, inside a
+#: member (under it, in its layer), where the view's layout places it, the layer what nothing
+#: places waits in — or nowhere.
+PlacementSource = Literal["member", "entry", "whole", "inside", "layout", "fallback", "none"]
 
 
 class ViewPlacementsRequest(_Base):
     """``POST /{ws}/graph/view-placements?viewId=`` — where a view the server places (one
-    made from a query, or a subset view) draws each of these entities."""
+    made from a query, or a subset view) draws each of these entities. ``nodes``: with each
+    one the view draws, the node itself as its layer pages list it (at most
+    ``VIEW_PLACEMENT_NODES_MAX`` URNs; more answers 422 ``too_many_nodes``)."""
     urns: List[str] = Field(min_length=1, max_length=VIEW_PLACEMENTS_MAX)
+    nodes: bool = False
 
 
 class EntityPlacement(_Base):
     layer_id: Optional[str] = Field(None, alias="layerId")
     source: PlacementSource
+    #: How many of its nearest containers are drawn in the same layer (it nests in them).
+    in_layer: Optional[int] = Field(None, alias="inLayer")
 
 
 class ViewPlacements(_Base):
@@ -417,6 +427,9 @@ class ViewPlacements(_Base):
     epoch: Optional[int] = None
     data_version: Optional[str] = Field(None, alias="dataVersion")
     digest: str = ""
+    #: Asked with ``nodes``: each drawn entity as a layer page's node (``ancestorPath``,
+    #: ``inLayer``), keyed by URN. Absent for one the view draws nowhere.
+    nodes: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 class ViewMembersExport(_Base):

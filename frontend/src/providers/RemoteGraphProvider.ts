@@ -626,12 +626,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
     async viewPlacements(
         viewId: string,
         urns: string[],
-        opts?: { signal?: AbortSignal },
+        opts?: { signal?: AbortSignal; nodes?: boolean },
     ): Promise<import('@/types/membership').ViewPlacementsAnswer> {
         // Members by their rows, the rest by the view's own placement: one batch, cached.
         return await this.fetch<import('@/types/membership').ViewPlacementsAnswer>('/view-placements', {
             method: 'POST',
-            body: JSON.stringify({ urns }),
+            body: JSON.stringify(opts?.nodes ? { urns, nodes: true } : { urns }),
             extraParams: { viewId },
             timeoutMs: TIMEOUTS.TRACE_MS,
             ...(opts?.signal ? { signal: opts.signal } : {}),

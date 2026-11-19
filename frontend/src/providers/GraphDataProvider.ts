@@ -889,12 +889,13 @@ export interface GraphDataProvider {
 
     /**
      * Where a view the server places (made from a query, or a search's matches) draws each
-     * of `urns` (at most 2,000) — what a trace in it is drawn by. Optional capability.
+     * of `urns` (at most 2,000; with `nodes`, at most 500 and the nodes themselves, as its
+     * layer pages list them). Optional capability.
      */
     viewPlacements?(
         viewId: string,
         urns: string[],
-        opts?: { signal?: AbortSignal },
+        opts?: { signal?: AbortSignal; nodes?: boolean },
     ): Promise<import('@/types/membership').ViewPlacementsAnswer>
 
     /**

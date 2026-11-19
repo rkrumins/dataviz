@@ -141,7 +141,10 @@ class SearchRunContext:
       scans need;
     * ``members`` — a view whose members are too many to list as roots: they
       bound the search beside its roots (``ViewMembers``), read per request
-      from the request's database session.
+      from the request's database session;
+    * ``session_rows`` — rows one scan keeps for later pages, in place of the
+      engine's setting (a subset layer's feed keeps more, so paging past a
+      session starts the next scan from the keyset less often).
     """
     data_version: str = ""
     scope_hash: str = ""
@@ -150,6 +153,7 @@ class SearchRunContext:
     scan: bool = True
     slot: Optional[Callable[[], AsyncContextManager[bool]]] = None
     members: Optional[ViewMembers] = None
+    session_rows: Optional[int] = None
 
 
 @runtime_checkable

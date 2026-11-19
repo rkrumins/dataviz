@@ -255,9 +255,18 @@ export interface RefreshResult {
 /** `POST /{ws}/graph/view-placements` — where a view the server places draws each of these
  *  entities: a member where its row is, anything else where the view's layout (or the view
  *  it follows) would put it, or nowhere (`layerId: null`). At most 2,000 a request. */
+/** Why a view draws an entity where it does — `inside`: under the member it sits in. */
+export type PlacementSource = 'member' | 'entry' | 'whole' | 'inside' | 'layout' | 'fallback' | 'none'
+
 export interface ViewPlacementsAnswer {
-  placements: Record<string, { layerId: string | null; source: 'member' | 'entry' | 'whole' | 'layout' | 'fallback' | 'none' }>
+  placements: Record<string, { layerId: string | null; source: PlacementSource; inLayer?: number | null }>
   epoch: number | null
   dataVersion: string | null
   digest: string
+  /** Asked with `nodes`: each entity the view draws, as its layer pages list it. */
+  nodes?: Record<string, import('./searchView').FeedNode> | null
 }
+
+/** URNs one `POST /view-placements` asks about, and with their nodes. */
+export const VIEW_PLACEMENTS_MAX = 2000
+export const VIEW_PLACEMENT_NODES_MAX = 500
