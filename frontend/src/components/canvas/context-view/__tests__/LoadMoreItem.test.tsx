@@ -112,6 +112,13 @@ describe('LoadMoreItem', () => {
         expect(screen.getByRole('button')).toHaveTextContent('Load 7 more')
     })
 
+    it('at the foot of a list or subset view’s layer, names its page and what is still to come', () => {
+        renderRow({ count: 49_620, feedPage: 500 })
+        const button = screen.getByRole('button')
+        expect(button).toHaveAccessibleName('Load 500 more · 49,620 to go')
+        expect(button).toHaveTextContent('Load 500 more · 49,620 to go')
+    })
+
     it('tells the caller which fetches were asked for and which drifted in', () => {
         // The click is something the user did, and the canvas names it —
         // "Snowflake · 5 more (10 of 41)". The one-page-ahead sentinel is not,

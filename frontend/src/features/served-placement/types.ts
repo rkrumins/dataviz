@@ -43,8 +43,14 @@ export interface ServedPlacementsApi {
   stateOf(urn: string): UrnState
   /** Where each is drawn — asked once, kept; null for one that couldn't be asked. */
   placeOf(urns: readonly string[], opts?: { signal?: AbortSignal; priority?: Priority }): Promise<ReadonlyMap<string, Placed | null>>
-  /** As `placeOf`, with the nodes of those it draws, ready to load. */
-  load(urns: readonly string[], opts?: { signal?: AbortSignal; priority?: Priority; onProgress?: (p: LoadProgress) => void }): Promise<LoadResult>
+  /** As `placeOf`, with the nodes of those it draws, ready to load. `onNodes`: each batch's
+   *  nodes as it is answered, so a caller can draw them before the last batch is in. */
+  load(urns: readonly string[], opts?: {
+    signal?: AbortSignal
+    priority?: Priority
+    onProgress?: (p: LoadProgress) => void
+    onNodes?: (nodes: LoadResult['nodes']) => void
+  }): Promise<LoadResult>
   counts(urns?: Iterable<string>): { placed: number; asking: number; failed: number; outside: number }
   retryFailed(): void
   reset(): void

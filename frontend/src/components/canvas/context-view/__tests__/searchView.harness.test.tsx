@@ -79,8 +79,8 @@ describe('A subset view on the canvas', () => {
       await h.settle()
 
       const warehouse = column('Warehouse')
-      expect(within(warehouse).getByTitle('2,000 of 80,412 matches in this layer')).toHaveTextContent('2,000/80,412')
-      expect(within(warehouse).getByText('Showing 2,000 of 80,412')).toBeInTheDocument()
+      expect(within(warehouse).getByTitle('2,000 of 80,412 matches in this layer')).toHaveTextContent('2,000 of 80,412 loaded')
+      expect(within(warehouse).getByText('Showing the first 2,000 of 80,412')).toBeInTheDocument()
       await act(async () => { fireEvent.click(within(warehouse).getByRole('button', { name: /Search in this layer/ })) })
       expect(requestSearchRun).toHaveBeenCalledWith({ kind: 'layer', layerAssignment: 'warehouse' }, 'header')
 

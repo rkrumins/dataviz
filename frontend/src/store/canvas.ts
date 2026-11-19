@@ -52,6 +52,9 @@ export interface LineageNode extends Node {
     /** The layer of a subset view whose feed listed it: its row is drawn there, where
      *  the server placed it. */
     feedLayerId?: string
+    /** Loaded out of its layer's page order, by where the server says the view draws it
+     *  (`loadIntoCanvas`): a search hit shown, a narrowing's member, a trace's card. */
+    viaServed?: boolean
   }
 }
 
@@ -163,6 +166,37 @@ export interface SearchFeedState {
   source?: 'members'
 }
 
+/** The feed key of a list or subset view's layer. */
+export const subsetFeedKey = (layerId: string) => `layer:${layerId}`
+
+/** Rows a list or subset view's layer asks of each page after its first, for as long as the
+ *  server has rows. The first asks the server's own default (200), so a layer shows at once. */
+export const FEED_PAGE_ROWS = 500
+
+/** Why a list or subset view's layer has no page to show: its last page failed (after its
+ *  retries). Kept per feed key (`layer:<id>`), whichever hydration instance asked. */
+export interface FeedFailure {
+  message: string
+  status: number | null
+}
+
+/** A page of a list or subset view's layer, landing with any others that land soon after. */
+export interface LandingFeedPage {
+  feedKey: string
+  feed: TypeFeedState
+  nodes: LineageNode[]
+  edges: LineageEdge[]
+  /** The graph it was read for (`graphGeneration`): a page of a graph since replaced is dropped. */
+  generation: number
+  /** Whether the feed still stands where the page was read from. When it doesn't (another
+   *  instance moved it on meanwhile), the rows land and its position stands. */
+  stands: (now: TypeFeedState | undefined) => boolean
+}
+
+/** Pages landing within this long of the last write are written in one: every store write
+ *  renders the whole canvas, and a layer read ahead lands a page every few hundred ms. */
+export const FEED_LANDING_MS = 250
+
 /** New roots a draft created that a curated view loads by URN: a page of them. They have no
  *  placement to page by yet, and an import of 100,000 is listed in the draft's Changes; the canvas
  *  says how many more there are (`createdRootsNotLoaded`). */
@@ -193,9 +227,17 @@ interface CanvasState {
   setTypeFeed: (feedKey: string, feed: TypeFeedState) => void
   /** Land one feed page (nodes, edges, feed position) as ONE store update. */
   addFeedPage: (feedKey: string, feed: TypeFeedState, nodes: LineageNode[], edges: LineageEdge[]) => void
+  /** Land a list or subset view's page — nodes, edges and the feed's position — with every
+   *  other page landing within FEED_LANDING_MS of the last write, as ONE store update. The
+   *  first page after a quiet spell is written at once. Resolves once written. */
+  landFeedPage: (page: LandingFeedPage) => Promise<void>
   /** Seed many pager and feed positions as ONE store update — every store update
    *  re-renders the whole canvas, so seeding 56 anchors one by one was 56 renders. */
   seedPositions: (childPages: Record<string, ChildPageState>, typeFeeds: Record<string, TypeFeedState>) => void
+  /** Layers of a list or subset view whose last page failed, by feed key. Cleared by setGraph. */
+  feedFailures: Record<string, FeedFailure>
+  /** Record (or, with null, clear) the failures of several feeds as ONE store update. */
+  markFeedFailures: (failures: Record<string, FeedFailure | null>) => void
   /** Monotonic counter — incremented on every node/edge mutation. */
   _version: number
   setNodes: (nodes: LineageNode[]) => void
@@ -533,6 +575,30 @@ export const useCanvasStore = create<CanvasState>()(
       }
       return true
     }
+    // Feed pages waiting to land, and when the last lot did.
+    let landing: Array<{ page: LandingFeedPage; resolve: () => void }> = []
+    let landingTimer: ReturnType<typeof setTimeout> | null = null
+    let lastLanding = -Infinity
+    const flushLanding = () => {
+      landingTimer = null
+      lastLanding = Date.now()
+      const pages = landing
+      landing = []
+      set((state) => {
+        const typeFeeds = { ...state.typeFeeds }
+        const nodes: LineageNode[] = []
+        const edges: LineageEdge[] = []
+        for (const { page } of pages) {
+          // Read for a graph since replaced: it belongs to that one.
+          if (page.generation !== state.graphGeneration) continue
+          for (const n of page.nodes) nodes.push(n)
+          for (const e of page.edges) edges.push(e)
+          if (page.stands(typeFeeds[page.feedKey])) typeFeeds[page.feedKey] = page.feed
+        }
+        return { ...(mergeGraph(state, nodes, edges) ?? {}), typeFeeds }
+      })
+      for (const { resolve } of pages) resolve()
+    }
     return ({
       // Nodes and Edges
       nodes: [],
@@ -661,6 +727,7 @@ export const useCanvasStore = create<CanvasState>()(
           graphGeneration: state.graphGeneration + 1,
           childPaging: {},
           typeFeeds: {},
+          feedFailures: {},
           lineagePartial: { in: new Set(), out: new Set() },
         }
       }),
@@ -682,10 +749,26 @@ export const useCanvasStore = create<CanvasState>()(
         ...(mergeGraph(state, newNodes, newEdges) ?? {}),
         typeFeeds: { ...state.typeFeeds, [feedKey]: feed },
       })),
+      landFeedPage: (page) => new Promise<void>((resolve) => {
+        landing.push({ page, resolve })
+        if (landingTimer !== null) return
+        const wait = lastLanding + FEED_LANDING_MS - Date.now()
+        if (wait <= 0) flushLanding()
+        else landingTimer = setTimeout(flushLanding, wait)
+      }),
       seedPositions: (childPages, typeFeeds) => set((state) => ({
         childPaging: { ...state.childPaging, ...childPages },
         typeFeeds: { ...state.typeFeeds, ...typeFeeds },
       })),
+      feedFailures: {},
+      markFeedFailures: (failures) => set((state) => {
+        const next = { ...state.feedFailures }
+        for (const [key, failure] of Object.entries(failures)) {
+          if (failure) next[key] = failure
+          else delete next[key]
+        }
+        return { feedFailures: next }
+      }),
       addGraph: (newNodes, newEdges) => set((state) => mergeGraph(state, newNodes, newEdges) ?? state),
 
       // Selection

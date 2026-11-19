@@ -1,8 +1,11 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { CREATED_ROOTS_LOADED, useCanvasStore, type ChildPageState, type LineageEdge, type LineageNode, type TypeFeedState } from '@/store/canvas'
+import {
+    CREATED_ROOTS_LOADED, FEED_PAGE_ROWS, subsetFeedKey, useCanvasStore,
+    type ChildPageState, type FeedFailure, type LineageEdge, type LineageNode, type TypeFeedState,
+} from '@/store/canvas'
 import { featureEnabled } from '@/store/features'
 import type { ViewFeedPage } from '@/types/searchView'
-import { httpStatusOf } from '@/services/graphRequestFailure'
+import { httpStatusOf, isClientTimeout } from '@/services/graphRequestFailure'
 import { primeLineageFor } from '@/lib/primeLineageFor'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
@@ -26,6 +29,7 @@ import {
     classifyGraphFailure, isFailoverFailure, isRetryableGraphFailure, MAX_READ_RETRIES, retryDelayMs,
 } from '@/services/graphRequestFailure'
 import { toCanvasNode, toCanvasEdge, withFeedLayer } from '@/lib/canvasNodeMapper'
+import { edgesForPage, isAggregatedEdge, lineageOnly } from '@/lib/feedPageEdges'
 import { useBranchCreatedDelta, committedCreatesOf, committedCreatedChildUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
@@ -48,8 +52,9 @@ const FEED_WALK_MAX_PAGES = 5
 /** Where a type feed stands after `page` — the SERVER's position: a client
  *  count of the rows returned is wrong under a draft overlay (see NodePage).
  *  The server counts a feed with its first page; later pages keep `total`. */
-/** The feed key of a subset view's layer. */
-export const subsetFeedKey = (layerId: string) => `layer:${layerId}`
+// The feed key of a list or subset view's layer, and the rows its pages ask: kept with the
+// feeds in the store, so what reads them needn't load this hook.
+export { FEED_PAGE_ROWS, subsetFeedKey }
 
 /** How long a subset layer's page lets the server scan before it answers with what
  *  it has found so far (the first page, and each continuation of a running one). */
@@ -83,6 +88,67 @@ export function subsetFeedAfter(layerId: string, page: ViewFeedPage, source?: 'm
             ...(source ? { source } : {}),
         },
     }
+}
+
+/** A layer whose first page failed: no rows listed yet, its next page the first. Seeded so
+ *  the layer's Retry (`loadMoreFeeds`) asks that page again. */
+function unlistedFeed(layerId: string, source?: 'members'): TypeFeedState {
+    return {
+        entityTypes: [], offset: 0, hasMore: true, total: null,
+        search: {
+            layerId, cursor: null, sessionId: null, status: 'complete', countStatus: 'lowerBound',
+            stale: false, asOf: null, capped: false, delivered: 0, ...(source ? { source } : {}),
+        },
+    }
+}
+
+/** An older member feed takes at most this many rows a page. */
+const OLDER_MEMBERS_MAX = 500
+
+/** What an older server refused of a page's `limit`, remembered for the session: a subset
+ *  feed that takes none (null), a member feed that takes fewer (its most). */
+const refusedLimit: { members?: number | null; feed?: number | null } = {}
+
+/** Forget what older servers refused — for tests, which each start a session of their own. */
+export function forgetRefusedPageLimits(): void {
+    delete refusedLimit.members
+    delete refusedLimit.feed
+}
+
+/** A 422 naming `limit`: an older server refusing the field (a subset feed's
+ *  `extra_forbidden`) or the number (a member feed's most). */
+function refusesLimit(err: unknown): boolean {
+    return httpStatusOf(err) === 422 && err instanceof Error && err.message.includes('"limit"')
+}
+
+/** A continuation page of FEED_PAGE_ROWS — or, from an older server that refused it, of what
+ *  it takes: asked again once, and remembered, so a layer never fails for it. */
+async function askPage(kind: 'members' | 'feed', ask: (limit: number | undefined) => Promise<ViewFeedPage>): Promise<ViewFeedPage> {
+    const most = refusedLimit[kind]
+    const limit = most === null ? undefined : Math.min(FEED_PAGE_ROWS, most ?? FEED_PAGE_ROWS)
+    try {
+        return await ask(limit)
+    } catch (err) {
+        if (limit === undefined || !refusesLimit(err)) throw err
+        refusedLimit[kind] = kind === 'members' && limit > OLDER_MEMBERS_MAX ? OLDER_MEMBERS_MAX : null
+        return askPage(kind, ask)
+    }
+}
+
+/** A layer's failed page, as its column says it. */
+export function feedFailureOf(err: unknown): FeedFailure {
+    const status = httpStatusOf(err)
+    const kind = classifyGraphFailure(err)
+    const message = status === 429 || status === 503 || kind === 'warming'
+        ? 'The server is busy right now.'
+        : status === 504 || isClientTimeout(err)
+            ? 'The server took too long to answer.'
+            : kind === 'unavailable'
+                ? 'The server couldn\u2019t be reached.'
+                : kind === 'session'
+                    ? 'Your session needs to reconnect.'
+                    : 'The server couldn\u2019t list this layer.'
+    return { message, status }
 }
 
 /** A subset view whose base view is gone answers 409 `base_missing`. */
@@ -314,13 +380,6 @@ export function isHydrationFailure(status: HydrationStatus): status is Hydration
     return status === 'warming' || status === 'slow' || status === 'unavailable' || status === 'error' || status === 'session'
 }
 
-/** The view's lineage types less the stored :AGGREGATED cells: the rows on
- *  screen get their roll-ups from /edges/aggregated, never from a read of
- *  their flows. */
-function lineageOnly(lineageEdgeTypes: string[]): string[] {
-    return lineageEdgeTypes.filter(t => t.toUpperCase() !== 'AGGREGATED')
-}
-
 /** The types /edges/between is asked for: containment and lineage, never the
  *  stored :AGGREGATED cells (see the reference hydration's edge fetch).
  *  Untyped only while the view has not declared both kinds. */
@@ -329,11 +388,6 @@ function betweenEdgeTypes(containmentEdgeTypes: string[], lineageEdgeTypes: stri
     return containmentEdgeTypes.length > 0 && lineage.length > 0
         ? [...containmentEdgeTypes, ...lineage]
         : undefined
-}
-
-/** A stored roll-up cell, which an untyped read can still bring. */
-function isAggregatedEdge(e: GraphEdge): boolean {
-    return String(e.edgeType ?? '').toUpperCase() === 'AGGREGATED'
 }
 
 export interface UseGraphHydrationResult {
@@ -821,6 +875,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Where each open-scope type feed stands after its first page —
                     // seeded once the graph is set (setGraph clears feeds).
                     const typeFeedSeeds: Array<[string, TypeFeedState]> = []
+                    // List and subset layers whose first page failed, said on each column.
+                    const failedFeeds: Record<string, FeedFailure> = {}
                     // This attempt's progress, kept for a retry if it ends partial.
                     let nextCarry: HydrationCarry | null = null
 
@@ -847,7 +903,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             settled.forEach((outcome, i) => {
                                 if (outcome.status !== 'fulfilled') {
                                     if (isBaseMissing(outcome.reason)) useCanvasStore.getState().setSubsetIssue('base_missing')
-                                    else batchErrors.push(outcome.reason)
+                                    else {
+                                        batchErrors.push(outcome.reason)
+                                        failedFeeds[subsetFeedKey(layerIds[i])] = feedFailureOf(outcome.reason)
+                                        typeFeedSeeds.push([subsetFeedKey(layerIds[i]), unlistedFeed(layerIds[i])])
+                                    }
                                     return
                                 }
                                 for (const node of outcome.value.nodes) {
@@ -874,7 +934,12 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         if (controller.signal.aborted) return
                         const seen = new Set<string>()
                         settled.forEach((outcome, i) => {
-                            if (outcome.status !== 'fulfilled') { batchErrors.push(outcome.reason); return }
+                            if (outcome.status !== 'fulfilled') {
+                                batchErrors.push(outcome.reason)
+                                failedFeeds[subsetFeedKey(layerIds[i])] = feedFailureOf(outcome.reason)
+                                typeFeedSeeds.push([subsetFeedKey(layerIds[i]), unlistedFeed(layerIds[i], 'members')])
+                                return
+                            }
                             for (const node of outcome.value.nodes) {
                                 if (seen.has(node.urn)) continue
                                 seen.add(node.urn)
@@ -1092,6 +1157,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         useCanvasStore.getState().seedPositions(
                             Object.fromEntries(anchorPagers), Object.fromEntries(typeFeedSeeds),
                         )
+                        if (Object.keys(failedFeeds).length > 0) useCanvasStore.getState().markFeedFailures(failedFeeds)
                     }
                     seedAnchorPagers()
 
@@ -1557,56 +1623,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
      * parent's). An edge is kept only once both ends are loaded.
      */
     const loadMoreFeeds = useCallback(async (feedKeys: string[]) => {
-        /** A page's edges: its incoming containment, lineage touching it, and containment
-         *  to loaded orphans of a type ``entityTypes`` can contain — each kept once both
-         *  ends are loaded. Null: a new graph was set meanwhile. */
-        const edgesForPage = async (
-            pageUrns: string[], entityTypes: string[], stale: () => boolean,
-        ): Promise<GraphEdge[] | null> => {
-            const before = useCanvasStore.getState()
-            const childTypes = new Set(entityTypes.flatMap(t =>
-                schemaEntityTypes.find(e => e.id === t)?.hierarchy?.canContain ?? []))
-            let orphans: string[] = []
-            if (childTypes.size > 0 && containmentEdgeTypes.length > 0) {
-                const parented = new Set<string>()
-                for (const e of before.edges) {
-                    if (isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) parented.add(e.target)
-                }
-                orphans = before.nodes
-                    .filter(n => childTypes.has(n.data.type) && !parented.has(n.id))
-                    .map(n => n.id)
-            }
-            const noteFailure = (err: unknown): GraphEdge[] => {
-                useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
-                return []
-            }
-            // Lineage out of and into the page as two ANCHORED reads: the
-            // one-query `anyUrns` form has no index-friendly shape and scans
-            // every lineage edge of the graph for each page. Flows only,
-            // never the stored :AGGREGATED cells, as /edges/between.
-            const none = Promise.resolve([] as GraphEdge[])
-            const lineage = lineageOnly(lineageEdgeTypes)
-            const [incoming, lineageOut, lineageIn, adopted] = pageUrns.length === 0 ? [[], [], [], []] : await Promise.all([
-                containmentEdgeTypes.length > 0
-                    ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: containmentEdgeTypes, limit: pageUrns.length * 4 + 100 }).catch(noteFailure)
-                    : none,
-                lineage.length > 0
-                    ? provider.getEdges({ sourceUrns: pageUrns, edgeTypes: lineage, limit: 200_000 }).catch(noteFailure)
-                    : none,
-                lineage.length > 0
-                    ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: lineage, limit: 200_000 }).catch(noteFailure)
-                    : none,
-                orphans.length > 0
-                    ? provider.getEdgesBetween([...pageUrns, ...orphans], containmentEdgeTypes).catch(noteFailure)
-                    : none,
-            ])
-            if (stale()) return null
-            const held = useCanvasStore.getState()._nodeIndex
-            const onPage = new Set(pageUrns)
-            const isLoaded = (u: string) => held.has(u) || onPage.has(u)
-            return [...incoming, ...lineageOut, ...lineageIn, ...adopted]
-                .filter(e => !isAggregatedEdge(e) && isLoaded(e.sourceUrn) && isLoaded(e.targetUrn))
-        }
+        const pageEdges = (pageUrns: string[], entityTypes: string[], stale: () => boolean) => edgesForPage(
+            provider, pageUrns, { entityTypes, schemaEntityTypes, containmentEdgeTypes, lineageEdgeTypes }, stale)
         const feeds = useCanvasStore.getState().typeFeeds
         const due = [...new Set(feedKeys)].filter(k => feeds[k]?.hasMore)
         await Promise.all(due.map(feedKey => {
@@ -1623,33 +1641,43 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     if (feed.search) {
                         // A subset view's layer: its next page of matches, or more of a
                         // scan still running — the server's search, never a type's page.
-                        // A view made from a query: its next page of members.
+                        // A view made from a query: its next page of members. Either
+                        // pages on for as long as the server has rows.
                         const viewFeed = provider.viewFeedPage?.bind(provider)
                         const membersPage = provider.viewMembersPage?.bind(provider)
                         const viewId = activeViewIdRef.current
                         const s = feed.search
                         if (!viewId || !(s.source === 'members' ? membersPage : viewFeed)) return
                         const result = s.source === 'members'
-                            ? await membersPage!(viewId, { layerId: s.layerId, ...(s.cursor ? { cursor: s.cursor } : {}) })
-                            : await viewFeed!(viewId, s.status === 'running' && s.sessionId
-                                ? { layerId: s.layerId, sessionId: s.sessionId, waitMs: SUBSET_WAIT_MS }
-                                : { layerId: s.layerId, ...(s.cursor ? { cursor: s.cursor } : {}), waitMs: SUBSET_WAIT_MS })
+                            ? await askPage('members', limit => membersPage!(viewId, {
+                                layerId: s.layerId, ...(s.cursor ? { cursor: s.cursor } : {}), ...(limit ? { limit } : {}),
+                            }))
+                            : await askPage('feed', limit => viewFeed!(viewId, {
+                                ...(s.status === 'running' && s.sessionId
+                                    ? { layerId: s.layerId, sessionId: s.sessionId, waitMs: SUBSET_WAIT_MS }
+                                    : { layerId: s.layerId, ...(s.cursor ? { cursor: s.cursor } : {}), waitMs: SUBSET_WAIT_MS }),
+                                ...(limit ? { limit } : {}),
+                            }))
                         if (stale()) return
                         const pageUrns = result.nodes.map(n => n.urn)
-                        const edges = await edgesForPage(pageUrns, [], stale)
+                        const edges = await pageEdges(pageUrns, [], stale)
                         if (edges === null) return
                         const held = useCanvasStore.getState()._nodeIndex
                         const fresh = result.nodes.filter((n, i) => !held.has(n.urn) && pageUrns.indexOf(n.urn) === i)
-                        const store = useCanvasStore.getState()
-                        const now = store.typeFeeds[feedKey]?.search
-                        if (now && (now.delivered !== s.delivered || now.sessionId !== s.sessionId)) {
-                            // Another instance moved this layer on meanwhile: the rows land, its position stands.
-                            store.addGraph(fresh.map(n => toCanvasNode(withFeedLayer(n, s.layerId))),
-                                edges.map(e => toCanvasEdge(e)))
-                            return
+                        if (useCanvasStore.getState().feedFailures[feedKey]) {
+                            useCanvasStore.getState().markFeedFailures({ [feedKey]: null })
                         }
-                        store.addFeedPage(feedKey, subsetFeedAfter(s.layerId, result, s.source),
-                            fresh.map(n => toCanvasNode(withFeedLayer(n, s.layerId))), edges.map(e => toCanvasEdge(e)))
+                        // With whatever other pages land about now, in one write. Another
+                        // instance may move this layer on meanwhile: the rows land, its position stands.
+                        await useCanvasStore.getState().landFeedPage({
+                            feedKey,
+                            feed: subsetFeedAfter(s.layerId, result, s.source),
+                            nodes: fresh.map(n => toCanvasNode(withFeedLayer(n, s.layerId))),
+                            edges: edges.map(e => toCanvasEdge(e)),
+                            generation,
+                            stands: now => !now?.search
+                                || (now.search.delivered === s.delivered && now.search.sessionId === s.sessionId),
+                        })
                         return
                     }
                     // One ask makes progress or proves there is none: a page whose
@@ -1666,7 +1694,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         if (stale()) return
                         const page = result.nodes
                         const pageUrns = page.map(n => n.urn)
-                        const edges = await edgesForPage(pageUrns, feed.entityTypes, stale)
+                        const edges = await pageEdges(pageUrns, feed.entityTypes, stale)
                         if (edges === null) return
                         const held = useCanvasStore.getState()._nodeIndex
                         const fresh = page.filter((n, i) => !held.has(n.urn) && pageUrns.indexOf(n.urn) === i)
@@ -1687,6 +1715,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 } catch (err) {
                     console.error(`[useGraphHydration] Failed to load more of feed ${feedKey}`, err)
                     setFailedNodes(prev => new Set(prev).add(key))
+                    // A list or subset layer's failure is the canvas's to say, whichever instance asked.
+                    if (feed.search) useCanvasStore.getState().markFeedFailures({ [feedKey]: feedFailureOf(err) })
                     if (feed.search && isRetryableGraphFailure(err)) {
                         // Shed or busy past its retries: a followed layer is asked again
                         // after the server's Retry-After, not left at "so far" until

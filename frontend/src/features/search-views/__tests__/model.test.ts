@@ -145,7 +145,7 @@ describe('words for a layer', () => {
   it('as of, and capped', () => {
     expect(asOfText('2026-11-03T10:42:00Z')).toMatch(/^as of /)
     expect(asOfText(null)).toBeNull()
-    expect(cappedText(2000, 80412)).toBe('Showing 2,000 of 80,412')
+    expect(cappedText(5000, 80412)).toBe('Showing the first 5,000 of 80,412')
   })
 })
 

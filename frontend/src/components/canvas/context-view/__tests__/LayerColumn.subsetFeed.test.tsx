@@ -58,7 +58,7 @@ describe('LayerColumn — a subset layer', () => {
 
   it('counts its matches as the server does, not the children of what it lists', () => {
     renderColumn({ subsetFeed: feed({ delivered: 2, total: 80412 }) })
-    expect(pill().textContent).toBe('2/80,412')
+    expect(pill().textContent).toBe('2 of 80,412 loaded')
     expect(pill().getAttribute('title')).toBe('2 of 80,412 matches in this layer')
   })
 
@@ -79,11 +79,11 @@ describe('LayerColumn — a subset layer', () => {
     expect(screen.getByText('No matches')).toBeInTheDocument()
   })
 
-  it('a capped layer says how many it shows, and offers the ways to the rest', () => {
+  it('a layer at an operator’s ceiling says how many it shows, and offers the ways to the rest', () => {
     const onSearchInLayer = vi.fn()
     const onExportLayer = vi.fn()
-    renderColumn({ subsetFeed: feed({ delivered: 2000, total: 80412, capped: true }), onSearchInLayer, onExportLayer })
-    expect(screen.getByText('Showing 2,000 of 80,412')).toBeInTheDocument()
+    renderColumn({ subsetFeed: feed({ delivered: 5000, total: 80412, capped: true }), onSearchInLayer, onExportLayer })
+    expect(screen.getByText('Showing the first 5,000 of 80,412')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Search in this layer/ }))
     expect(onSearchInLayer).toHaveBeenCalledWith('L1')
     fireEvent.click(screen.getByRole('button', { name: /Export/ }))
