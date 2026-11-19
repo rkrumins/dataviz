@@ -169,9 +169,9 @@ async def test_a_subset_of_a_list_view_lists_each_layers_members(test_client: As
     started = time.monotonic()
     rows, last, _slowest = await _layer(test_client, ws, sub, "small")
     found = {n["urn"]: n for n in rows}
-    assert set(found) == small | set(columns), "its members and what is inside them"
+    assert set(found) == small | set(columns) | {PLACED}, "its members, what is inside them, its entry"
     assert all(found[c].get("inLayer", 0) >= 1 for c in columns), "drawn under their member"
-    assert (last["totalCount"], last["countStatus"]) == (len(small) + len(columns), "exact")
+    assert (last["totalCount"], last["countStatus"]) == (len(small) + len(columns) + 1, "exact")
     print(f"Small: {len(rows):,} rows in {time.monotonic() - started:.1f} s")
 
     started = time.monotonic()
