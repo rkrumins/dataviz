@@ -13,18 +13,26 @@ What it must hold: every entity the seeds reach, each once, at its shortest
 distance and with the reason it is in; every flow between them; the same in
 the downloaded file.
 
+And at the column grain (tables of columns in domains, lineage between columns
+only): a trace kept with the tables its sources and consumers sit in, what is
+inside those tables, and those tables' own lineage — each at the distance a
+model of the rule computes.
+
 Run:  RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
       python -m pytest tests/integration/test_member_sets_live.py -q
 """
 from __future__ import annotations
 
 import csv
+import heapq
 import io
 import json
+import math
 import os
+import random
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 
 import pytest
 import pytest_asyncio
@@ -107,9 +115,85 @@ def _expected(nodes, edges):
     return bfs(inn), bfs(out)
 
 
+#: The column grain: domains of tables of columns, each column fed by up to two
+#: columns of the tables just before it (anywhere in the estate).
+DOMAINS, TABLES, COLUMNS, WINDOW = 8, 150, 6, 60
+
+
+def _column_graph():
+    """(parent {child: container}, types {urn: label}, lineage [(source, target)], seeds)."""
+    rng = random.Random(7)
+    parent, types, lineage = {}, {}, set()
+    for d in range(DOMAINS):
+        types[f"urn:dom:{d}"] = "domain"
+        for i in range(TABLES):
+            types[f"urn:tbl:{d}:{i}"], parent[f"urn:tbl:{d}:{i}"] = "dataset", f"urn:dom:{d}"
+    order = sorted((t for t, kind in types.items() if kind == "dataset"),
+                   key=lambda t: (int(t.rsplit(":", 1)[1]), t))
+    for k, table in enumerate(order):
+        for j in range(COLUMNS):
+            col = f"{table}/c{j}"
+            types[col], parent[col] = "schemaField", table
+            if k >= 4:
+                for _ in range(rng.choice((0, 0, 1, 1, 2))):
+                    source = order[rng.randrange(max(0, k - WINDOW), k)]
+                    lineage.add((f"{source}/c{rng.randrange(COLUMNS)}", col))
+    seeds = [f"{order[600]}/c0", f"{order[610]}/c3", f"{order[900]}/c2"]
+    return parent, types, sorted(lineage), seeds
+
+
+def _with_hosts(parent, types, lineage, seeds):
+    """What the column trace of ``seeds`` holds with the tables its partners sit in,
+    one level inside those, and their lineage, as ``{urn: (via, hops)}``. Each way: a
+    column one hop from where the walk stands joins, and so does its table at the same
+    distance; the walk then stands on every column of that table at the table's
+    distance. Containment is never a hop."""
+    kids, toward = {}, {"upstream": {}, "downstream": {}}
+    for child, container in parent.items():
+        kids.setdefault(container, []).append(child)
+    for a, b in lineage:
+        toward["downstream"].setdefault(a, []).append(b)
+        toward["upstream"].setdefault(b, []).append(a)
+
+    def walk(adj):
+        dist, stand = {}, {s: 0 for s in seeds}
+        heap = [(0, s) for s in seeds]
+
+        def stand_on(urn, d):
+            if d < stand.get(urn, math.inf):
+                stand[urn] = d
+                heapq.heappush(heap, (d, urn))
+
+        while heap:
+            d, u = heapq.heappop(heap)
+            if d > stand.get(u, math.inf):
+                continue
+            for v in adj.get(u, ()):
+                if v in seeds or d + 1 >= dist.get(v, math.inf):
+                    continue
+                dist[v] = d + 1
+                stand_on(v, d + 1)
+                host = parent.get(v) if types[v] == "schemaField" else None
+                if host is not None and d + 1 < dist.get(host, math.inf):
+                    dist[host] = d + 1
+                    for col in kids[host]:
+                        stand_on(col, d + 1)
+        return dist
+
+    members = {s: ("seed", None) for s in seeds}
+    for via in ("upstream", "downstream"):
+        for urn, hops in walk(toward[via]).items():
+            members.setdefault(urn, (via, hops))
+    for urn in [u for u, (via, _) in members.items() if via in ("upstream", "downstream")]:
+        for child in kids.get(urn, ()):
+            members.setdefault(child, ("partnerInside", None))
+    return members
+
+
 class LiveEngine:
-    """The three reads a member set makes, as ``ContextEngine`` makes them, over the
-    live provider (no ontology to resolve: the edge types are given)."""
+    """The reads a member set makes, as ``ContextEngine`` makes them, over the live
+    provider (no ontology to resolve: the edge types and the column grain's two types
+    are given)."""
 
     def __init__(self, provider):
         self.provider = provider
@@ -135,6 +219,48 @@ class LiveEngine:
 
     async def get_ancestor_chains(self, urns):
         return await self.provider.get_ancestor_chains(urns)
+
+    async def get_resolved_ontology(self):
+        from backend.app.ontology.models import EntityHierarchyData, EntityTypeDefEntry, ResolvedOntology
+
+        return ResolvedOntology(entity_type_definitions={
+            "dataset": EntityTypeDefEntry(hierarchy=EntityHierarchyData(can_contain=["schemaField"])),
+            "schemaField": EntityTypeDefEntry(hierarchy=EntityHierarchyData(can_contain=[])),
+        })
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def columns():
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(
+        host=os.getenv("FALKORDB_HOST", "localhost"),
+        port=int(os.getenv("FALKORDB_PORT", "6379")),
+        graph_name=f"member_sets_columns_{uuid.uuid4().hex[:8]}",
+        auth_enabled=False,
+    )
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    await p._ensure_connected()
+    parent, types, lineage, seeds = _column_graph()
+    for label in ("domain", "dataset", "schemaField"):
+        await p._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.urn)")
+    await p._graph.query("UNWIND $rows AS r CREATE (:domain {urn: r, displayName: r})",
+                         {"rows": [u for u, kind in types.items() if kind == "domain"]})
+    for label, inside in (("dataset", "domain"), ("schemaField", "dataset")):
+        rows = [{"urn": u, "parent": parent[u]} for u, kind in types.items() if kind == label]
+        for i in range(0, len(rows), 5000):
+            await p._graph.query(
+                f"UNWIND $rows AS r MATCH (c:{inside} {{urn: r.parent}}) "
+                f"CREATE (c)-[:CONTAINS]->(:{label} {{urn: r.urn, displayName: r.urn}})", {"rows": rows[i:i + 5000]})
+    pairs = [{"a": a, "b": b} for a, b in lineage]
+    for i in range(0, len(pairs), 5000):
+        await p._graph.query(
+            f"UNWIND $rows AS r MATCH (a:schemaField {{urn: r.a}}), (b:schemaField {{urn: r.b}}) "
+            f"CREATE (a)-[:{LINEAGE}]->(b)", {"rows": pairs[i:i + 5000]})
+    try:
+        yield p, parent, types, lineage, seeds
+    finally:
+        await p._graph.delete()
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -261,3 +387,50 @@ async def test_twenty_seeds_every_source_and_consumer_exactly(graph, maker):
 
     print(f"\n{len(rows):,} members, {len(kept_edges):,} flows: {requests} requests, "
           f"{engine.closures} closure steps, {elapsed:.1f} s; downloaded with where each sits in {downloaded:.1f} s")
+
+
+async def test_a_column_trace_with_its_tables_their_insides_and_their_lineage_exactly(columns, maker):
+    from backend.app.db.models import MemberSetRowORM
+    from backend.app.services.member_sets import stepper
+    from backend.app.services.member_sets import store as sets
+    from backend.common.models.view_membership import MembershipSpec
+
+    provider, parent, types, lineage, seeds = columns
+    expected = _with_hosts(parent, types, lineage, seeds)
+    spec = MembershipSpec.model_validate({"seeds": {"urns": seeds}, "expand": {
+        "upstream": "all", "downstream": "all", "partnerChildren": 1, "partnerHosts": True, "partnerLineage": True}})
+    async with maker() as session:
+        ms = await sets.open_set(
+            session, key=spec.spec_hash(), workspace_id="ws", data_source_id="ds",
+            spec=json.dumps(spec.model_dump(mode="json", by_alias=True, exclude_none=True)),
+            spec_hash=spec.spec_hash(), data_version="1", include_edges=False)
+        await session.commit()
+        set_id = ms.id
+
+    engine = LiveEngine(provider)
+    started, requests = time.monotonic(), 0
+    while True:
+        requests += 1
+        assert requests < 2_000, "the set never finished"
+        # Each request a different replica, a second long.
+        async with maker() as session:
+            await stepper.drive(session, set_id, engine, owner=uuid.uuid4().hex, wait_s=1.0)
+            ms = await sets.get(session, set_id)
+            await session.commit()
+        if ms.status != "running":
+            break
+    elapsed = time.monotonic() - started
+    assert ms.status == "complete", ms.error
+    assert sets.loads(ms.truncated, []) == []
+
+    async with maker() as session:
+        rows = {r.urn: r for r in (await session.execute(
+            select(MemberSetRowORM).where(MemberSetRowORM.set_id == set_id))).scalars().all()}
+    held = {u: (r.via, r.hops_up if r.via == "upstream" else r.hops_down if r.via == "downstream" else None)
+            for u, r in rows.items()}
+    assert held == expected
+    tables = sum(1 for u, (via, _) in held.items() if via in ("upstream", "downstream") and types[u] == "dataset")
+    assert tables > 500 and Counter(via for via, _ in held.values())["partnerInside"] > 1000
+
+    print(f"\n{len(rows):,} members ({tables:,} tables the trace's columns sit in): {requests} requests, "
+          f"{engine.closures} closure steps, {elapsed:.1f} s")

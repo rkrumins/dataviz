@@ -222,10 +222,14 @@ async def resolve_membership(
             counts.inside = await _descendants(run, members, seeds, int(expand.children), "inside")
 
         # ── 3. Their sources and consumers ───────────────────────────────────
+        is_leaf = await walk.leaf_rule(engine) if expand.partner_hosts else None
+        walk_hosts = bool(expand.partner_lineage)
         if expand.upstream:
-            counts.upstream = await _lineage(run, members, seeds, "upstream", expand.upstream)
+            counts.upstream = await _lineage(run, members, seeds, "upstream", expand.upstream,
+                                             is_leaf=is_leaf, walk_hosts=walk_hosts)
         if expand.downstream:
-            counts.downstream = await _lineage(run, members, seeds, "downstream", expand.downstream)
+            counts.downstream = await _lineage(run, members, seeds, "downstream", expand.downstream,
+                                               is_leaf=is_leaf, walk_hosts=walk_hosts)
 
         # ── 4. What is inside those ──────────────────────────────────────────
         partners = members.urns("upstream", "downstream")
@@ -278,8 +282,23 @@ async def _existing(run: _Run, urns: List[str]) -> Set[str]:
     return found
 
 
+async def _holding(run: _Run, urns: List[str]) -> List[str]:
+    """Those of ``urns`` the graph does not count empty (a trace's columns are): a
+    count of 0 is skipped, no count is kept."""
+    empty: Set[str] = set()
+    for batch in _batches(urns, READ_BATCH):
+        run.check()
+        async with run.slot():
+            nodes = await run.engine.get_nodes_query(
+                NodeQuery(urns=batch, limit=len(batch), include_child_count=True))
+        empty.update(n.urn for n in nodes if n.child_count == 0)
+    return [u for u in urns if u not in empty]
+
+
 async def _descendants(run: _Run, members: _Members, roots: List[str], depth: int, via: Via) -> int:
-    """Add what is inside ``roots``, ``depth`` levels down. Returns how many joined."""
+    """Add what is inside ``roots``, ``depth`` levels down — never reading one the
+    graph counts nothing inside. Returns how many joined."""
+    roots = await _holding(run, roots)
     added = 0
     gate = asyncio.Semaphore(DESCENDANTS_CONCURRENCY)
 
@@ -313,9 +332,11 @@ async def _descendants(run: _Run, members: _Members, roots: List[str], depth: in
     return added
 
 
-async def _lineage(run: _Run, members: _Members, seeds: List[str], direction: str, depth) -> int:
+async def _lineage(run: _Run, members: _Members, seeds: List[str], direction: str, depth, *,
+                   is_leaf: Optional[walk.Leaf] = None, walk_hosts: bool = False) -> int:
     """Add the seeds' sources (``upstream``) or consumers (``downstream``), ``depth``
-    hops out, or the whole way for ``"all"``. Returns how many joined.
+    hops out, or the whole way for ``"all"`` — with ``is_leaf``, the tables those sit
+    in too (``walk_hosts``: and their lineage). Returns how many joined.
 
     The walk is ``member_sets.walk`` — the one a member set takes too, here over
     this request's members: each step walks the nearest unfinished nodes as far as
@@ -339,7 +360,7 @@ async def _lineage(run: _Run, members: _Members, seeds: List[str], direction: st
             return await run.engine.trace_closure(request)
 
     while not members.full:
-        stepped = await walk.step(store, state, direction, target, call)
+        stepped = await walk.step(store, state, direction, target, call, is_leaf=is_leaf, walk_hosts=walk_hosts)
         if stepped is None:
             break
         added += stepped.joined

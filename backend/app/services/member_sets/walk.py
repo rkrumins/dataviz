@@ -22,6 +22,15 @@ request, on any replica, can take the next step. The steps are the same either w
 * **When it gives up.** A step that failed (timed out, a read failed) is taken again
   with half its batch, down to one anchor; one anchor that fails ``TRIES`` times is
   let go, and the walk says it is ``incomplete`` rather than stopping or looping.
+* **Hosts** (``is_leaf`` given). A partner whose type holds nothing (a column) brings
+  in its container (its table), the parent the step shipped its chain with, at the
+  nearest distance of what inside it was reached — containment is never a hop. A
+  container that is a seed, or inside one, is never a host. ``walk_hosts``: a host
+  that joins or comes nearer with depth left is queued and walked as a container
+  seed is, from what inside it carries lineage — and every step goes one hop, so
+  the walk keeps the tables in step with the columns. A step that could not read
+  its partners or their chains is taken again before what it found is kept: a
+  partner kept without its host would never be shipped again.
 
 Every write a step makes is idempotent (distances only shrink, flags are set, rows
 are inserted once), so a step taken twice — a crash between the graph call and its
@@ -47,6 +56,10 @@ TRIES = 3
 #: A closure step's reasons that mean it gave up rather than hit a cap. (``ancestors_failed``
 #: is not one: the containers it nests partners in are no part of a membership.)
 STEP_FAILURES = frozenset({"timeout", "seed_failed", "nodes_failed"})
+#: A step's reasons that, finding hosts, mean partners came without their types or chains.
+HOST_FAILURES = frozenset({"nodes_failed", "ancestors_failed"})
+
+Leaf = Callable[[str], bool]
 
 
 @dataclass
@@ -143,20 +156,43 @@ def new_state() -> dict:
     return {"pending": None, "batch": CLOSURE_SEEDS, "tries": 0}
 
 
+async def leaf_rule(engine) -> Optional[Leaf]:
+    """Whether an entity type holds nothing, as the data source's ontology says: a type
+    it defines with nothing it can contain. A type it does not define, or only saw in
+    the graph, is not one. None when the engine cannot say (or names no such type):
+    no partner has a host."""
+    if not hasattr(engine, "get_resolved_ontology"):
+        return None
+    resolved = await engine.get_resolved_ontology()
+    sources = resolved.resolution_sources or {}
+    leaves = {t.lower() for t, d in resolved.entity_type_definitions.items()
+              if sources.get(t) != "introspection" and not d.hierarchy.can_contain}
+    if not leaves:
+        return None
+    return lambda entity_type: (entity_type or "").lower() in leaves
+
+
 async def step(store: WalkStore, state: dict, direction: str, target: int, call: Call, *,
-               edges: bool = False) -> Optional[Stepped]:
+               edges: bool = False, is_leaf: Optional[Leaf] = None,
+               walk_hosts: bool = False) -> Optional[Stepped]:
     """Take the walk's next step, or None when there is nothing left to walk.
 
     ``target`` is the depth asked for (``ALL`` for the whole way); ``state`` the
     direction's walk state (``new_state``), updated in place; ``call`` runs one
-    closure request. ``edges``: keep the lineage between members."""
+    closure request. ``edges``: keep the lineage between members. ``is_leaf``: a
+    partner of a type that holds nothing brings in its host; ``walk_hosts``: whose
+    lineage is walked too."""
     work = await _next(store, state, direction)
     if work is None:
         return None
     exclude: List[str] = []
     if work.kind != "hub":
         exclude = await store.known_tail(direction, CLOSURE_EXCLUDE, work.anchors)
-    result = await call(_request(work, direction, target, exclude))
+    # A host's lineage is walked a step after the column that brought it in, and a member
+    # once known is not shipped again: walking the tables' lineage, a step goes one hop,
+    # so nothing is found farther away than a table's walk would have found it.
+    hop_max = 1 if is_leaf is not None and walk_hosts else LINEAGE_DEPTH_MAX
+    result = await call(_request(work, direction, target, exclude, hop_max))
     failed = bool(result.truncated and result.truncation_reason in STEP_FAILURES)
     up = direction == "upstream"
     frontier = result.frontier_up if up else result.frontier_down
@@ -164,10 +200,24 @@ async def step(store: WalkStore, state: dict, direction: str, target: int, call:
     wanted |= {f.urn for f in frontier}
     if edges:
         wanted |= {u for e in result.edges for u in (e.source_urn, e.target_urn)}
+    if is_leaf is not None:
+        # Every container the chains name: a host, and what it sits in (a seed's insides are no host).
+        wanted |= {e.source_urn for e in result.containment_edges}
     known = await store.read(direction, sorted(wanted))
-    change, cut = absorb(work, result, known, direction, target, edges=edges)
-    gave_up = _settle(state, work, result, change, cut, failed)
-    joined = await store.apply(direction, change)
+    change, cut = absorb(work, result, known, direction, target, edges=edges, is_leaf=is_leaf,
+                         walk_hosts=walk_hosts)
+    # Finding hosts, a step that could not read its partners' types or chains is taken
+    # again before anything it found is kept: a partner kept without its host would
+    # not be shipped again.
+    held = bool(is_leaf is not None and result.truncated and result.truncation_reason in HOST_FAILURES)
+    settled = Change(remaining=change.remaining) if held else change
+    gave_up = _settle(state, work, result, settled, cut, failed or held)
+    if held and gave_up:
+        # Let go: what it found is kept after all, without the hosts it could not read.
+        change.walked += settled.walked
+        change.cursors.update(settled.cursors)
+        settled = change
+    joined = await store.apply(direction, settled)
     return Stepped(work=work, joined=joined, gave_up=gave_up)
 
 
@@ -186,7 +236,8 @@ async def _next(store: WalkStore, state: dict, direction: str) -> Optional[Work]
     return Work("batch", [u for u, _, _ in queued], queued[0][1], {u: o for u, _, o in queued})
 
 
-def _request(work: Work, direction: str, target: int, exclude: List[str]) -> TraceClosureRequest:
+def _request(work: Work, direction: str, target: int, exclude: List[str],
+             hop_max: int = LINEAGE_DEPTH_MAX) -> TraceClosureRequest:
     up = direction == "upstream"
     if work.kind == "hub":
         return TraceClosureRequest(
@@ -194,7 +245,7 @@ def _request(work: Work, direction: str, target: int, exclude: List[str]) -> Tra
             upstream_depth=1 if up else 0, downstream_depth=0 if up else 1,
             after_cursor=work.cursor, max_nodes=max_nodes(),
         )
-    depth = int(min(target - work.hops, LINEAGE_DEPTH_MAX))
+    depth = int(min(target - work.hops, hop_max))
     return TraceClosureRequest(
         urn=work.anchors[0], direction=direction,
         upstream_depth=depth if up else 0, downstream_depth=0 if up else depth,
@@ -204,14 +255,19 @@ def _request(work: Work, direction: str, target: int, exclude: List[str]) -> Tra
 
 
 def absorb(work: Work, result: TraceClosureResult, known: Dict[str, Known], direction: str,
-           target: int, *, edges: bool = False) -> Tuple[Change, Set[str]]:
+           target: int, *, edges: bool = False, is_leaf: Optional[Leaf] = None,
+           walk_hosts: bool = False) -> Tuple[Change, Set[str]]:
     """A closure step's answer as the writes it makes, and the anchors it could not
     afford (``cut``: walked again, not lost). Pure.
 
     The step's anchors sit at their known distance, and so does what inside them it
     walked from (a container seed walks from the entities inside it that carry
     lineage); every partner is then one hop further than the nearest entity that
-    reaches it through an edge the step shipped, and nearest the same seed."""
+    reaches it through an edge the step shipped, and nearest the same seed. With
+    ``is_leaf``, everything shipped inside an anchor is walked from that anchor's own
+    distance — a partner too, its own distance read off the edges into it — what is
+    inside a host and reached is a partner, and the partners bring in their hosts
+    (``_hosts``)."""
     up = direction == "upstream"
     side = result.upstream_urns if up else result.downstream_urns
     other = result.downstream_urns if up else result.upstream_urns
@@ -224,11 +280,20 @@ def absorb(work: Work, result: TraceClosureResult, known: Dict[str, Known], dire
     base = min(start.values(), default=work.hops)
     anchors_set = dict.fromkeys(work.anchors)
     parent = {e.target_urn: e.source_urn for e in result.containment_edges}
+    inside: Set[str] = set()     # with is_leaf: shipped inside an anchor
+    in_host: Set[str] = set()    # ... inside one that is no seed's: reached, a partner
     for node in result.nodes:
-        if node.urn in side or node.urn in other or node.urn in start:
+        if node.urn in start:
             continue
-        start[node.urn] = base
-        origin[node.urn] = _inside(node.urn, parent, anchors_set, origin)
+        at = _anchor(node.urn, parent, anchors_set)
+        if is_leaf is not None and at is not None:
+            start[node.urn], origin[node.urn] = start[at], origin[at]
+            inside.add(node.urn)
+            if not _in_seed(at, parent, known):
+                in_host.add(node.urn)
+        elif node.urn not in side and node.urn not in other:
+            start[node.urn] = base
+            origin[node.urn] = origin[at if at is not None else work.anchors[0]]
 
     reach: Dict[str, List[str]] = {}
     for edge in result.edges:
@@ -246,23 +311,40 @@ def absorb(work: Work, result: TraceClosureResult, known: Dict[str, Known], dire
                 best[v] = d + 1
                 origin[v] = origin.get(u)
                 heapq.heappush(heap, (d + 1, v))
+    # With is_leaf, a partner's distance is where an edge reaches it from (one walked
+    # from inside an anchor starts there): one hop further than the nearest entity
+    # that reaches it.
+    arrival: Dict[str, Tuple[int, Optional[str]]] = {}
+    if is_leaf is not None:
+        for u, tos in reach.items():
+            for v in tos:
+                if (v in side or v in in_host) and u in best and best[u] + 1 < arrival.get(v, (math.inf,))[0]:
+                    arrival[v] = (best[u] + 1, origin.get(u))
 
     change = Change(remaining=target - work.hops)
     nodes = {n.urn: n for n in result.nodes}
     hops_now: Dict[str, int] = {u: k.hops for u, k in known.items() if k.hops is not None}
-    for urn in sorted(side):
-        hops = best.get(urn)
+    for urn in sorted(set(side) | set(arrival)):
+        if is_leaf is not None:
+            hops, near = arrival.get(urn, (None, None))
+        else:
+            hops, near = best.get(urn), origin.get(urn)
         if hops is None:
             # Shipped on this side with no edge to place it by: one step out.
             hops = base + 1
+        near = near or origin[work.anchors[0]]
         k = known.get(urn)
         if k is None:
-            change.new.append(Found(urn, hops, origin.get(urn) or origin[work.anchors[0]], nodes.get(urn)))
+            change.new.append(Found(urn, hops, near, nodes.get(urn)))
         elif k.hops is None or hops < k.hops:
-            change.nearer.append(Found(urn, hops, origin.get(urn) or origin[work.anchors[0]]))
+            change.nearer.append(Found(urn, hops, near))
         else:
             continue
         hops_now[urn] = min(hops, hops_now.get(urn, hops))
+    if is_leaf is not None:
+        _hosts(change, nodes, parent, known, hops_now, target, is_leaf, walk_hosts)
+        # A member inside an anchor was walked from the anchor's distance: not again from its own.
+        change.walked = [u for u in sorted(inside) if u in hops_now and hops_now[u] >= start[u]]
 
     frontier = result.frontier_up if up else result.frontier_down
     anchors = set(work.anchors)
@@ -294,16 +376,59 @@ def absorb(work: Work, result: TraceClosureResult, known: Dict[str, Known], dire
     return change, cut
 
 
-def _inside(urn: str, parent: Dict[str, str], anchors: Dict[str, None],
-            origin: Dict[str, Optional[str]]) -> Optional[str]:
-    """The seed an entity inside an anchor is nearest: its anchor's, found up its
-    containment chain — the first anchor's when the step shipped no chain to it."""
+def _anchor(urn: str, parent: Dict[str, str], anchors: Dict[str, None]) -> Optional[str]:
+    """The anchor an entity sits inside, found up its containment chain — None when
+    the step shipped no chain to one (it is then counted with the first anchor)."""
     at, seen = parent.get(urn), 0
     while at is not None and seen < 64:
         if at in anchors:
-            return origin[at]
+            return at
         at, seen = parent.get(at), seen + 1
-    return origin[next(iter(anchors))]
+    return None
+
+
+def _hosts(change: Change, nodes: Dict[str, GraphNode], parent: Dict[str, str], known: Dict[str, Known],
+           hops_now: Dict[str, int], target: int, is_leaf: Leaf, walk_hosts: bool) -> None:
+    """Bring in the host of each partner the step found (new or nearer) whose type
+    holds nothing: its parent, at the nearest distance found inside it, nearest that
+    partner's seed. A host the step found in its own right keeps the nearer of the
+    two; one known as near, a seed or inside one, is left as it is. A host that joins
+    or comes nearer with depth left is queued (``walk_hosts``)."""
+    found = {f.urn: f for f in (*change.new, *change.nearer)}
+    reached: Dict[str, Found] = {}
+    for f in sorted(found.values(), key=lambda f: (f.hops, f.urn)):
+        node, host = nodes.get(f.urn), parent.get(f.urn)
+        if node is not None and host is not None and host not in reached and is_leaf(node.entity_type):
+            reached[host] = Found(host, f.hops, f.origin, nodes.get(host))
+    for host, h in sorted(reached.items()):
+        if _in_seed(host, parent, known):
+            continue
+        k, own = known.get(host), found.get(host)
+        if own is not None:
+            if h.hops < own.hops:
+                own.hops, own.origin = h.hops, h.origin
+            h = own
+        elif k is None:
+            change.new.append(h)
+        elif k.hops is None or h.hops < k.hops:
+            change.nearer.append(Found(host, h.hops, h.origin))
+        else:
+            continue
+        hops_now[host] = h.hops
+        walked = k.walked if k is not None else -1
+        if walk_hosts and h.hops < target and walked < target - h.hops:
+            change.queue.append(host)
+
+
+def _in_seed(urn: str, parent: Dict[str, str], known: Dict[str, Known]) -> bool:
+    """Whether ``urn`` is a seed, or sits inside one, up the chain the step shipped."""
+    at, seen = urn, 0
+    while at is not None and seen < 64:
+        k = known.get(at)
+        if k is not None and k.via in ("seed", "inside"):
+            return True
+        at, seen = parent.get(at), seen + 1
+    return False
 
 
 def _settle(state: dict, work: Work, result: TraceClosureResult, change: Change,
@@ -327,7 +452,7 @@ def _settle(state: dict, work: Work, result: TraceClosureResult, change: Change,
             return False
         state["tries"] = 0
         if work.kind == "batch":
-            change.walked = list(work.anchors)
+            change.walked += work.anchors
         elif work.kind == "pending":
             state["pending"] = None
         else:
@@ -343,7 +468,7 @@ def _settle(state: dict, work: Work, result: TraceClosureResult, change: Change,
     if work.kind == "batch":
         # Grow back toward the full batch once steps succeed again.
         state["batch"] = min(CLOSURE_SEEDS, max(1, int(state.get("batch") or CLOSURE_SEEDS)) * 2)
-        change.walked = [a for a in work.anchors if a not in cut]
+        change.walked += [a for a in work.anchors if a not in cut]
     pages = (state["pending"] or {}).get("pages", 1) if work.kind == "pending" else 0
     state["pending"] = ({
         "anchors": work.anchors, "hops": work.hops, "origins": work.origins,
