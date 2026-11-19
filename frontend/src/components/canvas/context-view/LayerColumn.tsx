@@ -34,7 +34,7 @@ import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './FlatTreeItem'
 import type { PlacedOut, PlacementInfo } from './placement'
 import { groupNameClash, groupSubtreeIds, listGroups, parentGroupOf } from './layerMutations'
-import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
+import { LayerSortMenu, SORT_MODE_ICONS, SORT_MODE_LABELS } from './LayerSortMenu'
 import { ValueView, humanizeKey } from '@/components/ui/ValueView'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
@@ -118,7 +118,12 @@ interface LayerColumnProps {
    *  offers a click when a page lands elsewhere — never an unattended drain.
    *  `remaining`: what those feeds' types still hold on the server (null/absent:
    *  a feed has no total). */
-  feedMore?: { loading: boolean; failed: boolean; remaining?: number | null; types?: string[] }
+  feedMore?: {
+    loading: boolean; failed: boolean; remaining?: number | null; types?: string[]
+    /** A list or subset view's layer: the rows its next page brings (FEED_PAGE_ROWS). The row
+     *  then reads "Load 500 more · 49,620 to go", `remaining` being what is still to come. */
+    pageRows?: number
+  }
   onFeedMore?: (layerId: string) => void
   /** A subset view's layer: what its search has listed, of how many, and as of when.
    *  Its header counts the matches, not the children loaded rows report. */
@@ -131,11 +136,34 @@ interface LayerColumnProps {
     asOf: string | null
     capped: boolean
   }
-  /** What an empty layer says, in place of "No assigned entities yet". */
+  /** What an empty layer says, in place of "No assigned entities yet" ("No matches" for a
+   *  subset view's layer, "No members" for a list view's). */
   emptyText?: string
   /** A capped subset layer's ways to the rest of its matches. */
   onSearchInLayer?: (layerId: string) => void
   onExportLayer?: (layerId: string) => void
+  /** A list or subset view's layer whose first page is still on its way: ghost rows and the
+   *  loading pill, never the empty state. (Its layer may name no types or rules of its own, so
+   *  `isHydratingInitial` alone can't tell.) */
+  feedPending?: boolean
+  /** A list or subset view's layer whose page failed after its retries (the store's
+   *  `feedFailures`): said in place of its rows while it has none, else on its foot row — each
+   *  with a Retry. */
+  feedFailed?: { message: string; onRetry: () => void }
+  /** Matches of the canvas's search in this layer that the canvas hasn't loaded: a notice,
+   *  "1,240 matches not loaded", with ways to them. */
+  notLoadedMatches?: { count: number; onNarrow?: () => void; onExport?: () => void }
+  /** The node sorts this layer offers. One alone — a list or subset view's layer, sorted by
+   *  name as its pages arrive — is drawn as a fixed sort, "Sorted by name as they load", in
+   *  place of the sort menu. Absent: every sort. */
+  sortModesOffered?: LayerNodeSortMode[]
+  /** The canvas holds more rows than `VITE_CANVAS_LOADED_SOFT_MAX` (useFeedLookahead): nothing
+   *  is read ahead, so a layer with more says it loads on as it is scrolled to its end. */
+  largeLayer?: { loaded: number }
+  /** How many loaded rows lie below what the column shows, as it scrolls and grows — null
+   *  while it reads nothing ahead (folded, filtered, narrowed, tracing, or off screen). For
+   *  useFeedLookahead's `reportVisible`. */
+  onVisibleRows?: (layerId: string, rowsBelow: number | null) => void
   /** Parents the server says have no further pages, with the childCount that
    *  was said against: no load-more row while the parent still has that count,
    *  even when some of its children render in other columns. */
@@ -318,6 +346,18 @@ function getItemKey(item: FlatTreeNode, _index: number): string {
   return item.node.id
 }
 
+/** A layer that offers one sort only: what it is, where the menu would be. A list or subset
+ *  view's layer arrives page by page in name order, so name is the one order it can keep. */
+function FixedSort({ mode }: { mode: LayerNodeSortMode }) {
+  const Icon = SORT_MODE_ICONS[mode]
+  const said = mode === 'alpha-asc' ? 'Sorted by name as they load' : `Sorted: ${SORT_MODE_LABELS[mode]}`
+  return (
+    <span role="img" aria-label={said} title={said} className="p-1.5 text-ink-muted opacity-60">
+      <Icon className="w-3.5 h-3.5" />
+    </span>
+  )
+}
+
 /**
  * A container nobody has browsed: every child it currently holds was put
  * there out of band by a search reveal (`viaReveal`), not by a page anyone
@@ -432,6 +472,12 @@ export const LayerColumn = React.memo(function LayerColumn({
   emptyText,
   onSearchInLayer,
   onExportLayer,
+  feedPending = false,
+  feedFailed,
+  notLoadedMatches,
+  sortModesOffered,
+  largeLayer,
+  onVisibleRows,
   isFolded = false,
   spineWidth = SPINE_MAX_WIDTH_PX,
   foldEpoch = '',
@@ -453,7 +499,9 @@ export const LayerColumn = React.memo(function LayerColumn({
     return hasEntityTypes || hasRules || hasAssignments || hasLogicalNodes || acceptsUnassigned
   }, [layer])
 
-  const shouldShowGhosts = isHydratingInitial && layerHasConfiguredSources
+  const shouldShowGhosts = (isHydratingInitial && layerHasConfiguredSources) || feedPending
+  // A layer whose first page failed has no rows to show: it says so, with a Retry.
+  const showFeedError = !!feedFailed && nodes.length === 0
 
   // Custom-order guidance state: hint dismissal is a one-time preferences flag;
   // the end-zone hover drives the "Move to end" affordance.
@@ -677,7 +725,8 @@ export const LayerColumn = React.memo(function LayerColumn({
         } as HierarchyNode,
         depth: 0,
         parentIsLast: [],
-        count: null,
+        // A list or subset view's layer says what is still to come; a type feed can't.
+        count: feedMore.pageRows ? (feedMore.remaining ?? null) : null,
         feed: true,
       })
     }
@@ -962,8 +1011,9 @@ export const LayerColumn = React.memo(function LayerColumn({
     ? `${(subsetFeed.total ?? subsetFeed.delivered).toLocaleString()}${totalIsFloor ? '+' : ''}`
     : `${layerTotal.toLocaleString()}${totalIsFloor ? '+' : ''}`
   const subsetAsOf = subsetFeed?.stale ? asOfText(subsetFeed.asOf) : null
-  // A count still rising with nothing known past what is listed reads "4+", not "4 / 4+".
-  const subsetShowsTotal = !!subsetFeed && (!totalIsFloor || (subsetFeed.total ?? 0) > subsetFeed.delivered)
+  // More than is loaded: "1,200 of 50,820 loaded". A count still rising with nothing known
+  // past what is listed reads "4+"; everything loaded, the count alone.
+  const subsetPartial = !!subsetFeed && (subsetFeed.total ?? 0) > subsetFeed.delivered
 
   // TRACE HEADER: what this lane contributes to the LINEAGE — participants,
   // not rows. Each root carries the view model's own count of the
@@ -1445,11 +1495,12 @@ export const LayerColumn = React.memo(function LayerColumn({
   const overflowCounts = useMemo(() => {
     void scrollTick
     const el = scrollContainerRef.current
-    if (!el || flatTree.length === 0) return { above: 0, below: 0 }
+    // `unmeasured`: rows not laid out yet, so how many lie below is not known.
+    if (!el || flatTree.length === 0) return { above: 0, below: 0, unmeasured: !el }
     const scrollTop = el.scrollTop
     const viewportBottom = scrollTop + el.clientHeight
     const items = virtualizer.getVirtualItems()
-    if (items.length === 0) return { above: 0, below: 0 }
+    if (items.length === 0) return { above: 0, below: 0, unmeasured: true }
 
     let firstVisibleFlatIndex = -1
     let lastVisibleFlatIndex = -1
@@ -1473,6 +1524,24 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
     return { above, below }
   }, [scrollTick, flatTree, virtualizer, isRealRow])
+
+  // Where this column stands in its rows, for the canvas's read-ahead (useFeedLookahead) —
+  // only while the column is on screen and would page on its own: the rule its foot row's
+  // auto-load keeps (no filter that hides rows, no narrowing, no trace, not folded).
+  const [onScreen, setOnScreen] = useState(true)
+  useEffect(() => {
+    const el = scrollContainerRef.current
+    if (!onVisibleRows || !el || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(([entry]) => setOnScreen(!!entry?.isIntersecting), { root: null })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [onVisibleRows, isCollapsed])
+  const readsAhead = !isCollapsed && !isTracing && onScreen && !narrow && !overflowCounts.unmeasured
+    && (matchUrnSet.size === 0 || canvasFilterMode === 'highlight')
+  useEffect(() => {
+    onVisibleRows?.(layer.id, readsAhead ? overflowCounts.below : null)
+  }, [onVisibleRows, layer.id, readsAhead, overflowCounts.below])
+  useEffect(() => () => onVisibleRows?.(layer.id, null), [onVisibleRows, layer.id])
 
   // Periphery summary — flows from visible entities to partners beyond
   // THIS column's fold, computed by the edge overlay. Merged into the
@@ -2159,13 +2228,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                     ) : subsetFeed ? (
                       <>
                         <span className="text-[10px] font-semibold text-ink tabular-nums" style={{ color: layer.color }}>
-                          {subsetFeed.delivered.toLocaleString()}{subsetShowsTotal ? '' : '+'}
+                          {subsetFeed.delivered.toLocaleString()}{subsetPartial || !totalIsFloor ? '' : '+'}
                         </span>
-                        {subsetShowsTotal && (
-                          <>
-                            <span className="text-[9px] text-ink-muted/60">/</span>
-                            <span className="text-[10px] text-ink-muted/60 tabular-nums">{totalLabel}</span>
-                          </>
+                        {subsetPartial && (
+                          <span className="text-[10px] text-ink-muted/60 tabular-nums whitespace-nowrap">{` of ${totalLabel} loaded`}</span>
                         )}
                         {subsetFeed.status === 'running' && (
                           <LucideIcons.Loader2 className="w-2.5 h-2.5 animate-spin text-ink-muted/60" aria-label="still counting" />
@@ -2195,7 +2261,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <span className="text-[10px] font-semibold">Custom</span>
                   </div>
                 )}
-                {onSetSortMode && (
+                {sortModesOffered && sortModesOffered.length <= 1 ? (
+                  <FixedSort mode={sortModesOffered[0] ?? 'alpha-asc'} />
+                ) : onSetSortMode && (
                   <LayerSortMenu
                     layerName={layer.name}
                     layerColor={layer.color}
@@ -2820,9 +2888,33 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           )}
 
-          {flatTree.length === 0 ? (
+          {flatTree.length === 0 || showFeedError ? (
             <AnimatePresence mode="wait" initial={false}>
-              {shouldShowGhosts ? (
+              {showFeedError ? (
+                <motion.div
+                  key="feed-failed"
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.18, ease: 'easeOut' }}
+                  role="alert"
+                  className="flex flex-col items-center justify-center py-16 px-4 text-center"
+                >
+                  <div className="w-16 h-16 rounded-2xl flex items-center justify-center mb-4 bg-rose-500/10">
+                    <LucideIcons.CloudAlert className="w-8 h-8 text-rose-500/70" />
+                  </div>
+                  <p className="text-sm font-medium text-ink">Couldn&rsquo;t load this layer</p>
+                  <p className="text-xs text-ink-muted mt-1 max-w-[220px]">{feedFailed!.message}</p>
+                  <button
+                    type="button"
+                    data-canvas-interactive
+                    onClick={(e) => { e.stopPropagation(); feedFailed!.onRetry() }}
+                    className="mt-3 h-7 px-3 rounded-lg inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-ink-secondary border border-glass-border hover:text-ink hover:border-accent-lineage/40"
+                  >
+                    <LucideIcons.RotateCw className="w-3 h-3" /> Retry
+                  </button>
+                </motion.div>
+              ) : shouldShowGhosts ? (
                 <motion.div
                   key="ghost-stack"
                   initial={{ opacity: 0 }}
@@ -3085,9 +3177,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                           // drain of the whole type.
                           ? {
                             isLoading: feedMore?.loading ?? false,
-                            failed: (feedMore?.failed ?? false) && !(feedMore?.loading ?? false),
+                            failed: ((feedMore?.failed ?? false) || !!feedFailed) && !(feedMore?.loading ?? false),
                             rearmKey: visibleCount,
-                            onLoadMore: () => onFeedMore?.(layer.id),
+                            onLoadMore: () => (feedFailed ? feedFailed.onRetry() : onFeedMore?.(layer.id)),
+                            ...(feedMore?.pageRows ? { feedPage: feedMore.pageRows } : {}),
                           }
                           : {
                             isLoading: loadingNodes?.has(item.node.id) ?? false,
@@ -3214,12 +3307,42 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           )}
 
-          {/* A capped subset layer: the canvas lists its first rows; the rest are
-              found by searching in the layer, or exported. */}
+          {/* Matches of the canvas's search in this layer that aren't loaded: the ways to them. */}
+          {notLoadedMatches && notLoadedMatches.count > 0 && (
+            <div className="mx-2 mt-1 mb-2 rounded-xl border border-glass-border/70 bg-black/[0.02] dark:bg-white/[0.03] px-3 py-2 flex flex-wrap items-center gap-1.5">
+              <LucideIcons.SearchX className="w-3.5 h-3.5 text-ink-muted flex-shrink-0" aria-hidden />
+              <p className="flex-1 min-w-0 text-[11.5px] font-semibold text-ink tabular-nums">
+                {notLoadedMatches.count.toLocaleString()} {notLoadedMatches.count === 1 ? 'match' : 'matches'} not loaded
+              </p>
+              {notLoadedMatches.onNarrow && (
+                <button type="button" data-canvas-interactive onClick={notLoadedMatches.onNarrow}
+                  className="h-7 px-2.5 rounded-lg inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-ink-secondary border border-glass-border hover:text-ink hover:border-accent-lineage/40">
+                  <LucideIcons.Filter className="w-3 h-3" /> Narrow
+                </button>
+              )}
+              {notLoadedMatches.onExport && (
+                <button type="button" data-canvas-interactive onClick={notLoadedMatches.onExport}
+                  className="h-7 px-2.5 rounded-lg inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-ink-secondary border border-glass-border hover:text-ink hover:border-accent-lineage/40">
+                  <LucideIcons.Download className="w-3 h-3" /> Export
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* The canvas holds as many rows as it is set to read ahead: this layer goes on
+              loading only as it is scrolled to its end. */}
+          {largeLayer && feedMore && (
+            <p className="mx-3 mb-2 text-[10.5px] text-ink-muted leading-snug">
+              {largeLayer.loaded.toLocaleString()} rows on the canvas — the rest of this layer loads as you scroll to its end.
+            </p>
+          )}
+
+          {/* A layer at the ceiling an operator set: the canvas lists its first rows;
+              the rest are found by searching in the layer, or exported. */}
           {subsetFeed?.capped && (
             <div className="mx-2 mt-1 mb-3 rounded-xl border border-glass-border/70 bg-black/[0.02] dark:bg-white/[0.03] px-3 py-2.5">
               <p className="text-[11.5px] font-semibold text-ink tabular-nums">{cappedText(subsetFeed.delivered, subsetFeed.total)}</p>
-              <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">The canvas lists the first {subsetFeed.delivered.toLocaleString()}. For the rest:</p>
+              <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">This workspace lists at most {subsetFeed.delivered.toLocaleString()} a layer. For the rest:</p>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {onSearchInLayer && (
                   <button type="button" onClick={() => onSearchInLayer(layer.id)}

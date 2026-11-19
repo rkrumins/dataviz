@@ -121,7 +121,7 @@ describe('member feeds', () => {
   it('a column pages on by the server’s cursor, each row keeping its layer', async () => {
     const canvas = await hydrate()
     await act(async () => { await canvas.result.current.loadMoreFeeds(['layer:up']) })
-    expect(mockProvider.viewMembersPage).toHaveBeenLastCalledWith('v-members', { layerId: 'up', cursor: 'c-1' })
+    expect(mockProvider.viewMembersPage).toHaveBeenLastCalledWith('v-members', { layerId: 'up', cursor: 'c-1', limit: 500 })
     expect(mockProvider.viewFeedPage).not.toHaveBeenCalled()
     const layerOf = Object.fromEntries(useCanvasStore.getState().nodes.map((n) => [n.id, n.data.feedLayerId]))
     expect(layerOf).toMatchObject({ 'urn:u1': 'up', 'urn:u3': 'up', 'urn:d1': 'down' })

@@ -43,6 +43,7 @@ export function LoadMoreItem({
   autoLoad = false,
   rearmKey,
   failed = false,
+  feedPage,
 }: {
   parentId?: string
   depth: number
@@ -60,9 +61,14 @@ export function LoadMoreItem({
   rearmKey?: number
   /** The last page for this parent failed — offer a retry, don't auto-fire. */
   failed?: boolean
+  /** The foot of a list or subset view's layer: the rows its next page brings, `count` what
+   *  is still to come — "Load 500 more · 49,620 to go". */
+  feedPage?: number
 }) {
   const indentWidth = depth * 16
-  const nextPage = count === null ? CHILDREN_PAGE_SIZE : Math.min(CHILDREN_PAGE_SIZE, count)
+  const pageSize = feedPage ?? CHILDREN_PAGE_SIZE
+  const nextPage = count === null ? pageSize : Math.min(pageSize, count)
+  const restWord = feedPage ? 'to go' : 'remaining'
 
   const rowRef = useRef<HTMLDivElement>(null)
   const lastFiredKeyRef = useRef<string | null>(null)
@@ -130,8 +136,10 @@ export function LoadMoreItem({
         aria-label={failed
           ? `Couldn't load the next ${nextPage}. Retry`
           : count === null
-            ? 'Load more'
-            : `Load ${nextPage} more of ${count.toLocaleString()} remaining`}
+            ? (feedPage ? `Load ${nextPage} more` : 'Load more')
+            : feedPage
+              ? `Load ${nextPage} more · ${count.toLocaleString()} ${restWord}`
+              : `Load ${nextPage} more of ${count.toLocaleString()} ${restWord}`}
         className={cn(
           'flex flex-1 items-center justify-center gap-2 py-1.5 rounded-lg border text-[11px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
           'bg-black/[0.02] border-black/[0.08] dark:bg-white/[0.03] dark:border-white/[0.08] text-ink-muted',
@@ -159,11 +167,11 @@ export function LoadMoreItem({
               <LucideIcons.Plus className="w-3.5 h-3.5 text-ink-muted/70" />
             </span>
             {count === null ? (
-              <span className="tracking-wide">Load more</span>
+              <span className="tracking-wide">{feedPage ? `Load ${nextPage} more` : 'Load more'}</span>
             ) : (
               <span className="tracking-wide">
                 Load {nextPage} more
-                <span className="text-ink-muted/50"> · {count.toLocaleString()} remaining</span>
+                <span className="text-ink-muted/50"> · {count.toLocaleString()} {restWord}</span>
               </span>
             )}
           </>

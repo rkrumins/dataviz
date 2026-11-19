@@ -8,7 +8,7 @@
  * - urnToIdMap: O(1) URN-to-ID lookup
  */
 
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry, LayerNodeSortAlgo } from '@/types/schema'
 import {
   type GraphNode,
@@ -92,6 +92,47 @@ export function nestInContainers(roots: HierarchyNode[], layerId: string, rootCm
   }
   out.forEach((n) => settle(n, 0))
   return out.sort(rootCmp)
+}
+
+/** Whether two renders of a layer draw the same rows: the same ids in the same order and
+ *  depths, each reading the same node (a loaded row's `data` is the store's, so a changed
+ *  entity is a new object), with the same children. Rows of context and groups are built
+ *  afresh each time, so they compare by what they show. */
+function sameRows(a: HierarchyNode[], b: HierarchyNode[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]
+    const y = b[i]
+    if (x.id !== y.id || x.depth !== y.depth || x.name !== y.name || x.isLogical !== y.isLogical) return false
+    if (x.isLogical) {
+      if (x.logicalConfig !== y.logicalConfig || x.typeId !== y.typeId) return false
+      const cx = x.data.context as { matches?: number } | undefined
+      const cy = y.data.context as { matches?: number } | undefined
+      if (cx?.matches !== cy?.matches) return false
+    } else if (x.data !== y.data) return false
+    if (!sameRows(x.children, y.children)) return false
+  }
+  return true
+}
+
+/** Each layer's rows as last handed out. A layer that came out the same keeps the array it
+ *  had, so its memoized column skips the render a page landing in another layer causes — at
+ *  50,000 rows a layer, the cost of a page is then one column, not every one. */
+class KeptLayers {
+  private last: Map<string, HierarchyNode[]> | null = null
+
+  keep(next: Map<string, HierarchyNode[]>): Map<string, HierarchyNode[]> {
+    const last = this.last
+    if (last) {
+      next.forEach((rows, layerId) => {
+        const before = last.get(layerId)
+        if (before && sameRows(before, rows)) next.set(layerId, before)
+      })
+    }
+    this.last = next
+    return next
+  }
 }
 
 // ============================================
@@ -213,6 +254,9 @@ export function useLayerAssignment({
   const sessionSpec = useMemo(
     () => (placementSpec ? withSessionPlacements(placementSpec, instanceAssignments) : null),
     [placementSpec, instanceAssignments])
+
+  // A stable instance from useState's initializer, not a ref read in render (react-hooks/refs).
+  const [keptLayers] = useState(() => new KeptLayers())
 
   // Core Logic: Group nodes by layer with Deep Inheritance support.
   // Returns the promoted-anchor set alongside the grouping: `unassignedNodes`
@@ -676,9 +720,9 @@ export function useLayerAssignment({
       })
     }
 
-    return { grouped, promotedAnchors, contract }
+    return { grouped: keptLayers.keep(grouped), promotedAnchors, contract }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides, sessionSpec, placementChains, whereTheySit])
+  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides, sessionSpec, placementChains, whereTheySit, keptLayers])
 
   const nodesByLayer = layerGrouping.grouped
 

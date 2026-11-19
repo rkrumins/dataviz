@@ -395,10 +395,11 @@ export function feedCountSentence(feed: FeedCount): string {
   return running ? `${number.format(shown)} ${noun} so far` : `${feedCountText(feed)} ${noun}`
 }
 
-/** A capped layer's foot: "Showing 2,000 of 80,412". */
+/** The foot of a layer at the ceiling an operator set (a layer otherwise pages to its end):
+ *  "Showing the first 5,000 of 80,412". */
 export function cappedText(delivered: number, total?: number | null): string {
   return total && total > delivered
-    ? `Showing ${number.format(delivered)} of ${number.format(total)}`
+    ? `Showing the first ${number.format(delivered)} of ${number.format(total)}`
     : `Showing the first ${number.format(delivered)}`
 }
 
