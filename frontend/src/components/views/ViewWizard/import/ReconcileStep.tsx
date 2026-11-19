@@ -15,7 +15,7 @@ import { hasOntologyDrifted } from '@/components/schema/OntologyDriftBanner'
 import { ReconciliationPanel } from '@/features/view-transfer/reconcile/ReconciliationPanel'
 import type { EntitySearchScope } from '@/features/view-transfer/reconcile/EntitySearchPicker'
 import { resolutionCount, sameResolutions } from '@/features/view-transfer/reconcile/resolutions'
-import { pluralize } from '@/features/view-transfer/format'
+import { fileHeldCount, heldCount, heldText, pluralize } from '@/features/view-transfer/format'
 import { useImportSession } from './importSession'
 
 export function ReconcileStep({ target, targetLabel, searchScope, onSkipToReview }: {
@@ -66,7 +66,7 @@ export function ReconcileStep({ target, targetLabel, searchScope, onSkipToReview
             </div>
             <p className="text-sm font-semibold text-ink">Checking every entity the view places…</p>
             <p className="text-[11px] text-ink-muted">
-              {(view?.manifest.counts?.assignments ?? 0).toLocaleString()} placements against {targetLabel}
+              {heldText(view ? fileHeldCount(view) : heldCount(null))} against {targetLabel}
             </p>
           </>
         )}

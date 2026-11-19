@@ -6,7 +6,7 @@
 import { useNavigate } from 'react-router-dom'
 import { FileInput, Layers, PlusCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { percent, pluralize } from '@/features/view-transfer/format'
+import { heldCount, heldText, percent, pluralize } from '@/features/view-transfer/format'
 import type { BranchViewChange, BranchViewChanges } from '@/services/versioningApiService'
 
 const KIND = {
@@ -22,7 +22,7 @@ function detail(c: BranchViewChange): string {
   }
   if (c.matchRate !== null && c.matchRate !== undefined) parts.push(`${percent(c.matchRate)} matched`)
   if (c.change === 'create' && c.stats) {
-    parts.push(`${pluralize(c.stats.layers ?? 0, 'layer')}, ${(c.stats.assignments ?? 0).toLocaleString()} placements`)
+    parts.push(`${pluralize(c.stats.layers ?? 0, 'layer')}, ${heldText(heldCount(c.stats))}`)
     parts.push(c.goesLiveAs === 'workspace' ? 'goes live shared with its workspace' : 'goes live private')
   }
   if (c.diff && !c.diff.identical) {

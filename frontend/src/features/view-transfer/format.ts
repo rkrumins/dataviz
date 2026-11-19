@@ -5,7 +5,7 @@
  * control's words (commit, publish, revert): the two sit side by side in the product and must not
  * be mistaken for each other.
  */
-import type { UpdateStatus } from '@/services/viewTransferApiService'
+import type { InspectedView, UpdateStatus } from '@/services/viewTransferApiService'
 import type { ViewVersionSource } from '@/services/viewVersionsApiService'
 
 /** Mirrors the server's filename slug (`view_transfer._slug`), so the preview names the file the
@@ -65,6 +65,28 @@ export const VERSION_SOURCE_LABEL: Record<ViewVersionSource, string> = {
 
 export function pluralize(count: number, one: string, many = `${one}s`): string {
   return `${count.toLocaleString()} ${count === 1 ? one : many}`
+}
+
+/** What a view's design holds, by its headline count: a view made from a query holds members
+ *  (`stats.members`), which it never places by hand, so "0 placements" would say nothing of it;
+ *  any other view, its placements. A server from before members were counted sends none. */
+export function heldCount(stats: { assignments?: number; members?: number } | null | undefined): {
+  count: number
+  unit: 'member' | 'placement'
+} {
+  return typeof stats?.members === 'number'
+    ? { count: stats.members, unit: 'member' }
+    : { count: stats?.assignments ?? 0, unit: 'placement' }
+}
+
+/** The same, for a view in a file: a snapshot counts the members it carries. */
+export function fileHeldCount(view: Pick<InspectedView, 'manifest' | 'members'>): ReturnType<typeof heldCount> {
+  return view.members ? { count: view.members.count, unit: 'member' } : heldCount(view.manifest.counts)
+}
+
+/** "1,240 placements", or "3,400 members". */
+export function heldText(held: ReturnType<typeof heldCount>): string {
+  return pluralize(held.count, held.unit)
 }
 
 /** How a file stands against a view here that it already is. */

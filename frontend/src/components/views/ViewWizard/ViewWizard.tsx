@@ -1520,6 +1520,8 @@ function ViewWizardBody({
                     },
                     manifest: view.manifest,
                     history: view.history,
+                    // A snapshot's members, as the file carries them.
+                    ...(view.members ? { members: view.members } : {}),
                     resolutions: session.resolutions,
                     expectedTargetHash: session.reconcile.update?.targetWorkingHash ?? null,
                     ...(importStaged ? { stage: true } : {}),

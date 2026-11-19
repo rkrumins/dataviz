@@ -83,6 +83,15 @@ export interface BundleHeader {
   bundleHash?: string | null
 }
 
+/** A snapshot's members as its view file carries them, outside its definition (and its hash):
+ *  one row per member, in `columns` order. Sent back on import as it came. */
+export interface BundleMembers {
+  format: 'rows-v1'
+  count: number
+  columns: string[]
+  rows: unknown[][]
+}
+
 /** A view in an inspected file, with its definition already in canonical form. */
 export interface InspectedView {
   index: number
@@ -98,6 +107,9 @@ export interface InspectedView {
   manifest: BundleManifest
   history: BundleHistoryEntry[]
   historyTruncated: boolean
+  /** A snapshot view made from a query: the members it was exported with. Absent for any other
+   *  view, and from a server from before files carried them. */
+  members?: BundleMembers
 }
 
 /** A view here that IS a view in the file (same identity), and how the two stand. */
@@ -292,6 +304,9 @@ export interface ImportViewRequest {
   originDefinition?: Record<string, unknown>
   manifest?: BundleManifest
   history?: BundleHistoryEntry[]
+  /** The file's members for a snapshot (`InspectedView.members`), unchanged: sent only when the
+   *  file had them, so a server that takes none is never sent the key. */
+  members?: BundleMembers
   resolutions?: Resolutions
   /** The target's design hash when it was reviewed: refused (409) if it has moved since. */
   expectedTargetHash?: string | null

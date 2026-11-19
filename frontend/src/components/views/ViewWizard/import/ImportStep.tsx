@@ -22,7 +22,7 @@ import { getView, listViews, type View } from '@/services/viewApiService'
 import type { IdentityMatch, PackageProgress } from '@/services/viewTransferApiService'
 import { BundleDropzone } from '@/features/view-transfer/BundleDropzone'
 import { BundleSummaryCard } from '@/features/view-transfer/BundleSummaryCard'
-import { fileSize, pluralize, TONE_CHIP, UPDATE_STATUS_META } from '@/features/view-transfer/format'
+import { fileHeldCount, fileSize, heldText, pluralize, TONE_CHIP, UPDATE_STATUS_META } from '@/features/view-transfer/format'
 import { useImportSession, type ImportTargetView } from './importSession'
 import { onRadioGroupKeyDown } from '@/lib/radioGroupKeys'
 
@@ -106,7 +106,7 @@ export function ImportStep({ modeToggle }: { modeToggle?: ReactNode }) {
                       {i === session.viewIndex && <Check className="w-2.5 h-2.5" />}
                     </span>
                     <span className="text-xs font-medium text-ink truncate flex-1">{v.metadata.name}</span>
-                    <span className="text-[10px] text-ink-muted shrink-0">{(v.manifest.counts?.assignments ?? 0).toLocaleString()} placements</span>
+                    <span className="text-[10px] text-ink-muted shrink-0">{heldText(fileHeldCount(v))}</span>
                   </button>
                 ))}
               </div>
@@ -248,7 +248,7 @@ function CollectionSummary() {
           return (
             <li key={`${v.portableId}-${v.index}`} className="flex items-center gap-3 px-4 py-2">
               <span className="text-xs font-medium text-ink truncate flex-1" title={v.metadata.name}>{v.metadata.name}</span>
-              <span className="text-[10px] text-ink-muted shrink-0">{(v.manifest.counts?.assignments ?? 0).toLocaleString()} placements</span>
+              <span className="text-[10px] text-ink-muted shrink-0">{heldText(fileHeldCount(v))}</span>
               {match && status ? (
                 <span className={cn('text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0', TONE_CHIP[status.tone])}
                   title={`${match.name} in ${match.workspaceName ?? 'a workspace'}: ${status.detail}`}>
