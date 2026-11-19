@@ -454,3 +454,126 @@ class TestService:
             await svc.search(SearchQuery(predicate=TagPredicate(values=["x"]),
                                          scope=SearchScope(view_id=sub.id)))
         assert provider.searched == []
+
+
+#: A view made from a query with layers of its own (auto layers: a top-level type each).
+LIST_LAYERS = [{"id": "L1", "name": "Datasets", "order": 0, "entityTypes": ["dataset"]},
+               {"id": "L2", "name": "Charts", "order": 1, "entityTypes": ["chart"]}]
+#: urn → (layer, kept whole).
+LIST_MEMBERS = {"urn:ds1": ("L1", False), "urn:ds2": ("L1", True), "urn:ch1": ("L2", False)}
+
+
+async def _list_base(session, ws, *, layout=None, members=LIST_MEMBERS, epoch=1):
+    from backend.app.db.repositories import view_members_repo, view_membership_repo
+
+    base = await _view(session, ws, {
+        "layoutType": "reference", "content": {"entityScope": "curated", "visibleEntityTypes": []},
+        "layout": {"referenceLayout": {"layers": [] if layout else LIST_LAYERS,
+                                       "assignments": {"urn:e1": {"layerId": "L2"}}}},
+        "membership": {"v": 1, "mode": "live", "sources": [{"spec": {"seeds": {"urns": ["urn:s"]}}}],
+                       **({"layout": layout} if layout else {})}}, name="Members")
+    state = await view_membership_repo.ensure(session, base)
+    await view_members_repo.insert(session, [
+        {"view_id": base.id, "epoch": epoch, "urn": urn, "layer_id": layer, "sort_key": urn, "ord": i,
+         "label": "Table", "label_ord": i, "whole": whole, "covered": False}
+        for i, (urn, (layer, whole)) in enumerate(members.items())])
+    state.epoch = state.members_epoch = epoch
+    state.member_count = len(members)
+    await session.flush()
+    return base
+
+
+class TestSubsetOfAListView:
+    """Following a view made from a query, a subset's matches are placed by that view's member
+    rows: a layer holds its members — what is inside them too — and "Other matches" the rest."""
+
+    async def test_its_matches_are_placed_by_the_bases_members(self, db_session):
+        from backend.app.services.view_scope import MemberLayers
+
+        ws = await _ws(db_session)
+        base = await _list_base(db_session, ws)
+        eff = await _resolve(db_session, ws, await _view(db_session, ws, _subset(base.id)))
+        assert eff.subset_placement is None
+        assert eff.subset_members == MemberLayers(base.id, 1, entries={"urn:e1": "L2"})
+        assert [layer.id for layer in eff.subset_layers] == ["L1", "L2", REST_LAYER_ID]
+        assert sorted(eff.root_urns) == ["urn:ch1", "urn:ds1", "urn:ds2", "urn:e1"]
+        assert eff.entity_type_allow_list == frozenset(), "bounded by its members, not its layers' types"
+        assert sv.layer_condition(eff.subset_layers[0], None, eff.subset_members) == sv.member_layer("L1")
+        assert isinstance(sv.layer_condition(eff.subset_layers[2], None, eff.subset_members),
+                          type(sv.MatchAllPredicate()))
+
+    async def test_not_for_a_view_that_follows_another_nor_an_ordinary_one(self, db_session):
+        ws = await _ws(db_session)
+        plain = await _view(db_session, ws, BASE_CONFIG)
+        follow = await _list_base(db_session, ws, layout={"kind": "follow", "sourceViewId": plain.id})
+        for base in (plain, follow):
+            eff = await _resolve(db_session, ws, await _view(db_session, ws, _subset(base.id)))
+            assert eff.subset_members is None
+        own = await _resolve(db_session, ws, await _view(db_session, ws, {
+            **_subset((await _list_base(db_session, ws)).id, layout="own"),
+            "layout": {"referenceLayout": {"layers": [
+                {"id": REST_LAYER_ID, "name": "Other matches", "showUnassigned": True}], "assignments": {}}}}))
+        assert own.subset_members is None, "its own layout places by type"
+        with pytest.raises(ViewScopeError, match="no longer available"):
+            await _resolve(db_session, ws, await _view(db_session, ws, _subset(
+                (await _view(db_session, ws, _subset(plain.id))).id)))
+
+    async def test_a_member_moved_or_a_new_answer_is_a_new_scope(self, db_session):
+        from backend.app.db.repositories import view_members_repo
+        from backend.app.db.models import ViewMembershipStateORM
+
+        ws = await _ws(db_session)
+        base = await _list_base(db_session, ws)
+        sub = await _view(db_session, ws, _subset(base.id))
+        before = (await _resolve(db_session, ws, sub)).scope_hash
+        moved = {"urn:ds1": ("L2", False), "urn:ds2": ("L1", True), "urn:ch1": ("L2", False)}
+        await view_members_repo.insert(db_session, [
+            {"view_id": base.id, "epoch": 2, "urn": urn, "layer_id": layer, "sort_key": urn, "ord": i,
+             "label": "Table", "label_ord": i, "whole": whole, "covered": False}
+            for i, (urn, (layer, whole)) in enumerate(moved.items())])
+        state = await db_session.get(ViewMembershipStateORM, base.id)
+        state.members_epoch = 2
+        await db_session.flush()
+        assert (await _resolve(db_session, ws, sub)).scope_hash != before, "same roots, placed anew"
+
+    async def test_a_layer_inside_reads_the_bases_members_there(self, db_session):
+        ws = await _ws(db_session)
+        base = await _list_base(db_session, ws)
+        sub = await _view(db_session, ws, _subset(base.id))
+        engine = _Engine()
+        svc = AdvancedSearchService(engine, session=db_session, workspace_id=ws.id,
+                                    data_source_id="ds1")
+        page, eff = await svc.search(SearchQuery(predicate=LayerPredicate(layer_assignment="Charts"),
+                                                 scope=SearchScope(view_id=sub.id)))
+        sent = engine.provider.searched[-1]
+        assert sent.scope.root_urns == ["urn:ch1", "urn:e1"], "its members there, and the entry"
+        assert sent.predicate == GroupPredicate(op="and", children=[
+            sv.MatchAllPredicate(), TagPredicate(values=["pii"])]), "narrowed: the layer met"
+        assert sent.scope.entity_types is None
+        # Other matches: every match of its base, each page placed as the base draws it.
+        await svc.search(SearchQuery(predicate=LayerPredicate(layer_assignment=REST_LAYER_ID),
+                                     scope=SearchScope(view_id=sub.id)))
+        assert sorted(engine.provider.searched[-1].scope.root_urns) == [
+            "urn:ch1", "urn:ds1", "urn:ds2", "urn:e1"]
+        # Inside OR: the layer's members, listed.
+        either = GroupPredicate(op="or", children=[LayerPredicate(layer_assignment="L1"),
+                                                   TagPredicate(values=["x"])])
+        await svc.search(SearchQuery(predicate=either, scope=SearchScope(view_id=sub.id)))
+        listed = engine.provider.searched[-1].predicate.children[0].children[0]
+        assert [r.urn for r in listed.refs] == ["urn:ds1", "urn:ds2"]
+
+    async def test_a_hidden_layers_members_are_left_out_up_to_a_limit(self, db_session, monkeypatch):
+        from backend.app.services import advanced_search_service
+
+        ws = await _ws(db_session)
+        base = await _list_base(db_session, ws)
+        sub = await _view(db_session, ws, _subset(base.id, hiddenLayers=["L2"]))
+        eff = await _resolve(db_session, ws, sub)
+        assert [layer.id for layer in eff.subset_layers] == ["L1", REST_LAYER_ID]
+        pii, left_out = eff.search.children
+        assert pii == TagPredicate(values=["pii"])
+        assert [r.urn for r in _not(left_out).refs] == ["urn:ch1", "urn:e1"]
+        monkeypatch.setattr(advanced_search_service, "MEMBER_LAYER_LISTED_MAX", 1)
+        with pytest.raises(ViewScopeError, match="more than 1,000 members") as refused:
+            await _resolve(db_session, ws, sub)
+        assert refused.value.reason == "hidden_layers_too_large"

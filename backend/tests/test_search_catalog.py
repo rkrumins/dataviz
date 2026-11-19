@@ -383,6 +383,34 @@ class TestSessions:
             session_id=first["sessionId"])
         assert other["sessionId"] != first["sessionId"]
 
+    async def test_a_views_members_past_the_root_cap_are_read_where_they_are_kept(self, monkeypatch):
+        """As a search reads them: planned with them (``members``), each band of them read
+        as its unit runs — and a band whose members are all whole (roots) reads nothing."""
+        planned = {}
+
+        async def plan(provider, query, compiler, **kw):
+            planned.update(kw)
+            return Plan([Unit("members", "Dataset", 0, 4, size=4), Unit("members", "Dataset", 4, 6, size=2)])
+
+        class Members:
+            count = 6
+
+            async def read(self, label, lo, hi):
+                return [f"d{i}" for i in range(lo, hi) if i < 4]
+
+        class InList(_Graph):
+            def rows(self, label, params):
+                if "_visible" in params:
+                    return [r for r in self.entities[label] if r["urn"] in params["_visible"]]
+                return super().rows(label, params)
+
+        monkeypatch.setattr(catalog_mod, "make_plan", plan)
+        members = Members()
+        out, _ = await _follow(_Provider(InList(ENTITIES)),
+                               SearchRunContext(data_version="1", scope_hash="h", members=members))
+        assert planned["members"] is members
+        assert out["status"] == "complete" and out["entityTypes"] == [{"type": "Dataset", "count": 4}]
+
 
 # ---------------------------------------------------------------------------
 # Service and route
@@ -442,6 +470,52 @@ class TestService:
         request = SearchCatalogRequest.model_validate({"scope": {"viewId": "v"}})
         with pytest.raises(NotImplementedError):
             await _service(SimpleNamespace()).catalog(request)
+
+    async def test_a_view_made_from_a_query_past_the_root_cap_is_read_by_its_members(
+            self, db_session, monkeypatch):
+        """Never "N top-level containers, above the search limit": its listed roots, and
+        its members read where they are kept, as a search reads them."""
+        from backend.app.db.models import ViewORM, WorkspaceORM
+        from backend.app.db.repositories import view_members_repo, view_membership_repo
+
+        ws = WorkspaceORM(name="Catalog")
+        db_session.add(ws)
+        await db_session.flush()
+        view = ViewORM(name="Members", workspace_id=ws.id, view_type="reference", config=json.dumps({
+            "layoutType": "reference", "content": {"entityScope": "curated"},
+            "layout": {"referenceLayout": {"layers": [{"id": "L1"}], "assignments": {}}},
+            "membership": {"v": 1, "mode": "live", "sources": [{"spec": {"seeds": {"urns": ["urn:s"]}}}]}}))
+        db_session.add(view)
+        await db_session.flush()
+        state = await view_membership_repo.ensure(db_session, view)
+        await view_members_repo.insert(db_session, [
+            {"view_id": view.id, "epoch": 1, "urn": f"urn:m{i}", "layer_id": "L1", "sort_key": f"m{i}",
+             "ord": i, "label": "Table", "label_ord": i, "whole": i == 0, "covered": False}
+            for i in range(3)])
+        state.epoch = state.members_epoch = 1
+        state.member_count = 3
+        await db_session.flush()
+        seen = {}
+
+        class _Catalog:
+            supports_member_scope = True
+
+            async def deep_search_catalog(self, scope, *, context, **kw):
+                seen.update(roots=scope.root_urns, members=context.members)
+                return {"sessionId": "s", "status": "complete", "entities": 3}
+
+        monkeypatch.setenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", "2")
+        get_deep_search_settings.cache_clear()
+        try:
+            svc = AdvancedSearchService(SimpleNamespace(provider=_Catalog()), session=db_session,
+                                        workspace_id=ws.id)
+            out = await svc.catalog(SearchCatalogRequest.model_validate({"scope": {"viewId": view.id}}))
+        finally:
+            monkeypatch.delenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP")
+            get_deep_search_settings.cache_clear()
+        assert out.status == "complete"
+        assert seen["roots"] == ["urn:m0"], "the member kept whole"
+        assert seen["members"].count == 3 and await seen["members"].read("Table", 0, 3) == ["urn:m1", "urn:m2"]
 
 
 def _request(view_capability=None) -> Request:

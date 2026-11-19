@@ -25,7 +25,7 @@ import logging
 import time
 from contextlib import nullcontext
 from dataclasses import replace
-from typing import Any, Awaitable, Callable, Optional, Tuple
+from typing import Any, Awaitable, Callable, FrozenSet, Iterable, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -530,8 +530,14 @@ VIEW_HOLDS_NOTHING = ("This view holds nothing yet — nothing is placed in it �
 LAYER_HOLDS_NOTHING = "This layer holds nothing, so a search in it finds nothing."
 
 
+def _held_layers(eff_scope: EffectiveViewScope):
+    """The members a layer filter in this scope reads (``MemberLayers``): a view made from a
+    query's own, or those of the one a subset follows — or None."""
+    return getattr(eff_scope, "member_layers", None) or getattr(eff_scope, "subset_members", None)
+
+
 def _nothing_note(eff_scope: EffectiveViewScope) -> str:
-    held = getattr(eff_scope, "member_layers", None)
+    held = _held_layers(eff_scope)
     return LAYER_HOLDS_NOTHING if held is not None and held.narrowed else VIEW_HOLDS_NOTHING
 
 
@@ -722,8 +728,10 @@ def _urns_leaf(urns):
 def _in_member_layers(predicate, eff_scope: EffectiveViewScope, notes: list, *, top: bool = True):
     """A view made from a query's layer filters, as its members are kept: one the search's
     roots were narrowed to already (``MemberLayers.narrowed``) matches everything in them;
-    any other, the layer's members listed (at most ``MEMBER_LAYER_LISTED_MAX``, else a 400)."""
-    held = eff_scope.member_layers
+    any other, the layer's members listed (at most ``MEMBER_LAYER_LISTED_MAX``, else a 400).
+    In a subset that follows such a view, its "Other matches" is every match there
+    (``search_views.layer_condition``)."""
+    held = _held_layers(eff_scope)
     if isinstance(predicate, LayerPredicate):
         layer_id = _layer_id(eff_scope.layers, predicate.layer_assignment)
         if layer_id is None:
@@ -733,7 +741,7 @@ def _in_member_layers(predicate, eff_scope: EffectiveViewScope, notes: list, *, 
             if note not in notes:
                 notes.append(note)
             return predicate
-        if top and layer_id in held.narrowed:
+        if (top and layer_id in held.narrowed) or layer_id in _subset_rest(eff_scope):
             return MatchAllPredicate()
         urns = held.listed.get(layer_id)
         if urns is None:
@@ -764,7 +772,7 @@ def _with_resolved_layers(predicate, eff_scope: EffectiveViewScope, notes: list)
     made from a query, its members (``_in_member_layers``). A value no
     layer has keeps matching the stamp entities carry, and says so in
     ``notes``; a name two layers share, or a view past the limits, is a 400."""
-    if _has_layer(predicate) and eff_scope.member_layers is not None:
+    if _has_layer(predicate) and _held_layers(eff_scope) is not None:
         return _in_member_layers(predicate, eff_scope, notes)
     if not _has_layer(predicate) or eff_scope.placement is None:
         return predicate      # no layers: the stamp, as ever
@@ -791,6 +799,21 @@ def _with_resolved_layers(predicate, eff_scope: EffectiveViewScope, notes: list)
     resolved = predicate.model_copy()
     resolved._placement = LayerTarget(eff_scope.placement, layer_id, eff_scope.placement_digest)
     return resolved
+
+
+def _subset_rest(eff_scope: EffectiveViewScope) -> FrozenSet[str]:
+    """A subset's fallback layers ("Other matches"): placed by its base's members, every
+    match — never narrowed to members there."""
+    if getattr(eff_scope, "subset_members", None) is None:
+        return frozenset()
+    return frozenset(layer.id for layer in eff_scope.subset_layers if layer.rest)
+
+
+def layer_fold(scope_hash: str, layers: Iterable[str]) -> str:
+    """``scope_hash`` with ``layer:<id>`` folded in for each of ``layers``: the scope a search
+    whose roots were narrowed to those layers' members runs in (``_in_layer``)."""
+    key = "|".join(f"layer:{layer_id}" for layer_id in sorted(layers))
+    return hashlib.sha1(f"{scope_hash}|{key}".encode()).hexdigest()[:12]
 
 
 def _resolve_item_layers(items, eff_scope: EffectiveViewScope):
@@ -1286,13 +1309,15 @@ class AdvancedSearchService:
         run_context: Optional[SearchRunContext] = None,
     ) -> SearchCatalogResult:
         """Every property the view's entities carry, exactly — in the view's
-        scope, resolved here as a search's is."""
-        scope, eff = await self._rule_scope(request.scope)
+        scope, resolved here as a search's is: a view's members too many to list
+        as its roots read where they are kept."""
+        scope, eff = await self._rule_scope(request.scope, members=True)
         self._refuse_outside_subset(eff, "list the properties of what this view searches in")
         if scope is None:
             return SearchCatalogResult(session_id="", status="complete")
         op = self._provider_op("deep_search_catalog")
-        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
+        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash,
+                          members=self._members(request.scope, eff))
         out = await op(scope, context=context, wait_ms=request.wait_ms,
                        session_id=request.session_id, refresh=request.refresh)
         return SearchCatalogResult.model_validate(out)
@@ -1359,11 +1384,17 @@ class AdvancedSearchService:
     ) -> SearchAncestorCountsResult:
         """How many of a search's matches each requested container holds,
         from the search's session — which must have been planned for this
-        view's scope, resolved here as the search resolved it."""
+        view's scope, resolved here as the search resolved it: in a view whose
+        layers hold members, a search filtered to one of them ran in that
+        layer's scope (``layer_fold``), so each of those answers too."""
         eff_scope = await self._resolve_scope(request.scope)
         await self._guard_view_data_source(eff_scope)
         op = self._provider_op("deep_search_ancestor_counts")
-        context = replace(run_context or SearchRunContext(), scope_hash=eff_scope.scope_hash)
+        folded = (frozenset(layer_fold(eff_scope.scope_hash, {layer_id})
+                            for layer_id, _name in eff_scope.layers)
+                  if _held_layers(eff_scope) is not None else frozenset())
+        context = replace(run_context or SearchRunContext(), scope_hash=eff_scope.scope_hash,
+                          scope_hashes=folded)
         out = await op(request.session_id, list(dict.fromkeys(u for u in request.urns if u)),
                        context=context)
         return SearchAncestorCountsResult.model_validate(out)
@@ -1476,7 +1507,11 @@ class AdvancedSearchService:
         eff_scope = await self._member_layer_scope(eff_scope, [query.predicate], query.scope, narrow=True)
         self._refuse_outside_subset(eff_scope, "show the statement a search in this view runs",
                                     based_only=True)
-        query, entity_types_note = _stamp_resolved_scope(query, eff_scope)
+        # A search reads a view's members too many to list as roots where they are kept:
+        # so is it explained, its listed roots alone in the statement.
+        members = self._members(query.scope, eff_scope)
+        query, entity_types_note = _stamp_resolved_scope(query, eff_scope,
+                                                         members=members is not None)
         if _finds_nothing(query.scope, eff_scope):
             # Nothing to explain: a search here runs no statement at all.
             return {"cypher": "", "params": {}, "notes": [_nothing_note(eff_scope)],
@@ -1484,6 +1519,7 @@ class AdvancedSearchService:
         query = await self._subset_query(query, eff_scope, None)
         _reject_unbounded_text_any(
             query, entity_types_capped=entity_types_note is not None,
+            members=members is not None,
         )
         query, resolved_refs = await self._resolve_query_refs(query, None)
         layer_notes: list = []
@@ -1497,6 +1533,11 @@ class AdvancedSearchService:
             result["resolvedRefs"] = [r.model_dump(by_alias=True) for r in resolved_refs]
         if isinstance(result, dict) and layer_notes:
             result.setdefault("notes", []).extend(layer_notes)
+        if isinstance(result, dict) and members is not None:
+            result.setdefault("notes", []).append(
+                f"This view has {members.count:,} members, more than a search lists as its roots: "
+                "it reads them where they are kept, a band at a time, beside the roots named here "
+                "(the entries people placed and the members kept whole).")
         # Attach the resolved-scope summary so the dev panel can show
         # the user *what their search actually scopes to*. Critical
         # for debugging "why didn't this return anything" — answer is
@@ -1750,7 +1791,7 @@ class AdvancedSearchService:
         if _subset_search(eff_scope) is None:
             return predicate
         predicate = layer_filters_in_subset(predicate, eff_scope.subset_layers,
-                                            eff_scope.subset_placement)
+                                            eff_scope.subset_placement, eff_scope.subset_members)
         return predicate if boundary is None else with_boundary(predicate, boundary)
 
     async def _subset_query(self, query: SearchQuery, eff_scope: EffectiveViewScope,
@@ -1787,19 +1828,23 @@ class AdvancedSearchService:
     async def _member_layer_scope(self, eff_scope: EffectiveViewScope, predicates, requested: SearchScope,
                                   *, narrow: bool) -> EffectiveViewScope:
         """``eff_scope`` ready for the layer filters of ``predicates`` in a view made from a
-        query (``member_layers``): a filter every match of the one search meets
-        (``narrow``, in the view's own scope, with no roots of the client's) narrows its
-        roots to that layer's members; every other layer it names has its members listed,
-        up to ``MEMBER_LAYER_LISTED_MAX``. Any other scope as it is."""
-        held = getattr(eff_scope, "member_layers", None)
+        query (``member_layers``), or a subset that follows one (``subset_members``): a
+        filter every match of the one search meets (``narrow``, in the view's own scope,
+        with no roots of the client's) narrows its roots to that layer's members — a
+        subset layer's feed is such a search; every other layer it names has its members
+        listed, up to ``MEMBER_LAYER_LISTED_MAX``. A subset's "Other matches" is neither.
+        Any other scope as it is."""
+        held = _held_layers(eff_scope)
         if held is None or self._session is None:
             return eff_scope
+        rest = _subset_rest(eff_scope)
 
         def named(leaf) -> Optional[str]:
             try:
-                return _layer_id(eff_scope.layers, leaf.layer_assignment)
+                layer_id = _layer_id(eff_scope.layers, leaf.layer_assignment)
             except ValidationError:
                 return None     # a name two layers share: refused where the filter is resolved
+            return None if layer_id in rest else layer_id
 
         wanted = {layer_id for p in predicates for leaf in _layer_leaves(p)
                   for layer_id in [named(leaf)] if layer_id}
@@ -1812,15 +1857,18 @@ class AdvancedSearchService:
         if top:
             eff_scope = await self._in_layer(eff_scope, held, top)
         listed = {layer_id: await self._layer_members(held, layer_id) for layer_id in sorted(wanted - top)}
-        return replace(eff_scope, member_layers=replace(held, narrowed=frozenset(top), listed=listed))
+        held = replace(held, narrowed=frozenset(top), listed=listed)
+        if eff_scope.member_layers is None:
+            return replace(eff_scope, subset_members=held)
+        return replace(eff_scope, member_layers=held)
 
     async def _in_layer(self, eff_scope: EffectiveViewScope, held, layers: set) -> EffectiveViewScope:
         """The search's roots narrowed to one layer's members — and its entries — listed while
         they fit the root cap, else that layer's members read where they are kept
         (``member_scope``) beside the whole ones and the entries. Two layers at once hold
-        nothing: a member is in one. ``layer:<id>`` is folded into ``scope_hash``."""
-        key = "|".join(f"layer:{layer_id}" for layer_id in sorted(layers))
-        scope_hash = hashlib.sha1(f"{eff_scope.scope_hash}|{key}".encode()).hexdigest()[:12]
+        nothing: a member is in one. ``layer:<id>`` is folded into ``scope_hash``
+        (``layer_fold``)."""
+        scope_hash = layer_fold(eff_scope.scope_hash, layers)
         if len(layers) > 1:
             return replace(eff_scope, root_urns=(), member_scope=None, unlisted_roots=0, holds_nothing=True,
                            scope_hash=scope_hash)

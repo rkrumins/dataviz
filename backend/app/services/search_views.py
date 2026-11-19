@@ -18,6 +18,12 @@ entities placed by hand, or rules too costly to read) is followed by type, and
 the subset says why. A view made from a query can follow a view's layers the
 same way (``membership.layout.kind: follow``): it is served them as a subset is
 (``followed_base``, ``served_config``), and places its own members.
+
+A subset that follows a view made from a query that keeps its own layers
+(``placed_by_members``) places its matches by that view's member rows: a layer
+holds its members — and what is inside them — and "Other matches" the rest. Each
+layer is a search of the base's members there (``member_layer``), and each page
+is placed as the base draws it (``live_views.where.place_in_subset``).
 """
 from __future__ import annotations
 
@@ -39,8 +45,10 @@ from backend.common.models.search import (
     EdgesPredicate,
     EntityTypePredicate,
     GroupPredicate,
+    IsPredicate,
     LayerPredicate,
     MatchAllPredicate,
+    NodeRef,
     PathPredicate,
     RelatedPredicate,
     unwrap_edges,
@@ -54,6 +62,7 @@ from backend.common.models.search_view import (
     SubsetLayer,
     read_search_definition,
 )
+from backend.common.models.view_membership import read_definition
 from backend.common.search_semantics import fold_case
 
 #: A predicate nothing meets.
@@ -217,6 +226,15 @@ def follow_placement(base_config: Optional[Dict[str, Any]]) -> Tuple[Optional[Ba
     return BasePlacement(spec, digest), None
 
 
+def placed_by_members(base_config: Optional[Dict[str, Any]]) -> bool:
+    """Whether a subset that follows ``base_config`` places its matches by the base's
+    member rows: the base is a view made from a query with layers of its own (not one
+    that follows a view). Its config places nothing — its members are rows of their own
+    table — so ``follow_placement`` would put every match in "Other matches"."""
+    definition = read_definition(base_config) if isinstance(base_config, dict) else None
+    return definition is not None and definition.layout.kind != "follow"
+
+
 def subset_layers(definition: SearchViewDefinition, config: Dict[str, Any],
                   base_config: Optional[Dict[str, Any]]) -> List[SubsetLayer]:
     """The layers of a subset view: its base's when it follows it, else its own —
@@ -235,12 +253,16 @@ def shown_layers(layers: Sequence[SubsetLayer]) -> List[SubsetLayer]:
 
 
 def shown_search(search, layers: Sequence[SubsetLayer],
-                 placement: Optional[BasePlacement] = None):
+                 placement: Optional[BasePlacement] = None, *,
+                 hidden_members: Optional[Sequence[str]] = None):
     """What a subset's entities are found by, held to what its columns show: a
     hidden layer's matches are left out. Placed by type, that is its types, and
     with no column for every other type (no shown fallback layer), only the types
-    the shown columns hold. So a search inside the view finds what it shows, and
-    nothing it hides."""
+    the shown columns hold. Placed by its base's members (``hidden_members``: the
+    members, and entries, of the layers it hides), those. So a search inside the
+    view finds what it shows, and nothing it hides."""
+    if hidden_members is not None:
+        return _and(search, _not(one_of(hidden_members))) if hidden_members else search
     if placement is not None:
         return _and(search, *(_not(layer_condition(layer, placement))
                               for layer in layers if layer.hidden))
@@ -461,6 +483,14 @@ def types_not_in(types: Sequence[str]):
     return leaves[0] if len(leaves) == 1 else GroupPredicate(op="and", children=leaves)
 
 
+def one_of(urns: Sequence[str]):
+    """The entities ``urns`` name: one condition, however many (it compiles to one list)."""
+    if not urns:
+        return NOTHING
+    leaf = IsPredicate(refs=[NodeRef(urn=urns[0])])
+    return leaf.model_copy(update={"refs": [NodeRef(urn=u) for u in urns]})
+
+
 def _and(*parts):
     kept = [p for p in parts if p is not None and not isinstance(p, MatchAllPredicate)]
     if not kept:
@@ -488,12 +518,24 @@ def placed_in(placement: BasePlacement, layer_id: Optional[str]) -> LayerPredica
     return leaf
 
 
-def layer_condition(layer: SubsetLayer, placement: Optional[BasePlacement] = None):
+def member_layer(layer_id: str) -> LayerPredicate:
+    """In ``layer_id`` of a view made from a query, as its member rows hold it: a layer
+    filter the search service reads from them (``EffectiveViewScope.subset_members``) —
+    its members, what is inside them, and the entries placed there."""
+    return LayerPredicate.model_validate({"kind": "layer", "layerAssignment": layer_id})
+
+
+def layer_condition(layer: SubsetLayer, placement: Optional[BasePlacement] = None,
+                    members: Any = None):
     """What a match must also meet to be in ``layer``. Placed as the base places
     them: in that layer of the base's — or, for the "Other matches" a subset adds,
-    in none of them. Placed by type: one of its types — or, for the fallback
-    layer, none of the types the others own; None when the layer can hold
-    nothing."""
+    in none of them. Placed by its base's members (``members``, the scope's
+    ``subset_members``): that layer's members (``member_layer``) — the fallback
+    layer every match, a feed placing each page as the base draws it. Placed by
+    type: one of its types — or, for the fallback layer, none of the types the
+    others own; None when the layer can hold nothing."""
+    if members is not None:
+        return MatchAllPredicate() if layer.rest else member_layer(layer.id)
     if placement is not None:
         if layer.rest and layer.id not in placement.spec.layer_ids:
             return _not(placed_in(placement, None))
@@ -512,14 +554,16 @@ def feed_predicate(predicate, layer: SubsetLayer, placement: Optional[BasePlacem
 
 
 def scope_types(layer: SubsetLayer, boundary_types: FrozenSet[str],
-                placement: Optional[BasePlacement] = None) -> Optional[List[str]]:
+                placement: Optional[BasePlacement] = None,
+                members: Any = None) -> Optional[List[str]]:
     """The entity types a search for ``layer`` reads (what the engine prunes its
     labels to): the layer's types, inside the boundary's when it has some — or,
     for the fallback layer, the boundary's less the others'. Placed as the base
-    places them, a layer can hold any type the boundary does. None: every type
-    (an unbounded boundary's fallback layer). ``[]``: nothing to read."""
+    places them, or by its members, a layer can hold any type the boundary does.
+    None: every type (an unbounded boundary's fallback layer). ``[]``: nothing to
+    read."""
     folded = {fold_case(t): t for t in boundary_types}
-    if placement is not None:
+    if placement is not None or members is not None:
         return sorted(folded.values()) if folded else None
     if layer.rest:
         if not folded:
@@ -544,26 +588,27 @@ def with_boundary(predicate, boundary):
 
 
 def layer_filters_in_subset(predicate, layers: Sequence[SubsetLayer],
-                            placement: Optional[BasePlacement] = None):
+                            placement: Optional[BasePlacement] = None, members: Any = None):
     """``predicate`` with each layer filter written as what puts a match in that
     layer of the subset (``layer_condition``): placed there as its base places
-    entities, or by type. A layer no layer of the subset is called matches
-    nothing; one already resolved against the base (the server's own) stands."""
+    entities, by its base's members, or by type. A layer no layer of the subset is
+    called matches nothing; one already resolved against the base (the server's
+    own) stands."""
     if isinstance(predicate, LayerPredicate):
         if getattr(predicate, "_placement", None) is not None:
             return predicate
         layer = find_layer(layers, predicate.layer_assignment)
-        condition = layer_condition(layer, placement) if layer is not None else None
+        condition = layer_condition(layer, placement, members) if layer is not None else None
         return NOTHING if condition is None else condition
     if isinstance(predicate, GroupPredicate):
         return predicate.model_copy(update={"children": [
-            layer_filters_in_subset(c, layers, placement) for c in predicate.children]})
+            layer_filters_in_subset(c, layers, placement, members) for c in predicate.children]})
     if isinstance(predicate, RelatedPredicate) and predicate.where is not None:
         return predicate.model_copy(update={
-            "where": layer_filters_in_subset(predicate.where, layers, placement)})
+            "where": layer_filters_in_subset(predicate.where, layers, placement, members)})
     if isinstance(predicate, (PathPredicate, EdgesPredicate)):
         return predicate.model_copy(update={
-            f"{side}_where": layer_filters_in_subset(where, layers, placement)
+            f"{side}_where": layer_filters_in_subset(where, layers, placement, members)
             for side, where in (("source", predicate.source_where),
                                 ("target", predicate.target_where)) if where is not None})
     return predicate

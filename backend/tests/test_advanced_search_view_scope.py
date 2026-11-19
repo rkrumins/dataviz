@@ -1891,8 +1891,9 @@ async def test_a_view_made_from_a_query_past_the_cap_searches_its_members_where_
 async def test_past_the_cap_a_search_that_cant_read_members_is_still_refused(
     db_session: AsyncSession, monkeypatch,
 ):
-    """Members kept whole past the cap themselves, a narrowing hint naming roots of its
-    own, a statement to explain: each still refused, never a search wider than the view."""
+    """Members kept whole past the cap themselves — searched or explained — and a
+    narrowing hint naming roots of its own: each still refused, never a search wider than
+    the view."""
     from types import SimpleNamespace
 
     from backend.app.services.advanced_search_service import (
@@ -1919,8 +1920,123 @@ async def test_past_the_cap_a_search_that_cant_read_members_is_still_refused(
                                  run_context=SearchRunContext())
         with pytest.raises(ValidationError, match="top-level containers, above the search"):
             await svc.explain(SearchQuery(predicate=TagPredicate(values=["PII"]),
-                                          scope=SearchScope(view_id=plain.id)))
+                                          scope=SearchScope(view_id=whole.id)))
     assert provider.calls == []
+
+
+async def test_explain_past_the_cap_reads_the_members_where_they_are_kept(
+    db_session: AsyncSession, monkeypatch,
+):
+    """Explain runs what a search runs: past the root cap it is not refused, its statement
+    names the listed roots (the entries and the members kept whole), and it says the rest
+    are read where they are kept."""
+    from types import SimpleNamespace
+
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.common.models.search import SearchQuery, TagPredicate
+
+    class Explaining(_MemberSearchingProvider):
+        async def deep_search_explain(self, query):
+            self.calls.append(("explain", query.scope, None))
+            return {"cypher": "MATCH (n)", "params": {}, "notes": []}
+
+    ws = await _seed_workspace(db_session)
+    view = await _members_view(db_session, ws, [("urn:m0", True, False), ("urn:m1", False, False),
+                                                ("urn:m2", False, False)], entries=["urn:mine"])
+    provider = Explaining()
+    svc = AdvancedSearchService(SimpleNamespace(provider=provider), session=db_session,
+                                workspace_id=ws.id)
+    with _root_urns_cap(monkeypatch, "2"):
+        out = await svc.explain(SearchQuery(predicate=TagPredicate(values=["PII"]),
+                                            scope=SearchScope(view_id=view.id)))
+    [(_, scope, _)] = provider.calls
+    assert set(scope.root_urns) == {"urn:mine", "urn:m0"}
+    assert any("3 members" in n and "where they are kept" in n for n in out["notes"]), out["notes"]
+
+
+def _auto_list_view(layout=None) -> dict:
+    """A view made from a query with auto layers: each lists one top-level type."""
+    return {"layoutType": "reference", "content": {"entityScope": "curated", "visibleEntityTypes": []},
+            "membership": {"v": 1, "mode": "live", "sources": [{"spec": {"seeds": {"urns": ["urn:s"]}}}],
+                           **({"layout": layout} if layout else {})},
+            "layout": {"referenceLayout": {"layers": [] if layout else [
+                {"id": "L-ds", "name": "Datasets", "order": 0, "entityTypes": ["dataset"]},
+                {"id": "L-other", "name": "Other", "order": 1, "entityTypes": []}], "assignments": {}}}}
+
+
+async def test_a_view_made_from_a_query_is_bounded_by_its_members_not_its_layers_types(
+    db_session: AsyncSession,
+):
+    """Its auto layers list the top-level types its members are placed by; what is inside
+    its members is in it too. So a search reads every type under its members (the engine
+    prunes its labels to the scope's types), and a hint naming a nested type is accepted,
+    as a display rule matches it (``falkordb_search.membership``)."""
+    from types import SimpleNamespace
+
+    from backend.app.db.repositories import view_members_repo, view_membership_repo
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.common.models.search import SearchOptions, SearchQuery, SearchResultPage
+
+    class Recording:
+        def __init__(self):
+            self.scopes = []
+
+        async def deep_search(self, query, *, deadline_ms=None):
+            self.scopes.append(query.scope)
+            return SearchResultPage(hits=[], elapsed_ms=1)
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(db_session, ws, view_type="reference", config=_auto_list_view())
+    state = await view_membership_repo.ensure(db_session, view)
+    await view_members_repo.insert(db_session, [
+        {"view_id": view.id, "epoch": 1, "urn": "urn:ds", "layer_id": "L-ds", "sort_key": "ds", "ord": 0,
+         "label": "dataset", "label_ord": 0, "whole": False, "covered": False}])
+    state.epoch = state.members_epoch = 1
+    state.member_count = 1
+    await db_session.flush()
+
+    eff = await ViewScopeResolver(db_session).resolve(
+        workspace_id=ws.id, requested=SearchScope(view_id=view.id, entity_types=["schemaField"]))
+    assert eff.entity_type_allow_list == frozenset({"schemaField"}), "a hint for a nested type"
+    whole_view = await ViewScopeResolver(db_session).resolve(
+        workspace_id=ws.id, requested=SearchScope(view_id=view.id))
+    assert whole_view.entity_type_allow_list == frozenset()
+
+    provider = Recording()
+    svc = AdvancedSearchService(SimpleNamespace(provider=provider), session=db_session, workspace_id=ws.id)
+    await svc.search(SearchQuery(predicate={"kind": "tag", "values": ["pii"]},
+                                 scope=SearchScope(view_id=view.id), options=SearchOptions(results="hits")))
+    await svc.search(SearchQuery(predicate={"kind": "tag", "values": ["pii"]},
+                                 scope=SearchScope(view_id=view.id, entity_types=["schemaField"]),
+                                 options=SearchOptions(results="hits")))
+    assert [(s.root_urns, s.entity_types) for s in provider.scopes] == [
+        (["urn:ds"], None), (["urn:ds"], ["schemaField"])], "bounded by its members; no type gate"
+
+
+async def test_explain_names_the_layers_a_view_that_follows_another_is_served(db_session: AsyncSession):
+    """It stores no layers: the ones its layer filters read — those it is served — are what
+    explain says it has."""
+    from types import SimpleNamespace
+
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.common.models.search import SearchQuery, TagPredicate
+
+    class Explaining:
+        async def deep_search_explain(self, query):
+            return {"cypher": "MATCH (n)", "params": {}, "notes": []}
+
+    ws = await _seed_workspace(db_session)
+    base = await _seed_view(db_session, ws, view_type="reference", config={
+        "layoutType": "reference", "content": {"entityScope": "all"},
+        "layout": {"referenceLayout": {"assignments": {}, "layers": [
+            {"id": "b_tbls", "name": "Tables", "order": 0, "entityTypes": ["table"]}]}}})
+    view = await _seed_view(db_session, ws, view_type="reference",
+                            config=_auto_list_view({"kind": "follow", "sourceViewId": base.id}))
+    svc = AdvancedSearchService(SimpleNamespace(provider=Explaining()), session=db_session,
+                                workspace_id=ws.id)
+    out = await svc.explain(SearchQuery(predicate=TagPredicate(values=["PII"]),
+                                        scope=SearchScope(view_id=view.id)))
+    assert out["resolvedScope"]["layerIds"] == ["b_tbls", "other-matches"]
 
 
 async def test_a_layer_filter_in_a_view_that_follows_another_reads_the_layers_it_is_served(

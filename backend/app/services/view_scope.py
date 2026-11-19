@@ -71,6 +71,7 @@ from backend.app.services.search_views import (
     follow_placement,
     followed_placement,
     is_subset,
+    placed_by_members,
     search_hash,
     shown_layers,
     shown_search,
@@ -87,6 +88,13 @@ logger = logging.getLogger(__name__)
 CanvasKind = Literal[
     "reference", "graph", "hierarchy", "tree", "layered-lineage", "unknown",
 ]
+
+
+#: Why a subset of a view made from a query can't leave out the layers it hides: a search
+#: leaves their members out by listing them (``hidden_members``).
+HIDDEN_LAYERS_TOO_LARGE = (
+    "The layers this subset hides hold more than 1,000 members of its base view, more than a "
+    "search can leave out. Show some of them again.")
 
 
 class ViewNotFound(LookupError):
@@ -191,7 +199,8 @@ class EffectiveViewScope:
     it means (``search_views.layer_condition``)."""
     subset_placement: Any = None
     """How a subset that follows its base places its matches in those layers
-    (``search_views.BasePlacement``): as the base's canvas does. None: by type."""
+    (``search_views.BasePlacement``): as the base's canvas does. None: by type —
+    or by its base's members (``subset_members``)."""
     holds_nothing: bool = False
     """A curated view with nothing placed in it (or a subset of one): it shows
     nothing, so a search in it finds nothing. No roots here never means "no clamp"
@@ -209,6 +218,11 @@ class EffectiveViewScope:
     member_layers: Optional[MemberLayers] = None
     """A view made from a query that doesn't follow a view: its layers hold its members,
     kept in their own table, so a layer filter reads them there (``placement`` is None)."""
+    subset_members: Optional[MemberLayers] = None
+    """A subset that follows such a view (``search_views.placed_by_members``): its layers
+    hold the base's members and what is inside them, so a layer filter — and a layer's
+    feed — reads the base's members as that view's own would (``subset_placement`` is
+    None); "Other matches" holds the rest."""
 
 
 # --------------------------------------------------------------------------- #
@@ -342,6 +356,42 @@ def _placement_inputs(config: Dict[str, Any]) -> Tuple[Optional[PlacementSpec], 
          "scope": derive_entity_scope(config)},
         sort_keys=True, separators=(",", ":"), default=str)
     return spec, layers, hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def member_entries(config: Dict[str, Any]) -> Dict[str, str]:
+    """The entries people placed in a view made from a query (urn → layer): its members are
+    rows of their own table, so these are its config's only placements."""
+    return {urn: entry["layerId"] for urn, entry in parse_reference_layout(config).assignments.items()
+            if isinstance(entry, dict) and isinstance(entry.get("layerId"), str) and entry["layerId"]}
+
+
+def _members_digest(epoch: Optional[int], config: Dict[str, Any]) -> str:
+    """What decides where a view made from a query draws entities, beside its layers: which
+    answer its members are, the entries people placed and where they moved members."""
+    membership = config.get("membership") if isinstance(config.get("membership"), dict) else {}
+    canonical = json.dumps({"epoch": epoch, "entries": member_entries(config),
+                            "layout": membership.get("layout"), "overrides": membership.get("overrides")},
+                           sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+async def hidden_members(session: AsyncSession, held: MemberLayers,
+                         hidden: Iterable[str]) -> Optional[List[str]]:
+    """What a subset of a view made from a query leaves out with the layers ``hidden``:
+    their members and the entries placed there, listed — None past
+    ``MEMBER_LAYER_LISTED_MAX``, more than a search can leave out."""
+    from backend.app.services.advanced_search_service import MEMBER_LAYER_LISTED_MAX
+
+    hidden = set(hidden)
+    found = {urn for urn, layer_id in held.entries.items() if layer_id in hidden}
+    moved = {urn for urn, layer_id in held.entries.items() if layer_id not in hidden}
+    for layer_id in sorted(hidden):
+        urns = await view_members_repo.urns(session, held.view_id, held.epoch, layer_id=layer_id,
+                                            limit=MEMBER_LAYER_LISTED_MAX + 1 + len(moved))
+        found |= set(urns) - moved
+        if len(found) > MEMBER_LAYER_LISTED_MAX:
+            return None
+    return sorted(found)
 
 
 def _compute_scope_hash(
@@ -484,8 +534,12 @@ class ViewScopeResolver:
 
         allowed_root_urns: List[str] = sorted(set(ref_roots) | set(cnt_roots) | set(members))
         # Entity-type allow-list is the union of both sources; empty
-        # means "no constraint from the view".
-        allowed_entity_types: FrozenSet[str] = ref_ent_types | cnt_ent_types
+        # means "no constraint from the view". A view made from a query is bounded
+        # by its members: its layers' types only say where they are placed (an auto
+        # layer lists a top-level type, and holds what is inside its members too).
+        allowed_entity_types: FrozenSet[str] = (
+            cnt_ent_types if isinstance(config.get("membership"), dict)
+            else ref_ent_types | cnt_ent_types)
 
         # Depth: view config > request hint, then hard cap.
         view_max_depth = cnt_max_depth if cnt_max_depth > 0 else _DEFAULT_MAX_DEPTH
@@ -503,16 +557,17 @@ class ViewScopeResolver:
             requested.entity_types, allowed_entity_types,
         )
 
-        placement, layers, placement_digest = (
-            await self._followed_placement(view, config, members_epoch) or _placement_inputs(config))
+        followed = await self._followed_placement(view, config, members_epoch)
+        placement, layers, placement_digest = followed or _placement_inputs(config)
+        if followed is not None:
+            # It stores no layers: its layers are those it is served.
+            layer_ids = frozenset(layer_id for layer_id, _name in layers)
         member_layers = None
         definition = read_definition(config)
         if definition is not None and definition.layout.kind != "follow":
             # Its members are rows of their own table, never placements of its config.
             placement = None
-            member_layers = MemberLayers(view.id, members_epoch, entries={
-                urn: entry["layerId"] for urn, entry in parse_reference_layout(config).assignments.items()
-                if isinstance(entry, dict) and isinstance(entry.get("layerId"), str) and entry["layerId"]})
+            member_layers = MemberLayers(view.id, members_epoch, entries=member_entries(config))
         scope_hash = _compute_scope_hash(
             view_id=view.id,
             updated_at=view.updated_at,
@@ -565,7 +620,10 @@ class ViewScopeResolver:
         published roots, types and depth, whoever is asking — and its search,
         which the service adds to every search in the view. A subset of the whole
         data source has no roots and no types. A base gone, moved, or a subset
-        itself leaves nothing to look in: never a widened search."""
+        itself leaves nothing to look in: never a widened search. Following a view
+        made from a query, its matches are placed by that view's members
+        (``subset_members``) — and one hiding more of them than a search can leave
+        out is refused, never shown them."""
         definition = read_search_definition(config)
         if definition is None:
             raise ViewScopeError("subset_unreadable",
@@ -576,6 +634,7 @@ class ViewScopeResolver:
         allowed_types: FrozenSet[str] = frozenset()
         depth_hint = 0
         unlisted = 0
+        epoch: Optional[int] = None
         member_scope: Optional[MemberScope] = None
         if definition.within == "view":
             base = await self._load_view(definition.read_in)
@@ -587,11 +646,13 @@ class ViewScopeResolver:
                                      "This subset view's base view is no longer available.")
             ref_roots, ref_types, _layers = _collect_reference_roots(base_config)
             cnt_roots, cnt_types, depth_hint = _collect_content_scope(base_config)
-            members, unlisted, _epoch, member_scope = await self._member_roots(base.id, base_config)
+            members, unlisted, epoch, member_scope = await self._member_roots(base.id, base_config)
             if requested.root_urns:
                 member_scope = None
             allowed_roots = sorted(set(ref_roots) | set(cnt_roots) | set(members))
-            allowed_types = ref_types | cnt_types
+            # A base made from a query is bounded by its members, not its layers' types.
+            allowed_types = (cnt_types if isinstance(base_config.get("membership"), dict)
+                             else ref_types | cnt_types)
 
         view_max_depth = depth_hint if depth_hint > 0 else _DEFAULT_MAX_DEPTH
         effective_max_depth = max(1, min(view_max_depth, requested.max_depth or _DEFAULT_MAX_DEPTH,
@@ -602,9 +663,20 @@ class ViewScopeResolver:
         # includes — held to what those columns show.
         every_layer = subset_layers(definition, config, base_config)
         layers = shown_layers(every_layer)
-        placement = (follow_placement(base_config)[0]
-                     if definition.layout == "inherit" and base_config is not None else None)
-        search = shown_search(definition.search_predicate(), every_layer, placement)
+        placement = None
+        subset_members: Optional[MemberLayers] = None
+        hidden: Optional[List[str]] = None
+        if definition.layout == "inherit" and base_config is not None:
+            if placed_by_members(base_config):
+                subset_members = MemberLayers(base.id, epoch, entries=member_entries(base_config))
+                hidden = await hidden_members(self._session, subset_members,
+                                              [layer.id for layer in every_layer if layer.hidden])
+                if hidden is None:
+                    raise ViewScopeError("hidden_layers_too_large", HIDDEN_LAYERS_TOO_LARGE)
+            else:
+                placement = follow_placement(base_config)[0]
+        search = shown_search(definition.search_predicate(), every_layer, placement,
+                              hidden_members=hidden)
         return EffectiveViewScope(
             view_id=view.id,
             workspace_id=view.workspace_id,
@@ -620,7 +692,9 @@ class ViewScopeResolver:
                 data_source_id=view.data_source_id, root_urns=effective_root_urns,
                 entity_types=effective_entity_types, max_depth=effective_max_depth,
                 predicate_hash=search_hash(search),
-                placement=placement.digest if placement is not None else "",
+                placement=(placement.digest if placement is not None
+                           else _members_digest(epoch, base_config) if subset_members is not None
+                           else ""),
                 members_epoch=member_scope.epoch if member_scope is not None else None),
             dropped_urns=tuple(dropped),
             layers=tuple((layer.id, layer.name) for layer in layers),
@@ -634,6 +708,7 @@ class ViewScopeResolver:
                            and derive_entity_scope(base_config) == "curated"),
             unlisted_roots=unlisted,
             member_scope=member_scope,
+            subset_members=subset_members,
         )
 
     async def _followed_placement(

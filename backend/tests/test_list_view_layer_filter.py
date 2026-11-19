@@ -210,3 +210,78 @@ async def test_a_view_that_follows_another_is_placed_as_before(db_session):
     await db_session.flush()
     eff = await ViewScopeResolver(db_session).resolve(workspace_id=ws.id, requested=SearchScope(view_id=view.id))
     assert eff.member_layers is None and eff.placement is not None
+
+
+class Sessions(Provider):
+    """A session per search, kept with the scope it was planned for; ancestor counts read
+    from it by the engine's own check (``read_ancestor_counts``), handed what the service
+    resolved — as ``falkordb_provider.deep_search_ancestor_counts`` hands it."""
+
+    def __init__(self):
+        super().__init__()
+        self.planned = {}
+
+    async def deep_search_session(self, query, *, context):
+        page = await super().deep_search_session(query, context=context)
+        page.session_id = f"s{len(self.planned)}"
+        self.planned[page.session_id] = context.scope_hash
+        return page
+
+    async def deep_search_ancestor_counts(self, session_id, urns, *, context):
+        from backend.app.providers.falkordb_search.engine import read_ancestor_counts
+        return await read_ancestor_counts(self, session_id, urns, scope_hash=context.scope_hash,
+                                          scope_hashes=context.scope_hashes)
+
+
+@pytest.fixture()
+def sessions(monkeypatch):
+    """The engine's session store, as the scopes ``Sessions`` planned."""
+    from types import SimpleNamespace
+
+    from backend.app.providers.falkordb_search import engine as engine_mod
+
+    class Store:
+        def __init__(self, provider):
+            self.provider = provider
+
+        async def load(self, sid):
+            planned = self.provider.planned.get(sid)
+            return None if planned is None else SimpleNamespace(scope_hash=planned, status="complete")
+
+        async def read_tallies(self, sid, urns):
+            return {"urn:t1": [2, "t1", "Table", {"Table": 2}]}
+
+    monkeypatch.setattr(engine_mod, "store_for", lambda provider: Store(provider))
+
+
+async def test_ancestor_counts_after_a_layer_filter_read_that_search(db_session, sessions):
+    """A search filtered to a layer at the top runs in that layer's scope (``layer:<id>``
+    folded into the hash): its ancestor counts are read from it, not refused as another
+    scope's. Another view's session still is."""
+    from backend.common.models.search import SearchAncestorCountsRequest
+
+    ws, view = await list_view(db_session)
+    engine = Engine()
+    engine.provider = Sessions()
+    svc = AdvancedSearchService(engine, session=db_session, workspace_id=ws.id)
+
+    async def counts(sid):
+        return await svc.ancestor_counts(SearchAncestorCountsRequest(
+            scope=SearchScope(view_id=view.id), session_id=sid, urns=["urn:t1"]))
+
+    whole_view = await ViewScopeResolver(db_session).resolve(workspace_id=ws.id,
+                                                             requested=SearchScope(view_id=view.id))
+    page, eff = await svc.search(search(view, layer("Tables")), run_context=SearchRunContext())
+    assert eff.scope_hash == service.layer_fold(whole_view.scope_hash, {"L1"})
+    answered = await counts(page.session_id)
+    assert answered.status == "complete" and answered.counts["urn:t1"].count == 2
+    unfiltered, _eff = await svc.search(search(view, TagPredicate(values=["pii"])),
+                                        run_context=SearchRunContext())
+    assert (await counts(unfiltered.session_id)).status == "complete"
+
+    ws2, other = await list_view(db_session)
+    elsewhere = AdvancedSearchService(engine, session=db_session, workspace_id=ws2.id)
+    theirs, _eff = await elsewhere.search(search(other, layer("Tables")), run_context=SearchRunContext())
+    assert (await elsewhere.ancestor_counts(SearchAncestorCountsRequest(
+        scope=SearchScope(view_id=other.id), session_id=theirs.session_id, urns=["urn:t1"]))).status == "complete"
+    assert (await counts(theirs.session_id)).status == "expired", "another view's layer scope"

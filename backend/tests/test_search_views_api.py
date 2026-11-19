@@ -498,3 +498,66 @@ class TestFollowedByAViewMadeFromAQuery:
         subset = {"search": {"predicate": P, "readIn": "base"},
                   "layout": {"referenceLayout": {"layers": [], "assignments": entries}}}
         assert served_config(subset, base)["layout"]["referenceLayout"]["assignments"] == {}
+
+
+class TestOfAViewMadeFromAQuery:
+    """A subset of a view made from a query that keeps its own layers: bounded by its
+    members, its matches placed by them — and a layer it hides left out by listing its
+    members, as many as a search can list."""
+
+    async def list_base(self, db_session, ws: str, *, layers, entries=None, members=None) -> str:
+        from backend.app.db.repositories import view_members_repo, view_membership_repo
+
+        base = ViewORM(name="Members", workspace_id=ws, view_type="reference", visibility="workspace",
+                       config=json.dumps({
+                           "layoutType": "reference",
+                           "content": {"entityScope": "curated", "visibleEntityTypes": []},
+                           "layout": {"type": "reference", "referenceLayout": {
+                               "layers": layers, "assignments": entries or {}}},
+                           "membership": {"v": 1, "mode": "live", "layout": {"kind": "stages"},
+                                          "sources": [{"spec": {"seeds": {"urns": ["urn:s"]}}}]}}))
+        db_session.add(base)
+        await db_session.flush()
+        state = await view_membership_repo.ensure(db_session, base)
+        await view_members_repo.insert(db_session, [
+            {"view_id": base.id, "epoch": 1, "urn": urn, "layer_id": layer, "sort_key": urn, "ord": i,
+             "label": "dataset", "label_ord": i, "whole": False, "covered": False}
+            for i, (urn, layer) in enumerate((members or {}).items())])
+        state.epoch = state.members_epoch = 1
+        state.member_count = len(members or {})
+        await db_session.commit()
+        return base.id
+
+    STAGES = [{"id": "s0", "name": "Seeds", "order": 0}, {"id": "s1", "name": "One hop", "order": 1}]
+
+    async def test_a_word_alone_is_bounded_by_its_members(self, test_client, on, db_session):
+        ws = await workspace(test_client)
+        base = await self.list_base(db_session, ws, layers=self.STAGES, members={"urn:a": "s0"})
+        word = {"kind": "text", "value": "orders", "target": "any"}
+        made = await test_client.post(URL, json=body(ws, base, predicate=word))
+        assert made.status_code == 201, made.text
+
+    async def test_its_matches_are_placed_by_its_members_not_by_type(self, test_client, on, db_session,
+                                                                     monkeypatch):
+        from backend.app.services import advanced_search_service
+        monkeypatch.setattr(advanced_search_service, "LAYER_FILTER_MAX_HAND_PLACED", 0)
+        ws = await workspace(test_client)
+        base = await self.list_base(db_session, ws, layers=self.STAGES,
+                                    entries={"urn:kept": {"layerId": "s1", "assignedBy": "user"}})
+        made = await make(test_client, ws, base)
+        assert made["search"]["placedByType"] is False and made["search"]["placedByTypeReason"] is None
+
+    async def test_hiding_layers_past_what_a_search_can_leave_out(self, test_client, on, db_session,
+                                                                 monkeypatch):
+        from backend.app.services import advanced_search_service
+        monkeypatch.setattr(advanced_search_service, "MEMBER_LAYER_LISTED_MAX", 2)
+        ws = await workspace(test_client)
+        base = await self.list_base(db_session, ws, layers=self.STAGES, members={
+            "urn:a": "s0", "urn:b": "s0", "urn:c": "s0", "urn:d": "s1"})
+        refused = await test_client.post(URL, json=body(ws, base, hiddenLayers=["s0"]))
+        assert refused.status_code == 422 and refused.json()["detail"]["reason"] == "hidden_layers_too_large"
+        assert "more than 1,000 members" in refused.text
+        made = await make(test_client, ws, base, hiddenLayers=["s1"])
+        changed = await test_client.put(f"/api/v1/views/{made['view']['id']}/search", json={
+            "ifDefinitionHash": made["search"]["definitionHash"], "hiddenLayers": ["s0", "s1"]})
+        assert changed.status_code == 422 and changed.json()["detail"]["reason"] == "hidden_layers_too_large"
