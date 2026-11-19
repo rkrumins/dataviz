@@ -184,7 +184,7 @@ trace shows — N rows, open or not*, or, while the trace is still landing,
 | --- | --- |
 | **CSV** | One row per entity the trace shows — seed, upstream, downstream or both, its hops each way, the layer it is drawn in, where it sits, and which of your seeds reach it. Where it sits is its parent (`parentUrn`, `parentName`, `parentType`) and every container from the top down to it (`path` as names, `A / B`; `pathUrns` as URNs, `a; b`); both are empty for an entity at the top of the graph. Closed cards are included; the containers are each row's path, not rows of their own. A second file, `…-flows.csv`, holds the flows between them — see [Reading the files](#reading-the-files). Opens in any spreadsheet. |
 | **JSON** | The same entities and the flows between them — each flow with both its ends, as in the flows file — with the question that found them (the seeds and how far each way), so a script can ask it again. |
-| **Everything it reaches…** | The complete trace, worked out on the server: your starting entities and what is inside them (two levels down), every source and consumer, inside this view or not, however many, each with its parent and path as in the CSV above (not its layer: it may not be in this view). Choose CSV, NDJSON or JSON, and **Include the flows between them** if you want the lineage itself as well (a second file, or part of the JSON), each flow with both its ends as below. The panel shows how far it has got; close it and ask again later, and it carries on where it was. |
+| **Everything it reaches…** | The complete trace, worked out on the server: your starting entities and what is inside them (two levels down), every source and consumer, inside this view or not, however many, each with its parent and path as in the CSV above (not its layer: it may not be in this view). Choose CSV, NDJSON or JSON, and **Include the flows between them** if you want the lineage itself as well (a second file, or part of the JSON), each flow with both its ends as below. **With every column of the tables it reaches** adds what is inside the tables your trace comes to (their columns, not only those that carry the lineage), and **Their lineage too** traces from those columns as well — a much wider walk. The panel shows how far it has got; close it and ask again later, and it carries on where it was. |
 | **Save as view…** | A view of its own of what the trace shows — your starting entities with everything inside them, and everything they reach on the sides you're reading — as a subset of the view you traced in: its layers, each entity where that view places it, including what someone placed there by hand. See [Keep a narrowing as a view](#keep-a-narrowing-as-a-view). |
 | **Save trace** | Keeps the trace in this browser, with what it found. |
 
@@ -352,6 +352,13 @@ Kept as a list, the panel offers:
 2. **Keeps itself up to date** is on by default. When the view is opened after
    its data changed, what newly matches arrives and what stops matching leaves.
    Turn it off for a **snapshot**, which keeps the members it has now.
+   **Inside what it reaches** (from a trace): a trace reaches tables through the
+   columns that carry its lineage. **Lineage only** keeps just those; **One
+   level** brings in every column of each table it reaches; **Everything** keeps
+   each such table whole, with everything inside it as one entry. With either of
+   the last two, **Their lineage too** traces from everything inside those tables
+   as well — what feeds them and what they feed, as far as the trace goes. That
+   can be far more than the trace itself: the preview counts it before you save.
 3. **Layout** sets the layers the view starts with:
    - **Follow** the view you are in: the new view is a *subset* of it. Its
      layers are that view's, as they change there — a rename, a new layer or

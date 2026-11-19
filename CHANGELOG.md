@@ -44,6 +44,10 @@ versioned and unversioned graphs alike.
   and `pathUrns` in the dock's CSV and JSON, saved traces and member-set downloads.
 - **Every flow says where both its ends sit** (name, type, parent, path; the layer in the dock's
   files). The dock's CSV is two files: the entities and their flows.
+- **What is inside the tables a trace reaches, and their lineage** (`expand.partnerHosts`,
+  `expand.partnerLineage`): Save as view from a trace, the lineage export and Advanced Search's
+  export can bring in every column of the tables a trace reaches, or each table whole, and trace
+  from them too.
 - **List views' members nest in their containers** (`inLayer` on the member feed).
 
 ### Changed

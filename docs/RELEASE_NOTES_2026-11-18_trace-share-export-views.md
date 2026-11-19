@@ -214,7 +214,35 @@ gains a kind that borrows the subset's machinery:
   `20261118_1100_view_members` migration, with a guarded `add_column` for a database that already
   ran it.
 
-### 4.2 Preview and Save as view answered 422 on an older server
+### 4.2 What is inside the tables a trace reaches, and their lineage
+
+`partnerChildren` read inside the lineage partners themselves. On column-level lineage those are
+columns, so "with what is inside the sources and consumers" brought nothing: the table around a
+reached column was only drawn as a container, never a member. Two spec fields, sent only when
+chosen (`false` is stored as absent, so every existing spec hash, set key, view definition and the
+status ETag are unchanged — pinned by a test):
+
+* **`partnerHosts`.** A reached entity whose type can contain nothing (ontology
+  `hierarchy.canContain` empty, e.g. `schemaField`) brings in its container — its table — as an
+  `upstream`/`downstream` member at the nearest distance of what inside it was reached
+  (containment is never a hop). A seed, or anything inside one, is never such a table; an
+  ontology that names no such type brings none. `partnerChildren` (1 or `"all"`) then reads inside
+  those tables.
+* **`partnerLineage`** (needs `partnerHosts`). Each such table, while depth is left, is walked
+  like a container seed: from everything inside it that carries lineage, at its own distance;
+  what that reaches is a hop further, and its tables are walked in turn. Bounded by the depth, the
+  member cap and the deadline. With it a step walks one hop at a time, so every distance is the
+  nearest.
+
+The member-set walk (`member_sets/walk.py`) and the Narrow resolver share the rule. `partnerInside`
+now skips roots that hold nothing (one child-count read per 1,000), so "one level" over a wide
+trace doesn't read every column. Save as view from a trace offers **Inside what it reaches**
+(Lineage only / One level / Everything, and **Their lineage too**); the lineage export and Advanced
+Search's export offer a level in and **Their lineage too**. Measured live: 8 domains × 150 tables
+× 6 columns with one level and their lineage, both ways — 8,316 members, 1,188 tables, 25 closure
+steps, 4.7 s, exactly as computed independently.
+
+### 4.3 Preview and Save as view answered 422 on an older server
 
 The sheet sent `waitMs` (10,000) with every preview and save. A server from before it accepted the
 field refused the body (`extra_forbidden`), so the preview never appeared and saving failed. The
@@ -301,6 +329,10 @@ a view and snapshots of up to 500,000 rows.
   it on a draft yet. A layer filter in it counts the followed view's hand placements and its own
   moves towards the 1,000 a layer filter follows. Following a view made from a query is refused
   for now.
+* **"Their lineage too"** can fan out to most of a densely connected graph; only the depth, the
+  member cap and the deadline bound it, and it takes more closure steps (one hop each). A flow into
+  a table's column that joins only as what is inside that table isn't in the set's flows (that stage
+  runs after lineage). It needs the ontology to name the column-level types.
 * **`in_layer` in a stages layout** depends on which members share a page, so it can differ by
   page size there (any other layout gives the same rows at any page size).
 * `tests/test_data_source_transfers.py::test_a_move_refused_for_a_job_names_every_kind_of_job_in_words`
