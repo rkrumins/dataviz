@@ -900,7 +900,9 @@ fails.
   placed entities (entries with a real `layerId`) plus their containment descendants (when
   `inheritsChildren`, the default). A placement key is the entity's URN, or `gv:<entity id>` for a
   node without one, as the canvas writes it. Edges are kept only when **both** endpoints are in
-  scope. A view that places nothing exports the whole data source (the plan says so).
+  scope. A view made from a query places its members too (`view_members_repo.with_members`). A
+  view that places nothing is refused, whatever its kind — plan and start answer `422
+  view_holds_nothing` — and a scope that can't be read fails the export instead of widening it.
 - **Row-scoped export.** `stream.Selection` keeps only an explicit `entity_id`/`urn` set and/or
   entity-type set (intersection), composing after view scope.
 - **Add-property columns.** `props` emits extra empty `prop.<name>` columns to fill (`:219-222`).

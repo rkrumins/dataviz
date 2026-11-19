@@ -57,9 +57,21 @@ narrowings, every function inside list and subset views, and saving that never g
   its results in the browser.
 - **Trace inside list, follow and subset views** places every entity where the view draws it
   (`POST /{ws}/graph/view-placements`); the dock says **Placing N…**.
-- **A capped layer of a list view**: **Search in this layer**, and **Export** of every member it
-  holds (`POST /{ws}/graph/view-members/export`, `GET …/view-members/download`).
+- **A layer's menu** in list, follow and subset views: **Search in this layer** (with Undo), and
+  **Export this layer…** of every member it holds, as CSV or NDJSON
+  (`POST /{ws}/graph/view-members/export`, `GET …/view-members/download`).
 - A view that follows another shows that view's display rules, read-only (`rulesFrom`).
+- **Every member of a list view on the canvas.** A layer pages to its last member, looking one page
+  ahead while the browser is idle (*1,200 of 50,820 loaded*). Search results are grouped under
+  their layer; **Show on canvas** loads a member that isn't loaded into its layer; Narrow loads
+  every member it holds, with progress. `view-placements` answers `inLayer`, `inside` and, with
+  `nodes: true`, nodes ready to draw.
+- **Duplicate** makes a proper copy of a list or subset view (`POST /views/{id}/duplicate`): made
+  again from its definition, or its search.
+- The Explorer marks views *Made from a query* or *Subset of X*, with their counts.
+- **Keep out** and **Always include** act on a multi-selection.
+- API keys read list and subset views: members, placements, layer exports, member sets and saved
+  narrowings.
 
 ### Changed
 
@@ -78,6 +90,14 @@ narrowings, every function inside list and subset views, and saving that never g
 - `?narrow=` links keep the reach into the tables found, carry the seeds' names, and are withheld
   past 7,000 characters.
 - A layer filter in a plain list view finds that layer's members.
+- `VIEW_MEMBERS_FEED_MAX_ROWS` (was 5,000) and `DEEP_SEARCH_VIEW_FEED_MAX_ROWS` (was 2,000) default
+  to `0`, no ceiling; a subset layer is read a scan of `DEEP_SEARCH_VIEW_FEED_SESSION_ROWS` (5,000)
+  at a time.
+- **Export → This view** of a view that holds nothing answers `422 view_holds_nothing` instead of
+  exporting the whole data source.
+- A list or subset view stays a Context View: the wizard offers nothing else, `POST /views` with
+  `membership` or `search` answers `422 made_by_its_route`, and changing its layout type or entity
+  scope answers `422 list_view_context_only`.
 
 ### Fixed
 
@@ -92,6 +112,14 @@ narrowings, every function inside list and subset views, and saving that never g
 - A subset view's data export is refused (`422 subset_matches_export`) instead of silently covering
   the whole data source; the dialog offers its matches.
 - A past revision of a list view says it shows only what was placed by hand.
+- In a list view, search results no longer all land under "Not on this canvas", and Narrow no
+  longer filters only the rows loaded; a subset of a list view no longer puts everything in Other.
+- A snapshot moved to another environment arrives with its members.
+- Badges for a layer-narrowed search find its session; a busy graph on the first turn reads as
+  `updating`; a turn cancelled after its claim lets its lease go.
+- **A standalone FalkorDB** is no longer held to cluster timeouts (a search kept 10 s of its 45).
+- **A fresh install's upgrade** builds the version store before stamping head, so graph reads no
+  longer answer 503.
 
 ### Upgrading
 
@@ -103,9 +131,9 @@ narrowings, every function inside list and subset views, and saving that never g
 
 - Neo4j and Spanner have no closure walk: member sets answer 501 there.
 - The canvas's own Narrow still starts from a search's first 5,000 matches; a view saved from it
-  starts from every match. A layer lists 5,000 members on the canvas.
-- Saved traces, and a saved narrowing's copy of its results, stay in one browser; member sets,
-  view placements and the layer export are not on the API-key surface yet.
+  starts from every match.
+- Saved traces, and a saved narrowing's copy of its results, stay in one browser.
+- The canvas keeps every row it loads; nothing is evicted.
 - A view that follows another re-places its members on its next open after the view it follows
   changes how it places things, and can't have members moved in it on a draft yet.
 

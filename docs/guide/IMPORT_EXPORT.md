@@ -292,7 +292,9 @@ it.
 2. If you're in a draft, choose **Which version**: **My working branch**
    (includes your draft changes) or **Published** (what everyone else sees).
 3. Choose **What to export**: **This view** (only what the View contains) or
-   **Whole data source** (every entity in the graph).
+   **Whole data source** (every entity in the graph). A View that holds nothing
+   yet can't be exported as **This view** — it would be empty — so choose
+   **Whole data source** if that is what you want.
 4. Choose a format: the same five formats Import accepts — **Excel** is the
    best choice if you plan to edit it afterwards. For a spreadsheet format you
    can also **Add new property columns** to fill in.

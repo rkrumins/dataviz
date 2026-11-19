@@ -287,11 +287,17 @@ until its replacement arrives.
   its row places it, anything else where the view's layout — or the view it follows
   — would put it. The dock says **Placing N…** while it asks, and only an entity the
   view places nowhere counts as outside it.
-- **Search**, and **Search in this layer** on a layer's menu or its *first 5,000*
-  note, find that layer's members.
-- **Export** on a layer that holds more than the canvas lists downloads every member
-  it holds, with its parent and path, as CSV.
-- **Narrow**, and **Save search as view**: a view saved from one made from a query
+- **Every member is on the canvas.** A layer loads its members as you scroll, to
+  the last one, and says how far it has got (*1,200 of 50,820 loaded*).
+- **Search** finds members whether or not they're loaded yet, grouped under the
+  layer that draws them; **Show on canvas** brings one in and scrolls to it.
+  **Search in this layer**, on a layer's menu, finds that layer's members.
+- **Export this layer…**, on a layer's menu, downloads every member it holds, with
+  its parent and path, as CSV or NDJSON.
+- **Duplicate**, on its card in the Explorer, makes a proper copy: the same queries
+  and layout, its members worked out afresh.
+- **Narrow** loads every member the narrowing holds into its layer, and the chip
+  says how far it has got. **Save search as view**: a view saved from one made from a query
   can't follow it (where its members sit can't be followed) — choose **By type** or
   **Lineage stages** instead; saved from one that follows another view, it follows
   that view.
