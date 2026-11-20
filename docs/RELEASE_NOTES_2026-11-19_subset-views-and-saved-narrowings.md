@@ -107,8 +107,8 @@ them (`ON DELETE CASCADE`).
   per canvas merges what the canvas asks into requests of 2,000 (500 with nodes), two at a time,
   the reader's own asks first; a busy or unreachable server is asked again, then *Couldn't
   place N · Retry*.
-- **Search** groups results under their layer — *Placing…* while it is asked, *Not in this view*
-  if it is drawn nowhere — and a layer says *N matches not loaded*, with Narrow and Export.
+- **Search** groups results under their layer — *Placing…* while it is asked, *Not on this canvas*
+  if the view draws it nowhere — and a layer says *N matches not loaded*, with Narrow and Export.
   **Show on canvas**, the drawer and Lens load an unloaded member into its layer, open the rows
   it sits in and scroll to it.
 - **Narrow** loads every member the narrowing holds into its layer, behind the reader, with
