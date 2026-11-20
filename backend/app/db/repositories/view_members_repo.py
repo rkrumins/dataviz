@@ -359,7 +359,8 @@ async def replace(session: AsyncSession, state: ViewMembershipStateORM, view_id:
     epoch = int(state.epoch or 0) + 1
     rows = []
     labels: Dict[str, int] = {}
-    for urn in sorted(entries):
+    # Numbered in the order pages list them: by name where ``names`` has one, else by URN.
+    for urn in sorted(entries, key=lambda u: sort_key((names.get(u) or (None, None))[0], u)):
         entry = entries[urn]
         if not isinstance(entry, Mapping) or not isinstance(entry.get("layerId"), str):
             continue
