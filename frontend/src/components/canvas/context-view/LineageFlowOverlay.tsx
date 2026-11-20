@@ -45,7 +45,7 @@ import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { OFF_CANVAS_STUB_WIDTH, portalLabel } from './ghostCues'
 import { OffCanvasStub } from './OffCanvasStub'
 import { unitNoun } from './connections/connectionUnits'
-import { lineStrokeWidth, type LineState } from './lineWeight'
+import { LINE_WEIGHT_SCALE, lineStrokeWidth, type LineState } from './lineWeight'
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import { usePreferencesStore, type LineagePortSides } from '@/store/preferences'
 
@@ -1940,7 +1940,7 @@ export function LineageFlowOverlay({
             data-ghost-line={g.key}
             d={g.pathD}
             stroke={g.color}
-            strokeWidth={1.3}
+            strokeWidth={1.3 * LINE_WEIGHT_SCALE[lineWeight]}
             strokeDasharray="4 5"
             fill="none"
             opacity={0.5}

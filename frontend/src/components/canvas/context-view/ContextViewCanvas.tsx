@@ -8525,7 +8525,9 @@ export function ContextViewCanvas({
         } : undefined}
         onTraceNode={(id) => startCanvasTrace(id)}
         onFocusConnections={openLens}
-        onExportNode={exportWithChildren ? (id) => {
+        // Not on a grouping row: it isn't an entity, so there is nothing to export.
+        onExportNode={exportWithChildren && interactions.state.contextMenu.target?.type === 'node'
+          && isSelectableNode(interactions.state.contextMenu.target.id) ? (id) => {
           // The selection it is part of, or the entity right-clicked alone.
           const selection = selectedNodeIds.filter(isSelectableNode)
           exportWithChildren(selection.length > 1 && selection.includes(id) ? selection : [id])
