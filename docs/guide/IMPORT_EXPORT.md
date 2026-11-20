@@ -321,6 +321,8 @@ or right-click one and choose **Export with children…**. The **Export data**
 dialog opens on just them: the file holds what you selected, everything inside
 it at every level, and the relationships among them, nothing else. It's offered
 on data sources with version control, because only they can take the file back.
+In a trace, select cards the same way: the selection bar comes back with
+**Export…** alone, since a trace allows no edits but exporting only reads.
 
 Edit the file, then switch to Edit mode and use **Import** to bring it back.
 Each row finds its entity again by its `entity_id`, only the cells you changed
