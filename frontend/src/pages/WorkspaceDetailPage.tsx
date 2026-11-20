@@ -1,18 +1,33 @@
 /**
- * WorkspaceDetailPage — single workspace detail view at /workspaces/:wsId.
- * Modern tabbed dashboard with hero header, data source grid, views,
- * aggregation, and ontology sections.
+ * WorkspaceDetailPage — one workspace, at /workspaces/:wsId.
+ *
+ * It opens on the Overview — what waits on the reader, the way back into their
+ * work, the workspace at a glance — because most people come to a workspace to
+ * use it. Its views come next; the data behind them sits under one Data tab
+ * (Sources, Data model, Processing, Trends); and the people who run it find
+ * People, Activity and Settings after that. Each reader sees only the tabs they
+ * can use. Every older link (`?tab=aggregation`, `?ds=…`) still lands in place
+ * (see `workspaceTabs`).
  */
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, useContext } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
-    ChevronLeft, Plus, Database, Settings2,
-    GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
+    ChevronLeft, Plus, Database, Settings2, GitBranch, Eye, RefreshCw, Sparkles, Shapes, Activity,
     Users, ShieldOff, Send, GitPullRequestArrow, LineChart, History, Trash2,
 } from 'lucide-react'
+import { ViewEditorContext } from '@/components/layout/viewEditorContext'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/Tabs'
+import { Segmented } from '@/components/ui/Segmented'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { WorkspaceOverview } from '@/components/admin/workspace/overview/WorkspaceOverview'
+import { WorkspaceSettingsTab } from '@/components/admin/workspace/WorkspaceSettingsTab'
+import {
+    normalizeWorkspaceTab, workspaceTabParams, type DataSection, type WorkspaceTab,
+} from '@/components/admin/workspace/workspaceTabs'
+import { describeWorkspaceHealth } from '@/components/admin/workspace/workspaceHealthStory'
+import type { HeroLink } from '@/components/admin/workspace/WorkspaceHeroHeader'
 import { Link } from 'react-router-dom'
-import { cn } from '@/lib/utils'
 import { WorkspaceReviewsInbox } from '@/features/reviews/components/WorkspaceReviewsInbox'
 import { workspaceService, type DataSourceResponse } from '@/services/workspaceService'
 import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
@@ -30,9 +45,6 @@ import { AddDataSourceWizard } from '@/components/admin/workspace/AddDataSourceW
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
 import { DataSourceGridCard } from '@/components/admin/workspace/DataSourceGridCard'
-import { WorkspaceNodeIdentityDefaults } from '@/components/admin/workspace/WorkspaceNodeIdentityDefaults'
-import { WorkspaceDraftsPolicy } from '@/components/admin/workspace/WorkspaceDraftsPolicy'
-import { DraftsWhoseOwnerLeft } from '@/components/admin/workspace/DraftsWhoseOwnerLeft'
 import { WorkspaceCardSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { DataSourceDetailPanel } from '@/components/admin/workspace/DataSourceDetailPanel'
 import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSection'
@@ -47,7 +59,7 @@ import { workspaceActivityScope } from '@/components/activity/activityMeta'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 import { MoveDataSourceWizard, type MoveDataSourceWizardProps } from '@/features/data-source-transfer/MoveDataSourceWizard'
 import { TransferRequestsPanel } from '@/features/data-source-transfer/TransferRequestsPanel'
-import { useDataSourcesWithForks } from '@/features/versioning/hooks/useVersioning'
+import { useDataSourcesWithForks, useReviewInboxCounts } from '@/features/versioning/hooks/useVersioning'
 import { isForkDataSourceId } from '@/features/versioning/model/forks'
 
 // ─────────────────────────────────────────────────────────────────────
@@ -99,14 +111,21 @@ export function WorkspaceDetailPage() {
     const [selectedDsId, setSelectedDsId] = useState<string | null>(null)
     const [searchParams, setSearchParams] = useSearchParams()
     const canReadProfiling = useCanReadProfiling()
-    // Pick up ``?tab=members`` (and friends) so other pages can deep
-    // link straight to a specific tab — used by the WorkspacesPage
-    // "Members" shortcut.
-    const tabParam = searchParams.get('tab') as
-        | 'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | 'activity' | null
-    const [activeSection, setActiveSection] = useState<'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | 'activity'>(
-        tabParam ?? 'sources',
-    )
+    // Where the reader is, read from the address — so Back, a shared link and the
+    // server's notifications (`?tab=members`, `?tab=views`, an old `?tab=aggregation`)
+    // all land in place. A link that opens a data source opens on Data.
+    const requested = normalizeWorkspaceTab(searchParams.get('tab'), searchParams.get('section'), {
+        hasDataSource: !!searchParams.get('ds'),
+    })
+    const goTo = useCallback((tab: WorkspaceTab, section: DataSection = 'sources') => {
+        const p = workspaceTabParams({ tab, section })
+        setSearchParams(prev => {
+            const next = new URLSearchParams(prev)
+            if (p.tab) next.set('tab', p.tab); else next.delete('tab')
+            if (p.section) next.set('section', p.section); else next.delete('section')
+            return next
+        }, { replace: true })
+    }, [setSearchParams])
     // Reviews are a versioning surface; the tab (and a ?tab=reviews deep link)
     // disappears when the admin turns version control off.
     const versioningEnabled = useFeature('versioningEnabled')
@@ -131,19 +150,17 @@ export function WorkspaceDetailPage() {
         'workspace:datasource:manage', wsId ?? null,
     )
 
-    // Sync activeSection back to the URL so refresh / back navigation
-    // preserves the tab. Only writes when the value actually differs to
-    // avoid history spam.
-    useEffect(() => {
-        const current = searchParams.get('tab')
-        const desired = activeSection === 'sources' ? null : activeSection
-        if (current === desired) return
-        const next = new URLSearchParams(searchParams)
-        if (desired === null) next.delete('tab')
-        else next.set('tab', desired)
-        setSearchParams(next, { replace: true })
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeSection])
+    // Creating a view here starts on this workspace. The editor lives in the app
+    // shell; outside it (a test, a harness) there is simply no New view.
+    const viewEditor = useContext(ViewEditorContext)
+    const canCreateView = usePermission('workspace:view:create', wsId ?? null)
+    const canEditSchema = usePermission('workspace:ontology:manage', wsId ?? null)
+    const openNewView = viewEditor && canCreateView && wsId
+        ? () => viewEditor.openViewEditor(undefined, { workspaceId: wsId })
+        : undefined
+    // What waits on the reader in Reviews, for the tab's badge.
+    const reviewCounts = useReviewInboxCounts(wsId, versioningEnabled).data?.counts
+    const reviewsWaiting = reviewCounts ? reviewCounts.needs_review + reviewCounts.sent_back : 0
 
     // A fork's data source is not among the workspace's: its lists leave forks out. While the link
     // or the panel names one, read the list that includes them.
@@ -168,12 +185,16 @@ export function WorkspaceDetailPage() {
     useEffect(() => {
         const current = searchParams.get('ds')
         const desired = selectedDsId
-        if (current === desired || (!current && !desired)) return
+        // A source opened from a link with no tab belongs to Data: say so in the
+        // address, so closing its panel leaves the reader on Data, not the Overview.
+        const pinData = !!desired && !searchParams.get('tab')
+        if (!pinData && (current === desired || (!current && !desired))) return
         // A fork's link waits for the list that includes forks, rather than being dropped as unknown.
         if (!desired && isForkDataSourceId(current) && !forkSources) return
         const next = new URLSearchParams(searchParams)
         if (desired) next.set('ds', desired)
         else next.delete('ds')
+        if (pinData) next.set('tab', 'data')
         setSearchParams(next, { replace: true })
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedDsId])
@@ -478,6 +499,39 @@ export function WorkspaceDetailPage() {
             )
     }
 
+    // ── What the page shows this reader ──────────────────────
+    const healthStory = describeWorkspaceHealth(
+        healthStatus,
+        workspace.dataSources.map(ds => ({
+            label: ds.label || dsProviderMap[ds.id]?.catalogItemName || 'A data source',
+            aggregationStatus: readinessMap[ds.id]?.aggregationStatus ?? ds.aggregationStatus,
+            projectorCurrent: readinessMap[ds.id]?.projectorCurrent,
+        })),
+        { canManage: canManageDataSources },
+    )
+    const moreLinks: HeroLink[] = [
+        ...(canEditSchema ? [{ label: 'Edit the data model', to: `/schema?workspaceId=${wsId}`, icon: GitBranch }] : []),
+        ...(canManageDataSources ? [{ label: 'Ingestion jobs', to: '/ingestion?tab=jobs', icon: Settings2 }] : []),
+    ]
+    const tabs: Array<{ id: WorkspaceTab; label: string; icon: typeof Eye; count?: number; alert?: number }> = [
+        { id: 'overview', label: 'Overview', icon: Sparkles },
+        { id: 'views', label: 'Views', icon: Eye, count: allWorkspaceViews.length },
+        { id: 'data', label: 'Data', icon: Database, count: workspace.dataSources.length },
+        ...(versioningEnabled ? [{ id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, alert: reviewsWaiting }] : []),
+        ...(canAddMembers ? [{ id: 'members' as const, label: 'People', icon: Users }] : []),
+        ...(activityScope ? [{ id: 'activity' as const, label: 'Activity', icon: History }] : []),
+        ...(canManageDataSources || canManageMembers ? [{ id: 'settings' as const, label: 'Settings', icon: Settings2 }] : []),
+    ]
+    // A tab this reader can't open (an old Members link, say) reads as the Overview.
+    const activeTab: WorkspaceTab = tabs.some(t => t.id === requested.tab) ? requested.tab : 'overview'
+    const dataSection: DataSection = requested.section === 'trends' && !canReadProfiling ? 'sources' : requested.section
+    const dataSections = [
+        { value: 'sources' as const, label: 'Sources', icon: Database, count: workspace.dataSources.length },
+        { value: 'model' as const, label: 'Data model', icon: Shapes },
+        { value: 'processing' as const, label: 'Processing', icon: Activity },
+        ...(canReadProfiling ? [{ value: 'trends' as const, label: 'Trends', icon: LineChart }] : []),
+    ]
+
     return (
         <div className="absolute inset-0 overflow-y-auto bg-canvas">
         <PageContainer className="py-8 animate-in fade-in duration-500">
@@ -502,13 +556,19 @@ export function WorkspaceDetailPage() {
                 )}
             </div>
 
-            {/* Hero Header */}
+            {/* Hero: what this is, whether it's ready, and the way in */}
             <WorkspaceHeroHeader
                 workspace={workspace}
                 healthStatus={healthStatus}
+                healthStory={healthStory}
+                onHealthAction={section => goTo('data', section)}
                 aggregateStats={aggregateStats}
                 primaryOntologyName={primaryOntologyName}
                 providerInfos={Object.values(dsProviderMap)}
+                exploreHref={`/explorer?workspace=${encodeURIComponent(wsId ?? '')}`}
+                onNewView={openNewView}
+                moreLinks={moreLinks}
+                canEdit={canManageMembers}
                 isEditing={editingHeader}
                 editName={editName}
                 editDesc={editDesc}
@@ -519,207 +579,52 @@ export function WorkspaceDetailPage() {
                 onCancel={() => { setEditingHeader(false); setEditName(workspace.name); setEditDesc(workspace.description || '') }}
             />
 
-            {/* Quick-links bar */}
-            <div className="flex items-center gap-2 mt-6 mb-2">
-                <span className="text-[10px] font-bold text-ink-muted uppercase tracking-wider mr-1">Quick Links</span>
-                <Link to={`/explorer?workspace=${wsId}`}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-ink-muted border border-glass-border hover:text-indigo-500 hover:border-indigo-500/20 hover:bg-indigo-500/5 transition-colors">
-                    <Compass className="w-3 h-3" /> Explorer
-                </Link>
-                <Link to={`/schema?workspaceId=${wsId}`}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-ink-muted border border-glass-border hover:text-violet-500 hover:border-violet-500/20 hover:bg-violet-500/5 transition-colors">
-                    <GitBranch className="w-3 h-3" /> Schema Editor
-                </Link>
-                <Link to="/ingestion?tab=jobs"
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-ink-muted border border-glass-border hover:text-emerald-500 hover:border-emerald-500/20 hover:bg-emerald-500/5 transition-colors">
-                    <Settings2 className="w-3 h-3" /> Global Jobs
-                </Link>
-            </div>
-
-            {/* Section Tabs */}
-            <div className="flex items-center gap-1 border-b border-glass-border mt-4 mb-0">
-                {([
-                    { id: 'sources' as const, label: 'Data Sources', icon: Database, count: workspace.dataSources.length, hint: 'Graph databases connected to this workspace' },
-                    // Across this workspace's sources: what moved, and by how
-                    // much. The per-source view is the drill-down from here.
-                    ...(canReadProfiling
-                        ? [{ id: 'profiling' as const, label: 'Profiling', icon: LineChart, hint: 'Counts and composition over time, across this workspace' }]
-                        : []),
-                    { id: 'views' as const, label: 'Views', icon: Eye, count: allWorkspaceViews.length, hint: 'Saved visual perspectives on your data' },
-                    { id: 'aggregation' as const, label: 'Aggregation', icon: Settings2, hint: 'Edge materialization and job monitoring' },
-                    { id: 'ontology' as const, label: 'Ontology', icon: GitBranch, hint: 'Semantic type system and change history' },
-                    ...(versioningEnabled
-                        ? [{ id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, hint: 'Merge requests awaiting review across this workspace' }]
-                        : []),
-                    ...(canAddMembers
-                        ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Who is in, their requests to join, and how people get in' }]
-                        : []),
-                    ...(activityScope
-                        ? [{ id: 'activity' as const, label: 'Activity', icon: History, hint: 'Who changed what in this workspace, when, and why' }]
-                        : []),
-                ]).map(tab => {
-                    const Icon = tab.icon
-                    const isActive = activeSection === tab.id
-                    return (
-                        <button key={tab.id} onClick={() => setActiveSection(tab.id)}
-                            title={tab.hint}
-                            className={cn(
-                                'flex items-center gap-2 px-5 py-3 text-sm font-semibold transition-colors duration-150 border-b-2',
-                                isActive ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
-                                         : 'border-transparent text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-t-xl'
-                            )}>
-                            <Icon className="w-4 h-4" />
+            {/* Tabs — only the ones this reader can use. They stay in reach while a
+                long tab scrolls, on an opaque strip of the page's own colour (a blur
+                inside a scroller re-rasterises every frame). */}
+            <div className="sticky top-0 z-20 mt-4 pt-2 bg-canvas">
+            <Tabs value={activeTab} onValueChange={v => goTo(v as WorkspaceTab)}>
+                <TabsList look="underline" aria-label="Workspace sections" className="gap-1 sm:gap-2 overflow-x-auto overflow-y-hidden custom-scrollbar" data-tour="workspace-tabs">
+                    {tabs.map(tab => (
+                        <TabsTrigger key={tab.id} value={tab.id} icon={tab.icon} className="px-3 h-11 shrink-0"
+                            badge={tab.alert ? (
+                                <span className="ml-0.5 rounded-full bg-rose-500 px-1.5 text-[10px] font-bold leading-4 text-white">
+                                    {tab.alert}<span className="sr-only"> waiting on you</span>
+                                </span>
+                            ) : tab.count !== undefined ? (
+                                <span className="ml-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] px-1.5 text-[10px] font-bold leading-4 text-ink-muted">{tab.count}</span>
+                            ) : undefined}>
                             {tab.label}
-                            {tab.count !== undefined && (
-                                <span className={cn("px-1.5 py-0.5 rounded-full text-[10px] font-bold",
-                                    isActive ? "bg-indigo-500/20 text-indigo-600 dark:text-indigo-400" : "bg-black/5 dark:bg-white/5 text-ink-muted"
-                                )}>{tab.count}</span>
-                            )}
-                        </button>
-                    )
-                })}
+                        </TabsTrigger>
+                    ))}
+                </TabsList>
+            </Tabs>
             </div>
 
-            {/* ── Data Sources Tab ─────────────────────────── */}
-            {activeSection === 'sources' && (
-                <>
-                    {/* Section intro */}
-                    <div className="flex items-start gap-3 py-4 mb-2">
-                        <Info className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
-                        <div>
-                            <p className="text-sm text-ink-secondary leading-relaxed">
-                                Data sources are the graph databases that feed this workspace. Each source can have its own ontology and aggregation configuration.
-                                <span className="text-ink-muted"> Click on any card below to inspect its details, configure aggregation, or browse associated views.</span>
-                            </p>
-                        </div>
-                    </div>
-
-                    {/* Sources waiting to move in, or to leave — what an admin must answer. */}
-                    {canManageMembers && wsId && <TransferRequestsPanel variant="banner" workspaceId={wsId} />}
-
-                    {/* Workspace-level default, above the grid it governs. */}
-                    <WorkspaceNodeIdentityDefaults
-                        wsId={wsId!}
-                        identityProperty={workspace.identityProperty}
-                        nameProperty={workspace.nameProperty}
-                        canEdit={canManageDataSources}
-                        onSaved={reload}
-                    />
-
-                    {/* How drafts and reviews work across the sources below; and, for an admin,
-                        the drafts whose owner left, to hand on. */}
-                    {versioningEnabled && (
-                        <>
-                            <WorkspaceDraftsPolicy wsId={wsId!} canEdit={canManageMembers} />
-                            <DraftsWhoseOwnerLeft wsId={wsId!} />
-                        </>
-                    )}
-
-                    <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-lg font-bold text-ink">Data Sources</h3>
-                        {canManageDataSources && (
-                            <button onClick={() => setShowAddDs(true)}
-                                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 text-indigo-500 text-sm font-semibold hover:bg-indigo-500/20 transition-colors">
-                                <Plus className="w-4 h-4" /> Add Source
-                            </button>
-                        )}
-                    </div>
-
-                    {workspace.dataSources.length === 0 ? (
-                        <div className="flex flex-col items-center justify-center py-16 border-2 border-dashed border-glass-border rounded-2xl">
-                            <Database className="w-10 h-10 text-ink-muted mb-3" />
-                            <h4 className="text-sm font-bold text-ink mb-2">No data sources connected</h4>
-                            <p className="text-xs text-ink-muted mb-1 max-w-md text-center">
-                                Data sources connect this workspace to your enterprise graph databases. Once connected, you can configure ontologies, run aggregation, and create views.
-                            </p>
-                            <div className="flex items-center gap-4 mt-4 text-[10px] text-ink-muted">
-                                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">1</span> Add a source</span>
-                                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">2</span> Assign ontology</span>
-                                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">3</span> Run aggregation</span>
-                                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">4</span> Create views</span>
-                            </div>
-                            {canManageDataSources && (
-                                <button onClick={() => setShowAddDs(true)}
-                                    className="flex items-center gap-2 px-4 py-2 mt-5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold">
-                                    <Plus className="w-4 h-4" /> Add First Source
-                                </button>
-                            )}
-                        </div>
-                    ) : (
-                        <>
-                            {/* Hint for first-time users */}
-                            {!selectedDsId && workspace.dataSources.length > 0 && (
-                                <div className="flex items-center gap-2 px-3 py-2 mb-3 rounded-lg bg-indigo-500/5 border border-indigo-500/10 text-xs text-indigo-600 dark:text-indigo-400">
-                                    <HelpCircle className="w-3.5 h-3.5 shrink-0" />
-                                    <span>Click on a data source card to open its detail panel with insights, aggregation settings, and views.</span>
-                                </div>
-                            )}
-
-                            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-                                {workspace.dataSources.map(ds => {
-                                    const onto = ds.ontologyId ? ontologyMap[ds.ontologyId] : undefined
-                                    return (
-                                        <DataSourceGridCard
-                                            key={ds.id}
-                                            ds={ds}
-                                            stats={dsStatsMap[ds.id]}
-                                            providerInfo={dsProviderMap[ds.id]}
-                                            ontologyName={onto?.name}
-                                            ontologyVersion={onto?.version}
-                                            ontologyPublished={onto?.isPublished}
-                                            viewCount={(viewsByDs[ds.id] || []).length}
-                                            isSelected={selectedDsId === ds.id}
-                                            onSelect={() => setSelectedDsId(prev => prev === ds.id ? null : ds.id)}
-                                            onSetPrimary={() => handleSetPrimary(ds.id)}
-                                        />
-                                    )
-                                })}
-                            </div>
-                        </>
-                    )}
-
-                    {/* The trash. Renders nothing when it's empty — it appears only when there
-                        is actually something to undo, and vanishes again once there isn't. */}
-                    {wsId && (
-                        <DeletedDataSources
-                            wsId={wsId}
-                            canManage={canManageDataSources}
-                            refreshKey={trashKey}
-                            onRestore={deletion.restore}
-                            onDeletePermanently={deletion.openPermanent}
-                        />
-                    )}
-                </>
+            {/* ── Overview ─────────────────────────────────── */}
+            {activeTab === 'overview' && (
+                <WorkspaceOverview
+                    workspace={workspace}
+                    views={allWorkspaceViews}
+                    readinessMap={readinessMap}
+                    aggregateStats={aggregateStats}
+                    canManageSources={canManageDataSources}
+                    canManageMembers={canManageMembers}
+                    canAddMembers={canAddMembers}
+                    versioningEnabled={versioningEnabled}
+                    showActivity={!!activityScope}
+                    onGoTo={goTo}
+                    onNewView={openNewView}
+                    onAddSource={canManageDataSources ? () => setShowAddDs(true) : undefined}
+                />
             )}
 
-            {/* ── Profiling Tab ────────────────────────────── */}
-            {activeSection === 'profiling' && (
-                <div className="py-4">
-                    <ProfilingBoard
-                        workspaceId={wsId}
-                        onOpenSource={(row) => {
-                            // Drill into the source the board named, landing on
-                            // its Profiling tab rather than its Overview — the
-                            // reader arrived here asking about movement.
-                            const merged = new URLSearchParams(searchParams)
-                            merged.set('ds', row.data_source_id)
-                            merged.set('dstab', 'profiling')
-                            setSearchParams(merged, { replace: true })
-                        }}
-                    />
-                </div>
-            )}
-
-            {/* ── Views Tab ────────────────────────────────── */}
-            {activeSection === 'views' && (
+            {/* ── Views ────────────────────────────────────── */}
+            {activeTab === 'views' && (
                 <>
-                    <div className="flex items-start gap-3 py-4 mb-2">
-                        <Info className="w-4 h-4 text-cyan-500 shrink-0 mt-0.5" />
-                        <p className="text-sm text-ink-secondary leading-relaxed">
-                            Views are saved visual perspectives on your graph data — like dashboards for your knowledge graph. Each view can display data as a hierarchy, lineage map, context view, or table.
-                            <span className="text-ink-muted"> Filter by data source or search to find specific views. Click any view to open it.</span>
-                        </p>
-                    </div>
+                    <TabIntro>
+                        Saved ways of looking at this workspace’s data — maps, hierarchies and tables. Open one to explore it.
+                    </TabIntro>
                     <WorkspaceViewsSection
                         wsId={wsId!}
                         dataSources={workspace.dataSources}
@@ -730,66 +635,159 @@ export function WorkspaceDetailPage() {
                 </>
             )}
 
-            {/* ── Aggregation Tab ──────────────────────────── */}
-            {activeSection === 'aggregation' && (
+            {/* ── Data: Sources · Data model · Processing · Trends ── */}
+            {activeTab === 'data' && (
                 <>
-                    <div className="flex items-start gap-3 py-4 mb-2">
-                        <Info className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                        <p className="text-sm text-ink-secondary leading-relaxed">
-                            Aggregation materializes lineage edges by traversing your graph and computing transitive relationships.
-                            This pre-computation enables fast lineage queries in views.
-                            <span className="text-ink-muted"> Monitor job progress, configure projection modes, and manage aggregation schedules for each data source below.</span>
-                        </p>
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-5 pb-1">
+                        <Segmented
+                            label="Data"
+                            size="md"
+                            options={dataSections}
+                            value={dataSection}
+                            onChange={v => goTo('data', v)}
+                        />
+                        {dataSection === 'sources' && canManageDataSources && workspace.dataSources.length > 0 && (
+                            <button onClick={() => setShowAddDs(true)}
+                                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-sm font-semibold hover:bg-indigo-500/20 transition-colors">
+                                <Plus className="w-4 h-4" /> Add source
+                            </button>
+                        )}
                     </div>
-                    <WorkspaceAggregationDashboard
-                        dataSources={workspace.dataSources}
-                        readinessMap={readinessMap}
-                        onReaggregate={handleReaggregate}
-                        onPurge={handlePurge}
-                        onReaggregateAll={handleReaggregateAll}
-                    />
+
+                    {dataSection === 'sources' && (
+                        <>
+                            <TabIntro>
+                                Where this workspace’s data comes from. Open a source to see what’s in it and the views built on it.
+                            </TabIntro>
+
+                            {/* Sources waiting to move in, or to leave — what an admin must answer. */}
+                            {canManageMembers && wsId && <TransferRequestsPanel variant="banner" workspaceId={wsId} />}
+
+                            {workspace.dataSources.length === 0 ? (
+                                <div className="rounded-3xl border-2 border-dashed border-glass-border">
+                                    <EmptyState
+                                        icon={Database}
+                                        title="No data connected yet"
+                                        description={canManageDataSources
+                                            ? 'Connect the graph this workspace is about. Next you’ll choose its data model, build its connections and create the first view — the Overview walks you through it.'
+                                            : 'The people who look after this workspace haven’t connected any data yet.'}
+                                        action={canManageDataSources ? { label: 'Connect data', onClick: () => setShowAddDs(true), icon: Plus } : undefined}
+                                    />
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+                                    {workspace.dataSources.map(ds => {
+                                        const onto = ds.ontologyId ? ontologyMap[ds.ontologyId] : undefined
+                                        return (
+                                            <DataSourceGridCard
+                                                key={ds.id}
+                                                ds={ds}
+                                                stats={dsStatsMap[ds.id]}
+                                                providerInfo={dsProviderMap[ds.id]}
+                                                readiness={readinessMap[ds.id]}
+                                                ontologyName={onto?.name}
+                                                ontologyVersion={onto?.version}
+                                                ontologyPublished={onto?.isPublished}
+                                                viewCount={(viewsByDs[ds.id] || []).length}
+                                                isSelected={selectedDsId === ds.id}
+                                                onSelect={() => setSelectedDsId(prev => prev === ds.id ? null : ds.id)}
+                                                onSetPrimary={canManageDataSources ? () => handleSetPrimary(ds.id) : undefined}
+                                            />
+                                        )
+                                    })}
+                                </div>
+                            )}
+
+                            {/* The trash. Renders nothing when it's empty — it appears only when there
+                                is actually something to undo, and vanishes again once there isn't. */}
+                            {wsId && (
+                                <DeletedDataSources
+                                    wsId={wsId}
+                                    canManage={canManageDataSources}
+                                    refreshKey={trashKey}
+                                    onRestore={deletion.restore}
+                                    onDeletePermanently={deletion.openPermanent}
+                                />
+                            )}
+                        </>
+                    )}
+
+                    {dataSection === 'model' && (
+                        <>
+                            <TabIntro>
+                                The kinds of things your data holds and how they relate — and what changed in that model, when.
+                            </TabIntro>
+                            <WorkspaceOntologyTimeline dataSources={workspace.dataSources} ontologyMap={ontologyMap} />
+                        </>
+                    )}
+
+                    {dataSection === 'processing' && (
+                        <>
+                            <TabIntro>
+                                How fresh each source’s connections are. Lineage opens fast once they’re built; views keep working while they refresh.
+                            </TabIntro>
+                            <WorkspaceAggregationDashboard
+                                dataSources={workspace.dataSources}
+                                readinessMap={readinessMap}
+                                canManage={canManageDataSources}
+                                onReaggregate={handleReaggregate}
+                                onPurge={handlePurge}
+                                onReaggregateAll={handleReaggregateAll}
+                            />
+                        </>
+                    )}
+
+                    {dataSection === 'trends' && (
+                        <div className="py-4">
+                            <ProfilingBoard
+                                workspaceId={wsId}
+                                onOpenSource={(row) => {
+                                    // Drill into the source the board named, landing on
+                                    // its Profiling tab rather than its Overview — the
+                                    // reader arrived here asking about movement.
+                                    const merged = new URLSearchParams(searchParams)
+                                    merged.set('ds', row.data_source_id)
+                                    merged.set('dstab', 'profiling')
+                                    setSearchParams(merged, { replace: true })
+                                }}
+                            />
+                        </div>
+                    )}
                 </>
             )}
 
-            {/* ── Ontology Tab ─────────────────────────────── */}
-            {activeSection === 'ontology' && (
+            {/* ── Reviews (merge requests) ────────────────── */}
+            {activeTab === 'reviews' && versioningEnabled && wsId && (
                 <>
-                    <div className="flex items-start gap-3 py-4 mb-2">
-                        <Info className="w-4 h-4 text-violet-500 shrink-0 mt-0.5" />
-                        <p className="text-sm text-ink-secondary leading-relaxed">
-                            Ontologies define the semantic type system — which entity types and relationship types exist in your data.
-                            Each data source can use its own ontology version.
-                            <span className="text-ink-muted"> The timeline below shows all changes across ontologies assigned to this workspace's data sources.</span>
-                        </p>
-                    </div>
-                    <WorkspaceOntologyTimeline dataSources={workspace.dataSources} ontologyMap={ontologyMap} />
-                </>
-            )}
-
-            {/* ── Reviews Tab (merge requests) ────────────── */}
-            {versioningEnabled && activeSection === 'reviews' && wsId && (
-                <>
-                    <div className="flex items-start gap-3 py-4 mb-2">
-                        <Info className="w-4 h-4 text-accent-lineage shrink-0 mt-0.5" />
-                        <p className="text-sm text-ink-secondary leading-relaxed">
-                            Merge requests propose changes to a data source's published graph. Review the itemised
-                            changes, resolve any conflicts, and approve or merge.
-                            <span className="text-ink-muted"> Spans every versioned data source in this workspace.</span>
-                        </p>
-                    </div>
+                    <TabIntro>
+                        Proposed changes to this workspace’s data, waiting to be reviewed, approved and merged.
+                    </TabIntro>
                     <WorkspaceReviewsInbox wsId={wsId} />
                 </>
             )}
 
-            {/* ── Members Tab (RBAC) ──────────────────────── */}
-            {activeSection === 'members' && canAddMembers && wsId && (
+            {/* ── People (RBAC) ───────────────────────────── */}
+            {activeTab === 'members' && canAddMembers && wsId && (
                 <WorkspaceMembers workspaceId={wsId} canManage={canManageMembers} />
             )}
 
-            {activeSection === 'activity' && activityScope && (
+            {activeTab === 'activity' && activityScope && (
                 <div className="py-4">
                     <ActivityExplorer scope={activityScope} />
                 </div>
+            )}
+
+            {/* ── Settings — how the workspace behaves ─────── */}
+            {activeTab === 'settings' && wsId && (
+                <WorkspaceSettingsTab
+                    wsId={wsId}
+                    identityProperty={workspace.identityProperty}
+                    nameProperty={workspace.nameProperty}
+                    canEditIdentity={canManageDataSources}
+                    canEditPolicy={canManageMembers}
+                    versioningEnabled={versioningEnabled}
+                    onSaved={reload}
+                />
             )}
 
             {/* ── Modals ──────────────────────────────────── */}
@@ -892,6 +890,12 @@ export function WorkspaceDetailPage() {
         </PageContainer>
         </div>
     )
+}
+
+
+/** A tab's one plain sentence: what it is for, in the reader's words. */
+function TabIntro({ children }: { children: React.ReactNode }) {
+    return <p className="py-4 text-sm text-ink-secondary max-w-3xl">{children}</p>
 }
 
 

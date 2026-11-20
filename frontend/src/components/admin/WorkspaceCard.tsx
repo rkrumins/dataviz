@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink, Users, Check, Plug, Clock } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { workspaceColor, workspaceMonogram } from '@/lib/workspaceColor'
 import { compact } from '@/lib/formatMetric'
 import type { WorkspaceUsage } from '@/services/contentInsightsService'
 import { WorkspaceUsageLine } from './workspace/WorkspaceUsageLine'
@@ -10,6 +11,8 @@ import { type WorkspaceResponse } from '@/services/workspaceService'
 import { usePermission } from '@/store/auth'
 import { useIntentPrefetch } from '@/hooks/useIntentPrefetch'
 import { WorkspaceHealthBadge, type WorkspaceHealth } from './workspace/WorkspaceHealthBadge'
+import { describeWorkspaceHealth } from './workspace/workspaceHealthStory'
+import { usePersonaMode } from '@/store/persona'
 import { getProviderLogo } from './ProviderLogos'
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -67,21 +70,9 @@ interface WorkspaceCardProps {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const GRADIENT_ACCENTS = [
-    'from-indigo-500 to-violet-500',
-    'from-emerald-500 to-teal-500',
-    'from-violet-500 to-fuchsia-500',
-    'from-amber-500 to-orange-500',
-    'from-rose-500 to-pink-500',
-    'from-cyan-500 to-blue-500',
-]
-
 /** Initials for the workspace tile. "Major Refactor Agg" → "MR". */
 export function monogram(name: string): string {
-    const parts = name.trim().split(/\s+/).filter(Boolean)
-    if (parts.length === 0) return '?'
-    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
-    return (parts[0][0] + parts[1][0]).toUpperCase()
+    return workspaceMonogram(name)
 }
 
 /**
@@ -90,12 +81,11 @@ export function monogram(name: string): string {
  * The accent used to be `GRADIENT_ACCENTS[index % 6]`, so a card's colour came
  * from WHERE IT SAT in the list: re-sort, and every workspace changed colour.
  * Keyed on the id, the colour becomes part of the workspace's identity and you
- * can learn to recognise it.
+ * can learn to recognise it — the same one the dashboard, the workspace page and
+ * every workspace chip use (`lib/workspaceColor`).
  */
 export function accentFor(id: string): string {
-    let hash = 0
-    for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0
-    return GRADIENT_ACCENTS[hash % GRADIENT_ACCENTS.length]
+    return workspaceColor(id).gradient
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -119,6 +109,7 @@ export function WorkspaceCard({
     const [showSources, setShowSources] = useState(false)
     const prefetchHandlers = useIntentPrefetch(onPrefetch)
     const gradient = accentFor(ws.id)
+    const technical = usePersonaMode() === 'technical'
     const { uniqueEntityTypes, uniqueRelationshipTypes, ontologyNames, providerGroups, viewCount } = schemaSummary
     const memberCount = ws.memberCount ?? 0
     // Workspace deletion + set-default both gate on system:admin
@@ -212,7 +203,12 @@ export function WorkspaceCard({
                         {/* The status was a 2px dot with no label, grey on nearly every
                             card. Say what it means. */}
                         <span className="inline-flex items-center gap-1.5 mb-1">
-                            <WorkspaceHealthBadge status={healthStatus || 'unknown'} showLabel />
+                            {/* The word, with its reason on hover — which source, and why. */}
+                            <span title={describeWorkspaceHealth(healthStatus || 'unknown', (ws.dataSources ?? []).map(ds => ({
+                                label: ds.label || 'A data source', aggregationStatus: ds.aggregationStatus,
+                            })), { canManage: false }).detail}>
+                                <WorkspaceHealthBadge status={healthStatus || 'unknown'} showLabel />
+                            </span>
                         </span>
                         {ws.description ? (
                             <p className="text-xs text-ink-muted line-clamp-2">{ws.description}</p>
@@ -227,11 +223,12 @@ export function WorkspaceCard({
             {/* ── At a Glance — stats grid ── */}
             <div className="mx-5 mb-3 grid grid-cols-4 gap-px rounded-lg overflow-hidden border border-glass-border bg-glass-border">
                 {[
-                    { value: dsProviders.length, label: 'Sources', icon: CircleDot, color: 'text-indigo-500' },
-                    { value: stats.nodes > 0 ? compact(stats.nodes) : '\u2014', label: 'Nodes', icon: CircleDot, color: 'text-emerald-500' },
-                    { value: stats.edges > 0 ? compact(stats.edges) : '\u2014', label: 'Edges', icon: ArrowRightLeft, color: 'text-violet-500' },
-                    // The summary's count, so a zero is a real zero rather than "unknown".
+                    // Views first: they are what people open a workspace for. The
+                    // summary's count, so a zero is a real zero rather than "unknown".
                     { value: viewCount, label: 'Views', icon: Eye, color: 'text-cyan-500' },
+                    { value: dsProviders.length, label: 'Sources', icon: CircleDot, color: 'text-indigo-500' },
+                    { value: stats.nodes > 0 ? compact(stats.nodes) : '\u2014', label: technical ? 'Nodes' : 'Things', icon: CircleDot, color: 'text-emerald-500' },
+                    { value: stats.edges > 0 ? compact(stats.edges) : '\u2014', label: technical ? 'Edges' : 'Connections', icon: ArrowRightLeft, color: 'text-violet-500' },
                 ].map(s => (
                     <div key={s.label} className="bg-canvas-elevated p-2 text-center">
                         <div className="text-sm font-bold text-ink">{s.value}</div>

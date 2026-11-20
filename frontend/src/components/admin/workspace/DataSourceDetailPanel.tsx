@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { cn } from '@/lib/utils'
+import { viewTypeLabel } from '@/lib/viewUtils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { SourceProfiling } from '@/components/ingestion/profiling/SourceProfiling'
 import type { DataSourceResponse } from '@/services/workspaceService'
@@ -30,6 +31,7 @@ import type { DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
 import { getProviderLogo } from '../ProviderLogos'
 import { usePermission } from '@/store/auth'
+import { usePersonaMode } from '@/store/persona'
 import { useFeature } from '@/store/features'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
@@ -208,6 +210,8 @@ export function DataSourceDetailPanel({
     const canManageDs = usePermission(
         'workspace:datasource:manage', wsId,
     )
+    const canEditModel = usePermission('workspace:ontology:manage', wsId)
+    const technical = usePersonaMode() === 'technical'
 
     // ── Aggregation tab: pending edits live entirely in local state until the
     //    user clicks Save. This avoids per-keystroke API calls and full-page
@@ -360,27 +364,31 @@ export function DataSourceDetailPanel({
                                 )}
                                 {liveLastAggregatedAt && (
                                     <span className="flex items-center gap-1 text-[10px] text-ink-muted">
-                                        <Clock className="w-3 h-3" /> Aggregated {new Date(liveLastAggregatedAt).toLocaleDateString()}
+                                        <Clock className="w-3 h-3" /> Connections refreshed {new Date(liveLastAggregatedAt).toLocaleDateString()}
                                     </span>
                                 )}
-                                <NodeIdentityBadge value={ds.identityProperty} />
+                                {technical && <NodeIdentityBadge value={ds.identityProperty} />}
                                 <MovedFromChip wsId={wsId} dataSourceId={ds.id} />
                             </div>
 
                             {/* Quick action buttons */}
                             <div className="flex items-center gap-2">
-                                <Link
-                                    to={`/schema?workspaceId=${wsId}&dataSourceId=${ds.id}`}
-                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-500 text-white text-[11px] font-semibold hover:bg-indigo-600 transition-colors"
-                                >
-                                    <ExternalLink className="w-3 h-3" /> Schema Editor
-                                </Link>
+                                {/* What a source is for is its views — that is the way in. Editing its
+                                    data model is for the people who manage the model. */}
                                 <Link
                                     to={`/explorer?workspace=${wsId}&dataSource=${ds.id}`}
-                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-[11px] font-semibold text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-500 text-white text-[11px] font-semibold hover:bg-indigo-600 transition-colors"
                                 >
-                                    <Compass className="w-3 h-3" /> Explorer
+                                    <Compass className="w-3 h-3" /> Explore views
                                 </Link>
+                                {canEditModel && (
+                                    <Link
+                                        to={`/schema?workspaceId=${wsId}&dataSourceId=${ds.id}`}
+                                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-[11px] font-semibold text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                                    >
+                                        <ExternalLink className="w-3 h-3" /> Edit data model
+                                    </Link>
+                                )}
                                 <DataSourceActions
                                     wsId={wsId}
                                     onEdit={startEditing}
@@ -405,8 +413,8 @@ export function DataSourceDetailPanel({
                         {!editing && (
                         <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
                             <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Overview" onClick={() => setActiveTab('insights')} />
-                            <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Aggregation" onClick={() => setActiveTab('aggregation')} />
-                            <TabBtn active={activeTab === 'profiling'} icon={LineChart} label="Profiling" onClick={() => setActiveTab('profiling')} />
+                            <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Processing" onClick={() => setActiveTab('aggregation')} />
+                            <TabBtn active={activeTab === 'profiling'} icon={LineChart} label="Trends" onClick={() => setActiveTab('profiling')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
                             {versioningEnabled && (
                                 <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
@@ -476,7 +484,7 @@ export function DataSourceDetailPanel({
                                 <div className="space-y-3">
                                     <div className="flex items-center justify-between">
                                         <h6 className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">
-                                            Projection Mode
+                                            Where connections are kept
                                         </h6>
                                         {isDirty && (
                                             <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-600 dark:text-amber-400">
@@ -491,11 +499,11 @@ export function DataSourceDetailPanel({
                                         pendingMode === '' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                     )}>
                                         <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === ''}
-                                            onChange={handleSelectInherit} className="mt-1 accent-indigo-500" />
+                                            onChange={handleSelectInherit} disabled={!canManageDs} className="mt-1 accent-indigo-500" />
                                         <div>
-                                            <span className="text-sm font-medium text-ink">Inherit from Provider</span>
+                                            <span className="text-sm font-medium text-ink">The usual place</span>
                                             <span className="inline-flex items-center gap-1 ml-2 px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-500/10 text-emerald-500">DEFAULT</span>
-                                            <p className="text-xs text-ink-muted mt-0.5">Uses the provider's default projection mode</p>
+                                            <p className="text-xs text-ink-muted mt-0.5">Whatever this source’s provider does by default · inherit</p>
                                         </div>
                                     </label>
 
@@ -504,10 +512,10 @@ export function DataSourceDetailPanel({
                                         pendingMode === 'in_source' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                     )}>
                                         <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === 'in_source'}
-                                            onChange={handleSelectInSource} className="mt-1 accent-indigo-500" />
+                                            onChange={handleSelectInSource} disabled={!canManageDs} className="mt-1 accent-indigo-500" />
                                         <div>
-                                            <span className="text-sm font-medium text-ink">In Source</span>
-                                            <p className="text-xs text-ink-muted mt-0.5">Store aggregated edges in the same graph</p>
+                                            <span className="text-sm font-medium text-ink">With the data</span>
+                                            <p className="text-xs text-ink-muted mt-0.5">Kept in the same graph as the data · in source</p>
                                         </div>
                                     </label>
 
@@ -516,13 +524,13 @@ export function DataSourceDetailPanel({
                                         pendingMode === 'dedicated' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                     )}>
                                         <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === 'dedicated'}
-                                            onChange={handleSelectDedicated} className="mt-1 accent-indigo-500" />
+                                            onChange={handleSelectDedicated} disabled={!canManageDs} className="mt-1 accent-indigo-500" />
                                         <div className="flex-1">
-                                            <span className="text-sm font-medium text-ink">Dedicated Graph</span>
-                                            <p className="text-xs text-ink-muted mt-0.5">Store in a separate projection graph for isolation</p>
+                                            <span className="text-sm font-medium text-ink">In a graph of their own</span>
+                                            <p className="text-xs text-ink-muted mt-0.5">A separate graph, kept apart from the data · dedicated</p>
                                             {pendingMode === 'dedicated' && (
                                                 <div className="mt-3 animate-in slide-in-from-top-2 fade-in duration-200">
-                                                    <label className="block text-[11px] font-medium text-ink-secondary mb-1">Dedicated Graph Name</label>
+                                                    <label className="block text-[11px] font-medium text-ink-secondary mb-1">Name of that graph</label>
                                                     <input type="text" value={pendingDedicatedName}
                                                         onChange={e => setPendingDedicatedName(e.target.value)}
                                                         placeholder={`e.g. ${ds.label || ds.catalogItemId}_aggregated`}
@@ -653,7 +661,7 @@ export function DataSourceDetailPanel({
                                                         </div>
                                                     </div>
                                                     <div className="flex items-center gap-2 shrink-0">
-                                                        {view.layoutType && <span className="px-1.5 py-0.5 text-[9px] font-medium rounded bg-black/5 dark:bg-white/5 text-ink-muted">{view.layoutType}</span>}
+                                                        {view.layoutType && <span className="px-1.5 py-0.5 text-[9px] font-medium rounded bg-black/5 dark:bg-white/5 text-ink-muted">{viewTypeLabel(view.layoutType)}</span>}
                                                         <ExternalLink className="w-3 h-3 text-ink-muted opacity-0 group-hover/view:opacity-100 transition-opacity" />
                                                     </div>
                                                 </Link>

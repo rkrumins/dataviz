@@ -1,7 +1,13 @@
 /**
- * WorkspaceAggregationDashboard — Aggregation overview tab for the workspace detail page.
+ * WorkspaceAggregationDashboard — Data → Processing on the workspace page: how fresh
+ * each source's connections (its aggregation) are, in plain words.
  *
- * Shows per-data-source aggregation status with:
+ * It leads with how many sources are up to date, says what each warning means and
+ * what to do about it, and keeps the machinery — the worker fleet (platform admins),
+ * projection modes, identity properties, raw errors — for the Technical view or
+ * behind "Technical details". Rebuild and Clear are for people who manage the data.
+ *
+ * Shows per-data-source status with:
  * - Real-time polling when any job is pending/running
  * - Interactive status filter chips
  * - Inline active-job progress bars
@@ -23,6 +29,9 @@ import { aggregationService, type DataSourceReadinessResponse } from '@/services
 import { AggregationHistory } from '../AggregationHistory'
 import { NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { AggregationFleetPanel } from './AggregationFleetPanel'
+import { Disclosure } from '@/components/ui/Disclosure'
+import { usePersonaMode } from '@/store/persona'
+import { usePermission } from '@/store/auth'
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -35,6 +44,9 @@ interface WorkspaceAggregationDashboardProps {
      *  data source (heals pre-depth-stamp graphs so self-nesting hierarchies
      *  resolve). Optional — the button hides when not provided. */
     onReaggregateAll?: () => Promise<void>
+    /** Rebuild, clear and rebuild-all are for people who manage this workspace's
+     *  data; everyone else reads the state and the history. */
+    canManage?: boolean
 }
 
 type StatusFilter = 'all' | 'ready' | 'running' | 'pending' | 'failed' | 'skipped' | 'none'
@@ -49,15 +61,33 @@ const STATUS_CONFIG: Record<string, {
     bgColor: string
     borderColor: string
 }> = {
-    ready:   { label: 'Ready',       icon: CheckCircle2, dotColor: 'bg-emerald-400',               textColor: 'text-emerald-600 dark:text-emerald-400', bgColor: 'bg-emerald-500/10', borderColor: 'border-emerald-500/20' },
-    running: { label: 'Running',     icon: Loader2,      dotColor: 'bg-indigo-400 animate-pulse',   textColor: 'text-indigo-600 dark:text-indigo-400',   bgColor: 'bg-indigo-500/10',  borderColor: 'border-indigo-500/20' },
-    pending: { label: 'Pending',     icon: Clock,        dotColor: 'bg-amber-400 animate-pulse',    textColor: 'text-amber-600 dark:text-amber-400',     bgColor: 'bg-amber-500/10',   borderColor: 'border-amber-500/20' },
-    failed:  { label: 'Failed',      icon: AlertCircle,  dotColor: 'bg-red-400',                    textColor: 'text-red-600 dark:text-red-400',         bgColor: 'bg-red-500/10',     borderColor: 'border-red-500/20' },
+    ready:   { label: 'Up to date',  icon: CheckCircle2, dotColor: 'bg-emerald-400',               textColor: 'text-emerald-600 dark:text-emerald-400', bgColor: 'bg-emerald-500/10', borderColor: 'border-emerald-500/20' },
+    running: { label: 'Refreshing',  icon: Loader2,      dotColor: 'bg-indigo-400 animate-pulse',   textColor: 'text-indigo-600 dark:text-indigo-400',   bgColor: 'bg-indigo-500/10',  borderColor: 'border-indigo-500/20' },
+    pending: { label: 'Queued',      icon: Clock,        dotColor: 'bg-amber-400 animate-pulse',    textColor: 'text-amber-600 dark:text-amber-400',     bgColor: 'bg-amber-500/10',   borderColor: 'border-amber-500/20' },
+    failed:  { label: 'Didn’t finish', icon: AlertCircle,  dotColor: 'bg-red-400',                    textColor: 'text-red-600 dark:text-red-400',         bgColor: 'bg-red-500/10',     borderColor: 'border-red-500/20' },
     skipped: { label: 'Skipped',     icon: SkipForward,  dotColor: 'bg-gray-400',                   textColor: 'text-ink-muted',                         bgColor: 'bg-gray-500/10',    borderColor: 'border-gray-500/20' },
-    none:    { label: 'Not Started', icon: CircleDot,    dotColor: 'bg-gray-400',                   textColor: 'text-ink-muted',                         bgColor: 'bg-gray-500/10',    borderColor: 'border-gray-500/20' },
+    none:    { label: 'Not built yet', icon: CircleDot,    dotColor: 'bg-gray-400',                   textColor: 'text-ink-muted',                         bgColor: 'bg-gray-500/10',    borderColor: 'border-gray-500/20' },
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────
+
+/** "N of M up to date" as a ring — green when every source is. */
+function ReadyRing({ ready, total }: { ready: number; total: number }) {
+    const r = 22
+    const c = 2 * Math.PI * r
+    const frac = total > 0 ? ready / total : 0
+    return (
+        <div className="relative w-14 h-14 shrink-0" role="img" aria-label={`${ready} of ${total} sources up to date`}>
+            <svg viewBox="0 0 56 56" className="w-14 h-14 -rotate-90">
+                <circle cx="28" cy="28" r={r} fill="none" strokeWidth="6" className="stroke-black/[0.06] dark:stroke-white/[0.08]" />
+                <circle cx="28" cy="28" r={r} fill="none" strokeWidth="6" strokeLinecap="round"
+                    strokeDasharray={c} strokeDashoffset={c * (1 - frac)}
+                    className={cn('transition-[stroke-dashoffset] duration-700', frac === 1 ? 'stroke-emerald-500' : 'stroke-indigo-500')} />
+            </svg>
+            <span className="absolute inset-0 flex items-center justify-center text-xs font-bold tabular-nums text-ink">{ready}/{total}</span>
+        </div>
+    )
+}
 
 function relativeTime(dateStr: string): string {
     const diffMs = Date.now() - new Date(dateStr).getTime()
@@ -89,7 +119,11 @@ export function WorkspaceAggregationDashboard({
     onReaggregate,
     onPurge,
     onReaggregateAll,
+    canManage = true,
 }: WorkspaceAggregationDashboardProps) {
+    const technical = usePersonaMode() === 'technical'
+    // The worker fleet and pipeline defaults are platform operations.
+    const isPlatformAdmin = usePermission('system:admin')
     const [activeFilter, setActiveFilter] = useState<StatusFilter>('all')
     const [purging, setPurging] = useState<string | null>(null)
     const [triggering, setTriggering] = useState<string | null>(null)
@@ -202,45 +236,58 @@ export function WorkspaceAggregationDashboard({
 
     return (
         <div className="space-y-5">
-            {/* ─── Header ───────────────────────────────────────────── */}
-            <div className="flex items-center justify-between gap-3">
-                <h3 className="text-lg font-bold text-ink">Aggregation Overview</h3>
-                <div className="flex items-center gap-3">
-                    {hasActiveJobs && (
-                        <span className="flex items-center gap-1.5 text-[11px] font-medium text-indigo-600 dark:text-indigo-400">
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            Live — polling every 4s
-                        </span>
-                    )}
-                    {/* The page asks to confirm (and why) before anything runs. */}
-                    {onReaggregateAll && rebuildableCount > 0 && (
-                        <button
-                            onClick={handleRebuildAll}
-                            disabled={rebuildingAll}
-                            title={`Re-run aggregation for all ${rebuildableCount} data source(s) in this workspace. Heals graphs materialized before the depth-stamp contract so nested (self-referencing) hierarchies resolve.`}
-                            className={cn(
-                                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-50',
-                                needsRebuildCount > 0
-                                    ? 'border-amber-500/40 text-amber-600 dark:text-amber-400 hover:bg-amber-500/[0.06]'
-                                    : 'border-glass-border text-ink-secondary hover:border-indigo-500/40 hover:text-indigo-600 dark:hover:text-indigo-400',
-                            )}
-                        >
-                            {rebuildingAll
-                                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                : needsRebuildCount > 0 ? <AlertTriangle className="w-3.5 h-3.5" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                            Rebuild all aggregations
-                            {needsRebuildCount > 0 && (
-                                <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9px] font-bold tabular-nums">
-                                    {needsRebuildCount} need it
-                                </span>
-                            )}
-                        </button>
-                    )}
+            {/* ─── Header: how many are up to date, at a glance ────────── */}
+            <div className="flex flex-wrap items-center justify-between gap-4 rounded-3xl border border-glass-border bg-canvas-elevated p-5">
+                <div className="flex items-center gap-4 min-w-0">
+                    <ReadyRing ready={statusCounts.ready || 0} total={totalCount} />
+                    <div className="min-w-0">
+                        <h3 className="text-base font-bold text-ink">
+                            {totalCount === 0 ? 'No sources yet'
+                                : statusCounts.ready === totalCount ? 'All connections are up to date'
+                                : `${statusCounts.ready || 0} of ${totalCount} up to date`}
+                        </h3>
+                        <p className="text-xs text-ink-muted">
+                            {hasActiveJobs
+                                ? <span className="inline-flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400"><Loader2 className="w-3 h-3 animate-spin" /> Refreshing now — this page updates as it goes</span>
+                                : 'Connections are worked out from each source’s data so lineage opens fast.'}
+                        </p>
+                    </div>
                 </div>
+                {/* The page asks to confirm (and why) before anything runs. */}
+                {canManage && onReaggregateAll && rebuildableCount > 0 && (
+                    <button
+                        onClick={handleRebuildAll}
+                        disabled={rebuildingAll}
+                        title={`Rebuild the connections for all ${rebuildableCount} source(s) with a data model, with the current settings.`}
+                        className={cn(
+                            'flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-colors disabled:opacity-50',
+                            needsRebuildCount > 0
+                                ? 'border-amber-500/40 text-amber-600 dark:text-amber-400 hover:bg-amber-500/[0.06]'
+                                : 'border-glass-border text-ink-secondary hover:border-indigo-500/40 hover:text-indigo-600 dark:hover:text-indigo-400',
+                        )}
+                    >
+                        {rebuildingAll
+                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            : needsRebuildCount > 0 ? <AlertTriangle className="w-3.5 h-3.5" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                        Rebuild all
+                        {needsRebuildCount > 0 && (
+                            <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9px] font-bold tabular-nums">
+                                {needsRebuildCount} need it
+                            </span>
+                        )}
+                    </button>
+                )}
             </div>
 
-            {/* ─── Worker fleet + global tuning defaults ─────────────── */}
-            <AggregationFleetPanel />
+            {/* ─── Worker fleet + global tuning: platform operations, tucked away ─── */}
+            {isPlatformAdmin && (
+                <Disclosure
+                    summary={<span className="text-xs font-semibold text-ink-muted">Infrastructure — workers and pipeline defaults</span>}
+                    className="rounded-2xl border border-glass-border px-4 py-3"
+                >
+                    <div className="pt-3"><AggregationFleetPanel /></div>
+                </Disclosure>
+            )}
 
             {/* ─── Summary chips (interactive filters) ──────────────── */}
             <div className="flex flex-wrap items-center gap-2">
@@ -318,14 +365,12 @@ export function WorkspaceAggregationDashboard({
                         return (
                             <div
                                 key={ds.id}
-                                className={cn(
-                                    'border rounded-xl overflow-hidden transition-colors',
-                                    cfg.borderColor,
-                                    'bg-canvas-elevated',
-                                )}
+                                className="relative border border-glass-border rounded-2xl overflow-hidden transition-shadow bg-canvas-elevated hover:shadow-md"
                             >
+                                {/* The status as a slim stripe — the badge says it in words. */}
+                                <span aria-hidden className={cn('absolute inset-y-0 left-0 w-1', cfg.dotColor.replace(' animate-pulse', ''))} />
                                 {/* ── Card Body ────────────────────────────── */}
-                                <div className="p-4 space-y-3">
+                                <div className="p-4 pl-5 space-y-3">
                                     {/* Row 1: Identity + Status */}
                                     <div className="flex items-center gap-3">
                                         <div className={cn(
@@ -347,23 +392,23 @@ export function WorkspaceAggregationDashboard({
                                                     {cfg.label}
                                                 </span>
                                             </div>
-                                            <div className="flex items-center gap-3 mt-0.5 text-[11px] text-ink-muted">
+                                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-0.5 text-[11px] text-ink-muted">
                                                 <span>
                                                     <strong className="text-ink-secondary font-medium">
                                                         {edgeCount.toLocaleString()}
-                                                    </strong>{' '}aggregated edges
+                                                    </strong>{' '}connections built
                                                 </span>
                                                 {lastAgg && (
                                                     <span>
-                                                        Last: {relativeTime(lastAgg)}
+                                                        Refreshed {relativeTime(lastAgg)}
                                                     </span>
                                                 )}
-                                                {ds.projectionMode && ds.projectionMode !== 'in_source' && (
+                                                {technical && ds.projectionMode && ds.projectionMode !== 'in_source' && (
                                                     <span className="px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-600 dark:text-violet-400 text-[9px] font-bold uppercase">
                                                         {ds.projectionMode}
                                                     </span>
                                                 )}
-                                                <NodeIdentityBadge value={ds.identityProperty} />
+                                                {technical && <NodeIdentityBadge value={ds.identityProperty} />}
                                             </div>
                                         </div>
                                     </div>
@@ -381,7 +426,7 @@ export function WorkspaceAggregationDashboard({
                                                     ) : (
                                                         <Clock className="w-3 h-3" />
                                                     )}
-                                                    {status === 'running' ? stage.label : 'Job queued'}
+                                                    {status === 'running' ? stage.label : 'Waiting to start'}
                                                     {status === 'running' && stage.position && (
                                                         <span className="opacity-60 tabular-nums">{`(${stage.position})`}</span>
                                                     )}
@@ -407,10 +452,10 @@ export function WorkspaceAggregationDashboard({
                                                 counters and they stop moving when
                                                 the extract scan ends. */}
                                             {(stage.detail ?? (activeJob.totalEdges > 0 && activeJob.processedEdges > 0
-                                                ? `${activeJob.processedEdges.toLocaleString()} / ${activeJob.totalEdges.toLocaleString()} lineage edges scanned`
+                                                ? `${activeJob.processedEdges.toLocaleString()} / ${activeJob.totalEdges.toLocaleString()} connections scanned`
                                                 : null)) && (
                                                 <div className="text-[10px] text-ink-muted">
-                                                    {stage.detail ?? `${activeJob.processedEdges.toLocaleString()} / ${activeJob.totalEdges.toLocaleString()} lineage edges scanned`}
+                                                    {stage.detail ?? `${activeJob.processedEdges.toLocaleString()} / ${activeJob.totalEdges.toLocaleString()} connections scanned`}
                                                 </div>
                                             )}
                                         </div>
@@ -439,10 +484,10 @@ export function WorkspaceAggregationDashboard({
                                                         : ''}
                                                 </p>
                                                 <p className="text-[11px] text-red-600/90 dark:text-red-400/90">
-                                                    Aggregation finished, but this source's rolled-up
-                                                    connections are still catching up, so lineage may
-                                                    look incomplete. Re-aggregating will not fix it —
-                                                    check version control for this source.
+                                                    The refresh finished, but this source’s connections
+                                                    are still catching up with its latest published
+                                                    changes, so lineage may look incomplete. Rebuilding
+                                                    will not fix it — check this source’s version history.
                                                 </p>
                                             </div>
                                         </div>
@@ -453,7 +498,7 @@ export function WorkspaceAggregationDashboard({
                                         <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.06]">
                                             <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
                                             <p className="text-[11px] text-amber-600 dark:text-amber-400 font-medium">
-                                                Drift detected — source data has changed since last aggregation. Re-trigger to reconcile.
+                                                The data changed since these connections were built. Rebuild to bring them up to date.
                                             </p>
                                         </div>
                                     )}
@@ -464,25 +509,39 @@ export function WorkspaceAggregationDashboard({
                                         <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.06]">
                                             <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
                                             <p className="text-[11px] text-amber-600 dark:text-amber-400 font-medium">
-                                                Aggregation predates depth stamps — nested hierarchies (e.g. a type that
-                                                contains itself) won't fully resolve. Re-aggregate to rebuild with
-                                                depth-accurate roll-up.
+                                                Built the old way — things that contain things of their own kind (a
+                                                folder inside a folder) won’t nest fully. Rebuild to fix it.
                                             </p>
                                         </div>
                                     )}
 
                                     {/* Failed error */}
-                                    {status === 'failed' && readiness?.activeJob?.errorMessage && (
+                                    {status === 'failed' && (
                                         <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-red-500/20 bg-red-500/[0.06]">
                                             <XCircle className="w-3.5 h-3.5 text-red-500 flex-shrink-0 mt-0.5" />
-                                            <p className="text-[11px] text-red-600 dark:text-red-400 font-mono break-all">
-                                                {readiness.activeJob.errorMessage}
-                                            </p>
+                                            <div className="min-w-0 flex-1">
+                                                <p className="text-[11px] font-semibold text-red-600 dark:text-red-400">
+                                                    The last refresh didn’t finish, so some connections may be missing.
+                                                    {canManage ? ' Rebuild to try again.' : ' The people who manage this workspace’s data can rebuild it.'}
+                                                </p>
+                                                {readiness?.activeJob?.errorMessage && (
+                                                    <Disclosure
+                                                        defaultOpen={technical}
+                                                        summary={<span className="text-[11px] text-red-600/80 dark:text-red-400/80">Technical details</span>}
+                                                        className="mt-1"
+                                                    >
+                                                        <p className="mt-1 text-[11px] text-red-600 dark:text-red-400 font-mono break-all">
+                                                            {readiness.activeJob.errorMessage}
+                                                        </p>
+                                                    </Disclosure>
+                                                )}
+                                            </div>
                                         </div>
                                     )}
 
                                     {/* Actions */}
                                     <div className="flex items-center gap-2 pt-1">
+                                        {canManage && (<>
                                         <button
                                             onClick={() => handleReaggregate(ds)}
                                             disabled={isTriggering || status === 'running' || status === 'pending'}
@@ -498,10 +557,10 @@ export function WorkspaceAggregationDashboard({
                                             ) : (
                                                 <Settings2 className="w-3.5 h-3.5" />
                                             )}
-                                            {isTriggering ? 'Triggering...' : (status === 'running' || status === 'pending') ? 'Job Active' : 'Re-trigger'}
+                                            {isTriggering ? 'Starting…' : (status === 'running' || status === 'pending') ? 'Refreshing…' : 'Rebuild'}
                                         </button>
 
-                                        {status === 'ready' && (
+                                        {status === 'ready' && technical && (
                                             <button
                                                 onClick={() => handlePurge(ds)}
                                                 disabled={isPurging}
@@ -510,9 +569,10 @@ export function WorkspaceAggregationDashboard({
                                                 {isPurging
                                                     ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                                     : <Trash2 className="w-3.5 h-3.5" />}
-                                                Purge
+                                                Clear connections
                                             </button>
                                         )}
+                                        </>)}
 
                                         {/* Expand/collapse history toggle */}
                                         <button
@@ -520,7 +580,7 @@ export function WorkspaceAggregationDashboard({
                                             className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
                                         >
                                             <RefreshCw className={cn('w-3 h-3', isExpanded && 'text-indigo-500')} />
-                                            {isExpanded ? 'Hide History' : 'Job History'}
+                                            {isExpanded ? 'Hide history' : 'History'}
                                         </button>
                                     </div>
                                 </div>

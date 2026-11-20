@@ -58,8 +58,8 @@ export function WorkspaceOntologyTimeline({ dataSources, ontologyMap }: Workspac
         return (
             <div className="py-16 text-center border-2 border-dashed border-glass-border rounded-2xl">
                 <GitBranch className="w-10 h-10 mx-auto text-ink-muted mb-3 opacity-30" />
-                <h4 className="text-sm font-bold text-ink mb-1">No ontologies assigned</h4>
-                <p className="text-xs text-ink-muted">Assign ontologies to data sources to track semantic changes.</p>
+                <h4 className="text-sm font-bold text-ink mb-1">No data model chosen yet</h4>
+                <p className="text-xs text-ink-muted">Once a source has a data model (an ontology), every change to it shows here.</p>
             </div>
         )
     }
@@ -75,7 +75,7 @@ export function WorkspaceOntologyTimeline({ dataSources, ontologyMap }: Workspac
 
     return (
         <div className="space-y-6">
-            <h3 className="text-lg font-bold text-ink">Ontology Change Timeline</h3>
+            <h3 className="text-lg font-bold text-ink">What changed in your data model</h3>
 
             {dsWithOntology.map(ds => {
                 const ontology = ontologyMap[ds.ontologyId!]
@@ -98,7 +98,7 @@ export function WorkspaceOntologyTimeline({ dataSources, ontologyMap }: Workspac
 
                         {/* Timeline */}
                         {entries.length === 0 ? (
-                            <p className="ml-6 text-xs text-ink-muted">No audit history available.</p>
+                            <p className="ml-6 text-xs text-ink-muted">No changes recorded yet.</p>
                         ) : (
                             <div className="ml-2 border-l-2 border-glass-border pl-4 space-y-3">
                                 {entries.map(entry => (

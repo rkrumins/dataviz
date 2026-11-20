@@ -699,7 +699,7 @@ export default function WorkspaceViewsSection({
                     </Link>
                     {importEnabled && (
                         <button
-                            onClick={() => openViewEditor(undefined, { journey: 'import' })}
+                            onClick={() => openViewEditor(undefined, { journey: 'import', workspaceId: wsId })}
                             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-glass-border text-ink-muted hover:text-ink hover:border-indigo-500/30 text-sm font-medium transition-colors"
                             title="Import a view exported from another environment"
                         >
@@ -707,7 +707,7 @@ export default function WorkspaceViewsSection({
                         </button>
                     )}
                     <button
-                        onClick={() => openViewEditor()}
+                        onClick={() => openViewEditor(undefined, { workspaceId: wsId })}
                         className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors"
                     >
                         <Plus className="w-4 h-4" /> New view
@@ -879,7 +879,7 @@ export default function WorkspaceViewsSection({
                         </button>
                     ) : (
                         <button
-                            onClick={() => openViewEditor()}
+                            onClick={() => openViewEditor(undefined, { workspaceId: wsId })}
                             className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors"
                         >
                             <Plus className="w-4 h-4" /> New view

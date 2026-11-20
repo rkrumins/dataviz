@@ -184,11 +184,56 @@ TOURS.push(
       },
       {
         title: 'Inside a workspace',
-        body: 'Open any workspace to manage its **data sources**, **views**, **ontology**, **members**, and **reviews** — each on its own tab.',
+        body: 'Open any workspace and it starts on its **Overview**: what needs you, the views you use, and the workspace at a glance. Its **views**, **data**, **reviews** and **people** each have a tab.',
       },
       {
         title: "That's workspaces",
         body: 'With a workspace in place, your team has an isolated home to explore lineage together. Open **Help** to replay any tour.',
+      },
+    ],
+  },
+  {
+    id: 'workspace-detail',
+    title: 'Find your way around a workspace',
+    description: 'What a workspace shows you first, and where everything else lives.',
+    icon: Boxes,
+    estimate: '1 min',
+    // Lives on /workspaces/:wsId, which has no static path to navigate to. Offered
+    // from the workspace's own header, and from Help while you're under /workspaces/.
+    contextual: true,
+    contextPathPrefix: '/workspaces/',
+    steps: [
+      {
+        title: 'A workspace, at a glance',
+        body: 'Each workspace opens on its **Overview** — built for using it, not configuring it. Leave any time with **Esc**.',
+      },
+      {
+        target: '[data-tour="workspace-health"]',
+        placement: 'bottom',
+        title: 'Can I use it right now?',
+        body: 'Its health, said as a sentence. If something needs fixing and you can fix it, the link takes you straight there.',
+      },
+      {
+        target: '[data-tour="workspace-actions"]',
+        placement: 'bottom',
+        title: 'The way in',
+        body: '**Explore views** opens everything built here. If you can create views, **New view** starts one in this workspace.',
+      },
+      {
+        target: '[data-tour="workspace-attention"]',
+        placement: 'bottom',
+        title: 'What needs you',
+        body: 'Reviews asking for you, people asking to join, a source that needs a look — only what is yours to act on.',
+      },
+      {
+        target: '[data-tour="workspace-tabs"]',
+        placement: 'bottom',
+        title: 'Everything else',
+        body: '**Views** to browse, **Data** for where it comes from and how fresh it is, **Reviews** for proposed changes — and, for the people who run it, **People** and **Settings**.',
+      },
+      {
+        title: 'Business or Technical',
+        body: 'Want identifiers, projection modes and raw errors? Switch to the **Technical** view at the top of the app — the same page, with every detail showing.',
       },
     ],
   },
