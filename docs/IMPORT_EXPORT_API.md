@@ -194,12 +194,23 @@ What the export holds:
 | `asOfSeq` | The graph as it was at a past revision |
 | `viewId` | Only a view's entities: what it places, with their containment descendants. An edge only when both its ends are in |
 | `ids`, `types` | Comma-separated entity ids or urns, and entity types: only those. An edge only when both its ends are kept |
+| `withChildren` | With `ids`: everything inside those entities too, down the ontology's containment, at every level |
 | `props` | Comma-separated property names to add as empty `prop.<name>` columns to fill |
 | `filename`, `idempotencyKey` | The download's name (no extension); a key that makes the request safe to send again |
 
 `GET …/exports/plan`, with the same parameters, says first how many nodes and edges the file
 would hold, and whether an Excel sheet can hold them (1,048,575 rows). `GET …/exports/stream`
 streams the same file as it is read, with no job: it doesn't resume. An export can be up to 50 GB.
+
+More ids than a URL holds go in the body instead, `{"ids": [...]}`, on `POST …/exports` and on
+`POST …/exports/plan` (the plan's other parameters stay in the query). Entities and everything
+inside them, to edit and import back into a draft:
+
+```bash
+curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/exports?format=xlsx&branchId=$DRAFT&withChildren=true" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"ids": ["urn:li:container:sales", "urn:li:container:finance"]}'
+```
 
 **The columns** are the same in every format: a CSV, TSV or Excel row, an NDJSON line or a JSON
 object, one per node or edge. CSV and TSV files start with a UTF-8 byte-order mark.

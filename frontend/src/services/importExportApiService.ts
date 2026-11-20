@@ -670,8 +670,9 @@ export interface ExportPlan {
 
 /** Which data an export reads. A version-controlled data source exports from its versioned graph
  *  (`graphId`): published, a draft (`branchId`), Published as it was at a past revision
- *  (`asOfSeq`), or one view's entities (`viewId`). One without version control (`graphId` null)
- *  exports its whole live graph, a cold copy. */
+ *  (`asOfSeq`), one view's entities (`viewId`), or chosen entities (`ids`: entity ids, URNs, or
+ *  `gv:<entity id>` as the canvas names them), with everything inside them when `withChildren`.
+ *  One without version control (`graphId` null) exports its whole live graph, a cold copy. */
 export interface ExportTarget {
   wsId: string
   dataSourceId: string
@@ -679,6 +680,8 @@ export interface ExportTarget {
   viewId?: string
   branchId?: string
   asOfSeq?: number
+  ids?: string[]
+  withChildren?: boolean
 }
 
 function exportQuery(target: ExportTarget, format: ImportFormat, extra: Record<string, string | undefined> = {}): string {
@@ -687,8 +690,16 @@ function exportQuery(target: ExportTarget, format: ImportFormat, extra: Record<s
   if (target.graphId && target.viewId) q.set('viewId', target.viewId)
   if (target.graphId && target.branchId) q.set('branchId', target.branchId)
   else if (target.graphId && target.asOfSeq != null) q.set('asOfSeq', String(target.asOfSeq))
+  if (target.graphId && target.ids?.length && target.withChildren) q.set('withChildren', 'true')
   for (const [k, v] of Object.entries(extra)) if (v) q.set(k, v)
   return q.toString()
+}
+
+/** The chosen entities travel in the body: there can be more than a URL holds. */
+function selectionBody(target: ExportTarget): RequestInit {
+  return target.graphId && target.ids?.length
+    ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: target.ids }) }
+    : {}
 }
 
 function exportBase(target: ExportTarget): string {
@@ -698,7 +709,9 @@ function exportBase(target: ExportTarget): string {
 }
 
 export function planExport(target: ExportTarget, format: ImportFormat): Promise<ExportPlan> {
-  return authFetch<ExportPlan>(`${exportBase(target)}/plan?${exportQuery(target, format)}`)
+  const body = selectionBody(target)
+  return authFetch<ExportPlan>(`${exportBase(target)}/plan?${exportQuery(target, format)}`,
+    body.body ? { method: 'POST', ...body } : undefined)
 }
 
 export interface CreateExportResult {
@@ -716,7 +729,7 @@ export function createExport(
   return authFetch<CreateExportResult>(`${exportBase(target)}?${exportQuery(target, format, {
     props: opts.props?.length ? opts.props.join(',') : undefined,
     filename: opts.filename,
-  })}`, { method: 'POST' })
+  })}`, { method: 'POST', ...selectionBody(target) })
 }
 
 /** Stop an export that hasn't ended: its creator may, or a manager. Answers with its job, wherever

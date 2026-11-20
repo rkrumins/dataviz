@@ -154,10 +154,11 @@ and where it goes.
    only.
 3. Look at the header: it now shows **Exit Trace** and a **Depth** chip, and a
    bar along the bottom of the canvas reads **Tracing** with the entity's name
-   and its upstream and downstream counts.
+   and its upstream and downstream counts. A trace opens one hop each way.
 4. Click **Depth**. In **Trace settings**, drag **Upstream** or **Downstream**,
    or pick a preset: **Direct** (one hop each way), **Nearby** (five hops) or
-   **All hops**. The highlighted chain shrinks or grows straight away.
+   **All hops**. The highlighted chain shrinks or grows straight away. **Make
+   this my default** opens every new trace at the depth on screen.
 5. Click **Exit Trace** when you're done.
 
 > **Tip:** Two shortcuts start the same trace: right-click an entity and

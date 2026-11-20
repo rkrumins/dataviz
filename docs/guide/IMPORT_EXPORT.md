@@ -312,6 +312,21 @@ An export can always be brought back in through Import later, so it doubles
 as a safety net before a big change and as a way to work with your data
 outside {brand}.
 
+### Exporting part of the canvas to edit
+
+To work on a few entities and everything inside them, select them on the
+canvas (Cmd- or Ctrl-click each) and choose **Export…** on the selection bar,
+or right-click one and choose **Export with children…**. The **Export data**
+dialog opens on just them: the file holds what you selected, everything inside
+it at every level, and the relationships among them, nothing else.
+
+Edit the file, then switch to Edit mode and use **Import** to bring it back.
+Each row finds its entity again by its `entity_id`, only the cells you changed
+are applied, and a cell someone else changed since you exported is refused
+with the reason, as for any import ([Editing an export offline](#editing-an-export-offline)).
+Export from **My working branch** when you are in a draft, so the file starts
+from what you see.
+
 ### Data sources without version control
 
 Export works here too: it reads the data source's graph as it stands — every

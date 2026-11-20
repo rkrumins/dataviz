@@ -14,6 +14,8 @@
  *   - an export too large for Excel says so and offers CSV, which then exports;
  *   - a data source without version control exports its live graph, streamed, with no view or
  *     version to choose, in view mode as in edit mode;
+ *   - entities selected on the canvas export alone, with everything inside them, named for the
+ *     selection, and the dialog says how to bring the edited file back; none of them there says so;
  *   - new property columns are offered only for the spreadsheet formats;
  *   - a failure says why and can be retried.
  */
@@ -299,6 +301,34 @@ describe('ExportDialog', () => {
     expect(url.pathname).toBe('/api/v1/ws1/graph/export/stream')
     expect(url.searchParams.get('dataSourceId')).toBe('ds1')
     expect(screen.getByText(/about 1,200 entities/)).toBeInTheDocument()
+  })
+
+  it('exports what was selected on the canvas, with everything inside it, to edit and import back', async () => {
+    vi.mocked(planExport).mockResolvedValue(plan())
+    open({ branchId: 'br1', selected: ['urn:a', 'gv:e2'] })
+    expect(screen.getByText('2 selected entities')).toBeInTheDocument()
+    expect(screen.getByText(/With everything inside them/)).toBeInTheDocument()
+    expect(screen.queryByText('This view')).not.toBeInTheDocument()
+    expect(screen.queryByText('Whole data source')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Export CSV/ }))
+
+    await screen.findByText('Your download has started')
+    const target = { wsId: 'ws1', dataSourceId: 'ds1', graphId: 'g1', viewId: undefined, branchId: 'br1',
+                     ids: ['urn:a', 'gv:e2'], withChildren: true }
+    expect(planExport).toHaveBeenCalledWith(target, 'csv')
+    expect(createExport).toHaveBeenCalledWith(target, 'csv', { props: [], filename: 'Finance-DWH-selection-draft' })
+    expect(screen.getByText(/use Import in Edit mode to bring your changes back/)).toBeInTheDocument()
+  })
+
+  it('says when none of the selection is there to export', async () => {
+    vi.mocked(planExport).mockResolvedValue(plan({ nodes: 0, edges: 0, empty: true }))
+    open({ branchId: 'br1', selected: ['urn:gone'] })
+    expect(screen.getByText('The selected entity')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Export CSV/ }))
+
+    await screen.findByText('Nothing to export')
+    expect(screen.getByText('None of what you selected is in your draft, so there is nothing to export.')).toBeInTheDocument()
+    expect(createExport).not.toHaveBeenCalled()
   })
 
   it('offers new property columns only for spreadsheets, and sends them', async () => {

@@ -226,7 +226,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
     ),
     # A dry run checks a file against the graph and writes nothing; so does resolving identities.
     **_entries("versioning", RESOURCE, "validate_import", "create_export", "resolve_identities",
-               reads_only=True),
+               "plan_export_of_selection", reads_only=True),
 
     # ── Data sources: their state, their jobs, and change signals ────
     # Not here: anything on the Ingestion cockpit's any-workspace gate

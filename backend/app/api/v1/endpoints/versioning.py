@@ -5075,6 +5075,12 @@ class CreateExportResponse(_ApiModel):
     status: str
 
 
+class ExportSelectionBody(_ApiModel):
+    """The entities an export holds, sent in the body when there are too many for a URL: entity
+    ids, URNs, or ``gv:<entity id>`` (as the canvas names a node without a URN)."""
+    ids: List[str] = Field(default_factory=list, max_length=50_000)
+
+
 @router.post("/graphs/{graph_id}/exports", response_model=CreateExportResponse, status_code=202,
              dependencies=[Depends(_GATE_GRAPH_EXPORT)])
 async def create_export(
@@ -5086,10 +5092,13 @@ async def create_export(
     props: Optional[str] = Query(None, description="Comma-separated property names to add as empty columns to fill"),
     ids: Optional[str] = Query(None, description="Comma-separated entity_id/urn set — export only these entities"),
     types: Optional[str] = Query(None, description="Comma-separated entity types — export only these"),
+    with_children: bool = Query(False, alias="withChildren", description=(
+        "With ``ids``: every entity inside them (down containment edges) comes too")),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey", description=(
         "Makes the request safe to send again: the same key, from the same caller, answers "
         "with the job it started")),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
+    selection: Optional[ExportSelectionBody] = None,
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     viewer: Viewer = Depends(viewer_ctx),
@@ -5111,6 +5120,10 @@ async def create_export(
     _split = lambda v: [x.strip() for x in (v or "").split(",") if x.strip()]  # noqa: E731
     await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
                                user=user, claims=claims, session=session, svc=svc)
+    select_ids = _split(ids) + (selection.ids if selection else [])
+    # The containment the export follows from the selection, resolved now: the job walks it.
+    containment = (await _live_containment_map(session, ws_id, meta.get("data_source_id"))
+                   if with_children and select_ids else None)
     key = _callers_key(user, idempotency_key)
     job = await _job_for_key(ie, graph_id, key, "export")
     if job is None:
@@ -5120,8 +5133,8 @@ async def create_export(
                     workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                     actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
                     branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
-                    select_ids=_split(ids), select_types=_split(types), idempotency_key=key,
-                    file_name=download_name(filename, format) if filename else None)
+                    select_ids=select_ids, select_types=_split(types), select_children=containment,
+                    idempotency_key=key, file_name=download_name(filename, format) if filename else None)
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
             job = await _job_for_key(ie, graph_id, key, "export")
@@ -5172,13 +5185,14 @@ async def _check_export_access(
 
 async def _export_selection(
     ws_id: str, graph_id: str, meta: dict, *, branch_id: Optional[str], as_of_seq: Optional[int],
-    view_id: Optional[str], ids: Optional[str], types: Optional[str], viewer: Viewer, user: User,
+    view_id: Optional[str], ids: List[str], types: Optional[str], viewer: Viewer, user: User,
     claims: PermissionClaims, session: AsyncSession, svc: GraphVersioningService,
-    budget_s: Optional[float] = None,
+    budget_s: Optional[float] = None, with_children: bool = False,
 ):
     """The snapshot an export reads and the selection it keeps, with what the view contributed.
-    Given ``budget_s`` (a plan's), a view whose entities take longer than that to find leaves the
-    selection ``None``, and what the view holds unknown."""
+    ``with_children``: the entities inside ``ids`` (down containment edges) are kept too.
+    Given ``budget_s`` (a plan's), a view whose entities take longer than that to find, or a
+    selection whose children do, leaves the selection ``None``, and what it holds unknown."""
     from backend.app.services.versioning.import_export import stream
     from backend.app.services.versioning.import_export.snapshot import open_snapshot
 
@@ -5199,7 +5213,13 @@ async def _export_selection(
                 return snap, None, view
             keep = found["keep"]
             view.update(placements=found["placed"], found=found["found"], entities=len(keep))
-    selection = stream.Selection.of(keep=keep, ids=_split_list(ids), types=_split_list(types))
+    if with_children and ids:
+        containment = await _live_containment_map(session, ws_id, meta.get("data_source_id"))
+        expanded = await stream.with_children(snap, ids, containment, budget_s=budget_s)
+        if expanded is None:
+            return snap, None, view
+        ids = list(expanded)
+    selection = stream.Selection.of(keep=keep, ids=ids, types=_split_list(types))
     return snap, selection, view
 
 
@@ -5212,6 +5232,7 @@ async def plan_export(
     branch_id: Optional[str] = Query(None, alias="branchId"),
     ids: Optional[str] = Query(None),
     types: Optional[str] = Query(None),
+    with_children: bool = Query(False, alias="withChildren"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     viewer: Viewer = Depends(viewer_ctx),
@@ -5225,6 +5246,46 @@ async def plan_export(
     ``GRAPH_EXPORT_PLAN_BUDGET_SECS`` whatever the graph's size, history or shape (a fork, a draft,
     a past revision, a view): finding the view's entities and counting share it, and what isn't
     known by then is ``None``."""
+    return await _plan_export(
+        ws_id, graph_id, meta, format=format, as_of_seq=as_of_seq, view_id=view_id,
+        branch_id=branch_id, ids=_split_list(ids), types=types, with_children=with_children,
+        viewer=viewer, user=user, claims=claims, session=session, svc=svc)
+
+
+@router.post("/graphs/{graph_id}/exports/plan", dependencies=[Depends(_GATE_GRAPH_EXPORT)])
+async def plan_export_of_selection(
+    ws_id: str, graph_id: str,
+    selection: ExportSelectionBody,
+    format: str = Query("ndjson"),
+    as_of_seq: Optional[int] = Query(None, alias="asOfSeq"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    ids: Optional[str] = Query(None),
+    types: Optional[str] = Query(None),
+    with_children: bool = Query(False, alias="withChildren"),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """:func:`plan_export` for a selection sent in the body (``ids`` with those in the query):
+    one with more entities than a URL holds."""
+    return await _plan_export(
+        ws_id, graph_id, meta, format=format, as_of_seq=as_of_seq, view_id=view_id,
+        branch_id=branch_id, ids=_split_list(ids) + selection.ids, types=types,
+        with_children=with_children, viewer=viewer, user=user, claims=claims, session=session,
+        svc=svc)
+
+
+async def _plan_export(
+    ws_id: str, graph_id: str, meta: dict, *, format: str, as_of_seq: Optional[int],
+    view_id: Optional[str], branch_id: Optional[str], ids: List[str], types: Optional[str],
+    with_children: bool, viewer: Viewer, user: User, claims: PermissionClaims,
+    session: AsyncSession, svc: GraphVersioningService,
+) -> Dict[str, Any]:
+    """The answer of :func:`plan_export` and :func:`plan_export_of_selection`."""
     from backend.app.api.v1.endpoints.graph_export import excel_limit, export_format
     from backend.app.services.versioning.import_export import stream
     fmt = export_format(format)
@@ -5233,7 +5294,7 @@ async def plan_export(
     snap, selection, view = await _export_selection(
         ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
         types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc,
-        budget_s=stream.PLAN_BUDGET_S)
+        budget_s=stream.PLAN_BUDGET_S, with_children=with_children)
     counts = ({"nodes": None, "edges": None, "exact": False, "seen": 0} if selection is None
               else await stream.count(snap, selection, budget_s=until - clock()))
     if counts["exact"]:
@@ -5255,6 +5316,7 @@ async def stream_export(
     props: Optional[str] = Query(None, description="Comma-separated property names to add as empty columns to fill"),
     ids: Optional[str] = Query(None),
     types: Optional[str] = Query(None),
+    with_children: bool = Query(False, alias="withChildren"),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -5274,8 +5336,9 @@ async def stream_export(
     from backend.app.services.versioning.import_export import stream
     fmt = export_format(format)
     snap, selection, _view = await _export_selection(
-        ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
-        types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc)
+        ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id,
+        ids=_split_list(ids), types=types, viewer=viewer, user=user, claims=claims, session=session,
+        svc=svc, with_children=with_children)
     turn = await take_turn()
     try:
         columns = await xlsx_columns(stream.record_pages(snap, selection), fmt, _split_list(props))

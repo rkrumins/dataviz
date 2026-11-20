@@ -684,6 +684,7 @@ class ImportExportService:
         extra_props: Optional[List[str]] = None,
         select_ids: Optional[List[str]] = None,
         select_types: Optional[List[str]] = None,
+        select_children: Optional[Dict[str, bool]] = None,
         idempotency_key: Optional[str] = None,
         package: Optional[Dict[str, Any]] = None,
         file_name: Optional[str] = None,
@@ -693,9 +694,11 @@ class ImportExportService:
         ``branch_id`` exports that working branch's composed state (main + committed + draft),
         defaulting to published main. Export options (``props``/``ids``/``types``) ride in
         ``field_scope``: ``extra_props`` = empty columns to add; ``select_ids``/``select_types`` =
-        row-scope to just those entities / entity types. ``package`` makes the job a view package's
-        (view_transfer.package): the views' file is built from the versions sealed for it, then the
-        data is written into the package as it streams. ``file_name`` names the download."""
+        row-scope to just those entities / entity types; ``select_children`` (``{containment type:
+        child is source}``) adds every entity inside the selected ones. ``package`` makes the job a
+        view package's (view_transfer.package): the views' file is built from the versions sealed
+        for it, then the data is written into the package as it streams. ``file_name`` names the
+        download."""
         # Who started it: theirs to cancel (cancel_export).
         options: Dict[str, Any] = {"actor": actor}
         if package:
@@ -708,6 +711,9 @@ class ImportExportService:
             options["ids"] = select_ids
         if select_types:
             options["types"] = select_types
+        if select_ids and select_children is not None:
+            options["children"] = True
+            options["containment"] = select_children
         async with db.graphver_session() as s:
             await self._lock_in_workspace(s, graph_id, workspace_id)
             job = JobORM(

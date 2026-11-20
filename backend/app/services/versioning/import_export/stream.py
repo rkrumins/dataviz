@@ -122,6 +122,25 @@ async def resolve_placements(snap: Snapshot, keys: Iterable[str]) -> Dict[str, s
     return {**found, **{k: eid for k, eid in rest.items() if eid in live}}
 
 
+async def with_children(snap: Snapshot, ids: Iterable[str], containment: Dict[str, bool], *,
+                        budget_s: Optional[float] = None) -> Optional[Set[str]]:
+    """``ids`` (entity ids, URNs, or ``gv:<entity id>``) as entity ids, with every node inside
+    them down live containment edges. ``containment`` is ``{TYPE: child is source}``. Given
+    ``budget_s`` (a plan's), ``None`` when that takes longer (a selection holding a large
+    subtree)."""
+    deadline = asyncio.timeout(budget_s)
+    try:
+        async with deadline:
+            roots = set((await resolve_placements(snap, ids)).values())
+            types = {str(t).upper() for t in containment}
+            upward = {str(t).upper() for t, is_source in containment.items() if is_source}
+            return roots | await snap.containment_descendants(roots, types, upward)
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        return None
+
+
 async def view_entities(snap: Snapshot, scope: Dict[str, Any], *,
                         budget_s: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """A view's entities: every node it places, and the containment descendants of each placement

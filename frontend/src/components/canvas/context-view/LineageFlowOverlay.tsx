@@ -45,6 +45,7 @@ import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { OFF_CANVAS_STUB_WIDTH, portalLabel } from './ghostCues'
 import { OffCanvasStub } from './OffCanvasStub'
 import { unitNoun } from './connections/connectionUnits'
+import { lineStrokeWidth, type LineState } from './lineWeight'
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import { usePreferencesStore, type LineagePortSides } from '@/store/preferences'
 
@@ -232,6 +233,7 @@ export function LineageFlowOverlay({
   const tints = useLineageDirectionColors()
   // Lines that point back, in the reader's alert colour — or null, not marked.
   const backPointerColor = usePreferencesStore((s) => (s.highlightBackPointers ? s.backPointerColor || '#ef4444' : null))
+  const lineWeight = usePreferencesStore((s) => s.lineWeight) ?? 'regular'
   // Overflow indicators — badges at top/bottom of column gutters for off-screen connections
   const [overflowBadges, setOverflowBadges] = useState<OverflowBadge[]>([])
   // Trailing edge stubs — partial curves from visible nodes toward container boundary
@@ -599,7 +601,8 @@ export function LineageFlowOverlay({
         baseStrokeWidth = 2.2
       }
 
-      let dynamicStrokeWidth = baseStrokeWidth
+      // Every width comes from the line's state and the reader's Line weight (lineWeight.ts).
+      let lineState: LineState = 'idle'
 
       const isEdgeHighlighted = isHighlightActive && highlightedEdges?.has(edge.id)
       const isEdgeDimmed = isHighlightActive && !highlightedEdges?.has(edge.id)
@@ -607,8 +610,8 @@ export function LineageFlowOverlay({
       let isTraceEdge = false
       let isFocusIncident = false
       if (isTracing && traceResult) {
+        // A trace keeps every line at its usual width: colour, opacity and glow pick its own out.
         edgeOpacity = edge.isGhost ? 0.4 : 0.8
-        dynamicStrokeWidth = baseStrokeWidth + 1
         const srcInUpstream = traceResult.upstreamNodes?.has(edge.source)
         const tgtInUpstream = traceResult.upstreamNodes?.has(edge.target)
         const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
@@ -634,25 +637,23 @@ export function LineageFlowOverlay({
 
         if (!srcInUpstream && !tgtInUpstream && !srcInDownstream && !tgtInDownstream && !isFocusIncident) {
           edgeOpacity = edge.isGhost ? 0.05 : 0.1
-          dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
         } else {
           // Trace participants — including focus-incident — get the soft
           // outer drop-shadow glow via the `nx-edge-trace` class. The
-          // stroke itself stays at the regular trace width so the focus
-          // edges read as part of the same set rather than as bolded
-          // emphasis lines.
+          // stroke itself stays at the usual width so the focus edges
+          // read as part of the same set rather than as bolded emphasis
+          // lines.
           isTraceEdge = true
         }
       } else {
         if (isEdgeHighlighted) {
           edgeOpacity = 0.9
-          dynamicStrokeWidth = baseStrokeWidth + 1
+          lineState = 'highlighted'
         } else if (isEdgeDimmed) {
           edgeOpacity = edge.isGhost ? 0.05 : 0.1
-          dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
+          lineState = 'dimmed'
         } else {
           edgeOpacity = edgeOpacity * 0.5
-          dynamicStrokeWidth = baseStrokeWidth * 0.75
         }
       }
 
@@ -668,8 +669,9 @@ export function LineageFlowOverlay({
       if (delegation === 'hidden') return
       if (delegation === 'faint') {
         edgeOpacity = 0.15
-        dynamicStrokeWidth = Math.max(1, baseStrokeWidth * 0.7)
+        lineState = 'faint'
       }
+      const dynamicStrokeWidth = lineStrokeWidth(baseStrokeWidth, lineState, lineWeight)
 
       newComputedEdges.push({
         id: edge.id,
@@ -1189,7 +1191,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints, portSides, backPointerColor])
+  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints, portSides, backPointerColor, lineWeight])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after

@@ -5,7 +5,7 @@
  * the graph provider, and saves the narrowing's own spec, searched in this view.
  */
 import { act, fireEvent, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { FromMembersRequest, MembershipPlan, MembershipRequest, MembershipResult, PlanRequest } from '@/types/membership'
 
@@ -19,8 +19,13 @@ import { useNarrowStore } from '@/features/narrow/narrowStore'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { useAuthStore } from '@/store/auth'
 import { useFeaturesStore } from '@/store/features'
+import { usePreferencesStore } from '@/store/preferences'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
+
+// These read whole traces, several hops deep: they open at every hop the walk holds, not at the
+// reader's default of one (ContextViewCanvas.traceDefaultDepth.test.tsx pins that).
+beforeEach(() => usePreferencesStore.setState({ defaultTraceDepth: { up: 25, down: 25 } }))
 
 const ONE_LEVEL_IN: MembershipResult = {
   specHash: 'h1',
