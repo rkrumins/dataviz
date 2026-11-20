@@ -16,6 +16,7 @@ import {
   Compass, LayoutGrid, List, X, TrendingUp, Plus, FileUp, AlertTriangle, RefreshCw, ListFilter,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/Button'
 import { useAnyWorkspacePermission, useAuthStore } from '@/store/auth'
 import { useExplorerViews, type ExplorerFilters } from '@/hooks/useExplorerViews'
 import { parseSort } from '@/components/explorer/sortOptions'
@@ -151,16 +152,23 @@ export function ExplorerPage() {
   // endpoint isn't hit on every keystroke.
   const visitFrom = visit?.from
   const visitTo = visit?.to
+  // "Recent" means the past seven days as of opening the page, so the Recent list
+  // keeps one query (and the pages already scrolled in) for the whole visit.
+  const [recentSince] = useState(() => new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
   const resolveCtx = useMemo(
     () => ({
       currentUserId: currentUser?.id ?? null,
       today,
       visit: visitFrom && visitTo ? { from: visitFrom, to: visitTo } : null,
+      recentSince,
     }),
-    [currentUser?.id, today, visitFrom, visitTo],
+    [currentUser?.id, today, visitFrom, visitTo, recentSince],
   )
+  // The tiles are shortcuts to a category (Total: none), so each counts what
+  // clicking it shows — the current filters with the tile's own category, not
+  // the one open now.
   const statsParams = useMemo(
-    () => toQueryParams(resolveFilters(filterState, resolveCtx)),
+    () => toQueryParams(resolveFilters({ ...filterState, category: null }, resolveCtx)),
     [filterState, resolveCtx],
   )
   const { stats: catalogStats, isFetching: statsFetching } = useViewStats(statsParams)
@@ -172,6 +180,15 @@ export function ExplorerPage() {
     : 'gap-4'
 
   const [searchInput, setSearchInput] = useState(filterState.search)
+  // The box follows the address when something else moves it — the sidebar's
+  // Explorer link, a command-palette search — but not when the move is the box's
+  // own debounced write landing while the reader is still typing.
+  const [committedSearch, setCommittedSearch] = useState(filterState.search)
+  const [seenSearch, setSeenSearch] = useState(filterState.search)
+  if (filterState.search !== seenSearch) {
+    setSeenSearch(filterState.search)
+    if (filterState.search !== committedSearch) setSearchInput(filterState.search)
+  }
   const searchRef = useRef<HTMLInputElement>(null)
   const { recents, record: recordRecent, remove: removeRecent, clear: clearRecents } = useRecentSearches()
   // The box can hold a token being typed (`by:al`), which is not search text.
@@ -296,7 +313,10 @@ export function ExplorerPage() {
   useEffect(() => {
     if (searchSyncTimer.current) clearTimeout(searchSyncTimer.current)
     searchSyncTimer.current = setTimeout(() => {
-      if (searchText !== latestFilters.current.search) setFilterState(prev => ({ ...prev, search: searchText }))
+      if (searchText !== latestFilters.current.search) {
+        setCommittedSearch(searchText)
+        setFilterState(prev => ({ ...prev, search: searchText }))
+      }
     }, 350)
     return () => { if (searchSyncTimer.current) clearTimeout(searchSyncTimer.current) }
   }, [searchInput]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -335,6 +355,8 @@ export function ExplorerPage() {
     refetch,
     loadMore,
     hasMore,
+    loadMoreFailed,
+    retryLoadMore,
   } = useExplorerViews(filters)
   // Health map still drives the per-card health badge, but the
   // needs-attention filter itself runs server-side now, so the Explorer
@@ -367,7 +389,7 @@ export function ExplorerPage() {
   // (same cache entry), here for the people's names.
   const { facets: universeFacets } = useViewFacets()
   const people = useMemo(() => peopleFromFacets(universeFacets), [universeFacets])
-  const lookups = useFilterLookups(people, today, currentUser?.id)
+  const lookups = useFilterLookups(people, today, currentUser?.id, universeFacets)
   const listEmpty = !isLoading && !listError && loadedViews.length === 0 && hasActiveFilters
   const relaxations = useRelaxations(filterState, resolveCtx, lookups, { enabled: listEmpty })
 
@@ -389,11 +411,11 @@ export function ExplorerPage() {
 
   // ─── Keyboard navigation ────────────────────────────────────────────
 
-  const [focusedIndex, setFocusedIndex] = useState(-1)
+  // Focus is a view, not a position: favouriting it, a page loading in below or
+  // usage arriving must not move or drop it. It goes only when the view leaves.
+  const [focusedId, setFocusedId] = useState<string | null>(null)
+  const focusedIndex = focusedId ? views.findIndex(v => v.id === focusedId) : -1
   const gridRef = useRef<HTMLDivElement>(null)
-
-  // Reset focus when views change
-  useEffect(() => { setFocusedIndex(-1) }, [views])
 
   // Scroll focused card into view
   useEffect(() => {
@@ -437,7 +459,7 @@ export function ExplorerPage() {
           setSearchInput('')
           searchRef.current?.blur()
         } else {
-          setFocusedIndex(-1)
+          setFocusedId(null)
         }
         return
       }
@@ -453,11 +475,11 @@ export function ExplorerPage() {
       if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
         e.preventDefault()
         const step = e.key === 'ArrowDown' ? cols : 1
-        setFocusedIndex(prev => Math.min(prev + step, views.length - 1))
+        setFocusedId(views[Math.min(focusedIndex + step, views.length - 1)].id)
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
         e.preventDefault()
         const step = e.key === 'ArrowUp' ? cols : 1
-        setFocusedIndex(prev => Math.max(prev - step, 0))
+        setFocusedId(views[Math.max(focusedIndex - step, 0)].id)
       } else if (e.key === 'Enter' && focusedIndex >= 0 && focusedIndex < views.length) {
         e.preventDefault()
         setPreviewView(views[focusedIndex])
@@ -517,15 +539,22 @@ export function ExplorerPage() {
     return useAuthStore.getState().can('workspace:view:delete', view.workspaceId)
   }, [currentUser?.id])
 
+  // Delete forever (and Restore) are the trash's, and the server keeps them for
+  // workspace admins (view_access.can_hard_delete_view) — a creator would get a 403.
+  const canHardDeleteView = useCallback(
+    (view: View): boolean => useAuthStore.getState().can('workspace:admin', view.workspaceId),
+    [],
+  )
+
   const handleDeleteRequest = useCallback((view: View) => {
     if (!canDeleteView(view)) return
     setDeleteView({ id: view.id, name: view.name, favouriteCount: view.favouriteCount })
   }, [canDeleteView])
 
   const handlePermanentDeleteRequest = useCallback((view: View) => {
-    if (!canDeleteView(view)) return
+    if (!canHardDeleteView(view)) return
     setDeleteView({ id: view.id, name: view.name, favouriteCount: view.favouriteCount, permanent: true })
-  }, [canDeleteView])
+  }, [canHardDeleteView])
 
   const handleDeleted = useCallback(() => {
     if (!deleteView) return
@@ -558,8 +587,9 @@ export function ExplorerPage() {
   // canDeleteView — otherwise some rows would 403 and the operation
   // would partially succeed.
   const canBulkDelete = useMemo(
-    () => selectedViews.length > 0 && selectedViews.every(canDeleteView),
-    [selectedViews, canDeleteView],
+    () => selectedViews.length > 0
+      && selectedViews.every(filterState.category === 'deleted' ? canHardDeleteView : canDeleteView),
+    [selectedViews, filterState.category, canDeleteView, canHardDeleteView],
   )
 
   const handleBulkDeleted = useCallback(() => {
@@ -680,9 +710,9 @@ export function ExplorerPage() {
         <ExplorerStatsBar
           stats={catalogStats}
           isLoading={statsFetching}
-          onShowAll={() => setParam('category', null)}
-          onShowRecent={() => setParam('category', 'recently-added')}
-          onShowAttention={() => setParam('category', 'needs-attention')}
+          onShowAll={() => setFilterState(prev => ({ ...prev, category: null }))}
+          onShowRecent={() => setFilterState(prev => ({ ...prev, category: 'recently-added' }))}
+          onShowAttention={() => setFilterState(prev => ({ ...prev, category: 'needs-attention' }))}
         />
 
         {/* ── Search bar — words search, and typed tokens (by:ada,
@@ -746,9 +776,11 @@ export function ExplorerPage() {
         </div>
 
         {/* ── Headline Banner for Aggregation ───────────────────── */}
-        {activeWorkspaceId && filterState.dataSourceId && (
-          <AggregationProgressBanner 
-            workspaceId={activeWorkspaceId}
+        {/* The source decides it, not whichever workspace the store last opened —
+            a ?dataSource= link from elsewhere shows it too. */}
+        {filterState.dataSourceId && (
+          <AggregationProgressBanner
+            workspaceId={filterState.workspaceIds[0] ?? activeWorkspaceId ?? ''}
             dataSourceId={filterState.dataSourceId}
             onStatusChange={onAggregationStatus}
           />
@@ -782,7 +814,7 @@ export function ExplorerPage() {
                     editDisabled={false}
                     onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                     onRestore={() => handleRestore(v)}
-                    onPermanentDelete={() => handlePermanentDeleteRequest(v)}
+                    onPermanentDelete={canHardDeleteView(v) ? () => handlePermanentDeleteRequest(v) : undefined}
                     onTagClick={handleTagClick}
                     healthStatus={healthMap.get(v.id)?.status}
                     usage={usageMap?.[v.id]}
@@ -938,7 +970,7 @@ export function ExplorerPage() {
                       editDisabled={false}
                       onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                       onRestore={() => handleRestore(v)}
-                      onPermanentDelete={() => handlePermanentDeleteRequest(v)}
+                      onPermanentDelete={canHardDeleteView(v) ? () => handlePermanentDeleteRequest(v) : undefined}
                       onTagClick={handleTagClick}
                       healthStatus={healthMap.get(v.id)?.status}
                     usage={usageMap?.[v.id]}
@@ -971,9 +1003,10 @@ export function ExplorerPage() {
                 sort={parsed.sort}
                 onSortChange={v => setParam('sort', v)}
               />
-              {views.map(v => (
+              <div ref={gridRef}>
+              {views.map((v, i) => (
+                <div key={v.id} className={cn(i === focusedIndex && 'ring-2 ring-inset ring-accent-lineage/50')}>
                 <ExplorerListRow
-                  key={v.id}
                   view={v}
                   onToggleFavourite={() => toggleFavourite(v.id)}
                   onShare={() => handleShare(v)}
@@ -983,7 +1016,7 @@ export function ExplorerPage() {
                   editDisabled={false}
                   onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                   onRestore={() => handleRestore(v)}
-                  onPermanentDelete={() => handlePermanentDeleteRequest(v)}
+                  onPermanentDelete={canHardDeleteView(v) ? () => handlePermanentDeleteRequest(v) : undefined}
                   healthStatus={healthMap.get(v.id)?.status}
                     usage={usageMap?.[v.id]}
                   isSelected={selectedIds.has(v.id)}
@@ -998,13 +1031,21 @@ export function ExplorerPage() {
                     return next
                   })}
                 />
+                </div>
               ))}
+              </div>
             </div>
             </motion.div>
           )}
           </AnimatePresence>
 
-          {hasMore && <div ref={sentinelRef} className="h-4" />}
+          {hasMore && !loadMoreFailed && <div ref={sentinelRef} className="h-4" />}
+          {loadMoreFailed && views.length > 0 && (
+            <div role="status" className="mt-4 flex items-center justify-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-ink-secondary">
+              Couldn’t load more views.
+              <Button size="sm" variant="secondary" onClick={retryLoadMore}>Retry</Button>
+            </div>
+          )}
         </section>
       </PageContainer>
 

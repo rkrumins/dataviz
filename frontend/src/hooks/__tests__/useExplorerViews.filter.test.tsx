@@ -173,3 +173,65 @@ describe('useExplorerViews — source kind, dates and people reach the server', 
     expect(params.contributorRole).toBeUndefined()
   })
 })
+
+describe('useExplorerViews — removing a view', () => {
+  beforeEach(() => mockListViews.mockReset())
+
+  it('lowers the list total whichever page held the view', async () => {
+    const v = (id: string) => ({ id, name: id, favouriteCount: 0, updatedAt: '2026-01-01', viewType: 'graph' }) as unknown as View
+    mockListViews.mockImplementation((params?: ViewListParams) => Promise.resolve(
+      (params?.offset ?? 0) === 0
+        ? { items: [v('p1a'), v('p1b')], total: 4, hasMore: true, nextOffset: 2, popular: [] }
+        : { items: [v('p2a'), v('p2b')], total: 4, hasMore: false, nextOffset: null, popular: [] },
+    ))
+    const { result } = renderHook(() => useExplorerViews(baseFilters({ limit: 2 })), { wrapper: makeWrapper() })
+    await waitFor(() => expect(result.current.views).toHaveLength(2))
+    result.current.loadMore()
+    await waitFor(() => expect(result.current.views).toHaveLength(4))
+
+    result.current.removeView('p2a')
+
+    await waitFor(() => expect(result.current.views).toHaveLength(3))
+    expect(result.current.totalCount).toBe(3)
+  })
+})
+
+describe('useExplorerViews — a favourite', () => {
+  it('marks the other lists stale, so Favorites is fresh when opened next', async () => {
+    mockListViews.mockReset()
+    const v = { id: 'v1', name: 'v1', favouriteCount: 0, isFavourited: false, updatedAt: '2026-01-01', viewType: 'graph' } as unknown as View
+    mockListViews.mockResolvedValue({ items: [v], total: 1, hasMore: false, nextOffset: null, popular: [] } as never)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    qc.setQueryData(['explorer-views', { category: 'my-favourites' }], { pages: [], pageParams: [] })
+    const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    const { result } = renderHook(() => useExplorerViews(baseFilters()), { wrapper })
+    await waitFor(() => expect(result.current.views).toHaveLength(1))
+
+    result.current.toggleFavourite('v1')
+
+    await waitFor(() => expect(qc.getQueryState(['explorer-views', { category: 'my-favourites' }])?.isInvalidated).toBe(true))
+  })
+})
+
+describe('useExplorerViews — a page that fails', () => {
+  it('waits for Retry instead of asking again on its own', async () => {
+    mockListViews.mockReset()
+    const v = (id: string) => ({ id, name: id, favouriteCount: 0, updatedAt: '2026-01-01', viewType: 'graph' }) as unknown as View
+    mockListViews.mockImplementation((params?: ViewListParams) => (params?.offset ?? 0) === 0
+      ? Promise.resolve({ items: [v('a')], total: 2, hasMore: true, nextOffset: 1, popular: [] })
+      : Promise.reject(new Error('boom')))
+    const { result } = renderHook(() => useExplorerViews(baseFilters({ limit: 1 })), { wrapper: makeWrapper() })
+    await waitFor(() => expect(result.current.views).toHaveLength(1))
+
+    result.current.loadMore()
+    await waitFor(() => expect(result.current.loadMoreFailed).toBe(true))
+    const asked = mockListViews.mock.calls.length
+    result.current.loadMore()
+    expect(mockListViews.mock.calls.length).toBe(asked)
+
+    mockListViews.mockImplementation(() => Promise.resolve({ items: [v('b')], total: 2, hasMore: false, nextOffset: null, popular: [] }))
+    result.current.retryLoadMore()
+    await waitFor(() => expect(result.current.views.map(x => x.id)).toEqual(['a', 'b']))
+    expect(result.current.loadMoreFailed).toBe(false)
+  })
+})

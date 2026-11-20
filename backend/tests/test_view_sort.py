@@ -204,3 +204,44 @@ async def test_sort_modified_ascending_is_the_updated_column_reversed(db_session
 
     resp = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, sort="modified-asc", limit=50)
     assert [v.name for v in resp.items] == ["B", "A"]   # May before A's September publish
+
+
+async def test_stats_last_activity_counts_a_data_publish(db_session: AsyncSession):
+    """"Last activity" is the freshest change the cards show — a publish newer than
+    every settings edit counts."""
+    ws = await _ws(db_session)
+    a = await _view(db_session, ws.id, "A")
+    await _set_times(db_session, a.id, data_updated_at="2026-09-09T00:00:00+00:00",
+                     updated_at="2026-01-01T00:00:00+00:00")
+    stats = await view_repo.get_view_stats(db_session, workspace_id=ws.id)
+    assert stats.last_activity_at == "2026-09-09T00:00:00+00:00"
+
+
+async def test_tag_counts_match_the_case_blind_tag_filter(db_session: AsyncSession):
+    """Filtering by a tag ignores case (``PII`` finds ``pii``), so its count does too:
+    the number on the tag is the number of views the tag then shows."""
+    ws = await _ws(db_session)
+    for name, tags in [("A", ["PII"]), ("B", ["pii"]), ("C", ["pii", "PII"]), ("D", ["finance"])]:
+        v = await _view(db_session, ws.id, name)
+        row = (await db_session.execute(select(ViewORM).where(ViewORM.id == v.id))).scalar_one()
+        row.tags = __import__("json").dumps(tags)
+    await db_session.flush()
+
+    facets = await view_repo.get_view_facets(db_session, workspace_id=ws.id)
+    counts = {t.value.lower(): t.count for t in facets.tags}
+    assert counts == {"pii": 3, "finance": 1}
+    shown = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, tags=["PII"], limit=50)
+    assert shown.total == counts["pii"]
+
+
+async def test_search_treats_percent_and_underscore_as_text(db_session: AsyncSession):
+    ws = await _ws(db_session)
+    await _view(db_session, ws.id, "Growth 100% plan")
+    await _view(db_session, ws.id, "Plain")
+    await _view(db_session, ws.id, "snake_case model")
+    await _view(db_session, ws.id, "snakeXcase")
+
+    pct = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, search="%", limit=50)
+    assert [v.name for v in pct.items] == ["Growth 100% plan"]
+    under = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, search="snake_case", limit=50)
+    assert [v.name for v in under.items] == ["snake_case model"]

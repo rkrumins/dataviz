@@ -30,6 +30,7 @@ import {
 } from '@/services/viewApiService'
 import { httpStatusOf } from '@/services/graphRequestFailure'
 import { toQueryParams, type ResolvedViewFilters } from '@/features/view-filters/params'
+import { invalidateOtherViewLists } from '@/features/view-filters/invalidate'
 
 /** Stable empty slice so ``popularViews`` keeps one reference across renders. */
 const EMPTY_VIEWS: View[] = []
@@ -105,6 +106,9 @@ export interface UseExplorerViewsResult {
   refetch: () => void
   loadMore: () => void
   hasMore: boolean
+  /** The last page asked for failed; ``loadMore`` waits for ``retryLoadMore``. */
+  loadMoreFailed: boolean
+  retryLoadMore: () => void
 }
 
 // ─── Hook ───────────────────────────────────────────────────────────────────
@@ -185,7 +189,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
 
   const {
     data, isPending, error, refetch: rqRefetch, isFetching,
-    fetchNextPage, hasNextPage, isFetchingNextPage, isPlaceholderData,
+    fetchNextPage, hasNextPage, isFetchingNextPage, isPlaceholderData, isFetchNextPageError,
   } = query
 
   // Flatten loaded pages in the server's order, deduped (rows can shift between pages).
@@ -207,10 +211,13 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
   // Infinite scroll. Safe to call on every sentinel intersection: no-ops while
   // a page is in flight or while previous-data is shown during a filter switch
   // (so we never fetch the wrong offset against the newly-keyed query).
+  // A page that failed waits for the reader's Retry, rather than being asked for
+  // again on every intersection, silently.
   const loadMore = useCallback(() => {
-    if (isFetchingNextPage || isPlaceholderData || !hasNextPage) return
+    if (isFetchingNextPage || isPlaceholderData || !hasNextPage || isFetchNextPageError) return
     fetchNextPage()
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage, isPlaceholderData])
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage, isPlaceholderData, isFetchNextPageError])
+  const retryLoadMore = useCallback(() => { void fetchNextPage() }, [fetchNextPage])
 
   // ─── Optimistic favourite toggle ────────────────────────────────────
   // ``wasFavourited`` is captured at click time (before onMutate flips the
@@ -233,6 +240,8 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     onError: (_err, _vars, ctx) => {
       if (ctx?.previous) queryClient.setQueryData(queryKey, ctx.previous)
     },
+    // Favorites (and any other list visited) refetches when next shown.
+    onSettled: () => invalidateOtherViewLists(queryClient),
   })
 
   const toggleFavourite = useCallback((viewId: string) => {
@@ -245,17 +254,17 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
   const removeView = useCallback((viewId: string) => {
     queryClient.setQueryData<InfiniteData<ViewListResponse>>(queryKey, (curr) => {
       if (!curr) return curr
+      // ``total`` is the whole list's count, carried on every page (the header
+      // reads page one's), so it drops on every page whichever one held the view.
+      const had = curr.pages.some(page => page.items.some(v => v.id === viewId))
       return {
         ...curr,
-        pages: curr.pages.map(page => {
-          const had = page.items.some(v => v.id === viewId)
-          return {
-            ...page,
-            items: page.items.filter(v => v.id !== viewId),
-            popular: page.popular?.filter(v => v.id !== viewId),
-            total: had ? Math.max(0, page.total - 1) : page.total,
-          }
-        }),
+        pages: curr.pages.map(page => ({
+          ...page,
+          items: page.items.filter(v => v.id !== viewId),
+          popular: page.popular?.filter(v => v.id !== viewId),
+          total: had ? Math.max(0, page.total - 1) : page.total,
+        })),
       }
     })
   }, [queryClient, queryKey])
@@ -299,5 +308,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     refetch,
     loadMore,
     hasMore: hasNextPage,
+    loadMoreFailed: isFetchNextPageError,
+    retryLoadMore,
   }
 }

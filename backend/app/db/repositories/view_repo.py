@@ -1620,6 +1620,12 @@ async def permanently_delete_view(
 # Filtered listing & discovery                                         #
 # ------------------------------------------------------------------ #
 
+def _contains(text: str) -> str:
+    """A LIKE pattern matching ``text`` anywhere, with its own ``%``, ``_`` and ``\\``
+    escaped (pair it with ``escape="\\"``) so they match literally."""
+    return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 def _last_change_expr():
     """When the view last changed: the later of its last settings/layout edit
     and its last data publish.
@@ -1808,7 +1814,7 @@ def _apply_view_filters(
     # should be normalised upstream.
     if tags:
         query = query.where(
-            or_(*[ViewORM.tags.ilike(f'%"{t}"%') for t in tags])
+            or_(*[ViewORM.tags.ilike(_contains(f'"{t}"'), escape="\\") for t in tags])
         )
 
     # Search / attention both need workspace + data source joins; do them once.
@@ -1827,14 +1833,15 @@ def _apply_view_filters(
     if search:
         terms = search.split()
         if terms:
+            # A term is text: its % and _ match themselves, not "anything".
             query = query.where(and_(*[
                 (
-                    ViewORM.name.ilike(f"%{term}%")
-                    | ViewORM.description.ilike(f"%{term}%")
-                    | WorkspaceORM.name.ilike(f"%{term}%")
-                    | WorkspaceDataSourceORM.label.ilike(f"%{term}%")
-                    | ViewORM.created_by.ilike(f"%{term}%")
-                    | ViewORM.tags.ilike(f"%{term}%")
+                    ViewORM.name.ilike(_contains(term), escape="\\")
+                    | ViewORM.description.ilike(_contains(term), escape="\\")
+                    | WorkspaceORM.name.ilike(_contains(term), escape="\\")
+                    | WorkspaceDataSourceORM.label.ilike(_contains(term), escape="\\")
+                    | ViewORM.created_by.ilike(_contains(term), escape="\\")
+                    | ViewORM.tags.ilike(_contains(term), escape="\\")
                 )
                 for term in terms
             ]))
@@ -2339,8 +2346,14 @@ async def get_view_facets(
     response = ViewFacetsResponse(tags=[], view_types=[], creators=[])
 
     if "tags" in fields:
-        # Parsed in Python since the column is a JSON string.
-        tag_counts: Counter = Counter({t: 0 for t in filters.get("tags") or ()})
+        # Parsed in Python since the column is a JSON string. Counted case-blind,
+        # as the tag filter matches (``PII`` finds ``pii``), once per view, under the
+        # first spelling met (a chosen tag keeps the reader's own).
+        tag_counts: Counter = Counter()
+        label: Dict[str, str] = {}
+        for t in filters.get("tags") or ():
+            label.setdefault(t.lower(), t)
+            tag_counts[t.lower()] += 0
         tag_rows = await session.execute(counted(
             select(ViewORM.tags).where(ViewORM.tags.isnot(None)), "tags",
         ))
@@ -2351,13 +2364,15 @@ async def get_view_facets(
                 continue
             if not isinstance(parsed, list):
                 continue
+            for key in {t.lower() for t in parsed if isinstance(t, str) and t}:
+                tag_counts[key] += 1
             for t in parsed:
                 if isinstance(t, str) and t:
-                    tag_counts[t] += 1
-        selected_tags = set(filters.get("tags") or ())
+                    label.setdefault(t.lower(), t)
+        selected_tags = {t.lower() for t in filters.get("tags") or ()}
         response.tags = [
-            ViewFacetValue(value=v, count=c)
-            for v, c in _capped(
+            ViewFacetValue(value=label[k], count=c)
+            for k, c in _capped(
                 list(tag_counts.items()), lambda x: (-x[1], x[0]),
                 lambda x: x[0] in selected_tags,
             )
@@ -2608,9 +2623,10 @@ async def get_view_stats(
     attention_result = await session.execute(attention_query)
     needs_attention = attention_result.scalar_one() or 0
 
-    # Last activity — MAX(updated_at) across the same filtered set.
+    # Last activity across the same filtered set: the later of a settings edit and
+    # a data publish, which is what the cards show.
     last_activity_query = _apply_view_filters(
-        select(func.max(ViewORM.updated_at)),
+        select(func.max(_last_change_expr())),
         **filter_kwargs,
     )
     last_activity_result = await session.execute(last_activity_query)

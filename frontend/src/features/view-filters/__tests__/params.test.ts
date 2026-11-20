@@ -61,3 +61,11 @@ describe('toQueryParams', () => {
     expect(wide.createdAfter! > new Date(2026, 0, 1).toISOString()).toBe(true)
   })
 })
+
+describe('the Recent category', () => {
+  it('starts where the surface fixed it, so the list keeps one query for the visit', () => {
+    const since = '2026-10-05T09:13:00.000Z'
+    const p = toQueryParams(resolveFilters({ ...EMPTY_FILTERS, category: 'recently-added' }, { ...CTX, recentSince: since }))
+    expect(p.createdAfter).toBe(since)
+  })
+})
