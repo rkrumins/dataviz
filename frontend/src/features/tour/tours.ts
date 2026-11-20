@@ -361,11 +361,10 @@ TOURS.push(
     description: 'How drafts become reviewed, approved, and merged — a lap around the Review Center.',
     icon: GitPullRequestArrow,
     estimate: '2 min',
-    // Reviews live at the workspace-scoped route /workspaces/:wsId/reviews, which has
-    // no static path a route-step could navigate to. Offered from the reviews surface
-    // itself and from Help while you're anywhere under /workspaces/.
+    // Offered from the Review Center (/reviews) itself and from Help while you're there;
+    // its steps point at the queues, filters and list it shares with a workspace's Reviews tab.
     contextual: true,
-    contextPathPrefix: '/workspaces/',
+    contextPathPrefix: '/reviews',
     steps: [
       {
         title: 'Changes, reviewed',

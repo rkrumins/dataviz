@@ -23,6 +23,7 @@ from .endpoints import (
     workspace_directory, data_source_transfers,
     versioning,
     versioning_admin,
+    review_center,
     admin_idp_groups,
     admin_idp_providers,
     admin_user_identities,
@@ -471,6 +472,14 @@ api_router.include_router(
 # per template (services/template_access.py).
 api_router.include_router(
     layout_templates.router, prefix="/layout-templates", tags=["layout-templates"],
+)
+
+# ── The Review Center across workspaces ─────────────────────────────
+# Every review the reader may see, from every workspace they can read (or the
+# ones they name) — each read with that workspace's own permissions. Mounted
+# before the /{ws_id}/… routers so no workspace-scoped pattern can claim it.
+api_router.include_router(
+    review_center.router, prefix="/review-inbox", tags=["versioning:review-center"],
 )
 
 # ── Versioned graph editing (workspace-scoped) ───────────────────────

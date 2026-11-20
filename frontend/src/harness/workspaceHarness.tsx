@@ -13,6 +13,7 @@
  *   mode     business | technical               (default business)
  *   theme    light | dark
  *   tab / section / ds — passed to the page's own address
+ *   page     workspace | reviews                (reviews: the Review Center at /reviews)
  *
  * `npm run harness:workspace` drives Chromium over the main combinations and
  * writes PNGs to .harness/.
@@ -28,6 +29,8 @@ import { usePersonaStore } from '../store/persona'
 import { useAuthStore } from '../store/auth'
 import { ViewEditorContext } from '../components/layout/viewEditorContext'
 import { WorkspaceDetailPage } from '../pages/WorkspaceDetailPage'
+import { ReviewCenterPage } from '../pages/ReviewCenterPage'
+import { useWorkspacesStore } from '../store/workspaces'
 import {
     ONTOLOGIES, STATS, readinessOf, viewsOf, workspaceOf, type WorkspaceFixtureName,
 } from './workspaceFixtures'
@@ -37,6 +40,25 @@ const as = (params.get('as') ?? 'viewer') as 'viewer' | 'member' | 'admin'
 const fixture = (params.get('fixture') ?? 'populated') as WorkspaceFixtureName
 const dark = params.get('theme') === 'dark'
 const mode = (params.get('mode') ?? 'business') as 'business' | 'technical'
+const page = params.get('page') ?? 'workspace'
+
+// The Review Center's reviews, across three workspaces.
+const REVIEW_WS = [
+    { id: 'ws_fin', name: 'Finance Risk' }, { id: 'ws_ops', name: 'Operations' }, { id: 'ws_mkt', name: 'Marketing Insights' },
+]
+const reviewRow = (n: number, title: string, ws: { id: string; name: string }, h: number, who: string) => ({
+    prId: `pr_${n}`, title, graphId: 'g', targetGraphId: 'g', sourceBranchId: `b_${n}`, sourceBranchName: title.toLowerCase().replace(/\W+/g, '-').slice(0, 24),
+    targetBranch: 'main', status: 'open', createdAt: new Date(Date.now() - h * 7_200_000).toISOString(),
+    updatedAt: new Date(Date.now() - h * 3_600_000).toISOString(), lastActivityAt: new Date(Date.now() - h * 3_600_000).toISOString(),
+    actor: `u_${n}`, userNames: { [`u_${n}`]: who }, workspaceId: ws.id, workspaceName: ws.name, unread: n % 2 === 0,
+})
+const REVIEWS = [
+    reviewRow(1, 'Reclassify counterparty tiers', REVIEW_WS[0], 1, 'Ada Okafor'),
+    reviewRow(2, 'Add EMEA settlement feeds', REVIEW_WS[1], 3, 'Liam Chen'),
+    reviewRow(3, 'Retire legacy GL mappings', REVIEW_WS[0], 7, 'Priya Nair'),
+    reviewRow(4, 'Campaign attribution owners', REVIEW_WS[2], 20, 'Tom Weiss'),
+]
+const centerCounts = (rows: unknown[]) => ({ counts: { needs_review: rows.length, waiting: 1, sent_back: 1, ready: 0, open: rows.length + 2, done: 9 }, unread: { needs_review: 2 }, capped: false })
 
 const PERMS: Record<typeof as, string[]> = {
     viewer: ['workspace:view:read', 'workspace:datasource:read', 'workspace:ontology:read'],
@@ -59,6 +81,9 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const views = viewsOf(fixture)
     let m: RegExpMatchArray | null
     if ((m = p.match(/^\/api\/v1\/admin\/workspaces\/([^/]+)$/))) return json(ws)
+    if (p === '/api/v1/admin/workspaces' || p === '/api/v1/admin/workspaces/') {
+        return json(page === 'reviews' ? REVIEW_WS.map(w => ({ ...w, dataSources: [], isDefault: false, isActive: true, createdAt: '', updatedAt: '' })) : [ws])
+    }
     if (p === '/api/v1/admin/workspaces/datasources/cached-stats') {
         const data = Object.fromEntries(ws.dataSources.map(d => [`ws_fin/${d.id}`, STATS[d.id]]))
         return json({ data, meta: {
@@ -91,6 +116,19 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
             ? { workspaceId: 'ws_fin', views: 0, opens: 0, uniqueViewers: 0, topView: null, windowDays: 30 }
             : { workspaceId: 'ws_fin', views: 8, opens: 1_284, uniqueViewers: 23, topView: { viewId: 'v_exposure', name: 'Counterparty exposure lineage', opens: 412 }, windowDays: 30 } } })
     }
+    if (p === '/api/v1/review-inbox/counts') {
+        return json({ ...centerCounts(REVIEWS), byWorkspace: Object.fromEntries(REVIEW_WS.map(w => [w.id, centerCounts(REVIEWS.filter(r => r.workspaceId === w.id))])) })
+    }
+    if (p === '/api/v1/review-inbox') {
+        const only = url.searchParams.getAll('workspaceId')
+        const rows = only.length ? REVIEWS.filter(r => only.includes(r.workspaceId)) : REVIEWS
+        return json({ ...centerCounts(rows), byWorkspace: {}, queue: url.searchParams.get('queue') ?? 'needs_review', items: rows, total: rows.length })
+    }
+    if (p.endsWith('/review-inbox') && page === 'reviews') {
+        const wsId = p.split('/')[3]
+        const rows = REVIEWS.filter(r => r.workspaceId === wsId)
+        return json({ ...centerCounts(rows), queue: url.searchParams.get('queue') ?? 'needs_review', items: rows, total: rows.length })
+    }
     if (p.endsWith('/review-inbox/counts')) {
         return json({ counts: { needs_review: as === 'viewer' ? 0 : 2, waiting: 1, sent_back: 0, ready: 0, open: 3, done: 12 }, unread: {}, capped: false })
     }
@@ -121,6 +159,7 @@ useAuthStore.setState({
     permissions: { sid: 'harness', global: [], ws: { ws_fin: PERMS[as] } },
 } as never)
 usePersonaStore.setState({ mode })
+if (page === 'reviews') useWorkspacesStore.setState({ workspaces: REVIEW_WS.map(w => ({ ...w, dataSources: [] })) } as never)
 
 function Harness() {
     const setTheme = usePreferencesStore((s) => s.setTheme)
@@ -131,16 +170,21 @@ function Harness() {
         document.body.style.background = getComputedStyle(document.documentElement).getPropertyValue('--nx-bg-canvas').trim() || '#fff'
     }, [setTheme])
 
-    const page = new URLSearchParams()
-    for (const k of ['tab', 'section', 'ds', 'dstab']) { const v = params.get(k); if (v) page.set(k, v) }
-    const at = `/workspaces/ws_fin${page.toString() ? `?${page}` : ''}`
+    const address = new URLSearchParams()
+    for (const k of ['tab', 'section', 'ds', 'dstab']) { const v = params.get(k); if (v) address.set(k, v) }
+    const at = page === 'reviews'
+        ? `/reviews${params.get('workspace') ? `?workspace=${params.get('workspace')}` : ''}`
+        : `/workspaces/ws_fin${address.toString() ? `?${address}` : ''}`
 
     return (
         <QueryClientProvider client={qc}>
             <ViewEditorContext.Provider value={{ openViewEditor: () => {}, closeViewEditor: () => {} }}>
                 <MemoryRouter initialEntries={[at]}>
                     <div className="relative min-h-screen bg-canvas">
-                        <Routes><Route path="/workspaces/:wsId" element={<WorkspaceDetailPage />} /></Routes>
+                        <Routes>
+                            <Route path="/workspaces/:wsId" element={<WorkspaceDetailPage />} />
+                            <Route path="/reviews" element={<ReviewCenterPage />} />
+                        </Routes>
                     </div>
                 </MemoryRouter>
             </ViewEditorContext.Provider>

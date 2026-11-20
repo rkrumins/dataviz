@@ -86,6 +86,16 @@ export const PAGE_INDEX: PageEntry[] = [
         feature: 'layoutTemplatesEnabled',
     },
     {
+        id: 'reviews',
+        category: 'Page',
+        title: 'Review Center',
+        description: 'Changes waiting on you, across your workspaces',
+        keywords: ['reviews', 'merge requests', 'approve', 'pull requests', 'changes'],
+        path: '/reviews',
+        gate: { kind: 'sidebar', key: 'reviews' },
+        feature: 'versioningEnabled',
+    },
+    {
         id: 'workspaces',
         category: 'Page',
         title: 'Workspaces',

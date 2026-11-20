@@ -6,7 +6,7 @@
 import { useCallback } from 'react'
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, ReviewInboxParams, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, ReviewInboxCounts, ReviewInboxPage, ReviewInboxParams, StageOp, Watermark } from '@/services/versioningApiService'
 import { INBOX_QUERY_KEY } from '@/hooks/useInbox'
 import { workspaceService } from '@/services/workspaceService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
@@ -694,26 +694,47 @@ export const REVIEW_INBOX_PAGE = 25
 
 /** One queue of the review inbox, page by page ("Load more"), searched and filtered on the server.
  *  While another queue or filter loads, the last one stays on screen. */
-export function useReviewInbox(wsId: string | undefined, params: Omit<ReviewInboxParams, 'limit' | 'offset'>) {
-  return useInfiniteQuery({
-    queryKey: VERSIONING_KEYS.reviewInbox(wsId, params),
-    queryFn: ({ pageParam }) => api.getReviewInbox(wsId!, { ...params, limit: REVIEW_INBOX_PAGE, offset: pageParam }),
+/** The Review Center's scope when it spans every workspace the reader can read. */
+const ALL_WORKSPACES = '*'
+
+/** One workspace's inbox — or, with `wsId` null, the reader's reviews across every workspace
+ *  they can read (the Review Center). `undefined` waits for the workspace to be known. */
+export function useReviewInbox(wsId: string | null | undefined, params: Omit<ReviewInboxParams, 'limit' | 'offset'>) {
+  return useInfiniteQuery<ReviewInboxPage>({
+    queryKey: VERSIONING_KEYS.reviewInbox(wsId ?? ALL_WORKSPACES, params),
+    queryFn: ({ pageParam }) => {
+      const page = { ...params, limit: REVIEW_INBOX_PAGE, offset: pageParam as number }
+      return wsId === null ? api.getReviewCenter(page) : api.getReviewInbox(wsId!, page)
+    },
     initialPageParam: 0,
     getNextPageParam: (last, pages) => {
       const loaded = pages.reduce((n, p) => n + p.items.length, 0)
       return last.items.length > 0 && loaded < last.total ? loaded : undefined
     },
-    enabled: !!wsId && !!params.queue,
+    enabled: wsId !== undefined && wsId !== '' && !!params.queue,
     placeholderData: keepPreviousData,
     staleTime: 15_000,
     refetchOnWindowFocus: true,
   })
 }
 
+/** Counts across every workspace the reader can read, with each workspace's own — the sidebar's
+ *  Reviews badge and the Review Center's workspace picker. Read again every minute. */
+export function useReviewCenterCounts(enabled = true) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.reviewInboxCounts(ALL_WORKSPACES),
+    queryFn: () => api.getReviewCenterCounts(),
+    enabled,
+    staleTime: 15_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
 /** Each review-inbox queue's count and unread count — the Reviews badge — read again every minute. */
 export function useReviewInboxCounts(wsId?: string | null, enabled = true) {
-  return useQuery({
-    queryKey: VERSIONING_KEYS.reviewInboxCounts(wsId),
+  return useQuery<ReviewInboxCounts>({
+    queryKey: VERSIONING_KEYS.reviewInboxCounts(wsId ?? undefined),
     queryFn: () => api.getReviewInboxCounts(wsId!),
     enabled: !!wsId && enabled,
     staleTime: 15_000,

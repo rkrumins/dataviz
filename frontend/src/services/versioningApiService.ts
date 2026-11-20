@@ -543,6 +543,9 @@ export interface RebaseResponse {
 
 export interface PullRequest {
   prId: string
+  /** Where the review lives — set on the cross-workspace Review Center's rows. */
+  workspaceId?: string
+  workspaceName?: string
   graphId: string
   sourceBranchId: string
   sourceBranchOwner?: string | null   // owner of the source draft (only on the single-PR read)
@@ -3103,6 +3106,37 @@ export function getReviewInbox(wsId: string, params: ReviewInboxParams = {}): Pr
 /** Each queue's count and unread count, no rows: what the Reviews badge shows. */
 export function getReviewInboxCounts(wsId: string): Promise<ReviewInboxCounts> {
   return vfetch<ReviewInboxCounts>(`${base(wsId)}/review-inbox/counts`)
+}
+
+/** Across workspaces: the counts, and each workspace's own (the Review Center's picker badges). */
+export interface ReviewCenterCounts extends ReviewInboxCounts {
+  byWorkspace: Record<string, ReviewInboxCounts>
+}
+export interface ReviewCenterPage extends ReviewInboxPage {
+  byWorkspace: Record<string, ReviewInboxCounts>
+}
+
+function centerUrl(path: '' | '/counts', sp: URLSearchParams, workspaceIds?: string[]) {
+  for (const id of workspaceIds ?? []) sp.append('workspaceId', id)
+  const qs = sp.toString()
+  return `/api/v1/review-inbox${path}${qs ? `?${qs}` : ''}`
+}
+
+/** The reader's reviews across every workspace they can read — or those named — in one queue,
+ *  each row carrying its workspace. Same queues, search and order as one workspace's inbox. */
+export function getReviewCenter(params: Omit<ReviewInboxParams, 'dataSourceId'> & { workspaceIds?: string[] } = {}): Promise<ReviewCenterPage> {
+  const sp = new URLSearchParams()
+  if (params.queue) sp.set('queue', params.queue)
+  if (params.q?.trim()) sp.set('q', params.q.trim())
+  if (params.author) sp.set('author', params.author)
+  if (params.sort) sp.set('sort', params.sort)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  return vfetch<ReviewCenterPage>(centerUrl('', sp, params.workspaceIds))
+}
+
+export function getReviewCenterCounts(workspaceIds?: string[]): Promise<ReviewCenterCounts> {
+  return vfetch<ReviewCenterCounts>(centerUrl('/counts', new URLSearchParams(), workspaceIds))
 }
 
 /** The reader looked at a review: it stops being unread, and their notifications of it are read. */

@@ -24,7 +24,8 @@ export function tabForPath(pathname: string): NavigationTab | null {
     // Data-source ("connection") detail pages belong to Ingestion — their own
     // back link points at /ingestion.
     if (pathname.startsWith('/ingestion') || pathname.startsWith('/datasources')) return 'ingestion'
-    // A workspace's reviews (its inbox and each review's page) have their own row.
+    // The Review Center, and each review's page, have their own row.
+    if (pathname === '/reviews' || pathname.startsWith('/reviews/')) return 'reviews'
     if (/^\/workspaces\/[^/]+\/reviews(\/|$)/.test(pathname)) return 'reviews'
     if (pathname.startsWith('/workspaces')) return 'workspaces'
     if (pathname.startsWith('/schema')) return 'schema'
