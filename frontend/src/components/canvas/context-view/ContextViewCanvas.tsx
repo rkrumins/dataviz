@@ -2762,8 +2762,10 @@ export function ContextViewCanvas({
       const view = {
         showUpstream: direction !== 'down',
         showDownstream: direction !== 'up',
-        depthUp: openingTraceDepth().up,
-        depthDown: openingTraceDepth().down,
+        // The reader's default; Root Cause and Impact go every hop on their own side, as one
+        // hop rarely reaches a root or the last thing affected.
+        depthUp: direction === 'up' ? FULL_WALK_INITIAL_DEPTH : openingTraceDepth().up,
+        depthDown: direction === 'down' ? FULL_WALK_INITIAL_DEPTH : openingTraceDepth().down,
         // Re-pressing Trace on the focal already on screen does NOT re-seed the
         // overlay, so recording an empty picture here would leave the entry
         // describing a trace nobody is looking at. A genuinely new focal has no

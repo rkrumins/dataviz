@@ -4,9 +4,10 @@
  * Every trace used to open on all 25 hops it walks. Now it opens on the reader's default (My
  * preferences, or the depth control's "Make this my default"): one hop each way until they choose,
  * so a busy estate opens on what an entity feeds and what feeds it. The walk still holds every hop,
- * so going deeper costs no fetch.
+ * so going deeper costs no fetch. Root Cause and Impact, the one-direction traces, go every hop on
+ * their own side: one hop rarely reaches a root.
  */
-import { screen } from '@testing-library/react'
+import { act, fireEvent, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
@@ -45,6 +46,19 @@ describe('the depth a new trace opens at', () => {
     await h.startTrace('orders')
 
     expect(depthChip()).toMatch(/Depth.*25.*25/)
+    expect(h.visibleCardIds()).toContain('audit')
+  }, 30000)
+})
+
+describe('a one-direction trace', () => {
+  it('Root Cause goes every hop upstream, whatever the default', async () => {
+    const h = await renderCanvasWithTrace(estate(), { focus: 'orders' })
+    await h.openDrawer('orders')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Root Cause/ })) })
+    await h.waitForCard('audit')
+
+    expect(h.isTracing()).toBe(true)
+    expect(depthChip()).toMatch(/Depth.*25/)
     expect(h.visibleCardIds()).toContain('audit')
   }, 30000)
 })

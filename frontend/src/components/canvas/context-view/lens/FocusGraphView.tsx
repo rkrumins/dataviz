@@ -92,6 +92,8 @@ import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 import { bumpRenderCount } from './renderProbe'
 import { recordEvent } from '@/services/telemetryService'
+import { usePreferencesStore } from '@/store/preferences'
+import { LINE_WEIGHT_SCALE } from '../lineWeight'
 
 /** The longest edge an exported image may have, BEFORE `pixelRatio`
  *  doubles it. A ceiling on the FILE, never on the content: a board
@@ -3262,6 +3264,8 @@ export function edgeGrainVisual(p: {
 
 function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, data }: EdgeProps) {
   bumpRenderCount('FocusGraphEdgeComp')
+  // The reader's Line weight (Display → Line weight), as on the canvas.
+  const lineScale = LINE_WEIGHT_SCALE[usePreferencesStore((s) => s.lineWeight) ?? 'regular'] ?? 1
   const d = data as unknown as {
     count: number
     aggregated: boolean
@@ -3472,6 +3476,7 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // with the log of its members (two at 13, five at 100, never a slab) —
   // and its members, drawn back for a gesture, as ordinary wires.
   if (d.bundle) visual.strokeWidth += Math.min(5, Math.log2(Math.max(2, d.bundle)) * 1.1)
+  visual.strokeWidth *= lineScale
   // A bundle whose members are out (hovered here, or pinned) steps back
   // so the detail reads on top of it rather than through it.
   const [bundleHovered, setBundleHovered] = useState(false)

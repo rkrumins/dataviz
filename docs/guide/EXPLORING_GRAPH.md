@@ -104,7 +104,7 @@ fetches anything again.
   (5) or **All hops** (25). A side set to 0 is hidden. The dock's **Settings**
   tab has the same **Upstream depth** and **Downstream depth** sliders.
 - **The depth a trace opens at:** one hop each way (**Direct**) until you choose
-  your own. In **Trace settings**, **Make this my default** makes the depth on
+  your own. **Root Cause** and **Impact** go every hop in their direction. In **Trace settings**, **Make this my default** makes the depth on
   screen the one every new trace opens at; **Preferences → Lineage trace**
   (in your avatar menu) sets it too, each way, from 0 to 25. A shared link, a
   saved trace or the trace history opens at its own depth.
@@ -391,7 +391,7 @@ the view itself.
 | --- | --- |
 | See lines without hovering | **Edge Density** to **Adaptive** (strongest flows stay visible) or **All Edges**. **On Hover** is the default |
 | Draw more or fewer lines on a busy view | The **Edge Budget** slider (**Lines per entity** in On Hover), from 100 to 2,000 |
-| Make lines thicker or thinner | **Line weight**: **Thin**, **Regular** (the default) or **Thick**. A trace draws its lines at the same weight, so a busy one stays readable |
+| Make lines thicker or thinner | **Line weight**: **Thin**, **Regular** (the default) or **Thick**, on the canvas and in the Focus Lens. A trace draws its lines at the same weight, so a busy one stays readable |
 | Hide the arrowheads | **Direction → Arrow markers** off |
 | Spot dependencies that run against the layers | **Highlight lines that point back** on: a line whose source sits in a layer to the right of its target is drawn in an alert colour — **Red** (the default), **Amber** or **Magenta**. Its hover card says **Points back**, and **Flows** counts them (**←**) in the same colour |
 | Change the upstream and downstream colours | **Appearance → Lineage colours**: pick a preset, or set **Incoming** and **Outgoing** yourself |

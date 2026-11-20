@@ -9,6 +9,56 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Export what you selected to edit offline, lines as heavy as you like, and traces that open one hop deep
+
+Editing a few entities offline meant exporting the whole data source or a whole view. Now a canvas
+selection exports alone, with everything inside it, and comes back through Import. A trace drew its
+lines thicker than the rest of the canvas, which made a busy one heavy; lines are now one weight
+everywhere, and the reader picks it. And every trace opened on all 25 hops it walks; a trace now
+opens on the reader's own default, one hop each way to begin with.
+
+### Added
+
+- **Export a selection with everything inside it, to edit and import back.**
+  - Select entities and choose **Export…** on the selection bar, or right-click one and choose
+    **Export with children…**. The file holds them, everything inside them at every level, and the
+    relationships among them.
+  - Importing it in Edit mode applies only the cells you changed, as any import does.
+  - In a trace, selected cards bring the selection bar back with **Export…** alone.
+  - API: `withChildren` on `POST …/exports`, `GET …/exports/plan` and `…/exports/stream`. The ids
+    may also come in a JSON body (`{"ids": [...]}`) on `POST …/exports` and a new
+    `POST …/exports/plan`.
+  - Containment is followed in each type's own direction.
+- **Display → Line weight** (Thin, Regular, Thick) for the lines on the canvas and in the Focus Lens.
+- **A default trace depth**, saved in the browser. Set it in **Preferences → Lineage trace**, or
+  with **Make this my default** in a trace's Depth settings.
+
+### Changed
+
+- **A new trace opens at the reader's default depth, 1/1 to begin with, instead of 25/25.**
+  - Root Cause and Impact still go every hop in their direction.
+  - Shared links, saved traces and the trace history open at their own depth.
+  - The walk still fetches every hop, so going deeper is instant.
+- **A trace draws its lines at their usual width**, about 1.4px instead of about 2.8px. It picks
+  its own lines out by colour, opacity and glow.
+
+### Upgrading
+
+- No migrations.
+- Everyone's traces now open one hop each way. To open every trace at every hop again, choose
+  **All hops** in a trace's Depth settings and then **Make this my default**, or set 25 each way in
+  **Preferences → Lineage trace**.
+
+### Known limitations
+
+- Exporting part of the canvas to edit needs version control on the data source: a data source
+  without it can't take the file back.
+- Line weight covers the main canvas and the Focus Lens. The other graph layouts keep their own
+  widths.
+- The default depth lives in one browser, like every other preference.
+
+---
+
 ## [Unreleased] — Traces you can hand on, take away and keep, and views of a quarter of a million members
 
 A trace of twenty selected tables could be read in the dock and nothing else: no link (a link
