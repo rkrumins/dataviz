@@ -24,6 +24,7 @@ from .endpoints import (
     versioning,
     versioning_admin,
     review_center,
+    playground,
     admin_idp_groups,
     admin_idp_providers,
     admin_user_identities,
@@ -481,6 +482,9 @@ api_router.include_router(
 api_router.include_router(
     review_center.router, prefix="/review-inbox", tags=["versioning:review-center"],
 )
+
+# ── The Playground: find it, join it, leave it; set it up (platform admin) ──
+api_router.include_router(playground.router, prefix="/playground", tags=["playground"])
 
 # ── Versioned graph editing (workspace-scoped) ───────────────────────
 # The ONLY path between the frontend and the graphver Postgres store; the

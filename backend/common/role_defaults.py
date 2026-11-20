@@ -244,6 +244,25 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:view:read",
         }),
     ),
+    # The Playground's own role (``playground_policy.PLAYGROUND_ROLE``), given on joining it.
+    "workspace_playground_member": SystemRoleDefault(
+        description=(
+            "Build your own graphs and views in the Playground, and change only what you made. "
+            "No people, no publishing to everyone, no production data."
+        ),
+        scope_type="global",
+        permissions=frozenset({
+            "workspace:datasource:manage",
+            "workspace:datasource:read",
+            "workspace:native-query:read",
+            "workspace:ontology:read",
+            "workspace:provider:read",
+            "workspace:view:create",
+            "workspace:view:delete",
+            "workspace:view:edit",
+            "workspace:view:read",
+        }),
+    ),
 }
 
 

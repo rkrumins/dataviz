@@ -222,6 +222,7 @@ export function AppLayout() {
           initialWorkspaceId={initialScope.workspaceId}
           initialDataSourceId={initialScope.dataSourceId}
           journey={initialScope.journey}
+          initialProviderId={initialScope.providerId}
           importFile={initialScope.importFile}
           importIntoViewId={initialScope.importIntoViewId}
           importUploadId={initialScope.importUploadId}

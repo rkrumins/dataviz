@@ -84,8 +84,10 @@ function simpleHash(str: string): number {
 /**
  * Get a deterministic color set for a workspace.
  * Returns Tailwind class names for bg, text, and border.
+ * The Playground is always violet, so it reads as the sandbox wherever it appears.
  */
-export function workspaceColor(workspaceId: string): WorkspaceColorSet {
+export function workspaceColor(workspaceId: string, kind?: string): WorkspaceColorSet {
+  if (kind === 'playground') return WORKSPACE_COLORS[3]
   const index = simpleHash(workspaceId) % WORKSPACE_COLORS.length
   return WORKSPACE_COLORS[index]
 }

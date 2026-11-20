@@ -158,6 +158,10 @@ export function WorkspaceDetailPage() {
     const openNewView = viewEditor && canCreateView && wsId
         ? () => viewEditor.openViewEditor(undefined, { workspaceId: wsId })
         : undefined
+    // The Playground's "Start a new graph": the wizard on a blank graph, on its sandbox provider.
+    const openNewGraph = viewEditor && canCreateView && wsId
+        ? (providerId?: string) => viewEditor.openViewEditor(undefined, { workspaceId: wsId, journey: 'blank', providerId })
+        : undefined
     // What waits on the reader in Reviews, for the tab's badge.
     const reviewCounts = useReviewInboxCounts(wsId, versioningEnabled).data?.counts
     const reviewsWaiting = reviewCounts ? reviewCounts.needs_review + reviewCounts.sent_back : 0
@@ -520,7 +524,9 @@ export function WorkspaceDetailPage() {
         ...(versioningEnabled ? [{ id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, alert: reviewsWaiting }] : []),
         ...(canAddMembers ? [{ id: 'members' as const, label: 'People', icon: Users }] : []),
         ...(activityScope ? [{ id: 'activity' as const, label: 'Activity', icon: History }] : []),
-        ...(canManageDataSources || canManageMembers ? [{ id: 'settings' as const, label: 'Settings', icon: Settings2 }] : []),
+        // The Playground's settings are its administrator's: a member manages only their own graphs.
+        ...(canManageMembers || (canManageDataSources && workspace.kind !== 'playground')
+            ? [{ id: 'settings' as const, label: 'Settings', icon: Settings2 }] : []),
     ]
     // A tab this reader can't open (an old Members link, say) reads as the Overview.
     const activeTab: WorkspaceTab = tabs.some(t => t.id === requested.tab) ? requested.tab : 'overview'
@@ -616,6 +622,8 @@ export function WorkspaceDetailPage() {
                     onGoTo={goTo}
                     onNewView={openNewView}
                     onAddSource={canManageDataSources ? () => setShowAddDs(true) : undefined}
+                    onNewGraph={openNewGraph}
+                    onOpenGraph={setSelectedDsId}
                 />
             )}
 

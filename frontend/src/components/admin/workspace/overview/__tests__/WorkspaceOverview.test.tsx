@@ -16,8 +16,10 @@ const { state } = vi.hoisted(() => ({
         requests: [] as unknown[],
         transfers: [] as unknown[],
         ownerLeft: [] as unknown[],
+        playground: { graphQuota: 3, graphsUsed: 1, sandboxProviderId: 'prov_sb' } as Record<string, unknown> | undefined,
     },
 }))
+vi.mock('@/hooks/usePlayground', () => ({ usePlayground: () => ({ data: state.playground }) }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
     useReviewInboxCounts: () => ({ data: { counts: state.reviews } }),
     useDraftsWhoseOwnerLeft: (ws: string | null) => ({ data: ws ? state.ownerLeft : undefined }),
@@ -34,6 +36,7 @@ vi.mock('@/services/viewApiService', () => ({ listViews: vi.fn().mockResolvedVal
 vi.mock('@/components/views/WorkspaceActivityFeed', () => ({ WorkspaceActivityFeed: () => null }))
 
 import { WorkspaceOverview } from '../WorkspaceOverview'
+import { useAuthStore } from '@/store/auth'
 
 function ws(over: Partial<WorkspaceResponse> = {}): WorkspaceResponse {
     return {
@@ -67,6 +70,7 @@ beforeEach(() => {
     state.requests = []
     state.transfers = []
     state.ownerLeft = []
+    state.playground = { graphQuota: 3, graphsUsed: 1, sandboxProviderId: 'prov_sb' }
     window.localStorage.clear()
 })
 
@@ -145,5 +149,57 @@ describe('Get this workspace ready', () => {
             views: [{ id: 'v1', name: 'Map', isFavourited: false }] as View[],
         })
         expect(screen.queryByText('Get this workspace ready')).toBeNull()
+    })
+})
+
+describe('In the Playground', () => {
+    const playground = (over: Partial<WorkspaceResponse> = {}) => ws({
+        id: 'ws_play', name: 'Playground', kind: 'playground',
+        dataSources: [
+            { id: 'ds_mine', label: 'My experiment', createdBy: 'usr_me' },
+            { id: 'ds_theirs', label: 'Their experiment', createdBy: 'usr_other' },
+        ] as never,
+        ...over,
+    })
+    beforeEach(() => {
+        useAuthStore.setState({ user: { id: 'usr_me' } as never })
+    })
+
+    it('leads with the reader’s own experiments, not a setup checklist', () => {
+        renderOverview({ workspace: playground(), canManageSources: true, canManageMembers: true })
+        const panel = screen.getByRole('region', { name: 'Your experiments' })
+        expect(within(panel).getByText('My experiment')).toBeInTheDocument()
+        expect(within(panel).queryByText('Their experiment')).toBeNull()
+        expect(screen.queryByText('Get this workspace ready')).toBeNull()
+    })
+
+    it('shows the quota, and starts a graph on the sandbox provider', () => {
+        const onNewGraph = vi.fn()
+        renderOverview({ workspace: playground(), onNewGraph })
+        expect(screen.getByText('1 of 3 graphs used')).toBeInTheDocument()
+        expect(screen.getByRole('meter', { name: 'Graphs used' })).toHaveAttribute('aria-valuenow', '1')
+        fireEvent.click(screen.getByRole('button', { name: /Start a new graph/ }))
+        expect(onNewGraph).toHaveBeenCalledWith('prov_sb')
+    })
+
+    it('stops new graphs at the quota, and says what to do', () => {
+        state.playground = { graphQuota: 3, graphsUsed: 3, sandboxProviderId: 'prov_sb' }
+        const onNewGraph = vi.fn()
+        renderOverview({ workspace: playground(), onNewGraph })
+        expect(screen.getByRole('button', { name: /Start a new graph/ })).toBeDisabled()
+        expect(screen.getByText(/Delete one you’re done with/)).toBeInTheDocument()
+    })
+
+    it('shows the first steps before the reader has a graph', () => {
+        renderOverview({ workspace: playground({ dataSources: [] }) })
+        expect(screen.getByText('Start a blank graph')).toBeInTheDocument()
+        expect(screen.queryByText('No views here yet')).toBeNull()
+    })
+
+    it('opens one of the reader’s graphs', () => {
+        const onOpenGraph = vi.fn()
+        renderOverview({ workspace: playground(), onOpenGraph })
+        fireEvent.click(screen.getByRole('button', { name: /My experiment/ }))
+        expect(onOpenGraph).toHaveBeenCalledWith('ds_mine')
     })
 })

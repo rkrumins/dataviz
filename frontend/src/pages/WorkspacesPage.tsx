@@ -15,6 +15,7 @@ import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import { WorkspaceCard, type WsDataSourceProviderInfo, type WorkspaceSchemaSummary } from '@/components/admin/WorkspaceCard'
 import { useWorkspaceUsage } from '@/hooks/useContentInsights'
 import { WorkspaceFilterToolbar, type WorkspaceSortKey, type HealthFilter } from '@/components/admin/workspace/WorkspaceFilterToolbar'
+import { PlaygroundCard } from '@/components/playground/PlaygroundCard'
 import { WorkspaceListRow, WORKSPACE_LIST_GRID } from '@/components/admin/workspace/WorkspaceListRow'
 import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHealthBadge'
@@ -557,6 +558,9 @@ export function WorkspacesPage() {
 
             {tab === 'mine' && (
                 <>
+                    {/* The shared sandbox, pinned first: join it, open it, or set it up. */}
+                    <PlaygroundCard compact className="mb-5" />
+
                     {/* A failed refresh used to erase the provider/ontology detail silently.
                         Now it keeps it and admits it might be stale. */}
                     {(listFailed || probeFailed) && !isLoading && (

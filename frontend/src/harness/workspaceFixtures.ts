@@ -5,7 +5,7 @@
 const now = Date.now()
 const ago = (h: number) => new Date(now - h * 3_600_000).toISOString()
 
-export type WorkspaceFixtureName = 'populated' | 'failing' | 'empty'
+export type WorkspaceFixtureName = 'populated' | 'failing' | 'empty' | 'playground'
 
 const SOURCES = [
     {
@@ -28,7 +28,27 @@ const SOURCES = [
     },
 ]
 
+// The Playground: two graphs of the reader's, one of someone else's.
+const PLAYGROUND_SOURCES = [
+    ['ds_pg_supply', 'Supply chain sketch', 'usr_me', 30], ['ds_pg_crm', 'CRM data flows', 'usr_me', 4],
+    ['ds_pg_ml', 'ML feature pipeline', 'usr_ada', 60],
+].map(([id, label, createdBy, h]) => ({
+    id: id as string, workspaceId: 'ws_fin', label: label as string, providerId: 'prov_sandbox', graphName: (id as string).slice(3),
+    isPrimary: id === 'ds_pg_supply', isActive: true, ontologyId: 'ont_fin', aggregationStatus: 'ready',
+    lastAggregatedAt: ago(h as number), projectionMode: 'in_source', identityProperty: 'urn',
+    createdAt: ago((h as number) + 10), updatedAt: ago(h as number), sourceMode: 'managed', aggregationEdgeCount: 320,
+    createdBy: createdBy as string,
+}))
+
 export function workspaceOf(name: WorkspaceFixtureName) {
+    if (name === 'playground') {
+        return {
+            id: 'ws_fin', name: 'Playground', kind: 'playground',
+            description: 'A sandbox for trying things out — build a graph of your own and explore it.',
+            isDefault: false, isActive: true, publishPolicy: 'request', requestPolicy: 'open',
+            createdAt: ago(2000), updatedAt: ago(10), memberCount: 37, dataSources: PLAYGROUND_SOURCES,
+        }
+    }
     const dataSources = name === 'empty' ? [] : SOURCES.map(ds =>
         name === 'failing' && ds.id === 'ds_risk' ? { ...ds, aggregationStatus: 'failed' } : ds)
     return {
@@ -53,8 +73,23 @@ const VIEW_DEFS: Array<[string, string, string, string]> = [
 ]
 const SOURCE_NAME: Record<string, string> = { ds_ledger: 'General Ledger', ds_risk: 'Risk Models', ds_reg: 'Regulatory Reporting' }
 
+const PLAYGROUND_VIEWS: Array<[string, string, string, string, string, string]> = [
+    ['v_pg_suppliers', 'Suppliers to stores', 'layered-lineage', 'ds_pg_supply', 'usr_me', 'private'],
+    ['v_pg_crm', 'Where leads go', 'graph', 'ds_pg_crm', 'usr_me', 'workspace'],
+    ['v_pg_features', 'Feature store map', 'reference', 'ds_pg_ml', 'usr_ada', 'workspace'],
+    ['v_pg_models', 'Models and their inputs', 'hierarchy', 'ds_pg_ml', 'usr_ada', 'workspace'],
+]
+
 export function viewsOf(name: WorkspaceFixtureName) {
     if (name === 'empty') return []
+    if (name === 'playground') {
+        return PLAYGROUND_VIEWS.map(([id, viewName, viewType, dsId, by, visibility], i) => ({
+            id, name: viewName, viewType, workspaceId: 'ws_fin', workspaceName: 'Playground', dataSourceId: dsId,
+            dataSourceName: PLAYGROUND_SOURCES.find(d => d.id === dsId)?.label, config: {}, visibility,
+            isPinned: false, favouriteCount: 3 - i, isFavourited: false, createdAt: ago(200 - i * 30), updatedAt: ago(3 + i * 7),
+            createdBy: by, createdByName: by === 'usr_me' ? 'Sam Reader' : 'Ada Okafor', tags: [],
+        }))
+    }
     return VIEW_DEFS.map(([id, viewName, viewType, dsId], i) => ({
         id, name: viewName, viewType, workspaceId: 'ws_fin', workspaceName: 'Finance Risk', dataSourceId: dsId,
         dataSourceName: SOURCE_NAME[dsId], config: {}, visibility: i % 3 === 0 ? 'enterprise' : 'workspace',
@@ -80,6 +115,9 @@ export const STATS: Record<string, { nodeCount: number; edgeCount: number }> = {
     ds_ledger: { nodeCount: 48_210, edgeCount: 121_900 },
     ds_risk: { nodeCount: 12_480, edgeCount: 30_115 },
     ds_reg: { nodeCount: 3_920, edgeCount: 8_640 },
+    ds_pg_supply: { nodeCount: 64, edgeCount: 112 },
+    ds_pg_crm: { nodeCount: 23, edgeCount: 31 },
+    ds_pg_ml: { nodeCount: 140, edgeCount: 260 },
 }
 
 export const ONTOLOGIES = [

@@ -525,6 +525,24 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Workspaces, their access settings and every request are kept",
         ),
     ),
+    # Lets anyone who can sign in into a workspace and onto a provider: when it cannot
+    # be read, assume it is off, and nobody is let in.
+    "playgroundEnabled": FeatureWiring(
+        key="playgroundEnabled",
+        posture="security",
+        server_gates=(
+            "POST /playground/join — refused while off",
+            "GET /playground — says the Playground is off, and offers nothing",
+        ),
+        ui_surfaces=(
+            "Try the Playground — on the Dashboard for someone with no workspace, and on Workspaces",
+            "Setting the Playground up, on Workspaces, for platform administrators",
+        ),
+        still_allowed=(
+            "People already in the Playground keep their graphs and views; nothing is deleted",
+            "Leaving the Playground",
+        ),
+    ),
     # ── Notifications ──────────────────────────────────────────────────────────
     "announcementsEnabled": FeatureWiring(
         key="announcementsEnabled",

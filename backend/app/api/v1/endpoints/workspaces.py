@@ -40,7 +40,8 @@ from backend.app.db.repositories import (
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services import (
-    data_source_transfer, fork_sources, profiling_series, template_access, workspace_visibility,
+    data_source_transfer, fork_sources, playground_policy, profiling_series, template_access,
+    workspace_visibility,
 )
 from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
@@ -431,6 +432,14 @@ async def update_workspace(
                 "a built-in, an organization template, or this workspace's own."
             ))
     old_ws = await session.get(WorkspaceORM, workspace_id)
+    # The Playground's doors are fixed: open to join, publishing only on request.
+    if getattr(old_ws, "kind", None) == playground_policy.PLAYGROUND_KIND and (
+        (req.publish_policy is not None and req.publish_policy != "request")
+        or (req.request_policy is not None and req.request_policy != "open")
+    ):
+        raise HTTPException(status_code=403, detail=(
+            "The Playground stays open to everyone to join, and publishes only on request."
+        ))
     old_identity = (
         getattr(old_ws, "identity_property", None),
         getattr(old_ws, "name_property", None),
@@ -726,6 +735,8 @@ async def add_data_source(
     ws = await workspace_repo.get_workspace_orm(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
+    # The Playground holds only graphs built in it from blank: nothing is attached.
+    await playground_policy.assert_can_attach(session, workspace_id)
     # Validate references based on which path is used
     if req.catalog_item_id:
         from backend.app.db.repositories import catalog_repo
@@ -859,6 +870,7 @@ async def update_data_source(
     old_ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not old_ds or old_ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    await playground_policy.assert_owner(session, workspace_id, old_ds.created_by, _user.id, claims)
     if req.projection_mode is not None or req.dedicated_graph_name is not None:
         fork_sources.refuse_own_store(old_ds)  # a fork has no rollups to place (409)
     if (
@@ -983,6 +995,7 @@ async def remove_data_source(
     permanent: bool = Query(False, description="Skip the trash and destroy it now."),
     ds_id: str = Path(...),
     _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Move a data source to the trash — or, with ``?permanent=true``, destroy it now.
@@ -1007,9 +1020,11 @@ async def remove_data_source(
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
     fork_sources.refuse_lifecycle(ds)          # a fork goes with its graph (409)
+    await playground_policy.assert_owner(session, workspace_id, ds.created_by, _user.id, claims)
 
     count = await data_source_repo.count_data_sources(session, workspace_id)
-    if count <= 1:
+    # The Playground has no "last" source to keep: each experiment is its maker's to delete.
+    if count <= 1 and not await playground_policy.playground_of(session, workspace_id):
         raise HTTPException(status_code=409, detail="Cannot delete the last data source in a workspace")
 
     from backend.app.services.versioning import purge_worker

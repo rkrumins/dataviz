@@ -738,6 +738,16 @@ class WorkspaceORM(Base):
     review_self_merge = Column(Boolean, nullable=True)
     review_required_approvals = Column(Integer, nullable=True)
     review_threads_hold = Column(Boolean, nullable=True)
+    # What kind of workspace this is. 'standard' — a team's own, with the data it
+    # onboards. 'playground' — the one platform-provided sandbox anyone can join to
+    # build their own graphs from blank: no production data can be attached, nothing
+    # is published to everyone, and each person changes only what they made
+    # (``backend.app.services.playground_policy``). At most one (partial unique index).
+    kind = Column(Text, nullable=False, default="standard", server_default="standard")
+    # The playground's own settings, as JSON: ``sandboxProviderId`` (the only provider
+    # its blank graphs go on), ``starterOntologyIds`` (the data models its members may
+    # start from) and ``graphQuota`` (graphs per person). NULL on a standard workspace.
+    playground_settings = Column(Text, nullable=True)
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -775,6 +785,12 @@ class WorkspaceORM(Base):
         CheckConstraint(
             "review_required_approvals IS NULL OR review_required_approvals BETWEEN 0 AND 10",
             name="ck_workspaces_required_approvals",
+        ),
+        CheckConstraint("kind IN ('standard', 'playground')", name="ck_workspaces_kind"),
+        Index(
+            "uq_workspaces_one_playground", "kind", unique=True,
+            postgresql_where=text("kind = 'playground' AND deleted_at IS NULL"),
+            sqlite_where=text("kind = 'playground' AND deleted_at IS NULL"),
         ),
     )
 

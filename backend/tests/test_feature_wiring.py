@@ -237,6 +237,9 @@ def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
       * ``workspaceDirectoryEnabled`` — ON shows every listed workspace's name, purpose and
         approvers to everyone who can sign in. Where workspace names are themselves
         sensitive that is a disclosure, so the operator turns it on knowingly.
+      * ``playgroundEnabled`` — ON lets everyone who can sign in join a workspace and create
+        graphs on a provider. That provider must be one the operator set aside for it, so
+        the operator turns it on once they have — it cannot be a default.
     """
     # A single-select ladder has no "off" rung to ship on, so the boolean
     # question this test asks does not apply to it.
@@ -248,8 +251,8 @@ def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
     # happened to declare the flags in.
     assert off_by_default == [
         "analyticsPublicEnabled", "analyticsShowEmailAddresses",
-        "analyticsWorkspaceVisibility", "apiKeySsoRoundTripStepUp", "signupEnabled",
-        "workspaceDirectoryEnabled",
+        "analyticsWorkspaceVisibility", "apiKeySsoRoundTripStepUp", "playgroundEnabled",
+        "signupEnabled", "workspaceDirectoryEnabled",
     ], (
         f"a flag now ships OFF on a security exemption: {off_by_default}. That is allowed — but it "
         f"means a capability is invisible on every fresh deployment, so it should be a decision "

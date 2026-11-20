@@ -32,6 +32,7 @@ import type { WorkspaceResponse } from '@/services/workspaceService'
 import { listViews, type View } from '@/services/viewApiService'
 import type { DataSourceReadinessResponse } from '@/services/aggregationService'
 import { useRecentViews } from '@/hooks/useRecentViews'
+import { useAuthStore } from '@/store/auth'
 import { useViewUsage } from '@/hooks/useContentInsights'
 import { useRequestsToAnswer } from '@/hooks/useWorkspaceAccess'
 import { useReviewInboxCounts, useDraftsWhoseOwnerLeft } from '@/features/versioning/hooks/useVersioning'
@@ -42,6 +43,7 @@ import { AttentionCard, type AttentionItem } from './AttentionCard'
 import { SetupChecklist, type SetupStep } from './SetupChecklist'
 import { ViewTile } from './ViewTile'
 import { SectionTitle } from './SectionTitle'
+import { PlaygroundExperiments } from './PlaygroundExperiments'
 import type { DataSection, WorkspaceTab } from '../workspaceTabs'
 
 interface WorkspaceOverviewProps {
@@ -58,6 +60,10 @@ interface WorkspaceOverviewProps {
     onGoTo: (tab: WorkspaceTab, section?: DataSection) => void
     onNewView?: () => void
     onAddSource?: () => void
+    /** The Playground: start a blank graph (on its sandbox provider). */
+    onNewGraph?: (providerId?: string) => void
+    /** The Playground: open one of the reader's graphs. */
+    onOpenGraph?: (dataSourceId: string) => void
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
@@ -68,9 +74,10 @@ const ATTENTION_ICONS = {
 
 export function WorkspaceOverview({
     workspace, views, readinessMap, aggregateStats, canManageSources, canManageMembers, canAddMembers,
-    versioningEnabled, showActivity, onGoTo, onNewView, onAddSource,
+    versioningEnabled, showActivity, onGoTo, onNewView, onAddSource, onNewGraph, onOpenGraph,
 }: WorkspaceOverviewProps) {
     const wsId = workspace.id
+    const isPlayground = workspace.kind === 'playground'
     const sources = workspace.dataSources
 
     // ── What waits on the reader ────────────────────────────────────────
@@ -174,11 +181,13 @@ export function WorkspaceOverview({
 
     const popularQ = useQuery({
         queryKey: ['workspace-overview', 'popular', wsId],
-        queryFn: () => listViews({ workspaceIds: [wsId], sort: 'most-opened', limit: 4 }),
+        queryFn: () => listViews({ workspaceIds: [wsId], sort: 'most-opened', limit: isPlayground ? 8 : 4 }),
         enabled: views.length > 0,
         staleTime: 60_000,
     })
-    const popular = popularQ.data?.items ?? []
+    // In the Playground the reader's own work has its panel: this shelf is everyone else's.
+    const me = useAuthStore(s => s.user?.id)
+    const popular = (popularQ.data?.items ?? []).filter(v => !isPlayground || v.createdBy !== me).slice(0, 4)
     const usage = useViewUsage(popular.map(v => v.id)).data
 
     // ── At a glance ─────────────────────────────────────────────────────
@@ -194,9 +203,12 @@ export function WorkspaceOverview({
         <div className="grid gap-5 py-5 xl:grid-cols-3">
             <div className="space-y-5 xl:col-span-2 min-w-0">
                 {attention.length > 0 && <AttentionCard items={attention} />}
-                {isManager && <SetupChecklist wsId={wsId} steps={steps} />}
+                {/* The Playground has nothing to set up: it leads with the reader's own experiments. */}
+                {isPlayground
+                    ? <PlaygroundExperiments workspace={workspace} views={views} onNewGraph={onNewGraph} onOpenGraph={onOpenGraph ?? (() => onGoTo('data', 'sources'))} />
+                    : isManager && <SetupChecklist wsId={wsId} steps={steps} />}
 
-                {views.length === 0 ? (
+                {views.length === 0 ? (isPlayground ? null : (
                     <section className="rounded-3xl border border-dashed border-glass-border bg-canvas-elevated">
                         <EmptyState
                             icon={Eye}
@@ -207,7 +219,7 @@ export function WorkspaceOverview({
                             action={onNewView ? { label: 'New view', onClick: onNewView, icon: Plus } : undefined}
                         />
                     </section>
-                ) : (
+                )) : (
                     <>
                         <Shelf title="Jump back in" subtitle="Views you opened or favourited here" onSeeAll={() => onGoTo('views')} icon={History} tone="text-indigo-500 bg-indigo-500/10">
                             {recentHere.length + favourites.length === 0 ? (
@@ -228,7 +240,11 @@ export function WorkspaceOverview({
                             )}
                         </Shelf>
 
-                        <Shelf title="Popular here" subtitle="What people in this workspace open most" onSeeAll={() => onGoTo('views')} icon={Flame} tone="text-amber-500 bg-amber-500/10">
+                        <Shelf
+                            title={isPlayground ? 'Shared by others' : 'Popular here'}
+                            subtitle={isPlayground ? 'What people in the Playground open most — open one for ideas' : 'What people in this workspace open most'}
+                            onSeeAll={() => onGoTo('views')} icon={Flame} tone="text-amber-500 bg-amber-500/10"
+                        >
                             {popular.map(v => {
                                 const u = usage?.[v.id]
                                 return (

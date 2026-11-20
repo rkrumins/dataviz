@@ -82,6 +82,7 @@ def _to_response(row: WorkspaceDataSourceORM, identity=None) -> DataSourceRespon
         sourceMode=row.source_mode,
         writeBackEnabled=bool(row.write_back_enabled),
         forkOf=fork_of(row),
+        createdBy=row.created_by,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )

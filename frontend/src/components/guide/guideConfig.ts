@@ -263,6 +263,14 @@ export const guideEntries: GuideEntry[] = [
     description: 'What an access message means, how to ask for access, and where to see the answer',
     importFn: () => import('@docs/guide/REQUESTING_ACCESS.md?raw'),
   },
+  {
+    slug: 'playground',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'The Playground',
+    description: 'A sandbox anyone may join to build graphs of their own and try views out, apart from production',
+    importFn: () => import('@docs/guide/PLAYGROUND.md?raw'),
+  },
 
   // For Builders
   {

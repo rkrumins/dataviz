@@ -149,8 +149,11 @@ export interface ViewWizardProps {
     /** Optional pre-selected scope (e.g. from a data source card). */
     initialWorkspaceId?: string
     initialDataSourceId?: string
-    /** 'import' opens the Import journey: a view from a file exported by another environment. */
-    journey?: 'build' | 'import'
+    /** 'import' opens the Import journey: a view from a file exported by another environment;
+     *  'blank' opens on a new blank graph. */
+    journey?: 'build' | 'import' | 'blank'
+    /** Blank graph: the provider it goes on, chosen already. */
+    initialProviderId?: string
     /** Import journey: a file already chosen (dropped on the Explorer, say). */
     importFile?: File | null
     /** Import journey: update this view from the file ("Update from file…"). */
@@ -513,7 +516,8 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     const { activeWorkspaceId, activeDataSourceId, workspaces, ...wizardProps } = props
     const loadWorkspaces = useWorkspacesStore(s => s.loadWorkspaces)
     const lastScope = useMemo(() => readLastScope(), [])
-    const startMode: ScopeMode = props.journey === 'import' ? 'import' : 'existing'
+    const startMode: ScopeMode = props.journey === 'import' || props.journey === 'blank' ? props.journey : 'existing'
+    const initialProvider = props.journey === 'blank' ? props.initialProviderId ?? null : null
 
     // Determine initial selections: explicit props > active context > last used
     const initialWs = props.initialWorkspaceId ?? activeWorkspaceId ?? lastScope.wsId ?? null
@@ -525,7 +529,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     const [selectedWsId, setSelectedWsId] = useState<string | null>(initialWs)
     const [selectedDsId, setSelectedDsId] = useState<string | null>(initialDs)
     const [scopeMode, setScopeMode] = useState<ScopeMode>(startMode)
-    const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null)
+    const [selectedProviderId, setSelectedProviderId] = useState<string | null>(initialProvider)
     const [selectedOntologyId, setSelectedOntologyId] = useState<string | null>(null)
     const [scopeConfirmed, setScopeConfirmed] = useState(false)
 
@@ -604,7 +608,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
             setSelectedDsId(initialDs)
             setScopeMode(startMode)
             setImportStep(firstImportStep)
-            setSelectedProviderId(null)
+            setSelectedProviderId(initialProvider)
             setSelectedOntologyId(null)
             setScopeConfirmed(false)
             setDataTargetMode('existing')

@@ -84,8 +84,8 @@ export function monogram(name: string): string {
  * can learn to recognise it — the same one the dashboard, the workspace page and
  * every workspace chip use (`lib/workspaceColor`).
  */
-export function accentFor(id: string): string {
-    return workspaceColor(id).gradient
+export function accentFor(id: string, kind?: string): string {
+    return workspaceColor(id, kind).gradient
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ export function WorkspaceCard({
 }: WorkspaceCardProps) {
     const [showSources, setShowSources] = useState(false)
     const prefetchHandlers = useIntentPrefetch(onPrefetch)
-    const gradient = accentFor(ws.id)
+    const gradient = accentFor(ws.id, ws.kind)
     const technical = usePersonaMode() === 'technical'
     const { uniqueEntityTypes, uniqueRelationshipTypes, ontologyNames, providerGroups, viewCount } = schemaSummary
     const memberCount = ws.memberCount ?? 0

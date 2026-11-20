@@ -586,6 +586,10 @@ async def _destination_blockers(
     """What stops this source going to ``target`` right now — the half of the preflight a move
     and an undo share — and the version store's facts about it."""
     blockers: list[TransferIssue] = []
+    if getattr(target, "kind", None) == "playground":
+        # The Playground holds only graphs built in it from blank (playground_policy).
+        blockers.append(_issue(
+            "destination_playground", "The Playground only holds graphs built in it from blank.", "blocker"))
     if not target.is_active:
         blockers.append(_issue(
             "destination_unavailable", f"{target.name} is switched off, so it can't take data sources.",

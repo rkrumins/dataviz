@@ -9,11 +9,12 @@
  *   open http://localhost:5199/workspace-harness.html?as=admin&fixture=failing&tab=data&section=processing
  *
  *   as       viewer | member | admin            (default viewer)
- *   fixture  populated | failing | empty        (default populated)
+ *   fixture  populated | failing | empty | playground  (default populated)
  *   mode     business | technical               (default business)
  *   theme    light | dark
  *   tab / section / ds — passed to the page's own address
- *   page     workspace | reviews                (reviews: the Review Center at /reviews)
+ *   page     workspace | reviews | playground-card  (reviews: the Review Center at /reviews;
+ *            playground-card: the Playground card, &joined=0 before joining)
  *
  * `npm run harness:workspace` drives Chromium over the main combinations and
  * writes PNGs to .harness/.
@@ -30,6 +31,8 @@ import { useAuthStore } from '../store/auth'
 import { ViewEditorContext } from '../components/layout/viewEditorContext'
 import { WorkspaceDetailPage } from '../pages/WorkspaceDetailPage'
 import { ReviewCenterPage } from '../pages/ReviewCenterPage'
+import { PlaygroundCard } from '../components/playground/PlaygroundCard'
+import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { useWorkspacesStore } from '../store/workspaces'
 import {
     ONTOLOGIES, STATS, readinessOf, viewsOf, workspaceOf, type WorkspaceFixtureName,
@@ -80,6 +83,12 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const ws = workspaceOf(fixture)
     const views = viewsOf(fixture)
     let m: RegExpMatchArray | null
+    if (p === '/api/v1/playground') {
+        return json({
+            enabled: true, exists: true, workspaceId: 'ws_fin', name: 'Playground', joined: params.get('joined') !== '0',
+            graphQuota: 5, graphsUsed: 2, canSetUp: as === 'admin', sandboxProviderId: 'prov_sandbox',
+        })
+    }
     if ((m = p.match(/^\/api\/v1\/admin\/workspaces\/([^/]+)$/))) return json(ws)
     if (p === '/api/v1/admin/workspaces' || p === '/api/v1/admin/workspaces/') {
         return json(page === 'reviews' ? REVIEW_WS.map(w => ({ ...w, dataSources: [], isDefault: false, isActive: true, createdAt: '', updatedAt: '' })) : [ws])
@@ -159,6 +168,7 @@ useAuthStore.setState({
     permissions: { sid: 'harness', global: [], ws: { ws_fin: PERMS[as] } },
 } as never)
 usePersonaStore.setState({ mode })
+useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true } })
 if (page === 'reviews') useWorkspacesStore.setState({ workspaces: REVIEW_WS.map(w => ({ ...w, dataSources: [] })) } as never)
 
 function Harness() {
@@ -172,7 +182,7 @@ function Harness() {
 
     const address = new URLSearchParams()
     for (const k of ['tab', 'section', 'ds', 'dstab']) { const v = params.get(k); if (v) address.set(k, v) }
-    const at = page === 'reviews'
+    const at = page === 'playground-card' ? '/playground-card' : page === 'reviews'
         ? `/reviews${params.get('workspace') ? `?workspace=${params.get('workspace')}` : ''}`
         : `/workspaces/ws_fin${address.toString() ? `?${address}` : ''}`
 
@@ -184,6 +194,12 @@ function Harness() {
                         <Routes>
                             <Route path="/workspaces/:wsId" element={<WorkspaceDetailPage />} />
                             <Route path="/reviews" element={<ReviewCenterPage />} />
+                            <Route path="/playground-card" element={
+                                <div className="mx-auto max-w-5xl space-y-6 p-8">
+                                    <PlaygroundCard />
+                                    <PlaygroundCard compact />
+                                </div>
+                            } />
                         </Routes>
                     </div>
                 </MemoryRouter>

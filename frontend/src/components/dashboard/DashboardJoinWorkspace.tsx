@@ -15,6 +15,7 @@ import { MOTION } from '@/lib/motion'
 import { cn } from '@/lib/utils'
 import { useBrand } from '@/store/branding'
 import { useFeature } from '@/store/features'
+import { PlaygroundCard } from '@/components/playground/PlaygroundCard'
 
 export function DashboardJoinWorkspace() {
     const { appName } = useBrand()
@@ -74,6 +75,9 @@ export function DashboardJoinWorkspace() {
                     </div>
                 </div>
             </div>
+
+            {/* While they wait for a team's workspace: a sandbox of their own, if there is one. */}
+            <PlaygroundCard />
 
             <ol className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {steps.map((step, i) => (

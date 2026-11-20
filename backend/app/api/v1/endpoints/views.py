@@ -54,7 +54,7 @@ from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services import template_access, view_access, view_library, view_source_kinds
+from backend.app.services import playground_policy, template_access, view_access, view_library, view_source_kinds
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
 from backend.app.services.versioning.service import GraphVersioningService
@@ -188,6 +188,18 @@ _ = os
 
 # Fallback user_id when no auth token is present (backward compatibility).
 _ANONYMOUS_USER = "anonymous"
+
+
+async def _playground_owner_only(session: AsyncSession, view_id: str, user, claims: PermissionClaims) -> None:
+    """In the Playground a view is changed or deleted only by the person who made it (or an
+    admin) — whatever RBAC_ENFORCE_VIEWS says, since its members all hold view:edit."""
+    row = (await session.execute(
+        select(ViewORM.workspace_id, ViewORM.created_by).where(ViewORM.id == view_id)
+    )).first()
+    if row is not None:
+        await playground_policy.assert_owner(
+            session, row.workspace_id, row.created_by, getattr(user, "id", None), claims,
+        )
 
 
 def _user_id(user) -> str:
@@ -749,6 +761,7 @@ async def authorize_view_create(
             status_code=422,
             detail="visibility must be one of: private, workspace, enterprise",
         )
+    await playground_policy.assert_visibility(session, workspace_id, visibility)
 
     key = claims.key_scope
     if key is not None:
@@ -960,7 +973,9 @@ async def get_view(
         source_restricted=await _source_is_restricted(
             session, view_orm.workspace_id, view_orm.data_source_id,
         ),
-        platform_policy=await resolve_enterprise_view_policy(session),
+        # Nothing in the Playground goes out to everyone: for its views the tier isn't there.
+        platform_policy=("off" if await playground_policy.playground_of(session, view_orm.workspace_id)
+                         else await resolve_enterprise_view_policy(session)),
     ))
     if view.access.can_query_data_source and ds is not None:
         view.access.native_query_engine = await _native_query_engine(session, ds.provider_id)
@@ -995,6 +1010,7 @@ async def update_view(
     Rejecting loudly beats silently ignoring — an old client must never
     believe it changed sharing state when it didn't.
     """
+    await _playground_owner_only(session, view_id, user, claims)
     if req.visibility is not None:
         raise HTTPException(
             status_code=422,
@@ -1120,6 +1136,7 @@ async def update_view_layout(
     other branches) until the draft is promoted. Omitted (base/published edit)
     → the published row is updated in place, exactly as before.
     """
+    await _playground_owner_only(session, view_id, user, claims)
     existing = await view_repo.get_view(session, view_id)
     if not existing:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
@@ -1175,6 +1192,7 @@ async def delete_view(
     Soft-delete: creator OR ``workspace:view:delete``.
     Hard-delete: ``workspace:admin`` only (per the action matrix).
     """
+    await _playground_owner_only(session, view_id, user, claims)
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         # "Delete forever" targets views that are ALREADY in the trash —
         # the live-only default would 404 before the authz check runs.
@@ -1279,6 +1297,8 @@ async def update_view_visibility(
     if visibility not in ("private", "workspace", "enterprise"):
         raise HTTPException(status_code=422, detail="visibility must be one of: private, workspace, enterprise")
     await _refuse_while_in_draft(session, view_id)
+    target = (await session.execute(select(ViewORM.workspace_id).where(ViewORM.id == view_id))).scalar_one_or_none()
+    await playground_policy.assert_visibility(session, target, visibility)
 
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         view_orm = await _load_view_orm(session, view_id)
@@ -1396,6 +1416,7 @@ async def request_publication(
         raise HTTPException(status_code=409, detail="This view is already published")
     if view_orm.draft_branch_id:
         raise HTTPException(status_code=409, detail=_WAITING_IN_DRAFT)
+    await playground_policy.assert_visibility(session, view_orm.workspace_id, "enterprise")
 
     view_orm.publish_requested_by = user.id
     view_orm.publish_requested_at = datetime.now(timezone.utc).isoformat()
@@ -1471,6 +1492,7 @@ async def approve_publication(
         # The queue can outlive the setting: a request filed while the
         # tier was available must not become a way around its withdrawal.
         raise feature_disabled("enterpriseViewPolicy")
+    await playground_policy.assert_visibility(session, view_orm.workspace_id, "enterprise")
 
     previous = view_orm.visibility
     requester = view_orm.publish_requested_by

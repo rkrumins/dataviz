@@ -12,7 +12,7 @@
 import { Link } from 'react-router-dom'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import {
-    ArrowRight, Calendar, Check, Compass, GitBranch, MoreHorizontal, Pencil, Plus, ShieldCheck, X,
+    ArrowRight, Calendar, Check, Compass, FlaskConical, GitBranch, MoreHorizontal, Pencil, Plus, ShieldCheck, X,
 } from 'lucide-react'
 import type { ComponentType } from 'react'
 import { cn } from '@/lib/utils'
@@ -20,6 +20,7 @@ import { workspaceColor, workspaceMonogram } from '@/lib/workspaceColor'
 import { compact } from '@/lib/formatMetric'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import { useAuthStore, effectiveRoleFor, SYSTEM_ROLE_LABELS } from '@/store/auth'
+import { ROLE_NAMES } from '@/lib/roleNames'
 import { usePersonaMode } from '@/store/persona'
 import { useWorkspaceUsage } from '@/hooks/useContentInsights'
 import { Badge } from '@/components/ui/Badge'
@@ -88,11 +89,14 @@ export function WorkspaceHeroHeader({
     providerInfos, exploreHref, onNewView, moreLinks = [], canEdit,
     isEditing, editName, editDesc, onEditNameChange, onEditDescChange, onStartEdit, onSave, onCancel,
 }: WorkspaceHeroHeaderProps) {
-    const color = workspaceColor(workspace.id)
+    const isPlayground = workspace.kind === 'playground'
+    const color = workspaceColor(workspace.id, workspace.kind)
     const technical = usePersonaMode() === 'technical'
     const usage = useWorkspaceUsage([workspace.id]).data?.[workspace.id]
     const claims = useAuthStore(s => s.permissions)
     const role = claims ? effectiveRoleFor(claims, workspace.id) : null
+    // In the Playground, member-shaped permissions are the Playground member role.
+    const roleLabel = role && (isPlayground && role === ROLE_NAMES.WORKSPACE_MEMBER ? 'Playground member' : SYSTEM_ROLE_LABELS[role])
     const uniqueProviders = Array.from(new Map(providerInfos.map(p => [p.providerType, p])).values())
 
     return (
@@ -106,6 +110,12 @@ export function WorkspaceHeroHeader({
             <div aria-hidden className="pointer-events-none absolute inset-0 text-slate-900/[0.07] dark:text-white/[0.06] [background-image:radial-gradient(currentColor_1px,transparent_1.2px)] [background-size:18px_18px] [mask-image:linear-gradient(105deg,black_10%,transparent_60%)]" />
             <div aria-hidden className={cn('pointer-events-none absolute -top-32 -right-24 h-80 w-80 rounded-full blur-3xl opacity-70', color.glow)} />
             <div aria-hidden className={cn('relative h-1 w-full bg-gradient-to-r', color.gradient)} />
+            {isPlayground && (
+                <p className="relative flex items-center gap-2 border-b border-violet-500/15 bg-gradient-to-r from-violet-500/[0.12] via-fuchsia-500/[0.06] to-transparent px-5 sm:px-8 py-2 text-xs font-medium text-violet-800 dark:text-violet-200">
+                    <FlaskConical className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                    <span><strong className="font-semibold">Playground</strong> · for experiments — nothing here is production data, and nothing here changes it.</span>
+                </p>
+            )}
 
             <div className="relative p-5 sm:p-8">
                 <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
@@ -119,7 +129,9 @@ export function WorkspaceHeroHeader({
                             )}
                         >
                             <span className="absolute inset-x-0 top-0 h-1/2 bg-white/15" />
-                            <span className="relative">{workspaceMonogram(workspace.name)}</span>
+                            {isPlayground
+                                ? <FlaskConical className="relative w-7 h-7" />
+                                : <span className="relative">{workspaceMonogram(workspace.name)}</span>}
                         </div>
 
                         <div className="min-w-0 flex-1">
@@ -191,9 +203,9 @@ export function WorkspaceHeroHeader({
                                     {/* Who uses it, for what, and the reader's own place in it. */}
                                     <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
                                         <WorkspaceUsageLine usage={usage} />
-                                        {role && (
+                                        {roleLabel && (
                                             <span className="inline-flex items-center gap-1 rounded-full border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-2 py-0.5 text-[11px] font-medium text-ink-secondary">
-                                                <ShieldCheck className="w-3 h-3" aria-hidden /> You’re {withArticle(SYSTEM_ROLE_LABELS[role])} here
+                                                <ShieldCheck className="w-3 h-3" aria-hidden /> You’re {withArticle(roleLabel)} here
                                             </span>
                                         )}
                                     </div>

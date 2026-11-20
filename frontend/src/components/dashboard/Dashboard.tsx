@@ -115,7 +115,9 @@ export function Dashboard() {
     const isOnboarding = (workspaces?.length ?? 0) === 0 && !onboardingDismissedAt
     // No workspace and no way to create one: the way in is joining one.
     const canCreateWorkspace = useAuthStore(s => s.can('system:workspaces:create'))
-    const needsToJoin = (workspaces?.length ?? 0) === 0 && !canCreateWorkspace
+    // The Playground is a sandbox, not a team's workspace: someone in it alone still needs a way in.
+    const teamWorkspaces = (workspaces ?? []).filter(w => w.kind !== 'playground')
+    const needsToJoin = teamWorkspaces.length === 0 && !canCreateWorkspace
 
     const handleSelectHit = useCallback((hit: SearchHit) => {
         if (searchQuery.trim()) recordRecentSearch(searchQuery)
