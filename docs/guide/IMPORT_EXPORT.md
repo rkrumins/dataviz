@@ -23,6 +23,7 @@ lands in a draft.
 | You want to… | Without version control | You also need |
 | --- | --- | --- |
 | [Export data](#exporting-data) | Works — you get a *cold copy* of the graph as it stands | The **Export graph data** switch (on by default) |
+| [Export part of the canvas to edit](#exporting-part-of-the-canvas-to-edit) | Not available — a cold copy can't come back in | Version control on the data source, and the **Export graph data** switch |
 | [Import data](#importing-data) | Not available | Version control on, for the deployment and the data source, and permission to manage the workspace's data sources |
 | [Move a View](#moving-views-between-environments) as a View file | Works | The **View versions, import and export** preview, and **Export views** / **Import views** |
 | [Move a View with its data](#importing-a-view-with-its-data) | Not available | Version control on the data source it comes from and the one it goes to, the same switches, and **Export graph data** |
@@ -318,7 +319,8 @@ To work on a few entities and everything inside them, select them on the
 canvas (Cmd- or Ctrl-click each) and choose **Export…** on the selection bar,
 or right-click one and choose **Export with children…**. The **Export data**
 dialog opens on just them: the file holds what you selected, everything inside
-it at every level, and the relationships among them, nothing else.
+it at every level, and the relationships among them, nothing else. It's offered
+on data sources with version control, because only they can take the file back.
 
 Edit the file, then switch to Edit mode and use **Import** to bring it back.
 Each row finds its entity again by its `entity_id`, only the cells you changed
