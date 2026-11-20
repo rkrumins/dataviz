@@ -20,6 +20,7 @@ import {
   ChevronDown,
   Eye,
   Layers,
+  Minus,
   MoveRight,
   Settings2,
   Sliders,
@@ -30,7 +31,10 @@ import {
 import { useReducedMotionConfig } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { CollapsibleSection } from './DisplaySettingsPopover'
-import { usePreferencesStore, type LineageMotion, type LineagePortSides, type LineageRenderMode } from '@/store/preferences'
+import {
+  usePreferencesStore, type LineageMotion, type LineagePortSides, type LineageRenderMode, type LineWeight,
+} from '@/store/preferences'
+import { lineStrokeWidth } from './lineWeight'
 import { LINEAGE_DIRECTION_PRESETS, resolveLineageDirectionColors } from '@/lib/lineageDirectionColors'
 import { PortLegend } from './LineageGuide'
 
@@ -350,6 +354,10 @@ export function LineageDisplaySections({
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
+      <LineWeightSection disabled={disabled} />
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
       <BackPointers disabled={disabled} />
 
       {!simple && <>
@@ -654,6 +662,54 @@ const BACK_POINTER_COLORS = [
 /** Lines that point back: a source in a layer to the right of its target — a
  *  dependency running against the order of the view's layers — in an alert
  *  colour. Off until the reader turns it on. A trace keeps its own colours. */
+const LINE_WEIGHTS: { weight: LineWeight; label: string }[] = [
+  { weight: 'thin', label: 'Thin' },
+  { weight: 'regular', label: 'Regular' },
+  { weight: 'thick', label: 'Thick' },
+]
+
+/** How heavy lines are drawn — on the canvas and in a trace alike. Each choice shows a line at
+ *  the width it draws one. */
+function LineWeightSection({ disabled }: { disabled: boolean }) {
+  const weight = usePreferencesStore((s) => s.lineWeight) ?? 'regular'
+  const setWeight = usePreferencesStore((s) => s.setLineWeight)
+  return (
+    <CollapsibleSection id="line-weight" icon={Minus} title="Line weight"
+      summary={LINE_WEIGHTS.find((o) => o.weight === weight)?.label}>
+      <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+        How heavy lines are drawn. A trace keeps them at this weight too, so a busy one stays readable.
+      </p>
+      <div role="radiogroup" aria-label="Line weight" className="grid grid-cols-3 gap-1.5">
+        {LINE_WEIGHTS.map((opt) => {
+          const active = weight === opt.weight
+          return (
+            <button
+              key={opt.weight}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              disabled={disabled}
+              onClick={() => setWeight(opt.weight)}
+              className={cn(
+                'flex flex-col items-center gap-1.5 px-2 py-2 rounded-lg border text-[11px] font-medium transition-colors',
+                active
+                  ? 'bg-accent-lineage/15 border-accent-lineage/40 text-accent-lineage shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/35'
+                  : 'bg-black/[0.02] border-transparent text-ink-muted hover:bg-black/[0.05] hover:border-black/[0.08] hover:text-ink dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+              )}
+            >
+              <svg aria-hidden width="40" height="10" viewBox="0 0 40 10" className="overflow-visible">
+                <path d="M2 8 C 14 8, 26 2, 38 2" fill="none" stroke="currentColor" strokeLinecap="round"
+                  strokeWidth={lineStrokeWidth(1.8, 'idle', opt.weight)} />
+              </svg>
+              <span>{opt.label}</span>
+            </button>
+          )
+        })}
+      </div>
+    </CollapsibleSection>
+  )
+}
+
 function BackPointers({ disabled }: { disabled: boolean }) {
   const on = usePreferencesStore((s) => s.highlightBackPointers) ?? false
   const setOn = usePreferencesStore((s) => s.setHighlightBackPointers)

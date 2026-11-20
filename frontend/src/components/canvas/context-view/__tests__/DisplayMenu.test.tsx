@@ -2,7 +2,8 @@
  * DisplayMenu — RTL tests for the header's consolidated Canvas + Lineage
  * appearance popover: it opens on trigger click, both sections' controls
  * fire their callbacks, the Lineage-appearance section renders muted/inert
- * when Lineage is off, and Reset fires onReset.
+ * when Lineage is off, Reset fires onReset, and Line weight — in either
+ * view — stores the weight lines are drawn at.
  */
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -294,5 +295,21 @@ describe('DisplayMenu — Minimal density', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Display' }))
 
     expect(screen.getByText('Not shown on Minimal rows')).toBeInTheDocument()
+  })
+})
+
+describe('DisplayMenu — Line weight', () => {
+  it.each(['technical', 'business'] as const)('offers Thin, Regular and Thick in the %s view, and stores the choice', (mode) => {
+    usePersonaStore.setState({ mode })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const group = screen.getByRole('radiogroup', { name: 'Line weight' })
+    expect(within(group).getAllByRole('radio').map((o) => o.textContent)).toEqual(['Thin', 'Regular', 'Thick'])
+    expect(within(group).getByRole('radio', { name: 'Regular' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(group).getByRole('radio', { name: 'Thick' }))
+    expect(usePreferencesStore.getState().lineWeight).toBe('thick')
+    usePreferencesStore.setState({ lineWeight: 'regular' })
+    usePersonaStore.setState({ mode: 'technical' })
   })
 })

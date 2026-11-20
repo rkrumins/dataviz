@@ -53,6 +53,8 @@ export type LineageRenderMode = 'stubs' | 'auto' | 'raw'
  * while the board is sparse; 'off': none.
  */
 export type LineageMotion = 'focus' | 'all' | 'off'
+/** How heavy lineage lines are drawn on the canvas, in a trace as elsewhere. */
+export type LineWeight = 'thin' | 'regular' | 'thick'
 
 /**
  * Which side of an entity card marks its lineage — see `lineagePorts.ts`.
@@ -209,6 +211,9 @@ interface PreferencesState {
    *  setting override it to 'off'. */
   lineageMotion: LineageMotion
   setLineageMotion: (motion: LineageMotion) => void
+  /** How heavy lineage lines are drawn — the same in a trace as elsewhere. Regular by default. */
+  lineWeight: LineWeight
+  setLineWeight: (weight: LineWeight) => void
   /**
    * Entity cards on the canvas: solid by default, so a line passes cleanly
    * under a card — or frosted glass, where lines show softly through. Frosted
@@ -498,6 +503,8 @@ export const usePreferencesStore = create<PreferencesState>()(
         set((state) => ({ showFlowRibbons: !state.showFlowRibbons })),
       lineageMotion: 'focus',
       setLineageMotion: (lineageMotion) => set({ lineageMotion }),
+      lineWeight: 'regular',
+      setLineWeight: (lineWeight) => set({ lineWeight }),
       frostedCards: false,
       toggleFrostedCards: () => set((state) => ({ frostedCards: !state.frostedCards })),
       showConnectedTrays: true,
