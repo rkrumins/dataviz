@@ -296,6 +296,23 @@ export function TraceBottomDock({
           sinceSaved={sinceSaved}
         />
 
+        {/* Couldn't place: said in the slim dock too — the overview says it when expanded. With
+            nothing placed, the canvas behind would otherwise be empty with no word why. */}
+        {!expanded && placeFailed > 0 && (
+          <div role="alert" className="flex items-center gap-2 px-4 pb-2 text-[11px] font-semibold text-ink">
+            <span className="tabular-nums">{`Couldn’t place ${placeFailed.toLocaleString()}`}</span>
+            {onRetryPlacing && (
+              <button
+                type="button"
+                onClick={onRetryPlacing}
+                className="h-6 px-2 rounded-md text-[11px] font-semibold text-ink hover:bg-white/[0.1] focus-visible:outline focus-visible:outline-2"
+              >
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Drill-back breadcrumb — visible whenever one or more drills are
             active, in both compact and expanded modes. Self-hides when
             drilldowns is empty so the dock stays slim during a fresh
