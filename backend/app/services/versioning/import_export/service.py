@@ -49,8 +49,8 @@ logger = logging.getLogger(__name__)
 
 #: Why a view-scoped export of a view that holds nothing is refused: it is never widened to the
 #: whole data source in the view's name.
-VIEW_HOLDS_NOTHING = ("This view holds nothing yet, so there is nothing to export from it. Export the "
-                      "whole data source instead, or place entities in the view first.")
+VIEW_HOLDS_NOTHING = ("This view places no entities of its own, so it has no data to export as itself. "
+                      "Export the whole data source instead, or place entities in the view first.")
 
 
 def _now() -> str:

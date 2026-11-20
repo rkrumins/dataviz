@@ -248,9 +248,6 @@ export function ExportDialog({
                   browser shows it once it begins.
                 </p>
               )}
-              {inView && plan?.view?.placements === 0 && (
-                <p className="mt-2">This view places no entities of its own, so the export covers the whole data source.</p>
-              )}
               <p className="mt-2">
                 {live
                   ? 'Import it into a data source with version control to restore it there: its rows are matched by URN.'
