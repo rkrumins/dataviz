@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { ChevronDown, Check, ArrowUpDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { SortOption } from '@/hooks/useExplorerViews'
+import { SORT_LABELS } from './sortOptions'
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -26,17 +27,17 @@ interface ExplorerSortControlProps {
 // Ordered by intent: data-modification sorts first (the enterprise default),
 // then settings-edit, then creation, then name. Labels spell out WHAT each
 // timestamp means \u2014 "Newest first" used to ambiguously mean creation time.
-const SORT_OPTIONS: { key: SortOption; label: string; group?: string }[] = [
-  { key: 'recently-modified', label: 'Recently modified', group: 'By change' },
-  { key: 'data-newest', label: 'Recently updated data' },
-  { key: 'data-oldest', label: 'Oldest updated data' },
-  { key: 'updated', label: 'Recently edited (settings)' },
-  { key: 'newest', label: 'Newest created', group: 'By creation' },
-  { key: 'oldest', label: 'Oldest created' },
-  { key: 'popular', label: 'Most liked', group: 'Other' },
-  { key: 'most-opened', label: 'Most opened' },
-  { key: 'az', label: 'A \u2192 Z' },
-  { key: 'za', label: 'Z \u2192 A' },
+const SORT_OPTIONS: { key: SortOption; group?: string }[] = [
+  { key: 'recently-modified', group: 'By change' },
+  { key: 'data-newest' },
+  { key: 'data-oldest' },
+  { key: 'updated' },
+  { key: 'newest', group: 'By creation' },
+  { key: 'oldest' },
+  { key: 'popular', group: 'Other' },
+  { key: 'most-opened' },
+  { key: 'az' },
+  { key: 'za' },
 ]
 
 /* ------------------------------------------------------------------ */
@@ -71,7 +72,9 @@ export function ExplorerSortControl({ sort, onSortChange }: ExplorerSortControlP
     }
   }, [open, close])
 
-  const current = SORT_OPTIONS.find((o) => o.key === sort) ?? SORT_OPTIONS[0]
+  // A list-header click can choose a sort the menu doesn't list (Type, Owner…);
+  // the trigger still names it rather than claiming the default.
+  const currentLabel = SORT_LABELS[sort] ?? SORT_LABELS['recently-modified']
 
   return (
     <div ref={ref} className="relative">
@@ -85,7 +88,7 @@ export function ExplorerSortControl({ sort, onSortChange }: ExplorerSortControlP
         )}
       >
         <ArrowUpDown className="h-3.5 w-3.5" />
-        {current.label}
+        {currentLabel}
         <ChevronDown
           className={cn(
             'h-3 w-3 transition-transform duration-200',
@@ -123,7 +126,7 @@ export function ExplorerSortControl({ sort, onSortChange }: ExplorerSortControlP
                       : 'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
                   )}
                 >
-                  <span>{opt.label}</span>
+                  <span>{SORT_LABELS[opt.key]}</span>
                   {active && (
                     <Check className="h-3.5 w-3.5 text-accent-lineage shrink-0" />
                   )}

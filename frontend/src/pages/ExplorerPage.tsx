@@ -17,11 +17,11 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAnyWorkspacePermission, useAuthStore } from '@/store/auth'
-import { useExplorerViews, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
+import { useExplorerViews, type ExplorerFilters } from '@/hooks/useExplorerViews'
+import { parseSort } from '@/components/explorer/sortOptions'
 import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
 import { useViewUsage } from '@/hooks/useContentInsights'
-import { useOpensOrdering } from '@/components/explorer/useOpensOrdering'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
 import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
@@ -95,6 +95,9 @@ const STAGGER_STYLE = `
 }
 `
 
+/** No views selected — one reference, so a list change reads as "nothing" without a new Set. */
+const NO_SELECTION = new Set<string>()
+
 // ─── URL Param Helpers ──────────────────────────────────────────────────────
 
 /** The list's own settings in the address. The filters are read by
@@ -102,7 +105,7 @@ const STAGGER_STYLE = `
  *  "Browse in Explorer" link and saved filters write in the same spelling. */
 function parseSearchParams(params: URLSearchParams) {
   return {
-    sort: (params.get('sort') as SortOption) ?? 'recently-modified',
+    sort: parseSort(params.get('sort')),
     layout: (params.get('layout') as 'grid' | 'list') ?? 'grid',
   }
 }
@@ -183,7 +186,6 @@ export function ExplorerPage() {
   const openViewPreview = useCallback((v: View) => { setPreviewEditMode(false); setPreviewView(v) }, [])
   const openViewDetailsEdit = useCallback((v: View) => { setPreviewEditMode(true); setPreviewView(v) }, [])
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   // A selection belongs to the list it was made in. A new category, filter or
   // sort is a new list — views picked under All must not still be selected under
   // Deleted, where Delete is permanent. Only the layout keeps it.
@@ -192,8 +194,15 @@ export function ExplorerPage() {
     p.delete('layout')
     return p.toString()
   }, [searchKey])
-  useEffect(() => {
-    setSelectedIds(prev => (prev.size === 0 ? prev : new Set()))
+  const [selection, setSelection] = useState<{ listKey: string; ids: Set<string> }>(
+    () => ({ listKey, ids: new Set() }),
+  )
+  const selectedIds = selection.listKey === listKey ? selection.ids : NO_SELECTION
+  const setSelectedIds = useCallback((next: Set<string> | ((prev: Set<string>) => Set<string>)) => {
+    setSelection(prev => {
+      const current = prev.listKey === listKey ? prev.ids : NO_SELECTION
+      return { listKey, ids: typeof next === 'function' ? next(current) : next }
+    })
   }, [listKey])
   const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
@@ -335,15 +344,15 @@ export function ExplorerPage() {
 
   // Usage for everything on screen, in ONE request. A card fetching its own
   // would be one request per tile — the exact shape the batched endpoint
-  // exists to avoid — and the cache key is the sorted id list, so scrolling
-  // in another page re-uses nothing it already has rather than refetching.
+  // exists to avoid. The cache key is the sorted id list, so a new page asks
+  // for a new batch; the cards already shown keep their numbers meanwhile.
   const usageIds = useMemo(
     () => Array.from(new Set([...loadedViews, ...popularViews].map(v => v.id))),
     [loadedViews, popularViews],
   )
   const { data: usageMap } = useViewUsage(usageIds)
-  // "Most opened" is finished here rather than on the server — see the hook.
-  const views = useOpensOrdering(loadedViews, usageMap, filters.sort)
+  // Every sort, "Most opened" included, is the server's order.
+  const views = loadedViews
   // What a bulk action acts on: the selected views that are on screen — never an
   // id left over from a list the reader has moved away from.
   const selectedViews = useMemo(() => views.filter(v => selectedIds.has(v.id)), [views, selectedIds])
@@ -538,7 +547,7 @@ export function ExplorerPage() {
     // Notification
     notify('success', `"${deletedName}" has been deleted`)
     invalidateViewAggregates(queryClient)
-  }, [deleteView, removeViewFromList, notify, queryClient])
+  }, [deleteView, removeViewFromList, setSelectedIds, notify, queryClient])
 
   const handleBulkDelete = useCallback(() => {
     if (selectedViews.length === 0) return
@@ -561,7 +570,7 @@ export function ExplorerPage() {
     setShowBulkDelete(false)
     notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     invalidateViewAggregates(queryClient)
-  }, [selectedViews, removeViewFromList, notify, queryClient])
+  }, [selectedViews, removeViewFromList, setSelectedIds, notify, queryClient])
 
   const handleBulkVisibility = useCallback(async (visibility: 'private' | 'workspace' | 'enterprise') => {
     const ids = selectedViews.map(v => v.id)
@@ -593,7 +602,7 @@ export function ExplorerPage() {
         `Updated ${ids.length - failed.length} of ${ids.length} views — ${failed.length} failed: ${cause}`,
       )
     }
-  }, [selectedViews, notify, refetch, queryClient])
+  }, [selectedViews, setSelectedIds, notify, refetch, queryClient])
 
   /**
    * Clicking a tag chip on a card toggles that tag in the tag filter —

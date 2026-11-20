@@ -57,7 +57,6 @@ import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
 import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
 import { ExplorerSortControl } from '@/components/explorer/ExplorerSortControl'
 import { useViewUsage } from '@/hooks/useContentInsights'
-import { useOpensOrdering } from '@/components/explorer/useOpensOrdering'
 import { ExplorerCardSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
@@ -203,9 +202,8 @@ export default function WorkspaceViewsSection({
     // its own usage would be one request per tile.
     const usageIds = useMemo(() => loadedViews.map(v => v.id), [loadedViews])
     const { data: usageMap } = useViewUsage(usageIds)
-    // "Most opened" is finished on the client — opens live in the event log
-    // and views in the catalogue, and this repo bans cross-domain JOINs.
-    const views = useOpensOrdering(loadedViews, usageMap, sort)
+    // Every sort, "Most opened" included, is the server's order.
+    const views = loadedViews
 
     // Server-authoritative attention count for the whole workspace.
     const { stats } = useViewStats(useMemo(() => ({ workspaceIds: [wsId] }), [wsId]))

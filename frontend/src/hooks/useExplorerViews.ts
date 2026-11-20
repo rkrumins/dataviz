@@ -14,8 +14,8 @@
  *   current list on screen while it loads — no skeleton flash — and
  *   returning to a recently-seen filter renders instantly from cache.
  * - Search is debounced 300ms before it enters the key (hits the wire).
- * - Sort is client-side over the assembled list; we keep the API in
- *   ``updated_at desc`` order so pagination stays deterministic.
+ * - Every sort runs on the server (``view_repo._view_order_by``), across the
+ *   whole result and with an id tiebreak, so appended pages never reshuffle.
  * - Favourite toggles are an optimistic ``useMutation`` (cache patch +
  *   rollback on error); local removals patch the cache directly.
  */
@@ -55,51 +55,19 @@ export type SortOption =
   // Settings-edit time.
   | 'updated'
   | 'popular'
-  // Ranked by OPENS rather than favourites. Not server-sorted, and cannot be:
-  // opens live in the event log and views in the catalogue, and this repo bans
-  // cross-domain JOINs. Ordered on the client from the usage already fetched
-  // for the cards, exactly as `likes-asc` / `type-az` / `owner-az` are.
+  // Ranked by opens in the last 30 days. The server reads them from the event
+  // log by id and orders the catalogue by them — no cross-domain JOIN.
   | 'most-opened'
   | 'az'
   | 'za'
   // Column-sorts (list view header clicks)
+  | 'modified-asc'
   | 'updated-asc'
   | 'likes-asc'
   | 'type-az'
   | 'type-za'
   | 'owner-az'
   | 'owner-za'
-
-// The backend now orders these across the WHOLE result set (see
-// view_repo._view_order_by), which is what makes sort correct with infinite
-// scroll — re-sorting the appended pages here would be redundant and, for the
-// data-* NULL handling, could even disagree with the server. So for these keys
-// we trust the server order. Only the list-header column power-sorts (which the
-// server doesn't handle) are still applied to the loaded page here.
-const SERVER_SORTED = new Set<SortOption>([
-  'recently-modified', 'data-newest', 'data-oldest',
-  'newest', 'oldest', 'updated', 'updated-asc', 'popular', 'az', 'za',
-])
-
-function sortViews(views: View[], sort: SortOption): View[] {
-  if (SERVER_SORTED.has(sort)) return views
-  const sorted = [...views]
-  const byStr = (a: string, b: string) => a.localeCompare(b)
-  switch (sort) {
-    case 'likes-asc':
-      return sorted.sort((a, b) => a.favouriteCount - b.favouriteCount || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-    case 'type-az':
-      return sorted.sort((a, b) => byStr(a.viewType ?? '', b.viewType ?? '') || byStr(a.name, b.name))
-    case 'type-za':
-      return sorted.sort((a, b) => byStr(b.viewType ?? '', a.viewType ?? '') || byStr(a.name, b.name))
-    case 'owner-az':
-      return sorted.sort((a, b) => byStr(a.createdByName ?? a.createdBy ?? '', b.createdByName ?? b.createdBy ?? '') || byStr(a.name, b.name))
-    case 'owner-za':
-      return sorted.sort((a, b) => byStr(b.createdByName ?? b.createdBy ?? '', a.createdByName ?? a.createdBy ?? '') || byStr(a.name, b.name))
-    default:
-      return views
-  }
-}
 
 // ─── Filter Params ──────────────────────────────────────────────────────────
 
@@ -220,9 +188,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     fetchNextPage, hasNextPage, isFetchingNextPage, isPlaceholderData,
   } = query
 
-  // Flatten loaded pages, deduped (rows can shift between pages). Sort is
-  // applied client-side only for the list-header column power-sorts; the
-  // server already orders the global sorts (see SERVER_SORTED).
+  // Flatten loaded pages in the server's order, deduped (rows can shift between pages).
   const flatViews = useMemo(() => {
     const seen = new Set<string>()
     const out: View[] = []
@@ -234,7 +200,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     return out
   }, [data])
 
-  const views = useMemo(() => sortViews(flatViews, filters.sort), [flatViews, filters.sort])
+  const views = flatViews
   const popularViews = data?.pages[0]?.popular ?? EMPTY_VIEWS
   const totalCount = data?.pages[0]?.total ?? 0
 

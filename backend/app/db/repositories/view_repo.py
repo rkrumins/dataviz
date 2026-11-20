@@ -1975,12 +1975,66 @@ async def list_recent_views(
     return out
 
 
-def _view_order_by(sort: Optional[str]):
-    """Map a Explorer sort key to an ORDER BY clause list. Time-based sorts run
-    server-side (so they order across the WHOLE result, not just the loaded
-    page); name/popularity sorts fall through to the default and are refined
-    client-side. ``data_updated_at`` is TEXT ISO timestamps, so NULLs (views
-    whose data was never published) are pushed last via a coalesce sentinel."""
+#: The Type column's labels (frontend ``lib/domainLabels.ts`` VIEW_TYPE_LABELS), so a
+#: Type sort orders by what the reader sees — ``reference`` reads "Context View".
+_VIEW_TYPE_SORT_LABELS = {
+    "graph": "Graph", "hierarchy": "Hierarchy", "reference": "Context View",
+    "layered-lineage": "Layered Lineage", "tree": "Tree", "list": "List", "grid": "Grid",
+    "timeline": "Timeline",
+}
+
+#: "Most opened" counts opens over the same trailing window the cards' usage shows.
+_OPENS_WINDOW_DAYS = 30
+
+
+#: "Most opened" ranks this many of the most-opened views; the rest tie behind them
+#: and fall back to the last change, so the ORDER BY stays a bounded CASE.
+_OPENS_RANK_CAP = 1000
+
+
+def _view_order_by(sort: Optional[str], rank: Optional[Dict[str, int]] = None):
+    """Map an Explorer sort key to an ORDER BY clause list. Every sort runs here,
+    so it orders the WHOLE result, not just the loaded page, and every one ends on
+    the id: offset paging over tied keys (one publish stamps the same time on every
+    view of a source; names repeat) would otherwise skip or repeat rows.
+    ``data_updated_at`` is TEXT ISO timestamps, so NULLs (views whose data was
+    never published) are pushed last via a coalesce sentinel.
+
+    ``rank`` carries what another domain knows (a creator's display name, a view's
+    opens) as plain ids → positions, read beforehand by :func:`_sort_rank` — never
+    JOINed (``backend/app/db/DOMAIN_OWNERSHIP.md``)."""
+    return [*_view_order_keys(sort, rank or {}), ViewORM.id.asc()]
+
+
+async def _sort_rank(session: AsyncSession, sort: Optional[str], filter_kwargs: dict) -> Dict[str, int]:
+    """The positions an owner or most-opened sort orders by, read from the owning
+    domain by id: creators' names through :func:`resolve_user_ids` (identity), opens
+    through the analytics event log. Only the creators of THIS result are named."""
+    if sort in ("owner-az", "owner-za"):
+        creators = (await session.execute(
+            _apply_view_filters(select(ViewORM.created_by).distinct(), **filter_kwargs)
+        )).scalars().all()
+        names = await resolve_user_ids(session, set(creators))
+        named = sorted(names, key=lambda uid: ((names[uid][0] or "").lower(), uid),
+                       reverse=sort == "owner-za")
+        return {uid: i for i, uid in enumerate(named)}
+    if sort == "most-opened":
+        from backend.app.db.repositories.analytics_repo import view_open_counts
+        since = (datetime.now(timezone.utc) - timedelta(days=_OPENS_WINDOW_DAYS)).isoformat()
+        return await view_open_counts(session, since=since, limit=_OPENS_RANK_CAP)
+    return {}
+
+
+def _favourite_count():
+    # Correlated so popularity sorts across the whole result without reshaping the joins.
+    return (
+        select(func.count(ViewFavouriteORM.id))
+        .where(ViewFavouriteORM.view_id == ViewORM.id)
+        .scalar_subquery()
+    )
+
+
+def _view_order_keys(sort: Optional[str], rank: Dict[str, int]):
     if sort == "newest":
         return [ViewORM.created_at.desc()]
     if sort == "oldest":
@@ -1996,23 +2050,32 @@ def _view_order_by(sort: Optional[str]):
         # Oldest changed data first; never-published (NULL) → "9999" sorts last.
         return [func.coalesce(ViewORM.data_updated_at, "9999").asc(), ViewORM.updated_at.asc()]
     if sort == "recently-modified":
-        # Freshest of data-publish OR settings-edit — the intuitive default.
-        return [func.coalesce(ViewORM.data_updated_at, ViewORM.updated_at).desc()]
+        # The later of data-publish and settings-edit — the intuitive default.
+        return [_last_change_expr().desc()]
+    if sort == "modified-asc":
+        # The same "last changed" the list's Updated column shows, oldest first.
+        return [_last_change_expr().asc()]
     if sort == "az":
         return [ViewORM.name.asc()]
     if sort == "za":
         return [ViewORM.name.desc()]
     if sort == "popular":
-        # Correlated favourite-count subquery so popularity sorts across the
-        # whole result set (not the loaded page) without reshaping the joins.
-        fav_count = (
-            select(func.count(ViewFavouriteORM.id))
-            .where(ViewFavouriteORM.view_id == ViewORM.id)
-            .scalar_subquery()
-        )
-        return [fav_count.desc(), ViewORM.updated_at.desc()]
-    # Default (also covers the list-header column sorts refined client-side):
-    # settings-updated desc.
+        return [_favourite_count().desc(), ViewORM.updated_at.desc()]
+    if sort == "likes-asc":
+        return [_favourite_count().asc(), ViewORM.updated_at.desc()]
+    if sort in ("type-az", "type-za"):
+        label = case(_VIEW_TYPE_SORT_LABELS, value=ViewORM.view_type, else_=ViewORM.view_type)
+        return [label.asc() if sort == "type-az" else label.desc(), ViewORM.name.asc()]
+    if sort in ("owner-az", "owner-za"):
+        # Positions in name order (reversed for Z→A); a creator with no account sorts last.
+        if not rank:
+            return [ViewORM.name.asc()]
+        return [case(rank, value=ViewORM.created_by, else_=len(rank)).asc(), ViewORM.name.asc()]
+    if sort == "most-opened":
+        if not rank:
+            return [_last_change_expr().desc()]
+        return [case(rank, value=ViewORM.id, else_=0).desc(), _last_change_expr().desc()]
+    # Default (no sort, or one this list doesn't know): settings-updated desc.
     return [ViewORM.updated_at.desc()]
 
 
@@ -2139,7 +2202,7 @@ async def list_views_filtered(
     select_query = _apply_view_filters(select(ViewORM), **filter_kwargs)
     select_query = (
         select_query
-        .order_by(*_view_order_by(sort))
+        .order_by(*_view_order_by(sort, await _sort_rank(session, sort, filter_kwargs)))
         .limit(limit)
         .offset(offset)
     )

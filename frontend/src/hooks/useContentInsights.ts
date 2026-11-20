@@ -5,7 +5,7 @@
  * it. The strip simply does not render, which is the same thing that happens
  * on a platform where nobody has opened anything yet.
  */
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 
 import {
     getViewUsage, getWorkspaceUsage,
@@ -24,6 +24,10 @@ export function useViewUsage(viewIds: string[], enabled = true) {
         queryKey: ['view-usage', USAGE_WINDOW_DAYS, key.join(',')],
         queryFn: () => getViewUsage(key, USAGE_WINDOW_DAYS),
         enabled: enabled && key.length > 0,
+        // A new page of cards asks for a new batch; the cards already shown keep
+        // their numbers meanwhile instead of blanking (the map is keyed by view id,
+        // so a view not in it just has none yet).
+        placeholderData: keepPreviousData,
         // Usage is precomputed on the server and moves slowly; refetching it
         // as someone pans a canvas would be pure noise.
         staleTime: 5 * 60_000,
