@@ -33,7 +33,6 @@ import { listViews, type View } from '@/services/viewApiService'
 import type { DataSourceReadinessResponse } from '@/services/aggregationService'
 import { useRecentViews } from '@/hooks/useRecentViews'
 import { useAuthStore } from '@/store/auth'
-import { useViewUsage } from '@/hooks/useContentInsights'
 import { useRequestsToAnswer } from '@/hooks/useWorkspaceAccess'
 import { useReviewInboxCounts, useDraftsWhoseOwnerLeft } from '@/features/versioning/hooks/useVersioning'
 import { useWorkspaceTransfers } from '@/features/data-source-transfer/useDataSourceTransfers'
@@ -41,7 +40,7 @@ import { WorkspaceActivityFeed } from '@/components/views/WorkspaceActivityFeed'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { AttentionCard, type AttentionItem } from './AttentionCard'
 import { SetupChecklist, type SetupStep } from './SetupChecklist'
-import { ViewTile } from './ViewTile'
+import { OverviewViewGrid } from './OverviewViewGrid'
 import { SectionTitle } from './SectionTitle'
 import { PlaygroundExperiments } from './PlaygroundExperiments'
 import type { DataSection, WorkspaceTab } from '../workspaceTabs'
@@ -178,6 +177,7 @@ export function WorkspaceOverview({
     const byId = useMemo(() => new Map(views.map(v => [v.id, v])), [views])
     const recentHere = recent.filter(r => r.workspaceId === wsId && byId.has(r.viewId)).slice(0, 4)
     const favourites = views.filter(v => v.isFavourited && !recentHere.some(r => r.viewId === v.id)).slice(0, 4 - Math.min(4, recentHere.length))
+    const jumpBackIn = [...recentHere.map(r => byId.get(r.viewId)!), ...favourites]
 
     const popularQ = useQuery({
         queryKey: ['workspace-overview', 'popular', wsId],
@@ -188,7 +188,6 @@ export function WorkspaceOverview({
     // In the Playground the reader's own work has its panel: this shelf is everyone else's.
     const me = useAuthStore(s => s.user?.id)
     const popular = (popularQ.data?.items ?? []).filter(v => !isPlayground || v.createdBy !== me).slice(0, 4)
-    const usage = useViewUsage(popular.map(v => v.id)).data
 
     // ── At a glance ─────────────────────────────────────────────────────
     const lastRefreshed = sources
@@ -222,21 +221,12 @@ export function WorkspaceOverview({
                 )) : (
                     <>
                         <Shelf title="Jump back in" subtitle="Views you opened or favourited here" onSeeAll={() => onGoTo('views')} icon={History} tone="text-indigo-500 bg-indigo-500/10">
-                            {recentHere.length + favourites.length === 0 ? (
-                                <p className="col-span-full text-sm text-ink-muted">
+                            {jumpBackIn.length === 0 ? (
+                                <p className="rounded-2xl border border-dashed border-glass-border px-4 py-6 text-center text-sm text-ink-muted">
                                     Views you open or favourite in this workspace will wait for you here.
                                 </p>
                             ) : (
-                                <>
-                                    {recentHere.map(r => (
-                                        <ViewTile key={r.viewId}
-                                            view={{ id: r.viewId, name: r.viewName, viewType: r.viewType, dataSourceName: r.dataSourceName, favourite: byId.get(r.viewId)?.isFavourited }}
-                                            meta={`Opened ${timeAgo(r.visitedAt)}`} />
-                                    ))}
-                                    {favourites.map(v => (
-                                        <ViewTile key={v.id} view={{ ...v, favourite: true }} meta="In your favourites" />
-                                    ))}
-                                </>
+                                <OverviewViewGrid wsId={wsId} views={jumpBackIn} />
                             )}
                         </Shelf>
 
@@ -245,15 +235,7 @@ export function WorkspaceOverview({
                             subtitle={isPlayground ? 'What people in the Playground open most — open one for ideas' : 'What people in this workspace open most'}
                             onSeeAll={() => onGoTo('views')} icon={Flame} tone="text-amber-500 bg-amber-500/10"
                         >
-                            {popular.map(v => {
-                                const u = usage?.[v.id]
-                                return (
-                                    <ViewTile key={v.id} view={v}
-                                        meta={u && u.opens > 0
-                                            ? `${compact(u.opens)} opens · ${plural(u.uniqueViewers, 'person', 'people')}`
-                                            : 'Not opened lately'} />
-                                )
-                            })}
+                            <OverviewViewGrid wsId={wsId} views={popular} />
                         </Shelf>
                     </>
                 )}
@@ -306,7 +288,7 @@ function Shelf({ title, subtitle, onSeeAll, icon, tone, children }: {
                 icon={icon} tone={tone} title={title} subtitle={subtitle} className="mb-3"
                 action={<button type="button" onClick={onSeeAll} className="shrink-0 text-xs font-semibold text-accent-lineage hover:underline">All views</button>}
             />
-            <div className="grid gap-2.5 sm:grid-cols-2">{children}</div>
+            {children}
         </section>
     )
 }

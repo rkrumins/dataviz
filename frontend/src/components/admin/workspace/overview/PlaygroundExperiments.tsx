@@ -15,7 +15,7 @@ import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { View } from '@/services/viewApiService'
 import { useAuthStore } from '@/store/auth'
 import { usePlayground } from '@/hooks/usePlayground'
-import { ViewTile } from './ViewTile'
+import { OverviewViewGrid } from './OverviewViewGrid'
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
@@ -146,11 +146,7 @@ export function PlaygroundExperiments({ workspace, views, onNewGraph, onOpenGrap
                                 <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-ink-secondary">
                                     <Sparkles className="w-3.5 h-3.5 text-fuchsia-500" aria-hidden /> Your views
                                 </p>
-                                <div className="grid gap-2.5 sm:grid-cols-2">
-                                    {mine.slice(0, 4).map(v => (
-                                        <ViewTile key={v.id} view={v} meta={v.visibility === 'private' ? 'Only you' : 'Shared in the Playground'} />
-                                    ))}
-                                </div>
+                                <OverviewViewGrid wsId={workspace.id} views={mine.slice(0, 4)} />
                             </div>
                         )}
                     </div>

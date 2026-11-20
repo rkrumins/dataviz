@@ -32,7 +32,15 @@ vi.mock('@/features/data-source-transfer/useDataSourceTransfers', () => ({
 }))
 vi.mock('@/hooks/useRecentViews', () => ({ useRecentViews: () => ({ recent: [] }) }))
 vi.mock('@/hooks/useContentInsights', () => ({ useViewUsage: () => ({ data: {} }) }))
-vi.mock('@/services/viewApiService', () => ({ listViews: vi.fn().mockResolvedValue({ items: [] }) }))
+const { listViews, favouriteView } = vi.hoisted(() => ({
+    listViews: vi.fn(),
+    favouriteView: vi.fn(),
+}))
+vi.mock('@/services/viewApiService', () => ({ listViews, favouriteView, unfavouriteView: vi.fn() }))
+vi.mock('@/components/explorer/ExplorerPreviewDrawer', () => ({
+    ExplorerPreviewDrawer: ({ view, isOpen }: { view: { name: string } | null; isOpen: boolean }) =>
+        isOpen && view ? <div role="dialog" aria-label={`Preview ${view.name}`} /> : null,
+}))
 vi.mock('@/components/views/WorkspaceActivityFeed', () => ({ WorkspaceActivityFeed: () => null }))
 
 import { WorkspaceOverview } from '../WorkspaceOverview'
@@ -71,6 +79,8 @@ beforeEach(() => {
     state.transfers = []
     state.ownerLeft = []
     state.playground = { graphQuota: 3, graphsUsed: 1, sandboxProviderId: 'prov_sb' }
+    listViews.mockReset().mockResolvedValue({ items: [] })
+    favouriteView.mockReset().mockResolvedValue(undefined)
     window.localStorage.clear()
 })
 
@@ -201,5 +211,34 @@ describe('In the Playground', () => {
         renderOverview({ workspace: playground(), onOpenGraph })
         fireEvent.click(screen.getByRole('button', { name: /My experiment/ }))
         expect(onOpenGraph).toHaveBeenCalledWith('ds_mine')
+    })
+})
+
+describe('Views, shown the way the Explorer shows them', () => {
+    const view = (id: string, name: string, over: Partial<View> = {}) => ({
+        id, name, viewType: 'graph', workspaceId: 'ws1', workspaceName: 'Sales', dataSourceId: 'ds1', dataSourceName: 'Ledger',
+        visibility: 'workspace', isFavourited: false, favouriteCount: 0, tags: [], config: {},
+        createdAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-19T00:00:00Z', createdBy: 'usr_ada', createdByName: 'Ada',
+        ...over,
+    }) as unknown as View
+
+    it('shows the popular views as Explorer cards, which preview on a click', async () => {
+        listViews.mockResolvedValue({ items: [view('v1', 'Revenue lineage')] })
+        renderOverview({ views: [view('v1', 'Revenue lineage')] })
+        const shelf = screen.getByRole('region', { name: 'Popular here' })
+        const card = await within(shelf).findByRole('button', { name: /Revenue lineage/ })
+        fireEvent.click(card)
+        expect(screen.getByRole('dialog', { name: 'Preview Revenue lineage' })).toBeInTheDocument()
+    })
+
+    it('favourites a view from its card, at once', async () => {
+        listViews.mockResolvedValue({ items: [view('v1', 'Revenue lineage')] })
+        renderOverview({ views: [view('v1', 'Revenue lineage')] })
+        const shelf = screen.getByRole('region', { name: 'Popular here' })
+        await within(shelf).findByRole('button', { name: /Revenue lineage/ })
+        const heart = within(shelf).getByTitle('Favorite')
+        fireEvent.click(heart)
+        expect(favouriteView).toHaveBeenCalledWith('v1')
+        expect(within(shelf).getByTitle('Unfavorite')).toHaveAttribute('aria-pressed', 'true')
     })
 })
