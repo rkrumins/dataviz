@@ -52,6 +52,13 @@ describe('SelectionBar', () => {
     expect(onOpenDetails).toHaveBeenCalledTimes(1)
   })
 
+  it('shows for ONE entity where nothing else offers its actions (a trace)', () => {
+    renderBar(['a'], { onTrace: undefined, onOpenLens: undefined, onExport: vi.fn(), offerForOne: true })
+    const bar = screen.getByRole('region', { name: /selected entities/i })
+    expect(within(bar).getByText('orders')).toBeInTheDocument()
+    expect(within(bar).getByRole('button', { name: 'Export…' })).toBeInTheDocument()
+  })
+
   it('offers to export what is held, with everything inside it, only where the canvas can', async () => {
     const onExport = vi.fn()
     const { unmount } = render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()}

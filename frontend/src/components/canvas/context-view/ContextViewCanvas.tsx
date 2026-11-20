@@ -4971,6 +4971,11 @@ export function ContextViewCanvas({
   const versionControlled = !!resolveQ.data && !resolveQ.data.bootstrap && !!resolveQ.data.graphId
   const exportWithChildren = graphExportEnabled && versionControlled
     ? (ids: string[]) => setExportSelection(ids.filter(isSelectableNode)) : undefined
+  /** Whether a selection is exactly what is traced (a trace starts from its selection). */
+  const selectionIsTraced = (ids: readonly string[]) => {
+    const traced = new Set(canvasTrace.tracedUrns)
+    return ids.length === traced.size && ids.every((id) => traced.has(displayMap.get(id)?.urn ?? id))
+  }
   const [lineageExport, setLineageExport] = useState<{ spec: MembershipSpec; seedsLabel: string } | null>(null)
   const traceExportEverything = useMemo(() => {
     if (!graphExportEnabled || !(provider instanceof RemoteGraphProvider) || !traceActive) return undefined
@@ -7662,7 +7667,8 @@ export function ContextViewCanvas({
             raised dock overflows the top by exactly the trace dock's height. */}
         {/* What the canvas is holding, and what the actions will do with it.
             Hidden during a trace: the trace dock is then the thing being read,
-            and the selection has already been spent on it. */}
+            and the selection has already been spent on it (but for Export…,
+            below). */}
         {!traceActive && bulkLinkSurface !== 'panel' && (
           <SelectionBar
             nodeIds={bulkSelection}
@@ -7678,6 +7684,21 @@ export function ContextViewCanvas({
             onOpenShared={bulkSelection.length > 1 ? openShared : undefined}
             sharedEditable={canvasWritable && !traceActive}
             onExport={exportWithChildren ? () => exportWithChildren(bulkSelection) : undefined}
+          />
+        )}
+        {/* During a trace the selection's one action is Export…: it only reads, so the trace's
+            write lock doesn't apply, and a trace's cards have no context menu to offer it. Only
+            once the reader selects something other than what is traced: the selection a trace
+            starts from is the trace's own, and the dock already reads it. */}
+        {traceActive && exportWithChildren && !selectionIsTraced(bulkSelection) && (
+          <SelectionBar
+            nodeIds={bulkSelection}
+            labelFor={(id) => displayMap.get(id)?.name
+              || (traceNodeIndex?.get(id)?.data as { label?: string } | undefined)?.label || id}
+            onRemove={(id) => selectNode(id, true)}
+            onClear={clearSelection}
+            onExport={() => exportWithChildren(bulkSelection)}
+            offerForOne
           />
         )}
         {/* Link the selection to other entities in one go — a draft being

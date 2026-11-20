@@ -68,6 +68,9 @@ export interface SelectionBarProps {
   /** Download the held entities with everything inside them, to edit offline and import back.
    *  Absent — no version control, or no right to export — not offered. */
   onExport?: () => void
+  /** Show the bar for ONE held entity too: where nothing else offers its actions (a trace, whose
+   *  cards have no context menu). */
+  offerForOne?: boolean
 }
 
 export function SelectionBar({
@@ -84,13 +87,14 @@ export function SelectionBar({
   onOpenShared,
   sharedEditable = false,
   onExport,
+  offerForOne = false,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
   useBandReservation(ref, '--selection-bar-height')
 
   const count = nodeIds.length
   const single = count === 1
-  const shown = count > 1 || (single && !!onOpenDetails)
+  const shown = count > 1 || (single && (!!onOpenDetails || offerForOne))
   const named = nodeIds.slice(0, NAMED_LIMIT)
   const rest = count - named.length
   const showLineage = !!lineage && lineage.upstream + lineage.downstream > 0

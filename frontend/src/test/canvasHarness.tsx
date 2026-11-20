@@ -498,7 +498,7 @@ function stubProvider(
  *  ERR_INVALID_URL (a relative path with no origin) swallowed into a
  *  `console.error`. Answer it with the layout the store already holds, so the
  *  effect finds nothing to change and returns. */
-function stubFetch(estate: TraceEstate, entityScope: 'all' | 'curated' = 'curated'): () => void {
+function stubFetch(estate: TraceEstate, entityScope: 'all' | 'curated' = 'curated', versioned = false): () => void {
   const original = globalThis.fetch
   const view = {
     id: 'harness-view',
@@ -511,6 +511,14 @@ function stubFetch(estate: TraceEstate, entityScope: 'all' | 'curated' = 'curate
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     // The view's library (display rules, saved queries): empty, and editable.
     const library = { viewId: view.id, displayRules: [], savedQueries: [], canEdit: true }
+    // `versioned`: the data source has version control — its graph resolves, and the rest of
+    // the versioning API (drafts, reviews, policy) answers 404, as nothing there exists yet.
+    if (versioned && url.includes('/versioning/')) {
+      return url.includes('/versioning/resolve')
+        ? new Response(JSON.stringify({ graphId: 'harness-graph', mainBranchId: 'harness-main', mainHeadCommitSeq: 1 }),
+                       { status: 200, headers: { 'content-type': 'application/json' } })
+        : new Response(JSON.stringify({ detail: 'not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
+    }
     const body = url.includes('/api/v1/views/')
       ? (url.includes('/library') ? library : view)
       : {}
@@ -647,6 +655,9 @@ export async function renderCanvasWithTrace(
     /** The view's entityScope. Curated by default; 'all' opens the view to
      *  its whole data source. */
     entityScope?: 'all' | 'curated'
+    /** The data source has version control: its graph resolves (what the
+     *  canvas's export of a selection needs). Off by default. */
+    versioned?: boolean
     /** Flows `getEdges` answers with, by source or target, as TRANSFORMS
      *  edges with id `f:<source>><target>`. Absent: it answers none. */
     flows?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>
@@ -673,7 +684,7 @@ export async function renderCanvasWithTrace(
     if (key.startsWith('nx:trace-history:')) localStorage.removeItem(key)
   }
   releaseFetch?.()
-  releaseFetch = stubFetch(estate, opts.entityScope)
+  releaseFetch = stubFetch(estate, opts.entityScope, opts.versioned)
   usePreferencesStore.setState({ canvasDensity: 'spacious' } as never)
   // AUTHORING MUST BE LIVE for a test of the trace's write gates to mean
   // anything: with no draft open (or edit mode off) every connect/edit path
