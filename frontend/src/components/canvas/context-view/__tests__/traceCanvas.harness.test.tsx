@@ -21,8 +21,14 @@ import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate, coarseThenFineEstate } from '@/test/fixtures/traceEstates'
 import { decodeTraceShare, encodeTraceShare } from '@/hooks/lib/traceShareCodec'
 import { countTest, expectTestsRan } from '@/test/canary'
+import { usePreferencesStore } from '@/store/preferences'
 
-beforeEach(() => countTest())
+// These read whole traces, several hops deep: they open at every hop the walk holds, not at the
+// reader's default of one (ContextViewCanvas.traceDefaultDepth.test.tsx pins that).
+beforeEach(() => {
+  countTest()
+  usePreferencesStore.setState({ defaultTraceDepth: { up: 25, down: 25 } })
+})
 afterAll(() => expectTestsRan(25))
 
 describe('the trace overlay on the real canvas', () => {

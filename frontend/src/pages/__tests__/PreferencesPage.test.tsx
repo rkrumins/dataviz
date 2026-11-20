@@ -1,6 +1,7 @@
 /**
  * Preferences: the Dashboard's Needs attention stays off until someone turns it
- * on here, and the switch says plainly when there would be nothing to show.
+ * on here, and the switch says plainly when there would be nothing to show. The
+ * depth a new trace opens on is set here, each way, within the hops a trace walks.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -57,5 +58,25 @@ describe('PreferencesPage', () => {
         expect(usePreferencesStore.getState().openDetailsOnSelect).toEqual({ business: true, technical: true })
         fireEvent.click(technical)
         expect(usePreferencesStore.getState().openDetailsOnSelect).toEqual({ business: true, technical: false })
+    })
+})
+
+describe('PreferencesPage — Lineage trace', () => {
+    it('sets the depth a new trace opens on, each way, within the hops a trace walks', () => {
+        usePreferencesStore.setState({ defaultTraceDepth: { up: 1, down: 1 } })
+        renderPage()
+        const up = screen.getByLabelText('Upstream')
+        const down = screen.getByLabelText('Downstream')
+        expect(up).toHaveValue(1)
+        expect(down).toHaveValue(1)
+
+        fireEvent.change(up, { target: { value: '3' } })
+        expect(usePreferencesStore.getState().defaultTraceDepth).toEqual({ up: 3, down: 1 })
+        fireEvent.change(down, { target: { value: '80' } })
+        expect(usePreferencesStore.getState().defaultTraceDepth).toEqual({ up: 3, down: 25 })
+        expect(screen.getByText('Every hop')).toBeInTheDocument()
+        fireEvent.change(up, { target: { value: '0' } })
+        expect(screen.getByText('Hidden')).toBeInTheDocument()
+        usePreferencesStore.setState({ defaultTraceDepth: { up: 1, down: 1 } })
     })
 })

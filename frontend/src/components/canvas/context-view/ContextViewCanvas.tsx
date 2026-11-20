@@ -242,6 +242,15 @@ const EMPTY_TRACE_NODES: ReadonlySet<string> = new Set<string>()
  *  trace's hidden types are its own, ephemeral set — never browse's. */
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set<string>()
 
+/** The hops a new trace opens on: the reader's default (preferences), within the hops the walk
+ *  holds. */
+function openingTraceDepth(): { up: number; down: number } {
+  const depth = usePreferencesStore.getState().defaultTraceDepth
+    ?? usePreferencesStore.getInitialState().defaultTraceDepth
+  const within = (n: number) => (Number.isFinite(n) ? Math.max(0, Math.min(FULL_WALK_INITIAL_DEPTH, Math.round(n))) : 1)
+  return { up: within(depth.up), down: within(depth.down) }
+}
+
 /**
  * ONE ontology lookup for the Flows panel's rows, the overlay's colour
  * and the overlay's dash, CACHED PER TYPE. Each lookup builds a fresh
@@ -2537,9 +2546,13 @@ export function ContextViewCanvas({
   const [traceShowUpstream, setTraceShowUpstream] = useState(initialTraceShare?.up ?? true)
   const [traceShowDownstream, setTraceShowDownstream] = useState(initialTraceShare?.down ?? true)
   // Hop-depth limits — VIEW-side (the walk fetched everything; ≥ the
-  // walk's own fetch depth means unlimited). Reset on trace start.
-  const [traceDepthUp, setTraceDepthUp] = useState(initialTraceShare?.depthUp ?? FULL_WALK_INITIAL_DEPTH)
-  const [traceDepthDown, setTraceDepthDown] = useState(initialTraceShare?.depthDown ?? FULL_WALK_INITIAL_DEPTH)
+  // walk's own fetch depth means unlimited). Reset on trace start, to the
+  // reader's default (My preferences, or the depth control's "Make this my
+  // default"); a shared link opens on its sender's.
+  const [traceDepthUp, setTraceDepthUp] = useState(
+    () => initialTraceShare?.depthUp ?? openingTraceDepth().up)
+  const [traceDepthDown, setTraceDepthDown] = useState(
+    () => initialTraceShare?.depthDown ?? openingTraceDepth().down)
 
   // THE TRACE OVERLAY. Everything a trace draws — lanes, cards, counts,
   // wires — is a pure function of (walk model, this view's placement,
@@ -2749,8 +2762,8 @@ export function ContextViewCanvas({
       const view = {
         showUpstream: direction !== 'down',
         showDownstream: direction !== 'up',
-        depthUp: FULL_WALK_INITIAL_DEPTH,
-        depthDown: FULL_WALK_INITIAL_DEPTH,
+        depthUp: openingTraceDepth().up,
+        depthDown: openingTraceDepth().down,
         // Re-pressing Trace on the focal already on screen does NOT re-seed the
         // overlay, so recording an empty picture here would leave the entry
         // describing a trace nobody is looking at. A genuinely new focal has no

@@ -10,12 +10,17 @@
  * in hand: no fetch.
  */
 import { act, fireEvent, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { twoSeedEstate } from '@/test/fixtures/traceEstates'
 import { useCanvasStore } from '@/store/canvas'
 import { decodeTraceShare, encodeTraceShare } from '@/hooks/lib/traceShareCodec'
+import { usePreferencesStore } from '@/store/preferences'
+
+// These read whole traces, several hops deep: they open at every hop the walk holds, not at the
+// reader's default of one (ContextViewCanvas.traceDefaultDepth.test.tsx pins that).
+beforeEach(() => usePreferencesStore.setState({ defaultTraceDepth: { up: 25, down: 25 } }))
 
 /** Each seed answers with its OWN walk, as the server walks each on its own. */
 const estate = () => {

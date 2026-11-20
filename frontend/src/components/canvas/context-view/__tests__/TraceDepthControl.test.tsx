@@ -86,3 +86,20 @@ describe('TraceDepthControl — the trace settings live here', () => {
     usePreferencesStore.setState({ showLineageCounts: true })
   })
 })
+
+describe('TraceDepthControl — the depth a new trace opens on', () => {
+  it('says what new traces open at, and makes the depth on screen it when asked', () => {
+    usePreferencesStore.setState({ defaultTraceDepth: { up: 1, down: 1 } })
+    open(5, 3)
+    expect(screen.getByText(/New traces open at/).textContent).toBe('New traces open at 1/1.')
+    fireEvent.click(screen.getByRole('button', { name: 'Make this my default' }))
+    expect(usePreferencesStore.getState().defaultTraceDepth).toEqual({ up: 5, down: 3 })
+    expect(screen.getByText(/New traces open at/).textContent).toBe('New traces open at 5/3, as this one is.')
+    expect(screen.queryByRole('button', { name: 'Make this my default' })).not.toBeInTheDocument()
+    usePreferencesStore.setState({ defaultTraceDepth: { up: 1, down: 1 } })
+  })
+
+  it('opens new traces one hop each way until the reader chooses', () => {
+    expect(usePreferencesStore.getInitialState().defaultTraceDepth).toEqual({ up: 1, down: 1 })
+  })
+})

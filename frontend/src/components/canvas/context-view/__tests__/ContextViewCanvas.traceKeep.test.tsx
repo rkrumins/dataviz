@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { twoSeedEstate } from '@/test/fixtures/traceEstates'
+import { usePreferencesStore } from '@/store/preferences'
 
 const estate = () => {
   const e = twoSeedEstate()
@@ -20,7 +21,10 @@ const estate = () => {
 
 /** Every file the canvas hands the browser, as text. */
 let files: string[] = []
+// These read whole traces, several hops deep: they open at every hop the walk holds, not at the
+// reader's default of one (ContextViewCanvas.traceDefaultDepth.test.tsx pins that).
 beforeEach(() => {
+  usePreferencesStore.setState({ defaultTraceDepth: { up: 25, down: 25 } })
   files = []
   vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => {
     void (blob as Blob).text().then(t => files.push(t))

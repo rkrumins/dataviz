@@ -214,6 +214,11 @@ interface PreferencesState {
   /** How heavy lineage lines are drawn — the same in a trace as elsewhere. Regular by default. */
   lineWeight: LineWeight
   setLineWeight: (weight: LineWeight) => void
+  /** The hops a new trace opens on, upstream and downstream (0 hides a side; the walk's ceiling,
+   *  25, is every hop). One each by default: what an entity feeds and what feeds it. A shared
+   *  link, a saved trace or the trace history opens on its own. */
+  defaultTraceDepth: { up: number; down: number }
+  setDefaultTraceDepth: (depth: { up: number; down: number }) => void
   /**
    * Entity cards on the canvas: solid by default, so a line passes cleanly
    * under a card — or frosted glass, where lines show softly through. Frosted
@@ -505,6 +510,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       setLineageMotion: (lineageMotion) => set({ lineageMotion }),
       lineWeight: 'regular',
       setLineWeight: (lineWeight) => set({ lineWeight }),
+      defaultTraceDepth: { up: 1, down: 1 },
+      setDefaultTraceDepth: (defaultTraceDepth) => set({ defaultTraceDepth }),
       frostedCards: false,
       toggleFrostedCards: () => set((state) => ({ frostedCards: !state.frostedCards })),
       showConnectedTrays: true,
