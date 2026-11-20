@@ -290,6 +290,10 @@ async def lifespan(app: FastAPI):
         "housekeeping and IdP reachability prober started"
     )
 
+    # Whatever this process counts (services/settings/signals.py), added to Redis every ten seconds.
+    from backend.app.services.settings import signals
+    signals.start_flusher()
+
     # Store in app state
     app.state.aggregation_service = svc
     app.state.session_factory = get_jobs_session
@@ -339,6 +343,7 @@ async def lifespan(app: FastAPI):
         await asyncio.wait_for(registry.evict_all(), timeout=5)
     except asyncio.TimeoutError:
         logger.warning("Provider shutdown timed out")
+    await signals.stop_flusher()                # its last flush, before the bus Redis closes
     await close_redis()
     await close_db()
     logger.info("=== Aggregation Control Plane stopped ===")

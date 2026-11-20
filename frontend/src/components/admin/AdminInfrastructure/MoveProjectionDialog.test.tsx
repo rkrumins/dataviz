@@ -5,15 +5,16 @@
  * offers a move back onto a key the graph is still retiring, and turns the
  * server's refusals into what the administrator can do about them.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { moveProjection } = vi.hoisted(() => ({ moveProjection: vi.fn() }))
+const { moveProjection, buildPolicy } = vi.hoisted(() => ({ moveProjection: vi.fn(), buildPolicy: vi.fn() }))
 
 vi.mock('@/services/systemStatusService', async () => {
     const actual = await vi.importActual<typeof import('@/services/systemStatusService')>('@/services/systemStatusService')
-    return { ...actual, systemStatusService: { ...actual.systemStatusService, moveProjection } }
+    return { ...actual, systemStatusService: { ...actual.systemStatusService, moveProjection, buildPolicy } }
 })
 
 import { MoveProjectionDialog } from './MoveProjectionDialog'
@@ -33,7 +34,7 @@ const ROW: VersionedGraphRow = {
     lag: 0, status: 'idle', lastError: null, lastProjectedAt: null, progressDone: null, progressTotal: null,
     updatedAt: null, owned: true, forkParentGraphId: null, orphan: false, retiredKeys: [],
     residency: 'standard', residencyState: 'resident', evictedReason: null, lastReadAt: null,
-    sizeBytes: null, rehydratingSince: null,
+    sizeBytes: null, rehydratingSince: null, readMode: null, readModeEffective: 'in_place',
 }
 
 const MOVED = {
@@ -46,7 +47,12 @@ const MOVED = {
 function renderDialog(row: VersionedGraphRow = ROW) {
     const onMoved = vi.fn()
     const onClose = vi.fn()
-    render(<MoveProjectionDialog row={row} providers={PROVIDERS} onClose={onClose} onMoved={onMoved} />)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+        <QueryClientProvider client={qc}>
+            <MoveProjectionDialog row={row} providers={PROVIDERS} onClose={onClose} onMoved={onMoved} />
+        </QueryClientProvider>,
+    )
     return { onMoved, onClose }
 }
 
@@ -55,6 +61,7 @@ const refusal = (status: number, detail: Record<string, unknown>) =>
 
 beforeEach(() => {
     moveProjection.mockReset()
+    buildPolicy.mockReset()
 })
 
 describe('MoveProjectionDialog', () => {
@@ -71,6 +78,34 @@ describe('MoveProjectionDialog', () => {
             .toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Move' })).toBeDisabled()
         expect(moveProjection).not.toHaveBeenCalled()
+    })
+
+    it('says a move of a graph read beside keeps readers on the current version until it switches', async () => {
+        const policy = (on: boolean, rebuilds: boolean) => ({
+            enabled: on, fields: [], updatedBy: null, updatedAt: null,
+            values: { buildForRebuilds: { saved: null, default: true, effective: rebuilds },
+                      retireGraceSecs: { saved: 1800, default: 900, effective: 1800 } },
+        })
+        buildPolicy.mockResolvedValue(policy(true, true))
+        renderDialog({ ...ROW, readModeEffective: 'beside' })
+        expect(await screen.findByText(/The new copy is written from Postgres while readers keep the current version, then they switch to it at once; until then the graph takes the room of two copies\. The current platform key is removed about 30 minutes after the switch — until then you can move back\./))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/Reads come from Postgres/)).not.toBeInTheDocument()
+
+        // Rebuilds and moves written in place, or New-version builds off: moved in place, as before.
+        for (const [on, rebuilds] of [[true, false], [false, true]]) {
+            buildPolicy.mockResolvedValue(policy(on, rebuilds))
+            cleanup()
+            renderDialog({ ...ROW, readModeEffective: 'beside' })
+            expect(await screen.findByText(/Reads come from Postgres until the new copy catches up.*about 30 minutes after the new one catches up/))
+                .toBeInTheDocument()
+        }
+        // A graph read any other way never asks.
+        buildPolicy.mockClear()
+        cleanup()
+        renderDialog()
+        expect(screen.getByText(/Reads come from Postgres/)).toBeInTheDocument()
+        expect(buildPolicy).not.toHaveBeenCalled()
     })
 
     it('moves to the chosen provider on confirm, and hands the result back', async () => {

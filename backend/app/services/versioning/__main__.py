@@ -28,6 +28,7 @@ from backend.app.observability.event_loop_monitor import (
 )
 from backend.app.providers.eviction_budget import make_registry_budget_resolver
 from backend.app.services.projection_target import repair_projection_target
+from backend.app.services.settings import signals
 
 logger = logging.getLogger(__name__)
 
@@ -114,12 +115,26 @@ async def _amain() -> None:
         _install_metrics()
     except Exception as exc:              # noqa: BLE001 — never fail startup
         logger.warning("metrics backend not installed: %s", exc)
+    try:
+        config.warn_invalid_settings_env()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("versioned-graph settings: the environment was not checked: %s", exc)
     metrics_server = await _serve_metrics()
     lanes = config.worker_lanes()
     if not os.getenv("GRAPHVER_POOL_SIZE"):
         # Before the first session: the engine is built from this on first use.
         config.POOL_SIZE = config.lane_pool_size(lanes)
     await models.create_schema_and_partitions()
+    try:
+        # The graphs' own versioned-graph settings, when the graph store is a database of its own
+        # the upgrade could not read: copied into the settings store once, under its marker.
+        # Until then, every process reads a graph's own read mode from the graph store.
+        from backend.app.services.settings import legacy
+
+        await legacy.import_graph_values()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("versioned-graph settings: the graphs' own values were not imported: %s",
+                       exc)
     # target_resolver self-heals the projection target (the data source's real graph the canvas reads)
     # on every projection, so the standalone worker matches the interactive project_now path.
     # edge_types_resolver keeps :AGGREGATED rollups maintained incrementally; on_rollups_stale
@@ -164,6 +179,8 @@ async def _amain() -> None:
         run_event_loop_monitor(stats=EventLoopLagStats(), shutdown=monitor_stop),
         name="event-loop-monitor")
     keeper = LeaseKeeper(exit_on_wedge=True).start()
+    # What its lanes count (services/settings/signals.py), added to Redis every ten seconds.
+    signals.start_flusher()
 
     # This process caches provider configs + graph clients (via the registry factory)
     # and has NO warmup loop, so an admin repointing a provider would otherwise leave
@@ -190,6 +207,7 @@ async def _amain() -> None:
             await invalidation_listener.stop()
         except Exception:
             pass
+        await signals.stop_flusher()
         await close_broker_redis()
         await db.dispose_engine()
         logger.info("versioning worker stopped")

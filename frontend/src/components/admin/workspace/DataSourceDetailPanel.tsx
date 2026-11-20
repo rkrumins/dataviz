@@ -678,6 +678,7 @@ export function DataSourceDetailPanel({
                                 <DataSourceVersioningTab
                                     wsId={wsId}
                                     dataSourceId={ds.id}
+                                    label={ds.label}
                                     // A cold stats cache reads 0 / stale: no size beats a wrong one.
                                     itemCount={stats && !stats.computing ? stats.nodeCount + stats.edgeCount : null}
                                 />

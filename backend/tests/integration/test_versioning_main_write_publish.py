@@ -13,7 +13,7 @@ import os
 
 import pytest
 
-from backend.app.services.versioning import db, models
+from backend.app.services.versioning import db, models, route_cache
 from backend.app.services.versioning.service import GraphVersioningService
 
 pytestmark = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"),
@@ -201,6 +201,8 @@ def test_main_writes_through_the_projection_need_publish_for_a_person(
     async def _fresh(self, graph_id):
         return {"fresh": True, "committed": 1, "projected": 1, "served": 1}
     monkeypatch.setattr(GraphVersioningService, "projection_watermark", _fresh)
+    # What routes the read: the graph's route as this process keeps it.
+    monkeypatch.setattr(route_cache.RouteSnapshot, "state", lambda self: _fresh(self, self.graph_id))
     asyncio.run(_run_graph_writes())
 
 

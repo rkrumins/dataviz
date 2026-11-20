@@ -431,8 +431,10 @@ class DraftOverlayProvider:
     ``fork``: this is a fork's ``main``, read the same way over its root's store (``base``) with
     the fork's patch set; a draft on the fork overlays this one in turn. ``read_ns``: which version
     of its root's store a fork's reads were built against, carried in its cache keys
-    (:meth:`physical_graph_id`). ``version``: its ``overlay_version`` when the caller has read it
-    already (``fork_read_plan``), so the first read does not read it again.
+    (:meth:`physical_graph_id`). ``root_at``: the root's seq that store holds, when not the root's
+    head — the version the root's key serves while its projection catches up or rebuilds: the
+    fork's patch set is against the root there. ``version``: its ``overlay_version`` when the
+    caller has read it already (``fork_read_plan``), so the first read does not read it again.
 
     ``as_of_seq``: this is ``main`` as it was at that revision, over ``main``'s store at its head
     (``base``) with the patch set of everything main changed since
@@ -442,7 +444,7 @@ class DraftOverlayProvider:
 
     def __init__(self, base, *, svc, graph_id: str, branch_id: str, actor: Optional[str] = None,
                  fork: bool = False, read_ns: Optional[str] = None, version: Optional[tuple] = None,
-                 as_of_seq: Optional[int] = None):
+                 as_of_seq: Optional[int] = None, root_at: Optional[int] = None):
         if as_of_seq is not None and (not version or version[0] != "rev"):
             raise ValueError("a revision's overlay is keyed by its version: ('rev', seq, head)")
         self._base = base
@@ -454,6 +456,7 @@ class DraftOverlayProvider:
         self._read_ns = read_ns
         self._version = version
         self._as_of = as_of_seq
+        self._root_at = {"root_at": root_at} if root_at is not None else {}
         self._containment_types: List[str] = []
         self._delta: Optional[_OverlayDelta] = None
         # Writes (and as-of-free branch ops) reuse the ordinary branch provider — no duplication.
@@ -529,7 +532,7 @@ class DraftOverlayProvider:
     async def _delta_(self) -> _OverlayDelta:
         if self._delta is None:
             version = self._version or await self._svc.overlay_version(
-                graph_id=self._gid, branch_id=self._branch)
+                graph_id=self._gid, branch_id=self._branch, **self._root_at)
             cset = list(self._containment_types)
             # A revision's line is its own: readers of two revisions keep two deltas, not evict each
             # other's (a delta replaces the older ones of its line).
@@ -547,7 +550,7 @@ class DraftOverlayProvider:
                         graph_id=self._gid, as_of_seq=self._as_of, head_seq=version[2], **extend)
                 else:
                     raw = await self._svc.branch_overlay_delta(
-                        graph_id=self._gid, branch_id=self._branch, **extend)
+                        graph_id=self._gid, branch_id=self._branch, **self._root_at, **extend)
                 # Indexing a large draft's patch set is pure CPU: off the event loop.
                 return await asyncio.to_thread(_OverlayDelta, raw, cset)
 

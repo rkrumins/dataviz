@@ -17,6 +17,7 @@ from backend.common.models.graph import (
 )
 
 from ..providers.base import GraphDataProvider
+from .settings import signals
 from .versioning.errors import HTTP_MAPPED, AccessDenied
 from ..config.resilience import (
     FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
@@ -71,6 +72,23 @@ def _not_enabled():
     the caller gets 409 ``versioning_not_enabled`` (main.py), not a 200 saying it failed."""
     from ..providers.versioned_write_provider import VersioningNotEnabled
     return VersioningNotEnabled
+
+
+def _pg_reader(registry, svc, graph_id: str, branch_id: str, **kwargs):
+    """A Postgres reader of ``graph_id`` (``VersionedBranchProvider``) whose reads are bounded: each
+    of its sessions holds a place among the process's and the graph's reads from Postgres
+    (``registry.pg_read_slot``), and each statement is cut off past New-version builds' statement
+    limit (``db.bounded_read_sessions``) — so a large graph read from Postgres, while FalkorDB holds
+    no version of it, can't take the connection pool from every other read. Writes go through
+    ``svc``, unbounded."""
+    from ..providers.versioned_branch_provider import VersionedBranchProvider
+    from .versioning import db as gv_db
+    from .versioning.service import GraphVersioningService
+
+    read_svc = GraphVersioningService(gv_db.bounded_read_sessions(
+        graph_id, slot=getattr(registry, "pg_read_slot", None)))
+    return VersionedBranchProvider(svc, graph_id=graph_id, branch_id=branch_id, read_svc=read_svc,
+                                   **kwargs)
 
 
 class ContextEngine:
@@ -173,9 +191,20 @@ class ContextEngine:
             if fork and as_of_seq is not None:
                 from .versioning.errors import RevisionUnsupported
                 raise RevisionUnsupported("fork", "A fork's past revisions can't be opened yet")
-            provider = None if fork else await registry.get_provider_for_workspace(
-                workspace_id, session, data_source_id
-            )
+            provider, provider_error = None, None
+            if not fork:
+                try:
+                    provider = await registry.get_provider_for_workspace(
+                        workspace_id, session, data_source_id
+                    )
+                except (ProviderUnavailable, ConnectionError, OSError, asyncio.TimeoutError) as exc:
+                    # Not raised yet: a versioned graph whose main Postgres serves (FalkorDB holds
+                    # no version of it) needs no FalkorDB, so its read goes on below. Raised there
+                    # for anything that does need it, and for a source that isn't versioned.
+                    provider_error = exc if isinstance(exc, ProviderUnavailable) else ProviderUnavailable(
+                        provider_name=f"ws:{workspace_id}",
+                        reason=f"Provider instantiation failed: {exc}",
+                    )
         except ProviderUnavailable:
             raise
         except KeyError:
@@ -203,7 +232,16 @@ class ContextEngine:
             from .versioning.service import GraphVersioningService
             from .versioned_sources import serves_pin
             svc = GraphVersioningService()
-            graph = await svc.get_graph_by_data_source(data_source_id)
+            # The lookups that route the read run on the route engine: reads that fill the main
+            # pool can't stop them (db.get_route_engine). Each process reads a graph's route there
+            # once per change to it, not once per read (route_cache).
+            from .versioning import db as gv_db
+            from .versioning import route_cache
+            route = GraphVersioningService(gv_db.graphver_route_session)
+            snap = await route_cache.route_of_source(data_source_id)
+            graph = snap.graph() if snap is not None else None
+            if graph is None and provider_error is not None:
+                raise provider_error
             if graph is None and fork:
                 raise KeyError(f"Data source not found: {data_source_id}")   # its graph is trashed
             if graph is None and as_of_seq is not None:
@@ -216,9 +254,10 @@ class ContextEngine:
                 # out of FalkorDB and asks for its load. A fork's read does both for its root, once
                 # its plan says it reads through the root's store.
                 from .versioning import residency
+                held = None
                 if not fork and viewer is not None:
-                    await residency.hold(svc, graph)
-                main_id = await svc.main_branch_id(gid)
+                    held = await residency.hold(svc, graph)
+                main_id = snap.main_branch_id or await route.main_branch_id(gid)
                 is_draft = norm not in ("", "main", main_id)
                 if is_draft and as_of_seq is not None:
                     from .versioning.errors import RevisionUnsupported
@@ -233,9 +272,17 @@ class ContextEngine:
                     main_reader = await cls._fork_main_reader(
                         registry, session, workspace_id, svc, gid, main_id, actor, viewer)
                 else:
-                    wm = await svc.projection_watermark(gid)
+                    if held is not None:
+                        # The lease came after the route was read: as it is now, so an eviction
+                        # committed before the lease is seen (cache_manager.evict).
+                        snap = await route_cache.route_of_graph(gid) or snap
+                    wm = await snap.state()
                     if viewer is not None:
                         await residency.mark(graph, wm)
+                    if wm["served"] is not None and provider_error is not None:
+                        # FalkorDB holds a version to serve, and can't be reached: as before, the
+                        # read fails rather than load Postgres when FalkorDB is overloaded.
+                        raise provider_error
                     # Main is served from FalkorDB only from the key the projection publishes, at
                     # the version it holds (``served``, serving_seq): the head, or, while the
                     # projection catches up or rebuilds in place, the version it last published,
@@ -245,6 +292,14 @@ class ContextEngine:
                             getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
                             wm.get("falkor_graph_name"), gid):
                         served = wm["served"]
+                    elif wm["served"] is None and wm.get("status") is not None:
+                        # Postgres serves it: counted when its key holds a version, further behind
+                        # the head than the read mode allows. Never a reason for the read to fail.
+                        from .versioning.service import serving_seq
+                        if serving_seq(wm.get("projected") or 0, wm.get("committed") or 0,
+                                       wm["status"], getattr(snap, "served_commit_seq", None),
+                                       -1) is not None:
+                            signals.bump("reads.from_database_while_behind", graph_id=gid)
                 main_served = served is not None
                 read_provider = None
                 read_branch: Optional[str] = None
@@ -267,10 +322,9 @@ class ContextEngine:
                     # changed since over it, read-only. The patch set rewinds every entity changed
                     # after the revision, so a store at the revision or later reads it right: one
                     # still catching up from an earlier version reads it from Postgres.
-                    from ..providers.versioned_branch_provider import VersionedBranchProvider
                     from ..providers.draft_overlay_provider import DraftOverlayProvider
-                    base = provider if main_served and served >= revision else VersionedBranchProvider(
-                        svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    base = provider if main_served and served >= revision else _pg_reader(
+                        registry, svc, gid, main_id, actor=actor)
                     # Keyed by the store's version it reads against, as a fork's is, so nothing
                     # read while the store was out or catching up outlives that.
                     read_provider = DraftOverlayProvider(
@@ -293,10 +347,9 @@ class ContextEngine:
                     # Postgres main reader. A draft over a key still catching up shows main as that
                     # key does, as main's own readers see it.
                     # A no-change draft has an empty delta → pure pass-through → identical to main.
-                    from ..providers.versioned_branch_provider import VersionedBranchProvider
                     from ..providers.draft_overlay_provider import DraftOverlayProvider
-                    base = provider if main_served else main_reader or VersionedBranchProvider(
-                        svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    base = provider if main_served else main_reader or _pg_reader(
+                        registry, svc, gid, main_id, actor=actor)
                     # The draft's version (its head, branch point, main's head, status) keys every
                     # cached read of it (``read_ns`` → ``graph_ns``): a commit to the draft from
                     # anywhere — an import window, another tab, the API — moves it, so no reader is
@@ -312,9 +365,8 @@ class ContextEngine:
                     # No version of main in FalkorDB to serve (a first seed, a move, a key out of
                     # FalkorDB, or GRAPHVER_READ_MAX_LAG past): serve it from Postgres; once the key
                     # holds one, the FalkorDB hot path is used.
-                    from ..providers.versioned_branch_provider import VersionedBranchProvider
-                    read_provider = main_reader or VersionedBranchProvider(
-                        svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    read_provider = main_reader or _pg_reader(registry, svc, gid, main_id,
+                                                              actor=actor)
                     read_branch = main_id
                 if read_provider is not None:
                     engine = cls(provider=read_provider, ontology_service=ontology_service)
@@ -392,8 +444,11 @@ class ContextEngine:
     async def _fork_main_reader(registry, session, workspace_id: str, svc, gid: str, main_id: str,
                                 actor: Optional[str], viewer=None):
         """What reads a fork's ``main``: its root's store — the root's FalkorDB provider, built from
-        the root's data source, while its projection holds its head in the key it publishes; else
-        the root's Postgres reader — with the fork's patch set over it (``DraftOverlayProvider``).
+        the root's data source, while the key its projection publishes holds a version of the
+        root's main whole (the head, or behind it, the version it last published, while no pass
+        has written into it since: ``fork_serving_seq``; the fork's patch set is then against the
+        root there); else the root's Postgres reader, at its head — with the fork's patch set over
+        it (``DraftOverlayProvider``).
         Past ``GRAPHVER_FORK_REWIND_MAX`` entities to classify (``fork_reads_from``), the fork's
         own layered Postgres reads, which read nothing of its root's. Who may read is the fork's to
         decide, as it was decided: the root's source is read on its behalf. A person's read through
@@ -401,9 +456,10 @@ class ContextEngine:
         the root's state as its plan read it — or, with residency on, as read again after the
         root's hold."""
         from ..providers.draft_overlay_provider import DraftOverlayProvider
-        from ..providers.versioned_branch_provider import FORK_NO_DEEP_SEARCH, VersionedBranchProvider
+        from ..providers.versioned_branch_provider import FORK_NO_DEEP_SEARCH
         from .versioned_sources import serves_pin
         from .versioning.residency import on_read
+        from .versioning.service import fork_serving_seq
 
         # One session reads the fork's version, its ceiling, its root and the root's store.
         try:
@@ -411,8 +467,8 @@ class ContextEngine:
         except ValueError as exc:                    # its parent is gone: a fork not found
             raise KeyError(str(exc)) from exc
         if plan["reads_from"] == "postgres":
-            return VersionedBranchProvider(svc, graph_id=gid, branch_id=main_id, actor=actor,
-                                           deep_search_gap=FORK_NO_DEEP_SEARCH)
+            return _pg_reader(registry, svc, gid, main_id, actor=actor,
+                              deep_search_gap=FORK_NO_DEEP_SEARCH)
         root_id = plan["root_id"]
         # Residency (doc 17): with it on, the root's read lease is held before its store is read
         # for what follows — the plan read it before — and the read counts for the root.
@@ -420,10 +476,20 @@ class ContextEngine:
                                     "data_source_id": plan["root_data_source_id"]},
                               viewer=viewer, state=plan)
         if store is not None:
-            plan.update({k: store[k] for k in ("projected", "status", "fresh", "falkor_provider",
+            plan.update({k: store[k] for k in ("projected", "status", "fresh", "serving",
+                                               "window_rows", "last_error", "falkor_provider",
                                                "falkor_graph_name")})
+        serving = fork_serving_seq(plan["serving"], plan["fresh"], plan["status"],
+                                   plan["window_rows"], plan["last_error"])
+        if serving is None and not plan["root_trashed"]:
+            # Postgres serves the root: counted for it when its key holds a version it is still
+            # writing past, or one further behind the head than its read mode allows.
+            from .versioning.service import serving_seq
+            if plan["serving"] is not None or serving_seq(
+                    plan["projected"], plan["committed"], plan["status"], None, -1) is not None:
+                signals.bump("reads.from_database_while_behind", graph_id=root_id)
         base = None
-        if plan["fresh"] and not plan["root_trashed"]:
+        if serving is not None and not plan["root_trashed"]:
             try:
                 provider = await registry.get_provider_for_workspace(
                     workspace_id, session, plan["root_data_source_id"])
@@ -435,16 +501,19 @@ class ContextEngine:
                 if serves_pin(getattr(provider, "manager_cache_key", None), plan["falkor_provider"],
                               plan["falkor_graph_name"], root_id):
                     base = provider
+        # The root's seq the patch set is against: the version its key serves, else its head, which
+        # its Postgres reader reads.
+        root_at = serving if base is not None else plan["committed"]
         if base is None:
-            base = VersionedBranchProvider(svc, graph_id=root_id, branch_id=plan["root_main"],
-                                           actor=actor)
+            base = _pg_reader(registry, svc, root_id, plan["root_main"], actor=actor)
         # Its cache keys carry the root store's version it reads against: the root's writes and
         # projections bump only the root's cache (DraftOverlayProvider.physical_graph_id); and the
         # store's status, so nothing read while the root was out or loading outlives that.
         return DraftOverlayProvider(
             base, svc=svc, graph_id=gid, branch_id=main_id, actor=actor, fork=True,
-            version=plan["version"],
-            read_ns=f"{root_id}@{plan['committed']}:{plan['projected']}:{plan['status']}")
+            version=(*plan["version"][:2], root_at, plan["version"][3]),
+            root_at=root_at if root_at != plan["committed"] else None,
+            read_ns=f"{root_id}@{plan['committed']}:{plan['projected']}:{plan['status']}:{root_at}")
 
     # ------------------------------------------------------------------ #
     # Connection-aware factory (legacy compat)                             #

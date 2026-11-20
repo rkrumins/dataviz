@@ -1,9 +1,9 @@
 """``POST …/graphs/{gid}/identities/resolve``: what values name on the published graph, as an import
 naming an identifier finds rows — the route's part. It checks the identifier (422 with the
-grammar), takes ``prop.<the data source's identity property>`` as the urn it holds, answers 409
-``identifier_not_indexed`` before an import has built a property's index, and anyone who reads the
-graph may call it, an API key too (it changes nothing). The lookups themselves are pinned on
-Postgres (``integration/test_import_identifier``, ``integration/test_ingest_standard_ids``).
+grammar), takes ``prop.<the data source's identity property>`` (with ``,urn`` or not) as the urn it
+holds, answers 409 ``identifier_not_indexed`` before an import has built a property's index, and
+anyone who reads the graph may call it, an API key too (it changes nothing). The lookups themselves
+are pinned on Postgres (``integration/test_import_identifier``, ``integration/test_ingest_standard_ids``).
 """
 from __future__ import annotations
 
@@ -63,10 +63,22 @@ async def test_the_identity_property_is_the_urn_it_holds(test_client, versioning
     assert resp.json()["identifier"] == "urn" and _Versioning.asked[0]["identifier"] == "urn"
 
 
+async def test_the_identity_property_then_the_urn_is_the_urn_too(test_client, versioning):
+    """``prop.<identity property>,urn`` asks for no index an import builds: the property holds the urn,
+    so it is ``urn``, as an import reads it. Another property's ``,urn`` is its own."""
+    resp = await test_client.post(_PATH, json={"identifier": "prop.asset_id,urn", "values": ["A-1"]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["identifier"] == "urn" and _Versioning.asked[0]["identifier"] == "urn"
+    other = await test_client.post(_PATH, json={"identifier": "prop.external_id,urn", "values": ["E1"]})
+    assert other.json()["identifier"] == _Versioning.asked[1]["identifier"] == "prop.external_id,urn"
+
+
 @pytest.mark.parametrize("identifier", ["sap_id", "prop.urn", ""])
 async def test_an_identifier_it_may_not_name_is_a_422(test_client, versioning, identifier):
     resp = await test_client.post(_PATH, json={"identifier": identifier, "values": ["x"]})
     assert resp.status_code == 422 and resp.json()["detail"]["type"] == "invalid_identifier", resp.text
+    if identifier != "prop.urn":                       # it says every form it may be
+        assert "prop.<name>,urn" in resp.json()["detail"]["message"], resp.text
 
 
 async def test_a_property_no_import_has_indexed_is_a_409(test_client, versioning):

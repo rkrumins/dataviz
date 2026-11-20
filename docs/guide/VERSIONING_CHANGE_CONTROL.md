@@ -22,8 +22,9 @@ guide.
   reviewers).
 - **Review before anything ships.** Raise a change for review, see exactly what
   moves, resolve conflicts, then merge.
-- **Full history, and a way back.** Every publish is a revision you can
-  inspect, undo on its own, or roll the whole graph back to.
+- **Full history, and a way back.** Every publish or merge that changes
+  Published is a revision you can inspect, undo on its own, or roll the whole
+  graph back to.
 
 Version control covers the graph's entities and relationships. It is not the
 same as the versioning of a [semantic layer](/guide/semantic-layer) (the
@@ -132,8 +133,8 @@ flowchart LR
    don't need a review.
 5. **Review Center** — a reviewer checks the changes, pulls in newer published
    work if needed, and **Merge**s it, or **Dismiss**es it.
-6. **History** — every merge or publish becomes a revision you can undo or roll
-   back to.
+6. **History** — every merge or publish that changes Published becomes a
+   revision you can undo or roll back to.
 
 ## Follow the track
 
@@ -177,8 +178,11 @@ More terms are in the [Glossary](/guide/glossary).
    from this View) or **Whole graph**. Select a revision to see its changes.
 
 After a merge or publish, the banner *Merged — your changes are now live* (or
-*Published — …*) offers **View in history** too. A data source's **Versioning**
-tab lists its recent commits, drafts and open merge requests.
+*Published — …*) offers **View in history** too. When Published already had the
+changes, the banner reads *Already live — the published graph had these
+changes*: no revision was added, so there is no **View in history**. A data
+source's **Versioning** tab lists its recent commits, drafts and open merge
+requests.
 
 The history is listed newest first, by month and day, and keeps loading older
 revisions as you scroll — all the way back to the first.
@@ -345,7 +349,7 @@ View's sharing.
 | **Fork** a data source; **Delete** and **Restore** a fork | People who can edit the workspace's data sources |
 | **Update from parent** | People who can publish |
 | **Propose to parent** | Anyone who can read the fork |
-| **Drafts and reviews** settings | **Workspace admins** |
+| The drafts and reviews settings | **Workspace admins**, within the limits Super Admins set |
 | Switch version control or edit mode off for everyone | Administrators, in **Administration → Features** |
 
 Organisation-wide admin roles can do all of the above in every workspace.
@@ -356,21 +360,30 @@ Organisation-wide admin roles can do all of the above in every workspace.
 
 ## Drafts and reviews settings
 
-On a workspace's page, **Drafts and reviews** sets, for every data source in it:
+On a workspace's page, the **Versioned graphs** tab sets, under **Drafts &
+history**, for every data source in it:
 
-- **New drafts start** — **Public** (the default) or **Private**;
-- **Drafts may be** — **Public or private**, **Public only** or **Private only**.
-  Turning private drafts off leaves existing private drafts as they are;
-- **Whoever opens a review may approve it** — **Yes** by default;
-- **Whoever opens a review may merge it** — **Yes** by default. With **No**,
-  drafts are published only through a review someone else merges.
+- **New drafts start** — **Public** or **Private**;
+- **Draft levels allowed** — **Public or private**, **Public only** or **Private
+  only**. Turning private drafts off leaves existing private drafts as they are;
+- **People may approve their own reviews**;
+- **People may merge their own reviews**. With it off, drafts are published only
+  through a review someone else merges;
+- **Approvals a review needs** — **Everyone asked**, or a set number (see [How
+  many approvals a review needs](/guide/review-center#how-many-approvals-a-review-needs));
+- **Open threads hold the merge**. With it on, a review merges only once every
+  thread on it is resolved.
 
-A data source can set its own on its **Versioning** tab; each setting is its
-own or **Use the workspace's setting**. Only workspace admins change them.
+A data source can set its own: on its **Versioning** tab, **Open settings** opens
+its settings, where each one is its own or follows the workspace's (**Use the
+workspace's value** goes back to it). Workspace admins change them, within the
+limits a Super Admin sets for the platform. [Versioned Graph
+Settings](/guide/versioned-graph-settings#drafts--history) explains each one, with its default.
 
-**Drafts whose owner left**, below them, lists the open drafts of people who
-have left the workspace — their name, owner, level and when they last changed,
-never what they hold. Choose **Hand on** to give one a new owner.
+**Drafts whose owner left**, on the workspace's **Data Sources** tab, lists the
+open drafts of people who have left the workspace — their name, owner, level and
+when they last changed, never what they hold. Choose **Hand on** to give one a
+new owner.
 
 ## Where to next
 

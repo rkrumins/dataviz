@@ -261,6 +261,20 @@ class ChangeListBusy(_HttpMapped, RuntimeError):
                          {"Retry-After": str(retry_after)})
 
 
+class GraphReadBusy(_HttpMapped, RuntimeError):
+    """A read of a graph from Postgres (while FalkorDB holds no version of it) ran past the
+    New-version builds' statement limit, and Postgres cancelled it: answered as a busy store the
+    reader may retry, so one large graph's reads never hold the connection pool from everyone's."""
+
+    status_code = 503
+
+    def __init__(self, retry_after: int = 2):
+        super().__init__("this graph is taking too long to read while it is being prepared; try "
+                         "again in a moment",
+                         {"type": "graph_read_busy", "retryable": True},
+                         {"Retry-After": str(retry_after)})
+
+
 class JobActive(_HttpMapped, RuntimeError):
     """Another job of the same kind is already running on this branch.
     Same shape as ``BootstrapConflict``'s ``job_active``."""
@@ -579,7 +593,8 @@ class ReviewRequired(_HttpMapped, RuntimeError):
 
 class DraftPruned(_HttpMapped, RuntimeError):
     """A read of a closed draft's changes after they were removed. A merged or abandoned draft keeps
-    them for the retention window (Admin → Infrastructure → Versioned graphs → Draft retention);
+    them for the retention window (Keep closed drafts' changes for, ``drafts.keepClosedDays``: Admin →
+    Versioned graphs → Settings → Drafts & history);
     after it, only the draft's record stays: its name, owner, commits and review. A merged draft's
     changes are in ``main``, in the commit it landed as."""
 
@@ -663,7 +678,7 @@ class PartialMergeUnsupported(_HttpMapped, RuntimeError):
 
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
-               LockBusy, ChangeListBusy, RevisionUnsupported, RevisionTooFar, RevisionReadOnly,
+               LockBusy, ChangeListBusy, GraphReadBusy, RevisionUnsupported, RevisionTooFar, RevisionReadOnly,
                JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionAlreadyAdopted,
                ProjectionPassInFlight, ProjectionKeyInUse,

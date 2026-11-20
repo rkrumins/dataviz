@@ -49,13 +49,16 @@ function findChromium() {
   return ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => existsSync(p)) ?? null
 }
 
+/** Vite's output without its colour codes: with CI set it prints "Local" in bold, between them. */
+const plain = (d) => String(d).replace(/\x1b\[[0-9;]*m/g, '')
+
 async function startVite() {
   const vite = spawn('npx', ['vite', '--port', String(PORT), '--strictPort'], { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Vite did not start in 60s')), 60_000)
-    vite.stdout.on('data', (d) => { if (String(d).includes('Local:')) { clearTimeout(timer); resolve() } })
+    vite.stdout.on('data', (d) => { if (plain(d).includes('Local:')) { clearTimeout(timer); resolve() } })
     vite.stderr.on('data', (d) => {
-      if (String(d).includes('is in use')) {
+      if (plain(d).includes('is in use')) {
         clearTimeout(timer)
         reject(new Error(`Port ${PORT} is already serving an older build. Stop it first:  pkill -f "vite --port ${PORT}"`))
       }

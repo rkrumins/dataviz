@@ -83,8 +83,12 @@ class VersionedBranchProvider:
 
     def __init__(self, svc, *, graph_id: str, branch_id: str,
                  actor: Optional[str] = None, as_of_seq: Optional[int] = None,
-                 deep_search_gap: str = _NO_DEEP_SEARCH):
+                 deep_search_gap: str = _NO_DEEP_SEARCH, read_svc=None):
         self._svc = svc
+        # Reads go through ``read_svc`` when given: ContextEngine's, whose sessions are bounded
+        # (db.bounded_read_sessions) so a large graph read from Postgres can't take the pool.
+        # Writes keep ``svc``.
+        self._read = read_svc or svc
         self._gid = graph_id
         self._branch = branch_id
         self._actor = actor or "system"
@@ -108,7 +112,7 @@ class VersionedBranchProvider:
         held = write_batch.node(urn)                     # made earlier in this request's batch
         if held is not None:
             return held
-        d = await self._svc.get_node_from_state(
+        d = await self._read.get_node_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of, urn=urn,
             containment_edge_types=self._containment_types)
         return GraphNode(**d) if d else None
@@ -116,7 +120,7 @@ class VersionedBranchProvider:
     async def get_nodes(self, query: NodeQuery) -> List[GraphNode]:
         # Pass the (engine-resolved) containment types so the draft read computes childCount,
         # exactly as FalkorDB does for main — without it, draft nodes lose their expand chevron.
-        rows = await self._svc.get_nodes_from_state(
+        rows = await self._read.get_nodes_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             urns=query.urns, entity_types=query.entity_types, search_query=query.search_query,
             limit=query.limit or 100, offset=query.offset or 0,
@@ -142,13 +146,13 @@ class VersionedBranchProvider:
         return NodePage(nodes=page, hasMore=len(rows) > limit, nextOffset=offset + len(page))
 
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
-        rows = await self._svc.search_from_state(
+        rows = await self._read.search_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             query=query, limit=limit)
         return [GraphNode(**d) for d in rows]
 
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
-        rows = await self._svc.get_edges_from_state(
+        rows = await self._read.get_edges_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             source_urns=query.source_urns, target_urns=query.target_urns,
             any_urns=query.any_urns, edge_types=query.edge_types,
@@ -176,7 +180,7 @@ class VersionedBranchProvider:
     ) -> ChildrenWithEdgesResult:
         # Pages by OFFSET (the cursor is not an input here) — which is why paging
         # clients send both: FalkorDB takes the cursor, this path the offset.
-        d = await self._svc.get_children_with_edges_from_state(
+        d = await self._read.get_children_with_edges_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             parent_urn=parent_urn, containment_edge_types=edge_types or [],
             lineage_edge_types=lineage_edge_types, include_lineage_edges=include_lineage_edges,
@@ -192,7 +196,7 @@ class VersionedBranchProvider:
         offset: int = 0, limit: int = 100, sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None, sort_direction: str = "asc",
     ) -> List[GraphNode]:
-        d = await self._svc.get_children_with_edges_from_state(
+        d = await self._read.get_children_with_edges_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             parent_urn=parent_urn, containment_edge_types=edge_types or [],
             include_lineage_edges=False, limit=limit, offset=offset)
@@ -204,7 +208,7 @@ class VersionedBranchProvider:
         limit: int = 100, cursor: Optional[str] = None, include_child_count: bool = True,
         sort_direction: str = "asc",
     ) -> TopLevelNodesResult:
-        d = await self._svc.top_level_from_state(
+        d = await self._read.top_level_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             containment_edge_types=self._containment_types,
             root_entity_types=root_entity_types, entity_types=entity_types,
@@ -221,7 +225,7 @@ class VersionedBranchProvider:
         max_nodes: int, timeout_ms: int, include_containment_edges: bool = False,
         include_inherited_lineage: bool = True,
     ) -> TraceResult:
-        d = await self._svc.trace_from_state(
+        d = await self._read.trace_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             urn=urn, level=level, upstream_depth=upstream_depth, downstream_depth=downstream_depth,
             lineage_edge_types=lineage_edge_types, containment_edge_types=containment_edge_types,
@@ -393,7 +397,7 @@ class VersionedBranchProvider:
         # `drill_anchor` is accepted for contract parity and ignored: a
         # branch state replays raw edges rather than reading AGGREGATED
         # cells, so there is no pair collection to make asymmetric.
-        d = await self._svc.expand_from_state(
+        d = await self._read.expand_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             source_urn=source_urn, target_urn=target_urn, next_level=next_level,
             lineage_edge_types=lineage_edge_types, containment_edge_types=containment_edge_types,
@@ -588,7 +592,7 @@ class VersionedBranchProvider:
                 "entityTypeCounts": entity_type_counts,
                 "edgeTypeCounts": edge_type_counts,
             }
-        state = await self._svc.materialize_state(
+        state = await self._read.materialize_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of)
         entity_type_counts: Dict[str, int] = {}
         for p in state["nodes"].values():
@@ -631,7 +635,7 @@ class VersionedBranchProvider:
                 tagStats=[TagSummary(tag=t, count=c, entityTypes=["entity"])
                           for t, c in counted["tags"].items()],
             )
-        state = await self._svc.materialize_state(
+        state = await self._read.materialize_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of)
         ent_counts: Dict[str, int] = {}
         ent_samples: Dict[str, List[str]] = {}
@@ -666,7 +670,7 @@ class VersionedBranchProvider:
         state otherwise (an as-of read, a draft, a fork) — those come from the composed state."""
         if self._as_of is not None:
             return None
-        return await self._svc.schema_counts(graph_id=self._gid, branch_id=self._branch)
+        return await self._read.schema_counts(graph_id=self._gid, branch_id=self._branch)
 
     async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         """An entity's ancestors on this branch, parent first, root last (as FalkorDB's reader)."""
@@ -680,7 +684,7 @@ class VersionedBranchProvider:
     async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
         """``{urn: [parent, …, root]}`` from this branch's own state (a draft's moves included);
         absent = unknown, ``[]`` = a root — the GraphDataProvider contract."""
-        return await self._svc.ancestor_chains(
+        return await self._read.ancestor_chains(
             graph_id=self._gid, branch_id=self._branch, urns=urns,
             containment_edge_types=self._containment_types, as_of_seq=self._as_of)
 
@@ -728,7 +732,7 @@ class VersionedBranchProvider:
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
         # The id names the edge it resolves to — never a node that shares it (resolve_edges).
-        found = (await self._svc.resolve_edges(
+        found = (await self._read.resolve_edges(
             graph_id=self._gid, edge_ids=[edge_id], branch_id=self._branch)).get(edge_id)
         if found is None:
             return None
@@ -750,7 +754,7 @@ class VersionedBranchProvider:
             await self._commit([{"op": "delete", "entity_kind": "edge", "entity_id": edge_id,
                                  "payload": None}], f"delete edge {edge_id}")
             return True
-        found = (await self._svc.resolve_edges(
+        found = (await self._read.resolve_edges(
             graph_id=self._gid, edge_ids=[edge_id], branch_id=self._branch)).get(edge_id)
         if found is None:
             return False

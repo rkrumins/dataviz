@@ -552,13 +552,14 @@ describe('AnalyticsPage', () => {
         // exist on touch at all.
         await user.click(button)
 
-        const tip = await screen.findByRole('tooltip')
+        const tip = await screen.findByRole('dialog', { name: 'Stickiness' })
         expect(within(tip).getByText(/daily or occasionally/i)).toBeInTheDocument()
         expect(within(tip).getByText(/how it's calculated/i)).toBeInTheDocument()
         expect(within(tip).getByText(/why it matters/i)).toBeInTheDocument()
 
         await user.keyboard('{Escape}')
-        await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
+        await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Stickiness' })).toBeNull())
+        expect(button).toHaveFocus()
     })
 
     // ── Redaction ───────────────────────────────────────────────────
@@ -832,7 +833,7 @@ describe('AnalyticsPage', () => {
         } as never)
         renderAt('/analytics?tab=data')
         await user.click(await screen.findByRole('button', { name: /what does "time to first build" mean/i }))
-        expect(within(await screen.findByRole('tooltip')).getByText(/kept for 30 days/i)).toBeInTheDocument()
+        expect(within(await screen.findByRole('dialog', { name: 'Time to first build' })).getByText(/kept for 30 days/i)).toBeInTheDocument()
     })
 
     it('has no caveat on first builds when every run is kept', async () => {
@@ -842,7 +843,7 @@ describe('AnalyticsPage', () => {
         } as never)
         renderAt('/analytics?tab=data')
         await user.click(await screen.findByRole('button', { name: /what does "time to first build" mean/i }))
-        expect(within(await screen.findByRole('tooltip')).queryByText(/are kept for/i)).toBeNull()
+        expect(within(await screen.findByRole('dialog', { name: 'Time to first build' })).queryByText(/are kept for/i)).toBeNull()
     })
 
     it('says version control could not be read rather than reporting none', async () => {

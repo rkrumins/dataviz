@@ -68,6 +68,7 @@ tests/test_bootstrap_worker_unit.py
 tests/test_branding_endpoint.py
 tests/test_branding_repo.py
 tests/test_bring_into_history.py
+tests/test_build_policy.py
 tests/test_bulkhead.py
 tests/test_cache_refresh_route.py
 tests/test_canvas_endpoints.py
@@ -123,6 +124,7 @@ tests/test_falkordb_replication.py
 tests/test_falkordb_run_guarded.py
 tests/test_falkordb_store_outage.py
 tests/test_falkordb_write_and_wait_unit.py
+tests/test_feature_flag_generation.py
 tests/test_fold_batch_ops.py
 tests/test_fork_data_sources.py
 tests/test_forks_feature_flag.py
@@ -199,6 +201,7 @@ tests/test_package_seed_rows.py
 tests/test_parse_cost.py
 tests/test_permission_implications.py
 tests/test_permission_service.py
+tests/test_pg_read_bounds.py
 tests/test_placement_conformance.py
 tests/test_placement_dry_run.py
 tests/test_placement_legacy_parity.py
@@ -208,6 +211,7 @@ tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
 tests/test_projection_batched_payloads.py
+tests/test_projection_builds_unit.py
 tests/test_projection_cancellation_unit.py
 tests/test_projection_dedicated_rollups.py
 tests/test_projection_derived_labels.py
@@ -239,6 +243,7 @@ tests/test_purge_reaper_unit.py
 tests/test_purge_then_rebuild.py
 tests/test_raw_properties.py
 tests/test_rbac_migration.py
+tests/test_read_mode_route.py
 tests/test_read_pressure_yield.py
 tests/test_reaper_rehome.py
 tests/test_reconcile_detectors.py
@@ -257,8 +262,10 @@ tests/test_restore_preview_api.py
 tests/test_revision_api.py
 tests/test_revision_engine_routing.py
 tests/test_revision_gate.py
+tests/test_rollup_cells_parity.py
 tests/test_rollup_health.py
 tests/test_rollup_rebuild_hook_proxy.py
+tests/test_rollup_window_safety.py
 tests/test_run_step_ledger.py
 tests/test_s3_object_store.py
 tests/test_saved_view_filters.py
@@ -287,6 +294,14 @@ tests/test_seed_templates.py
 tests/test_service_account_keys.py
 tests/test_service_account_lifecycle.py
 tests/test_service_accounts_api.py
+tests/test_settings_effective.py
+tests/test_settings_facts.py
+tests/test_settings_resolver.py
+tests/test_settings_signal_sites.py
+tests/test_settings_signals.py
+tests/test_settings_snapshot.py
+tests/test_settings_validate.py
+tests/test_settings_world.py
 tests/test_shard_capacity.py
 tests/test_source_changed_signal.py
 tests/test_squash_plan_unit.py
@@ -308,6 +323,8 @@ tests/test_upload_pins.py
 tests/test_versioned_branch_aggregated_edges.py
 tests/test_versioned_branch_resolve_identities.py
 tests/test_versioned_branch_trace_closure.py
+tests/test_versioned_graph_health_api.py
+tests/test_versioned_graph_settings_api.py
 tests/test_versioned_sources_lookup.py
 tests/test_versioning_access_groups.py
 tests/test_versioning_admin_graphs_route.py

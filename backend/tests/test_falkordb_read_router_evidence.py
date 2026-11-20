@@ -453,6 +453,71 @@ def test_a_node_that_answers_starts_the_streak_over():
     assert p._deadline_streak_verdict(asyncio.TimeoutError()) is None
 
 
+def test_a_streak_against_a_node_the_projector_writes_is_answered_busy_not_as_a_failover(
+        monkeypatch):
+    """While the projector holds its writing lease on the node, the readers' deadlines there are
+    its writes holding them, not a wedged node: the miss that would end the streak is a retryable
+    busy answer, and the streak starts over — no failover memo answers every read of the graph for
+    seconds. Without the lease, or with the switch off, the streak ends in a failover as before."""
+    from backend.common.adapters import ProviderBusy, ProviderFailingOver
+
+    p = _provider(_Conn())
+    p._host, p._port = "10.0.0.3", 6379
+    p._conn_cfg = types.SimpleNamespace(mode="cluster", read_from_replicas="auto",
+                                        host="10.0.0.3", port=6379)
+    fp._deadline_streaks.pop("10.0.0.3:6379", None)
+    writing = {"now": True}
+
+    async def lease(endpoint):
+        assert endpoint == "10.0.0.3:6379"
+        return writing["now"]
+
+    monkeypatch.setattr(fp, "_projector_writing", lease)
+
+    def miss():
+        """One deadline miss, as ``_guarded_timed`` judges it."""
+        busy = asyncio.run(p._own_writes_verdict())
+        return busy if busy is not None else p._deadline_streak_verdict(asyncio.TimeoutError())
+
+    verdicts = [miss() for _ in range(fp._DEADLINE_STREAK_LIMIT)]
+    assert verdicts[:-1] == [None] * (fp._DEADLINE_STREAK_LIMIT - 1)
+    assert isinstance(verdicts[-1], ProviderBusy)
+    assert not isinstance(verdicts[-1], ProviderFailingOver)
+    assert verdicts[-1].retry_after_seconds == fp._OWN_WRITES_RETRY_AFTER_S
+    assert fp._deadline_streaks["10.0.0.3:6379"] == 0
+    assert getattr(p, "_failing_over_until", 0) <= time.monotonic(), "no failover memo"
+
+    for writing["now"], on in ((False, True), (True, False)):
+        monkeypatch.setattr(fp, "_STREAK_IGNORE_PROJECTOR_WRITES", on)
+        verdicts = [miss() for _ in range(fp._DEADLINE_STREAK_LIMIT)]
+        assert isinstance(verdicts[-1], ProviderFailingOver), (writing, on)
+
+
+def test_whether_the_projector_writes_a_node_is_asked_once_per_poll_and_fails_open(monkeypatch):
+    from backend.app.services.aggregation import redis_client
+
+    asked = []
+
+    class _Redis:
+        async def exists(self, key):
+            asked.append(key)
+            return 1
+
+    fp._projector_writing_seen.clear()
+    monkeypatch.setattr(redis_client, "get_redis", lambda: _Redis())
+    assert asyncio.run(fp._projector_writing("h:1")) is True
+    assert asyncio.run(fp._projector_writing("h:1")) is True
+    assert asked == ["gvproj:writing:h:1"]
+
+    def down():
+        raise ConnectionError("no Redis")
+
+    fp._projector_writing_seen.clear()
+    monkeypatch.setattr(redis_client, "get_redis", down)
+    assert asyncio.run(fp._projector_writing("h:1")) is False
+    fp._projector_writing_seen.clear()
+
+
 # ── delete is idempotent under the retry that made it so ─────────────────
 
 

@@ -41,6 +41,8 @@ from backend.app.config.feature_wiring import FEATURE_WIRING
 # guarding anything. ``seed_feature_registry`` re-exports these two unchanged
 # (its ``__all__``), so this is the same data by a route that costs nothing.
 from backend.app.config.features_seed import SEED_CATEGORIES, SEED_DEFINITIONS
+# Stdlib only, like the two above: the settings registry's categories, some of which have a switch.
+from backend.app.config.versioned_graph_settings import CATEGORIES as SETTING_CATEGORIES
 
 _REPO = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO / "backend" / "app"
@@ -334,6 +336,22 @@ def test_a_declared_ui_surface_actually_exists(key: str):
         + f"\n\n...but no file under frontend/src reads '{key}'. The admin turns it off and "
         f"the button is still there — clicking it now 403s."
     )
+
+
+def test_a_switch_of_versioned_graph_settings_names_where_they_are():
+    """New-version builds and Graph residency are each the switch of a category of versioned-graph
+    settings, and are shown with those settings: Admin → Versioned graphs → Settings. A surface
+    names that category as the settings registry labels it, so renaming the category, or moving
+    the settings again (they were on Admin → Infrastructure), can't leave the Features page
+    pointing at a place that isn't there."""
+    switches = {c.master_switch: c.label for c in SETTING_CATEGORIES if c.master_switch}
+    assert switches, "no category of versioned-graph settings has a switch"
+    for key, label in switches.items():
+        place = f"The {label} category on Admin → Versioned graphs → Settings"
+        assert any(s.startswith(place) for s in FEATURE_WIRING[key].ui_surfaces), (
+            f"{key} is the switch of {label}, but no UI surface of it says so: "
+            f"{FEATURE_WIRING[key].ui_surfaces}"
+        )
 
 
 def test_no_flag_is_decoration():

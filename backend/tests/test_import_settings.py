@@ -1,15 +1,19 @@
 """A graph's import settings: what its imports' rows find their entities by when an import names no
 identifier, and the replace guard's limits.
 
-* Each field resolves on its own: the graph's data source's own, else the platform's, and says
-  where it came from. An import that names an identifier uses it.
+* Each field resolves on its own: the graph's data source's own, else its workspace's, else the
+  platform's, and says where it came from. The values live in the settings store
+  (``tests/common/settings_world.py`` stands in for it); the old columns resolve by the same rule
+  (``import_settings.resolve``). An import that names an identifier uses it.
 * An import keeps what it was made with (``jobs.import_settings``): where its identifier came from,
-  and the guard's limits with where each came from. The guard and the fail-fast check use those.
+  the guard's switch and limits with where each came from, the refused rows it allows and how many
+  properties its graph may match by. The guard and the fail-fast check use those.
 * Anyone who reads the graph reads them, an API key too; workspace admins set them, never with a
-  key. ``"inherit"`` clears a field, a field left out stays, and a real change is recorded once. A
-  fork's are its parent's, but for a property default: a fork's rows can't be matched by a property
-  yet, so there it is ``entity_id``, its source ``fork``, in its settings and on its imports — all
-  but the data source's identifier property, which holds the urn, and stays.
+  key. ``"inherit"`` clears a field, a field left out stays, and a real change is saved through the
+  store, written through to the old columns and recorded once. A fork's are its parent's, but for
+  a property default: a fork's rows can't be matched by a property yet, so there it is
+  ``entity_id``, its source ``fork``, in its settings and on its imports — all but the data
+  source's identifier property, which holds the urn, and stays.
 """
 from __future__ import annotations
 
@@ -52,9 +56,17 @@ def test_each_field_resolves_on_its_own():
                                              "sources": dict.fromkeys(import_settings.platform(), "platform")}
 
 
-def test_an_import_names_its_own_identifier_or_takes_its_graphs_and_its_job_keeps_where_each_came_from():
-    row = _row(import_identifier="prop.external_id", import_replace_min_live=10)
-    identifier, kept = import_settings.for_import(row, None)
+def _own(world, ds_id: str, **values) -> None:
+    """A data source's graph's own import settings, by old column, saved in the store."""
+    keys = {column: key for column, _api, key in import_settings.FIELDS}
+    for column, value in values.items():
+        world.set(keys[column], "graph", ds_id, value)
+
+
+async def test_an_import_names_its_own_identifier_or_takes_its_graphs_and_its_job_keeps_where_each_came_from(
+        settings_world):
+    _own(settings_world, "ds_1", import_identifier="prop.external_id", import_replace_min_live=10)
+    identifier, kept = await import_settings.for_import("ws_1", "ds_1", None)
     assert (identifier, kept["identifierSource"]) == ("prop.external_id", "data_source")
     assert kept["replaceLimits"] == {
         "minLive": 10, "deleteFraction": config.IMPORT_REPLACE_GUARD_DELETE_FRACTION,
@@ -62,63 +74,109 @@ def test_an_import_names_its_own_identifier_or_takes_its_graphs_and_its_job_keep
         "minMatchFraction": config.IMPORT_REPLACE_MIN_MATCH_FRACTION,
         "sources": {"minLive": "data_source", "deleteFraction": "platform",
                     "createFraction": "platform", "minMatchFraction": "platform"}}
-    assert import_settings.for_import(row, " urn ")[0] == "urn"
-    assert import_settings.for_import(row, "urn")[1]["identifierSource"] == "request"
-    assert import_settings.for_import(None, "")[:1] == ("entity_id",)
-    assert import_settings.for_import(None, None)[1]["identifierSource"] == "platform"
+    assert (await import_settings.for_import("ws_1", "ds_1", " urn "))[0] == "urn"
+    assert (await import_settings.for_import("ws_1", "ds_1", "urn"))[1]["identifierSource"] == "request"
+    assert (await import_settings.for_import(None, None, ""))[:1] == ("entity_id",)
+    assert (await import_settings.for_import(None, None, None))[1]["identifierSource"] == "platform"
 
 
-def test_the_platforms_identifier_is_the_operators_when_it_is_one(monkeypatch):
+async def test_an_import_keeps_every_rule_it_runs_under_from_its_graph_workspace_or_platform(
+        settings_world):
+    settings_world.set("imports.identifier", "workspace", "ws_1", "urn")
+    settings_world.set("imports.replaceGuard", "workspace", "ws_1", False)
+    settings_world.set("imports.maxRefusedRows", "graph", "ds_1", "unlimited")
+    settings_world.set("imports.guardDeleteShare", "platform", "", 0.8)
+    settings_world.set("imports.maxMatchingProperties", "platform", "", 3)
+    identifier, kept = await import_settings.for_import("ws_1", "ds_1", None)
+    assert (identifier, kept["identifierSource"]) == ("urn", "workspace")
+    assert (kept["replaceGuard"], kept["maxRefusedRows"], kept["maxMatchingProperties"]) == (
+        False, "-1", 3), "the worker's words for unlimited"
+    assert (kept["replaceLimits"]["deleteFraction"],
+            kept["replaceLimits"]["sources"]["deleteFraction"]) == (0.8, "platform")
+    identifier, kept = await import_settings.for_import("ws_2", "ds_9", None)
+    assert (identifier, kept["replaceGuard"], kept["maxRefusedRows"]) == ("entity_id", True, "0")
+
+
+async def test_the_platforms_identifier_is_the_operators_when_it_is_one(monkeypatch):
     monkeypatch.setattr(config, "IMPORT_IDENTIFIER", "urn")
-    assert import_settings.for_import(None, None)[0] == "urn"
+    assert (await import_settings.for_import(None, None, None))[0] == "urn"
     monkeypatch.setattr(config, "IMPORT_IDENTIFIER", "no such thing")
-    assert import_settings.for_import(None, None)[0] == "entity_id"
+    assert (await import_settings.for_import(None, None, None))[0] == "entity_id"
 
 
-def test_on_a_fork_a_property_default_is_entity_id_and_says_why(monkeypatch):
-    row = _row(import_identifier="prop.external_id", import_replace_min_live=10)
-    identifier, kept = import_settings.for_import(row, None, fork=True)
+async def test_on_a_fork_a_property_default_is_entity_id_and_says_why(monkeypatch, settings_world):
+    _own(settings_world, "ds_1", import_identifier="prop.external_id", import_replace_min_live=10)
+    fork = {"root_id": "ds_1", "fork": True}
+    identifier, kept = await import_settings.for_import("ws_1", "dsfork_1", None, **fork)
     assert (identifier, kept["identifierSource"]) == ("entity_id", "fork")
     assert kept["replaceLimits"]["minLive"] == 10, "the parent's limits still hold"
-    effective = import_settings.resolve(row, fork=True)
+    effective = await import_settings.effective("ws_1", "dsfork_1", **fork)
     assert (effective["identifier"], effective["sources"]["identifier"]) == ("entity_id", "fork")
-    assert import_settings.for_import(row, None)[0] == "prop.external_id", "its parent keeps it"
+    assert (await import_settings.for_import("ws_1", "ds_1", None))[0] == "prop.external_id", \
+        "its parent keeps it"
     # One a fork can match by stays; a property the import names is the import's (and refused).
-    assert import_settings.for_import(_row(import_identifier="urn"), None, fork=True)[0] == "urn"
-    assert import_settings.for_import(row, "prop.external_id", fork=True)[1]["identifierSource"] == "request"
+    _own(settings_world, "ds_2", import_identifier="urn")
+    assert (await import_settings.for_import("ws_1", "dsfork_2", None, root_id="ds_2",
+                                             fork=True))[0] == "urn"
+    assert (await import_settings.for_import("ws_1", "dsfork_1", "prop.external_id",
+                                             **fork))[1]["identifierSource"] == "request"
     # The platform's too.
     monkeypatch.setattr(config, "IMPORT_IDENTIFIER", "prop.sap_id")
-    assert import_settings.for_import(None, None, fork=True)[0] == "entity_id"
-    assert import_settings.for_import(None, None)[0] == "prop.sap_id"
+    assert (await import_settings.for_import(None, None, None, fork=True))[0] == "entity_id"
+    assert (await import_settings.for_import(None, None, None))[0] == "prop.sap_id"
 
 
-def test_on_a_fork_a_default_of_its_identifier_property_stays_as_its_parents(monkeypatch):
+async def test_on_a_fork_a_default_of_its_identifier_property_stays_as_its_parents(
+        monkeypatch, settings_world):
     # The property its data source identifies nodes by holds the urn: matched as the urn, on a
     # fork too.
-    row = _row(import_identifier="prop.asset_id")
-    identifier, kept = import_settings.for_import(row, None, fork=True, identity_property="asset_id")
+    fork = {"fork": True, "identity_property": "asset_id"}
+    _own(settings_world, "ds_1", import_identifier="prop.asset_id")
+    identifier, kept = await import_settings.for_import("ws_1", "dsfork_1", None, root_id="ds_1",
+                                                        **fork)
     assert (identifier, kept["identifierSource"]) == ("prop.asset_id", "data_source")
-    effective = import_settings.resolve(row, fork=True, identity_property="asset_id")
+    effective = await import_settings.effective("ws_1", "dsfork_1", root_id="ds_1", **fork)
     assert (effective["identifier"], effective["sources"]["identifier"]) == ("prop.asset_id", "data_source")
     # Any other property is entity_id there.
-    other = _row(import_identifier="prop.external_id")
-    assert import_settings.for_import(other, None, fork=True, identity_property="asset_id")[0] == "entity_id"
+    _own(settings_world, "ds_2", import_identifier="prop.external_id")
+    assert (await import_settings.for_import("ws_1", "dsfork_2", None, root_id="ds_2",
+                                             **fork))[0] == "entity_id"
+    # With ,urn or not: the identifier property holds the urn, and any other property is entity_id.
+    _own(settings_world, "ds_3", import_identifier="prop.asset_id,urn")
+    identifier, kept = await import_settings.for_import("ws_1", "dsfork_3", None, root_id="ds_3",
+                                                        **fork)
+    assert (identifier, kept["identifierSource"]) == ("prop.asset_id,urn", "data_source")
+    _own(settings_world, "ds_4", import_identifier="prop.external_id,urn")
+    identifier, kept = await import_settings.for_import("ws_1", "dsfork_4", None, root_id="ds_4",
+                                                        **fork)
+    assert (identifier, kept["identifierSource"]) == ("entity_id", "fork")
     # The platform's default alike; and with no identifier property, a property is never the urn.
     monkeypatch.setattr(config, "IMPORT_IDENTIFIER", "prop.asset_id")
-    identifier, kept = import_settings.for_import(None, None, fork=True, identity_property="asset_id")
+    identifier, kept = await import_settings.for_import(None, None, None, **fork)
     assert (identifier, kept["identifierSource"]) == ("prop.asset_id", "platform")
-    assert import_settings.for_import(None, None, fork=True)[0] == "entity_id"
+    assert (await import_settings.for_import(None, None, None, fork=True))[0] == "entity_id"
 
 
-def test_the_guard_runs_under_the_limits_its_job_was_made_with():
-    _identifier, kept = import_settings.for_import(
-        _row(import_replace_min_live=10, import_replace_delete_fraction=0.9,
-             import_replace_create_fraction=0.1), None)
+async def test_the_guard_runs_under_the_limits_its_job_was_made_with(settings_world):
+    _own(settings_world, "ds_1", import_replace_min_live=10, import_replace_delete_fraction=0.9,
+         import_replace_create_fraction=0.1)
+    _identifier, kept = await import_settings.for_import("ws_1", "ds_1", None)
     verdict = replace_verdict(20, 18, 2, allowed=False, limits=kept["replaceLimits"])
     assert verdict["state"] == "blocked"
     assert verdict["limits"] == {"minLive": 10, "deleteFraction": 0.9, "createFraction": 0.1}
     assert verdict["sources"] == dict.fromkeys(("minLive", "deleteFraction", "createFraction"), "data_source")
     assert replace_verdict(20, 18, 2, allowed=False)["state"] == "passed"   # the platform's: 1,000
+
+
+async def test_the_guard_switch_its_job_keeps_holds_whatever_the_platform_says_now(settings_world):
+    from backend.app.services.settings import effective
+
+    _identifier, kept = await import_settings.for_import("ws_1", "ds_1", None)
+    settings_world.set("imports.replaceGuard", "platform", "", False)    # after the job was made
+    await effective.refresh()
+    assert replace_verdict(1000, 900, 900, allowed=False)["state"] == "off"
+    assert replace_verdict(1000, 900, 900, allowed=False, limits=kept["replaceLimits"],
+                           guard=kept["replaceGuard"])["state"] == "blocked"
 
 
 def test_apply_writes_only_what_changed_and_inherit_clears():
@@ -192,7 +250,7 @@ async def _recorded(db_session) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_an_admin_sets_a_graphs_settings_and_a_change_is_recorded_once(
-        test_client, db_session, estate, graph):
+        test_client, db_session, estate, graph, settings_world):
     start = await test_client.get(_PATH)
     assert start.status_code == 200, start.text
     body = start.json()
@@ -226,6 +284,14 @@ async def test_an_admin_sets_a_graphs_settings_and_a_change_is_recorded_once(
     assert cleared.json()["overrides"]["identifier"] is None
     assert cleared.json()["overrides"]["replaceDeleteFraction"] == 0.8      # left out: it stays
     assert len(await _recorded(db_session)) == 2
+    # Saved through the store, and written through to the old columns.
+    assert {s.source for s in settings_world.saves} == {"legacy_api"}
+    ds = await db_session.get(WorkspaceDataSourceORM, "ds_1", populate_existing=True)
+    assert (ds.import_identifier, ds.import_replace_delete_fraction) == (None, 0.8)
+    # A workspace's own value reaches a graph that sets none.
+    settings_world.set("imports.guardMinLive", "workspace", "ws_1", 50)
+    effective = (await test_client.get(_PATH)).json()["effective"]
+    assert (effective["replaceMinLive"], effective["sources"]["replaceMinLive"]) == (50, "workspace")
 
 
 @pytest.mark.asyncio
@@ -271,11 +337,11 @@ class _Imports:
 
 @pytest.mark.asyncio
 async def test_on_a_fork_its_parents_property_default_is_entity_id_and_its_imports_run_by_it(
-        test_client, db_session, estate, graph, tmp_path):
+        test_client, db_session, estate, graph, tmp_path, settings_world):
     from backend.app.services import fork_sources
     from backend.app.services.storage.object_store import LocalFsObjectStore
     parent = await db_session.get(WorkspaceDataSourceORM, "ds_1")
-    parent.import_identifier = "prop.external_id"
+    _own(settings_world, "ds_1", import_identifier="prop.external_id")
     db_session.add(fork_sources.fork_row(parent, ds_id="dsfork_1", name="try", parent_graph_id="g_0",
                                          actor="u"))
     await db_session.commit()
@@ -299,13 +365,13 @@ async def test_on_a_fork_its_parents_property_default_is_entity_id_and_its_impor
 
 @pytest.mark.asyncio
 async def test_on_a_fork_a_default_of_its_identifier_property_stays_and_its_imports_run_by_it(
-        test_client, db_session, estate, graph, tmp_path):
+        test_client, db_session, estate, graph, tmp_path, settings_world):
     from backend.app.services import fork_sources
     from backend.app.services.storage.object_store import LocalFsObjectStore
     # Its provider identifies the nodes by asset_id: neither data source's row names it.
     (await db_session.get(ProviderORM, "prov_1")).identity_property = "asset_id"
     parent = await db_session.get(WorkspaceDataSourceORM, "ds_1")
-    parent.import_identifier = "prop.asset_id"
+    _own(settings_world, "ds_1", import_identifier="prop.asset_id")
     db_session.add(fork_sources.fork_row(parent, ds_id="dsfork_1", name="try", parent_graph_id="g_0",
                                          actor="u"))
     await db_session.commit()
@@ -328,11 +394,15 @@ async def test_on_a_fork_a_default_of_its_identifier_property_stays_and_its_impo
 
 
 @pytest.mark.asyncio
-async def test_an_import_takes_its_graphs_identifier_unless_it_names_one(db_session, estate):
-    ds = await db_session.get(WorkspaceDataSourceORM, "ds_1")
-    ds.import_identifier, ds.import_replace_min_match_fraction = "urn", 0.5
-    await db_session.flush()
+async def test_an_import_takes_its_graphs_identifier_unless_it_names_one(db_session, estate,
+                                                                         settings_world):
+    _own(settings_world, "ds_1", import_identifier="urn", import_replace_min_match_fraction=0.5)
+    settings_world.set("imports.maxRefusedRows", "workspace", "ws_1", "2%")
     identifier, kept = await V._import_settings_for(db_session, "ds_1", None)
+    assert (kept["replaceGuard"], kept["maxRefusedRows"], kept["maxMatchingProperties"]) == (
+        True, "2%", config.MAX_MATCHING_PROPERTIES)
+    assert V._with_refused_budget(kept, None)["maxRefusedRows"] == "2%"       # its workspace's
+    assert V._with_refused_budget(kept, "5")["maxRefusedRows"] == "5"         # the request's
     assert (identifier, kept["identifierSource"], kept["replaceLimits"]["minMatchFraction"]) == (
         "urn", "data_source", 0.5)
     assert (await V._import_settings_for(db_session, "ds_1", "prop.sap_id"))[0] == "prop.sap_id"

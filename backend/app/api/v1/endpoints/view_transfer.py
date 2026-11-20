@@ -44,7 +44,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.versioning import (
-    _domain_errors, draft_level, export_scope_of, get_import_export_service, get_versioning_service,
+    _domain_errors, _import_settings_for, draft_level, export_scope_of, get_import_export_service,
+    get_versioning_service,
 )
 from backend.app.api.v1.endpoints.large_json import json_response
 from backend.app.api.v1.endpoints.view_guards import editable_view, may_edit_view, readable_view
@@ -690,6 +691,9 @@ async def import_package_data(
             "type": "upload_expired",
             "message": "This package upload is about to expire. Choose the file again to import it."})
 
+    # Its rows find their entities, and it runs, by the data source's import settings, as any import.
+    identifier, settings = await _import_settings_for(
+        session, body.dataSourceId, None, fork=bool(graph.get("fork_parent_graph_id")))
     with _domain_errors():
         try:                                # its draft is opened with the job: none is left behind
             created = await ie.create_import_job(
@@ -698,7 +702,7 @@ async def import_package_data(
                 reconcile_mode="upsert", idempotency_key=key, name=name, originating_view_id=body.viewId,
                 # An update's data places the roots it creates in the draft's copy of that view (its
                 # staged view keeps them), or a curated view shows none of them.
-                scope_view_id=body.viewId,
+                scope_view_id=body.viewId, identifier=identifier, import_settings=settings,
                 draft_visibility=await draft_level(session, body.dataSourceId),
             )
         except IntegrityError:              # the same target, asked for twice at once

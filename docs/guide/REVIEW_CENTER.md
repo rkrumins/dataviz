@@ -46,7 +46,7 @@ stateDiagram-v2
 | **Conflicts** | Published changed some of the same things after the draft was started | **Merge**, and choose which values to keep |
 | **Approved** | It has the approvals its data source asks for (see [How many approvals a review needs](#how-many-approvals-a-review-needs)) | **Merge** |
 | **Sent back** | A reviewer asked for changes, and the draft hasn't changed since | Its author changes the draft |
-| **Merged** | Its changes are in Published | Nothing — or **Revert this merge** if it was a mistake |
+| **Merged** | Its changes are in Published | Nothing — or **Revert this merge** if it was a mistake and the merge added a revision |
 | **Closed** | Dismissed without merging, or its draft was abandoned | Nothing. A dismissed review's draft is kept |
 
 ## Open the Review Center
@@ -269,18 +269,22 @@ members (up to 200).
 
 ### How many approvals a review needs
 
-Each data source says how many approvals its reviews need, under **Drafts and
-reviews** (a workspace sets it for all its data sources, and a data source can
-choose its own):
+Each data source says how many approvals its reviews need: **Approvals a review
+needs**, under **Drafts & history** in its settings (**Open settings** on its
+**Versioning** tab). A workspace sets it for all its data sources on its
+**Versioned graphs** tab, and a Super Admin for the platform under
+**Administration → Versioned graphs**; a data source's own choice wins, then its
+workspace's. [Versioned Graph
+Settings](/guide/versioned-graph-settings#drafts-requiredapprovals) explains it.
 
 | **Approvals a review needs** | Means |
 | --- | --- |
 | **Everyone asked** (the default) | Every person and group asked must approve. A review that asks no one needs no approval |
-| **1 approval** … **10 approvals** | That many approvals that still stand, from anyone who may approve — asked or not |
+| **A set number**, 1 to 10 | That many approvals that still stand, from anyone who may approve — asked or not |
 
 An approval stands until the draft changes after it. **Open threads hold the
-merge** set to **Yes** means a review merges only once every thread on it is
-resolved. **Whoever opens a review may approve it** set to **No** means its
+merge** turned on means a review merges only once every thread on it is
+resolved. **People may approve their own reviews** turned off means its
 author's approval never counts — not even for a group they're in. A fork follows
 its parent's rules.
 
@@ -300,7 +304,9 @@ its parent's rules.
    then choose **Merge with resolutions**.
 5. If the draft was started from a View, {brand} opens that View on Published,
    where a banner says *Merged — your changes are now live*, with **View in
-   history**.
+   history**. If Published already had the draft's changes, the banner reads
+   *Already live — the published graph had these changes* instead: nothing new
+   was published, so there is no new version and no **View in history**.
 
 If something holds the merge, it says what: the approvals it still needs and
 who is asked, a request for changes that still holds, or open threads where the
@@ -398,7 +404,7 @@ and opening the review marks its notices read.
 ## What merging does
 
 - The draft's changes land on Published as **one new revision** in the
-  history.
+  history, unless Published already had them: then no revision is added.
 - The draft closes as merged. (Merging only what's accepted leaves it open with
   the rest.)
 - Views the draft created or changed go live with it.
@@ -407,7 +413,8 @@ and opening the review marks its notices read.
 
 Merged the wrong thing? Open the merged review and choose **Revert this
 merge** under **More for this review**. It adds a new revision that undoes the
-merge, and the history is kept. See
+merge, and the history is kept. A merge that added no revision has nothing to
+undo, so it doesn't offer **Revert this merge**. See
 [Undo vs. Restore](/guide/versioning-change-control#undo-vs-restore--the-distinction-that-matters).
 
 If someone sends the draft straight to Published with **Publish now** while its

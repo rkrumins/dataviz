@@ -17,13 +17,18 @@
  *   • A terminal phase INSIDE the shell ("creating" → "success"), so creating is the
  *     last step of the wizard rather than a detached dialog that appears after it.
  *   • Framer-motion step transitions instead of an instant content swap.
+ *
+ * `onEscape` opts a wizard into the keyboard behaviour a modal owes (`useModalA11y`): Esc
+ * calls it, Tab stays inside, and focus goes back to what opened the wizard. A wizard without
+ * it behaves as it always has.
  */
-import { useEffect, useId, useRef } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Check, Loader2, X, ArrowLeft, ArrowRight, Save } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { DocsLink } from '@/components/help/DocsLink'
+import { useModalA11y } from '@/hooks/useModalA11y'
 
 export interface WizardStepDef {
     id: string
@@ -63,6 +68,9 @@ export interface WizardShellProps {
     /** When set, renders a contextual Guide link in the shell header. It opens
      *  in a new tab, so reading the Guide never discards the wizard. */
     helpSlug?: string
+    /** Opt-in: Esc calls it, Tab is held inside the wizard, and focus returns to what opened
+     *  it. Ignored while something opened over the wizard (its own confirm) has the keyboard. */
+    onEscape?: () => void
     children: React.ReactNode
 }
 
@@ -87,17 +95,36 @@ export function WizardShell({
     hideClose,
     wide,
     helpSlug,
+    onEscape,
     children,
 }: WizardShellProps) {
     const isTerminal = !!terminalPhase
     const isWide = !isTerminal && !!wide
     const titleId = useId()
-    const dialogRef = useRef<HTMLDivElement>(null)
+
+    // The latest handler, called through one stable function: a new one on every render would
+    // tear the trap down and send focus back to the page each time.
+    const escape = useRef(onEscape)
+    useLayoutEffect(() => { escape.current = onEscape })
+    const panel = useRef<HTMLDivElement | null>(null)
+    const onEsc = useCallback(() => {
+        const active = document.activeElement
+        // Esc belongs to whatever has the keyboard: a dialog or a list opened over the wizard
+        // closes first, on its own.
+        if (panel.current && active && active !== document.body && !panel.current.contains(active)) return
+        escape.current?.()
+    }, [])
+    // Before the focus effect below, so the trap remembers what opened the wizard.
+    const dialogRef = useModalA11y(Boolean(onEscape), onEsc)
+    const setPanel = useCallback((el: HTMLDivElement | null) => {
+        panel.current = el
+        dialogRef.current = el
+    }, [dialogRef])
 
     // Move focus into the dialog on mount so keyboard + screen-reader users
     // land inside the wizard rather than back on the page behind the backdrop.
     useEffect(() => {
-        dialogRef.current?.focus()
+        panel.current?.focus()
     }, [])
 
     return (
@@ -105,7 +132,7 @@ export function WizardShell({
             <Backdrop open={true} zClassName="z-50" className="bg-black/60" />
             <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
             <motion.div
-                ref={dialogRef}
+                ref={setPanel}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby={titleId}
@@ -120,7 +147,7 @@ export function WizardShell({
                 )}
             >
                 {/* Header */}
-                <div className="flex items-center justify-between px-8 py-5 border-b border-glass-border bg-gradient-to-r from-black/[0.02] to-transparent dark:from-white/[0.02]">
+                <div className="flex items-center justify-between px-4 sm:px-8 py-5 border-b border-glass-border bg-gradient-to-r from-black/[0.02] to-transparent dark:from-white/[0.02]">
                     <div className="flex items-center gap-4">
                         <div className={cn(
                             'w-12 h-12 rounded-xl flex items-center justify-center text-white shadow-md',
@@ -138,7 +165,7 @@ export function WizardShell({
                             <h2 id={titleId} className="text-xl font-bold text-ink">
                                 {title}
                             </h2>
-                            <p className="text-sm text-ink-muted">
+                            <p className="text-sm text-ink-secondary">
                                 {isTerminal
                                     ? terminalSubtitle
                                     : `Step ${currentStepIndex + 1} of ${activeSteps.length}: ${activeSteps[currentStepIndex]?.label}`}
@@ -161,10 +188,11 @@ export function WizardShell({
 
                 {/* Progress Steps — overflow-proof: connectors flex instead of fixed
                     widths, pills can shrink with truncating labels, and non-active
-                    labels drop out below lg so all six steps always fit the modal.
+                    labels drop out below lg so all six steps always fit the modal (on a
+                    phone the active one's too: the subtitle above names it).
                     In the terminal phase every step reads complete and a final pill
                     shows the create itself. */}
-                <div className="px-8 py-4 bg-black/[0.02] dark:bg-white/[0.02] border-b border-glass-border">
+                <div className="px-4 sm:px-8 py-4 bg-black/[0.02] dark:bg-white/[0.02] border-b border-glass-border">
                     <div className="flex items-center min-w-0">
                         {activeSteps.map((step, index) => {
                             const isActive = !isTerminal && step.id === currentStep
@@ -183,7 +211,7 @@ export function WizardShell({
                                             isActive
                                                 ? 'bg-indigo-600 text-white shadow-md ring-2 ring-indigo-100 dark:ring-indigo-900'
                                                 : isCompleted
-                                                    ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400 hover:bg-emerald-100'
+                                                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400 hover:bg-emerald-100'
                                                     : 'text-ink-muted cursor-not-allowed',
                                         )}
                                     >
@@ -197,7 +225,7 @@ export function WizardShell({
                                                     {index + 1}
                                                 </span>
                                             )}
-                                        <span className={cn('truncate', !isActive && 'hidden lg:inline')}>
+                                        <span className={cn('truncate', isActive ? 'hidden sm:inline' : 'hidden lg:inline')}>
                                             {step.label}
                                         </span>
                                     </button>
@@ -231,8 +259,9 @@ export function WizardShell({
                     </div>
                 </div>
 
-                {/* Step Content */}
-                <div className="flex-1 overflow-y-auto min-h-[520px]">
+                {/* Step Content — at least 520px tall where the screen has the room; on a short
+                    phone it shrinks, so the footer stays on screen. */}
+                <div className="flex-1 overflow-y-auto min-h-0 sm:min-h-[520px]">
                     <AnimatePresence mode="wait">
                         <motion.div
                             key={terminalPhase ?? currentStep}
@@ -240,35 +269,37 @@ export function WizardShell({
                             animate={{ opacity: 1, x: 0 }}
                             exit={{ opacity: 0, x: -20 }}
                             transition={{ duration: 0.06 }}
-                            className="p-8"
+                            className="p-4 sm:p-8"
                         >
                             {children}
                         </motion.div>
                     </AnimatePresence>
                 </div>
 
-                {/* Footer */}
-                <div className="flex items-center justify-between px-8 py-5 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02]">
+                {/* Footer — on a phone, Back is its arrow and the paddings tighten, so Back,
+                    Cancel and the primary action fit 360px on one line. */}
+                <div className="flex items-center justify-between gap-2 px-4 sm:px-8 py-5 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02]">
                     {footer ?? (
                         <>
                             <button
                                 onClick={onBack}
                                 disabled={currentStepIndex === 0}
+                                aria-label="Back"
                                 className={cn(
-                                    'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors duration-150',
+                                    'flex items-center gap-2 px-3 sm:px-5 py-2.5 rounded-xl font-medium transition-colors duration-150',
                                     currentStepIndex > 0
                                         ? 'text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5'
                                         : 'text-ink-muted cursor-not-allowed',
                                 )}
                             >
                                 <ArrowLeft className="w-4 h-4" />
-                                Back
+                                <span className="hidden sm:inline">Back</span>
                             </button>
 
-                            <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-2 sm:gap-3">
                                 <button
                                     onClick={onClose}
-                                    className="px-5 py-2.5 rounded-xl font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
+                                    className="px-3 sm:px-5 py-2.5 rounded-xl font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
                                 >
                                     Cancel
                                 </button>
@@ -278,9 +309,9 @@ export function WizardShell({
                                         onClick={onSubmit}
                                         disabled={!canProceed || isSubmitting}
                                         className={cn(
-                                            'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
+                                            'flex items-center gap-2 whitespace-nowrap px-4 sm:px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
                                             canProceed && !isSubmitting
-                                                ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:brightness-110 shadow-md'
+                                                ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white hover:brightness-110 shadow-md'
                                                 : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
                                         )}
                                     >
@@ -295,9 +326,9 @@ export function WizardShell({
                                         onClick={onNext}
                                         disabled={!canProceed}
                                         className={cn(
-                                            'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
+                                            'flex items-center gap-2 whitespace-nowrap px-4 sm:px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
                                             canProceed
-                                                ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:brightness-110 shadow-md'
+                                                ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white hover:brightness-110 shadow-md'
                                                 : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
                                         )}
                                     >

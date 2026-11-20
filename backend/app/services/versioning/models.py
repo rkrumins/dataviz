@@ -478,7 +478,8 @@ class ProjectionStateORM(VersioningBase):
     shard_map = Column(JSONB, nullable=True)
     # A moved graph's old platform keys, waiting to be dropped once the new key has caught up:
     # ``[{name, provider, retireAfter, afterSeq, movedBy}]``, NULL when none
-    # (``move_projection``; 20261018_1100_gv_ps_retired).
+    # (``move_projection``; 20261018_1100_gv_ps_retired). A key a build switched away from, or a
+    # build's own key dropped with it, also names the build (``build``).
     retired_keys = Column(JSONB, nullable=True)
     # A customer graph's own spelling of its types, where it differs from the declared one:
     # ``{"nodes": {declared: physical}, "edges": {declared: physical}}``, recorded when the enable

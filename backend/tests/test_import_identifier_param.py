@@ -18,8 +18,8 @@ from backend.app.services.versioning import config
     ("entity_id", ("entity_id", "request")), (" urn ", ("urn", "request")),
     ("prop.external_id", ("prop.external_id", "request")),
 ])
-def test_an_import_takes_the_identifier_it_names_or_the_platforms(given, expect):
-    identifier, kept = import_settings.for_import(None, given)
+async def test_an_import_takes_the_identifier_it_names_or_the_platforms(given, expect):
+    identifier, kept = await import_settings.for_import(None, None, given)
     assert (identifier, kept["identifierSource"]) == expect
 
 
@@ -47,7 +47,7 @@ async def test_a_property_then_the_urn_is_an_identifier_an_import_may_name():
 
 async def test_the_platforms_default_is_the_operators_when_it_is_one(monkeypatch):
     monkeypatch.setattr(config, "IMPORT_IDENTIFIER", "urn")
-    assert import_settings.for_import(None, None)[0] == "urn"
+    assert (await import_settings.for_import(None, None, None))[0] == "urn"
     assert (await endpoints._import_settings_for(None, None, None))[0] == "urn"
     monkeypatch.setattr(config, "IMPORT_IDENTIFIER", "no such thing")
-    assert import_settings.for_import(None, None)[0] == "entity_id"
+    assert (await import_settings.for_import(None, None, None))[0] == "entity_id"

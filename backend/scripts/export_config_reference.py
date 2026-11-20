@@ -195,8 +195,168 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "Days a merged or abandoned draft keeps its changes before the versioning worker removes "
         "them; `0` keeps them for good. The draft's record stays (its name, owner, commits and "
         "review), and a merged draft's changes are in the published graph. A system administrator "
-        "overrides it live: Admin → Infrastructure → Versioned graphs → Draft retention. Each sweep spends at most 5 "
-        "minutes on it, so a draft of millions of rows is removed over a few sweeps.",
+        "overrides it live: Admin → Versioned graphs → Settings → Drafts & history (`drafts.keepClosedDays`), for the "
+        "platform or a workspace. Each sweep spends at most 5 minutes on it, so a draft of millions of "
+        "rows is removed over a few sweeps.",
+        None,
+    ),
+    "GRAPHVER_DRAFT_TTL_DAYS": (
+        "Days an open draft may go untouched before the versioning worker's sweep abandons it: not "
+        "one with a live review or staged edits, nor one on a deleted, frozen or recently unfrozen "
+        "graph.",
+        None,
+    ),
+    "GRAPHVER_PURGE_GRACE_DAYS": (
+        "Days a deleted data source stays in the trash, restorable, before the reaper (every "
+        "`GRAPHVER_REAP_POLL_SECS`) queues its purge, which removes it and its version history for "
+        "good. Forks in the trash follow the same window.",
+        None,
+    ),
+    "GRAPHVER_MAX_FORKS_PER_GRAPH": (
+        "Live forks one graph may have; one more is refused with `409 fork_limit`. Forks in the "
+        "trash don't count.",
+        None,
+    ),
+    "GRAPHVER_READ_MAX_LAG": (
+        "How many versions behind main's head a graph's FalkorDB key may still serve reads of main "
+        "while it catches up or rebuilds in place, for a graph that reads `in_place` or `beside`; "
+        "further behind, its reads go to Postgres. `-1` (the default): however far behind. `0`: the "
+        "head only. A graph that reads `latest` never serves an older version.",
+        None,
+    ),
+    "IMPORT_REPLACE_GUARD": (
+        "Refuse a replace import that would delete most of its scope and make most of it again "
+        "(limits: `IMPORT_REPLACE_GUARD_MIN_LIVE`, `_DELETE_FRACTION`, `_CREATE_FRACTION`), unless "
+        "it is sent with `allowMassDelete=true`. `0` turns the guard off; the early stop "
+        "(`IMPORT_REPLACE_MIN_MATCH_FRACTION`) still applies.",
+        None,
+    ),
+    "IMPORT_MAX_REFUSED_ROWS": (
+        "How many of an import's rows may be refused before it holds, when the import doesn't say: "
+        "`0` holds on any refused row, a count (`100`) or a share of the file's rows (`0.5%`) goes "
+        "on within it, and `-1` always goes on. Held, a replace deletes nothing and an "
+        "`autoPublish` import leaves its draft for review.",
+        None,
+    ),
+    "GRAPHVER_MAX_MATCHING_PROPERTIES": (
+        "Properties one graph's imports may match nodes by (`identifier=prop.<name>`), each with an "
+        "index of its values kept in Postgres; one more is refused "
+        "(`too_many_matching_properties`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_ABOVE": (
+        "Changed rows above which a publish is built in a second FalkorDB key while the current one keeps serving, then switched to (New-version builds, when its switch is on); smaller ones are written in place, paced. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.aboveRows`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_REBUILDS": (
+        "`1`: rebuilds and moves of platform-owned keys are built beside too: the new key is seeded from Postgres while reads keep the current version, then they switch to it. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.forRebuilds`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_MODE": (
+        "How a build makes its key: `auto` copies the serving key when its node has room, else seeds from Postgres on the node with most room; `copy` or `reseed` forces one way. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.method`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_COPY_MARGIN_PCT": (
+        "The free memory a copy needs on its node, as a share of the graph's size (`220` = ×2.2: while it runs, a copy holds the new key and its own buffer, each about the graph's size). A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.copyRoomPct`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_COPY_MAX_BYTES": (
+        "The largest graph copied rather than seeded from Postgres; `0`: no limit. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.copyMaxBytes`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_NO_ROOM_POLICY": (
+        "With no room for a build anywhere: `wait` (the current version keeps serving) or `in_place` (the change is written into the serving key, paced). A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.noRoom`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_NO_ROOM_ALERT_SECS": (
+        "Seconds a build may wait for room before it raises an alert. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.noRoomAlertSecs`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_CONCURRENCY": (
+        "Builds each versioning worker runs at once, never more than `GRAPHVER_PROJECTION_CONCURRENCY`. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.perWorker`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_MAX_ATTEMPTS": (
+        "Failures after which a build is dropped and the current version keeps serving. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.maxAttempts`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS": (
+        "The most rows a build may still have to catch up when it switches; the rest is written into the new key right after the switch. Defaults to `GRAPHVER_PROJECTION_INLINE_MAX_ROWS`. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.switchMaxLagRows`).",
+        None,
+    ),
+    "GRAPHVER_RETIRE_GRACE_SECS": (
+        "Seconds a graph's previous FalkorDB key stays after a switch or a move, so reads under way finish on it. A system administrator overrides it live: Admin → Versioned graphs → Settings → Updates & loading (`updates.retireGraceSecs`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_STATEMENT_TARGET_MS": (
+        "The time each projector write statement aims at; larger batches are split, so reads on the same node keep their turn. A system administrator overrides it live: Admin → Versioned graphs → Settings → Updates & loading (`updates.statementTargetMs`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_WRITE_CEILING_S": (
+        "The most one projector write statement may take, on any FalkorDB mode, before it is stopped and split. A system administrator overrides it live: Admin → Versioned graphs → Settings → Updates & loading (`updates.writeCeilingSecs`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_PACING_RATIO": (
+        "The pause after each projector write statement, as a share of the time it took. A system administrator overrides it live: Admin → Versioned graphs → Settings → Updates & loading (`updates.pacingRatio`).",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_READ_PRESSURE_RATIO": (
+        "The pause after each projector write statement while reads on the node are waiting, as a share of the time it took. A system administrator overrides it live: Admin → Versioned graphs → Settings → Updates & loading (`updates.readPressureRatio`).",
+        None,
+    ),
+    "GRAPHVER_READ_STATEMENT_TIMEOUT_MS": (
+        "The most one read of a versioned graph from Postgres may take (while FalkorDB holds no version of it); past it the read answers 503 and is retried. A system administrator overrides it live: Admin → Versioned graphs → Settings → Database reads (`database.readTimeoutMs`).",
+        None,
+    ),
+    "GRAPHVER_PG_READS_PER_GRAPH": (
+        "Reads of one versioned graph from Postgres that run at once per process; more wait briefly, then answer 429. A system administrator overrides it live: Admin → Versioned graphs → Settings → Database reads (`database.readsPerGraph`).",
+        None,
+    ),
+    "GRAPHVER_PG_READS_PER_PROCESS": (
+        "Reads from Postgres that run at once per process across graphs, so they never take the whole connection pool. A system administrator overrides it live: Admin → Versioned graphs → Settings → Database reads (`database.readsPerProcess`).",
+        None,
+    ),
+    "FALKORDB_STREAK_IGNORE_PROJECTOR_WRITES": (
+        "While the projector writes through a FalkorDB endpoint (it holds `gvproj:writing:<endpoint>` "
+        "in Redis), readers there whose deadlines run out in a row are told to retry (`429`, "
+        "`Retry-After: 2`) rather than that the node is failing over, which answers every read of "
+        "the graph from a memo for seconds. `0` treats such a streak as a failover, as before.",
+        None,
+    ),
+    "GRAPHVER_READ_MODE": (
+        "What readers of a versioned graph get while its next version is written into FalkorDB, "
+        "for every graph that doesn't set its own: `latest` (the default, as reads have always "
+        "worked: always the newest published version, from Postgres until FalkorDB holds it, "
+        "slower on a large graph), `in_place` (the version "
+        "FalkorDB last finished, while the next is written into the same key; readers may see part "
+        "of it) or `beside` (exactly that version, while the next is built in a second key, then "
+        "one switch; needs New-version builds on, and room for a second copy). Set live in "
+        "Admin → Versioned graphs → Settings → Reads & consistency as `reads.mode`, for the "
+        "platform, a workspace or a graph; this variable is the default where none is set.",
+        None,
+    ),
+    "GRAPHVER_ROUTE_CACHE_SECS": (
+        "The most seconds a process routes reads of a versioned graph by the route it last read "
+        "(its pin, watermark and main branch) without reading it again. It reads it again at once "
+        "when a write moves the graph's route token in Redis (`gvroute:g:<graph id>`, `gvroute:set`, "
+        "`gvroute:all`), which every write to a route announces as its commit returns; this bounds "
+        "only a change that could not be announced. `0` turns the cache off: every read is routed "
+        "from Postgres.",
+        None,
+    ),
+    "GRAPHVER_ROUTE_POOL_SIZE": (
+        "Connections kept, per process, in the small pool that routes every read of a versioned "
+        "graph (its key, its watermark, its main branch). It is apart from `GRAPHVER_POOL_SIZE`, so "
+        "reads that fill that pool can't stop routing; each statement on it is cut off past two "
+        "seconds. Counts toward Postgres' `max_connections` with the main pool.",
+        None,
+    ),
+    "GRAPHVER_ROUTE_POOL_MAX_OVERFLOW": (
+        "Connections the routing pool may open past `GRAPHVER_ROUTE_POOL_SIZE` at a peak.",
+        None,
+    ),
+    "GRAPHVER_ROUTE_POOL_TIMEOUT_SECS": (
+        "Seconds a read waits for a routing connection before it fails, rather than queueing.",
         None,
     ),
     "MAX_IMPORT_BODY_BYTES": (
@@ -566,6 +726,32 @@ NOTES: dict[str, tuple[str, str | None]] = {
     ),
 }
 
+#: Variables an administrator can now also set in the app: the key the settings registry
+#: (``backend/app/config/versioned_graph_settings.py``) gives each, its category there, and the
+#: levels it may be set at. The variable stays the default wherever no value is set. Each one's
+#: description says so; ``tests/test_settings_registry.py`` holds this map to the registry.
+PROMOTED: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "GRAPHVER_READ_MAX_LAG": ("reads.maxVersionsBehind", "Reads & consistency",
+                              ("platform", "workspace", "graph")),
+    "GRAPHVER_DRAFT_TTL_DAYS": ("drafts.idleCloseDays", "Drafts & history", ("platform", "workspace")),
+    "GRAPHVER_MAX_FORKS_PER_GRAPH": ("forks.maxPerGraph", "Drafts & history",
+                                     ("platform", "workspace", "graph")),
+    "GRAPHVER_PURGE_GRACE_DAYS": ("trash.restoreDays", "Drafts & history", ("platform", "workspace")),
+    "IMPORT_REPLACE_GUARD": ("imports.replaceGuard", "Imports", ("platform", "workspace", "graph")),
+    "IMPORT_MAX_REFUSED_ROWS": ("imports.maxRefusedRows", "Imports", ("platform", "workspace", "graph")),
+    "GRAPHVER_MAX_MATCHING_PROPERTIES": ("imports.maxMatchingProperties", "Imports", ("platform",)),
+}
+
+
+def _promoted(key: str, category: str, scopes: tuple) -> str:
+    """The sentence a promoted variable's description ends with."""
+    levels = [{"platform": "the platform", "workspace": "a workspace", "graph": "a graph"}[s]
+              for s in scopes]
+    where = levels[0] if len(levels) == 1 else ", ".join(levels[:-1]) + " or " + levels[-1]
+    return (f" Also set in Admin → Versioned graphs → Settings → {category} as `{key}`, for {where}; "
+            "this variable is the default where none is set.")
+
+
 #: What ``ENV=production`` turns on, from ``backend/app/main.py`` and the other places
 #: that read ``ENV``.
 PRODUCTION_CHECKS = (
@@ -599,6 +785,10 @@ PINNED = {
     "AGGREGATION_DISPATCH_MODE": "aggregation",
     "LOG_LEVEL": "observability",
     "METRICS_PORT": "observability",
+    # Read beside other subsystems too (the settings facts, the settings import migration); each
+    # belongs where an operator looks for it.
+    "GUNICORN_WORKERS": "http",
+    "GRAPHVER_DB_URL": "versioning",
 }
 
 #: The same, by name prefix, for families defined in the central ``config/resilience.py``.
@@ -1749,6 +1939,9 @@ def build() -> str:
     descriptions, keys = template_descriptions()
     descriptions = {name: text for name, text in descriptions.items() if name in variables}
     descriptions.update({name: note for name, (note, _) in NOTES.items() if name in variables})
+    for name, promoted in PROMOTED.items():
+        if name in descriptions:
+            descriptions[name] += _promoted(*promoted)
     print(f"{TAG} {reads} env reads: {len(variables)} variables "
           f"({len(descriptions)} described, {len(variables) - len(descriptions)} internal tuning), "
           f"{len(patterns)} name patterns, {len(unresolved)} unresolved.", file=sys.stderr)

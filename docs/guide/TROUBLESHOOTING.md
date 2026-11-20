@@ -443,8 +443,10 @@ See [The Review Center](/guide/review-center).
 
 **Likely cause:** your data source has someone other than whoever opened a
 review merge it. Choose **Submit for review** and ask a teammate who can publish
-to merge it. A workspace admin sets this under **Drafts and reviews** — see
-[Versioning & Change Control](/guide/versioning-change-control).
+to merge it. A workspace admin sets this: **People may merge their own
+reviews**, on the workspace's **Versioned graphs** tab or in the data source's
+settings — see [Versioning & Change
+Control](/guide/versioning-change-control#drafts-and-reviews-settings).
 
 ### A script's API key is refused
 

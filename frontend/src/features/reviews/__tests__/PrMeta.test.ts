@@ -1,10 +1,11 @@
 /**
  * PrMeta — derivePrTitle's fallback title generation. Pins the "Publish draft by usr_…"
  * regression: an untitled PR's derived title must show the resolved actor name, never
- * the raw usr_* id.
+ * the raw usr_* id. And mergedAs: the commit a merge landed on main as, which the review page names
+ * and offers to revert, only when there is one.
  */
 import { describe, it, expect } from 'vitest'
-import { derivePrTitle } from '../components/PrMeta'
+import { derivePrTitle, mergedAs } from '../components/PrMeta'
 import type { PullRequest } from '@/services/versioningApiService'
 
 const basePr = (over: Partial<PullRequest>): PullRequest => ({
@@ -38,5 +39,19 @@ describe('derivePrTitle', () => {
   it('falls back to Unknown for an unresolved actor — never the raw id', () => {
     const pr = basePr({})
     expect(derivePrTitle(pr)).toBe('Publish draft by Unknown')
+  })
+})
+
+describe('mergedAs', () => {
+  it('is a fork review’s merge commit', () => {
+    expect(mergedAs(basePr({ status: 'merged', graphId: 'g_fork', resultingCommitId: 'cmt_1' }))).toBe('cmt_1')
+  })
+
+  it('is a draft review’s merge commit only when the merge landed on main', () => {
+    const merged = (over: Partial<PullRequest>) => basePr({ status: 'merged', ...over })
+    expect(mergedAs(merged({ resultingCommitId: 'cmt_squash1', resultingCommitSeq: 12 }))).toBe('cmt_squash1')
+    // Merged on an older server, changing nothing: it recorded its draft's own head, not on main.
+    expect(mergedAs(merged({ resultingCommitId: 'cmt_drafthead', resultingCommitSeq: null }))).toBeNull()
+    expect(mergedAs(merged({}))).toBeNull()
   })
 })

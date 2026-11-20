@@ -69,16 +69,19 @@ def test_the_filters_and_cursor_reach_the_inventory():
         client = _client()
         r = client.get(_PATH, params={
             "provider": "falkor-eu", "status": "failed", "workspaceId": "ws1",
-            "kind": "orphan", "q": "customer", "cursor": "graph_a", "limit": 2})
+            "kind": "orphan", "q": "customer", "cursor": "graph_a", "limit": 2,
+            "readModeEffective": "in_place", "residency": "coldline", "ownSettings": "true"})
         assert r.status_code == 200, r.text
         assert r.json() == {"graphs": [], "nextCursor": None}
         assert client.get(_PATH).status_code == 200
 
     assert asked == [
         {"provider": "falkor-eu", "status": "failed", "workspace_id": "ws1", "kind": "orphan",
-         "q": "customer", "cursor": "graph_a", "limit": 2},
+         "q": "customer", "cursor": "graph_a", "limit": 2, "read_mode": "in_place",
+         "residency": "coldline", "own_settings": True},
         {"provider": None, "status": None, "workspace_id": None, "kind": None,
-         "q": None, "cursor": None, "limit": 50},
+         "q": None, "cursor": None, "limit": 50, "read_mode": None, "residency": None,
+         "own_settings": None},
     ]
 
 
@@ -91,4 +94,6 @@ def test_an_unknown_status_or_kind_is_refused():
         assert client.get(_PATH, params={"status": "stale"}).status_code == 422
         assert client.get(_PATH, params={"kind": "draft"}).status_code == 422
         assert client.get(_PATH, params={"limit": 0}).status_code == 422
+        assert client.get(_PATH, params={"readModeEffective": "fastest"}).status_code == 422
+        assert client.get(_PATH, params={"residency": "lukewarm"}).status_code == 422
 

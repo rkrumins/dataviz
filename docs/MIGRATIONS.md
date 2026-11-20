@@ -313,6 +313,109 @@ A branch's build that migrates a database others use stamps it with revisions `m
 
 This is not the old recovery. `env.py` used to "recover" by stamping back to `0001_baseline`, which left the schema untouched and replayed the whole chain over live data. That was the single most destructive line in the migration path, and it stays gone.
 
+**A revision renamed after an image shipped it is translated, not refused.** `_RENAMED_REVISIONS`
+in `env.py` maps a retired id, such as one shortened to fit `VARCHAR(32)`, to the new id of the
+same migration, before the check above; `test_alembic_upgrade_resilience.py` checks every entry
+against the chain. A stamp this chain never had is placed from the lineage record instead (above):
+`20261112_1700_gv_ps_served`, which an image of 12 November stamped before
+`20261112_1700_gv_ps_pressure` was put ahead of the served migration (now
+`20261112_1800_gv_ps_served`), is placed at `20261112_1600_import_settings`, the parent both share,
+so the pressure column is added and the served one is found in place. Don't rename or renumber a
+migration once an image has been built from it.
+
+## Moving the versioned-graph settings into one store
+
+Two revisions, `20261116_1000_setting_values` and `20261116_1100_settings_import`, move every
+versioned-graph setting into one store in the management database, where the platform, a workspace
+and a graph each keep their own values ([Versioned Graph Settings](/guide/versioned-graph-settings)
+explains the settings). Neither alters a table the running release reads.
+
+**`20261116_1000_setting_values` creates the store:**
+
+- `setting_values`: one row per value chosen, keyed `(domain, key, scope, scope_id)`, where
+  `scope_id` is `''` for the platform, a workspace's id, or a data source's id for its graph.
+  `value` NULL means nothing is chosen there, so the level above decides. `limits`, on platform
+  rows only, bound what workspace admins may choose. `version` is the value's own, for optimistic
+  concurrency, and `rev` takes the next number of `setting_values_rev_seq` on every write, so each
+  process reloads only what changed.
+- `setting_changes`: each value's before and after, under the change set of its save, with who,
+  why and how (`api`, `legacy_api`, `migration` or `revert`).
+- `settings_imports`: the one-time imports that have run.
+
+It adds tables, two sequences and five indexes, each guarded, so it can run again and does nothing
+on a `create_all` baseline. It waits at most five seconds for a lock, as the revisions before it.
+The downgrade drops all of it.
+
+**`20261116_1100_settings_import` copies in every value saved before the store:** New-version
+builds' JSON (`platform_settings.gv_build_policy`), the residency policy's `gv_*` columns and
+`gv_draft_retention_days`; each workspace's drafts and reviews policy; each data source's drafts
+and reviews policy and import settings; and each graph's own read mode, and its residency class
+where it differs from the platform's.
+
+- **Locks.** It reads the old storage and writes only the new tables. It takes the store's writers'
+  lock (an advisory lock on `settings:versioned-graphs`), so no save from a process already on the
+  new image lands in the middle of it, and, like the revisions before it, waits at most five
+  seconds for a lock.
+- **Idempotent.** Each value goes in with `ON CONFLICT DO NOTHING`: one already in the store is
+  left as it is, and its marker, `legacy`, is written once. Each value it copies is recorded in
+  `setting_changes` as a `migration` change, keeping who saved it and when where the old storage
+  says. Forks are skipped: a fork has no values of its own.
+- **What the old values meant is frozen in the revision**, not read from the registry: NULL, `""`
+  and `"inherit"` copy nothing; an old `0` for the largest graph copied is `unlimited`, and for draft
+  retention `forever`.
+- **A graph database of its own.** When `GRAPHVER_DB_URL` names a database other than the
+  management one, the revision can't read the graphs' values, and marks them pending. The versioning
+  worker copies them at start-up, once, under the marker `legacy_graph`; several workers starting at
+  once copy them once between them. Until then, each process reads a graph's own read mode from
+  `projection_state.read_mode`, and each graph keeps the residency class its row holds.
+- The downgrade forgets the markers; the values stay, as the store's.
+
+**`20261119_1600_merge_settings` joins the two to `main`'s chain.** They came off
+`20261113_1400_gv_ps_candidate` before `main` took that line in on its own, and environments
+deployed from this branch ran them, so they keep the parents they were pushed with (the lineage
+record lists them). The merge revision runs nothing.
+
+**`20261119_1700_review_rules_store` copies in the review rules.** `20261118_1100_review_rules` put
+`review_required_approvals` (0 to 10, where 0 is everyone asked) and `review_threads_hold` on
+`workspaces` and `workspace_data_sources`. They are the settings `drafts.requiredApprovals` and
+`drafts.threadsHold` now, and the old columns are written through for one release, like the rest of
+the drafts and reviews policy. The revision copies what they hold as `20261116_1100_settings_import`
+copied the other fields: `ON CONFLICT DO NOTHING`, a `migration` change for each value, forks
+skipped, under the store's writers' lock, waiting at most five seconds for a lock, and the marker
+`legacy_review_rules`. NULL copies nothing, and an old `0` approvals is `everyone`. It reads only
+the columns the tables have, so on a database whose schema is short of what its stamp claims it
+copies what is there, and runs again once `--recover` has made the rest. The downgrade forgets the
+marker.
+
+**Rolling back.** For one release, every save through the store writes the old storage too:
+New-version builds' JSON, the `platform_settings` columns, a workspace's and a data source's
+columns (a data source's forks' as well), and a graph's `projection_state.read_mode`. Each graph's
+residency class in force stays on `projection_state.residency`. So the previous image, rolled back
+to, runs as configured, except for what the old storage has no place for:
+
+- every value set for a workspace, but its drafts and reviews policy: its read mode, residency
+  class, draft windows, fork limit, trash window and import settings;
+- the platform's values of the settings that had none before: how far behind a copy may serve, how
+  long idle drafts stay open, forks per graph, the trash window, the drafts and reviews policy, and
+  the import settings, which go back to their environment variables or built-in defaults;
+- a graph's own value of how far behind its copy may serve, its fork limit, its replace guard and
+  the refused rows it allows;
+- the platform's limits (the old image doesn't show the history of changes either);
+- inheritance: a graph keeps the residency class in force on its row, as its own.
+
+Back on the new image, take into the store what was changed through the old endpoints meanwhile;
+the import won't, as it has run, and it leaves a value already in the store as it is:
+
+```bash
+python -m backend.app.services.settings legacy-diff           # each value the two disagree on, as JSON
+python -m backend.app.services.settings legacy-diff --adopt   # save the old storage's values into the store
+```
+
+`--adopt` saves them all or none, recorded as `legacy_api` changes; if the store moved while it
+read, it saves nothing, and running it again compares afresh. The graphs' own values are compared
+when the graph store can be read. A following release drops the old columns and the old
+endpoints.
+
 ## Commands
 
 ```bash

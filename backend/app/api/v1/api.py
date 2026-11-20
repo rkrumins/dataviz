@@ -23,6 +23,8 @@ from .endpoints import (
     workspace_directory, data_source_transfers,
     versioning,
     versioning_admin,
+    versioned_graph_settings,
+    versioned_graph_health,
     admin_idp_groups,
     admin_idp_providers,
     admin_user_identities,
@@ -133,6 +135,22 @@ api_router.include_router(
 # route needs system:admin.
 api_router.include_router(
     versioning_admin.router, prefix="/admin/versioning", tags=["admin:versioning"],
+)
+# Versioned-graph settings (services/settings): the platform's values, for system admins; and the
+# registry they are explained by, for anyone signed in. A workspace's and a graph's are mounted
+# with the versioning router below.
+api_router.include_router(
+    versioned_graph_settings.platform_router, prefix="/admin/versioning/settings",
+    tags=["admin:versioning"],
+)
+# What happened, counted where it happened (services/settings/signals.py): system admins.
+api_router.include_router(
+    versioned_graph_health.signals_router, prefix="/admin/versioning/signals",
+    tags=["admin:versioning"],
+)
+api_router.include_router(
+    versioned_graph_settings.schema_router, prefix="/settings/versioned-graphs",
+    tags=["settings:versioned-graphs"],
 )
 # Public read-only flag values — the app shell needs them before/without a
 # session (mirrors branding.public_router). Values only, never admin metadata.
@@ -483,6 +501,22 @@ api_router.include_router(
 api_router.include_router(
     versioning.router, prefix="/{ws_id}/versioning", tags=["versioning:workspace"],
     dependencies=[Depends(versioning_write_gate)],
+)
+# A workspace's and a graph's versioned-graph settings: read with the data-source read, changed by
+# workspace admins within the platform's limits. Gated like the versioning router, as the drafts
+# policy they hold always was.
+api_router.include_router(
+    versioned_graph_settings.workspace_router, prefix="/{ws_id}/versioning/settings",
+    tags=["versioning:workspace"], dependencies=[Depends(versioning_write_gate)],
+)
+api_router.include_router(
+    versioned_graph_settings.graph_router, prefix="/{ws_id}/versioning/graphs/{graph_id}/settings",
+    tags=["versioning:workspace"], dependencies=[Depends(versioning_write_gate)],
+)
+# A graph's health, the top of its settings drawer: read with the data-source read, gated like them.
+api_router.include_router(
+    versioned_graph_health.health_router, prefix="/{ws_id}/versioning/graphs/{graph_id}/health",
+    tags=["versioning:workspace"], dependencies=[Depends(versioning_write_gate)],
 )
 
 # ── Workspace-scoped data routers ───────────────────────────────────

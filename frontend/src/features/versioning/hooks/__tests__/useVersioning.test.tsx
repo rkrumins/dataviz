@@ -2,6 +2,7 @@
  * useVersioning — useRebuildProjection seeds the watermark cache with the response's watermark so an
  * instant rebuild still surfaces a 'rebuilding' observation. Without the seed, the post-invalidate
  * refetch can return already-fresh and the Data Health progress effect hangs at "Rebuilding…".
+ * usePublishBranch counts a publish only when it published: one that changed nothing shipped nothing.
  */
 import React from 'react'
 import { renderHook, waitFor } from '@testing-library/react'
@@ -15,6 +16,7 @@ const rebaseDraft = vi.fn()
 const createFork = vi.fn()
 const updateFromParent = vi.fn()
 const openForkPullRequest = vi.fn()
+const publishBranch = vi.fn()
 const listDataSources = vi.fn()
 vi.mock('@/services/versioningApiService', () => ({
   rebuildProjection: (...args: unknown[]) => rebuildProjection(...args),
@@ -23,19 +25,22 @@ vi.mock('@/services/versioningApiService', () => ({
   createFork: (...args: unknown[]) => createFork(...args),
   updateFromParent: (...args: unknown[]) => updateFromParent(...args),
   openForkPullRequest: (...args: unknown[]) => openForkPullRequest(...args),
+  publishBranch: (...args: unknown[]) => publishBranch(...args),
 }))
 vi.mock('@/services/workspaceService', () => ({
   workspaceService: { listDataSources: (...args: unknown[]) => listDataSources(...args) },
 }))
 vi.mock('@/hooks/useAggregatedLineage', () => ({ invalidateAggregatedEdges: vi.fn() }))
 vi.mock('@/providers/providerPool', () => ({ releaseProviderCaches: vi.fn(() => 0) }))
+vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
 
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { releaseProviderCaches } from '@/providers/providerPool'
+import { recordEvent } from '@/services/telemetryService'
 import { useBranchStore } from '@/store/branchStore'
 import {
-  useCreateFork, useDataSourcesWithForks, useDecideBootstrapDuplicates, useOpenForkPullRequest, usePullLatestDraft,
-  useRebuildProjection, useRefreshDraftFromOthers, useUpdateFromParent, VERSIONING_KEYS,
+  useCreateFork, useDataSourcesWithForks, useDecideBootstrapDuplicates, useOpenForkPullRequest, usePublishBranch,
+  usePullLatestDraft, useRebuildProjection, useRefreshDraftFromOthers, useUpdateFromParent, VERSIONING_KEYS,
 } from '../useVersioning'
 
 describe('useRebuildProjection', () => {
@@ -122,6 +127,31 @@ describe('usePullLatestDraft', () => {
     expect(await pull({ clean: true, conflicts: [], alreadyUpToDate: true })).toBe(0)
     expect(await pull({ clean: false, conflicts: [{ entity_id: 'A' }] })).toBe(0)
     expect(invalidateAggregatedEdges).not.toHaveBeenCalled()
+  })
+})
+
+describe('usePublishBranch', () => {
+  beforeEach(() => vi.mocked(recordEvent).mockClear())
+
+  const publish = async (res: Record<string, unknown>) => {
+    publishBranch.mockResolvedValue(res)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    )
+    const { result } = renderHook(() => usePublishBranch('ws1', 'g1'), { wrapper })
+    result.current.mutate({ branchId: 'br_1', message: 'Publish' })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+  }
+
+  it('counts a publish that landed a commit', async () => {
+    await publish({ commitId: 'cmt_9', revisionId: 9, outcome: 'published' })
+    expect(recordEvent).toHaveBeenCalledWith('version.published')
+  })
+
+  it('counts nothing for a publish that changed nothing: main held its changes already', async () => {
+    await publish({ commitId: 'cmt_head', revisionId: 8, outcome: 'unchanged' })
+    expect(recordEvent).not.toHaveBeenCalled()
   })
 })
 

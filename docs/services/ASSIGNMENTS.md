@@ -199,7 +199,8 @@ the case of a URN pattern.
    an entry naming a deleted layer. `canvasOnly` flags (`duplicate-types`, `authored-rules`,
    `empty-rule`, `glob-pattern`, `property-rule`, `fallback-layer`) change the canvas even when the
    server counts do not. Fix stale entries, priorities and inert rules first.
-4. Enable the flag. Servers pick it up within 30 s, open tabs within about a minute or on focus.
+4. Enable the flag. Servers pick it up within about 2 s (30 s while Redis is out of reach), open
+   tabs within about a minute or on focus.
 5. Check the listed views: canvas, Layer Studio, search badges and trace lanes agree, and the
    canvas sends no `/assignments/compute` request.
 6. Roll back by turning the flag off. No view is rewritten.

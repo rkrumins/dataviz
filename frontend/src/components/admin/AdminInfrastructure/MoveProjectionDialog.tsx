@@ -14,6 +14,7 @@
  */
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useQuery } from '@tanstack/react-query'
 import { ArrowRightLeft } from 'lucide-react'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -48,6 +49,17 @@ export function MoveProjectionDialog({ row, providers, onClose, onMoved }: Props
     const nameOf = (id: string | null) => providers.find(p => p.id === id)?.name ?? id ?? 'default'
     // A move back needs its provider to be a target still; the built-in default is not one.
     const backTo = row.retiredKeys.filter(k => targets.some(p => p.id === k.provider))
+    // A graph read beside, with New-version builds and "Rebuilds and moves too" on, is expected
+    // to have its move built beside its key; the response says what was done.
+    const policyQ = useQuery({
+        queryKey: ['admin', 'build-policy'],
+        queryFn: systemStatusService.buildPolicy,
+        enabled: row.readModeEffective === 'beside',
+        refetchOnWindowFocus: false,
+    })
+    const beside = row.readModeEffective === 'beside' && policyQ.data?.enabled === true
+        && policyQ.data.values.buildForRebuilds?.effective === true
+    const graceMinutes = Math.max(1, Math.round(Number(policyQ.data?.values.retireGraceSecs?.effective ?? 900) / 60))
 
     const explain = (e: Error & { detail?: unknown }): string => {
         const d: Refusal = typeof e.detail === 'object' && e.detail ? e.detail as Refusal : {}
@@ -134,8 +146,18 @@ export function MoveProjectionDialog({ row, providers, onClose, onMoved }: Props
                         )}
 
                         <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                            Reads come from Postgres until the new copy catches up; aggregated lineage is missing until its rollups are rebuilt.
-                            The current platform key is removed about 15 minutes after the new one catches up — until then you can move back.
+                            {beside ? (
+                                <>
+                                    The new copy is written from Postgres while readers keep the current version, then they switch to it at once;
+                                    until then the graph takes the room of two copies. The current platform key is removed
+                                    about {graceMinutes} minutes after the switch — until then you can move back.
+                                </>
+                            ) : (
+                                <>
+                                    Reads come from Postgres until the new copy catches up; aggregated lineage is missing until its rollups are rebuilt.
+                                    The current platform key is removed about {graceMinutes} minutes after the new one catches up — until then you can move back.
+                                </>
+                            )}
                         </p>
                         {error && <p className="text-[11px] text-red-600 dark:text-red-400">{error}</p>}
                     </div>

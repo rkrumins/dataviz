@@ -2,9 +2,11 @@
 
 * ``POST /graphs/{gid}/load`` — Load now: asks for an evicted graph's load, which admission
   decides like any other; a graph in FalkorDB is left alone.
-* ``PUT /graphs/{gid}/residency`` ``{"class": ...}`` — Always, Standard or Coldline. Always on a
-  graph out of FalkorDB is admission-checked now: 409 ``capacity_insufficient`` naming the master
-  and the shortfall when its load would not fit, else its load is asked for. Recorded.
+* ``PUT /graphs/{gid}/residency`` ``{"class": ...}`` — Always, Standard or Coldline, as the graph's
+  own class: saved in the settings store at the graph's scope (``legacy_api``), then written to
+  its row. Always on a graph out of FalkorDB is admission-checked now: 409
+  ``capacity_insufficient`` naming the master and the shortfall when its load would not fit, else
+  its load is asked for. Recorded.
 
 A fork has no key of its own: 409 ``not_for_forks``. System administrators only, never an API key.
 """
@@ -39,18 +41,41 @@ class _Svc:
         return dict(self.wm)
 
 
+class _Session:
+    """The request's management session: the settings store's writer lock, the write-through's
+    flush and the save's commit (the store is the in-memory one, ``settings_world``)."""
+
+    def __init__(self):
+        self.commits = 0
+
+    async def execute(self, statement, params=None):
+        assert "pg_advisory_xact_lock" in str(statement)
+
+    async def flush(self):
+        pass
+
+    async def commit(self):
+        self.commits += 1
+
+    async def rollback(self):
+        pass
+
+
 @pytest.fixture
-def world(monkeypatch):
-    """What the routes asked for, set and recorded."""
-    out = SimpleNamespace(loads=[], classes=[], recorded=[],
+def world(monkeypatch, settings_world):
+    """What the routes asked for, saved, wrote to the graphs' rows (``kept``) and recorded, in
+    the order they did (``done``)."""
+    out = SimpleNamespace(loads=[], kept=[], recorded=[], done=[], store=settings_world,
                           admission=(True, "m1:6379", 0, None))
 
     async def request_load(gid):
         out.loads.append(gid)
+        out.done.append("load")
 
-    async def set_class(gid, residency_class):
-        out.classes.append((gid, residency_class))
-        return out.svc.wm["residency"]
+    async def keep_classes(**reach):
+        out.kept.append(reach)
+        out.done.append("kept")
+        return []
 
     async def admission(gid):
         return residency.Admitted(*out.admission)
@@ -60,7 +85,7 @@ def world(monkeypatch):
         return True
 
     monkeypatch.setattr(residency, "request_load", request_load)
-    monkeypatch.setattr(residency, "set_class", set_class)
+    monkeypatch.setattr(residency, "keep_classes", keep_classes)
     monkeypatch.setattr(residency, "admission", admission)
     monkeypatch.setattr(va.recorder, "record_for_request", record)
     out.svc = _Svc()
@@ -95,7 +120,7 @@ async def test_an_unknown_graph_is_a_404_and_a_fork_a_409(world, call):
             return await va.load_graph("g1", user=_ADMIN, session=object())
         return await va.set_graph_residency(
             "g1", va.ResidencyClassRequest.model_validate({"class": "always"}),
-            user=_ADMIN, session=object())
+            user=_ADMIN, session=_Session())
 
     world.svc = _Svc(known=False)
     with pytest.raises(HTTPException) as caught:
@@ -105,13 +130,18 @@ async def test_an_unknown_graph_is_a_404_and_a_fork_a_409(world, call):
     with pytest.raises(HTTPException) as caught:
         await run()
     assert caught.value.status_code == 409 and caught.value.detail["type"] == "not_for_forks"
-    assert world.loads == world.classes == world.recorded == []
+    assert world.loads == world.kept == world.recorded == world.store.saves == []
 
 
 async def _set(world, residency_class):
     return await va.set_graph_residency(
         "g1", va.ResidencyClassRequest.model_validate({"class": residency_class}),
-        user=_ADMIN, session=object())
+        user=_ADMIN, session=_Session())
+
+
+def _own_class(world):
+    row = world.store.rows.get(("residency.class", "graph", "ds1"))
+    return row.value if row is not None else None
 
 
 async def test_always_on_a_graph_out_of_falkordb_that_does_not_fit_is_refused(world):
@@ -123,7 +153,7 @@ async def test_always_on_a_graph_out_of_falkordb_that_does_not_fit_is_refused(wo
     assert caught.value.status_code == 409 and detail["type"] == "capacity_insufficient"
     assert detail["master"] == "10.0.0.2:6379" and detail["shortfallBytes"] == 3 * 1024 ** 3
     assert "10.0.0.2:6379" in detail["message"] and "3.0 GiB" in detail["message"]
-    assert world.classes == world.loads == world.recorded == []
+    assert world.kept == world.loads == world.recorded == world.store.saves == []
 
 
 @pytest.mark.parametrize("why, says", [
@@ -144,10 +174,25 @@ async def test_a_refused_admission_says_why_in_words(world, why, says):
 
 
 async def test_always_on_a_graph_out_of_falkordb_that_fits_is_set_and_loaded(world):
+    """Saved as the graph's own class through the settings store, as the old route's save, with
+    the reason given; written to the graph's row, and only then its load asked for."""
+    from backend.app.common import activity_context
+
     world.svc = _Svc(state="evicted", residency_class="coldline")
-    out = await _set(world, "always")
+    token = activity_context.bind(activity_context.ActivityContext(
+        actor_id="usr_admin", stated_reason="Opened first thing every day"))
+    try:
+        out = await _set(world, "always")
+    finally:
+        activity_context.reset(token)
     assert out == {"graphId": "g1", "residency": "always", "state": "evicted"}
-    assert world.classes == [("g1", "always")] and world.loads == ["g1"]
+    (change_set,) = world.store.saves
+    assert (change_set.source, change_set.actor, change_set.reason) == (
+        "legacy_api", "usr_admin", "Opened first thing every day")
+    assert [(a.key, a.scope, a.scope_id, a.before_value, a.after_value)
+            for a in change_set.applied] == [("residency.class", "graph", "ds1", None, "always")]
+    assert world.kept == [{"sources": ["ds1"]}] and world.loads == ["g1"]
+    assert world.done == ["kept", "load"]
     assert world.recorded == [("platform.versioning.residency_changed", {
         "details": {"graphId": "g1", "workspaceId": "ws1", "dataSourceId": "ds1",
                     "from": "coldline", "to": "always"}, "best_effort": True})]
@@ -157,13 +202,21 @@ async def test_any_class_on_a_resident_graph_is_set_with_no_admission_and_no_loa
     world.admission = (False, "m1:6379", 1, "capacity")       # would refuse, if it were asked
     for cls in ("always", "coldline"):
         await _set(world, cls)
-    assert world.classes == [("g1", "always"), ("g1", "coldline")] and world.loads == []
+    assert [[(a.before_value, a.after_value) for a in cs.applied]
+            for cs in world.store.saves] == [[(None, "always")], [("always", "coldline")]]
+    assert _own_class(world) == "coldline" and world.loads == []
+    assert world.kept == [{"sources": ["ds1"]}] * 2
     assert [r[1]["details"]["to"] for r in world.recorded] == ["always", "coldline"]
 
 
 async def test_the_same_class_again_records_nothing(world):
+    """The graph keeps it as its own: it no longer follows its workspace's or the platform's."""
     await _set(world, "standard")
     assert world.recorded == []
+    assert _own_class(world) == "standard" and len(world.store.saves) == 1
+    await _set(world, "standard")
+    assert len(world.store.saves) == 1                   # nothing changed: no change set
+    assert world.kept == [{"sources": ["ds1"]}] * 2      # its row written all the same
 
 
 def test_only_the_three_classes():

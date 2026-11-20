@@ -164,7 +164,7 @@ erDiagram
 
 | Tier | Tables | Cardinality | Partitioned? |
 |------|--------|-------------|--------------|
-| **Control-plane** | `graphs`, `branches`, `branch_members`, `merge_requests`, `projection_state`, `jobs`, `import_rows` | low / medium | no |
+| **Control-plane** | `graphs`, `branches`, `branch_members`, `merge_requests`, `projection_state`, `jobs`, `import_rows`, `import_mentions` | low / medium | no |
 | **Versioned data** | `commits`, `node_versions`, `edge_versions`, `entity_heads`, `merkle_nodes`, `working_changes` | high, append-only | **HASH(`graph_id`) × 64** |
 
 `PARTITIONED_TABLES` is the authoritative list (`models.py:45-52`).
