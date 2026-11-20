@@ -146,6 +146,8 @@ export function ExplorerListRow({
         {onToggleSelect && (
           <button
             type="button"
+            aria-label={`${isSelected ? 'Deselect' : 'Select'} ${view.name}`}
+            aria-pressed={!!isSelected}
             onClick={e => { e.stopPropagation(); onToggleSelect() }}
             className={cn(
               'w-5 h-5 rounded-md border flex items-center justify-center transition-all duration-150',

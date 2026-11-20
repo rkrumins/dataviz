@@ -184,6 +184,17 @@ export function ExplorerPage() {
   const openViewDetailsEdit = useCallback((v: View) => { setPreviewEditMode(true); setPreviewView(v) }, [])
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  // A selection belongs to the list it was made in. A new category, filter or
+  // sort is a new list — views picked under All must not still be selected under
+  // Deleted, where Delete is permanent. Only the layout keeps it.
+  const listKey = useMemo(() => {
+    const p = new URLSearchParams(searchKey)
+    p.delete('layout')
+    return p.toString()
+  }, [searchKey])
+  useEffect(() => {
+    setSelectedIds(prev => (prev.size === 0 ? prev : new Set()))
+  }, [listKey])
   const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
@@ -333,6 +344,9 @@ export function ExplorerPage() {
   const { data: usageMap } = useViewUsage(usageIds)
   // "Most opened" is finished here rather than on the server — see the hook.
   const views = useOpensOrdering(loadedViews, usageMap, filters.sort)
+  // What a bulk action acts on: the selected views that are on screen — never an
+  // id left over from a list the reader has moved away from.
+  const selectedViews = useMemo(() => views.filter(v => selectedIds.has(v.id)), [views, selectedIds])
   // Resolves the provider (e.g. falkordb/neo4j) behind each view's data source
   // so cards can surface what the view is built from.
   const { resolve: resolveProvider } = useDataSourceProviderMap()
@@ -527,34 +541,30 @@ export function ExplorerPage() {
   }, [deleteView, removeViewFromList, notify, queryClient])
 
   const handleBulkDelete = useCallback(() => {
-    if (selectedIds.size === 0) return
+    if (selectedViews.length === 0) return
     setShowBulkDelete(true)
-  }, [selectedIds])
+  }, [selectedViews])
 
   // Bulk delete is only offered when every selected view passes
   // canDeleteView — otherwise some rows would 403 and the operation
   // would partially succeed.
-  const canBulkDelete = useMemo(() => {
-    if (selectedIds.size === 0) return false
-    for (const v of views) {
-      if (!selectedIds.has(v.id)) continue
-      if (!canDeleteView(v)) return false
-    }
-    return true
-  }, [selectedIds, views, canDeleteView])
+  const canBulkDelete = useMemo(
+    () => selectedViews.length > 0 && selectedViews.every(canDeleteView),
+    [selectedViews, canDeleteView],
+  )
 
   const handleBulkDeleted = useCallback(() => {
-    const ids = Array.from(selectedIds)
+    const ids = selectedViews.map(v => v.id)
     ids.forEach(id => removeViewFromList(id))
     setPreviewView(prev => prev && ids.includes(prev.id) ? null : prev)
     setSelectedIds(new Set())
     setShowBulkDelete(false)
     notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     invalidateViewAggregates(queryClient)
-  }, [selectedIds, removeViewFromList, notify, queryClient])
+  }, [selectedViews, removeViewFromList, notify, queryClient])
 
   const handleBulkVisibility = useCallback(async (visibility: 'private' | 'workspace' | 'enterprise') => {
-    const ids = Array.from(selectedIds)
+    const ids = selectedViews.map(v => v.id)
     if (ids.length === 0) return
     // allSettled: one failed view (say, a publish-permission miss) must
     // not mask how many succeeded, nor swallow the reason.
@@ -583,7 +593,7 @@ export function ExplorerPage() {
         `Updated ${ids.length - failed.length} of ${ids.length} views — ${failed.length} failed: ${cause}`,
       )
     }
-  }, [selectedIds, notify, refetch, queryClient])
+  }, [selectedViews, notify, refetch, queryClient])
 
   /**
    * Clicking a tag chip on a card toggles that tag in the tag filter —
@@ -1009,13 +1019,11 @@ export function ExplorerPage() {
         onPickPerson={id => { setPreviewView(null); pickPerson(id) }}
       />
       <ExplorerBulkActions
-        selectedCount={selectedIds.size}
+        selectedCount={selectedViews.length}
         onDelete={canBulkDelete ? handleBulkDelete : undefined}
         onChangeVisibility={handleBulkVisibility}
         onExport={exportEnabled && filterState.category !== 'deleted'
-          ? () => setExportSelection(Array.from(selectedIds, id => ({
-              id, name: views.find(v => v.id === id)?.name ?? id,
-            })))
+          ? () => setExportSelection(selectedViews.map(v => ({ id: v.id, name: v.name })))
           : undefined}
         onClearSelection={() => setSelectedIds(new Set())}
       />
@@ -1036,7 +1044,7 @@ export function ExplorerPage() {
         <DeleteViewDialog viewId={deleteView.id} viewName={deleteView.name} favouriteCount={deleteView.favouriteCount} isOpen={true} onClose={() => setDeleteView(null)} onDeleted={handleDeleted} permanent={deleteView.permanent} />
       )}
       <BulkDeleteDialog
-        viewIds={Array.from(selectedIds)}
+        viewIds={selectedViews.map(v => v.id)}
         isOpen={showBulkDelete}
         onClose={() => setShowBulkDelete(false)}
         onDeleted={handleBulkDeleted}

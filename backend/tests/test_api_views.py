@@ -176,11 +176,17 @@ async def test_delete_view_not_found(test_client: AsyncClient):
 # ── DELETE /views/{view_id}?permanent=true ─────────────────────────────
 
 async def test_permanent_delete_view(test_client: AsyncClient):
-    """Permanently deleting a view returns 204 and it is gone."""
+    """Permanently deleting a view from the trash returns 204 and it is gone. A live
+    view is refused (409) until it has been moved to the trash."""
     ws_id = await _create_workspace(test_client)
     created = await _create_view(test_client, ws_id, "Perm Delete Me")
     view_id = created["id"]
 
+    resp = await test_client.delete(f"/api/v1/views/{view_id}?permanent=true")
+    assert resp.status_code == 409
+
+    resp = await test_client.delete(f"/api/v1/views/{view_id}")
+    assert resp.status_code == 204
     resp = await test_client.delete(f"/api/v1/views/{view_id}?permanent=true")
     assert resp.status_code == 204
 
@@ -465,7 +471,9 @@ async def test_view_crud_roundtrip(test_client: AsyncClient):
     assert r.status_code == 200
     assert r.json()["name"] == "Roundtrip Updated"
 
-    # Permanent delete
+    # Permanent delete: from the trash
+    r = await test_client.delete(f"/api/v1/views/{view_id}")
+    assert r.status_code == 204
     r = await test_client.delete(f"/api/v1/views/{view_id}?permanent=true")
     assert r.status_code == 204
 

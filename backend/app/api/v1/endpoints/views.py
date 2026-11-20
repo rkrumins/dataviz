@@ -1193,6 +1193,16 @@ async def delete_view(
 
     existing = await view_repo.get_view(session, view_id)
     if permanent:
+        # Destroying is the trash's button, never a shortcut past it: a view still
+        # live (one left selected from another list, say) is refused, not destroyed.
+        live = (await session.execute(
+            select(ViewORM.id).where(ViewORM.id == view_id, ViewORM.deleted_at.is_(None))
+        )).scalar_one_or_none()
+        if live is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="This view isn't in the trash. Move it to the trash first, then delete it forever.",
+            )
         deleted = await view_repo.permanently_delete_view(session, view_id)
     else:
         deleted = await view_repo.delete_view(session, view_id)

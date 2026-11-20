@@ -496,6 +496,27 @@ async def test_permanent_delete_from_trash(test_client: AsyncClient, db_session)
     assert (await db_session.get(ViewORM, ids["workspace_a"])) is None
 
 
+@pytest.mark.asyncio
+async def test_permanent_delete_refuses_a_live_view(test_client: AsyncClient, db_session):
+    """'Delete forever' is the trash's button. A view that was never moved
+    there — say, one still selected from another list when the reader switched
+    the Explorer to Deleted — is refused rather than destroyed, even for an
+    admin, and stays exactly where it was."""
+    ids = await _seed(db_session)
+    admin_claims = PermissionClaims(sid="s_wsadmin", ws_perms={WS_A: (
+        "workspace:admin", "workspace:view:*", "workspace:datasource:*",
+    )})
+    admin = _user("usr_live_admin")
+    with _auth(user=admin, claims=admin_claims):
+        hard = await test_client.delete(
+            f"/api/v1/views/{ids['workspace_a']}", params={"permanent": "true"},
+        )
+    assert hard.status_code == 409, hard.text
+    assert "trash" in hard.json()["detail"].lower()
+    row = await db_session.get(ViewORM, ids["workspace_a"])
+    assert row is not None and row.deleted_at is None
+
+
 # ── view health is server-computed (never guessed from membership) ───
 
 @pytest.mark.asyncio
