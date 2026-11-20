@@ -12,6 +12,11 @@ change in it is either made or refused with a reason — Postgres.
   snapshot deletes what it left out.
 * **Nothing silent.** A urn cell edited, an exported edge given a new end, and two rows for one
   node each come back with a reason.
+* **Links on their own.** A file of links between entities the graph holds, with no entity rows
+  and no ``kind`` column, makes exactly those links: from CSV, from a workbook whose one sheet is
+  "Links", from JSON. Ends are found by urn, qualifiedName or entity id; a link carries its
+  confidence and properties; a bad cell refuses its own row; a delete by a link's id alone deletes
+  it; a urn two entities carry names neither. A replace of links only deletes nothing.
 * **A selection with its children.** Entities picked on the canvas, exported from a draft with
   everything inside them (containment either way round, never lineage or a sibling), edited, and
   imported back onto that draft: exactly the edit lands.
@@ -265,6 +270,70 @@ async def _selection(h):
     assert nodes[sibling]["description"] == "hr d0" and (other, outside) in edges
 
 
+async def _links(h):
+    import io
+
+    import openpyxl
+    from backend.app.services.versioning.import_export.import_worker import ReplaceOfLinksOnly
+
+    q = {"op": "create", "entity_kind": "node", "entity_id": "q1",
+         "payload": {"entityType": "Table", "displayName": "by name", "qualifiedName": "db.by_name"}}
+    await h.graph([_node(X, "orders"), _node(Y, "revenue"), _node(Z, "costs"), _node(V, "ledger"), q])
+    draft = await h.svc.open_draft(graph_id=h.gid, owner="u")
+
+    csv = (f"edgeType,sourceUrn,targetUrn,confidence,prop.via\n"
+           f"LINEAGE,{X},{Y},0.8,nightly\n"
+           f"LINEAGE,{Y},{Z},high,\n").encode()                 # a bad confidence: that row alone
+    _d, summary, rows = await h.upload(csv, "csv", branch_id=draft)
+    assert _counts(summary) == {"new": 1, "updated": 0, "deleted": 0, "unchanged": 0, "invalid": 1}, summary
+    assert summary["byKind"] == {"edge": {"new": 1, "invalid": 1}}
+    assert rows[1][1][0].startswith("confidence: 'high' isn't a number")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Links"
+    ws.append(["edgeType", "sourceQualifiedName", "targetUrn"])
+    ws.append(["LINEAGE", "db.by_name", V])
+    buf = io.BytesIO()
+    wb.save(buf)
+    _d, summary, _rows = await h.upload(buf.getvalue(), "xlsx", branch_id=draft)
+    assert _counts(summary)["new"] == 1, summary
+
+    _d, summary, _rows = await h.upload(
+        json.dumps([{"edgeType": "LINEAGE", "source_entity_id": Z, "targetUrn": V}]).encode(), "json",
+        branch_id=draft)
+    assert _counts(summary)["new"] == 1, summary
+
+    nodes, edges = await h.state(draft)
+    assert {(X, Y), ("q1", V), (Z, V)} <= edges and (Y, Z) not in edges
+    got = await h.svc.materialize_state(graph_id=h.gid, branch_id=draft)
+    xy = next(e for e in got["edges"].values() if (e["sourceEntityId"], e["targetEntityId"]) == (X, Y))
+    assert (xy.get("confidence"), xy["properties"].get("via")) == (0.8, "nightly")
+
+    # A delete naming a link by its id alone deletes it.
+    xy_id = next(eid for eid, e in got["edges"].items() if (e["sourceEntityId"], e["targetEntityId"]) == (X, Y))
+    _d, summary, _rows = await h.upload_ndjson([{"kind": "edge", "_op": "delete", "entity_id": xy_id}],
+                                               branch_id=draft)
+    assert _counts(summary)["deleted"] == 1, summary
+    _nodes, edges = await h.state(draft)
+    assert (X, Y) not in edges
+
+    # A urn two entities carry names neither.
+    await h.svc.apply_ops(graph_id=h.gid, branch_id=draft, actor="u", message="twin", ops=[
+        {"op": "create", "entity_kind": "node", "entity_id": "twin", "payload": {
+            "urn": Y, "entityType": "Table", "displayName": "revenue twin"}}])
+    _d, summary, rows = await h.upload(f"edgeType,sourceUrn,targetUrn\nLINEAGE,{Y},{V}\n".encode(), "csv",
+                                       branch_id=draft)
+    assert _counts(summary)["invalid"] == 1 and "more than one entity" in rows[0][1][0], rows
+
+    # A replace of links only deletes nothing: every entity they don't name would go.
+    with pytest.raises(ReplaceOfLinksOnly):
+        await h.upload(f"edgeType,sourceUrn,targetUrn\nLINEAGE,{X},{V}\n".encode(), "csv",
+                       branch_id=draft, mode="replace")
+    nodes, _edges = await h.state(draft)
+    assert {X, Y, Z, V, "q1"} <= set(nodes)
+
+
 async def _nothing_silent(h):
     e1 = "urn:uuid:0192f5a4-0000-7000-8000-0000000000e2"
     await h.graph([_node(X, "orders"), _node(Y, "revenue"), _node(Z, "legacy"), _edge(e1, X, Y)])
@@ -283,8 +352,8 @@ async def _nothing_silent(h):
     assert summary["invalid"] == 2 and summary["updated"] == 1, summary
 
 
-@pytest.mark.parametrize("scenario", [_excel, _stale, _script, _nothing_silent, _selection],
-                         ids=["excel", "stale-workbook", "script", "nothing-silent", "selection"])
+@pytest.mark.parametrize("scenario", [_excel, _stale, _script, _nothing_silent, _selection, _links],
+                         ids=["excel", "stale-workbook", "script", "nothing-silent", "selection", "links"])
 def test_offline_edits_come_back_reconciled(scenario):
     async def run():
         await models.create_schema_and_partitions()

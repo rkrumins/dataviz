@@ -34,12 +34,13 @@ from . import identifier as identifiers
 from . import keys as matching
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
-from .import_worker import (IdentifierMatchedNothing, ImportWorker, ReplaceBlocked, ReplaceRowsRefused,
+from .import_worker import (IdentifierMatchedNothing, ImportWorker, ReplaceBlocked, ReplaceOfLinksOnly,
+                            ReplaceRowsRefused,
                             _normalize_page,
                             _label as _row_label, _record_pages, lease_job, refused_budget,
                             refused_digest, within_budget)
 from .resolve import _ALREADY_GONE, _STATUS
-from .rowmodel import column_order
+from .rowmodel import column_order, record_kind
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
 from .snapshot import open_snapshot
 from . import uploads
@@ -438,7 +439,7 @@ class ImportExportService:
                 logger.exception("releasing job %s failed", job_id)
             if isinstance(exc, asyncio.CancelledError):
                 raise
-        except (ReplaceBlocked, ReplaceRowsRefused, IdentifierMatchedNothing,
+        except (ReplaceBlocked, ReplaceRowsRefused, ReplaceOfLinksOnly, IdentifierMatchedNothing,
                 matching.MatchingPropertyLimit, matching.NotOnAFork) as exc:
             # Refused by the replace's own checks: nothing deleted, the rows on the draft. The
             # failure says why (``summary.failure.code``) and what to do (``action``).
@@ -1283,8 +1284,10 @@ class ImportExportService:
         rows: List[Dict[str, Any]] = []
         skipped = 0
         async for page in _record_pages(adapter, _chunks()):
-            records += [r for r in page if isinstance(r, dict)          # a row, not a skipped record
-                        and str(r.get("kind") or "").strip().lower() in ("node", "edge")]
+            for r in page:                      # a record without a kind is read by what it carries
+                if record_kind(r) and not r.get("kind"):
+                    r["kind"] = record_kind(r)
+            records += [r for r in page if record_kind(r)]             # a row, not a skipped record
             page_rows, page_skipped = await asyncio.to_thread(_normalize_page, page, False)
             skipped += page_skipped
             rows += [{**row, "_row_index": len(rows) + i} for i, (_kind, row) in enumerate(page_rows)]

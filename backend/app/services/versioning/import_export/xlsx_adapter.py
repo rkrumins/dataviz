@@ -42,13 +42,21 @@ class XlsxAdapter:
         wb = openpyxl.load_workbook(io.BytesIO(buf), read_only=True, data_only=True)
         del buf   # BytesIO copied it (only exact bytes are shared): don't hold the upload twice
         try:
-            for sheet_name, kind in ((_NODE_SHEET, "node"), (_EDGE_SHEET, "edge")):
-                ws = _find_sheet(wb, sheet_name)
-                if ws is None:
-                    continue
+            named = [(ws, kind) for name, kind in ((_NODE_SHEET, "node"), (_EDGE_SHEET, "edge"))
+                     if (ws := _find_sheet(wb, name)) is not None]
+            for ws, kind in named:
                 for rec in _read_sheet(ws, at=at):
                     rec["kind"] = kind          # kind is the SHEET, not a column
                     yield rec
+            if not named:
+                # A workbook of the user's own (a sheet "Links", "Sheet1"…): every sheet but the
+                # guides is read, and each row is a node or an edge by what it carries
+                # (rowmodel.record_kind) or by a kind column of its own.
+                for ws in wb.worksheets:
+                    if str(ws.title or "").strip().lower() in (_INSTRUCTIONS.lower(), _COLUMNS.lower()):
+                        continue
+                    for rec in _read_sheet(ws, at=at):
+                        yield rec
         finally:
             wb.close()
 
