@@ -1,14 +1,15 @@
 /**
  * createExport pins: it asks the server, with a POST, to prepare the export chosen (the format,
- * the view, the draft, new property columns, the file's name). cancelExport asks the server, with
- * a POST, to stop that export, and answers with its job.
+ * the view, the draft, new property columns, the file's name). Entities chosen on the canvas go in
+ * the body, with everything inside them asked for, and planExport asks about them the same way.
+ * cancelExport asks the server, with a POST, to stop that export, and answers with its job.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../apiClient', () => ({ authFetch: vi.fn() }))
 
 import { authFetch } from '../apiClient'
-import { cancelExport, createExport } from '../importExportApiService'
+import { cancelExport, createExport, planExport } from '../importExportApiService'
 
 beforeEach(() => {
   localStorage.clear()
@@ -27,6 +28,30 @@ describe('createExport', () => {
     expect(Object.fromEntries(sent.searchParams)).toEqual(
       { format: 'csv', viewId: 'v1', branchId: 'b1', props: 'Owner,PII', filename: 'Finance-DWH' })
     expect(init).toMatchObject({ method: 'POST' })
+  })
+
+  it('sends the entities chosen on the canvas in the body, with what is inside them', async () => {
+    vi.mocked(authFetch).mockResolvedValue({ jobId: 'j1', resultUri: 'r', status: 'pending' })
+    const target = { wsId: 'ws1', dataSourceId: 'ds1', graphId: 'g1', branchId: 'b1',
+                     ids: ['urn:a', 'gv:e2'], withChildren: true }
+    await createExport(target, 'xlsx', { filename: 'Finance-DWH-selection' })
+    await planExport(target, 'xlsx')
+
+    for (const [url, init] of vi.mocked(authFetch).mock.calls) {
+      const sent = new URL(url, 'http://app')
+      expect(sent.searchParams.get('withChildren')).toBe('true')
+      expect(sent.searchParams.has('ids')).toBe(false)
+      expect(init).toMatchObject({ method: 'POST', headers: { 'Content-Type': 'application/json' } })
+      expect(JSON.parse(String(init?.body))).toEqual({ ids: ['urn:a', 'gv:e2'] })
+    }
+    expect(new URL(vi.mocked(authFetch).mock.calls[1][0], 'http://app').pathname)
+      .toBe('/api/v1/ws1/versioning/graphs/g1/exports/plan')
+  })
+
+  it('asks for a plan with a plain GET when nothing is chosen', async () => {
+    vi.mocked(authFetch).mockResolvedValue({})
+    await planExport({ wsId: 'ws1', dataSourceId: 'ds1', graphId: 'g1' }, 'csv')
+    expect(vi.mocked(authFetch).mock.calls[0][1]).toBeUndefined()
   })
 })
 

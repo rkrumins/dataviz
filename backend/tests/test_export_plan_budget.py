@@ -51,9 +51,10 @@ class _Snap:
     page_size = 2
     as_of_seq, branch_id = 7, "br_main"
 
-    def __init__(self, nodes=(), edges=(), *, hang=(), heads=None, endless=False) -> None:
+    def __init__(self, nodes=(), edges=(), *, hang=(), heads=None, endless=False, inside=None) -> None:
         self._by = {"node": {w.entity_id: w for w in nodes}, "edge": {w.entity_id: w for w in edges}}
         self._hang, self._heads, self._endless = set(hang), heads, endless
+        self._inside = inside or {}     # {entity id: what is inside it}
 
     async def head_counts(self):
         if "heads" in self._hang:
@@ -80,10 +81,10 @@ class _Snap:
         urns = set(urns)
         return {w.urn: w.entity_id for w in self._by["node"].values() if w.urn in urns}
 
-    async def containment_descendants(self, roots, containment_types):
+    async def containment_descendants(self, roots, containment_types, child_is_source=frozenset()):
         if "descendants" in self._hang:
             await _never()
-        return set()
+        return {d for r in roots for d in self._inside.get(r, ())}
 
 
 async def _timed(coro):
@@ -188,3 +189,37 @@ async def test_the_plan_answers_within_its_budget_whatever_it_waits_on(monkeypat
                           view_id="v1", scope=scope)
     assert plan["view"] == {"viewId": "v1", "placements": 2, "found": 2, "entities": 2}
     assert (plan["nodes"], plan["edges"], plan["exact"], plan["empty"]) == (2, 1, True, False)
+
+
+async def test_a_selection_sent_in_the_body_is_planned_with_what_is_inside_it(monkeypatch):
+    """``POST /exports/plan``: the ids in the body, with ``withChildren`` their contents too,
+    resolved within the budget like a view's."""
+    async def _containment(*args, **kwargs):
+        return {"CONTAINS": False}
+
+    async def _allowed(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(stream, "PLAN_BUDGET_S", BUDGET)
+    monkeypatch.setattr(versioning, "_check_export_access", _allowed)
+    monkeypatch.setattr(versioning, "_live_containment_map", _containment)
+
+    async def plan(snap, **kw):
+        async def _open(**kwargs):
+            return snap
+        monkeypatch.setattr(snapshot_module, "open_snapshot", _open)
+        return await _timed(versioning.plan_export_of_selection(
+            ws_id="ws1", graph_id="g1", selection=versioning.ExportSelectionBody(ids=["urn:a"]),
+            format="ndjson", as_of_seq=None, view_id=None, branch_id=None, ids=None, types=None,
+            user=None, claims=None, viewer=None, meta={"data_source_id": "ds1"}, session=None,
+            svc=None, **kw))
+
+    graph = dict(nodes=[node("a"), node("b"), node("c")],
+                 edges=[edge("ab", "a", "b"), edge("bc", "b", "c")], inside={"a": {"b"}})
+    (got, _) = await plan(_Snap(**graph), with_children=True)
+    assert (got["nodes"], got["edges"], got["exact"]) == (2, 1, True), got
+    (got, _) = await plan(_Snap(**graph), with_children=False)
+    assert (got["nodes"], got["edges"]) == (1, 0), got
+    # Contents that take too long to find leave the plan unknown, at the budget.
+    (got, took) = await plan(_Snap(**graph, hang={"descendants"}), with_children=True)
+    assert (got["nodes"], got["empty"]) == (None, None) and took < BUDGET + 0.5, (got, took)

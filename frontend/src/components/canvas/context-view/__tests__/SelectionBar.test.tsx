@@ -52,6 +52,17 @@ describe('SelectionBar', () => {
     expect(onOpenDetails).toHaveBeenCalledTimes(1)
   })
 
+  it('offers to export what is held, with everything inside it, only where the canvas can', async () => {
+    const onExport = vi.fn()
+    const { unmount } = render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()}
+      onClear={vi.fn()} onExport={onExport} />)
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Export…' }))
+    expect(onExport).toHaveBeenCalledTimes(1)
+    unmount()
+    renderBar(['a', 'b'])
+    expect(screen.queryByRole('button', { name: 'Export…' })).not.toBeInTheDocument()
+  })
+
   it('offers to edit what several share in a draft — and to read it outside one', async () => {
     const onOpenShared = vi.fn()
     const { unmount } = render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()} onClear={vi.fn()}

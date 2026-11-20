@@ -4952,6 +4952,12 @@ export function ContextViewCanvas({
   // member set), for when the browser holds only part of it or the reader
   // wants what this view cannot place as well.
   const graphExportEnabled = useFeature('graphExportEnabled')
+  // Entities picked on the canvas, exported with everything inside them to edit offline and import
+  // back: a data source with version control only, as only one of those takes the file back.
+  const [exportSelection, setExportSelection] = useState<string[] | null>(null)
+  const versionControlled = !!resolveQ.data && !resolveQ.data.bootstrap && !!resolveQ.data.graphId
+  const exportWithChildren = graphExportEnabled && versionControlled
+    ? (ids: string[]) => setExportSelection(ids.filter(isSelectableNode)) : undefined
   const [lineageExport, setLineageExport] = useState<{ spec: MembershipSpec; seedsLabel: string } | null>(null)
   const traceExportEverything = useMemo(() => {
     if (!graphExportEnabled || !(provider instanceof RemoteGraphProvider) || !traceActive) return undefined
@@ -7438,7 +7444,7 @@ export function ContextViewCanvas({
         )}
         {/* Export works in view and edit mode alike, with or without version control: a source
              without it (or still being put under it) exports its live graph, a cold copy. */}
-        {showExportDialog && scopeWsId && dataSourceId && !resolveQ.isLoading && (
+        {(showExportDialog || !!exportSelection?.length) && scopeWsId && dataSourceId && !resolveQ.isLoading && (
           <ExportDialog
             wsId={scopeWsId}
             dataSourceId={dataSourceId}
@@ -7449,7 +7455,8 @@ export function ContextViewCanvas({
             branchId={effectiveBranchId ?? undefined}
             // At a past revision, exporting exports the graph as it was then: what is on screen.
             asOfSeq={viewExecCtx?.asOfSeq ?? null}
-            onClose={() => setShowExportDialog(false)}
+            selected={exportSelection ?? undefined}
+            onClose={() => { setShowExportDialog(false); setExportSelection(null) }}
           />
         )}
         {viewExport && activeView && (
@@ -7657,6 +7664,7 @@ export function ContextViewCanvas({
             onOpenDetails={offerDetails ? () => useCanvasStore.getState().openNodeDrawer(bulkSelection[0]) : undefined}
             onOpenShared={bulkSelection.length > 1 ? openShared : undefined}
             sharedEditable={canvasWritable && !traceActive}
+            onExport={exportWithChildren ? () => exportWithChildren(bulkSelection) : undefined}
           />
         )}
         {/* Link the selection to other entities in one go — a draft being
@@ -8483,6 +8491,11 @@ export function ContextViewCanvas({
         } : undefined}
         onTraceNode={(id) => startCanvasTrace(id)}
         onFocusConnections={openLens}
+        onExportNode={exportWithChildren ? (id) => {
+          // The selection it is part of, or the entity right-clicked alone.
+          const selection = selectedNodeIds.filter(isSelectableNode)
+          exportWithChildren(selection.length > 1 && selection.includes(id) ? selection : [id])
+        } : undefined}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={canEditGraph ? interactions.editEdge : undefined}
         onDeleteEdge={canEditGraph ? interactions.deleteEdge : undefined}

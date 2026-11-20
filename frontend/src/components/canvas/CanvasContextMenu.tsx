@@ -91,6 +91,9 @@ export interface CanvasContextMenuProps {
     /** Open the Lineage Lens on this node — its immediate connections,
      *  grouped and searchable. */
     onFocusConnections?: (id: string) => void
+    /** Export… — this node (or the selection it is part of) with everything inside it, to edit
+     *  offline and import back. */
+    onExportNode?: (id: string) => void
     onCopyUrn?: (id: string) => void
     /** Arm edge connect-mode from this node */
     onConnect?: (sourceId: string) => void
@@ -135,6 +138,7 @@ export function CanvasContextMenu({
     onCreateChild,
     onTraceNode,
     onFocusConnections,
+    onExportNode,
     onCopyUrn,
     onConnect,
     onLinkNode,
@@ -242,6 +246,15 @@ export function CanvasContextMenu({
                     icon: 'Focus',
                     shortcut: 'F',
                     onClick: () => { onFocusConnections(target.id); onClose() }
+                })
+            }
+
+            if (onExportNode) {
+                result.push({
+                    id: 'export-with-children',
+                    label: 'Export with children…',
+                    icon: 'FileDown',
+                    onClick: () => { onExportNode(target.id); onClose() }
                 })
             }
 
@@ -500,7 +513,7 @@ export function CanvasContextMenu({
         result.push(...customActions)
 
         return result
-    }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
+    }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections, onExportNode,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical])
 

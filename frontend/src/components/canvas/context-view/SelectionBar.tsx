@@ -65,6 +65,9 @@ export interface SelectionBarProps {
   onOpenShared?: () => void
   /** The shared panel edits: the action reads "Edit N…", otherwise "Details". */
   sharedEditable?: boolean
+  /** Download the held entities with everything inside them, to edit offline and import back.
+   *  Absent — no version control, or no right to export — not offered. */
+  onExport?: () => void
 }
 
 export function SelectionBar({
@@ -80,6 +83,7 @@ export function SelectionBar({
   onOpenDetails,
   onOpenShared,
   sharedEditable = false,
+  onExport,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
   useBandReservation(ref, '--selection-bar-height')
@@ -282,6 +286,23 @@ export function SelectionBar({
               >
                 <LucideIcons.ScanSearch className="w-3.5 h-3.5" strokeWidth={2.2} />
                 Narrow…
+              </button>
+            )}
+            {onExport && (
+              <button
+                type="button"
+                onClick={onExport}
+                title="Download these with everything inside them, to edit offline and import back"
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
+                  'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
+                  'hover:border-accent-lineage/45 hover:text-accent-lineage',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                  'transition-colors duration-150',
+                )}
+              >
+                <LucideIcons.FileDown className="w-3.5 h-3.5" strokeWidth={2.2} />
+                Export…
               </button>
             )}
             {!single && onOpenLens && (
