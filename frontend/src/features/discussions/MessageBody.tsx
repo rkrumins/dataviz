@@ -1,7 +1,8 @@
 /**
  * MessageBody — what someone wrote, as plain text: the people it mentions drawn as chips (their
- * card on hover, their profile on click) and http(s) addresses as links that open apart from the
- * app. Nothing else is interpreted — no HTML, no other scheme — so a message can never run code.
+ * card on hover — with Ask a question where `askOf` offers it — their profile on click) and
+ * http(s) addresses as links that open apart from the app. Nothing else is interpreted — no HTML,
+ * no other scheme — so a message can never run code.
  */
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
@@ -10,11 +11,17 @@ import { splitLinks, splitMentions } from '@/features/reviews/comments/mentions'
 import type { PeopleMap } from '@/services/discussionsService'
 import { nameOf } from './discussionText'
 
+/** Asking someone a question: what their card's "Ask a question" does, when it is offered. */
+export type AskOf = (personId: string) => (() => void) | undefined
+
 /** A person a message mentions: their card on hover, their profile on click. */
-export function MentionChip({ id, text, people }: { id: string; text: string; people: PeopleMap | undefined }) {
+export function MentionChip({ id, text, people, onAsk }: {
+    id: string; text: string; people: PeopleMap | undefined; onAsk?: () => void
+}) {
     const p = people?.[id]
     return (
-        <PersonHoverCard userId={id} displayName={nameOf(id, people)} email={p?.email} avatarId={p?.avatarId} roles={['Mentioned']}>
+        <PersonHoverCard userId={id} displayName={nameOf(id, people)} email={p?.email} avatarId={p?.avatarId} roles={['Mentioned']}
+            onAsk={onAsk}>
             <Link to={`/people/${encodeURIComponent(id)}`}
                 className="px-1 -mx-0.5 rounded-md font-semibold text-accent-lineage bg-accent-lineage/10 hover:bg-accent-lineage/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
                 {text}
@@ -23,10 +30,11 @@ export function MentionChip({ id, text, people }: { id: string; text: string; pe
     )
 }
 
-export function MessageBody({ body, mentions, people, className }: {
+export function MessageBody({ body, mentions, people, askOf, className }: {
     body: string
     mentions: readonly string[]
     people: PeopleMap | undefined
+    askOf?: AskOf
     className?: string
 }) {
     // Matched by the name as it was written, which a since-deleted account still has.
@@ -34,7 +42,7 @@ export function MessageBody({ body, mentions, people, className }: {
     return (
         <p className={cn('whitespace-pre-wrap break-words text-ink', className)}>
             {splitMentions(body, mentions, names).map((part, i) => part.mention
-                ? <MentionChip key={i} id={part.mention} text={part.text} people={people} />
+                ? <MentionChip key={i} id={part.mention} text={part.text} people={people} onAsk={askOf?.(part.mention)} />
                 : splitLinks(part.text).map((bit, j) => bit.href ? (
                     <a key={`${i}.${j}`} href={bit.href} target="_blank" rel="noopener noreferrer nofollow"
                         className="font-medium text-accent-lineage underline decoration-accent-lineage/30 underline-offset-2 hover:decoration-accent-lineage break-all">

@@ -2,7 +2,9 @@
  * MessageItem — one message of a thread: who wrote it (their card on hover), what they are here
  * (Asker, View owner, Data steward, Admin), when, and what. The question reads larger than the
  * replies; the accepted answer is framed. Edited and deleted messages say so. Its "…" holds Copy
- * link, and — as the reader may — Edit, Delete and Mark as answer.
+ * link, and — as the reader may — Edit, Delete and Mark as answer. The author's card, and each
+ * mentioned person's, asks them a question about the thread's subject (never yourself, nor
+ * someone whose account is gone).
  */
 import { useState } from 'react'
 import { Check, CheckCircle2, Link2, Pencil, Trash2, Undo2 } from 'lucide-react'
@@ -15,8 +17,9 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { CommentComposer } from '@/features/reviews/comments/CommentComposer'
 import { useAuthStore } from '@/store/auth'
 import type { Message, ThreadDetail } from '@/services/discussionsService'
-import { useDiscussionActions, useMentionSource } from './useDiscussions'
-import { MessageBody } from './MessageBody'
+import { useConversationsEnabled, useDiscussionActions, useMentionSource } from './useDiscussions'
+import { MessageBody, type AskOf } from './MessageBody'
+import { useDiscussionsDrawer } from './drawerStore'
 import { OverflowMenu } from './OverflowMenu'
 import { ROLE_CLASS, ROLE_LABEL, messageLink, nameOf } from './discussionText'
 
@@ -50,6 +53,14 @@ export function MessageItem({ thread, message, highlighted, onStale, onError }: 
     const mayDelete = !deleted && !question && (mine || thread.access.canModerate)
     const mayAnswer = !deleted && !question && thread.access.canAnswer && thread.status !== 'closed'
     const roles = message.roles.map((r) => ROLE_LABEL[r])
+    const conversations = useConversationsEnabled()
+    const openQuestions = useDiscussionsDrawer((s) => s.open)
+    const askOf: AskOf = (personId) => (conversations && personId !== me && !people[personId]?.deleted
+        ? () => openQuestions({
+            subject: { type: thread.subject.type, id: thread.subject.id, name: thread.subject.name },
+            compose: true, recipients: [personId],
+        })
+        : undefined)
 
     const fail = (e: unknown) => { if (!onStale?.(e)) onError?.(e) }
     const copyLink = () => {
@@ -76,7 +87,7 @@ export function MessageItem({ thread, message, highlighted, onStale, onError }: 
             )}
             <div className="flex items-start gap-3">
                 <PersonHoverCard userId={message.authorId} displayName={who} email={author?.email} avatarId={author?.avatarId}
-                    roles={roles.length ? roles : ['Taking part']}>
+                    roles={roles.length ? roles : ['Taking part']} onAsk={askOf(message.authorId)}>
                     <span className="shrink-0 rounded-full">
                         <UserAvatar userId={author?.deleted ? null : message.authorId} name={who} avatarId={author?.avatarId} hasImage={author?.hasImage}
                             className={cn('font-bold', question ? 'w-9 h-9 text-xs' : 'w-7 h-7 text-[10px]', (author?.deleted || deleted) && 'grayscale opacity-70')} />
@@ -121,7 +132,7 @@ export function MessageItem({ thread, message, highlighted, onStale, onError }: 
                             }}
                         />
                     ) : (
-                        <MessageBody body={message.body} mentions={message.mentions} people={people}
+                        <MessageBody body={message.body} mentions={message.mentions} people={people} askOf={askOf}
                             className={cn('mt-1', question ? 'text-[14.5px] leading-relaxed font-medium' : 'text-[13px] leading-relaxed')} />
                     )}
                     {confirming && (

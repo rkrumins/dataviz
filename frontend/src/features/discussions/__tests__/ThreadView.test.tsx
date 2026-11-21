@@ -27,6 +27,7 @@ vi.mock('@/store/auth', () => ({
 }))
 
 import { ThreadView } from '../ThreadView'
+import { useDiscussionsDrawer } from '../drawerStore'
 
 function renderThread(props: Partial<React.ComponentProps<typeof ThreadView>> = {}) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -140,5 +141,49 @@ describe('ThreadView', () => {
         await waitFor(() => expect(screen.queryByText(/This changed/)).not.toBeInTheDocument())
         expect(api.getThread).toHaveBeenLastCalledWith('th_1')
         expect(await screen.findByText('This question is closed.')).toBeInTheDocument()
+    })
+})
+
+describe('asking someone in a thread', () => {
+    const withMentions = () => thread({
+        messages: [
+            message('m_q', 'u_me', 'Where does the tier column come from?', 0, { kind: 'question', roles: ['asker'] }),
+            message('m_1', 'u_ana', '@Fay Liu or @Gone Person would know.', 10, { mentions: ['u_fay', 'u_gone'] }),
+        ],
+        people: { ...PEOPLE, u_gone: { id: 'u_gone', displayName: 'Gone Person', email: null, avatarId: null, hasImage: false, deleted: true } },
+    })
+    const card = async (name: string) => screen.findByRole('dialog', { name })
+
+    beforeEach(() => useDiscussionsDrawer.setState({ target: null }))
+
+    it('asks a message’s author about the thread’s subject, from their card', async () => {
+        api.getThread.mockResolvedValue(withMentions())
+        renderThread()
+        const reply = await screen.findByRole('article', { name: 'Reply from Ana Silva' })
+        fireEvent.mouseEnter(within(reply).getByText('AS'))
+        fireEvent.click(within(await card('Ana Silva')).getByRole('button', { name: 'Ask a question' }))
+        expect(useDiscussionsDrawer.getState().target).toMatchObject({
+            subject: { type: 'view', id: 'v1', name: 'Revenue' }, compose: true, recipients: ['u_ana'], threadId: null,
+        })
+    })
+
+    it('asks someone a message mentions, from the chip’s card', async () => {
+        api.getThread.mockResolvedValue(withMentions())
+        renderThread()
+        fireEvent.mouseEnter(await screen.findByRole('link', { name: '@Fay Liu' }))
+        fireEvent.click(within(await card('Fay Liu')).getByRole('button', { name: 'Ask a question' }))
+        expect(useDiscussionsDrawer.getState().target).toMatchObject({ compose: true, recipients: ['u_fay'] })
+    })
+
+    it('never offers to ask yourself or someone whose account is gone', async () => {
+        api.getThread.mockResolvedValue(withMentions())
+        renderThread()
+        const question = await screen.findByRole('article', { name: 'Question from Me Myself' })
+        fireEvent.mouseEnter(within(question).getByText('MM'))
+        expect(within(await card('Me Myself')).queryByRole('button', { name: 'Ask a question' })).not.toBeInTheDocument()
+        fireEvent.mouseEnter(screen.getByRole('link', { name: '@Gone Person' }))
+        const gone = await card('Former member')
+        expect(within(gone).queryByRole('button', { name: 'Ask a question' })).not.toBeInTheDocument()
+        expect(within(gone).getByRole('link', { name: /View profile/ })).toBeInTheDocument()
     })
 })
