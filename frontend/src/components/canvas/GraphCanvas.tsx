@@ -75,6 +75,7 @@ import { BuildPanel } from './create/buildmode/BuildPanel'
 // Hooks
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useRevealNode } from '@/hooks/useRevealNode'
+import { useCanvasReveal } from '@/store/canvasReveal'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useElkLayout } from '@/hooks/useElkLayout'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
@@ -710,6 +711,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       })
     },
   })
+  // "Show on canvas" from a question pans here the same way.
+  useCanvasReveal(revealAndFocus)
 
   // Multi-locate: reveal a batch of targets in parallel, then fit the
   // viewport so all of them are on screen. Each reveal runs the same

@@ -62,6 +62,7 @@ import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
+import { useCanvasReveal } from '@/store/canvasReveal'
 import { resolveEntityName } from '@/lib/entityDisplayName'
 
 interface HierarchyCanvasProps {
@@ -324,6 +325,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       useCanvasStore.getState().pulseNode(nodeId)
     }, 100)
   }, [flatNodes, selectNode])
+  // "Show on canvas" from a question opens the path the same way.
+  useCanvasReveal(expandToNode)
 
   // Toggle node expansion with lazy loading
   const toggleNode = useCallback(async (nodeId: string) => {

@@ -8,6 +8,7 @@
  */
 import { create } from 'zustand'
 import { useCanvasStore } from '@/store/canvas'
+import { revealNodeOnCanvas } from '@/store/canvasReveal'
 import type { SubjectKey } from '@/services/discussionsService'
 
 /** A node on the canvas a question is about. */
@@ -76,9 +77,10 @@ export const useDiscussionsDrawer = create<DrawerState>((set) => ({
 
 /**
  * Close the drawer and show the node on the canvas: selected (never toggled off, as a second
- * click on a selected node would), pulsed where it is drawn, and a drawn row of the Context or
- * Hierarchy view scrolled to the middle. Selecting alone does not scroll, and a row the
- * virtualizer has not drawn has no element to scroll to — it is still selected, with its details.
+ * click on a selected node would), pulsed, and revealed by the mounted canvas
+ * (`revealNodeOnCanvas`) — the Graph canvas pans to it, the Context view scrolls its row into view
+ * even before the virtualizer has drawn it, the Hierarchy opens its path; collapsed ancestors are
+ * opened first, and loaded where the canvas can.
  */
 export function showNodeOnCanvas(urn: string) {
     useDiscussionsDrawer.getState().close()
@@ -87,7 +89,6 @@ export function showNodeOnCanvas(urn: string) {
         const id = canvas.nodes.find((n) => n.id === urn || n.data?.urn === urn)?.id ?? urn
         if (!(canvas.selectedNodeIds.length === 1 && canvas.selectedNodeIds[0] === id)) canvas.selectNode(id)
         canvas.pulseNode(id)
-        const row = document.getElementById(`layer-node-${id}`) ?? document.getElementById(`hierarchy-node-${id}`)
-        row?.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'smooth' })
+        revealNodeOnCanvas(id)
     })
 }

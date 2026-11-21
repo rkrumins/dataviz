@@ -82,6 +82,7 @@ import { SelectionBar } from './SelectionBar'
 import { BulkEditPanel } from './BulkEditPanel'
 import { LayerSettingsPanel } from './LayerSettingsPanel'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
+import { useCanvasReveal } from '@/store/canvasReveal'
 import { ChangeNavigator } from './ChangeNavigator'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
@@ -4623,6 +4624,8 @@ export function ContextViewCanvas({
     if (!isDrawnRow(nodeId)) await revealPartnersRef.current?.([nodeId], { anchoredOnly: true })
     return revealAndFocus(nodeId, revealOpts)
   }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked, isDrawnRow])
+  // "Show on canvas" from a question: the same reveal, rows not drawn yet included.
+  useCanvasReveal(revealOnCanvas)
 
   // Multi-locate (T24 F5): reveal each target (expanding collapsed
   // ancestors), then walk each one through the SAME virtualizer-aware
