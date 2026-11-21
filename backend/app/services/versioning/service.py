@@ -8120,12 +8120,16 @@ class GraphVersioningService:
 
     async def draft_search_window(self, *, graph_id: str, branch_id: str,
                                   commit_id: Optional[str], since_seq: Optional[int] = None,
-                                  limit: int = 0) -> Dict[str, object]:
+                                  limit: int = 0,
+                                  containment_types: Optional[Sequence[str]] = None) -> Dict[str, object]:
         """What a draft's search answers fold in one step (``providers.draft_search``): the seq of
         the draft's commit ``commit_id`` — its head, as :meth:`overlay_version` read it — and,
         given ``since_seq``, the nodes the draft's commits after that seq wrote, by entity id
-        (``None`` past ``limit``), and whether those commits wrote an edge too. Index-backed, as
-        :meth:`_changed_in_window` is: a commit writes rows only for what it changed."""
+        (``None`` past ``limit``), and whether those commits wrote an edge that may move a node
+        (``edges``): one of ``containment_types`` (any case), or one whose row names no type (a
+        delete) — any edge, without them. An edge of another type moves nothing a fold reads.
+        Index-backed, as :meth:`_changed_in_window` is: a commit writes rows only for what it
+        changed."""
         out: Dict[str, object] = {"seq": None, "nodes": None, "edges": False}
         async with self._session() as s:
             if commit_id:
@@ -8142,8 +8146,11 @@ class GraphVersioningService:
 
             nodes = (await s.execute(select(NodeVersionORM.entity_id).where(
                 *window(NodeVersionORM)).distinct().limit(limit + 1))).scalars().all()
-            out["edges"] = await s.scalar(
-                select(EdgeVersionORM.entity_id).where(*window(EdgeVersionORM)).limit(1)) is not None
+            moves = () if containment_types is None else (or_(
+                EdgeVersionORM.edge_type.is_(None),
+                func.upper(EdgeVersionORM.edge_type).in_([t.upper() for t in containment_types])),)
+            out["edges"] = await s.scalar(select(EdgeVersionORM.entity_id).where(
+                *window(EdgeVersionORM), *moves).limit(1)) is not None
             out["nodes"] = sorted(nodes) if len(nodes) <= limit else None
         return out
 

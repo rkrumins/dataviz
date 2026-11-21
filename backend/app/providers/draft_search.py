@@ -26,7 +26,10 @@ FalkorDB compiler's meaning, as the stub provider answers with it).
 A predicate the Python evaluator can't answer for one entity alone — one that follows
 relationships, tests the view's layers, reads a field only the platform keeps, or names an entity
 the draft changed — keeps main's answer, flagged (``approximate``, a note). Any failure in the
-correction does the same: main's answer, said to be main's, never a 500 or a wrong number.
+correction does the same: main's answer, said to be main's, never a 500 or a wrong number. So does
+a draft too large to read whole: a correction that would read more than ``DRAFT_SEARCH_MAX_DELTA``
+entities of ``D`` afresh answers with main's counts and catalog (``TOO_LARGE``); a fold of a later
+commit reads only what it wrote, and stays exact at any size.
 """
 from __future__ import annotations
 
@@ -51,6 +54,7 @@ from backend.app.providers.falkordb_search.session import (
     store_for,
 )
 from backend.app.services.deep_search import CompileError, SearchRunContext
+from backend.app.services.versioning import config as vconfig
 from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import GraphNode, NodeQuery
 from backend.common.models.search import MatchAllPredicate
@@ -63,6 +67,10 @@ BATCH = 1000
 
 #: How long a correction is kept, unused.
 _TTL_S = 3600
+
+#: Steps a request runs between saves of its correction: it is saved too when its wait is spent,
+#: and when it completes.
+SAVE_EVERY = 10
 
 #: The membership column that says an entity is inside the scope at all.
 _SCOPE = "__draft_scope__"
@@ -87,6 +95,7 @@ MEMBERSHIP_MAINS = ("{n} of your rules can't be answered on your draft's values 
                     "for what your draft changed, their chips show the published graph's answer.")
 MEMBERSHIP_NOT_DRAFT_AWARE = ("Your draft's changes couldn't be read just now, so the chips show "
                               "the published graph — they will catch up.")
+TOO_LARGE = "Your draft changed more than {n:,} entities, so these counts show the published graph."
 
 #: A rule kind whose answer for an entity depends on other entities or on the view.
 _RELATIONAL = frozenset({"related", "degree", "isOrphan", "isLeaf", "isRoot", "hasIncoming",
@@ -421,6 +430,10 @@ class DraftSearch:
                 acc["deltas"][rid] = acc["deltas"].get(rid, 0) + delta
 
         state = await self._advance("counts", scope, rules_id, {"deltas": {}}, step, wait_ms)
+        if state.get("tooLarge"):
+            note = TOO_LARGE.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA)
+            return {"deltas": {}, "approximate": {rid: note for rid, _ in items},
+                    "status": "complete", "progress": {"scanned": 0, "total": 0}}
         acc = state["acc"]
         for rid, why in (acc.get("approximate") or {}).items():
             approx.setdefault(rid, why if why in _NOTES else RELATIONSHIPS)
@@ -434,11 +447,13 @@ class DraftSearch:
         """Main's catalog ``main_answer`` with the draft's changes folded in — ``values_for``: a key
         whose every kept value is listed (as main's own catalog lists it)."""
         skip = _skipped_keys()
+        # The change's statistics as this request folds them, read from the correction once —
+        # and written back to it only when it is saved (``keep``).
+        live: Dict[str, CatalogStats] = {}
 
-        def fold(read: _Read, states: List[_State], held_json: str) -> str:
+        def fold(read: _Read, states: List[_State], change: CatalogStats) -> None:
             # Each entity out as main holds it (when main holds it in the scope), and back as
             # the draft does (when the draft does) — CPU, off the event loop.
-            change = CatalogStats.from_json(held_json)
             for s in states:
                 held = read.main_nodes.get(s.urn) if s.urn in read.main_in else None
                 if held is not None:
@@ -447,14 +462,22 @@ class DraftSearch:
                 if s.node is not None and self._in_scope(scope, read, s):
                     change.add_entity(_label(s.node.entity_type), s.node.properties,
                                       s.node.tags, skip, s.sign)
-            return change.to_json()
 
         async def step(states: List[_State], acc: Dict[str, Any]) -> None:
             read = await self._read(scope, [], states, nodes=True)
-            acc["stats"] = await asyncio.to_thread(fold, read, states, acc["stats"])
+            if "stats" not in live:
+                live["stats"] = await asyncio.to_thread(CatalogStats.from_json, acc["stats"])
+            await asyncio.to_thread(fold, read, states, live["stats"])
+
+        def keep(acc: Dict[str, Any]) -> None:
+            if "stats" in live:
+                acc["stats"] = live["stats"].to_json()
 
         state = await self._advance("catalog", scope, [], {"stats": CatalogStats().to_json()},
-                                    step, wait_ms)
+                                    step, wait_ms, keep)
+        if state.get("tooLarge"):
+            return {**main_answer, "notes": [*(main_answer.get("notes") or []),
+                                             TOO_LARGE.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA)]}
         main_progress = main_answer.get("progress") or {}
         progress = {"scanned": int(main_progress.get("scanned") or 0) + state["cursor"],
                     "total": int(main_progress.get("total") or 0) + state["total"]}
@@ -468,7 +491,7 @@ class DraftSearch:
         if main_session is None or raw is None:
             raise LookupError("main's catalog is not kept where its session is")
         merged, wide = CatalogStats.from_json(raw).folded(
-            CatalogStats.from_json(state["acc"]["stats"]))
+            live.get("stats") or CatalogStats.from_json(state["acc"]["stats"]))
         answer = answer_of(merged, main_session, self.main_ctx, wide, values_for=values_for)
         answer.update({
             "status": state["status"],
@@ -481,21 +504,31 @@ class DraftSearch:
 
     # ---- the correction's session -------------------------------------- #
     async def _advance(self, kind: str, scope, rules_id, fresh: Dict[str, Any], step,
-                       wait_ms: int) -> Dict[str, Any]:
+                       wait_ms: int, keep=None) -> Dict[str, Any]:
         """This request's share of a correction: continue the one this draft version has, or
         start it — folding in only the commits since the latest complete one of the same draft,
         rules and scope over the same main, when that is fewer entities than ``D`` — and run its
-        steps under its lease until ``wait_ms`` is spent. Returns its state."""
+        steps under its lease until ``wait_ms`` is spent, saving it every ``SAVE_EVERY`` steps,
+        when the wait is spent and when it completes (``keep(acc)`` first readies what a step
+        holds apart). Returns its state — ``tooLarge``, and nothing run, for a read of all of ``D``
+        past ``DRAFT_SEARCH_MAX_DELTA``.
+
+        The corrections a newer one supersedes are deleted, not left to their TTL: the complete one
+        of an earlier version, once the newer completes; one still running for an earlier version,
+        once the newer starts."""
         version = list(self.overlay._version or ())
         line = _digest([kind, self.overlay._gid, self.overlay._branch, self.main_ctx.data_version,
                         self.ctx.scope_hash, scope.model_dump(mode="json", by_alias=True),
                         rules_id])
         sid = _digest([line, [str(v) for v in version]])
-        pointer = f"draft-search:{line}"
+        pointer, running = f"draft-search:{line}", f"draft-search-running:{line}"
         session = await self.store.load(sid)
         state = json.loads(await self.store.load_accumulator(sid) or "null") if session else None
+        finished = False
         if session is None or state is None:
             state = await self._plan(version, pointer, fresh)
+            if _too_large(state):
+                return {**state, "tooLarge": True}
             session = Session(sid, line, self.main_ctx.data_version, None, 0, [], [],
                               state["total"], scope_hash=self.ctx.scope_hash)
             if state["cursor"] >= state["total"]:
@@ -504,6 +537,9 @@ class DraftSearch:
                 state["status"] = "complete"
                 await self.store.save(session, None, _TTL_S,
                                       accumulator=json.dumps(state, separators=(",", ":")))
+                finished = True
+            else:
+                await self._supersede_running(running, sid)
         if session.status == RUNNING:
             deadline = time.monotonic() + max(0.0, wait_ms / 1000.0)
             token = await self.store.lease(sid, int(max(wait_ms, 1000) + 30_000))
@@ -519,26 +555,48 @@ class DraftSearch:
                         state = {**state, "mode": "full", "cursor": 0, "acc": fresh}
                         items = await self._items(state)
                         state["total"] = session.total = len(items)
+                        if _too_large(state):
+                            return {**state, "tooLarge": True}
+                    steps = 0
                     while session.status == RUNNING:
                         batch = items[state["cursor"]:state["cursor"] + BATCH]
                         await step(await self._states(state, batch), state["acc"])
                         state["cursor"] += len(batch)
                         session.scanned = state["cursor"]
+                        steps += 1
                         if state["cursor"] >= state["total"]:
                             session.status = COMPLETE
                             state["status"] = "complete"
-                        if not await self.store.save(
-                                session, token, _TTL_S,
-                                accumulator=json.dumps(state, separators=(",", ":"))):
-                            break           # the lease went to another request: it carries on
-                        if time.monotonic() >= deadline:
+                        spent = time.monotonic() >= deadline
+                        if session.status == COMPLETE or spent or steps % SAVE_EVERY == 0:
+                            if keep is not None:
+                                await asyncio.to_thread(keep, state["acc"])
+                            if not await self.store.save(
+                                    session, token, _TTL_S,
+                                    accumulator=json.dumps(state, separators=(",", ":"))):
+                                break       # the lease went to another request: it carries on
+                            finished = session.status == COMPLETE
+                        if spent:
                             break
                 finally:
                     await self.store.release(sid, token)
         if session.status == COMPLETE:
+            before = await self.store.pointed(pointer) if finished else None
             await self.store.point(pointer, sid, _TTL_S)
+            if before and before != sid:
+                await self.store.delete(before)         # folded into this one
         state["status"] = "complete" if session.status == COMPLETE else "running"
         return state
+
+    async def _supersede_running(self, running: str, sid: str) -> None:
+        """``sid`` starts on its line: one still running there for an earlier version is deleted
+        (a request stepping it stops at its next save), and ``sid`` is the line's running one."""
+        before = await self.store.pointed(running)
+        if before and before != sid:
+            held = await self.store.load(before)
+            if held is not None and held.status == RUNNING:
+                await self.store.delete(before)
+        await self.store.point(running, sid, _TTL_S)
 
     async def _plan(self, version: List[Any], pointer: str, fresh: Dict[str, Any]) -> Dict[str, Any]:
         """A new correction for this draft version: a fold of the commits since the latest
@@ -560,7 +618,8 @@ class DraftSearch:
             return state
         window = await self.overlay._svc.draft_search_window(
             graph_id=self.overlay._gid, branch_id=self.overlay._branch,
-            commit_id=version[0], since_seq=held["seq"], limit=len(order) // 2)
+            commit_id=version[0], since_seq=held["seq"], limit=len(order) // 2,
+            containment_types=list(self.overlay._containment_types))
         if window.get("edges") or window.get("nodes") is None:
             return state                        # moves, or more than reading D costs
         return {**state, "mode": "fold", "from": held["seq"], "total": len(window["nodes"]),
@@ -600,6 +659,11 @@ class DraftSearch:
 
 
 _NOTES = frozenset({RELATIONSHIPS, LAYERS, PLATFORM_FIELD, NAMES_CHANGED})
+
+
+def _too_large(state: Dict[str, Any]) -> bool:
+    """A correction that would read more of ``D`` afresh than a request may: main answers."""
+    return state["mode"] == "full" and state["total"] > vconfig.DRAFT_SEARCH_MAX_DELTA
 
 
 def _roots(scope) -> Set[str]:

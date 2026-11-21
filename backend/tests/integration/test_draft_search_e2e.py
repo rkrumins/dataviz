@@ -4,14 +4,18 @@ The correction a draft's deep-search answers make (``providers.draft_search``) r
 patch set and its values from the versioning service, and folds a later commit in from what that
 commit wrote (``draft_search_window``) and what the draft held before it (``draft_nodes_as_of``).
 Here those reads run against Postgres; main's store is the stub provider over main's own state, and
-every answer must equal the stub's over the draft's state.
+every answer must equal the stub's over the draft's state. A commit that writes a relationship
+moving nothing (not containment) is folded in all the same; a draft too large to read whole answers
+with main's counts and catalog, said so.
 """
 import os
 
 import pytest
 
+from backend.app.providers import draft_search
 from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
 from backend.app.services.deep_search import SearchRunContext
+from backend.app.services.versioning import config as vconfig
 from backend.common.models.search import SearchOptions, SearchQuery, SearchScope
 from backend.graph.adapters.stub_deep_search import StubDeepSearchProvider
 from backend.tests.integration.test_fork_overlay_delta import _d, _run
@@ -163,4 +167,64 @@ def test_counts_membership_and_the_catalog_are_the_drafts_commit_after_commit():
         assert catalog["status"] == "complete" and catalog["entities"] == truth["entities"]
         assert {p["key"]: (p["count"], p["values"]) for p in catalog["properties"]} == \
             {p["key"]: (p["count"], p["values"]) for p in truth["properties"]}
+    _run(case)
+
+
+def test_a_commit_writing_a_relationship_that_moves_nothing_is_folded_in():
+    async def case(svc):
+        gid, main, draft = await _seeded(svc)
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="lineage",
+                            containment_edge_types=CONT, ops=[{
+                                "op": "create", "entity_kind": "edge", "entity_id": "e:c1>c2",
+                                "payload": {"edgeType": "FLOWS_TO", "sourceEntityId": "c1",
+                                            "targetEntityId": "c2", "properties": {"weight": 1}}}])
+        items = list(RULES.items())
+        assert await _counts(await _overlay(svc, gid, main, draft), items) == \
+            await _truth(svc, gid, draft, items)
+        before = (await svc.overlay_version(graph_id=gid, branch_id=draft))[0]
+        seq = (await svc.draft_search_window(graph_id=gid, branch_id=draft, commit_id=before))["seq"]
+        weight = {"op": "update", "entity_kind": "edge", "entity_id": "e:c1>c2",
+                  "payload": {"properties": {"weight": 2}}}
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="weight",
+                            containment_edge_types=CONT, ops=[weight])
+        head = (await svc.overlay_version(graph_id=gid, branch_id=draft))[0]
+        moved = await svc.draft_search_window(graph_id=gid, branch_id=draft, commit_id=head,
+                                              since_seq=seq, limit=10, containment_types=CONT)
+        assert moved == {"seq": seq + 1, "nodes": [], "edges": False}
+        assert (await svc.draft_search_window(graph_id=gid, branch_id=draft, commit_id=head,
+                                              since_seq=seq, limit=10))["edges"] is True
+
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="weight and tier",
+                            containment_edge_types=CONT,
+                            ops=[{**weight, "payload": {"properties": {"weight": 3}}},
+                                 _node("c1", "Column", op="update", tier="bronze", rows=10)])
+        folded = []
+        as_of = svc.draft_nodes_as_of
+
+        async def spy(**kw):
+            folded.append(sorted(kw["entity_ids"]))
+            return await as_of(**kw)
+
+        svc.draft_nodes_as_of = spy
+        assert await _counts(await _overlay(svc, gid, main, draft), items) == \
+            await _truth(svc, gid, draft, items)
+        assert folded == [["c1"]], "folded in, the relationship moving nothing"
+    _run(case)
+
+
+def test_a_draft_too_large_to_read_whole_answers_with_mains_counts_said_so(monkeypatch):
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 2)
+
+    async def case(svc):
+        gid, main, draft = await _seeded(svc)               # it changed three entities
+        overlay = await _overlay(svc, gid, main, draft)
+        items = list(RULES.items())
+        note = draft_search.TOO_LARGE.format(n=2)
+        deltas = await overlay.deep_search_count_deltas(SCOPE, items, context=CONTEXT, wait_ms=5000)
+        assert deltas["deltas"] == {} and deltas["approximate"] == {rid: note for rid, _ in items}
+        catalog = await overlay.deep_search_catalog(SCOPE, context=CONTEXT, wait_ms=5000)
+        mains = await catalog_of(await _stub(svc, gid, main), SCOPE, CONTEXT)
+        assert catalog["notes"][-1] == note
+        assert {p["key"]: (p["count"], p["values"]) for p in catalog["properties"]} == \
+            {p["key"]: (p["count"], p["values"]) for p in mains["properties"]}
     _run(case)
