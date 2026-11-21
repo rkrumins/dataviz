@@ -1,7 +1,7 @@
 /**
  * DataSourceDetailPanel — slide-in drawer for data source details.
  * Renders as a right-side panel via portal (same pattern as ExplorerPreviewDrawer).
- * Tabs: Insights · Aggregation · Views
+ * Tabs: Insights · Aggregation · Views (· Questions · Activity · Versioning, by switch)
  */
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -11,7 +11,7 @@ import { MOTION } from '@/lib/motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
     BarChart3, AlertTriangle, Loader2,
-    GitBranch, Star, Clock, Compass, Save, RotateCcw, LineChart, MessageCircleQuestion,
+    GitBranch, Star, Clock, Compass, Save, RotateCcw, LineChart, MessageCircleQuestion, History,
 } from 'lucide-react'
 import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { cn } from '@/lib/utils'
@@ -24,7 +24,7 @@ import type { View } from '@/services/viewApiService'
 
 /** Tab ids, in the order they appear. Hoisted so the URL parser and the
  *  buttons cannot drift apart. */
-const DATA_SOURCE_TABS = ['insights', 'profiling', 'aggregation', 'views', 'questions', 'versioning'] as const
+const DATA_SOURCE_TABS = ['insights', 'profiling', 'aggregation', 'views', 'questions', 'activity', 'versioning'] as const
 type DataSourceTab = (typeof DATA_SOURCE_TABS)[number]
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceReadinessResponse } from '@/services/aggregationService'
@@ -41,6 +41,10 @@ import { DataSourceLifecycle, MovedFromChip } from '@/features/data-source-trans
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
 import { DataContactsCard } from './DataContactsCard'
+import { AboutDataSourceCard } from './AboutDataSourceCard'
+import { DataSourceActivity } from './DataSourceActivity'
+import { TrustBadges } from '@/components/dataSource/TrustBadges'
+import { DATA_SOURCE_METADATA_FEATURE } from '@/services/dataSourceMetadataService'
 import { DiscussionPanel } from '@/features/discussions/DiscussionPanel'
 import { ThreadView } from '@/features/discussions/ThreadView'
 import { WatchButton } from '@/features/discussions/DiscussionsDrawer'
@@ -98,6 +102,10 @@ interface DataSourceDetailPanelProps {
         original: AggregationConfigSnapshot,
     ) => Promise<void>
     onClose: () => void
+    /** Tags already used in this workspace, most used first — offered when tagging this one. */
+    tagSuggestions?: string[]
+    /** Shows the workspace's data requests (where the one this source came from is listed). */
+    onShowDataRequests?: () => void
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -163,6 +171,8 @@ export function DataSourceDetailPanel({
     onPurge,
     onSaveAggregationConfig,
     onClose,
+    tagSuggestions,
+    onShowDataRequests,
 }: DataSourceDetailPanelProps) {
     /**
      * Tab state lives in the URL, not in `useState`.
@@ -175,8 +185,10 @@ export function DataSourceDetailPanel({
      */
     const [searchParams, setSearchParams] = useSearchParams()
     const conversations = useFeature('conversationsEnabled')
+    const details = useFeature(DATA_SOURCE_METADATA_FEATURE)
     const rawTab = searchParams.get('dstab')
-    const activeTab: DataSourceTab = DATA_SOURCE_TABS.includes(rawTab as DataSourceTab) && (rawTab !== 'questions' || conversations)
+    const activeTab: DataSourceTab = DATA_SOURCE_TABS.includes(rawTab as DataSourceTab)
+        && (rawTab !== 'questions' || conversations) && (rawTab !== 'activity' || details)
         ? (rawTab as DataSourceTab)
         : 'insights'
     const setActiveTab = (next: DataSourceTab) => {
@@ -374,6 +386,7 @@ export function DataSourceDetailPanel({
                                     <span className={cn("w-2 h-2 rounded-full", ds.isActive ? 'bg-emerald-500' : 'bg-gray-400')} />
                                     {ds.isActive ? 'Active' : 'Inactive'}
                                 </span>
+                                {details && <TrustBadges trustStatus={ds.trustStatus} classification={ds.classification} size="md" />}
                                 {ontologyName && (
                                     <Link
                                         to={ontologyId ? `/schema/${ontologyId}` : '/schema'}
@@ -440,6 +453,9 @@ export function DataSourceDetailPanel({
                             {conversations && (
                                 <TabBtn active={activeTab === 'questions'} icon={MessageCircleQuestion} label="Questions" count={questions?.open} onClick={() => setActiveTab('questions')} />
                             )}
+                            {details && (
+                                <TabBtn active={activeTab === 'activity'} icon={History} label="Activity" onClick={() => setActiveTab('activity')} />
+                            )}
                             {versioningEnabled && (
                                 <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
                             )}
@@ -483,6 +499,7 @@ export function DataSourceDetailPanel({
                             ) : (<>
                             {/* ─── Insights Tab ─────────────────────────── */}
                             {activeTab === 'insights' && (<div className="space-y-5">
+                                <AboutDataSourceCard key={ds.id} wsId={wsId} dsId={ds.id} tagSuggestions={tagSuggestions} onShowRequests={onShowDataRequests} />
                                 <DataContactsCard wsId={wsId} dsId={ds.id} onAsk={() => { setAskOpen(true); showThread(null) }} />
                                 {ds.catalogItemId ? (
                                     <DataSourceProfile
@@ -506,6 +523,9 @@ export function DataSourceDetailPanel({
                                         compose={askOpen} onComposeChange={setAskOpen} />
                                 )
                             )}
+
+                            {/* ─── Activity Tab ─────────────────────────── */}
+                            {activeTab === 'activity' && <DataSourceActivity wsId={wsId} dsId={ds.id} />}
 
                             {/* ─── Profiling Tab ────────────────────────── */}
                             {activeTab === 'profiling' && (

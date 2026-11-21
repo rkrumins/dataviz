@@ -15,6 +15,8 @@ import { searchDirectory } from '@/services/userDirectoryService'
 export interface Subject extends ManagerRef {
     name: string
     detail: string
+    /** A team's size. */
+    memberCount?: number
 }
 
 export const subjectKey = (s: ManagerRef) => `${s.type}:${s.id}`
@@ -44,7 +46,7 @@ export function SubjectPicker({ label, types = ['user', 'group'], exclude = [], 
                     subjects: [
                         ...res.users.map((u) => ({ type: 'user' as const, id: u.id, name: u.displayName, detail: u.email })),
                         ...res.groups.map((g) => ({
-                            type: 'group' as const, id: g.id, name: g.name,
+                            type: 'group' as const, id: g.id, name: g.name, memberCount: g.memberCount,
                             detail: `Team · ${g.memberCount} member${g.memberCount === 1 ? '' : 's'}`,
                         })),
                     ],

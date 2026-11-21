@@ -32,6 +32,9 @@ export interface DataSourceContacts {
 
 export interface ContactRef { subjectType: 'user' | 'group'; subjectId: string }
 
+/** The query that holds a source's contacts — the contacts card and the About card share it. */
+export const contactsKey = (wsId: string, dsId: string) => ['data-source-contacts', wsId, dsId] as const
+
 const path = (wsId: string, dsId: string) =>
     `/api/v1/admin/workspaces/${encodeURIComponent(wsId)}/data-sources/${encodeURIComponent(dsId)}/contacts`
 

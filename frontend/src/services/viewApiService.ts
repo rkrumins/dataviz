@@ -9,6 +9,7 @@
 import type { ViewVisibility } from '@/lib/viewVisibility'
 import type { LayerAssignmentEntry, ViewConfiguration, ViewLayerConfig } from '@/types/schema'
 import { authFetch } from './apiClient'
+import type { Classification, TrustStatus } from './dataSourceMetadataService'
 import { queryClient } from '@/lib/queryClient'
 import { VIEW_VERSIONS_QUERY_KEY, VIEW_VERSION_STATUS_QUERY_KEY } from './viewVersionsApiService'
 
@@ -151,6 +152,9 @@ export interface View {
      *  server couldn't tell — the version store was unreachable, or the view has
      *  no data source and its workspace no default. */
     sourceKind?: 'versioned' | 'external' | null
+    /** Its data source's sensitivity and trust status, when it has them. */
+    dataSourceClassification?: Classification | null
+    dataSourceTrustStatus?: TrustStatus | null
     tags?: string[]
     isPinned: boolean
     favouriteCount: number

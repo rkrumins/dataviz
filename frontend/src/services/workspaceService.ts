@@ -8,6 +8,7 @@ import { fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 import type { AccessRequestStatus, RequestPolicy, WorkspaceAccessMode } from './accessRequestsService'
 import type { DataSourceTransferResponse } from './dataSourceTransferService'
+import type { Classification, TrustStatus } from './dataSourceMetadataService'
 
 const ADMIN_API = '/api/v1/admin/workspaces'
 
@@ -92,6 +93,13 @@ export interface DataSourceResponse {
     createdBy?: string | null
     createdAt: string
     updatedAt: string
+    /** What it is, in its own words; else the catalog item's (shown "From the catalog"). */
+    description?: string | null
+    catalogDescription?: string | null
+    tags?: string[]
+    /** How sensitive its data is — a label, not the publishing gate `isRestricted`. */
+    classification?: Classification | null
+    trustStatus?: TrustStatus | null
 
     // Aggregation state
     aggregationStatus: 'none' | 'pending' | 'running' | 'ready' | 'failed' | 'skipped'
