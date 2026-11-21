@@ -1195,6 +1195,10 @@ class DataRequestORM(Base):
     updated_at = Column(Text, nullable=False, default=_now)
     resolved_at = Column(Text, nullable=True)
     resolved_by = Column(Text, nullable=True)
+    #: When a request left waiting was brought up again to the people who connect it,
+    #: then to the platform team (``access_housekeeping``). Once each.
+    reminded_at = Column(Text, nullable=True)
+    escalated_at = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("idx_data_requests_workspace_created", "workspace_id", "created_at"),
@@ -3706,6 +3710,10 @@ class IdpLinkRequestORM(Base):
     resolved_at = Column(Text, nullable=True)
     resolution_note = Column(Text, nullable=True)
     mapping_id = Column(Text, nullable=True)
+    #: When a request left waiting was brought up again to the platform administrators,
+    #: then a last time (``access_housekeeping``). Once each.
+    reminded_at = Column(Text, nullable=True)
+    escalated_at = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("idx_idp_link_requests_status", "status", "requested_at"),
