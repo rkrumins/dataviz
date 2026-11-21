@@ -30,7 +30,7 @@ beforeAll(() => {
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
 const DRAFT = 'MATCH (d:Dataset)-[:FEEDS]->(x:Dashboard) WHERE "PII" IN d.tags RETURN d LIMIT 50'
-const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input)
     if (url.endsWith('/api/v1/ai/status')) return json({ configured: true, personas: { data: true, help: true } })
     if (url.endsWith('/api/v1/ai/query/draft')) {
