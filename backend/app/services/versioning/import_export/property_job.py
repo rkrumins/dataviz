@@ -74,6 +74,7 @@ from ..errors import BranchNotOpen
 from ..job_lease import Lease, Superseded
 from ..models import BranchORM, CommitORM, EdgeVersionORM, JobORM, NodeVersionORM
 from ..service import OntologyViolation
+from .import_worker import _analyze_graph
 from .snapshot import Snapshot, Winner, open_snapshot
 from .stream import resolve_placements
 
@@ -931,8 +932,17 @@ class PropertyJobWorker:
                    if self._write_context is not None else {})
         if (await self._position(job_id)).cursor is None:
             await lease.retry_transient(lambda: self._resolve(job_id, job))
+        # The planner's statistics of the graph's partitions, refreshed before the first window and
+        # after it: until autovacuum gets to them they hold none of what a publish just wrote to
+        # main, nor of the draft's own rows, and each entity's read, planned for a handful of rows,
+        # scanned the whole branch — a 100k job's window took 18 s where the others took 2 s, and
+        # the field checks of the draft's publish, which read its rows too, 22 s for 10k nodes.
+        await _analyze_graph(job["graphId"])
+        first = True
         while await lease.retry_transient(lambda: self._next_window(job_id, job, context)):
-            pass
+            if first:
+                await _analyze_graph(job["graphId"])
+                first = False
         summary = (await self._position(job_id)).summary
         source = job["op"].get("sourceJobId") if job["op"]["kind"] == "undo" else None
 

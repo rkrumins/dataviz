@@ -66,6 +66,62 @@ What 1M + 1M left behind: 6.1 GB of graphver in Postgres (each entity's version 
 `main`, and both branches' heads) and 2.7 GB of the import's staged rows until they are swept
 ([08](08-import-export.md) §3c); 1.05 GB for the graph in FalkorDB (`GRAPH.MEMORY USAGE`).
 
+### A bulk property job over every node, its undo, the draft's search, and field rules at publish
+
+After the published graph: a bulk property job (`run property`) sets `bench_owner` on every node in
+a new draft, 10,000 nodes a window and a commit each; that draft's rule counts and property catalog
+are read as the draft-aware search answers them (`run draft-search`: three rules, at the client's
+waits, over the graph projected into FalkorDB, with `main`'s own counts and catalog read first);
+the job is undone (`run undo`: a window per commit it wrote, newest first, then 500 nodes read back
+to hold what they held before it). A second job's draft is published with a required `bench_owner`
+field on every type, so every page's field check runs (`run publish --field-rules hold`).
+`--field-rules fail` makes the attributes' `bench_owner` a number field instead, which the job's
+text breaks: the publish must be refused (409) counting every attribute, naming the first 100.
+
+Measured on one 4-CPU, 15 GB machine shared with other work: its load average was 4 to 9 while
+the 100k + 100k steps ran (a 1M import ran beside them) and about 1 while the 1M + 1M ones did; on
+it every step, the older ones too, missed the 50 ms loop-lag p99 target.
+
+| Step | 100k + 100k | 1M + 1M |
+|------|------------:|--------:|
+| Bulk property job, every node (`set`) | 29 s, 205 MB | 263 s, 206 MB |
+| — its windows (10,000 nodes, one commit) | 10: 2.5 s, longest 3.4 s; 45 statements | 100: 2.5 s, longest 4.0 s, last tenth 6% faster than the first; 45–47 statements |
+| The draft's counts, three rules | exact, 5 requests | `main`'s with the cutoff note, 1 request (30 s) |
+| The draft's property catalog | exact, 27 requests | `main`'s with the cutoff note, 1 request |
+| — the draft search's peak memory; its sessions in Redis | 277 MB; +8 MB | 1,678 MB; +0 MB |
+| Undo of the job | 29 s, 233 MB | 283 s, 239 MB |
+| — its windows (one commit of the job) | 10: 2.7 s, longest 3.3 s; 43 statements | 100: 2.8 s, longest 4.1 s, last tenth 5% faster; 43–45 statements |
+| — 500 nodes read back after it | all as before the job | all as before the job |
+| Publish under field rules every node holds | 25 s, 420 MB; field checks 6.6 s (one batch) | 248 s, 487 MB; field checks 57 s over 50 pages, longest 1.4 s |
+| Publish refused by field rules (every attribute) | 409 in 7 s, 409 MB: 25,000 counted, 100 named | not run (10k: 2,500 counted) |
+
+`main`'s own counts and catalog, read first and not in the table, took 4 requests at 100k and 13 at
+1M. The draft's search answered each time as it must: exact within the 200,000-entity cutoff
+(`GRAPHVER_DRAFT_SEARCH_MAX_DELTA`), the counts moved by exactly what the job did and the catalog
+holding `bench_owner` on every node; past it, `main`'s answer with the note on every rule and the
+catalog, at once. The bulk property job and its undo are flat in the graph's size: the same memory,
+window time and statements a window at 1M as at 100k, ten times the windows. So is the publish's
+field check, a page at a time: 1.1 s a page on average, 1.4 s at most, within the paged publish's
+own memory. Together the five steps took about 20 minutes at 1M. (`run project` now follows a pass
+that stops at `GRAPHVER_PROJECTION_PASS_MAX_SECS`, 300 s, with the next, as the projection lane
+does: the 1M published window took two passes, 344 s, and FalkorDB matched Postgres after.)
+
+What doesn't scale yet:
+
+- **A read of a draft that changed a million entities.** Past the cutoff the draft's search reads
+  nothing of the draft — that is 33 MB and under a second — but its first request still builds the
+  draft's overlay, as any read of the draft does: 30 s to read the patch set and 1.1 GB to hold it
+  (about 1.2 KB a changed entity, as `GRAPHVER_OVERLAY_CACHE_ENTRIES` in §9 says), past the client's
+  wait and the 512 MB a step is held to elsewhere. CI holds the draft's search to 512 MB plus
+  1.6 KB a node. Building the overlay a page at a time, or answering past the cutoff from a count
+  of the draft's heads, would make it flat.
+- **The planner's statistics after a bulk write.** Right after a publish, or once a job's first
+  window wrote to its draft, Postgres's statistics of the graph's partitions held none of those
+  rows; each entity's read was planned for a handful of rows by the branch's changeset index and
+  scanned the whole branch — a 100k job's window took 18 s where the others took 2.5 s, and the
+  field checks of a 10k draft's publish 22 s. A bulk property job (and its undo) now analyzes the
+  graph's partitions before its first window and after it, as an import does after its nodes.
+
 ### At 10 million (derived)
 
 Not measured: the 1M + 1M run times five, for a graph of 5,000,000 nodes and 5,000,000 edges.
@@ -86,7 +142,10 @@ wait for its lock and answer 503 `lock_busy` past their wait; saves into drafts 
 
 CI runs the 1M + 1M graph end to end every week (`.github/workflows/versioning-scale.yml`, also on
 demand at any size). It fails when a step does not complete, when its peak memory passes its ceiling
-(512 MB, 1 GB for a publish), or when FalkorDB and Postgres disagree after it. To measure at your own
+(512 MB, 1 GB for a publish, 512 MB and 1.6 KB a node for the draft's search), or when FalkorDB and
+Postgres disagree after it; when a bulk property job's or its undo's window takes more than 15 s or
+100 statements, or its last windows run 20% slower than its first, or it leaves nodes unchanged;
+and when the draft's search takes more than 60 requests, or answers wrong. To measure at your own
 size, point the harness at a staging Postgres and FalkorDB sized like production
 (`MANAGEMENT_DB_URL`, `FALKORDB_HOST`, `FALKORDB_PORT`) and run each step in a process of its own:
 
@@ -97,10 +156,21 @@ $B run inspect --package /data/p10m.zip --state s.json --label inspect
 $B run import --target empty --state s.json --label import
 $B run publish --state s.json --label publish
 $B run project --state s.json --label project
-$B run project --full --state s.json --label rebuild
+$B run project --full --keep --state s.json --label rebuild
 $B run export --state s.json --label export
+$B run property --state s.json --label property
+REDIS_CACHE_HOST=… $B run draft-search --state s.json --label draft-search
+$B run undo --state s.json --label undo
+$B run property --state s.json --label property-again
+$B run publish --field-rules hold --state s.json --label publish-fields
 $B report --state s.json --md report.md
 ```
+
+`--keep` leaves the rebuilt graph in FalkorDB for `draft-search` (delete it after); give
+`draft-search` the cache Redis the API keeps search sessions in (`REDIS_CACHE_*`), so its memory is
+measured too. The undo runs after the search, since an undone draft reads as the published graph,
+and a second job's draft is the one published. `run publish --field-rules fail`, before the `hold`
+one, checks a refusal's count.
 
 Watch each step's peak memory (flat in the graph's size), its time (linear), how long the publish
 held the graph's publish lock, and how much Postgres and FalkorDB grew.

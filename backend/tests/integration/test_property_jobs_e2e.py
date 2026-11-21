@@ -139,6 +139,31 @@ def test_each_window_is_one_commit_and_a_superseded_job_resumes_without_repeatin
     asyncio.run(_windows_and_resume(monkeypatch))
 
 
+# ── the planner's statistics ──────────────────────────────────────────────────
+async def _statistics(monkeypatch) -> None:
+    from backend.app.services.versioning.import_export import property_job
+
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 3)
+    svc, ds, gid, draft = await _draft()
+    ie = ImportExportService(versioning=svc)
+    job_id = await _create(ie, ds, gid, draft, RENAME, {"ids": [f"urn:n{i}" for i in range(8)]})
+    before, windows = len(await _messages(gid, draft)), []
+
+    async def analyze(graph_id):
+        assert graph_id == gid
+        windows.append(len(await _messages(gid, draft)) - before)
+    monkeypatch.setattr(property_job, "_analyze_graph", analyze)
+    await ie.run_property(job_id)
+    # Before the first window (main's rows, a publish's perhaps, not in them yet) and after it (the
+    # draft's own): planned for a handful of rows, each id's read scanned the whole branch.
+    assert windows == [0, 1]
+    await db.dispose_engine()
+
+
+def test_a_job_refreshes_the_planners_statistics_before_its_first_window_and_after_it(monkeypatch):
+    asyncio.run(_statistics(monkeypatch))
+
+
 # ── one at a time, idempotent, publish waits, cancel keeps what landed ─────────
 async def _one_at_a_time(monkeypatch) -> None:
     monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 3)
