@@ -7,7 +7,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { KnowledgeStatus } from '@/services/aiAdminService'
-import { CollectionsTable } from '../knowledge/KnowledgeTab'
+import { CollectionsTable, SourceTestView } from '../knowledge/KnowledgeTab'
 
 const STATUS: KnowledgeStatus = {
     store: 'pgvector',
@@ -49,5 +49,21 @@ describe('the collections table', () => {
         render(<CollectionsTable status={{ store: 'none', collections: [{ ...STATUS.collections[0], status: 'lexical' }] }} onReindex={vi.fn()} />)
         expect(screen.getByText(/searched by their words only/)).toBeInTheDocument()
         expect(rowOf('Guide and docs')).toHaveTextContent('Words only')
+    })
+})
+
+describe('testing an external source', () => {
+    it('shows what it answered with', () => {
+        render(<SourceTestView report={{ ok: true, detail: 'Answered with 2 result(s).',
+            sample: [{ title: 'Runbook: restarts', url: 'https://wiki.example.com/r' }, { title: 'On-call' }] }} />)
+        const sample = screen.getByRole('list', { name: 'Sample results' })
+        expect(within(sample).getAllByRole('listitem').map((li) => li.textContent))
+            .toEqual(['Runbook: restartshttps://wiki.example.com/r', 'On-call'])
+    })
+
+    it('shows why it failed, with the code', () => {
+        render(<SourceTestView report={{ ok: false, code: 'auth', detail: 'The sign-in was refused.' }} />)
+        expect(screen.getByRole('status')).toHaveTextContent('The sign-in was refused. (auth)')
+        expect(screen.queryByRole('list', { name: 'Sample results' })).not.toBeInTheDocument()
     })
 })

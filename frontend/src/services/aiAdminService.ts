@@ -162,6 +162,8 @@ export interface KnowledgeSourceTestReport {
     ok: boolean
     latencyMs?: number
     detail?: unknown
+    code?: string
+    sample?: { title: string; url?: string }[]
     checks?: TestCheck[]
 }
 

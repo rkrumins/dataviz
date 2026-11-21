@@ -275,7 +275,7 @@ export function KnowledgeTab() {
     )
 }
 
-function SourceTestView({ report }: { report: KnowledgeSourceTestReport }) {
+export function SourceTestView({ report }: { report: KnowledgeSourceTestReport }) {
     const detail = detailText(report.detail)
     return (
         <div
@@ -290,7 +290,12 @@ function SourceTestView({ report }: { report: KnowledgeSourceTestReport }) {
                 {report.ok ? 'The source answered.' : 'The source could not answer.'}
                 {report.latencyMs != null && <span className="ml-2 font-normal tabular-nums text-ink-muted">{report.latencyMs.toLocaleString()} ms</span>}
             </p>
-            {detail && <p className={report.ok ? 'text-ink-muted' : 'text-rose-600 dark:text-rose-400'}>{detail}</p>}
+            {detail && <p className={report.ok ? 'text-ink-muted' : 'text-rose-600 dark:text-rose-400'}>{detail}{report.code ? ` (${report.code})` : ''}</p>}
+            {report.sample && report.sample.length > 0 && (
+                <ul aria-label="Sample results" className="list-disc pl-4 text-ink-muted">
+                    {report.sample.map((s, i) => <li key={i}>{s.title}{s.url && <span className="ml-1 text-ink-faint">{s.url}</span>}</li>)}
+                </ul>
+            )}
             {report.checks && <CheckList checks={report.checks} />}
         </div>
     )
