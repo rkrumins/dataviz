@@ -144,6 +144,12 @@ def _summary_access_request(verb: str):
     return _build
 
 
+def _summary_workspace_request(verb: str):
+    def _build(p: dict) -> str:
+        return f"Workspace request '{p.get('name') or p.get('request_id') or '?'}' {verb}"
+    return _build
+
+
 def _summary_idp_provider(verb: str):
     def _build(p: dict) -> str:
         slug = p.get("slug") or p.get("provider_id") or "?"
@@ -560,6 +566,12 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.logged_in": ("info", _summary_login),
     "rbac.workspace.created": ("info", _summary_workspace_lifecycle("created")),
     "rbac.workspace.updated": ("info", _summary_workspace_lifecycle("updated")),
+    "workspace.request.submitted": ("info", _summary_workspace_request("submitted")),
+    "workspace.request.resubmitted": ("info", _summary_workspace_request("resubmitted")),
+    "workspace.request.approved": ("info", _summary_workspace_request("approved")),
+    "workspace.request.sent_back": ("info", _summary_workspace_request("sent back with a question")),
+    "workspace.request.declined": ("warning", _summary_workspace_request("declined")),
+    "workspace.request.withdrawn": ("info", _summary_workspace_request("withdrawn")),
     "identity.api_key.created": (
         "info", lambda p: f"API key {_api_key_label(p)} created",
     ),
@@ -1022,6 +1034,12 @@ LABELS: dict[str, str] = {
     "rbac.access_request.routed": "Pointed a request to the identity provider",
     "rbac.access_request.fulfilled": "Access arrived through the identity provider",
     "rbac.access_request.escalated": "Sent a waiting request to the Org Admins",
+    "workspace.request.submitted": "Requested a workspace",
+    "workspace.request.resubmitted": "Resubmitted a workspace request",
+    "workspace.request.approved": "Approved a workspace request",
+    "workspace.request.sent_back": "Sent a workspace request back",
+    "workspace.request.declined": "Declined a workspace request",
+    "workspace.request.withdrawn": "Withdrew a workspace request",
     "rbac.role.created": "Created a role",
     "rbac.role.updated": "Changed a role",
     "rbac.role.deleted": "Deleted a role",
@@ -1285,7 +1303,7 @@ def _subject_user(event_type: str, p: dict) -> Optional[str]:
     """The person an event is ABOUT, when it is about one."""
     if p.get("subject_type") == "user":
         return _str(p.get("subject_id"), 128)
-    if event_type.startswith("rbac.access_request."):
+    if event_type.startswith(("rbac.access_request.", "workspace.request.")):
         return _str(p.get("requester_id"), 128)
     return _str(p.get("user_id") or p.get("target_user_id"), 128)
 

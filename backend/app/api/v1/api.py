@@ -20,7 +20,7 @@ from .endpoints import (
     view_membership, search_views,
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
-    workspace_directory, data_source_transfers,
+    workspace_directory, data_source_transfers, workspace_requests,
     versioning,
     versioning_admin,
     review_center,
@@ -266,6 +266,24 @@ api_router.include_router(
     access_requests.admin_router,
     prefix="/admin/access-requests",
     tags=["admin:access-requests"],
+)
+# Workspace requests — anyone asks for a workspace of their own; whoever creates
+# workspaces answers. Three prefixes, like access requests: ask, "my requests",
+# and answering.
+api_router.include_router(
+    workspace_requests.public_router,
+    prefix="/workspace-requests",
+    tags=["workspace-requests"],
+)
+api_router.include_router(
+    workspace_requests.me_router,
+    prefix="/me",
+    tags=["me:workspace-requests"],
+)
+api_router.include_router(
+    workspace_requests.admin_router,
+    prefix="/admin/workspace-requests",
+    tags=["admin:workspace-requests"],
 )
 # Access reviews — a workspace admin keeps or removes each grant.
 api_router.include_router(

@@ -96,6 +96,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "playgroundEnabled":
         "The Playground is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "workspaceRequestsEnabled":
+        "Requesting a workspace is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
     "allowedViewModes":
         "That view type is not available in this deployment. "
         "An administrator chooses the available types under Admin → Features.",
@@ -637,6 +640,32 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "from production, before turning this on."
         ),
         "sort_order": 8,
+        "deprecated": False,
+    },
+    {
+        "key": "workspaceRequestsEnabled",
+        "name": "Workspace requests",
+        "description": (
+            "Let anyone who can sign in ask for a workspace of their own — its name, what it is "
+            "for, the teammates to add and the Playground graphs to bring along — for Org and "
+            "Super Admins to approve, send back with a question, or decline."
+        ),
+        "impact_when_off": (
+            "Request a workspace disappears and the server refuses new and resubmitted requests. "
+            "Requests already sent can still be read, withdrawn and answered, and workspaces made "
+            "from them keep everything. Nothing is deleted."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Approving creates the workspace, makes the requester its Workspace Admin and their "
+            "teammates its Members, and moves the Playground graphs they chose into it with their "
+            "views."
+        ),
+        "sort_order": 9,
         "deprecated": False,
     },
     # ── Lineage ────────────────────────────────────────────────────────────────

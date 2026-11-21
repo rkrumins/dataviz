@@ -819,6 +819,106 @@ class WorkspaceDirectoryResponse(BaseModel):
     entries: list[WorkspaceDirectoryEntry] = Field(default_factory=list)
 
 
+# ── Workspace requests ───────────────────────────────────────────────
+
+class WorkspaceRequestCreate(BaseModel):
+    """Body for ``POST /api/v1/workspace-requests`` and, resubmitting one sent
+    back, ``PUT /api/v1/me/workspace-requests/{id}``. ``purpose`` is one of
+    ``team``, ``project``, ``poc``, ``reporting``, ``other``."""
+    model_config = ConfigDict(populate_by_name=True)
+    name: str = Field(max_length=200)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    purpose: str
+    team_name: Optional[str] = Field(default=None, alias="teamName", max_length=120)
+    teammate_ids: list[str] = Field(default_factory=list, alias="teammateIds", max_length=100)
+    playground_source_ids: list[str] = Field(
+        default_factory=list, alias="playgroundSourceIds", max_length=100,
+    )
+    data_needs: Optional[str] = Field(default=None, alias="dataNeeds", max_length=2000)
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class WorkspaceRequestApprove(BaseModel):
+    """Body for approving: the name and description to create the workspace
+    with, when the approver changes what was asked for."""
+    model_config = ConfigDict(populate_by_name=True)
+    name: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=2000)
+
+
+class WorkspaceRequestSendBack(BaseModel):
+    """Body for sending a request back: the question the requester answers."""
+    model_config = ConfigDict(populate_by_name=True)
+    question: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceRequestDecline(BaseModel):
+    """Body for declining: an optional reason the requester sees."""
+    model_config = ConfigDict(populate_by_name=True)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class WorkspaceRequestPerson(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+
+
+class WorkspaceRequestSource(BaseModel):
+    """A Playground graph the request brings along, and its live views."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    label: Optional[str] = None
+    view_count: int = Field(default=0, alias="viewCount")
+
+
+class WorkspaceRequestResponse(BaseModel):
+    """Wire shape of a workspace request. ``status`` is ``pending``,
+    ``changes_requested`` (``question`` waits for the requester), ``approved``,
+    ``declined`` or ``withdrawn``. An approved request names the workspace it
+    made, and ``outcome`` is ``{movedSources, failedSources: [{id, reason}],
+    membersAdded, workspaceId}``."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    requester_id: str = Field(alias="requesterId")
+    requester_name: Optional[str] = Field(default=None, alias="requesterName")
+    name: str
+    description: Optional[str] = None
+    purpose: str
+    team_name: Optional[str] = Field(default=None, alias="teamName")
+    teammate_ids: list[str] = Field(default_factory=list, alias="teammateIds")
+    teammates: list[WorkspaceRequestPerson] = Field(default_factory=list)
+    playground_source_ids: list[str] = Field(default_factory=list, alias="playgroundSourceIds")
+    playground_sources: list[WorkspaceRequestSource] = Field(default_factory=list, alias="playgroundSources")
+    data_needs: Optional[str] = Field(default=None, alias="dataNeeds")
+    note: Optional[str] = None
+    status: str
+    question: Optional[str] = None
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+    resolved_at: Optional[str] = Field(default=None, alias="resolvedAt")
+    resolved_by: Optional[str] = Field(default=None, alias="resolvedBy")
+    resolution_note: Optional[str] = Field(default=None, alias="resolutionNote")
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    outcome: Optional[dict] = None
+
+
+class WorkspaceRequestPlaygroundActivity(BaseModel):
+    """What the requester built in the Playground: their live graphs there, and
+    the live views on them."""
+    model_config = ConfigDict(populate_by_name=True)
+    graphs: int = 0
+    views: int = 0
+
+
+class WorkspaceRequestDetail(WorkspaceRequestResponse):
+    """A request as an approver reads it: who asked, and what they have built."""
+    requester_email: Optional[str] = Field(default=None, alias="requesterEmail")
+    playground_activity: WorkspaceRequestPlaygroundActivity = Field(
+        default_factory=WorkspaceRequestPlaygroundActivity, alias="playgroundActivity",
+    )
+
+
 # ── Access reviews ───────────────────────────────────────────────────
 
 class AccessReviewCounts(BaseModel):

@@ -42,6 +42,7 @@ __all__ = [
     "invite_repo",
     "access_request_repo",
     "access_review_repo",
+    "workspace_request_repo",
     "idp_group_mapping_repo",
     "idp_provider_repo",
     "user_identity_repo",
@@ -95,4 +96,5 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers and IDEs only
         user_identity_repo,
         user_repo,
         workspace_repo,
+        workspace_request_repo,
     )

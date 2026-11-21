@@ -1051,6 +1051,77 @@ class DataSourceTransferORM(Base):
         )
 
 
+class WorkspaceRequestORM(Base):
+    """Someone asking for a workspace of their own, for the people who create
+    workspaces to answer.
+
+    ``pending`` → ``approved`` | ``declined`` | ``withdrawn``, or ``pending`` →
+    ``changes_requested`` (an approver asked a ``question``) → ``pending`` again when
+    the requester edits and resubmits, or ``withdrawn`` / ``declined``. Approval
+    creates the workspace (``workspace_id``) and records what it did in ``outcome``
+    (JSON): the Playground graphs moved into it, those that could not be, and the
+    teammates added. One open request per person (``uq_workspace_requests_one_open``).
+
+    ``teammate_ids`` and ``playground_source_ids`` are JSON lists of ids. No foreign
+    keys, like ``data_source_transfers``: people, workspaces and sources are named by
+    id, and the record outlives them.
+    """
+    __tablename__ = "workspace_requests"
+
+    id = Column(Text, primary_key=True, default=lambda: f"wsr_{uuid.uuid4().hex[:12]}")
+    requester_id = Column(Text, nullable=False)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    purpose = Column(Text, nullable=False)
+    team_name = Column(Text, nullable=True)
+    teammate_ids = Column(Text, nullable=False, default="[]")            # JSON
+    playground_source_ids = Column(Text, nullable=False, default="[]")   # JSON
+    data_needs = Column(Text, nullable=True)
+    note = Column(Text, nullable=True)
+    status = Column(Text, nullable=False, default="pending")
+    question = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    workspace_id = Column(Text, nullable=True)
+    outcome = Column(Text, nullable=True)                                # JSON
+
+    __table_args__ = (
+        Index("idx_workspace_requests_status_created", "status", "created_at"),
+        Index("idx_workspace_requests_requester", "requester_id", "created_at"),
+        CheckConstraint(
+            "purpose IN ('team', 'project', 'poc', 'reporting', 'other')",
+            name="ck_workspace_requests_purpose",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'changes_requested', 'approved', 'declined', 'withdrawn')",
+            name="ck_workspace_requests_status",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND resolved_at IS NULL) "
+            "OR (status = 'changes_requested' AND resolved_at IS NULL AND question IS NOT NULL) "
+            "OR (status = 'approved' AND resolved_at IS NOT NULL AND workspace_id IS NOT NULL) "
+            "OR (status IN ('declined', 'withdrawn') AND resolved_at IS NOT NULL)",
+            name="ck_workspace_requests_state_consistency",
+        ),
+        # Both dialects, or SQLite silently builds a plain UNIQUE.
+        Index(
+            "uq_workspace_requests_one_open", "requester_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'changes_requested')"),
+            sqlite_where=text("status IN ('pending', 'changes_requested')"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<WorkspaceRequest id={self.id!r} requester={self.requester_id!r} "
+            f"name={self.name!r} status={self.status!r}>"
+        )
+
+
 # ------------------------------------------------------------------ #
 # context_models  (how to visualize/organize the graph)               #
 # ------------------------------------------------------------------ #

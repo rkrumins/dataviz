@@ -50,6 +50,7 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "WorkspaceORM": "workspace",
     "WorkspaceDataSourceORM": "workspace",
     "DataSourceTransferORM": "workspace",
+    "WorkspaceRequestORM": "workspace",
     "AssignmentRuleSetORM": "workspace",
     # provider
     "ProviderORM": "provider",

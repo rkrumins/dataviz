@@ -1086,6 +1086,17 @@ group's members aren't told), `access.expiring` before it ends and
 `access.exception_retired` when the identity provider takes an exception
 over; admins get `access_review.overdue`.
 
+**Workspace requests** (kind; `/workspace-requests`, answered by holders of
+`system:workspaces:create`):
+
+* approvers get `workspace_request.submitted` and
+  `workspace_request.resubmitted`, linking to `/workspaces?tab=requests`;
+* the requester gets `workspace_request.approved` (linking to
+  `/workspaces/{id}?welcome=1`), and `workspace_request.sent_back` and
+  `workspace_request.declined` (linking to `/my/access?tab=workspaces`);
+* teammates the approval adds get `workspace.member_added`, linking to
+  `/workspaces/{id}`.
+
 ## Invites
 
 A platform administrator (`system:admin`) can mint an invite for **any**
