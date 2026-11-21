@@ -83,6 +83,9 @@ export interface WorkspaceRequest {
     /** Approver detail only: how to reach the requester, and what they built in the Playground. */
     requesterEmail?: string | null
     playgroundActivity?: { graphs: number; views: number }
+    /** Approver detail: whether the Playground's sandbox connection lets a new workspace in
+     *  (null when no graph comes along). */
+    sandboxAdmitsNew?: boolean | null
 }
 
 /** What the requester fills in. */
@@ -131,6 +134,8 @@ export const workspaceRequestsService = {
         groupNames?: Record<string, string>
         /** The identity-provider connection the links are for; none means any connection. */
         idpProviderId?: string | null
+        /** Allow the new workspace on the sandbox connection, so the graphs can move. */
+        admitToSandbox?: boolean
     } = {}) =>
         authFetch<WorkspaceRequest>(`${ADMIN}/${encodeURIComponent(id)}/approve`, json(overrides)),
     /** A platform administrator links a group from an approved request to its identity-provider group. */

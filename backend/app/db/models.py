@@ -1091,6 +1091,10 @@ class WorkspaceRequestORM(Base):
     resolution_note = Column(Text, nullable=True)
     workspace_id = Column(Text, nullable=True)
     outcome = Column(Text, nullable=True)                                # JSON
+    #: When a request left waiting was brought up again to the approvers, then to
+    #: the platform administrators (``access_housekeeping``); cleared on resubmit.
+    reminded_at = Column(Text, nullable=True)
+    escalated_at = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("idx_workspace_requests_status_created", "status", "created_at"),

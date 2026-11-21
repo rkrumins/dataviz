@@ -63,7 +63,7 @@ export function useWorkspaceRequestActions() {
         approve: useMutation({
             mutationFn: ({ id, ...overrides }: {
                 id: string; name?: string; description?: string
-                groupNames?: Record<string, string>; idpProviderId?: string | null
+                groupNames?: Record<string, string>; idpProviderId?: string | null; admitToSandbox?: boolean
             }) => workspaceRequestsService.approve(id, overrides),
             onSuccess: async () => {
                 await done()

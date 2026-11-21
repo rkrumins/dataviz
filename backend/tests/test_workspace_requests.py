@@ -572,3 +572,86 @@ async def test_a_taken_group_name_stops_the_approval_before_anything_is_made(
         "type": "group_name_taken", "message": None, "groupKey": "g2", "suggestion": "Ada's Lab · Readers 2"}
     made = (await db_session.execute(select(WorkspaceORM).where(WorkspaceORM.name == "Ada's Lab"))).scalars().all()
     assert made == []
+
+
+# ── Requests left waiting ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_request_left_waiting_is_brought_up_then_taken_further_once_each(
+    test_client: AsyncClient, estate, db_session, flag_on,
+):
+    from datetime import datetime, timedelta
+    from backend.app.services.access_housekeeping import nudge_waiting_workspace_requests
+
+    db_session.add(UserORM(id=ROOT.id, email=ROOT.email, password_hash="x", first_name="Root", last_name="T",
+                           status="active", created_at=T0, updated_at=T0))
+    db_session.add(RoleBindingORM(subject_type="user", subject_id=ROOT.id, role_name="super_admin", scope_type="global"))
+    await db_session.commit()
+    req = await _submit(test_client)
+    sent = datetime.fromisoformat((await db_session.get(WorkspaceRequestORM, req["id"])).updated_at)
+
+    assert await nudge_waiting_workspace_requests(db_session, now=sent + timedelta(days=2)) == (0, 0)
+    assert await nudge_waiting_workspace_requests(db_session, now=sent + timedelta(days=4)) == (1, 0)
+    assert (await _kinds(db_session, OLGA.id))["workspace_request.reminder"] == "/workspaces?tab=requests"
+    assert await nudge_waiting_workspace_requests(db_session, now=sent + timedelta(days=5)) == (0, 0)   # once
+    assert await nudge_waiting_workspace_requests(db_session, now=sent + timedelta(days=8)) == (0, 1)
+    assert (await _kinds(db_session, ROOT.id))["workspace_request.escalated"] == "/workspaces?tab=requests"
+    assert await nudge_waiting_workspace_requests(db_session, now=sent + timedelta(days=30)) == (0, 0)
+
+    # Sent back and answered: the waiting starts afresh.
+    with _as(OLGA, APPROVER):
+        await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/send-back", json={"question": "Why?"})
+    with _as(ADA, PLAYER):
+        r = await test_client.put(f"/api/v1/me/workspace-requests/{req['id']}", json=_ask(note="Because"))
+    assert r.status_code == 200, r.text
+    row = (await db_session.execute(
+        select(WorkspaceRequestORM).where(WorkspaceRequestORM.id == req["id"]).execution_options(populate_existing=True)
+    )).scalar_one()
+    assert (row.reminded_at, row.escalated_at) == (None, None)
+    later = datetime.fromisoformat(row.updated_at)
+    assert await nudge_waiting_workspace_requests(db_session, now=later + timedelta(days=4)) == (1, 0)
+
+
+# ── A sandbox connection that names its workspaces ──────────────────────
+
+@pytest.mark.asyncio
+async def test_a_sandbox_that_names_its_workspaces_is_flagged_and_a_platform_admin_can_let_the_new_one_in(
+    test_client: AsyncClient, estate, db_session, flag_on,
+):
+    sandbox = await db_session.get(ProviderORM, "prov_sandbox")
+    sandbox.permitted_workspaces = json.dumps([PG])
+    await db_session.commit()
+    req = await _submit(test_client, playgroundSourceIds=["ds_ada_a"])
+    with _as(OLGA, APPROVER):
+        detail = await test_client.get(f"/api/v1/admin/workspace-requests/{req['id']}")
+        refused = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/approve",
+                                         json={"admitToSandbox": True})
+    assert detail.json()["sandboxAdmitsNew"] is False
+    assert refused.status_code == 403 and refused.json()["detail"]["type"] == "cannot_admit"
+
+    with _as(ROOT, PLATFORM):
+        r = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/approve",
+                                   json={"admitToSandbox": True})
+    assert r.status_code == 200, r.text
+    ws_id = r.json()["workspaceId"]
+    assert r.json()["outcome"]["movedSources"] == ["ds_ada_a"] and r.json()["outcome"]["failedSources"] == []
+    sandbox = (await db_session.execute(
+        select(ProviderORM).where(ProviderORM.id == "prov_sandbox").execution_options(populate_existing=True)
+    )).scalar_one()
+    assert json.loads(sandbox.permitted_workspaces) == [PG, ws_id]
+
+
+@pytest.mark.asyncio
+async def test_the_flag_is_absent_when_no_graph_comes_along_or_every_workspace_is_let_in(
+    test_client: AsyncClient, estate, flag_on,
+):
+    bare = await _submit(test_client, playgroundSourceIds=[])
+    with _as(OLGA, APPROVER):
+        none = await test_client.get(f"/api/v1/admin/workspace-requests/{bare['id']}")
+    assert none.json()["sandboxAdmitsNew"] is None
+    with _as(ADA, PLAYER):
+        await test_client.post(f"/api/v1/me/workspace-requests/{bare['id']}/withdraw")
+    req = await _submit(test_client, playgroundSourceIds=["ds_ada_a"])
+    with _as(OLGA, APPROVER):
+        ok = await test_client.get(f"/api/v1/admin/workspace-requests/{req['id']}")
+    assert ok.json()["sandboxAdmitsNew"] is True

@@ -8,6 +8,9 @@
   reminded; after a week the Org Admins hear too. Once each.
 * **Access reviews past their due date.** The workspace's admins and whoever
   started the review hear once.
+* **Workspace requests still waiting.** After three days the people who create
+  workspaces (Org and Super Admins) are reminded; after a week the platform
+  administrators hear too. Once each, counted from when it was last sent.
 
 Runs on the CONTROLPLANE/DEV role only, like the other sweepers, and claims an
 advisory lock per pass so two processes never send the same reminder. It
@@ -30,6 +33,7 @@ from backend.app.db.models import (
     AccessReviewORM,
     RoleBindingORM,
     WorkspaceORM,
+    WorkspaceRequestORM,
 )
 from backend.app.db.repositories import notification_repo, user_repo
 from backend.common.roles import role_label
@@ -249,6 +253,57 @@ async def nudge_waiting_requests(
     return reminded, escalated
 
 
+async def nudge_waiting_workspace_requests(
+    session: AsyncSession, *, now: Optional[datetime] = None,
+) -> tuple[int, int]:
+    """Bring up workspace requests nobody has answered: to the people who create
+    workspaces after :data:`REMIND_AFTER`, to the platform administrators after
+    :data:`ESCALATE_AFTER` — counted from when the request was last sent. A request
+    sent back waits on its requester, not on them. Returns ``(reminded, escalated)``."""
+    now = now or _now()
+    rows = (await session.execute(
+        select(WorkspaceRequestORM).where(
+            WorkspaceRequestORM.status == "pending",
+            WorkspaceRequestORM.updated_at <= (now - REMIND_AFTER).isoformat(),
+            or_(WorkspaceRequestORM.reminded_at.is_(None), WorkspaceRequestORM.escalated_at.is_(None)),
+        ).order_by(WorkspaceRequestORM.updated_at).limit(_BATCH)
+    )).scalars().all()
+    if not rows:
+        return 0, 0
+    names = await user_repo.get_identities_by_ids(session, sorted({r.requester_id for r in rows}))
+    approvers = await notification_repo.users_with_global_permission(session, "system:workspaces:create")
+    platform: Optional[set[str]] = None
+    reminded = escalated = 0
+    for row in rows:
+        waited = now - (_instant(row.updated_at) or now)
+        ident = names.get(row.requester_id)
+        who = (ident["name"] or ident["email"]) if ident else "Someone"
+        if row.reminded_at is None:
+            row.reminded_at = now.isoformat()
+            await notification_repo.notify(
+                session, user_ids=approvers - {row.requester_id}, kind="workspace_request.reminder",
+                title=f"{who} is still waiting for a workspace: {row.name}",
+                body=f"Asked {_days(waited)} days ago. Answer it on the Requests tab.",
+                link="/workspaces?tab=requests", resource_type="workspace_request", resource_id=row.id,
+                dedupe_unread=True,
+            )
+            reminded += 1
+        if row.escalated_at is None and waited >= ESCALATE_AFTER:
+            row.escalated_at = now.isoformat()
+            if platform is None:
+                platform = await notification_repo.users_with_global_permission(session, "system:admin")
+            await notification_repo.notify(
+                session, user_ids=platform - {row.requester_id}, kind="workspace_request.escalated",
+                title=f"Nobody has answered {who}'s request for a workspace",
+                body=f"“{row.name}” has waited {_days(waited)} days. You can answer it on the Requests tab.",
+                link="/workspaces?tab=requests", resource_type="workspace_request", resource_id=row.id,
+                dedupe_unread=True,
+            )
+            escalated += 1
+    await session.flush()
+    return reminded, escalated
+
+
 async def flag_overdue_reviews(session: AsyncSession, *, now: Optional[datetime] = None) -> int:
     """Tell a workspace's admins, once, that its access review is past its
     due date — with how much is left. Returns how many reviews it flagged."""
@@ -306,6 +361,8 @@ async def run_sweeper(
                 if await claim_this_pass(session, "rbac:access-housekeeping"):
                     expiring = await remind_expiring(session)
                     reminded, escalated = await nudge_waiting_requests(session)
+                    ws_reminded, ws_escalated = await nudge_waiting_workspace_requests(session)
+                    reminded, escalated = reminded + ws_reminded, escalated + ws_escalated
                     overdue = await flag_overdue_reviews(session)
                     await session.commit()
                     if expiring or reminded or escalated or overdue:

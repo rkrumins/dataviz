@@ -1090,7 +1090,9 @@ over; admins get `access_review.overdue`.
 `system:workspaces:create`):
 
 * approvers get `workspace_request.submitted` and
-  `workspace_request.resubmitted`, linking to `/workspaces?tab=requests`;
+  `workspace_request.resubmitted`, linking to `/workspaces?tab=requests`, and
+  `workspace_request.reminder` when one has waited three days; platform
+  administrators get `workspace_request.escalated` after a week;
 * the requester gets `workspace_request.approved` (linking to
   `/workspaces/{id}?welcome=1`), and `workspace_request.sent_back` and
   `workspace_request.declined` (linking to `/my/access?tab=workspaces`);

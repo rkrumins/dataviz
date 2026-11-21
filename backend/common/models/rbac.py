@@ -868,6 +868,9 @@ class WorkspaceRequestApprove(BaseModel):
     description: Optional[str] = Field(default=None, max_length=2000)
     group_names: Optional[dict[str, str]] = Field(default=None, alias="groupNames")
     idp_provider_id: Optional[str] = Field(default=None, alias="idpProviderId", max_length=200)
+    #: Allow the new workspace on the Playground's sandbox connection first, so the
+    #: graphs can move into it (platform administrators: connections are theirs).
+    admit_to_sandbox: bool = Field(default=False, alias="admitToSandbox")
 
 
 class WorkspaceRequestIdpLink(BaseModel):
@@ -955,6 +958,10 @@ class WorkspaceRequestDetail(WorkspaceRequestResponse):
     playground_activity: WorkspaceRequestPlaygroundActivity = Field(
         default_factory=WorkspaceRequestPlaygroundActivity, alias="playgroundActivity",
     )
+    #: Whether the Playground's sandbox connection lets a new workspace in — when it
+    #: names its workspaces, the graphs can't move into the new one unless it is
+    #: allowed (``admitToSandbox`` on approval). None when no graph comes along.
+    sandbox_admits_new: Optional[bool] = Field(default=None, alias="sandboxAdmitsNew")
 
 
 # ── Access reviews ───────────────────────────────────────────────────

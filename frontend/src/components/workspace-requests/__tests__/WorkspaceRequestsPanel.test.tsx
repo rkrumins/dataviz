@@ -171,3 +171,27 @@ describe('Groups asked for with the workspace', () => {
         expect(screen.queryByText('Identity-provider links to confirm')).not.toBeInTheDocument()
     })
 })
+
+describe('A sandbox connection that names its workspaces', () => {
+    const CLOSED = { ...REQUEST, sandboxAdmitsNew: false } as unknown as WorkspaceRequest
+
+    it('lets a platform administrator let the new workspace in, on by default', async () => {
+        useAuthStore.setState({ permissions: { global: ['system:admin', 'system:workspaces:create'], ws: {} } } as never)
+        api.get.mockResolvedValue(CLOSED)
+        api.approve.mockResolvedValue({ ...CLOSED, status: 'approved', workspaceId: 'ws_new',
+            outcome: { workspaceId: 'ws_new', movedSources: ['ds_1'], failedSources: [], membersAdded: [] } })
+        const { user, drawer } = await openReview()
+        expect(await within(drawer).findByText(/only lets in workspaces it names/)).toBeInTheDocument()
+        expect(within(drawer).getByRole('checkbox', { name: /Let the new workspace in/ })).toBeChecked()
+        await user.click(within(drawer).getByRole('button', { name: /Approve…/ }))
+        await user.click(within(drawer).getByRole('button', { name: /Approve and create/ }))
+        expect(api.approve).toHaveBeenCalledWith('wsr_1', expect.objectContaining({ admitToSandbox: true }))
+    })
+
+    it('tells an Org Admin the graphs stay in the Playground until a platform administrator lets it in', async () => {
+        api.get.mockResolvedValue(CLOSED)
+        const { drawer } = await openReview()
+        expect(await within(drawer).findByText(/stay in the Playground for now/)).toBeInTheDocument()
+        expect(within(drawer).queryByRole('checkbox')).not.toBeInTheDocument()
+    })
+})

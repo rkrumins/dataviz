@@ -157,6 +157,17 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         icon: 'text-amber-500',
         tile: 'bg-amber-500/10',
     },
+    // A request for a workspace left waiting: brought up to the approvers, then further.
+    'workspace_request.reminder': {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'workspace_request.escalated': {
+        Icon: ShieldAlert,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
     // Groups an approved request made, waiting for a platform administrator to link them
     // to the identity provider.
     'workspace_request.idp_links_pending': {

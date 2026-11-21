@@ -67,6 +67,8 @@ def upgrade() -> None:
             sa.Column("resolution_note", sa.Text(), nullable=True),
             sa.Column("workspace_id", sa.Text(), nullable=True),
             sa.Column("outcome", sa.Text(), nullable=True),
+            sa.Column("reminded_at", sa.Text(), nullable=True),
+            sa.Column("escalated_at", sa.Text(), nullable=True),
             sa.CheckConstraint(
                 "purpose IN ('team', 'project', 'poc', 'reporting', 'other')",
                 name="ck_workspace_requests_purpose",

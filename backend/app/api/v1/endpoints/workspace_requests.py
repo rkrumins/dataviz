@@ -161,7 +161,8 @@ async def approve_workspace_request(
     body = body or WorkspaceRequestApprove()
     row = await service.approve(session, approver, claims, request_id,
                                 name=body.name, description=body.description,
-                                group_names=body.group_names, idp_provider_id=body.idp_provider_id)
+                                group_names=body.group_names, idp_provider_id=body.idp_provider_id,
+                                admit_to_sandbox=body.admit_to_sandbox)
     return await _one(session, row)
 
 

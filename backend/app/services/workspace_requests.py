@@ -33,7 +33,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
-    GroupORM, IdpProviderORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM, WorkspaceRequestORM, view_is_live,
+    GroupORM, IdpProviderORM, ProviderORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM, WorkspaceRequestORM,
+    view_is_live,
 )
 from backend.app.db.repositories import (
     group_repo,
@@ -302,6 +303,8 @@ async def resubmit(session: AsyncSession, user: User, request_id: str,
     row.teammate_ids = json.dumps(fields["teammate_ids"])
     row.playground_source_ids = json.dumps(fields["playground_source_ids"])
     row.proposed_groups = json.dumps(fields["proposed_groups"])
+    # Waiting starts afresh: the reminders count from now.
+    row.reminded_at = row.escalated_at = None
     await _move(session, row, "pending", "resubmitted", actor_id=user.id)
     await _emit(session, "workspace.request.resubmitted", row, user.id)
     await _tell_approvers(session, row, "workspace_request.resubmitted",
@@ -521,10 +524,38 @@ async def _link(session: AsyncSession, group_id: str, idp_group: str, provider_i
     return None
 
 
+async def _sandbox_provider(session: AsyncSession) -> Optional[ProviderORM]:
+    """The Playground's sandbox connection, if there is one."""
+    playground = await get_playground(session)
+    if playground is None:
+        return None
+    provider_id = json.loads(playground.playground_settings or "{}").get("sandboxProviderId")
+    return await session.get(ProviderORM, provider_id) if provider_id else None
+
+
+def _permitted(provider: ProviderORM) -> list[str]:
+    """A connection's allowed workspaces; none listed means every one."""
+    try:
+        value = json.loads(provider.permitted_workspaces) if provider.permitted_workspaces else ["*"]
+    except (TypeError, ValueError):
+        value = ["*"]
+    return [str(v) for v in value] if isinstance(value, list) and value else ["*"]
+
+
+async def _sandbox_admits_new(session: AsyncSession, row: WorkspaceRequestORM) -> Optional[bool]:
+    """Whether graphs coming along can move into a workspace made now: the sandbox
+    connection lets in every workspace, or names them. None when none come along."""
+    if not repo.ids_of(row.playground_source_ids):
+        return None
+    provider = await _sandbox_provider(session)
+    return provider is None or "*" in _permitted(provider)
+
+
 async def approve(session: AsyncSession, approver: User, claims: PermissionClaims, request_id: str, *,
                   name: Optional[str] = None, description: Optional[str] = None,
                   group_names: Optional[dict[str, str]] = None,
-                  idp_provider_id: Optional[str] = None) -> WorkspaceRequestORM:
+                  idp_provider_id: Optional[str] = None,
+                  admit_to_sandbox: bool = False) -> WorkspaceRequestORM:
     """Create the workspace, bind its people and bring the Playground graphs along.
 
     The workspace, its bindings and the approval are committed first; each graph's
@@ -541,6 +572,9 @@ async def approve(session: AsyncSession, approver: User, claims: PermissionClaim
     names = await _group_names(session, proposals, ws_name, group_names)
     if idp_provider_id and await session.get(IdpProviderORM, idp_provider_id) is None:
         raise HTTPException(status_code=422, detail="That identity-provider connection doesn't exist.")
+    if admit_to_sandbox and not has_permission(claims, "system:admin"):
+        raise _refuse(status.HTTP_403_FORBIDDEN, "cannot_admit",
+                      "Only a platform administrator can allow a workspace on the sandbox connection.")
 
     created = await workspace_repo.create_workspace(
         session, WorkspaceCreateRequest(name=ws_name, description=ws_description, dataSources=[]),
@@ -573,6 +607,15 @@ async def approve(session: AsyncSession, approver: User, claims: PermissionClaim
 
     made = await _make_groups(session, row, proposals, names, ws_id, ws_name, approver, claims,
                               idp_provider_id or None) if proposals else {}
+    if admit_to_sandbox and repo.ids_of(row.playground_source_ids):
+        sandbox = await _sandbox_provider(session)
+        if sandbox is not None and "*" not in (allowed := _permitted(sandbox)) and ws_id not in allowed:
+            sandbox.permitted_workspaces = json.dumps([*allowed, ws_id])
+            await user_repo.create_outbox_event(
+                session, event_type="provider.connection.workspace_admitted",
+                payload={"provider_id": sandbox.id, "workspace_id": ws_id, "actor_id": approver.id,
+                         "request_id": row.id},
+            )
 
     source_ids = repo.ids_of(row.playground_source_ids)
     outcome: dict = {"movedSources": [], "failedSources": [], "membersAdded": added, "workspaceId": ws_id, **made}
@@ -725,5 +768,5 @@ async def detail(session: AsyncSession, row: WorkspaceRequestORM) -> WorkspaceRe
             )
     return WorkspaceRequestDetail(
         **base.model_dump(), requester_email=ident["email"] if ident else None,
-        playground_activity=activity,
+        playground_activity=activity, sandbox_admits_new=await _sandbox_admits_new(session, row),
     )

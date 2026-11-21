@@ -63,12 +63,16 @@ export function ReviewWorkspaceRequestDrawer({ request: listed, onClose }: { req
         staleTime: 60_000,
     }).data ?? []
     const [providerId, setProviderId] = useState('')
+    // The sandbox connection names its workspaces: graphs can't move into a new one unless it's let in.
+    const sandboxClosed = request.sandboxAdmitsNew === false && sources.length > 0
+    const [admit, setAdmit] = useState(true)
 
     const approve = () => actions.approve.mutate(
         {
             id: request.id, name: name.trim(), description: description.trim(),
             groupNames: Object.keys(groupNames).length ? groupNames : undefined,
             idpProviderId: canLink && toLink.length ? providerId || null : undefined,
+            admitToSandbox: sandboxClosed && canLink ? admit : undefined,
         },
         {
             onSuccess: (r) => setApproved(r),
@@ -195,6 +199,21 @@ export function ReviewWorkspaceRequestDrawer({ request: listed, onClose }: { req
                                         <p className="mt-2 text-xs text-ink-muted">
                                             On approval these move with their views. People in the Playground who aren’t in the new workspace stop seeing them.
                                         </p>
+                                        {sandboxClosed && (
+                                            <div role="note" className="mt-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] p-3 text-xs text-ink">
+                                                <p className="font-semibold text-amber-800 dark:text-amber-200">The sandbox connection only lets in workspaces it names.</p>
+                                                {canLink ? (
+                                                    <label className="mt-2 flex items-start gap-2">
+                                                        <input type="checkbox" checked={admit} onChange={e => setAdmit(e.target.checked)} className="mt-0.5" />
+                                                        <span>Let the new workspace in, so these graphs can move. Otherwise they stay in the Playground.</span>
+                                                    </label>
+                                                ) : (
+                                                    <p className="mt-1 text-ink-secondary">
+                                                        These graphs can’t move into a new workspace until a platform administrator lets it in. If you approve, they stay in the Playground for now.
+                                                    </p>
+                                                )}
+                                            </div>
+                                        )}
                                     </>
                                 )}
                             </Section>

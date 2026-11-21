@@ -102,6 +102,14 @@ it's for, who's in it, what comes over from the Playground and what data they ne
   answer and resend it.
 * **Decline** says no, with a reason they'll see.
 
+If graphs come along from the Playground but its sandbox connection only lets in
+workspaces it names, the drawer says so. A platform administrator can let the new
+workspace in as they approve (it's ticked for them); otherwise the graphs stay in the
+Playground until someone does.
+
+A request nobody answers is brought up again: to the people who create workspaces
+after three days, and to the platform administrators after a week.
+
 You can't answer a request of your own.
 
 ## Where to next
