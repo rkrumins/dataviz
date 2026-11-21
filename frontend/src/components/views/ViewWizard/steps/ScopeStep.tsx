@@ -9,7 +9,8 @@
  * only requires changing the data source, not this component.
  */
 
-import { useState, useMemo, useCallback, useEffect, useRef, memo, type ReactNode } from 'react'
+import { useState, useMemo, useCallback, useContext, useEffect, useRef, memo, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import { useFeature } from '@/store/features'
 import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -35,6 +36,8 @@ import {
     Sparkles,
     WifiOff,
     FileUp,
+    WandSparkles,
+    UploadCloud,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -49,6 +52,7 @@ import { useWorkspacePage } from '@/hooks/useWorkspacePage'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
+import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import type { ScopeMode } from '../ViewWizard'
 import type { ProviderScopeOption } from '../useBlankScopeOptions'
 
@@ -980,6 +984,45 @@ function BlankPickerEmpty({ icon, title, hint, href, cta }: { icon: ReactNode; t
     )
 }
 
+/**
+ * In the Playground, no starter data model to begin a blank graph from is not a dead end: a
+ * sample or the member's own data makes a data model of its own. Both start on the Playground's
+ * front page, so the wizard closes on the way there.
+ */
+function PlaygroundNoModels() {
+    const close = useContext(ViewEditorContext)?.closeViewEditor
+    const starts = [
+        { to: '/playground?start=samples', label: 'Start from a sample', hint: 'A ready-made graph, with its own data model', icon: WandSparkles, tile: 'from-amber-400 to-orange-500' },
+        { to: '/playground?start=import', label: 'Bring your own data', hint: 'Your CSV or JSON files make the data model', icon: UploadCloud, tile: 'from-sky-400 to-indigo-500' },
+    ]
+    return (
+        <div className="rounded-xl border border-dashed border-violet-500/30 bg-violet-500/[0.04] px-4 py-6 text-center">
+            <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">No starter data models yet</p>
+            <p className="mx-auto mt-1 max-w-sm text-xs text-slate-500 dark:text-slate-400">
+                A blank graph begins from a data model, and none is offered here yet. Start from a sample or bring your own data instead — either makes one for you.
+            </p>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                {starts.map(s => (
+                    <Link
+                        key={s.to}
+                        to={s.to}
+                        onClick={() => close?.()}
+                        className="flex items-center gap-3 rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2.5 text-left shadow-sm transition hover:border-violet-500/40 hover:shadow-md hover:shadow-violet-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/50"
+                    >
+                        <span className={cn('flex w-8 h-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white', s.tile)}>
+                            <s.icon className="w-4 h-4" aria-hidden />
+                        </span>
+                        <span className="min-w-0">
+                            <span className="block text-xs font-semibold text-ink">{s.label}</span>
+                            <span className="block text-[11px] text-ink-muted">{s.hint}</span>
+                        </span>
+                    </Link>
+                ))}
+            </div>
+        </div>
+    )
+}
+
 function BlankScopePickers({
     providers,
     ontologies,
@@ -989,6 +1032,7 @@ function BlankScopePickers({
     onSelectProvider,
     onSelectOntology,
     ontologySlot,
+    isPlayground = false,
 }: {
     providers: ProviderScopeOption[]
     ontologies: OntologyDefinitionResponse[]
@@ -998,6 +1042,8 @@ function BlankScopePickers({
     onSelectProvider: (id: string) => void
     onSelectOntology: (id: string) => void
     ontologySlot?: ReactNode
+    /** The Playground: its members start from a "starter data model", and without one, elsewhere. */
+    isPlayground?: boolean
 }) {
     const [typeFilter, setTypeFilter] = useState<'all' | string>('all')
 
@@ -1081,11 +1127,13 @@ function BlankScopePickers({
             {ontologySlot ?? <section className="space-y-3">
                 <div className="flex items-center gap-2">
                     <Sparkles className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Published semantic layer</span>
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">{isPlayground ? 'Starter data model' : 'Published semantic layer'}</span>
                     <span className="text-xs text-slate-400 ml-auto">{ontologies.length}</span>
                 </div>
                 {loading ? (
                     <PickerSkeleton />
+                ) : ontologies.length === 0 && isPlayground ? (
+                    <PlaygroundNoModels />
                 ) : ontologies.length === 0 ? (
                     <BlankPickerEmpty
                         icon={<Sparkles className="w-6 h-6" />}
@@ -1522,6 +1570,7 @@ export function ScopeStep({
                             onSelectProvider={onSelectProvider}
                             onSelectOntology={onSelectOntology}
                             ontologySlot={blankOntologySlot}
+                            isPlayground={selectedWorkspace.kind === 'playground'}
                         />
                     ) : selectedWorkspace ? (
                         <>
