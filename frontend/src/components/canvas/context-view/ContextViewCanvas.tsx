@@ -378,6 +378,11 @@ import {
 } from '../search/session/useViewSearchSessionController'
 import { questionsFromHere } from '../search/session/queryFromHere'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
+import { PropertyOpHost } from '../property-manager/PropertyOpHost'
+import { MAX_CONTAINERS, propertyJobLabel, type TargetPreset } from '../property-manager/op/opModel'
+import { usePropertyJobs } from '@/features/versioning/hooks/usePropertyJobs'
+import { usePropertyJobsStore, type TrackedJob } from '@/store/propertyJobsStore'
+import type { PropertyJob } from '@/services/versioningApiService'
 import { OrphansDrawer } from './OrphansDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
@@ -4848,6 +4853,44 @@ export function ContextViewCanvas({
   // Warn the user once when any child fetch fails — gives them an explicit
   // signal beyond the inline error rows inside the affected parent's subtree.
   const { notify } = useAppNotifications()
+
+  // BULK PROPERTY CHANGES — written to the draft open here by a job on the server, while the canvas
+  // can write to it; followed to the end (across a reload), and the canvas re-read once one lands —
+  // unless staged edits wait, which a re-read would not lose but the reader may want to finish first.
+  const propertyGraphWrite = useMemo(() => (canvasWritable && scopeWsId && graphId && effectiveBranchId
+    ? { wsId: scopeWsId, graphId, branchId: effectiveBranchId } : null), [canvasWritable, scopeWsId, graphId, effectiveBranchId])
+  const propertyLayers = useMemo(() => storeLayers.map((l) => ({ id: l.id, name: l.name })), [storeLayers])
+  const onPropertyJobEnded = useCallback((tracked: TrackedJob, job: PropertyJob) => {
+    const what = propertyJobLabel(tracked.op)
+    if (job.status === 'cancelled') {
+      notify('info', `${what} was stopped — what it had already changed stays on your draft.`)
+      return
+    }
+    if (job.status === 'failed') {
+      const why = typeof job.error === 'string' ? job.error : job.error?.message
+      notify('error', `${what} stopped${why ? `: ${why}` : ''}. What it had already changed stays on your draft.`)
+      return
+    }
+    const changed = job.summary?.changed ?? 0
+    // The write gate's own refusals; the rest of `refused` were left alone (or not in the draft).
+    const refused = job.summary?.refused?.byReason?.write_refused ?? 0
+    const message = `${what}: ${changed.toLocaleString()} ${changed === 1 ? 'entity' : 'entities'} changed on your draft`
+      + (refused ? ` — ${refused.toLocaleString()} couldn’t be; Property Manager says why.` : '.')
+    const reread = () => {
+      queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
+      releaseProviderCaches()
+      useBranchStore.getState().bumpDraftEpoch()
+      useBranchStore.getState().setCommittedDiffHidden(false)
+    }
+    if (useStagedChangesStore.getState().changes.length === 0) {
+      reread()
+      notify(refused ? 'warning' : 'success', message,
+        { label: 'Review changes', onClick: () => useStagedChangesStore.getState().openReviewPanel('saved') })
+    } else {
+      notify('info', `${message} Refresh the canvas to see it — your staged changes stay staged.`, { label: 'Refresh canvas', onClick: reread })
+    }
+  }, [notify, queryClient])
+  usePropertyJobs(scopeWsId, graphId, effectiveBranchId, onPropertyJobEnded)
   const lastFailedCountRef = useRef(0)
   useEffect(() => {
     const count = failedNodes?.size ?? 0
@@ -4909,6 +4952,15 @@ export function ContextViewCanvas({
     window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
     void narrowNow({ spec: initialNarrowShare.spec, seedsLabel: initialNarrowShare.label ?? 'the shared starting points' })
   }, [initialNarrowShare, narrowEnabled, narrowViewId, narrowNow])
+  // A property changed on every match of a search — the exact match set, every page — on the draft.
+  const editFromSearch = useCallback((query: SearchQuery, count: number | null) => {
+    usePropertyJobsStore.getState().requestOp({
+      target: {
+        kind: 'search', predicate: query.predicate, label: 'the search’s matches', count: count ?? undefined,
+        scopeMode: query.scope?.scopeMode === 'data_source' ? 'data_source' : 'view',
+      },
+    })
+  }, [])
   const narrowFromSearch = useCallback((query: SearchQuery) => {
     openNarrow({
       spec: specFor({ query: query.predicate }, {}, query.scope?.scopeMode === 'data_source' ? 'dataSource' : 'view'),
@@ -5137,7 +5189,38 @@ export function ContextViewCanvas({
     return actions
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactions.state.contextMenu.target, membersEditable, displayMap, applyMemberOps, notify])
-  const nodeCustomActions = useMemo(() => [...memberMenuActions, ...reorderMenuActions], [memberMenuActions, reorderMenuActions])
+  // PROPERTIES from a right-click: compare a selection in the entity drawer; change a property on a
+  // container's children, or on everything inside it — however many, on the draft.
+  const propertyMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const target = interactions.state.contextMenu.target
+    if (!target || target.type !== 'node' || !isSelectableNode(target.id)) return []
+    const selection = selectedNodeIds.filter(isSelectableNode)
+    const many = selection.length > 1 && selection.includes(target.id)
+    const ids = many ? selection : [target.id]
+    const actions: ContextMenuAction[] = []
+    if (many) {
+      actions.push({ id: 'compare-selection', label: `Compare & edit ${ids.length.toLocaleString()}…`, icon: 'Layers',
+        onClick: () => { interactions.closeContextMenu(); useCanvasStore.getState().openNodesDrawer(ids) } })
+    }
+    const containers = canvasWritable
+      ? ids.filter((id) => Number(displayMap.get(id)?.data?.childCount ?? 0) > 0).slice(0, MAX_CONTAINERS) : []
+    if (containers.length > 0) {
+      const urns = containers.map((id) => (displayMap.get(id)?.data?.urn as string | undefined) ?? id)
+      const label = urns.length === 1 ? canvasDisplayName(urns[0]!) : `${urns.length} containers`
+      const ask = (target: TargetPreset) => () => { interactions.closeContextMenu(); usePropertyJobsStore.getState().requestOp({ target }) }
+      actions.push(
+        { id: 'properties-children', label: `Change properties of ${urns.length === 1 ? 'its' : 'their'} children…`, icon: 'ListTree',
+          onClick: ask({ kind: 'children', urns, label }) },
+        { id: 'properties-inside', label: 'Change properties of everything inside…', icon: 'FolderTree',
+          onClick: ask({ kind: 'inside', urns, label, includeSelf: false }) },
+      )
+    }
+    if (actions.length) actions[actions.length - 1] = { ...actions[actions.length - 1], dividerAfter: true }
+    return actions
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.state.contextMenu.target, selectedNodeIds, canvasWritable, displayMap])
+  const nodeCustomActions = useMemo(() => [...propertyMenuActions, ...memberMenuActions, ...reorderMenuActions],
+    [propertyMenuActions, memberMenuActions, reorderMenuActions])
   // Right-click → Narrow to this: one entry per reach, applied at once; or
   // choose in the composer. The selection the entity is part of narrows together.
   const narrowMenuActions = useMemo<ContextMenuAction[]>(() => {
@@ -6043,11 +6126,15 @@ export function ContextViewCanvas({
           seedsLabel: `everything in ${layer.name}`,
         })
         : undefined,
+      // A property changed on every entity the view places in it — however many — on the draft.
+      onEditProperties: canvasWritable
+        ? () => usePropertyJobsStore.getState().requestOp({ target: { kind: 'layer', layerId: layer.id, name: layer.name } })
+        : undefined,
     }
   }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
     canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, personaMode, canEditGraph, subsetView,
-    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setLayerSettingsFor])
+    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setLayerSettingsFor, canvasWritable])
 
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
@@ -7080,6 +7167,10 @@ export function ContextViewCanvas({
         onRevealNode={revealSearchHit}
         onFrameMatches={handleFrameMatches}
         onNarrowMatches={narrowEnabled ? narrowFromSearch : undefined}
+        onEditMatches={canvasWritable ? editFromSearch : undefined}
+        onEditPicked={canvasWritable
+          ? (urns) => usePropertyJobsStore.getState().requestOp({ target: { kind: 'selection', ids: urns } })
+          : undefined}
         onSaveMatchesAsView={(canSaveSearchAsView || editingSubset) ? onSaveMatchesAsView : undefined}
         saveMatchesLabel={editingSubset ? `Update “${editingSubset.name}”…` : undefined}
       />
@@ -8472,6 +8563,12 @@ export function ContextViewCanvas({
           useSearchStore.getState().requestSearchRun(p, 'property-manager')
           search.openPanel()
         }}
+      />
+      <PropertyOpHost
+        viewId={activeView?.id ?? ''}
+        graphWrite={propertyGraphWrite}
+        knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
+        layers={propertyLayers}
       />
       {/* Orphaned entities — independent like the Property Manager; fetches nothing while closed. */}
       <OrphansDrawer

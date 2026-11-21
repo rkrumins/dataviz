@@ -193,6 +193,51 @@ Outside a draft the same bar says **Details**: the drawer compares them,
 read-only, with **Edit in a draft**. Choosing one entity's own details turns
 the drawer to it — **Back** returns to the comparison.
 
+## Change a property across the graph
+
+To change a property on more entities than you can select — a whole layer,
+everything inside a container, a search's matches, the whole view — use the
+**Property Manager**. The change runs on the server and reaches every entity
+the target includes, however many, even ones not loaded on the canvas.
+
+1. Start from where you are:
+   - **Properties** in the View's header → **Properties** tab → **New**, or
+     **Change**, **Duplicate as…** or **Remove** on a property;
+   - right-click a layer's header → **Change properties in this layer…**;
+   - right-click a container → **Change properties of its children…** or
+     **…of everything inside…** (or **Change inside…** in its drawer);
+   - **Edit properties…** on the Advanced Search results bar.
+2. **What** — choose **Set value**, **Fill if empty**, **Rename**, **Copy to
+   new** or **Remove**, the property (the View's properties are suggested, with
+   how many entities hold each), and its value or new name. For a rename or
+   copy onto a name some entities already hold, choose to leave those entities
+   as they are or replace their value.
+3. **Where** — choose which entities: the one you started from is already
+   chosen. You can also pick every entity in the View, every entity with the
+   property, the entities selected on the canvas, a layer, a container's
+   children or everything inside it (and the container itself, if you like),
+   the search's matches, or your own conditions. It searches **This view**
+   unless you choose **The whole data source** and confirm it.
+4. **Review** — the exact counts: how many entities will change, whose values
+   are replaced, and which are left as they are, with a few of them by name. It
+   also says what would stop the change: a name the platform keeps, the graph's
+   property-name budget, or another change still running on this draft. Save
+   or discard any staged changes first.
+5. **Apply**. Removing, renaming or overwriting 1,000 entities or more — or
+   any across the whole data source — asks you to type the property's name.
+
+The change is applied to your draft a batch at a time. The **Properties** tab
+lists it under **Changes on this draft** with how far it has got (**Stop**
+keeps what it already changed), and keeps following it if you reload the
+page. When it ends, it says how many entities changed and which it couldn't
+change; **Which, and why** downloads them. Then the canvas reloads, or offers
+**Refresh canvas** if you have staged changes. Like any change in a draft, it
+reaches Published when the draft is published. Until then, counts and the
+property list still show the published graph.
+
+Entities are found as they are published: an entity new in this draft isn't
+matched — select it on the canvas instead.
+
 ## Change a relationship
 
 1. Click a line on the canvas. The relationship's drawer opens: what it means,

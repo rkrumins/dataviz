@@ -702,6 +702,15 @@ matches as they are then. See
 [Show only some entities and what they reach](/guide/exploring-graph#show-only-some-entities-and-what-they-reach).
 Narrow is a preview your administrator turns on.
 
+### Changing a property on the matches
+
+In a draft, **Edit properties…** on the results bar changes a property on
+every match — however many, on every page, not only the ones loaded — on your
+draft: set it, fill it where it's missing, rename it, copy it to a new name or
+remove it. In Search Studio, pick rows and choose **Edit properties…** to change
+only those. See
+[Change a property across the graph](/guide/editing-in-a-draft#change-a-property-across-the-graph).
+
 ### Keeping the matches as a view
 
 On a Context View, **Save as view…** on the results bar keeps the search's

@@ -10,16 +10,18 @@
  * being read, the tab shows what has been read so far and how far the read
  * has got.
  *
- * Lifecycle operations are staged IN-SESSION (``propertyDraftStore``) and
- * surfaced optimistically over the catalogue — there is no backend
- * node-property write yet, so the copy makes clear nothing is persisted.
- * They are offered only where an entity edit could be kept, in a draft
- * (``useEntityEditing``); elsewhere they are disabled and say why.
+ * A property is changed in bulk — set, filled, renamed, copied, removed — through
+ * the one guided dialog (``requestOp``), applied to the draft by a job on the
+ * server; the draft's jobs are listed with how far each has got and what it
+ * did, and their properties are marked in the list. Changes are offered only
+ * where an entity edit could be kept, in a draft (``useEntityEditing``);
+ * elsewhere they are disabled and say why. With several entities selected on
+ * the canvas, it offers to compare and edit them in the entity drawer.
  */
 import { motion } from 'framer-motion'
 import {
-    AlertTriangle, ArrowDownWideNarrow, ChevronRight, CircleSlash, Copy, Database, Layers, Loader2,
-    Pencil, Plus, ScanSearch, Search, Sparkles, Tag, Tags, Trash2, Undo2,
+    AlertTriangle, ArrowDownWideNarrow, ChevronRight, CircleSlash, Copy, CopyPlus, Database, Layers, Loader2,
+    Pencil, Plus, ScanSearch, Search, Sparkles, Tag, Tags, Trash2,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
@@ -29,16 +31,17 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
 import { useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { useCurrentBranchId, useGraphId } from '@/store/branchStore'
+import { useCanvasStore } from '@/store/canvas'
 import {
-    usePropertyCatalogOverlay, usePropertyDraftStore, usePropertyOps,
-    type CatalogOverlayEntry, type PropertyOp,
-} from '@/store/propertyDraftStore'
+    useDraftPropertyJobs, usePropertyCatalogOverlay, usePropertyJobsStore, type CatalogOverlayEntry, type OpRequest,
+} from '@/store/propertyJobsStore'
 import type { Predicate, SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
 
 import { fieldClass } from '../search/builder/editors/shared'
 
 import { PropertyInsightsHeader } from './PropertyInsightsHeader'
-import { PropertyOperationDialog, type PropertyDialogMode } from './PropertyOperationDialog'
+import { PropertyJobsPanel } from './PropertyJobsPanel'
 import { RankedValueBars, UsageGauge } from './PropertyInsightCharts'
 import { EntityTypeChips, SampleValueChips, TypeTile } from './PropertyValueChips'
 import { KIND_LABEL, storedType } from './propertyValueTypes'
@@ -46,8 +49,6 @@ import { KIND_LABEL, storedType } from './propertyValueTypes'
 
 export interface PropertyBrowserProps {
     viewId: string
-    knownEntityTypes: string[]
-    knownLayers: string[]
     onCreateRuleFromPredicate: (predicate: Predicate, suggestedName: string) => void
     /** Open + run a predicate in the Advanced Search panel (canvas-owned). */
     onSearchPredicate?: (predicate: Predicate) => void
@@ -56,7 +57,6 @@ export interface PropertyBrowserProps {
 /** A bound "search this in Advanced Search" callback passed to rows. */
 export type SearchHandler = (predicate: Predicate, label: string) => void
 
-type DialogState = { mode: PropertyDialogMode; key?: string } | null
 type SortMode = 'usage' | 'name'
 
 /** Rows drawn at first, and added per "Show more" — a view can carry
@@ -65,7 +65,7 @@ const ROWS_PAGE = 100
 
 
 export function PropertyBrowser({
-    viewId, knownEntityTypes, knownLayers, onCreateRuleFromPredicate, onSearchPredicate,
+    viewId, onCreateRuleFromPredicate, onSearchPredicate,
 }: PropertyBrowserProps) {
     const { notify } = useAppNotifications()
     // Open + run a constructed predicate in the real Advanced Search panel.
@@ -85,38 +85,44 @@ export function PropertyBrowser({
     const { catalog, reading, error, unavailable, refresh } = usePropertyCatalog(viewId)
     const [query, setQuery] = useState('')
     const [sort, setSort] = useState<SortMode>('usage')
-    const [dialog, setDialog] = useState<DialogState>(null)
     const [shown, setShown] = useState(ROWS_PAGE)
 
-    const pendingOps = usePropertyOps()
-    const overlay = usePropertyCatalogOverlay()
+    // The draft's bulk changes — running and ended — and what they do to each property.
+    const jobs = useDraftPropertyJobs(useGraphId(), useCurrentBranchId())
+    const overlay = usePropertyCatalogOverlay(jobs)
     // Where editing isn't offered the change actions go; where it is but
     // can't be kept yet, they stay disabled with the reason.
     const editing = useEntityEditing()
-    const change = (mode: PropertyDialogMode, key?: string) =>
-        editing.offered ? () => setDialog({ mode, key }) : undefined
+    const change = (request: OpRequest) =>
+        editing.offered ? () => usePropertyJobsStore.getState().requestOp(request) : undefined
+    const selected = useCanvasStore((s) => s.selectedNodeIds.filter((id) => !id.startsWith('logical:')).length)
 
     const properties = useMemo(() => catalog?.properties ?? [], [catalog])
     const tags = useMemo(() => catalog?.tags ?? [], [catalog])
     const entities = catalog?.entities ?? 0
 
     const knownKeys = useMemo(() => new Set(properties.map((p) => p.key)), [properties])
-    const pendingNewKeys = useMemo(
-        () => [...overlay.keys()].filter(
-            (k) => !knownKeys.has(k) && (overlay.get(k)!.kinds.has('set') || overlay.get(k)!.kinds.has('fillEmpty')),
-        ).sort(),
-        [overlay, knownKeys],
-    )
-    // The value a staged-new property will be set to (for its preview chip).
+    // Properties a change on the draft gives entities that none held before (a set, a fill, or the
+    // new name of a rename or a copy) — not in the published catalog until the draft is published.
+    const pendingNewKeys = useMemo(() => {
+        const keys = new Set<string>()
+        for (const t of jobs) {
+            if (t.job?.status === 'failed' || t.job?.status === 'cancelled') continue
+            const k = t.op.kind === 'rename' || t.op.kind === 'copy' ? t.op.to : t.op.kind === 'remove' ? undefined : t.op.key
+            if (k && !knownKeys.has(k)) keys.add(k)
+        }
+        return [...keys].sort()
+    }, [jobs, knownKeys])
+    // The value a new property is set to (for its preview chip).
     const stagedValueByKey = useMemo(() => {
         const m = new Map<string, string>()
-        for (const op of pendingOps) {
-            if ((op.kind === 'set' || op.kind === 'fillEmpty') && op.value !== undefined && !m.has(op.key)) {
-                m.set(op.key, String(op.value))
+        for (const t of jobs) {
+            if ((t.op.kind === 'set' || t.op.kind === 'fillEmpty') && t.op.value !== undefined && !m.has(t.op.key)) {
+                m.set(t.op.key, String(t.op.value))
             }
         }
         return m
-    }, [pendingOps])
+    }, [jobs])
 
     const q = query.trim().toLowerCase()
     // The catalog lists keys most-carried first; A–Z is the other order.
@@ -131,17 +137,6 @@ export function PropertyBrowser({
     const filteredTags = useMemo(
         () => (q ? tags.filter((t) => t.tag.toLowerCase().includes(q)) : tags),
         [tags, q],
-    )
-
-    const dialogEl = dialog && (
-        <PropertyOperationDialog
-            viewId={viewId}
-            mode={dialog.mode}
-            initialKey={dialog.key}
-            knownEntityTypes={knownEntityTypes}
-            knownLayers={knownLayers}
-            onClose={() => setDialog(null)}
-        />
     )
 
     if (unavailable) {
@@ -176,9 +171,8 @@ export function PropertyBrowser({
     if (nothingFound) {
         return (
             <div className="flex flex-col gap-3">
-                {pendingOps.length > 0 && <PendingChanges ops={pendingOps} />}
-                <EmptyHero onNew={change('create')} blocked={editing.blocked} />
-                {dialogEl}
+                <PropertyJobsPanel jobs={jobs} />
+                <EmptyHero onNew={change({})} blocked={editing.blocked} />
             </div>
         )
     }
@@ -189,7 +183,22 @@ export function PropertyBrowser({
         <div className="flex flex-col gap-3">
             <PropertyInsightsHeader catalog={catalog} reading={reading} error={error} onRefresh={refresh} />
 
-            {pendingOps.length > 0 && <PendingChanges ops={pendingOps} />}
+            <PropertyJobsPanel jobs={jobs} />
+
+            {selected >= 2 && (
+                <button
+                    type="button"
+                    onClick={() => useCanvasStore.getState().openNodesDrawer(useCanvasStore.getState().selectedNodeIds)}
+                    className="flex items-center gap-3 rounded-2xl border border-accent-lineage/30 bg-accent-lineage/[0.06] px-3.5 py-2.5 text-left hover:bg-accent-lineage/[0.1] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                >
+                    <Layers className="w-4 h-4 text-accent-lineage shrink-0" aria-hidden />
+                    <span className="flex-1 min-w-0">
+                        <span className="block text-[12.5px] font-semibold text-ink">{selected.toLocaleString()} selected on the canvas</span>
+                        <span className="block text-[11px] text-ink-muted">Compare their properties — and change them together</span>
+                    </span>
+                    <ChevronRight className="w-3.5 h-3.5 text-accent-lineage shrink-0" aria-hidden />
+                </button>
+            )}
 
             {/* Toolbar: filter + sort + New */}
             <div className="flex items-center gap-2">
@@ -207,13 +216,13 @@ export function PropertyBrowser({
                 <SortToggle sort={sort} onChange={setSort} />
                 {editing.offered && (
                     <HoverTip
-                        label="Define a new property and apply it to matched entities"
-                        detail={editing.blocked ?? undefined}
+                        label="Change a property on many entities"
+                        detail={editing.blocked ?? 'Set, fill, rename, copy or remove it — on a layer, inside a container, a search’s matches, or the whole view'}
                         className="shrink-0 inline-flex"
                     >
                         <button
                             type="button"
-                            onClick={() => setDialog({ mode: 'create' })}
+                            onClick={() => usePropertyJobsStore.getState().requestOp({})}
                             disabled={!!editing.blocked}
                             className="inline-flex items-center gap-1.5 px-2.5 h-9 rounded-lg text-[12px] font-semibold bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30 transition-colors disabled:opacity-50 disabled:shadow-none disabled:hover:bg-accent-lineage"
                         >
@@ -235,8 +244,8 @@ export function PropertyBrowser({
                                 key={`new-${key}`}
                                 propertyKey={key}
                                 stagedValue={stagedValueByKey.get(key)}
-                                onUpdate={change('update', key)}
-                                onRemove={change('remove', key)}
+                                onUpdate={change({ kind: 'set', key })}
+                                onRemove={change({ kind: 'remove', key })}
                                 blocked={editing.blocked}
                                 onCreateRule={() => onCreateRuleFromPredicate({ kind: 'hasProperty', key, negate: false }, key)}
                             />
@@ -249,8 +258,9 @@ export function PropertyBrowser({
                                 exact={catalog.status === 'complete'}
                                 onSearch={search}
                                 overlay={overlay.get(property.key)}
-                                onUpdate={change('update', property.key)}
-                                onRemove={change('remove', property.key)}
+                                onUpdate={change({ kind: 'set', key: property.key })}
+                                onDuplicate={change({ kind: 'copy', key: property.key })}
+                                onRemove={change({ kind: 'remove', key: property.key })}
                                 blocked={editing.blocked}
                                 onCreateRule={() => onCreateRuleFromPredicate(
                                     { kind: 'hasProperty', key: property.key, negate: false }, property.key)}
@@ -302,7 +312,6 @@ export function PropertyBrowser({
                 </div>
             )}
 
-            {dialogEl}
         </div>
     )
 }
@@ -370,78 +379,11 @@ function EmptyHero({ onNew, blocked }: { onNew?: () => void; blocked: string | n
                 <div className="text-[15px] font-display font-semibold text-ink">Manage properties for this view</div>
                 <p className="mt-1 text-[12px] text-ink-muted leading-snug max-w-[280px]">
                     Define a property and roll it out to every matched entity, audit how existing
-                    ones are used, and clean up in bulk. Changes stage in-session — nothing is saved yet.
+                    ones are used, and clean up in bulk — on your draft, however many entities.
                 </p>
             </div>
             {cta && (blocked ? <HoverTip label={blocked} className="relative inline-flex">{cta}</HoverTip> : cta)}
         </motion.div>
-    )
-}
-
-
-// ---------------------------------------------------------------------------
-// Pending changes review
-// ---------------------------------------------------------------------------
-
-function opSummary(op: PropertyOp): string {
-    const n = `${op.targetCount} ${op.targetCount === 1 ? 'entity' : 'entities'}`
-    switch (op.kind) {
-        case 'set': return `Set ${op.key} = ${String(op.value)} · ${n}`
-        case 'fillEmpty': return `Fill ${op.key} (if empty) = ${String(op.value)} · ${n}`
-        case 'rename': return `Rename ${op.key} → ${op.newKey} · ${n}`
-        case 'remove': return `Remove ${op.key} · ${n}`
-    }
-}
-
-function PendingChanges({ ops }: { ops: PropertyOp[] }) {
-    const [open, setOpen] = useState(false)
-    const removeOp = usePropertyDraftStore((s) => s.removeOp)
-    const clearOps = usePropertyDraftStore((s) => s.clearOps)
-
-    const rollup = useMemo(() => {
-        const counts: Record<string, number> = {}
-        let entities = 0
-        for (const op of ops) { counts[op.kind] = (counts[op.kind] ?? 0) + 1; entities += op.targetCount }
-        const parts = Object.entries(counts).map(([k, v]) => `${v} ${k}`)
-        return { parts, entities }
-    }, [ops])
-
-    return (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 overflow-hidden">
-            <button type="button" onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-2 px-3 py-2 text-left">
-                <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span className="flex-1 min-w-0 text-[11.5px] text-amber-100/90 leading-tight">
-                    <span className="font-semibold">{ops.length} staged change{ops.length === 1 ? '' : 's'}</span>
-                    {' '}— in-session only, not saved to the graph
-                </span>
-                <ChevronRight className={cn('w-3.5 h-3.5 text-amber-300/80 shrink-0 transition-transform', open && 'rotate-90')} />
-            </button>
-            {open && (
-                <div className="px-2 pb-2 flex flex-col gap-1 border-t border-amber-500/20 pt-1.5">
-                    <div className="px-2 text-[10px] text-amber-200/70">
-                        Would {rollup.parts.join(' · ')} across ~{rollup.entities} {rollup.entities === 1 ? 'entity' : 'entities'}.
-                    </div>
-                    {ops.map((op) => (
-                        <div key={op.id} className="group flex items-center gap-2 px-2 py-1 rounded-md hover:bg-amber-500/10">
-                            <span className="flex-1 min-w-0 truncate text-[11px] font-mono text-amber-100/90" title={opSummary(op)}>
-                                {opSummary(op)}
-                            </span>
-                            <button
-                                type="button"
-                                onClick={() => removeOp(op.id)}
-                                title="Undo this staged change"
-                                className="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded text-amber-300/70 hover:text-amber-100 hover:bg-amber-500/20 transition-colors"
-                            >
-                                <Undo2 className="w-3 h-3" />
-                            </button>
-                        </div>
-                    ))}
-                    <button type="button" onClick={clearOps} className="self-end mt-0.5 text-[10.5px] text-amber-300/80 hover:text-amber-100 transition-colors">
-                        Discard all
-                    </button>
-                </div>
-            )}
-        </div>
     )
 }
 
@@ -478,7 +420,7 @@ function valuePredicate(key: string, v: SearchCatalogValue): Predicate {
 }
 
 function PropertyRow({
-    property, entities, exact, overlay, onUpdate, onRemove, blocked, onCreateRule, onCopy, onSearch,
+    property, entities, exact, overlay, onUpdate, onDuplicate, onRemove, blocked, onCreateRule, onCopy, onSearch,
 }: {
     property: SearchCatalogProperty
     /** Entities in the view — what coverage is a share of. */
@@ -487,6 +429,8 @@ function PropertyRow({
     exact: boolean
     overlay?: CatalogOverlayEntry
     onUpdate?: () => void
+    /** Copy its values to a new property. */
+    onDuplicate?: () => void
     onRemove?: () => void
     blocked: string | null
     onCreateRule: () => void
@@ -541,14 +485,15 @@ function PropertyRow({
                         )}
                         {overlay && (
                             <PendingBadge
-                                label={pendingRemove ? 'remove' : overlay.kinds.has('rename') ? 'rename' : 'edit'}
+                                label={`${pendingRemove ? 'removed' : overlay.kinds.has('rename') ? 'renamed' : overlay.kinds.has('copy') ? 'copied' : 'changed'}${overlay.running ? '…' : ''}`}
                                 tone={pendingRemove ? 'rose' : 'amber'}
                             />
                         )}
                         <div className="ml-auto shrink-0 flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                                 <RowAction icon={<Copy className="w-3 h-3" />} label="Copy the name" onClick={onCopy} />
-                                {onUpdate && <RowAction icon={<Pencil className="w-3 h-3" />} label="Update" onClick={onUpdate} blocked={blocked} />}
+                                {onUpdate && <RowAction icon={<Pencil className="w-3 h-3" />} label="Change" onClick={onUpdate} blocked={blocked} />}
+                                {onDuplicate && <RowAction icon={<CopyPlus className="w-3 h-3" />} label="Duplicate as…" onClick={onDuplicate} blocked={blocked} />}
                                 {onRemove && <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger blocked={blocked} />}
                                 <RowAction icon={<Plus className="w-3 h-3" />} label="Create rule" onClick={onCreateRule} />
                             </div>
@@ -684,7 +629,7 @@ function PropertyRow({
 }
 
 
-/** A property staged in this session that no entity carries yet. */
+/** A property a change on the draft gives entities, that none carried before. */
 function PendingNewRow({
     propertyKey, stagedValue, onUpdate, onRemove, blocked, onCreateRule,
 }: {

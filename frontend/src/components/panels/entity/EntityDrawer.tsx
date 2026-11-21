@@ -22,6 +22,7 @@
 import { memo, useCallback, useId, useMemo, useState } from 'react'
 import { useCanvasStore, isSelectableNode, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { stagedIndexOf } from '@/store/stagedIndex'
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
@@ -279,6 +280,9 @@ function OpenEntityDrawer({
               onDoneCustomizing={() => setCustomizing(false)}
               showHistory={historyFor === node.id}
               onRestoreDeleted={isGhost ? () => restoreGhost((data.urn as string | undefined) || node.id) : undefined}
+              onEditInside={editable && Number(form.childCount || form._collapsedChildCount || 0) > 0
+                ? () => usePropertyJobsStore.getState().requestOp({ target: { kind: 'children', urns: [urn], label: title } })
+                : undefined}
             />
           </TabsContent>
           {editable && (

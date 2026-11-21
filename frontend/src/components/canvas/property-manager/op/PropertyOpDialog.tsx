@@ -1,0 +1,253 @@
+/**
+ * PropertyOpDialog — one bulk property change, guided: **What** (the operation, the property, its
+ * value or new name) → **Where** (which entities) → **Review** (counted exactly, with anything that
+ * would stop it), then applied to the draft by a job on the server: every entity the target reaches,
+ * however many — not only the ones loaded on the canvas.
+ *
+ * A removal, a rename or an overwrite of many entities (or across the whole data source) asks for
+ * the property's name to be typed first. The request carries a key made from what it applies, so
+ * retrying after a failure never applies it twice. Portal-mounted: a scrim beside an inert wrapper,
+ * only the panel interactive.
+ */
+import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
+import { createPortal } from 'react-dom'
+import { motion } from 'framer-motion'
+import { ArrowLeft, ArrowRight, Check, Database, X } from 'lucide-react'
+import { cn, generateId } from '@/lib/utils'
+import { MOTION } from '@/lib/motion'
+import { Backdrop } from '@/components/ui/Backdrop'
+import { Button, IconButton } from '@/components/ui/Button'
+import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
+import { useAppNotifications } from '@/components/ui/notifications'
+import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
+import { useAffectedSample } from '@/hooks/usePropertyInsights'
+import { createPropertyJob, previewPropertyJob, type PropertyJobPreview } from '@/services/versioningApiService'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
+import {
+  impactOf, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel, reviewCounts, scopeFixedToView, targetLabel, targetOf,
+  type OpDraft, type ScopeMode, type TargetPreset,
+} from './opModel'
+import { useReviewCounts } from './useReviewCounts'
+import { WhatStep } from './WhatStep'
+import { WhereStep, type LayerOption } from './WhereStep'
+import { ReviewStep } from './ReviewStep'
+
+export interface GraphWrite { wsId: string; graphId: string; branchId: string }
+
+const STEPS = ['What', 'Where', 'Review'] as const
+
+export function PropertyOpDialog({
+  viewId, graphWrite, seed, knownEntityTypes, layers, selectionIds, onClose,
+}: {
+  viewId: string
+  graphWrite: GraphWrite
+  seed: OpRequest
+  knownEntityTypes: string[]
+  layers: readonly LayerOption[]
+  selectionIds: readonly string[]
+  onClose: () => void
+}) {
+  const { notify } = useAppNotifications()
+  const { catalog } = usePropertyCatalog(viewId)
+  const properties = useMemo(() => catalog?.properties ?? [], [catalog])
+
+  const [op, setOp] = useState<OpDraft>(() => ({
+    kind: seed.kind ?? 'set', key: seed.key ?? '', to: '', value: '', onConflict: 'skip',
+  }))
+  const [preset, setPreset] = useState<TargetPreset>(() => seed.target ?? (seed.key ? { kind: 'hasKey', key: seed.key } : { kind: 'view' }))
+  const [scopeMode, setScopeMode] = useState<ScopeMode>(() => (seed.target?.kind === 'search' ? seed.target.scopeMode : 'view'))
+  const [sourceConfirmed, setSourceConfirmed] = useState(false)
+  // A change whose What is already whole (Remove from a row) opens on Where.
+  const [step, setStep] = useState(() => (opProblem({ kind: seed.kind ?? 'set', key: seed.key ?? '', to: '', value: '', onConflict: 'skip' }) ? 0 : 1))
+
+  // ── Where ──
+  // A preset that named the old property follows a new one.
+  const target = targetOf(preset, viewId, scopeMode)
+  const predicate = predicateOf(preset)
+  const effectiveScope: ScopeMode = scopeFixedToView(preset) ? 'view' : scopeMode
+  const whatProblem = opProblem(op)
+  const whereProblem = !target
+    ? (preset.kind === 'custom' ? 'Add a condition to say which entities' : 'Choose which entities')
+    : preset.kind !== 'selection' && effectiveScope === 'data_source' && !sourceConfirmed ? 'Confirm the whole data source is meant' : null
+
+  // ── Review: counted, checked and sampled once it is reached ──
+  const reviewing = step === 2 && !whatProblem && !whereProblem
+  const countItems = useMemo(() => (reviewing && predicate ? reviewCounts(op, predicate) : null), [reviewing, predicate, op])
+  const counts = useReviewCounts(viewId, countItems, effectiveScope)
+  const sample = useAffectedSample(viewId, reviewing && predicate && effectiveScope === 'view' ? predicate : null, reviewing && !!predicate)
+  // The server's check, kept with the request it answers: a newer request reads as checking.
+  const requestKey = reviewing && target ? JSON.stringify({ op: jobOp(op), target }) : ''
+  const [checked, setChecked] = useState<{ key: string; data: PropertyJobPreview | null }>({ key: '', data: null })
+  useEffect(() => {
+    if (!requestKey || !target) return
+    const controller = new AbortController()
+    previewPropertyJob(graphWrite.wsId, graphWrite.graphId, graphWrite.branchId, jobOp(op), target, controller.signal)
+      .then((data) => { if (!controller.signal.aborted) setChecked({ key: requestKey, data }) })
+      .catch(() => { if (!controller.signal.aborted) setChecked({ key: requestKey, data: null }) })
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestKey, graphWrite.wsId, graphWrite.graphId, graphWrite.branchId])
+  const preview = { data: checked.key === requestKey ? checked.data : null, loading: !!requestKey && checked.key !== requestKey }
+
+  const ids = preset.kind === 'selection'
+  const tally = ids
+    ? preview.data?.counts ? { target: preview.data.counts.matched, haveKey: preview.data.counts.haveKey, haveTo: preview.data.counts.haveTo ?? 0 } : null
+    : counts.counts.size > 0 ? {
+      target: counts.counts.get('target')?.count, haveKey: counts.counts.get('haveKey')?.count, haveTo: counts.counts.get('haveTo')?.count,
+    } : null
+  const impact = tally && tally.target !== undefined ? impactOf(op, tally) : null
+  const exact = ids ? !!preview.data?.counts : counts.complete
+  const stagedCount = useStagedChangesStore((s) => s.changes.length)
+  const blocked = !!preview.data?.refusal || !!preview.data?.activeJobId || preview.data?.nameBudget?.verdict === 'refused'
+    || stagedCount > 0 || preview.loading || (exact && impact?.changes === 0)
+
+  // ── Apply ──
+  // The same change sent again — a retry — carries the same key; a different one, a new key.
+  const salt = useMemo(() => generateId('propjob'), [])
+  const idempotencyKey = `${salt}:${hash(requestKey)}`
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const submit = async () => {
+    if (!target) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const job = await createPropertyJob(graphWrite.wsId, graphWrite.graphId, graphWrite.branchId, jobOp(op), target, idempotencyKey,
+        `Bulk property: ${propertyJobLabel(jobOp(op))} on ${targetLabel(preset)}`)
+      usePropertyJobsStore.getState().track({
+        jobId: job.jobId, ...graphWrite, viewId, op: jobOp(op), targetLabel: targetLabel(preset),
+        startedAt: new Date().toISOString(), job,
+      })
+      notify('success', `Applying ${propertyJobLabel(jobOp(op))} to ${targetLabel(preset)} on your draft — follow it in Property Manager.`)
+      onClose()
+    } catch (e) {
+      setError((e as Error).message || 'The change could not be started. Try again.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+  const apply = () => {
+    if (!impact) { void submit(); return }
+    if (needsTypedConfirm(op, impact, effectiveScope)) setConfirming(true)
+    else void submit()
+  }
+
+  const canNext = step === 0 ? !whatProblem : step === 1 ? !whereProblem : !blocked && !submitting
+  const next = () => {
+    if (!canNext) return
+    if (step < 2) setStep(step + 1)
+    else apply()
+  }
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.defaultPrevented || confirming) return
+    if (e.key === 'Escape') { e.preventDefault(); onClose() }
+    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); next() }
+  }
+
+  if (typeof document === 'undefined') return null
+  return createPortal(
+    <>
+      <Backdrop open onClick={onClose} zClassName="z-[80]" className="bg-black/50" />
+      <div className="fixed inset-0 z-[80] flex items-center justify-center p-4 pointer-events-none" onKeyDown={onKeyDown}>
+        <motion.div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="property-op-title"
+          initial={{ opacity: 0, scale: 0.96, y: 6 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={MOTION.modalSpring}
+          className="pointer-events-auto relative flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl shadow-black/40"
+        >
+          <div className="flex items-start gap-3 border-b border-glass-border px-5 py-4 bg-gradient-to-br from-accent-lineage/[0.07] to-transparent">
+            <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-lineage/15 text-accent-lineage">
+              <Database className="h-5 w-5" aria-hidden />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h3 id="property-op-title" className="text-[15px] font-semibold leading-tight text-ink">Change a property</h3>
+              <p className="mt-0.5 text-[11.5px] text-ink-muted">On every entity it should reach — applied to your draft by the server.</p>
+              <ol className="mt-3 flex items-center gap-1" aria-label="Steps">
+                {STEPS.map((label, i) => {
+                  const done = i < step
+                  const reachable = i < step || (i === 1 && !whatProblem) || (i === 2 && !whatProblem && !whereProblem)
+                  return (
+                    <li key={label} className="flex items-center gap-1">
+                      {i > 0 && <span className="h-px w-5 bg-glass-border" aria-hidden />}
+                      <button type="button" disabled={!reachable} onClick={() => setStep(i)} aria-current={i === step ? 'step' : undefined}
+                        className={cn('inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold transition-colors',
+                          i === step ? 'bg-accent-lineage text-white' : done ? 'bg-accent-lineage/15 text-accent-lineage hover:bg-accent-lineage/25' : 'text-ink-muted disabled:opacity-60')}>
+                        <span className={cn('inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px]', i === step ? 'bg-white/25' : 'bg-black/[0.06] dark:bg-white/10')}>
+                          {done ? <Check className="h-2.5 w-2.5" aria-hidden /> : i + 1}
+                        </span>
+                        {label}
+                      </button>
+                    </li>
+                  )
+                })}
+              </ol>
+            </div>
+            <IconButton icon={X} label="Close" shortcut="Esc" onClick={onClose} />
+          </div>
+
+          <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-5 py-4">
+            <motion.div key={step} initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} transition={MOTION.stepSwap}>
+              {step === 0 && <WhatStep op={op} onChange={setOp} properties={properties} />}
+              {step === 1 && (
+                <WhereStep
+                  viewId={viewId} preset={preset} onPreset={setPreset} scopeMode={scopeMode} onScope={setScopeMode}
+                  sourceConfirmed={sourceConfirmed} onConfirmSource={setSourceConfirmed} op={op}
+                  selectionIds={selectionIds} layers={layers} seed={seed.target} knownEntityTypes={knownEntityTypes}
+                />
+              )}
+              {step === 2 && (
+                <ReviewStep
+                  op={op} preset={preset} scopeMode={effectiveScope} counts={ids ? null : counts} impact={impact} exact={exact}
+                  preview={preview.data} previewLoading={preview.loading} sample={sample.data} sampleLoading={sample.loading}
+                  stagedCount={stagedCount}
+                />
+              )}
+            </motion.div>
+          </div>
+
+          <div className="flex items-center gap-2 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-5 py-3">
+            <span role={error ? 'alert' : undefined} className={cn('min-w-0 flex-1 truncate text-[11.5px]', error ? 'text-rose-600 dark:text-rose-400' : 'text-ink-muted')}>
+              {error ?? (step === 0 ? whatProblem : step === 1 ? whereProblem : null) ?? ''}
+            </span>
+            {step > 0 && <Button size="sm" variant="ghost" leftIcon={ArrowLeft} onClick={() => setStep(step - 1)}>Back</Button>}
+            <Button size="sm" variant={step === 2 && (op.kind === 'remove') ? 'danger' : 'primary'} rightIcon={step < 2 ? ArrowRight : undefined}
+              disabled={!canNext} loading={submitting} onClick={next}>
+              {step < 2 ? 'Next' : error ? 'Try again' : `Apply${impact ? ` to ${impact.changes.toLocaleString()}${exact ? '' : '+'}` : ''}`}
+            </Button>
+          </div>
+        </motion.div>
+      </div>
+      {confirming && impact && (
+        <DangerConfirmDialog
+          isOpen
+          title={`${propertyJobLabel(jobOp(op))} on ${impact.changes.toLocaleString()} entities?`}
+          subtitle={`On ${targetLabel(preset)}${effectiveScope === 'data_source' ? ', across the whole data source' : ''} — in your draft, until it is published.`}
+          confirmPhrase={op.key.trim()}
+          confirmLabel="Apply"
+          sections={[{
+            label: 'Entities', count: impact.changes, tone: op.kind === 'remove' ? 'destructive' : 'warning',
+            consequence: op.kind === 'remove' ? `Lose ${op.key.trim()}` : op.kind === 'rename' ? `${op.key.trim()} becomes ${op.to.trim()}` : `${op.key.trim()} is replaced`,
+          }]}
+          impactHeading="This will change"
+          irreversibleNote={null}
+          caveat="Nothing is published until the draft is. Until then, the draft's changes can be reviewed and discarded."
+          onClose={() => setConfirming(false)}
+          onConfirm={async () => { setConfirming(false); await submit() }}
+        />
+      )}
+    </>,
+    document.body,
+  )
+}
+
+/** A short, stable digest of what a request applies. */
+function hash(s: string): string {
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36)
+}

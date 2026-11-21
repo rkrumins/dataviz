@@ -10,7 +10,7 @@
  * changed from Customize, which opens above the sections.
  */
 import { Fragment, useMemo, useState, type ReactNode } from 'react'
-import { Check, Copy, FileText, History, Info, Link, Sparkles, Tag } from 'lucide-react'
+import { Check, Copy, FileText, FolderTree, History, Info, Link, Sparkles, Tag } from 'lucide-react'
 import { useFeature } from '@/store/features'
 import { peerPropertyStats } from './peerPropertyStats'
 import { usePersonaMode } from '@/store/persona'
@@ -18,7 +18,8 @@ import { usePreferencesStore, type DrawerSectionId } from '@/store/preferences'
 import type { EntityFieldDefinition } from '@/types/schema'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
-import { IconButton } from '@/components/ui/Button'
+import { Button, IconButton } from '@/components/ui/Button'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Section } from '../DrawerSection'
 import { PropertyEditor } from '../PropertyEditor'
@@ -63,7 +64,7 @@ export function EntityViewTab({
   nodeId, form, original, urn, childCount, tagColors, userProps, copiedUrn, onCopyUrn, canEdit,
   originalProps, publishedProps, digest, onCommitProperties,
   onFocusNode, onLocateMany, onRevealPath, history, typeId = '', typeName = '', fields, identity,
-  customizing = false, onDoneCustomizing, showHistory = false, onRestoreDeleted,
+  customizing = false, onDoneCustomizing, showHistory = false, onRestoreDeleted, onEditInside,
 }: {
   nodeId: string
   form: Data
@@ -103,6 +104,8 @@ export function EntityViewTab({
   showHistory?: boolean
   /** Bring it back, deleted in this draft — offered on its deletion in History. */
   onRestoreDeleted?: () => void
+  /** A container in a draft: change a property on everything inside it. */
+  onEditInside?: () => void
 }) {
   const versioningEnabled = useFeature('versioningEnabled')
   const mode = usePersonaMode()
@@ -161,7 +164,12 @@ export function EntityViewTab({
     details: () => <DetailsList form={form} />,
     relationship: () => <PlacementSummary nodeId={nodeId} childCount={childCount} onFocusNode={onFocusNode} />,
     properties: () => (
-      <Section title="Properties" icon={FileText} flush={hasProps || removedSome || (editsProps && adding)}>
+      <Section title="Properties" icon={FileText} flush={hasProps || removedSome || (editsProps && adding)}
+        action={onEditInside && (
+          <HoverTip label="Change a property on everything inside it" detail="Its children, or every level down — however many, on your draft">
+            <Button size="sm" variant="ghost" leftIcon={FolderTree} className="h-6 px-2 text-2xs" onClick={onEditInside}>Change inside…</Button>
+          </HoverTip>
+        )}>
         {hasProps || removedSome || (editsProps && adding) ? (
           <PanelErrorBoundary resetKeys={[urn]}>
             {editsProps ? (

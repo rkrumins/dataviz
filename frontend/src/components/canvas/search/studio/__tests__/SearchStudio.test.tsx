@@ -218,6 +218,16 @@ describe('ResultsTable', () => {
             draft, { kind: 'group', op: 'not', children: [{ kind: 'is', refs: [{ urn: 'a' }] }] }] })
     })
 
+    it('changes a property on the picked rows\' entities — where the canvas can write', () => {
+        const onEditPicked = vi.fn()
+        render(<ResultsTable hits={[hit('a', 'orders'), hit('b', 'customers')]} query={draft} draft={draft} onEditPicked={onEditPicked}
+                             onRefine={vi.fn()} onLookInside={vi.fn()} canLoadMore={false} isLoadingMore={false} />)
+        fireEvent.click(screen.getByRole('checkbox', { name: 'Pick orders' }))
+        fireEvent.click(screen.getByRole('checkbox', { name: 'Pick customers' }))
+        fireEvent.click(screen.getByRole('button', { name: /Edit properties…/ }))
+        expect(onEditPicked).toHaveBeenCalledWith(['a', 'b'])
+    })
+
     it('keeps at most as many as one condition can name', () => {
         const onRefine = vi.fn()
         const many = Array.from({ length: KEEP_MAX + 6 }, (_, i) => hit(`u${i}`, `table ${i}`))

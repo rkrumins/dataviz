@@ -14,6 +14,7 @@
  */
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
+import type { Predicate } from '@/types/search'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { remember, sendNdjsonInParts } from './importExportApiService'
 import { pollJob } from './importExportApiService'
@@ -1920,6 +1921,121 @@ export async function saveGraphChangesInParts(
   if (job.status === 'completed' && job.result) return job.result
   throw versioningError(job.error?.status ?? 500, job.error?.detail ?? 'The save did not finish. Save again.',
     'The save did not finish. Save again.')
+}
+
+// ============================================
+// Bulk property changes — one operation on every entity a target reaches, applied to a draft by a
+// job on the server (a window of entities per commit), followed here until it ends.
+// ============================================
+
+export type PropertyOpKind = 'set' | 'fillEmpty' | 'remove' | 'rename' | 'copy'
+
+export interface PropertyJobOp {
+  kind: PropertyOpKind
+  key: string
+  /** The new name — rename and copy. */
+  to?: string
+  /** The value — set and fill. */
+  value?: unknown
+  /** Where an entity already holds `to`: leave it (`skip`) or replace its value. */
+  onConflict?: 'skip' | 'overwrite'
+}
+
+/** Which entities: named ones, or every entity criteria match — in the view, or the whole data source. */
+export type PropertyJobTarget =
+  | { ids: string[] }
+  | { viewId: string; predicate: Predicate; scopeMode: 'view' | 'data_source' }
+
+export interface PropertyJobSummary {
+  changed: number
+  unchanged: number
+  /** Not in the draft. */
+  missing: number
+  deletedInDraft: number
+  /** A rename or copy onto a name an entity already held, left alone. */
+  conflicts: number
+  /** Every target not written as asked — by reason: `missing`, `deleted_in_draft`, `conflict`, and
+   *  `write_refused` (the write gate turned it away). Its rows download as a CSV. */
+  refused: { count: number; byReason: Record<string, number>; examples: Array<Record<string, unknown>> }
+  commits: number
+  firstCommitId?: string | null
+  lastCommitId?: string | null
+  cancelled?: boolean
+}
+
+export interface PropertyJob {
+  jobId: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  phase?: string | null
+  /** 0–1. */
+  progress?: number | null
+  processed?: number | null
+  total?: number | null
+  error?: string | { code?: string; message?: string } | null
+  summary?: Partial<PropertyJobSummary> | null
+  op?: PropertyJobOp
+  branchId?: string
+  createdAt?: string
+}
+
+export interface PropertyNameBudget {
+  registered: number | null
+  nativeBudget: number | null
+  ceiling: number
+  isNew: boolean | null
+  /** `raw`: past the native budget, kept as raw JSON (not searchable by value). */
+  verdict: 'ok' | 'raw' | 'refused'
+}
+
+export interface PropertyJobPreview {
+  refusal: { code: string; message: string } | null
+  nameBudget: PropertyNameBudget | null
+  activeJobId: string | null
+  /** Exact, read from the draft — for a target of named entities only. */
+  counts: { matched: number; haveKey: number; haveTo: number | null; missing: number } | null
+}
+
+const propertyJobs = (wsId: string, graphId: string) => `${base(wsId)}/graphs/${graphId}/property-jobs`
+
+/** What applying `op` to `target` on the draft would meet, before it is applied. */
+export function previewPropertyJob(
+  wsId: string, graphId: string, branchId: string, op: PropertyJobOp, target: PropertyJobTarget, signal?: AbortSignal,
+): Promise<PropertyJobPreview> {
+  return vfetch<PropertyJobPreview>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/property-jobs/preview`, {
+    method: 'POST', body: JSON.stringify({ op, target }), signal,
+  })
+}
+
+/** Start applying `op` to `target` on the draft. The same key answers with the same job, so a
+ *  retried request never applies it twice. */
+export function createPropertyJob(
+  wsId: string, graphId: string, branchId: string, op: PropertyJobOp, target: PropertyJobTarget,
+  idempotencyKey: string, message?: string,
+): Promise<PropertyJob> {
+  return vfetch<PropertyJob>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/property-jobs`, {
+    method: 'POST', body: JSON.stringify({ op, target, ...(message ? { message } : {}) }),
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
+}
+
+export function getPropertyJob(wsId: string, graphId: string, jobId: string, signal?: AbortSignal): Promise<PropertyJob> {
+  return vfetch<PropertyJob>(`${propertyJobs(wsId, graphId)}/${jobId}`, { signal })
+}
+
+/** Stop it at its next window. What it already applied stays on the draft. */
+export function cancelPropertyJob(wsId: string, graphId: string, jobId: string): Promise<PropertyJob> {
+  return vfetch<PropertyJob>(`${propertyJobs(wsId, graphId)}/${jobId}/cancel`, { method: 'POST' })
+}
+
+/** The entities it could not change, and why — a CSV to download. */
+export const refusedPropertyJobUrl = (wsId: string, graphId: string, jobId: string) =>
+  `${propertyJobs(wsId, graphId)}/${jobId}/refused?format=csv`
+
+/** Follow a job until it ends — through blips, and paused while the tab is hidden. */
+export function followPropertyJob(
+  wsId: string, graphId: string, jobId: string, onTick: (job: PropertyJob) => void, signal?: AbortSignal,
+): Promise<PropertyJob> {
+  return pollJob(() => getPropertyJob(wsId, graphId, jobId, signal), { onTick, signal })
 }
 
 /**

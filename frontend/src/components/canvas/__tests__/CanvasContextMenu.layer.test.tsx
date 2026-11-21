@@ -103,6 +103,17 @@ describe('CanvasContextMenu — layer target', () => {
     expect(screen.getByRole('button', { name: /Layer details…/ })).toBeInTheDocument()
   })
 
+  it('changes a property on every entity in the layer — where the canvas can write', () => {
+    const onEditProperties = vi.fn()
+    const onClose = open(model({ onEditProperties }))
+    fireEvent.click(screen.getByRole('button', { name: /Change properties in this layer…/ }))
+    expect(onEditProperties).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalled()
+    cleanup()
+    open(model())
+    expect(screen.queryByRole('button', { name: /Change properties in this layer…/ })).not.toBeInTheDocument()
+  })
+
   it('carries the header\'s own actions where the header keeps to the essentials', () => {
     const m = model({ onAddEntity: vi.fn(), onNewGroup: vi.fn(), onBuild: vi.fn() })
     open(m)

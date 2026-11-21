@@ -3,7 +3,9 @@
  * catalog: every key with how many entities carry it, its kinds (mixed ones
  * flagged and explained), its range, its values with exact counts (or that
  * it has too many to list), the tags with their counts — and the searches
- * and rules it hands off, typed as the values are stored.
+ * and rules it hands off, typed as the values are stored. Changes open the
+ * one bulk-change dialog; the draft's changes are listed as they run and
+ * once they end, and mark the properties they touch.
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -14,6 +16,9 @@ import {
     NO_DRAFT, NO_VERSION_CONTROL, type EntityEditing,
 } from '@/features/versioning/hooks/useEntityEditing'
 import type { SearchCatalogProperty, SearchCatalogResult } from '@/types/search'
+import { useBranchStore } from '@/store/branchStore'
+import { useCanvasStore } from '@/store/canvas'
+import { usePropertyJobsStore, type TrackedJob } from '@/store/propertyJobsStore'
 
 import { PropertyBrowser } from '../PropertyBrowser'
 
@@ -27,9 +32,6 @@ vi.mock('@/hooks/usePropertyCatalog', () => ({
 }))
 vi.mock('@/components/ui/notifications', () => ({
     useAppNotifications: () => ({ notify }),
-}))
-vi.mock('../PropertyOperationDialog', () => ({
-    PropertyOperationDialog: () => <div>operation dialog</div>,
 }))
 vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/features/versioning/hooks/useEntityEditing')>()),
@@ -82,7 +84,7 @@ function renderBrowser(over: Partial<PropertyCatalogState> = {}) {
     const onCreateRuleFromPredicate = vi.fn()
     render(
         <PropertyBrowser
-            viewId="view-1" knownEntityTypes={[]} knownLayers={[]}
+            viewId="view-1"
             onSearchPredicate={onSearchPredicate}
             onCreateRuleFromPredicate={onCreateRuleFromPredicate}
         />,
@@ -211,13 +213,18 @@ describe('PropertyBrowser', () => {
 describe('PropertyBrowser — a property is changed only in a draft', () => {
     beforeEach(() => { editing = { offered: true, blocked: null } })
 
-    it('offers New, Update and Remove while a draft is open', async () => {
+    it('opens the bulk-change dialog from New, and from a property: Change, Duplicate as…, Remove', async () => {
+        const user = userEvent.setup()
         renderBrowser()
+        await user.click(screen.getByRole('button', { name: 'New' }))
+        expect(usePropertyJobsStore.getState().consumeRequest()).toEqual({})
         const owner = within(card('owner'))
-        expect(owner.getByRole('button', { name: 'Update' })).toBeEnabled()
-        expect(owner.getByRole('button', { name: 'Remove' })).toBeEnabled()
-        await userEvent.setup().click(screen.getByRole('button', { name: 'New' }))
-        expect(screen.getByText('operation dialog')).toBeInTheDocument()
+        await user.click(owner.getByRole('button', { name: 'Change' }))
+        expect(usePropertyJobsStore.getState().consumeRequest()).toEqual({ kind: 'set', key: 'owner' })
+        await user.click(owner.getByRole('button', { name: 'Duplicate as…' }))
+        expect(usePropertyJobsStore.getState().consumeRequest()).toEqual({ kind: 'copy', key: 'owner' })
+        await user.click(owner.getByRole('button', { name: 'Remove' }))
+        expect(usePropertyJobsStore.getState().consumeRequest()).toEqual({ kind: 'remove', key: 'owner' })
     })
 
     it('disables them on a data source without version control, and says why', async () => {
@@ -231,7 +238,7 @@ describe('PropertyBrowser — a property is changed only in a draft', () => {
         await user.unhover(create.parentElement!)
 
         const owner = within(card('owner'))
-        const update = owner.getByRole('button', { name: 'Update' })
+        const update = owner.getByRole('button', { name: 'Change' })
         expect(update).toBeDisabled()
         expect(owner.getByRole('button', { name: 'Remove' })).toBeDisabled()
         await user.hover(update.parentElement!)
@@ -255,8 +262,60 @@ describe('PropertyBrowser — a property is changed only in a draft', () => {
         renderBrowser()
         expect(screen.queryByRole('button', { name: 'New' })).not.toBeInTheDocument()
         const owner = within(card('owner'))
-        expect(owner.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument()
+        expect(owner.queryByRole('button', { name: 'Change' })).not.toBeInTheDocument()
         expect(owner.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
         expect(owner.getByRole('button', { name: 'Create rule' })).toBeEnabled()
+    })
+})
+
+
+describe('PropertyBrowser — the draft\'s bulk changes', () => {
+    const tracked = (jobId: string, patch: Partial<TrackedJob>): TrackedJob => ({
+        jobId, wsId: 'ws', graphId: 'g1', branchId: 'd1', viewId: 'view-1',
+        op: { kind: 'rename', key: 'owner', to: 'steward' }, targetLabel: 'every entity in this view',
+        startedAt: '2026-11-21T00:00:00Z', job: { jobId, status: 'running', progress: 0.4, processed: 400, total: 1000 }, ...patch,
+    })
+
+    beforeEach(() => {
+        editing = { offered: true, blocked: null }
+        localStorage.clear()
+        useBranchStore.setState({ graphId: 'g1', currentBranchId: 'd1' } as never)
+        usePropertyJobsStore.setState({ jobs: [], request: null } as never)
+        useCanvasStore.setState({ selectedNodeIds: [], drawerNodeIds: null, drawerNodeId: null, drawerDirty: false, pendingDrawerMove: null } as never)
+    })
+
+    it('lists one being applied, with how far it has got — and marks the property it changes', () => {
+        usePropertyJobsStore.getState().track(tracked('j1', {}))
+        renderBrowser()
+        const panel = within(screen.getByRole('region', { name: 'Changes on this draft' }))
+        expect(panel.getByText('Rename owner → steward')).toBeInTheDocument()
+        expect(panel.getByText('400 of 1,000')).toBeInTheDocument()
+        expect(panel.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+        expect(within(card('owner')).getByText('renamed…')).toBeInTheDocument()
+        // The new name, which none of the published entities holds yet.
+        expect(screen.getByText('new')).toBeInTheDocument()
+    })
+
+    it('says what one that ended did, and offers why some could not be changed', () => {
+        usePropertyJobsStore.getState().track(tracked('j2', {
+            op: { kind: 'remove', key: 'legacyCode' },
+            job: { jobId: 'j2', status: 'completed', summary: {
+                changed: 9, unchanged: 1, missing: 1, conflicts: 0,
+                refused: { count: 3, byReason: { missing: 1, write_refused: 2 }, examples: [] },
+            } },
+        }))
+        renderBrowser()
+        const panel = within(screen.getByRole('region', { name: 'Changes on this draft' }))
+        expect(panel.getByText(/changed/).textContent).toMatch(/9 changed · 1 left as they were · 1 not in the draft · 2 couldn’t be/)
+        expect(panel.getByRole('button', { name: 'Which, and why' })).toBeInTheDocument()
+        panel.getByRole('button', { name: 'Dismiss' }).click()
+        expect(usePropertyJobsStore.getState().jobs).toEqual([])
+    })
+
+    it('offers to compare several entities selected on the canvas', async () => {
+        useCanvasStore.setState({ selectedNodeIds: ['a', 'b', 'logical:g'] } as never)
+        renderBrowser()
+        await userEvent.setup().click(screen.getByRole('button', { name: /2 selected on the canvas/ }))
+        expect(useCanvasStore.getState().drawerNodeIds).toEqual(['a', 'b'])
     })
 })

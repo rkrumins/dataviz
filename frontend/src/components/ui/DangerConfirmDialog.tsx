@@ -55,6 +55,10 @@ export function DangerConfirmDialog({
     safeMessage = 'Nothing else will be affected.',
     /** Anything the deletion does NOT do, that a reasonable person would assume it does. */
     caveat,
+    /** The impact list's heading — for an action that changes rather than deletes. */
+    impactHeading = 'This will destroy',
+    /** The closing warning; null for an action that can still be taken back. */
+    irreversibleNote = 'This cannot be undone',
     onClose,
     onConfirm,
 }: {
@@ -68,6 +72,8 @@ export function DangerConfirmDialog({
     impactUnknown?: boolean
     safeMessage?: string
     caveat?: string
+    impactHeading?: string
+    irreversibleNote?: string | null
     onClose: () => void
     onConfirm: () => void | Promise<void>
 }) {
@@ -184,7 +190,7 @@ export function DangerConfirmDialog({
                                 <div className="flex items-center gap-2 mb-3">
                                     <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
                                     <h4 className="text-xs font-bold uppercase tracking-wider text-red-600 dark:text-red-400">
-                                        This will destroy
+                                        {impactHeading}
                                     </h4>
                                 </div>
 
@@ -232,9 +238,11 @@ export function DangerConfirmDialog({
                                     })}
                                 </ul>
 
-                                <p className="mt-3 pt-3 border-t border-red-200 dark:border-red-500/20 text-[11px] font-bold uppercase tracking-wider text-red-600 dark:text-red-400">
-                                    This cannot be undone
-                                </p>
+                                {irreversibleNote && (
+                                    <p className="mt-3 pt-3 border-t border-red-200 dark:border-red-500/20 text-[11px] font-bold uppercase tracking-wider text-red-600 dark:text-red-400">
+                                        {irreversibleNote}
+                                    </p>
+                                )}
                             </div>
                         )}
 
