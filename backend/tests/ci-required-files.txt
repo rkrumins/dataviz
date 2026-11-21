@@ -219,6 +219,9 @@ tests/test_placement_conformance.py
 tests/test_placement_dry_run.py
 tests/test_placement_legacy_parity.py
 tests/test_playground.py
+tests/test_playground_graduation.py
+tests/test_playground_imports.py
+tests/test_playground_maker_rights.py
 tests/test_playground_samples.py
 tests/test_probe_graph_providers.py
 tests/test_probe_projection_lag.py

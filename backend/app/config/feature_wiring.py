@@ -222,7 +222,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         server_gates=(
             "versioning_gate.py — every /graph write (drafts, commits, merges, reverts)",
             "versioned_write_provider.py — backstop on the write-through path",
-            "GET /playground/samples, POST /playground/samples/{sample_id} — starting from a sample",
+            "GET /playground/samples, POST /playground/samples/{sample_id}, POST /playground/imports — a starter "
+            "graph's first version (and a sample's example draft)",
         ),
         ui_surfaces=(
             "Canvas edit mode, drafts, reviews and history",
@@ -535,6 +536,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /playground/join — refused while off",
             "GET /playground — says the Playground is off, and offers nothing",
             "GET /playground/samples, POST /playground/samples/{sample_id} — refused while off",
+            "POST /playground/imports (start a graph from your own data) — refused while off",
             "POST /{ws_id}/versioning/blank-graphs in the Playground — starting a new graph there is refused",
         ),
         ui_surfaces=(
@@ -744,6 +746,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         server_gates=(
             "POST /blank-graphs — provision a lineage model with no data source",
             "GET /playground/samples, POST /playground/samples/{sample_id} — a sample is a blank model",
+            "POST /playground/imports — a graph started from your own data is a blank model",
         ),
         ui_surfaces=(
             "Blank-model option in the View wizard",
