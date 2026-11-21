@@ -30,6 +30,8 @@ The assistant answers from the platform's own reads — Advanced Search, the lin
 | "Do we have views about supply-chain failures?" | Keyword search as the person, for the topic and its synonyms, fused with semantic matches from the views collection, each verified as the person | Medium-high | Private views are found by keyword only |
 | "Write the search for…" / "Write the Cypher for…" | A validated `SearchQuery` with its exact count, shown as the query language; Cypher checked by the native-query guard | High for searches, medium for Cypher | The person always runs Cypher themselves |
 | "How do I share a view?" · "Why can't I edit?" | Hybrid retrieval over the docs and user guide, answered with citations to the exact section; feature switches checked | High | When the docs do not answer, it says so and gives the support contact |
+| "What do you know about this view?" · "Explain its hierarchy" · "What kinds of connection are there?" | The context brief: the view's details and layers, the semantic layer's types with counts in the view and the source, how they nest, every kind of connection with its direction and count, what the entities carry, and what limits answers there — shown as a card | High | Says when the schema is still being computed or stands in from the semantic layer alone |
+| Any of the above on a data source with a generic schema (everything is a `Node`, a `kind` property says what it is) | The property is detected with its counts and confirmed once; searches, counts and impact reports then read kinds of thing through it | High once confirmed | Asks which property it is rather than guessing; says when nothing is hierarchy, nothing is lineage, or no semantic layer is assigned |
 | "Tables about supplier payments" across millions of entities | Synonym expansion into text conditions | Medium | Entity-level semantic search comes with the entity index |
 | Questions across every data source at once | — | Not yet | Search is bound to one data source; the assistant asks which |
 
@@ -77,8 +79,9 @@ flowchart LR
 ## Identity and access
 
 - **The switch.** **AI assistant** (`aiAssistantEnabled`) ships off and fails closed. Off, the edge refuses every AI route and every delegation stops working at once.
-- **The permission.** `workspace:ai:use`, held by every built-in role that reads data sources — in the workspace a request names, or any workspace when it names none. Administration needs `system:admin`. See [RBAC](/docs/rbac#the-ai-assistant).
-- **The delegation** (ADR-032). A `nxdlg_` token per request, read only, one turn long, narrowed to the request's workspace and to the API key it came with, if any. It is accepted on the API-key path: the deny-by-default endpoint surface, the resource fence, claims from the person's live access. It is refused on writes, on native queries, after the session ends and when the switch is off.
+- **The permission.** `workspace:ai:use`, held by every built-in role that reads data sources — in the workspace a request names, or any workspace when it names none. A view names its own workspace, whatever the request sent. Administration needs `system:admin`. See [RBAC](/docs/rbac#the-ai-assistant).
+- **Shared views.** Someone who reads a view through a share or organisation-wide visibility, not as a member of its workspace, may ask about it when they hold `workspace:ai:use` in any workspace. Their delegation reaches **that view alone**, every read names it (`?viewId=`), and the edge tells the service so (`X-AI-Reach: view`): searches stay inside the view, and lineage-following conditions, which the platform refuses past a view's edge, are not attempted. Traces still work.
+- **The delegation** (ADR-032). A `nxdlg_` token per request, read only, one turn long, narrowed to the request's workspace (or, for a shared view, to the view) and to the API key it came with, if any. It is accepted on the API-key path: the deny-by-default endpoint surface, the resource fence, claims from the person's live access. It is refused on writes, on native queries, after the session ends and when the switch is off.
 - **Internal token.** `AI_INTERNAL_TOKEN` between the edge and the service; the service will not start in production without it.
 
 ## Models and sign-in
@@ -104,7 +107,7 @@ Every outbound call — model, token endpoint, MCP server — goes through the s
 A turn (`agent/loop.py`):
 
 1. **Checks** — a chat connection is set; the persona is on; the person has budget left today (`dailyTokensPerUser`) and fewer turns running than `maxConcurrentTurnsPerUser`.
-2. **Grounds** — for the data persona, the view, its schema (entity types with counts in scope, containment and lineage edge types), its property catalogue (keys, kinds, coverage, the most common values) and tags, the confirmed vocabulary, what the person has selected, and earlier results. Read through the platform's cached, view-scoped reads; bounded; cached per person and view for five minutes.
+2. **Grounds** — for the data persona, the **context brief** (`agent/brief.py`): the view's details, layers and scope; the semantic layer's types with their counts in the view (catalogue) and in the whole source (introspection), how they nest, every kind of connection with its class, direction and count; the property catalogue and tags; caveats about the source's shape; plus the confirmed vocabulary, what the person has selected, and earlier results. Every graph read names the view; cached per person and view for five minutes. The model gets a ranked, bounded version under the data-sharing policy, fitted to its budget by shedding detail (values, later descriptions, the long tail of properties and tags) rather than cutting it mid-structure. On a workspace, data source, semantic layer or Explorer page the brief describes that page — a data source or Explorer page reads through the source's most used view so searches work — and on a guide page the Help persona knows the page's title and sections.
 3. **Answers** — the model streams text and calls tools, at most `maxStepsPerTurn` times, within `AI_TURN_TIMEOUT_SECONDS`.
 4. **Keeps** — the question, the answer with its cards, steps and follow-ups, the result references and confirmed concepts, the tokens spent.
 
@@ -117,6 +120,7 @@ A turn (`agent/loop.py`):
 | `resolve_concept` | A business term read against this data source (below) |
 | `analyze_impact`, `trace_lineage`, `explain_rollup` | The impact and provenance playbooks; the physical edges behind a rolled-up link |
 | `find_views`, `set_context` | Views about a topic across workspaces; working inside one |
+| `describe_context` | The context brief as a card — "what do you know about this view?" |
 | `show_query`, `draft_cypher` | A search or Cypher for the person to open and run |
 | `search_docs`, `get_feature_switches` | The docs and guide, with citations; what is switched on |
 | `ask_user`, `suggest_followups` | A choice for the person; follow-up chips |
@@ -125,7 +129,9 @@ The model writes predicates in the platform's `SearchQuery` grammar. Before anyt
 
 **Concepts** (`agent/concepts.py`). "PII", "owner", "updated", "ingested" rarely match a field. The assistant uses a reading confirmed in the conversation, remembered by the person, or set for the workspace; otherwise it gathers candidates from the data — tags, property keys, property values, tag and glossary entities — counts each one exactly, and applies one on its own only when it is the word itself and nothing else matches. Otherwise it asks, with the counts and "any of these", and remembers the answer for the data source if the person says so. Administrators curate shared readings under **Business vocabulary**.
 
-**Impact** (`agent/impact.py`) resolves the target (asking when a name matches several), walks physical lineage to a node budget, falls back to rolled-up lineage and exact counts when the walk is cut short, and reports the affected assets by type and container, the consumers at the end, the owners, the paths with each edge's transformation, the job schedules on the way ("daily at 04:00 UTC") and a heuristic severity with its reasons. The affected set is kept as a predicate, so "who owns those?" composes with it.
+**Generic schemas.** A source that keeps (almost) everything under one type — a generic `Node`, `Entity`, `Asset` — usually says what each entity is in a property. The brief detects candidates from the catalogue: a string property on at least 90% of that type, with 2–60 distinct short, word-like values, ranked by a name like `type`, `kind` or `category`; for a dominant type with a real name only those names count. It never applies one on its own. When a question names a kind of thing that is not a type ("tables"), the assistant asks once — *Which property says what kind of thing each one is?* — with what each candidate holds; the answer is remembered like any reading (concept `entity type`) and can be made the workspace's. From then on `entityType in [table]` runs as `entityType in [Node] AND kind in [table]`, results are grouped by the property, impact reports name the kinds, and the Cypher drafter is told. A type the source does not have at all goes back to the model with the types it does have.
+
+**Impact** (`agent/impact.py`) resolves the target (asking when a name matches several), walks physical lineage to a node budget, falls back to rolled-up lineage and exact counts when the walk is cut short, and reports the affected assets by type and container, the consumers at the end, the owners, the paths with each edge's transformation, the job schedules on the way ("daily at 04:00 UTC") and a heuristic severity with its reasons. It relies on no type names: consumers are where lineage ends, ranked by the types the semantic layer says lineage ends at; a job is whatever records a schedule; owners come from the confirmed reading of "owner", then the catalogue's owner-like keys. The affected set is kept as a predicate, so "who owns those?" composes with it.
 
 ## Semantic matching and knowledge
 
@@ -141,7 +147,8 @@ All under `/api/v1/ai/`, through the edge.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/status` | Whether a model is connected, which personas are on, the knowledge collections' state |
+| GET | `/status` | Whether a model is connected, which personas are on, the knowledge collections' state, the data-sharing policy |
+| GET | `/context` | The context brief for a view (`viewId`) or page (`pageKind`, `pageId`, `pageTitle`) — for the person, unfiltered, no model called; gated as a question about it would be |
 | POST | `/chat/stream` | Ask; the answer streams as server-sent events: `meta`, `step`, `text`, `block`, `clarify`, `actions`, `followups`, `usage`, `error`, `done` |
 | POST | `/query/draft` | A search (`mode: search`, validated and counted) or Cypher (`mode: cypher`, guard-checked) for a question |
 | GET, DELETE | `/conversations`, `/conversations/{id}` | The person's own conversations |
@@ -150,7 +157,7 @@ All under `/api/v1/ai/`, through the edge.
 | * | `/admin/*` | Connections and their test, settings, knowledge and re-index, external sources, business vocabulary, usage (`system:admin`) |
 | POST | `/mcp/knowledge` | The knowledge MCP server |
 
-Cards (`block` events) are typed: `results`, `impact`, `query`, `views`, `citations`, `entity`, `notice`, and `clarify` for a choice. Each carries what the person needs to act — the predicate to open in Advanced Search, the trace to open on the canvas, the view to open.
+Cards (`block` events) are typed: `results`, `impact`, `query`, `views`, `citations`, `entity`, `context`, `notice`, and `clarify` for a choice. Each carries what the person needs to act — the predicate to open in Advanced Search, the trace to open on the canvas, the view to open.
 
 ## The knowledge MCP server
 
@@ -180,6 +187,8 @@ Operator settings are environment variables (see [Configuration](/docs/configura
 
 - Searches and closure walks need FalkorDB; Neo4j and Spanner sources get partial answers, DataHub none.
 - Questions are about one data source at a time.
+- A type property is detected for entities only; a single generic edge type whose own property says what kind of connection it is is reported, not read through.
+- On a view shared with someone outside its workspace, searches cannot follow lineage past the view's edge (the platform refuses it); traces can.
 - Entity-level semantic matching is not built yet; view and docs matching are.
 - The first provider kind is OpenAI-compatible; Anthropic, Bedrock, Vertex and a custom HTTP template are next.
 - Per-person concurrency is counted per AI service process.

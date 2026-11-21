@@ -38,6 +38,11 @@ Companions:
 - **Administration → AI** — connections, data sharing, limits, retention, knowledge, vocabulary,
   usage.
 - **Knowledge MCP** — `POST /api/v1/ai/mcp/knowledge` for other teams' agents.
+- **Everywhere, already in context** — a copilot bubble on every page and ⌘J, the guide included.
+  The panel knows the view or page you're on; **What I know** shows its details, layers, types and
+  how they nest, every kind of connection, what its entities carry and what limits answers there.
+- **Generic schemas** — when everything is a `Node` and a property such as `kind` says what each one
+  is, the assistant finds it, asks once, remembers it, and from then on "tables" means tables.
 
 ## 2. How accuracy is protected
 
@@ -47,7 +52,8 @@ Companions:
 2. **Deterministic playbooks** for impact and provenance: the same question gets the same report.
 3. **Asking, not guessing.** A business term is matched against the data with counts; one exact,
    unambiguous match is used and said; anything else is a choice for the person, remembered if
-   they wish.
+   they wish. The same holds for which property says what kind of thing an entity is, in a source
+   with a generic schema — and no part of an answer relies on what types are called.
 4. **Exact counts at any size.** A walk cut at its node budget is followed by an exact count
    from a search walked from the target; rolled-up lineage gives the breadth, and the report says
    which grain each number came from.
@@ -61,6 +67,8 @@ Companions:
   fence, the person's live claims, views and data `read` only. Refused on writes, on native
   queries, after the session ends, when the switch is off; never wider than an API key it came
   with.
+- A view **shared with you** from a workspace you're not in can be asked about; the delegation then
+  reaches that view alone.
 - Every outbound call is held to the shared **network guard**: no loopback or cloud metadata, no
   private host an operator has not listed, no plain http in production, no redirects.
 - **Data sharing** under Administration → AI decides whether descriptions, property values and
@@ -98,4 +106,6 @@ Companions:
 - Provider kinds beyond OpenAI-compatible (Anthropic, Bedrock, Vertex, a custom HTTP template).
 - Entity-level semantic matching (designed: selective by type, opted in per data source).
 - Data-plane MCP tools (search, trace, impact) for other teams' agents.
+- Reading a generic edge type's own "kind" property; lineage-following searches on views shared
+  from outside your workspaces.
 - Questions across several data sources at once; Neo4j and Spanner closure walks.

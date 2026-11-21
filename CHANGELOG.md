@@ -38,6 +38,18 @@ is meant rather than guessing. Off until an administrator turns it on and connec
 - **Semantic matching** for views and docs on a pgvector store, with versioned collections that
   re-embed only what changed; lexical when no embedding model is set.
 - Permission `workspace:ai:use`; new services `ai-service` and `vectordb`.
+- **The assistant everywhere**: a copilot bubble on every page (and ⌘J), the guide and docs
+  included when signed in; the panel already knows the view or page you're on, and **What I know**
+  shows it — the view's details and layers, its types with counts in the view and the data source,
+  how they nest, every kind of connection with its direction and count, what its entities carry,
+  and what limits answers there. Workspace, data source, semantic layer and Explorer pages get
+  their own context.
+- **Generic schemas**: when everything is one type (a `Node`) and a property says what each entity
+  is, the assistant finds the property, asks once which one it is, remembers it per data source
+  (or for everyone, from Business vocabulary), and reads kinds of thing through it in searches,
+  counts and impact reports. Impact reports no longer depend on type names.
+- Views shared with you, or visible across the organisation, can be asked about without a role in
+  their workspace; the assistant then reads that view alone.
 
 ### Changed
 
@@ -65,6 +77,9 @@ is meant rather than guessing. Off until an administrator turns it on and connec
 - The first provider kind is OpenAI-compatible; Anthropic, Bedrock and Vertex adapters follow.
 - Searches and closure walks need FalkorDB: Neo4j and Spanner sources get partial answers.
 - One data source per question; entity-level semantic matching is not built yet.
+- A generic edge type whose property says what kind of connection it is is reported, not read
+  through. On a view shared from outside your workspaces, searches can't follow lineage past the
+  view's edge; traces can.
 
 ---
 

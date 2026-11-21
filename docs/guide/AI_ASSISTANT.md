@@ -10,11 +10,33 @@ The assistant answers questions about your data in plain language — what feeds
 
 ## Get started in 2 minutes
 
-1. Open a View and press **⌘J** / **Ctrl+J**, or choose the assistant button in the top bar. The panel opens beside the page.
+1. Open a View and choose the assistant bubble in the bottom-right corner, press **⌘J** / **Ctrl+J**, or choose the assistant button in the top bar. The panel opens beside the page, already knowing which view you're on.
 2. Ask: *What breaks if `customers` is removed?*
 3. Watch **How I got this** — each step the assistant takes, as it takes it.
 4. Read the answer and its report card. **Open the trace** shows it on the canvas; **Open in Advanced Search** gives you the exact search to keep.
 5. Click a follow-up chip — *Who owns the affected assets?* — or type your own: *only the dashboards*.
+
+---
+
+## Open it from anywhere
+
+The assistant bubble sits in the bottom-right corner of every page, above the canvas's own controls. Hover it to see what it will ask about — *Ask about Supply chain*. It hides while the panel is open; a dot on it means an answer finished while the panel was closed. **⌘J** / **Ctrl+J** and the top-bar button work everywhere too, including the guide and docs when you're signed in.
+
+---
+
+## What it knows about where you are
+
+The **context chip** at the top of the panel names what the assistant is looking at. Choose it to see **What I know** — everything the assistant has to go on before you ask:
+
+| On | It knows |
+|---|---|
+| A view | Its name, description, workspace and data source, semantic layer and layout; its layers in order; the types it holds with how many are in the view and in the whole data source, and how they nest (*Platform › Schema › Table › Column*); every kind of connection — hierarchy, lineage or other — with its direction and how many there are; which properties and tags its entities carry; and anything that limits answers there |
+| A workspace | Its description and data sources |
+| A data source or Explorer | The data source, read through its most used view |
+| A semantic layer | Its types, how they nest, its connections, and which data sources use it |
+| A guide or docs page | The page and its sections — the panel opens on **Help** there |
+
+Ask *What do you know about this view?* or *Explain the hierarchy* and the assistant shows the same card in the conversation. Starter questions follow what the view holds — its layers, its lineage, its owners.
 
 ---
 
@@ -68,6 +90,19 @@ Words such as *PII*, *owner*, *updated* or *ingested* are recorded differently i
 
 Pick one. Tick **Remember for this data source** and it will not ask you again; administrators can make a reading everyone's under **Business vocabulary**. Your remembered readings are listed — and can be forgotten — from the panel's menu.
 
+### Data sources with generic schemas
+
+Some data sources keep everything under one type — every entity is a *Node* — and say what each one is in a property, such as `kind = table`. The assistant notices this and says so in **What I know**. The first time you ask about a kind of thing — *How many tables are there?* — it asks which property says what kind of thing each entity is, showing what each candidate holds:
+
+> Everything here is a ‘Node’. Which property says what kind of thing each one is?
+> ○ The property “kind” — table 300 · column 150 · dashboard 30 · job 20
+
+Pick one and tick **Remember for this data source**. From then on *tables*, *dashboards* and *jobs* mean exactly that, results are grouped by them, and impact reports name them. Administrators can make the reading everyone's under **Business vocabulary**. **What I know** also says when nothing is recorded as hierarchy, nothing as lineage, or no semantic layer is assigned — so you know which questions can't be answered yet.
+
+### Views shared with you
+
+You can ask about a view someone shared with you, or one visible across the organisation, even if you're not a member of its workspace. The assistant reads only that view: searches stay inside it and can't follow lineage past its edge, though traces still can. **What I know** says so.
+
 ### Follow-ups
 
 Every result is remembered for the conversation. *Those*, *these* and *of them* mean the last results, however many there are, and the assistant adds your new condition to the search that produced them rather than to a list — so the answer stays exact.
@@ -92,6 +127,8 @@ Ask how to do something: *How do I share a view with a team?*, *Why can't I edit
 ## What is sent, and what is kept
 
 - Your question, and the names, types — and, if your administrator allows, descriptions and property values — of what the answer needs, are sent to the AI model your administrator connected. Nothing you cannot read is ever sent: the assistant reads as you.
+- Once you confirm which property says what kind of thing each entity is, its values (*table*, *dashboard*…) are sent as type names, like other type names, whatever the sample-values setting. Until then they follow that setting.
+- **What I know** shows you everything the assistant can read about the page; its footer says which of it the model is sent.
 - The assistant never changes anything. It cannot: it reads with a read-only pass that expires within minutes.
 - Conversations are kept for you only, for 30 days unless your administrator chose otherwise. Delete one from the history menu at any time.
 - The activity log records *that* you asked, and where — never what.

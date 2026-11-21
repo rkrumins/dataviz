@@ -439,6 +439,13 @@ about what they can read — the assistant reads as them:
   request names (`context.workspaceId` or `?workspaceId=`), or in any workspace when
   it names none — the Help persona answers from the product docs, which are public.
   **Administration → AI** (`/api/v1/ai/admin/*`) needs `system:admin` instead.
+  A request about a view checks the view's own workspace, whatever workspace it names.
+* **Views shared with you.** Someone who reads a view through a share or
+  organisation-wide visibility, without a role in its workspace, may ask about it when
+  they hold `workspace:ai:use` in any workspace. Their delegation is narrowed to that
+  view alone, and every read names it, so the platform's view capability applies:
+  searches stay inside the view, and nothing of its data source outside the view is
+  reachable. A view they cannot read is refused exactly as if no view were named.
 * **What the assistant can reach.** For each request the web tier mints a
   short-lived, read-only delegation (`nxdlg_…`, ADR-032) that the AI service presents
   on every read. It is held by the API key surface and resource fence, with claims
