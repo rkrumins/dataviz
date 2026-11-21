@@ -195,6 +195,27 @@ describe('review discussions, partial publishes and publishing to everyone', () 
     })
 })
 
+describe('requests left waiting', () => {
+    it.each([
+        ['data_request.reminder', 'lucide-clock', 'data_request', '/workspaces/ws_fin?tab=data&section=sources'],
+        ['data_request.escalated', 'lucide-shield-alert', 'data_request', '/workspaces?tab=requests'],
+        ['idp_link.reminder', 'lucide-clock', 'idp_link_request', '/workspaces?tab=requests'],
+        ['idp_link.escalated', 'lucide-shield-alert', 'idp_link_request', '/workspaces?tab=requests'],
+    ])('shows %s with its own icon and opens where it is answered', async (kind, icon, resourceType, link) => {
+        mockList.mockResolvedValue({
+            items: [message({ kind, title: 'Ada is still waiting', resourceType, link, actorId: null, actorName: null })],
+            unread: 1,
+        })
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        const row = (await screen.findByText('Ada is still waiting')).closest('[role="button"]')!
+        expect(row.querySelector(`.${icon}`)).not.toBeNull()
+        expect(row.querySelector('.lucide-bell')).toBeNull()
+        fireEvent.click(row)
+        expect(navigate).toHaveBeenCalledWith(link)
+    })
+})
+
 describe('questions and conversations', () => {
     afterEach(() => useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } }))
 

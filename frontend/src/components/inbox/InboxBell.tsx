@@ -197,6 +197,17 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         icon: 'text-rose-500',
         tile: 'bg-rose-500/10',
     },
+    // A link left waiting: the platform administrators are reminded, then a last time.
+    'idp_link.reminder': {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'idp_link.escalated': {
+        Icon: ShieldAlert,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
     'workspace_request.declined': {
         Icon: XCircle,
         icon: 'text-rose-500',
@@ -223,6 +234,17 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: XCircle,
         icon: 'text-rose-500',
         tile: 'bg-rose-500/10',
+    },
+    // A request for data left waiting: brought up to the workspace's admins, then to the platform team.
+    'data_request.reminder': {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'data_request.escalated': {
+        Icon: ShieldAlert,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
     },
     // A request nobody has answered, brought up again — then to the Org Admins.
     'access_request.reminder': {
