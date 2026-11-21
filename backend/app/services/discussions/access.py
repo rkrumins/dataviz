@@ -23,12 +23,14 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import exists, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import rbac_flag
-from backend.app.db.models import DiscussionORM, DiscussionParticipantORM, ViewORM, WorkspaceDataSourceORM
-from backend.app.db.repositories import user_repo
+from backend.app.db.models import (
+    DiscussionORM, DiscussionParticipantORM, ViewORM, WorkspaceDataSourceORM, view_is_live,
+)
+from backend.app.db.repositories import discussion_repo, user_repo
 from backend.app.services import view_access
 from backend.app.services.discussions.readers import (  # noqa: F401 — re-exported
     Maintainers,
@@ -92,6 +94,8 @@ async def readable_subject(session: AsyncSession, caller: Caller, subject_type: 
             if exc.status_code == 404:
                 raise not_found("view") from exc
             raise
+        if view.draft_branch_id is not None:      # staged in a draft: not live yet
+            raise not_found("view")
         return view_subject(view)
     if subject_type == "data_source":
         ds = (await session.execute(
@@ -117,13 +121,7 @@ async def sees_every_private_thread(session: AsyncSession, caller: Caller, subje
 def private_clause(user_id: str):
     """SQL: a thread the caller may see on a subject they read but do not maintain — open,
     or private with them in it. Id-correlated, inside the collaboration domain."""
-    return or_(
-        DiscussionORM.visibility == "open",
-        exists().where(
-            DiscussionParticipantORM.discussion_id == DiscussionORM.id,
-            DiscussionParticipantORM.user_id == user_id,
-        ),
-    )
+    return discussion_repo.visible_to(user_id)
 
 
 async def thread_visible(
@@ -147,7 +145,7 @@ async def readable_subject_ids(
     out: set[tuple[str, str]] = set()
     view_ids = sorted(i for t, i in wanted if t == "view")
     if view_ids:
-        stmt = select(ViewORM.id).where(ViewORM.id.in_(view_ids), ViewORM.deleted_at.is_(None))
+        stmt = select(ViewORM.id).where(ViewORM.id.in_(view_ids), view_is_live())
         if rbac_flag("RBAC_ENFORCE_VIEWS"):
             ctx = await view_access.ViewerContext.build(session, user=caller.user, claims=caller.claims)
             stmt = stmt.where(view_access.readable_views_clause(await view_access.build_read_scope(session, ctx)))

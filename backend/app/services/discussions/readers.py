@@ -40,6 +40,7 @@ from backend.app.db.models import (
     ViewORM,
     WorkspaceDataSourceORM,
     WorkspaceORM,
+    view_is_live,
 )
 from backend.app.db.repositories import (
     binding_repo,
@@ -84,11 +85,25 @@ def source_subject(ds: WorkspaceDataSourceORM) -> Subject:
                    workspace_id=ds.workspace_id, created_by=ds.created_by, data_source_id=ds.id)
 
 
+def subject_link(subject: Subject) -> str:
+    """Where the subject's conversations are: the view, or the source's Questions tab."""
+    if subject.type == "view":
+        return f"/views/{subject.id}"
+    return f"/workspaces/{subject.workspace_id}?tab=data&section=sources&ds={subject.id}&dstab=questions"
+
+
+def thread_link(subject: Subject, thread_id: str, message_id: Optional[str] = None) -> str:
+    base = subject_link(subject)
+    link = f"{base}{'&' if '?' in base else '?'}discussion={thread_id}"
+    return f"{link}&message={message_id}" if message_id else link
+
+
 async def load_subject(session: AsyncSession, subject_type: str, subject_id: str) -> Optional[Subject]:
-    """The live subject, or ``None`` when it is unknown or deleted."""
+    """The live subject, or ``None`` when it is unknown, deleted or still waiting in a
+    draft to go live (conversations are about what people can find)."""
     if subject_type == "view":
         view = (await session.execute(
-            select(ViewORM).where(ViewORM.id == subject_id, ViewORM.deleted_at.is_(None))
+            select(ViewORM).where(ViewORM.id == subject_id, view_is_live())
         )).scalar_one_or_none()
         return view_subject(view) if view is not None else None
     if subject_type == "data_source":
@@ -111,7 +126,7 @@ async def load_subjects(
     out: dict[tuple[str, str], Subject] = {}
     if view_ids:
         for v in (await session.execute(
-            select(ViewORM).where(ViewORM.id.in_(view_ids), ViewORM.deleted_at.is_(None))
+            select(ViewORM).where(ViewORM.id.in_(view_ids), view_is_live())
         )).scalars().all():
             out[("view", v.id)] = view_subject(v)
     if ds_ids:

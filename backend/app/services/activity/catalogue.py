@@ -163,6 +163,14 @@ def _summary_data_request(verb: str):
     return _build
 
 
+def _summary_discussion(verb: str):
+    def _build(p: dict) -> str:
+        where = "a data source" if p.get("subject_type") == "data_source" else "a view"
+        private = "private " if p.get("visibility") == "private" else ""
+        return f"{verb} a {private}question about {where} ({p.get('subject_id') or '?'})"
+    return _build
+
+
 def _summary_idp_provider(verb: str):
     def _build(p: dict) -> str:
         slug = p.get("slug") or p.get("provider_id") or "?"
@@ -594,6 +602,14 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "workspace.data_request.connected": ("info", _summary_data_request("connected")),
     "workspace.data_request.declined": ("warning", _summary_data_request("declined")),
     "workspace.data_request.withdrawn": ("info", _summary_data_request("withdrawn")),
+    "collaboration.discussion.asked": ("info", _summary_discussion("Asked")),
+    "collaboration.discussion.answered": ("info", _summary_discussion("Accepted an answer to")),
+    "collaboration.discussion.closed": ("info", _summary_discussion("Closed")),
+    "collaboration.discussion.reopened": ("info", _summary_discussion("Reopened")),
+    "collaboration.discussion.deleted": ("warning", _summary_discussion("Deleted")),
+    "collaboration.discussion_message.deleted": (
+        "warning", lambda p: f"Deleted a message in conversation {p.get('discussion_id') or '?'}",
+    ),
     "identity.api_key.created": (
         "info", lambda p: f"API key {_api_key_label(p)} created",
     ),
@@ -1075,6 +1091,12 @@ LABELS: dict[str, str] = {
     "workspace.data_request.connected": "Connected requested data",
     "workspace.data_request.declined": "Declined a data request",
     "workspace.data_request.withdrawn": "Withdrew a data request",
+    "collaboration.discussion.asked": "Asked a question",
+    "collaboration.discussion.answered": "Accepted an answer",
+    "collaboration.discussion.closed": "Closed a question",
+    "collaboration.discussion.reopened": "Reopened a question",
+    "collaboration.discussion.deleted": "Deleted a question",
+    "collaboration.discussion_message.deleted": "Deleted a message in a conversation",
     "rbac.role.created": "Created a role",
     "rbac.role.updated": "Changed a role",
     "rbac.role.deleted": "Deleted a role",
@@ -1172,6 +1194,8 @@ _CATEGORY_RULES: tuple[tuple[str, str], ...] = tuple(sorted((
     ("workspace.", "data"),
     ("provider.", "data"),
     ("ontology.", "content"),
+    # Questions and conversations about views and data sources: auditor-only.
+    ("collaboration.", "content"),
     ("visualization.", "content"),
     ("view.", "content"),
     ("branding.", "platform"),

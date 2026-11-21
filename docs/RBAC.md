@@ -1157,6 +1157,71 @@ about an organization — and, to `system:admin`, everyone's with `seenCount`.
 `GET /admin/idp-groups/preview?idpGroup=` (`system:admin`) names up to ten people
 whose last sign-in had it.
 
+## Conversations
+
+Questions and conversations are about a view or a data source (the *subject*),
+under `/discussions` (`conversationsEnabled`, a preview that ships off). No new
+permission: what you may do follows from what you can already open.
+
+**Reading a subject** is the view's own read rule (`can_read_view`: its tier, its
+grants, its creator, the workspace's admins) or, for a data source,
+`workspace:datasource:read` in its workspace. A subject you can't open answers 404
+`not_found`, so its conversations stay as private as it is.
+
+**Seeing a thread.** An open thread is seen by everyone who can open the subject. A
+private one is seen by the people in it (who asked, the people asked, anyone
+mentioned, anyone who replied or followed), the subject's *maintainers* — a view's
+creator and editor grantees; a source's data contacts — and its workspace's admins
+(`workspace:admin`, so Org and Super Admins too); every one of them must still be able
+to open the subject. Lists, counts, badges and summaries apply the same rule.
+Losing access to the subject hides its threads; getting it back returns them.
+
+| Action | Who |
+|---|---|
+| Ask | Anyone who can open the subject, if a person (a service account: 403 `person_required`) |
+| Reply | Anyone who sees the thread, while it is not closed |
+| Edit a message | Its author (`expectedVersion`; 409 `stale`) |
+| Delete a message | Its author, or a workspace admin |
+| Delete a question (and its thread) | The asker, or a workspace admin |
+| Accept or un-accept an answer | The asker, a maintainer, or a workspace admin |
+| Close or reopen | The asker, the people asked, a maintainer, or a workspace admin |
+| Mention someone | Only people who can open the subject (422 `cannot_mention`) |
+| Change a source's Stewards | `workspace:datasource:manage` |
+| Change a source's Owner | `workspace:datasource:manage` and either `workspace:admin` or being the current Owner (403 `owner_locked`) |
+
+API keys reach none of it (`api_key_surface.py` lists no conversations route).
+
+**Who a question reaches.** The asker chooses *View's owners* (the creator and editor
+grantees) and *Data owners* (the source's named Owner and Stewards; a source naming
+nobody derives them — who created it and the people named on the data requests
+connected as it), and may add up to 20 people. When nobody chosen can be reached,
+or the source names and derives nobody, it goes to the workspace's admins, else the
+Org Admins. Only people who can open the subject are reached — the rest come back as
+`notReached` (`cannot_read`, `not_a_person`, `inactive`, `group_too_large`) — at most
+50, a group's first 50 members.
+
+**Notifications** (`resource_type` `discussion`, the thread's id): `discussion.asked`
+(the people asked), `discussion.mentioned`, `discussion.replied` (followers; one
+unread per thread), `discussion.answered` (the asker, the answer's author, followers),
+`discussion.closed` (the asker, when someone else closed it), `discussion.reminder`
+(day 3 with no response from anyone but the asker: the people asked),
+`discussion.escalated` (day 7: the workspace's admins, else the Org Admins) and
+`discussion.watched` (watchers of the subject, for each new open question). Naming
+someone a data contact sends `data_source.contact_added` (`resource_type`
+`data_source`). Nobody is told of their own action, a muted thread tells its
+participant nothing, and nobody who can no longer open the subject is told.
+
+**Events** (ids only, never what anyone wrote): `collaboration.discussion.asked`,
+`.answered`, `.closed`, `.reopened`, `.deleted`,
+`collaboration.discussion_message.deleted`, and
+`workspace.data_source.contacts_changed`. The `collaboration.*` events are for
+auditors only.
+
+With `conversationsEnabled` off, asking, replying, editing, watching, following and
+changing data contacts are refused `403 feature_disabled`; reading, marking read,
+muting, unfollowing, unwatching, answering, closing and deleting still work, and
+reminders and watcher notices pause.
+
 ## Invites
 
 A platform administrator (`system:admin`) can mint an invite for **any**
