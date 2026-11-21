@@ -227,12 +227,12 @@ export const AI_FIXTURES: Record<string, AiFixture> = {
             step('s1', 'Searching the user guide', 'done', '3 passages'),
             ...words('Open the view, then choose **Share** in its header [1]. You can invite people by name or copy a link — '
                 + 'anyone the view is shared with can open it, whatever workspace they are in [1]. To let others change it, '
-                + 'give them **Can edit** [2]. Your company’s policy asks that views holding customer data are only shared inside your team [3].'),
+                + 'make them a **co-owner** [2]. Your company’s policy asks that views holding customer data are only shared inside your team [3].'),
             block({ id: 'blk_cite', type: 'citations', data: { items: [
-                { n: 1, title: 'Sharing a view', section: 'Share with people', href: '/guide/managing-views#share-with-people',
+                { n: 1, title: 'Managing & Sharing Views', section: 'Share a View with people or groups', href: '/guide/managing-views#share-a-view-with-people-or-groups',
                     snippet: 'Choose Share in the view header. Invite people by name, or copy the view’s link…', source: 'guide', trust: 'product' },
-                { n: 2, title: 'Roles and permissions', section: 'View roles', href: '/guide/rbac#view-roles',
-                    snippet: 'Viewers can open a view; editors can change its layers and layout…', source: 'guide', trust: 'product' },
+                { n: 2, title: 'Managing & Sharing Views', section: 'Owners and co-owners', href: '/guide/managing-views#owners-and-co-owners',
+                    snippet: 'Viewers can open a view; co-owners can change its layers, layout and who it is shared with…', source: 'guide', trust: 'product' },
                 { n: 3, title: 'Data handling policy', section: 'Customer data', href: 'https://wiki.example.com/policy/data',
                     snippet: 'Views that hold customer personal data are shared within the owning team only…', source: 'Confluence', trust: 'external' },
             ] } }),
