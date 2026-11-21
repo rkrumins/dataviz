@@ -140,7 +140,7 @@ class IdentityUnavailable(RuntimeError):
 
 def _label(row: Dict[str, Any]) -> Optional[str]:
     """How a row is named in a dry run's list, as the import preview names it."""
-    return row.get("displayName") or row.get("qualifiedName") or row.get("urn") or row.get("edgeType")
+    return _row_label(row) or None
 
 
 class ImportExportService:

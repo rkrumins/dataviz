@@ -40,6 +40,10 @@ export interface ImportSummary {
   refused?: RefusedRows | null
   /** A replace: the edges its node deletes took with them (an edge never outlives its ends). */
   edgesCascaded?: number
+  /** The file's rows by kind — entities (`node`) and relationships (`edge`) — each by outcome. */
+  byKind?: Partial<Record<'node' | 'edge', Partial<Record<'new' | 'updated' | 'unchanged' | 'deleted' | 'invalid', number>>>>
+  /** Records that were neither an entity nor a relationship row: skipped. */
+  skipped?: number
 }
 
 /** An import's report of the rows it refused (`summary.refused`). */

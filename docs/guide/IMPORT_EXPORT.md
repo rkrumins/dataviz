@@ -173,6 +173,45 @@ import. A new row needs one: a row with only an `entity_id` you made up for the
 file is refused, because the next import couldn't find what it made and would
 make it again.
 
+### Importing relationships on their own
+
+To connect entities the graph already holds, import a file of links alone: no
+entity rows, and no `kind` column. A row with an `edgeType` and no
+`entityType` is read as a relationship, in a CSV, a JSON file or any sheet of
+an Excel workbook (a workbook with no **Nodes** or **Edges** sheet is read
+whole, so a sheet named "Links" or "Sheet1" works).
+
+Each end of a link is named by its entity's `urn` (`sourceUrn`, `targetUrn`),
+its entity id (`source_entity_id`, `target_entity_id`), its `qualifiedName`
+(`sourceQualifiedName`, `targetQualifiedName`), or a key your data source
+matches by (`source.<field>`, `target.<field>`). A link can carry a
+`confidence` (0 to 1) and properties as `prop.<name>` columns. For example, as
+a CSV:
+
+```
+edgeType,sourceUrn,targetUrn,confidence,prop.via
+FEEDS,urn:acme:table:sales.orders,urn:acme:table:finance.ledger,0.9,nightly
+FEEDS,urn:acme:table:sales.customers,urn:acme:table:sales.orders,,
+```
+
+or as JSON:
+
+```
+[{"edgeType": "HAS", "sourceQualifiedName": "sales.orders", "targetQualifiedName": "sales.orders.amount"}]
+```
+
+**Download a starter template** shows every one of these columns on its Edges
+sheet. A link already there is updated, never made twice: a link is the same
+link whenever it joins the same two entities with the same type. Import such a
+file with **Add & update**: a replace of links alone is stopped before it
+deletes anything, because it would delete every entity no link names.
+
+A row is refused, with the reason, when an end names no entity, or one that
+two entities share (give it the entity's id instead), when its `confidence`
+isn't a number, or, on a data source whose ontology is enforced, when its type
+may not join those two kinds of entity. The file's other rows still import.
+The summary counts entities and relationships apart.
+
 ### Matching rows to existing items
 
 Every item keeps one id for life, whatever matched it, so its history carries

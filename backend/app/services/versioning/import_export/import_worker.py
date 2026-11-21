@@ -318,15 +318,23 @@ def _fixes(by_code: Mapping[str, int]) -> Dict[str, str]:
     return {code: FIXES[code] for code in by_code if code in FIXES}
 
 
+def _end_name(row: Mapping[str, Any], end: str) -> Optional[str]:
+    """How an edge row names its ``end``: as given, by urn, qualifiedName, entity id or a key."""
+    keys = row.get(f"{end}Keys") or {}
+    return next((str(v) for v in (row.get(end), row.get(f"{end}Urn"), row.get(f"{end}QualifiedName"),
+                                  row.get(f"{end}_entity_id"), *keys.values()) if v), None)
+
+
 def _label(row: Mapping[str, Any]) -> str:
-    """What a staged row is called: its name, else its key; an edge, by its type and ends."""
+    """What a staged row is called: an entity by its name, else its key; a link by its type and
+    its ends, source first — by its own id only when it names neither end (a delete by id)."""
+    if row.get("kind") == "edge":
+        source, target = _end_name(row, "source"), _end_name(row, "target")
+        if source or target:
+            return f"{row.get('edgeType') or 'link'} {source or '?'} → {target or '?'}"
+        return str(row.get("entity_id") or row.get("edgeType") or "")
     named = row.get("displayName") or row.get("qualifiedName") or row.get("urn") or row.get("entity_id")
-    if named or row.get("kind") != "edge":
-        return str(named or "")
-    ends = [row.get(k) for k in ("source", "target", "sourceUrn", "targetUrn",
-                                  "source_entity_id", "target_entity_id")]
-    ends = [str(e) for e in ends if e][:2]
-    return f"{row.get('edgeType') or 'edge'} {' → '.join(ends)}".strip()
+    return str(named or "")
 
 
 def where_text(row: Mapping[str, Any]) -> str:

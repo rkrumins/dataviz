@@ -9,6 +9,46 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Import the links between entities on their own, from any CSV, JSON or Excel sheet
+
+Links could be imported only alongside a `kind` column or on a sheet named Edges. A CSV or a
+workbook of the reader's own imported nothing and said nothing, one bad cell failed the whole file,
+and a strict graph's rules waited for the publish. Now a file of links alone imports from any
+format, refuses what it can't apply row by row with the reason, and says what it made.
+
+### Added
+
+- **A file of links alone** (no entity rows) imports from CSV, TSV, JSON, NDJSON or Excel. A row
+  without a `kind` column is a link when it has an `edgeType` and no `entityType`. A workbook with
+  no Nodes or Edges sheet is read whole, so a sheet named "Links" works.
+- The import summary counts **entities and relationships apart** (`summary.byKind`), and names
+  each link "TYPE source → target".
+- The import template's Edges sheet shows **every way to name an end**: entity id, urn,
+  qualifiedName, the data source's keys, and `confidence`.
+- **Delete a link by its `entity_id` alone** with `_op=delete`.
+
+### Changed
+
+- On a **strict graph**, an import refuses a link between types its relationship may not join, on
+  its row with the reason, as a checkpoint or publish would; the file's other rows import.
+- A **bad `confidence` or `properties_json` cell** refuses its row instead of failing the file.
+- A **urn two live entities carry** is ambiguous: a row naming it is refused (`duplicate_value`)
+  rather than matched to one of them.
+- A **replace whose file holds only links** stops before deleting anything (`links_only`).
+
+### Fixed
+
+- **BELONGS_TO** (child → parent) containment: a parent's second child was refused as "already has
+  a parent", and a child could be given a second parent. The hierarchy check now orients each
+  containment type by its direction.
+
+### Known limitations
+
+- Child → parent containment is recognised by the type name BELONGS_TO (as the canvas places it);
+  other upward names (PART_OF, MEMBER_OF) are read as parent → child.
+
+---
+
 ## [Unreleased] — Export what you selected to edit offline, lines as heavy as you like, and traces that open one hop deep
 
 Editing a few entities offline meant exporting the whole data source or a whole view. Now a canvas

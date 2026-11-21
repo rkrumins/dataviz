@@ -288,7 +288,11 @@ _INSTRUCTION_LINES = [
     ("• Add a NEW property = add a column named 'prop.<name>' (e.g. prop.owner) and fill only the"
      " rows it applies to. Add a new entity = a new row: give it a urn of your own (a pointer —"
      " importing the file again updates that entity; it isn't stored, so keep your own id in a"
-     " property to see it) or leave entity_id/urn blank.", _PLAIN),
+     " property to see it), or leave entity_id/urn blank and give it a qualifiedName.", _PLAIN),
+    ("• Add a new LINK = a row on the Edges sheet: its edgeType, and each end named by its"
+     " entity id (source_entity_id), its urn (sourceUrn) or its qualifiedName"
+     " (sourceQualifiedName) — the same for the target. A file of links alone, with no entity"
+     " rows, imports too.", _PLAIN),
     ("• DELETE a property value with the token \\N in its cell (or delete the whole row's entity"
      " by setting _op to 'delete').", _PLAIN),
     ("• Save as .xlsx and import — you'll review every change before anything is published.", _PLAIN),

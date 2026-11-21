@@ -75,3 +75,15 @@ def test_a_bad_cell_refuses_its_row_not_the_file():
     assert broken["op"] == "invalid" and broken["op_error"].startswith("properties_json isn't valid JSON")
     fine = normalize({"edgeType": "FEEDS", "sourceUrn": "urn:a", "targetUrn": "urn:b", "confidence": "0.5"}, "edge")
     assert fine["op"] == "upsert" and fine["confidence"] == 0.5
+
+
+def test_a_link_is_named_by_its_type_and_its_ends_source_first():
+    from backend.app.services.versioning.import_export.import_worker import _label
+    assert _label({"kind": "edge", "edgeType": "FEEDS", "source_entity_id": "e1", "targetUrn": "urn:b"}) \
+        == "FEEDS e1 → urn:b", "ends named two ways: still source first"
+    assert _label({"kind": "edge", "edgeType": "HAS", "sourceQualifiedName": "orders",
+                   "targetKeys": {"sap_id": "7"}}) == "HAS orders → 7"
+    assert _label({"kind": "edge", "edgeType": "FEEDS", "entity_id": "E1", "sourceUrn": "urn:a",
+                   "targetUrn": "urn:b"}) == "FEEDS urn:a → urn:b", "an exported link: by its ends, not its id"
+    assert _label({"kind": "edge", "entity_id": "E1", "op": "delete"}) == "E1", "a delete by id alone"
+    assert _label({"kind": "node", "displayName": "orders", "urn": "urn:a"}) == "orders"
