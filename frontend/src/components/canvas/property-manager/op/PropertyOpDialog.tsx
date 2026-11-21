@@ -6,10 +6,12 @@
  * reaches, however many — not only the ones loaded on the canvas. Relationships the same way: named
  * ones, or every one a Connections search matches (an edge target, `isEdgeTarget`).
  *
- * A removal, a rename or an overwrite of many entities (or across the whole data source) asks for
- * the property's name to be typed first. The request carries a key made from what it applies, so
- * retrying after a failure never applies it twice. Portal-mounted: a scrim beside an inert wrapper,
- * only the panel interactive.
+ * It is applied only once Review's count is final. A removal, a rename or an overwrite of many
+ * entities (or across the whole data source) asks for the property's name to be typed first — of
+ * any number, when the count is approximate or unknown. The request carries a key made from what it
+ * applies, so retrying after a failure never applies it twice. Another change still running on
+ * the draft can be followed from here instead. Portal-mounted: a scrim beside an inert wrapper,
+ * only the panel interactive; a body that fails to draw offers to close it.
  */
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
@@ -21,16 +23,20 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { Button, IconButton } from '@/components/ui/Button'
 import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
 import { useAffectedSample } from '@/hooks/usePropertyInsights'
-import { createPropertyJob, previewPropertyJob, type PropertyJobPreview } from '@/services/versioningApiService'
+import {
+  JobActiveError, PropertyJobRefusedError, createPropertyJob, getPropertyJob, previewPropertyJob,
+  type PropertyJob, type PropertyJobPreview,
+} from '@/services/versioningApiService'
 import type { SearchCatalogProperty } from '@/types/search'
 import { useDiscovery } from '../../search/builder/useDiscovery'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
 import {
   EDGE_RESERVED_KEYS, impactOf, isCleanup, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
-  reviewCounts, scopeFixedToView, targetLabel, targetOf, type OpDraft, type ScopeMode, type TargetPreset,
+  reviewCounts, scopeFixedToView, targetLabel, targetOf, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset,
 } from './opModel'
 import { useReviewCounts } from './useReviewCounts'
 import { WhatStep } from './WhatStep'
@@ -42,7 +48,7 @@ export interface GraphWrite { wsId: string; graphId: string; branchId: string }
 const STEPS = ['What', 'Where', 'Review'] as const
 
 export function PropertyOpDialog({
-  viewId, graphWrite, seed, knownEntityTypes, layers, selectionIds, onClose,
+  viewId, graphWrite, seed, knownEntityTypes, layers, selectionIds, onClose, onOpenManager,
 }: {
   viewId: string
   graphWrite: GraphWrite
@@ -51,6 +57,8 @@ export function PropertyOpDialog({
   layers: readonly LayerOption[]
   selectionIds: readonly string[]
   onClose: () => void
+  /** Open Property Manager, where the draft's changes are followed. */
+  onOpenManager?: () => void
 }) {
   const { notify } = useAppNotifications()
   const { catalog } = usePropertyCatalog(viewId)
@@ -78,27 +86,34 @@ export function PropertyOpDialog({
   const effectiveScope: ScopeMode = scopeFixedToView(preset) ? 'view' : scopeMode
   const whatProblem = opProblem(op, edges)
   const whereProblem = !target
-    ? (preset.kind === 'custom' ? 'Add a condition to say which entities' : `Choose which ${edges ? 'relationships' : 'entities'}`)
+    ? (tooManyIds(preset) ?? (preset.kind === 'custom' ? 'Add a condition to say which entities' : `Choose which ${edges ? 'relationships' : 'entities'}`))
     : preset.kind !== 'selection' && preset.kind !== 'relationships' && effectiveScope === 'data_source' && !sourceConfirmed ? 'Confirm the whole data source is meant' : null
 
   // ── Review: counted, checked and sampled once it is reached ──
   const reviewing = step === 2 && !whatProblem && !whereProblem
+  // Try again: the check and the counts asked afresh.
+  const [attempt, setAttempt] = useState(0)
+  const retry = () => setAttempt((n) => n + 1)
   const countItems = useMemo(() => (reviewing && predicate ? reviewCounts(op, predicate) : null), [reviewing, predicate, op])
-  const counts = useReviewCounts(viewId, countItems, effectiveScope)
+  const counts = useReviewCounts(viewId, countItems, effectiveScope, attempt)
   const sample = useAffectedSample(viewId, reviewing && predicate && !edges && effectiveScope === 'view' ? predicate : null, reviewing && !!predicate && !edges)
   // The server's check, kept with the request it answers: a newer request reads as checking.
-  const requestKey = reviewing && target ? JSON.stringify({ op: jobOp(op), target }) : ''
-  const [checked, setChecked] = useState<{ key: string; data: PropertyJobPreview | null }>({ key: '', data: null })
+  const changeKey = reviewing && target ? JSON.stringify({ op: jobOp(op), target }) : ''
+  const requestKey = changeKey && `${changeKey}#${attempt}`
+  const [checked, setChecked] = useState<{ key: string; data: PropertyJobPreview | null; error: string | null }>({ key: '', data: null, error: null })
   useEffect(() => {
     if (!requestKey || !target) return
     const controller = new AbortController()
     previewPropertyJob(graphWrite.wsId, graphWrite.graphId, graphWrite.branchId, jobOp(op), target, controller.signal)
-      .then((data) => { if (!controller.signal.aborted) setChecked({ key: requestKey, data }) })
-      .catch(() => { if (!controller.signal.aborted) setChecked({ key: requestKey, data: null }) })
+      .then((data) => { if (!controller.signal.aborted) setChecked({ key: requestKey, data, error: null }) })
+      .catch((e: unknown) => {
+        if (!controller.signal.aborted) setChecked({ key: requestKey, data: null, error: (e as Error).message || 'the server didn’t answer' })
+      })
     return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestKey, graphWrite.wsId, graphWrite.graphId, graphWrite.branchId])
-  const preview = { data: checked.key === requestKey ? checked.data : null, loading: !!requestKey && checked.key !== requestKey }
+  const answered = checked.key === requestKey
+  const preview = { data: answered ? checked.data : null, error: answered ? checked.error : null, loading: !!requestKey && !answered }
 
   const ids = preset.kind === 'selection' || preset.kind === 'relationships'
   const tally = ids
@@ -113,17 +128,21 @@ export function PropertyOpDialog({
   // A convert's bound, from how the view's entities store the property (the target is in the view).
   const kinds = effectiveScope === 'view' ? properties.find((p) => p.key === op.key.trim())?.kinds : null
   const impact = tally && tally.target !== undefined ? impactOf(op, tally, kinds) : null
-  const exact = ids ? !!preview.data?.counts : counts.complete
+  // Counted to the end (or, where nothing can count it, never to be); `exact` when it is also the
+  // draft's own count, not Published's or a floor.
+  const final = ids ? !!preview.data?.counts : counts.complete || counts.unavailable
+  const exact = final && (ids || ![...counts.counts.values()].some((c) => c.approximate || c.lowerBound))
   const stagedCount = useStagedChangesStore((s) => s.changes.length)
+  // Applied only on a final count: what it says it changes is what it changes.
   const blocked = !!preview.data?.refusal || !!preview.data?.activeJobId || preview.data?.nameBudget?.verdict === 'refused'
-    || stagedCount > 0 || preview.loading || (exact && impact?.changes === 0)
+    || stagedCount > 0 || preview.loading || !!preview.error || !final || (!ids && !!counts.error) || (exact && impact?.changes === 0)
 
   // ── Apply ──
   // The same change sent again — a retry — carries the same key; a different one, a new key.
   const salt = useMemo(() => generateId('propjob'), [])
-  const idempotencyKey = `${salt}:${hash(requestKey)}`
+  const idempotencyKey = `${salt}:${hash(changeKey)}`
   const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<Error | null>(null)
   const [confirming, setConfirming] = useState(false)
   const submit = async () => {
     if (!target) return
@@ -141,14 +160,28 @@ export function PropertyOpDialog({
       notify('success', `Applying ${propertyJobLabel(jobOp(op))} to ${targetLabel(preset)} on your draft — follow it in Property Manager.`)
       onClose()
     } catch (e) {
-      setError((e as Error).message || 'The change could not be started. Try again.')
+      setError(e instanceof Error && e.message ? e : new Error('The change could not be started. Try again.'))
     } finally {
       setSubmitting(false)
     }
   }
+  // The change already running on the draft: followed in Property Manager, instead of this one.
+  const follow = async (jobId: string) => {
+    try {
+      const job = await getPropertyJob(graphWrite.wsId, graphWrite.graphId, jobId)
+      if (!job.op) throw new Error('it isn’t a bulk property change')
+      usePropertyJobsStore.getState().track({
+        jobId, ...graphWrite, viewId, op: job.op, targetLabel: startedOn(job),
+        ...(job.entityKind === 'edge' ? { entityKind: 'edge' as const } : {}), startedAt: job.createdAt ?? new Date().toISOString(), job,
+      })
+      onClose()
+      onOpenManager?.()
+    } catch (e) {
+      notify('error', `Couldn’t follow it: ${(e as Error).message}. An import shows in the draft’s history once it ends — apply this change after it.`)
+    }
+  }
   const apply = () => {
-    if (!impact) { void submit(); return }
-    if (needsTypedConfirm(op, impact, effectiveScope)) setConfirming(true)
+    if (needsTypedConfirm(op, impact, effectiveScope, exact)) setConfirming(true)
     else void submit()
   }
 
@@ -211,49 +244,60 @@ export function PropertyOpDialog({
           </div>
 
           <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-5 py-4">
-            <motion.div key={step} initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} transition={MOTION.stepSwap}>
-              {step === 0 && (edges
-                ? <EdgeWhatStep viewId={viewId} op={op} onChange={setOp} />
-                : <WhatStep op={op} onChange={setOp} properties={properties} viewId={viewId} />)}
-              {step === 1 && (
-                <WhereStep
-                  viewId={viewId} preset={preset} onPreset={setPreset} scopeMode={scopeMode} onScope={setScopeMode}
-                  sourceConfirmed={sourceConfirmed} onConfirmSource={setSourceConfirmed} op={op}
-                  selectionIds={selectionIds} layers={layers} seed={seed.target} knownEntityTypes={knownEntityTypes}
-                />
-              )}
-              {step === 2 && (
-                <ReviewStep
-                  op={op} preset={preset} scopeMode={effectiveScope} counts={ids ? null : counts} impact={impact} exact={exact}
-                  preview={preview.data} previewLoading={preview.loading} sample={sample.data} sampleLoading={sample.loading}
-                  stagedCount={stagedCount} reason={reason} onReason={setReason} edges={edges}
-                />
-              )}
-            </motion.div>
+            <PanelErrorBoundary resetKeys={[step]} onClose={onClose}>
+              <motion.div key={step} initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} transition={MOTION.stepSwap}>
+                {step === 0 && (edges
+                  ? <EdgeWhatStep viewId={viewId} op={op} onChange={setOp} />
+                  : <WhatStep op={op} onChange={setOp} properties={properties} viewId={viewId} />)}
+                {step === 1 && (
+                  <WhereStep
+                    viewId={viewId} preset={preset} onPreset={setPreset} scopeMode={scopeMode} onScope={setScopeMode}
+                    sourceConfirmed={sourceConfirmed} onConfirmSource={setSourceConfirmed} op={op}
+                    selectionIds={selectionIds} layers={layers} seed={seed.target} knownEntityTypes={knownEntityTypes}
+                  />
+                )}
+                {step === 2 && (
+                  <ReviewStep
+                    op={op} preset={preset} scopeMode={effectiveScope} counts={ids ? null : counts} impact={impact} exact={exact}
+                    preview={preview.data} previewLoading={preview.loading} previewError={preview.error} onRetry={retry}
+                    sample={sample.data} sampleLoading={sample.loading}
+                    stagedCount={stagedCount} reason={reason} onReason={setReason} edges={edges}
+                    onFollow={(jobId) => void follow(jobId)} onChangeTarget={() => setStep(1)}
+                  />
+                )}
+              </motion.div>
+            </PanelErrorBoundary>
           </div>
 
           <div className="flex items-center gap-2 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-5 py-3">
             <span role={error ? 'alert' : undefined} className={cn('min-w-0 flex-1 truncate text-[11.5px]', error ? 'text-rose-600 dark:text-rose-400' : 'text-ink-muted')}>
-              {error ?? (step === 0 ? whatProblem : step === 1 ? whereProblem : null) ?? ''}
+              {error?.message ?? (step === 0 ? whatProblem : step === 1 ? whereProblem : null) ?? ''}
             </span>
+            {error instanceof JobActiveError && (
+              <Button size="sm" variant="ghost" onClick={() => void follow(error.jobId)}>Follow it</Button>
+            )}
+            {error instanceof PropertyJobRefusedError && error.code === 'too_many_ids' && (
+              <Button size="sm" variant="ghost" onClick={() => { setError(null); setStep(1) }}>Choose another target</Button>
+            )}
             {step > 0 && <Button size="sm" variant="ghost" leftIcon={ArrowLeft} onClick={() => setStep(step - 1)}>Back</Button>}
             <Button size="sm" variant={step === 2 && (op.kind === 'remove') ? 'danger' : 'primary'} rightIcon={step < 2 ? ArrowRight : undefined}
               disabled={!canNext} loading={submitting} onClick={next}>
               {step < 2 ? 'Next' : error ? 'Try again'
-                : `Apply${impact ? ` to ${impact.upTo ? 'up to ' : ''}${impact.changes.toLocaleString()}${exact ? '' : '+'}` : ''}`}
+                : `Apply${impact ? ` to ${impact.upTo ? 'up to ' : ''}${final && !exact ? 'about ' : ''}${impact.changes.toLocaleString()}${final ? '' : '+'}` : ''}`}
             </Button>
           </div>
         </motion.div>
       </div>
-      {confirming && impact && (
+      {confirming && (
         <DangerConfirmDialog
           isOpen
-          title={`${propertyJobLabel(jobOp(op))} on ${impact.changes.toLocaleString()} ${edges ? 'relationships' : 'entities'}?`}
+          title={`${propertyJobLabel(jobOp(op))} on ${impact ? `${exact ? '' : 'about '}${impact.changes.toLocaleString()}` : 'an unknown number of'} ${edges ? 'relationships' : 'entities'}?`}
           subtitle={`On ${targetLabel(preset)}${effectiveScope === 'data_source' ? ', across the whole data source' : ''} — in your draft, until it is published.`}
           confirmPhrase={op.key.trim()}
           confirmLabel="Apply"
+          impactUnknown={!impact}
           sections={[{
-            label: edges ? 'Relationships' : 'Entities', count: impact.changes,
+            label: edges ? 'Relationships' : 'Entities', count: impact?.changes ?? 0,
             tone: op.kind === 'remove' || (op.kind === 'convert' && op.onFail === 'remove') ? 'destructive' : 'warning',
             consequence: op.kind === 'remove' ? `Lose ${op.key.trim()}` : op.kind === 'rename' ? `${op.key.trim()} becomes ${op.to.trim()}`
               : cleanup ? `${op.key.trim()} is rewritten${op.kind === 'convert' && op.onFail === 'remove' ? ', or removed where it won’t convert' : ''}`
@@ -289,6 +333,13 @@ function edgePropertiesOf(keysByEdgeType: Record<string, string[]>): SearchCatal
     .map(([key, count]): SearchCatalogProperty => ({
       key, count, distinct: 0, distinctExact: false, values: [], byEntityType: {}, kinds: {}, residual: 0,
     }))
+}
+
+/** What a change started elsewhere was started on, in words. */
+function startedOn(job: PropertyJob): string {
+  const noun = job.entityKind === 'edge' ? 'relationships' : 'entities'
+  if (job.target?.kind === 'ids') return job.target.count ? `${job.target.count.toLocaleString()} named ${noun}` : `named ${noun}`
+  return `the ${noun} a search matches${job.target?.kind === 'predicate' && job.target.scopeMode === 'data_source' ? ', across the data source' : ''}`
 }
 
 /** A short, stable digest of what a request applies. */

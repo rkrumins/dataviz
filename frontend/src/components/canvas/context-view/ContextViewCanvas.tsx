@@ -375,10 +375,9 @@ import {
 import { questionsFromHere } from '../search/session/queryFromHere'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { PropertyOpHost } from '../property-manager/PropertyOpHost'
-import { MAX_CONTAINERS, propertyJobLabel, searchPreset, type TargetPreset } from '../property-manager/op/opModel'
-import { usePropertyJobs } from '@/features/versioning/hooks/usePropertyJobs'
-import { usePropertyJobsStore, type TrackedJob } from '@/store/propertyJobsStore'
-import type { PropertyJob } from '@/services/versioningApiService'
+import { MAX_CONTAINERS, searchPreset, type TargetPreset } from '../property-manager/op/opModel'
+import { useCanvasPropertyJobs } from '@/features/versioning/canvas/useCanvasPropertyJobs'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { OrphansDrawer } from './OrphansDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
@@ -4829,42 +4828,9 @@ export function ContextViewCanvas({
   const { notify } = useAppNotifications()
 
   // BULK PROPERTY CHANGES — written to the draft open here by a job on the server, while the canvas
-  // can write to it; followed to the end (across a reload), and the canvas re-read once one lands —
-  // unless staged edits wait, which a re-read would not lose but the reader may want to finish first.
-  const propertyGraphWrite = useMemo(() => (canvasWritable && scopeWsId && graphId && effectiveBranchId
-    ? { wsId: scopeWsId, graphId, branchId: effectiveBranchId } : null), [canvasWritable, scopeWsId, graphId, effectiveBranchId])
+  // can write to it; followed to the end, the canvas re-read once one lands (useCanvasPropertyJobs).
+  const propertyGraphWrite = useCanvasPropertyJobs({ wsId: scopeWsId, graphId, branchId: effectiveBranchId, writable: canvasWritable })
   const propertyLayers = useMemo(() => storeLayers.map((l) => ({ id: l.id, name: l.name })), [storeLayers])
-  const onPropertyJobEnded = useCallback((tracked: TrackedJob, job: PropertyJob) => {
-    const what = propertyJobLabel(tracked.op)
-    if (job.status === 'cancelled') {
-      notify('info', `${what} was stopped — what it had already changed stays on your draft.`)
-      return
-    }
-    if (job.status === 'failed') {
-      const why = typeof job.error === 'string' ? job.error : job.error?.message
-      notify('error', `${what} stopped${why ? `: ${why}` : ''}. What it had already changed stays on your draft.`)
-      return
-    }
-    const changed = job.summary?.changed ?? 0
-    // The write gate's own refusals; the rest of `refused` were left alone (or not in the draft).
-    const refused = job.summary?.refused?.byReason?.write_refused ?? 0
-    const message = `${what}: ${changed.toLocaleString()} ${changed === 1 ? 'entity' : 'entities'} changed on your draft`
-      + (refused ? ` — ${refused.toLocaleString()} couldn’t be; Property Manager says why.` : '.')
-    const reread = () => {
-      queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
-      releaseProviderCaches()
-      useBranchStore.getState().bumpDraftEpoch()
-      useBranchStore.getState().setCommittedDiffHidden(false)
-    }
-    if (useStagedChangesStore.getState().changes.length === 0) {
-      reread()
-      notify(refused ? 'warning' : 'success', message,
-        { label: 'Review changes', onClick: () => useStagedChangesStore.getState().openReviewPanel('saved') })
-    } else {
-      notify('info', `${message} Refresh the canvas to see it — your staged changes stay staged.`, { label: 'Refresh canvas', onClick: reread })
-    }
-  }, [notify, queryClient])
-  usePropertyJobs(scopeWsId, graphId, effectiveBranchId, onPropertyJobEnded)
   const lastFailedCountRef = useRef(0)
   useEffect(() => {
     const count = failedNodes?.size ?? 0
@@ -8435,6 +8401,7 @@ export function ContextViewCanvas({
         graphWrite={propertyGraphWrite}
         knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
         layers={propertyLayers}
+        onOpenManager={() => setPropertyManagerOpen(true)}
       />
       {/* Orphaned entities — independent like the Property Manager; fetches nothing while closed. */}
       <OrphansDrawer

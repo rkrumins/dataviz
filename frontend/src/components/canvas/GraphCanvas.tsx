@@ -55,6 +55,7 @@ import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeT
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
+import { PropertyOpHost } from './property-manager/PropertyOpHost'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useEffectiveBranchId } from '@/store/branchStore'
@@ -70,6 +71,7 @@ import { StagedChangesPanel } from './context-view/StagedChangesPanel'
 import { Kbd } from '@/components/ui/Kbd'
 import { DraftSaveControls } from '@/features/versioning/canvas/DraftSaveControls'
 import { remapIdSet, useCanvasEditGate, useDraftSave, useStagedUndoShortcuts } from '@/features/versioning/canvas/useDraftSave'
+import { useCanvasPropertyJobs } from '@/features/versioning/canvas/useCanvasPropertyJobs'
 import { InlineNodeEditor } from './InlineNodeEditor'
 import { CommandPalette } from './CommandPalette'
 import { EditorToolbar } from './EditorToolbar'
@@ -971,8 +973,10 @@ export function GraphCanvas({ className }: { className?: string }) {
   const editModeEnabled = useFeature('editModeEnabled')
   // Graph edits are kept only in a draft the caller may write, with edit mode on — and a trace is
   // read-only for its whole life. The same gate as the Context View's, and the same save.
-  const { scopeWsId, dataSourceId, viewId, graphId, isDraft, canEditGraph } = useCanvasEditGate()
+  const { scopeWsId, dataSourceId, viewId, graphId, branchId, isDraft, canEditGraph } = useCanvasEditGate()
   const canvasWritable = canEditGraph && !trace.isTracing
+  // Bulk property changes: the one dialog writes to the draft open here, and its jobs are followed.
+  const propertyGraphWrite = useCanvasPropertyJobs({ wsId: scopeWsId, graphId, branchId, writable: canvasWritable })
   const saveToDraft = useDraftSave({
     wsId: scopeWsId,
     viewId,
@@ -1826,6 +1830,12 @@ export function GraphCanvas({ className }: { className?: string }) {
           />
         )}
       </AnimatePresence>
+      <PropertyOpHost
+        viewId={activeView?.id ?? ''}
+        graphWrite={propertyGraphWrite}
+        onOpenManager={() => setPropertyManagerOpen(true)}
+        knownEntityTypes={schemaEntityTypes.map((et) => et.id)}
+      />
 
       {/* UX Components */}
       <CanvasContextMenu

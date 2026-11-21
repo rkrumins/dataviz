@@ -39,6 +39,8 @@ export interface CanvasEditGate {
   viewId: string | null
   /** The versioned graph the view reads, once resolved. */
   graphId: string | null
+  /** The draft of this view open now; null on Published. */
+  branchId: string | null
   /** A draft of this view is open: being on one IS edit mode. */
   isDraft: boolean
   /** Graph edits are kept here: a draft, edit mode on, and the caller may write it. */
@@ -57,7 +59,10 @@ export function useCanvasEditGate(): CanvasEditGate {
   const editModeEnabled = useFeature('editModeEnabled')
   const graphId = useGraphId()
   const { canWrite: draftWritable } = useActiveDraftAccess(scopeWsId ?? undefined, graphId, viewId, effectiveBranchId)
-  return { scopeWsId, dataSourceId, viewId, graphId, isDraft, canEditGraph: isDraft && editModeEnabled && draftWritable }
+  return {
+    scopeWsId, dataSourceId, viewId, graphId, branchId: effectiveBranchId, isDraft,
+    canEditGraph: isDraft && editModeEnabled && draftWritable,
+  }
 }
 
 export interface DraftSaveHost {

@@ -104,16 +104,18 @@ export const RelationshipDrawer = memo(function RelationshipDrawer(props: Relati
       {target.kind === 'relationship' ? (
         <RelationshipPanel key={`r:${target.id}`} {...props} target={target} onClose={closeDrawer} />
       ) : target.kind === 'relationships' ? (
-        <MultiRelationshipView
-          key={`m:${target.id}`}
-          target={target}
-          onClose={closeDrawer}
-          canEdit={props.canEdit}
-          writesLocked={props.writesLocked}
-          resolveNode={props.resolveNode}
-          onLocateMany={props.onLocateMany}
-          onStartEditing={props.onStartEditing}
-        />
+        // A comparison of many relationships that fails to draw leaves the drawer, and the canvas, standing.
+        <PanelErrorBoundary key={`m:${target.id}`} onClose={closeDrawer}>
+          <MultiRelationshipView
+            target={target}
+            onClose={closeDrawer}
+            canEdit={props.canEdit}
+            writesLocked={props.writesLocked}
+            resolveNode={props.resolveNode}
+            onLocateMany={props.onLocateMany}
+            onStartEditing={props.onStartEditing}
+          />
+        </PanelErrorBoundary>
       ) : (
         <ConnectionView
           key={`c:${target.id}`}

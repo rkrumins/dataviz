@@ -294,6 +294,34 @@ describe('PropertyBrowser — a property is changed only in a draft', () => {
         expect(take()).toEqual({ kind: 'convert', key: 'isPii', toKind: 'Boolean' })
     })
 
+    it('merges the values picked, by value — however the list reorders as the catalog is read', async () => {
+        const user = userEvent.setup()
+        const dept = (values: SearchCatalogProperty['values']) => property({
+            key: 'dept', count: 600, kinds: { String: 600 }, distinct: 3, values,
+        })
+        const finance = { value: 'Finance', kind: 'String', count: 200 }
+        const spaced = { value: 'finance ', kind: 'String', count: 80 }
+        const browser = () => <PropertyBrowser viewId="view-1" onCreateRuleFromPredicate={vi.fn()} />
+        state = { catalog: catalog({ status: 'running', properties: [dept([finance, spaced, { value: 'Ops', kind: 'String', count: 20 }])] }),
+                  reading: 50, error: null, unavailable: false, refresh: vi.fn() }
+        const view = render(browser())
+        await user.click(screen.getByTitle('dept'))
+        await user.click(within(card('dept')).getByRole('checkbox', { name: 'Pick Ops' }))
+        await user.click(within(card('dept')).getByRole('checkbox', { name: 'Pick Finance' }))
+
+        // The read goes on: Ops is now the most held, and every value moves.
+        state = { ...state, reading: null, catalog: catalog({ properties: [dept([{ value: 'Ops', kind: 'String', count: 320 }, finance, spaced])] }) }
+        view.rerender(browser())
+        const row = within(card('dept'))
+        expect(row.getByRole('checkbox', { name: 'Pick Ops' })).toBeChecked()
+        expect(row.getByRole('checkbox', { name: 'Pick Finance' })).toBeChecked()
+        expect(row.getAllByRole('checkbox').filter((c) => (c as HTMLInputElement).checked)).toHaveLength(2)
+        await user.click(row.getByRole('button', { name: /Merge into/ }))
+        expect(usePropertyJobsStore.getState().consumeRequest()).toEqual({
+            kind: 'mapValues', key: 'dept', map: [{ from: 'Finance', fromKind: 'String', to: 'Ops', toKind: 'String' }],
+        })
+    })
+
     it('offers no change at all where editing is off', () => {
         editing = { offered: false, blocked: NO_DRAFT }
         renderBrowser()
@@ -364,6 +392,38 @@ describe('PropertyBrowser — the draft\'s bulk changes', () => {
         expect(panel.getByText(/200/).closest('p')!.textContent).toMatch(/200 changed · 600 left as they were · 4 wouldn’t convert/)
         expect(panel.getByText(/Published — listed in the publish’s audit/)).toBeInTheDocument()
         expect(panel.getByRole('button', { name: 'Which, and why' })).toBeInTheDocument()
+    })
+
+    it('says how many a search no longer matched on the draft, and why its matches were judged as published', () => {
+        usePropertyJobsStore.getState().track(tracked('j6', {
+            op: { kind: 'set', key: 'tier', value: 'gold' },
+            job: { jobId: 'j6', status: 'completed', summary: {
+                changed: 40, unchanged: 0, conflicts: 0, noLongerMatches: 3,
+                refused: { count: 3, byReason: { no_longer_matches: 3 }, examples: [] },
+                recheck: { exact: false, note: 'Your draft changed more than 200,000 entities, so its matches were judged as published.' },
+            } },
+        }))
+        renderBrowser()
+        const panel = within(screen.getByRole('region', { name: 'Changes on this draft' }))
+        expect(panel.getByText(/40/).closest('p')!.textContent)
+            .toMatch(/40 changed · 3 no longer matched the search on your draft — left as they are/)
+        expect(panel.getByText('Your draft changed more than 200,000 entities, so its matches were judged as published.'))
+            .toBeInTheDocument()
+    })
+
+    it('says when it lost track of one, and offers to check again — or to dismiss it', async () => {
+        const user = userEvent.setup()
+        usePropertyJobsStore.getState().track(tracked('j4', { lost: { at: '2026-11-21T00:00:00Z', message: 'Failed to fetch' } }))
+        usePropertyJobsStore.getState().track(tracked('j5', { lost: { at: '2026-11-21T00:00:00Z', message: 'the server no longer has it', gone: true } }))
+        renderBrowser()
+        const panel = within(screen.getByRole('region', { name: 'Changes on this draft' }))
+        expect(panel.getByText(/Lost track of this change: Failed to fetch/)).toBeInTheDocument()
+        expect(panel.getByText(/can’t be found on the server any more/)).toBeInTheDocument()
+        expect(panel.queryByRole('button', { name: 'Stop' })).toBeNull()
+        await user.click(panel.getByRole('button', { name: 'Check again' }))
+        expect(usePropertyJobsStore.getState().jobs.find((j) => j.jobId === 'j4')!.lost?.checking).toBe(true)
+        await user.click(panel.getAllByRole('button', { name: 'Dismiss' })[0]!)
+        expect(usePropertyJobsStore.getState().jobs.map((j) => j.jobId)).toEqual(['j4'])
     })
 
     it('offers to compare several entities selected on the canvas', async () => {

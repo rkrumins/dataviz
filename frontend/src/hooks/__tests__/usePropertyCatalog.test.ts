@@ -112,6 +112,31 @@ describe('usePropertyCatalog', () => {
         useBranchStore.setState({ currentBranchId: null })
     })
 
+    it('shares one read of a view between its readers — the Properties tab and the bulk dialog', async () => {
+        let finish: (a: SearchCatalogResult) => void = () => {}
+        searchCatalog
+            .mockResolvedValueOnce(answer({ status: 'running', entities: 40,
+                                            progress: { scanned: 40, total: 100, matched: 40 } }))
+            .mockImplementationOnce(() => new Promise((r) => { finish = r }))
+        const tab = renderHook(() => usePropertyCatalog('view-1'))
+        await waitFor(() => expect(tab.result.current.catalog?.entities).toBe(40))
+        // The dialog opens while the read is under way: it joins it, and hears what it heard so far.
+        const dialog = renderHook(() => usePropertyCatalog('view-1'))
+        expect(dialog.result.current.catalog?.entities).toBe(40)
+
+        act(() => finish(answer({ entities: 100 })))
+        await waitFor(() => expect(dialog.result.current.catalog?.entities).toBe(100))
+        expect(tab.result.current.catalog?.entities).toBe(100)
+        expect(searchCatalog).toHaveBeenCalledTimes(2)
+
+        // The read stops only once neither follows it.
+        const signal = () => (searchCatalog.mock.calls[1][1] as { signal: AbortSignal }).signal
+        tab.unmount()
+        expect(signal().aborted).toBe(false)
+        dialog.unmount()
+        expect(signal().aborted).toBe(true)
+    })
+
     it("shows a view's last complete catalog at once when it is opened again", async () => {
         searchCatalog.mockResolvedValueOnce(answer({ entities: 100 }))
         const first = renderHook(() => usePropertyCatalog('view-1'))

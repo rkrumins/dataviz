@@ -12,7 +12,7 @@ import { Segmented } from '@/components/ui/Segmented'
 import type { Predicate } from '@/types/search'
 import { useDiscovery } from '../../search/builder/useDiscovery'
 import { VisualQueryBuilder } from '../../search/panel/VisualQueryBuilder'
-import { scopeFixedToView, type OpDraft, type ScopeMode, type TargetPreset } from './opModel'
+import { scopeFixedToView, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset } from './opModel'
 import { FIELD, LABEL } from './styles'
 
 export interface LayerOption { id: string; name: string }
@@ -100,6 +100,7 @@ export function WhereStep({
   }, [seed, selectionIds, key, layers, preset])
 
   const fixed = scopeFixedToView(preset)
+  const tooMany = tooManyIds(preset)
   return (
     <div className="space-y-5">
       <div role="radiogroup" aria-label="Which entities" className="grid gap-1.5">
@@ -120,6 +121,11 @@ export function WhereStep({
                   <span className="block text-[11.5px] text-ink-muted">{c.detail}</span>
                 </span>
               </button>
+              {on && tooMany && (
+                <p className="flex items-start gap-1.5 px-3 pb-3 pl-[3.25rem] text-[11.5px] text-amber-800 dark:text-amber-200">
+                  <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden /> {tooMany}
+                </p>
+              )}
               {on && c.id === 'layer' && preset.kind === 'layer' && (
                 <div className="px-3 pb-3 pl-[3.25rem]">
                   <select aria-label="Layer" value={preset.layerId} className={cn(FIELD, 'h-8')}
