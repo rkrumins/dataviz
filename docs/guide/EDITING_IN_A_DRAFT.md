@@ -173,6 +173,14 @@ to confirm.
 
    A field of the entity type that no two entities may share (a unique field)
    can't be given one value for all — set it one entity at a time.
+
+   A field with allowed values offers them under the property (**Must be one
+   of**), one click each. A value it doesn't allow, one not of the field's type,
+   or a required field removed is said under the property — and staged all the
+   same: it is publishing the draft that refuses it, listing each entity and
+   what to change (the same is said in the single entity's drawer, and on a
+   bulk change's Review step). Only what the draft changes is judged, so values
+   from before a field had its rules still publish.
 4. Choose **Stage for N** (or `⌘S` / `Ctrl-S`). The footer first says what it
    will do — how many entities change, and how many values are replaced or left
    as they are. Each entity's change is staged on its own, as if you had edited

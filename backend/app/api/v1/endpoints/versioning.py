@@ -7487,6 +7487,42 @@ def _check_property_job(op: PropertyJobOp, target: PropertyJobTarget, rules) -> 
     return None
 
 
+def _property_job_warnings(op: PropertyJobOp, rules) -> List[Dict[str, str]]:
+    """What a bulk property job would leave that publishing its draft refuses — a value its field
+    doesn't allow or isn't of its type, a required field removed — per entity type that defines
+    the key: ``[{code, entityType, field, message}]``. Said before it runs, never refused: the job
+    writes the draft all the same, and the publish is the gate (``FieldViolation``)."""
+    if rules is None:
+        return []
+    from backend.app.services.versioning.ontology import JUDGED_TYPES, allowed_phrase, field_value_problem
+    out: List[Dict[str, str]] = []
+
+    def warn(code: str, etype: str, key: str, message: str) -> None:
+        out.append({"code": code, "entityType": etype, "field": key, "message": message})
+
+    for etype, rule in sorted(rules.entity_types.items()):
+        f = rule.fields.get(op.key)
+        if f is not None and op.kind in ("set", "fillEmpty"):
+            problem = field_value_problem(f, op.value)
+            if problem:
+                warn(problem[0], etype, op.key, f"On {etype}: {problem[1]} A {etype} given it can't be "
+                                                "published until it holds a value the field allows.")
+            elif f.required and op.value in (None, "", []):
+                warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {etype} it is "
+                                                      "emptied on can't be published until it has one again.")
+        if f is not None and f.required and op.kind in ("remove", "rename"):
+            warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {etype} it is "
+                                                  f"{'removed' if op.kind == 'remove' else 'renamed away'} from "
+                                                  "can't be published until it has one again.")
+        to = rule.fields.get(op.to) if op.kind in ("rename", "copy") and op.to else None
+        if to is not None and (to.allowed or to.type in JUDGED_TYPES):
+            held = f"one of {allowed_phrase(to.allowed)}" if to.allowed else f"of type {to.type}"
+            warn("field_checked", etype, op.to, f"{op.to} is a field of {etype} that must be {held}: a value "
+                                                f"{'renamed' if op.kind == 'rename' else 'copied'} into it that "
+                                                "isn't stops that entity being published until it is changed.")
+    return out
+
+
 async def _property_job_view_readable(session: AsyncSession, ws_id: str, meta: dict, view_id: str,
                                       user: User, claims: PermissionClaims) -> bool:
     """The view a search target names: in this workspace, on this graph's data source, not
@@ -7593,8 +7629,10 @@ async def preview_property_job(
     """What a bulk property job would meet, nothing written: why it would be refused
     (``refusal``: ``{code, message}``, or null), whether its key fits the graph's property names
     (``nameBudget``), the import or bulk property job already running on the draft
-    (``activeJobId``), and — for an id target — what its ids find in the draft as it stands
-    (``counts``: ``matched``, ``haveKey``, ``haveTo``, ``missing``)."""
+    (``activeJobId``), for an id target what its ids find in the draft as it stands
+    (``counts``: ``matched``, ``haveKey``, ``haveTo``, ``missing``), and what it would leave that
+    publishing the draft refuses (``warnings``: ``[{code, entityType, field, message}]`` — the
+    fields' rules; never a refusal)."""
     main = branch_id == "main"
     if not main:
         with _property_job_errors():
@@ -7609,9 +7647,10 @@ async def preview_property_job(
     if body.target.ids is not None and not main and len(body.target.ids) <= vconfig.PROPERTY_JOB_MAX_IDS:
         counts = await ie.preview_property_counts(graph_id=graph_id, branch_id=branch_id,
                                                   op=body.op.wire(), ids=body.target.ids)
+    warnings = [] if main else _property_job_warnings(body.op, await _rules_for_meta(session, ws_id, meta))
     return {"refusal": {"code": refusal[1], "message": refusal[2]} if refusal else None,
             "nameBudget": budget, "activeJobId": None if main else await ie.active_draft_job(branch_id),
-            "counts": counts}
+            "counts": counts, "warnings": warnings}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs", status_code=202,

@@ -31,6 +31,8 @@ export function entityDefToSchema(id: string, def: Record<string, unknown>): Ent
       displayOrder: (f.display_order as number) ?? 0,
       reconciliationKey: ((f.reconciliation_key ?? f.reconciliationKey) as boolean) ?? false,
       unique: (f.unique as boolean) ?? false,
+      ...(f.format ? { format: f.format as EntityTypeSchema['fields'][number]['format'] } : {}),
+      ...readAllowed(f),
     })),
     hierarchy: {
       level: (hierarchy.level as number) ?? 0,
@@ -91,8 +93,22 @@ export function entitySchemaToBackend(et: EntityTypeSchema): Record<string, unkn
       // Stored only when on (off is the default): a type saved unchanged must read as unchanged.
       ...(f.reconciliationKey ? { reconciliation_key: true } : {}),
       ...(f.unique ? { unique: true } : {}),
+      ...(f.format ? { format: f.format } : {}),
+      ...(f.allowedValues?.length ? { allowed_values: f.allowedValues } : {}),
+      ...(f.allowedValues?.length && f.allowOther ? { allow_other: true } : {}),
     })),
   }
+}
+
+/** A stored field's allowed values (`allowed_values`, each as its text) and whether others are
+ *  accepted too — set only when it has some, so a field without them reads as it always did. */
+function readAllowed(f: Record<string, unknown>): { allowedValues?: string[]; allowOther?: boolean } {
+  const raw = f.allowed_values ?? f.allowedValues
+  const values = Array.isArray(raw)
+    ? [...new Set(raw.filter((v) => v !== null && typeof v !== 'object').map((v) => String(v).trim()).filter(Boolean))]
+    : []
+  if (values.length === 0) return {}
+  return { allowedValues: values, ...((f.allow_other ?? f.allowOther) ? { allowOther: true } : {}) }
 }
 
 export function relDefToSchema(id: string, def: Record<string, unknown>): RelTypeWithClassifications {

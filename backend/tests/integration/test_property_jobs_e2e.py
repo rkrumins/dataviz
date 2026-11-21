@@ -284,6 +284,7 @@ async def _routes() -> None:
         assert preview["refusal"] is None and preview["activeJobId"] is None
         assert preview["counts"] == {"matched": 2, "haveKey": 2, "haveTo": 0, "missing": 1}
         assert preview["nameBudget"]["verdict"] == "ok" and preview["nameBudget"]["ceiling"] == 65_534
+        assert preview["warnings"] == []                  # no field rules here: nothing publishing refuses
         reserved = {"op": {"kind": "set", "key": "displayName", "value": "x"}, "target": {"ids": ids}}
         r = await c.post(f"{jobs}/preview", json=reserved, headers=PAT)
         assert r.json()["refusal"]["code"] == "reserved_key", r.text

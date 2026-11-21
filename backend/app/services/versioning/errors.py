@@ -508,6 +508,21 @@ class UniqueViolation(_HttpMapped, RuntimeError):
              "total": len(self.violations)})
 
 
+class FieldViolation(_HttpMapped, RuntimeError):
+    """A publish would give entities property values their type's fields refuse — not of the
+    field's type, not one of its allowed values — or leave a required field without one: refused,
+    naming each entity, field and value (the first 100, and how many)."""
+
+    def __init__(self, violations):
+        self.violations = list(violations)
+        first = self.violations[0] if self.violations else {}
+        n = len(self.violations)
+        super().__init__(
+            f"{n} {'value breaks' if n == 1 else 'values break'} the fields their entity types define — "
+            f"{first.get('name') or first.get('entity_id')}: {first.get('reason')}",
+            {"type": "field_violation", "violations": self.violations[:100], "total": n})
+
+
 class EdgeEndsMissing(_HttpMapped, ValueError):
     """An edge create named no source or no target: stored, it would read as a node."""
 
@@ -671,5 +686,5 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
                IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate,
                CrossesUpdate, AmbiguousUrn, EntityExists, EdgeEndsMissing, UniqueViolation,
-               DraftPruned, DecisionConflict, ReviewIncomplete, ChangesRejected, NothingAccepted,
+               FieldViolation, DraftPruned, DecisionConflict, ReviewIncomplete, ChangesRejected, NothingAccepted,
                PartialMergeUnsupported, ChangesRequested)

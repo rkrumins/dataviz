@@ -213,6 +213,28 @@ def test_one_value_for_a_unique_field_is_refused_on_more_than_one_entity(V):
     assert _code(V, {"kind": "set", "key": "code", "value": "X"}) is None          # no ontology
 
 
+def test_what_publishing_would_refuse_is_warned_never_refused(V):
+    from backend.app.services.versioning.ontology import FieldRule
+    rules = OntologyRules(entity_types={"Dataset": EntityRule(fields={
+        "tier": FieldRule(type="status", allowed=("gold", "silver"), name="Tier"),
+        "owner": FieldRule(required=True, name="Owner"),
+        "rows": FieldRule(type="number", name="Rows")})})
+
+    def warned(op):
+        body = _request(V, op)
+        assert V._check_property_job(body.op, body.target, rules) is None      # never a refusal
+        return [(w["code"], w["entityType"], w["field"]) for w in V._property_job_warnings(body.op, rules)]
+
+    assert warned({"kind": "set", "key": "tier", "value": "bronze"}) == [("field_not_allowed", "Dataset", "tier")]
+    assert warned({"kind": "fillEmpty", "key": "rows", "value": "many"}) == [("field_type", "Dataset", "rows")]
+    assert warned({"kind": "set", "key": "tier", "value": "gold"}) == []
+    assert warned({"kind": "remove", "key": "owner"}) == [("field_required", "Dataset", "owner")]
+    assert warned({"kind": "rename", "key": "owner", "to": "steward"}) == [("field_required", "Dataset", "owner")]
+    assert warned({"kind": "copy", "key": "label", "to": "tier"}) == [("field_checked", "Dataset", "tier")]
+    assert warned({"kind": "set", "key": "other", "value": "x"}) == []
+    assert V._property_job_warnings(_request(V, {"kind": "remove", "key": "owner"}).op, None) == []
+
+
 def test_the_job_keeps_its_op_as_the_plan_reads_it(V):
     op = _request(V, {"kind": "rename", "key": "owner", "to": "steward", "onConflict": "overwrite",
                       "value": "ignored"}).op.wire()

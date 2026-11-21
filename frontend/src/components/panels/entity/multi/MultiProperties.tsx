@@ -18,7 +18,7 @@ import { Section } from '../../DrawerSection'
 import { PropertyComposer } from '../../PropertyEditor'
 import { PanelErrorBoundary } from '../../PanelErrorBoundary'
 import type { PropertySuggestion } from '../../property/composerModel'
-import { ComparisonRow } from './ComparisonRow'
+import { ComparisonRow, type GovernedRule } from './ComparisonRow'
 import { changeOf, takenNames, type KeyChange } from './editOps'
 import { useDrawerList } from './useDrawerList'
 import type { Member } from './ValueBreakdown'
@@ -28,7 +28,7 @@ type Filter = 'all' | 'same' | 'differs' | 'partial' | 'changed'
 const ROW_ESTIMATE = 64
 
 export function MultiProperties({
-  fields, nodeIds, edit, onChange, onAddAll, editable, sharedValueRefused, memberOf, onFocusNode, onOpenNode,
+  fields, nodeIds, edit, onChange, onAddAll, editable, sharedValueRefused, fieldRuleFor, memberOf, onFocusNode, onOpenNode,
   staged, suggestions,
 }: {
   fields: SharedField[]
@@ -40,6 +40,8 @@ export function MultiProperties({
   onAddAll: (entries: Array<[string, unknown]>) => void
   editable: boolean
   sharedValueRefused: (key: string) => string | null
+  /** The entity type's field a property is, when a publish judges it. */
+  fieldRuleFor?: (key: string) => GovernedRule | null
   memberOf: (id: string) => Member
   onFocusNode?: (id: string) => void
   onOpenNode?: (id: string) => void
@@ -126,6 +128,7 @@ export function MultiProperties({
         change={changeOf(edit, key)}
         editable={editable}
         sharedValueRefused={sharedValueRefused(key)}
+        rule={fieldRuleFor?.(key) ?? null}
         expanded={expanded.has(key)}
         onToggle={toggle}
         onChange={onChange}

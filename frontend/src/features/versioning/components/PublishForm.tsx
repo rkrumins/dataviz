@@ -18,7 +18,10 @@ import { useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { GitPullRequest, Rocket, Loader2, AlertTriangle, ArrowRight, ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { nodeIndexOf } from '@/lib/storeIndex'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { CopyButton } from '@/components/ui/CopyButton'
+import { useCanvasStore } from '@/store/canvas'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
@@ -31,7 +34,8 @@ import { invalidateViewVersions } from '@/hooks/useViewVersions'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { queryClient } from '@/lib/queryClient'
 import {
-  describeUniqueViolation, MergeConflictError, NotUpToDateError, PullRequestExistsError, UniqueViolationError,
+  describeUniqueViolation, FieldViolationError, MergeConflictError, NotUpToDateError, PullRequestExistsError,
+  UniqueViolationError, type FieldViolation,
 } from '@/services/versioningApiService'
 import { ChangeCountChips } from './ChangesPanel'
 import { DraftViewChanges } from './DraftViewChanges'
@@ -79,6 +83,8 @@ export function usePublishFlow({
   const [notUpToDate, setNotUpToDate] = useState<NotUpToDateError | null>(null)
   /** A publish refused because values that must be unique are shared: which, said here. */
   const [unique, setUnique] = useState<UniqueViolationError | null>(null)
+  /** A publish refused because values break their entity types' fields: each one, said here. */
+  const [fieldRefusal, setFieldRefusal] = useState<FieldViolationError | null>(null)
   /** A review we discovered only when the server rejected our open (the race backstop). */
   const [raced, setRaced] = useState<{ prId: string; title?: string | null } | null>(null)
   /** "Publish now" while a review is open bypasses it — make that an explicit second step. */
@@ -128,6 +134,8 @@ export function usePublishFlow({
       setNotUpToDate(e)
     } else if (e instanceof UniqueViolationError) {
       setUnique(e)
+    } else if (e instanceof FieldViolationError) {
+      setFieldRefusal(e)
     } else if (e instanceof PullRequestExistsError) {
       // We lost a race (or the list was stale). Don't dead-end — show the review that won.
       setRaced({ prId: e.prId, title: e.prTitle })
@@ -140,6 +148,7 @@ export function usePublishFlow({
     setConflicts(null)
     setNotUpToDate(null)
     setUnique(null)
+    setFieldRefusal(null)
     openMr.mutate(
       {
         branchId, title: message || undefined, description: description || undefined,
@@ -167,6 +176,7 @@ export function usePublishFlow({
     setConflicts(null)
     setNotUpToDate(null)
     setUnique(null)
+    setFieldRefusal(null)
     publish.mutate(
       { branchId, message: message || 'Publish draft' },
       {
@@ -191,7 +201,7 @@ export function usePublishFlow({
   return {
     workspaceId, branchId, dataSourceId, changeSet, onClose, onLeave, canPublishDraft, changesLoading,
     message, setMessage, description, setDescription, reviewers, setReviewers, reviewerGroups, setReviewerGroups,
-    conflicts, notUpToDate, unique, confirmBypass, canManage, canPublish, reviewOnly,
+    conflicts, notUpToDate, unique, fieldRefusal, confirmBypass, canManage, canPublish, reviewOnly,
     publish, openMr, prPending, busy, viewChanges, viewChangesQ, viewChangeCount, changeCount, hasChanges, unsaved,
     existingPr, inReview, goToReview, handleOpenMr, handlePublish,
   }
@@ -207,7 +217,7 @@ export function PublishBody({ flow, offerSave = true }: {
 }) {
   const {
     branchId, changeSet, onClose, onLeave, changesLoading, message, setMessage, description, setDescription,
-    reviewers, setReviewers, reviewerGroups, setReviewerGroups, conflicts, notUpToDate, unique, confirmBypass, viewChanges, viewChangesQ,
+    reviewers, setReviewers, reviewerGroups, setReviewerGroups, conflicts, notUpToDate, unique, fieldRefusal, confirmBypass, viewChanges, viewChangesQ,
     viewChangeCount, changeCount, hasChanges, unsaved, existingPr, inReview, goToReview, workspaceId, dataSourceId,
   } = flow
   return (
@@ -354,6 +364,28 @@ export function PublishBody({ flow, offerSave = true }: {
         </div>
       )}
 
+      {fieldRefusal && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1 text-[11px] text-ink-muted">
+            <span className="font-medium text-amber-500">
+              Nothing was published — {fieldRefusal.total === 1
+                ? '1 value breaks'
+                : `${fieldRefusal.total} values break`} the fields their entity types define.
+            </span>{' '}
+            Change them in the draft, then publish.
+            <ul aria-label="Values to change" className="mt-1.5 space-y-1 text-ink">
+              {fieldRefusal.violations.slice(0, UNIQUE_SHOWN).map((v, i) => (
+                <FieldViolationRow key={`${v.entity_id}:${v.field}:${i}`} v={v} onOpen={() => { onClose(); onLeave?.() }} />
+              ))}
+            </ul>
+            {fieldRefusal.total > Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN) && (
+              <p className="mt-1">…and {fieldRefusal.total - Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN)} more.</p>
+            )}
+          </div>
+        </div>
+      )}
+
       {notUpToDate && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
@@ -366,6 +398,35 @@ export function PublishBody({ flow, offerSave = true }: {
         </div>
       )}
     </div>
+  )
+}
+
+/** One value a publish refused by its field: the entity by name, what is wrong — and the way to it:
+ *  opened in the drawer when it is on the canvas, else its id to find it by. */
+function FieldViolationRow({ v, onOpen }: { v: FieldViolation; onOpen: () => void }) {
+  const id = v.urn || `gv:${v.entity_id}`
+  const onCanvas = useCanvasStore((s) => nodeIndexOf(s.nodes).has(id))
+  const name = v.name || v.urn || v.entity_id
+  return (
+    <li className="flex items-start gap-2 min-w-0">
+      <div className="min-w-0 flex-1 break-words">
+        <span className="font-medium">{name}</span>
+        <span className="text-ink-muted"> · {v.type} · </span>
+        {v.reason}
+      </div>
+      {onCanvas ? (
+        <button
+          type="button"
+          onClick={() => { onOpen(); useCanvasStore.getState().openNodeDrawer(id) }}
+          aria-label={`Open ${name}`}
+          className="shrink-0 px-1.5 h-5 rounded text-[10.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10"
+        >
+          Open
+        </button>
+      ) : (
+        <CopyButton value={id} label={`Copy the id of ${name}`} className="shrink-0" />
+      )}
+    </li>
   )
 }
 

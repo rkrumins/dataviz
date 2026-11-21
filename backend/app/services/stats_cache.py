@@ -431,6 +431,7 @@ async def build_synthetic_schema(
                     "showInNode": f.show_in_node, "showInPanel": f.show_in_panel,
                     "showInTooltip": f.show_in_tooltip, "displayOrder": f.display_order,
                     "reconciliationKey": f.reconciliation_key, "unique": f.unique,
+                    "format": f.format, "allowedValues": list(f.allowed_values), "allowOther": f.allow_other,
                 }
                 for f in ent_def.fields
             ] or [

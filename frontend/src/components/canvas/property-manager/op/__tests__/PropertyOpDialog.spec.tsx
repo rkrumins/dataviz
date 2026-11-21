@@ -192,4 +192,19 @@ describe('PropertyOpDialog', () => {
     expect(api.create).toHaveBeenCalledTimes(2)
     expect(api.create.mock.calls[0][5]).toBe(api.create.mock.calls[1][5])
   })
+
+  it('says what publishing the draft would refuse of it — and applies it all the same', async () => {
+    const user = userEvent.setup()
+    api.preview.mockResolvedValue({
+      refusal: null, nameBudget: { registered: 10, nativeBudget: 50000, ceiling: 65534, isNew: false, verdict: 'ok' },
+      activeJobId: null, counts: null,
+      warnings: [{ code: 'field_required', entityType: 'Table', field: 'owner',
+        message: "Owner is required on Table: a Table it is removed from can't be published until it has one again." }],
+    })
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    expect(await screen.findByText(/Owner is required on Table: a Table it is removed from/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Apply to 30' }))
+    expect(api.create).toHaveBeenCalledTimes(1)
+  })
 })

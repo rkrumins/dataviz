@@ -17,10 +17,13 @@
  * where an entity edit could be kept, in a draft (``useEntityEditing``);
  * elsewhere they are disabled and say why. With several entities selected on
  * the canvas, it offers to compare and edit them in the entity drawer.
+ *
+ * "Make it a field…" promotes a property to a field of the entity types that carry it, in the
+ * data source's semantic layer (``PromoteFieldDialog``) — offered to who may edit the layer.
  */
 import { motion } from 'framer-motion'
 import {
-    AlertTriangle, ArrowDownWideNarrow, ChevronRight, CircleSlash, Copy, CopyPlus, Database, Layers, Loader2,
+    AlertTriangle, ArrowDownWideNarrow, ChevronRight, CircleSlash, Copy, CopyPlus, Database, Layers, ListChecks, Loader2,
     Pencil, Plus, ScanSearch, Search, Sparkles, Tag, Tags, Trash2,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
@@ -31,6 +34,7 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
 import { useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
 import { useCurrentBranchId, useGraphId } from '@/store/branchStore'
 import { useCanvasStore } from '@/store/canvas'
 import {
@@ -42,6 +46,7 @@ import { fieldClass } from '../search/builder/editors/shared'
 
 import { PropertyInsightsHeader } from './PropertyInsightsHeader'
 import { PropertyJobsPanel } from './PropertyJobsPanel'
+import { PromoteFieldDialog } from './PromoteFieldDialog'
 import { RankedValueBars, UsageGauge } from './PropertyInsightCharts'
 import { EntityTypeChips, SampleValueChips, TypeTile } from './PropertyValueChips'
 import { KIND_LABEL, storedType } from './propertyValueTypes'
@@ -96,6 +101,9 @@ export function PropertyBrowser({
     const change = (request: OpRequest) =>
         editing.offered ? () => usePropertyJobsStore.getState().requestOp(request) : undefined
     const selected = useCanvasStore((s) => s.selectedNodeIds.filter((id) => !id.startsWith('logical:')).length)
+    // A property made a field of its types, in the semantic layer — by who may edit the layer.
+    const canEditLayer = useSemanticLayerAccess().canEdit
+    const [promoting, setPromoting] = useState<SearchCatalogProperty | null>(null)
 
     const properties = useMemo(() => catalog?.properties ?? [], [catalog])
     const tags = useMemo(() => catalog?.tags ?? [], [catalog])
@@ -265,6 +273,7 @@ export function PropertyBrowser({
                                 onCreateRule={() => onCreateRuleFromPredicate(
                                     { kind: 'hasProperty', key: property.key, negate: false }, property.key)}
                                 onCopy={() => copyKey(property.key)}
+                                onPromote={canEditLayer ? () => setPromoting(property) : undefined}
                             />
                         ))}
                     </div>
@@ -311,6 +320,8 @@ export function PropertyBrowser({
                         : 'No properties read yet.'}
                 </div>
             )}
+
+            {promoting && <PromoteFieldDialog property={promoting} onClose={() => setPromoting(null)} />}
 
         </div>
     )
@@ -420,7 +431,7 @@ function valuePredicate(key: string, v: SearchCatalogValue): Predicate {
 }
 
 function PropertyRow({
-    property, entities, exact, overlay, onUpdate, onDuplicate, onRemove, blocked, onCreateRule, onCopy, onSearch,
+    property, entities, exact, overlay, onUpdate, onDuplicate, onRemove, blocked, onCreateRule, onCopy, onSearch, onPromote,
 }: {
     property: SearchCatalogProperty
     /** Entities in the view — what coverage is a share of. */
@@ -436,6 +447,8 @@ function PropertyRow({
     onCreateRule: () => void
     onCopy: () => void
     onSearch?: SearchHandler
+    /** Make it a field of the types that carry it, in the semantic layer. */
+    onPromote?: () => void
 }) {
     const [expanded, setExpanded] = useState(false)
     const key = property.key
@@ -495,6 +508,7 @@ function PropertyRow({
                                 {onUpdate && <RowAction icon={<Pencil className="w-3 h-3" />} label="Change" onClick={onUpdate} blocked={blocked} />}
                                 {onDuplicate && <RowAction icon={<CopyPlus className="w-3 h-3" />} label="Duplicate as…" onClick={onDuplicate} blocked={blocked} />}
                                 {onRemove && <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger blocked={blocked} />}
+                                {onPromote && <RowAction icon={<ListChecks className="w-3 h-3" />} label="Make it a field…" onClick={onPromote} />}
                                 <RowAction icon={<Plus className="w-3 h-3" />} label="Create rule" onClick={onCreateRule} />
                             </div>
                             <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg text-ink-muted group-hover:bg-glass transition-colors">

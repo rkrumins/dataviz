@@ -12,7 +12,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
-import { useSchemaStore } from '@/store/schema'
+import { convertBackendEntityType, useSchemaStore } from '@/store/schema'
+import type { EntityTypeDefinition } from '@/providers/GraphDataProvider'
 import { useNotificationStore } from '@/components/ui/notifications'
 import { stagedChangesToOps } from '@/features/versioning/model/stagedChangesToOps'
 
@@ -64,14 +65,28 @@ beforeEach(() => {
   useStagedChangesStore.setState({ changes: [], past: [], redoStack: [] } as never)
   useNotificationStore.setState({ notifications: [] } as never)
   useFeaturesStore.setState({ values: { versioningEnabled: true, editModeEnabled: true } } as never)
+  // As the backend sends the type (`FieldSchema`) and the schema store loads it: what each field
+  // asks of a value has to survive the load for the drawer to act on it.
   useSchemaStore.setState({
     schema: {
-      entityTypes: [{
-        id: 'dataset', name: 'Dataset', pluralName: 'Datasets', visual: { color: '#6366f1' },
-        fields: [{ id: 'code', name: 'Code', type: 'string', unique: true }],
-      }],
+      entityTypes: [convertBackendEntityType(datasetType())],
     },
   } as never)
+})
+
+const field = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
+  id, name, type: 'string', required: false, showInNode: false, showInPanel: true, showInTooltip: false, displayOrder: 0, ...extra,
+})
+const datasetType = (): EntityTypeDefinition => ({
+  id: 'dataset', name: 'Dataset', pluralName: 'Datasets', description: '',
+  visual: { icon: 'Box', color: '#6366f1', shape: 'rounded', size: 'md', borderStyle: 'solid', showInMinimap: true },
+  fields: [
+    field('code', 'Code', { unique: true }),
+    field('tier', 'Tier', { type: 'status', allowedValues: ['gold', 'silver'] }),
+    field('owner', 'Owner', { required: true }),
+  ],
+  hierarchy: { level: 0, canContain: [], canBeContainedBy: [], defaultExpanded: false },
+  behavior: { selectable: true, draggable: true, expandable: true, traceable: true, clickAction: 'select', doubleClickAction: 'expand' },
 })
 
 describe('several entities in the drawer', () => {
@@ -232,6 +247,37 @@ describe('several entities in the drawer', () => {
     expect(within(rowOf('owner')).getByText('Same')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Edit in a draft' }))
     expect(onStartEditing).toHaveBeenCalled()
+  })
+})
+
+describe('several entities: what the fields of their type ask', () => {
+  it('offers the allowed values, and warns of one publishing refuses — staged all the same', async () => {
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    const picker = within(rowOf('tier')).getByRole('group', { name: 'Allowed values of tier' })
+    expect(within(rowOf('tier')).getByText('Must be one of')).toBeInTheDocument()
+    await user.click(within(picker).getByRole('button', { name: 'silver' }))
+    expect(within(rowOf('tier')).queryByRole('status')).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Edit sla for all' }))
+    await user.type(screen.getByRole('textbox', { name: 'sla for all' }), '2h{Enter}')
+    // A value it doesn't allow: said, not blocked.
+    await user.click(within(rowOf('tier')).getByRole('button', { name: 'Undo the change to tier' }))
+    await user.click(within(rowOf('tier')).getByRole('button', { name: 'Fill tier where missing' }))
+    await user.click(screen.getByRole('button', { name: 'Edit tier where missing' }))
+    await user.type(screen.getByRole('textbox', { name: 'tier where missing' }), 'bronze{Enter}')
+    expect(within(rowOf('tier')).getByRole('status')).toHaveTextContent(
+      'Must be one of gold, silver — “bronze” isn’t. Publishing will refuse it.')
+    await user.click(screen.getByRole('button', { name: 'Stage for 3' }))
+    expect(ops().find((o) => o.id === 'returns')?.payload.properties).toMatchObject({ tier: 'bronze', sla: '2h' })
+  })
+
+  it('warns that removing a required field leaves them unpublishable', async () => {
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    await user.click(within(rowOf('owner')).getByRole('button', { name: 'Remove owner from all' }))
+    expect(within(rowOf('owner')).getByRole('status')).toHaveTextContent(/Owner is required for Datasets/)
+    expect(screen.getByRole('button', { name: 'Stage for 3' })).toBeEnabled()
   })
 })
 

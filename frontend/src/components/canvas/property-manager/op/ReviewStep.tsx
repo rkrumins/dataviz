@@ -86,6 +86,10 @@ export function ReviewStep({
       {previewLoading && <p className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Checking it can be applied…</p>}
       {preview?.refusal && <Notice tone="danger" icon={Ban}>{preview.refusal.message}</Notice>}
       {preview?.activeJobId && <Notice tone="danger" icon={Ban}>Another change is still being applied to this draft. Wait for it to finish, then apply this one.</Notice>}
+      {/* What publishing would refuse (the entity types' fields): said, never a block. */}
+      {preview?.warnings?.map((w) => (
+        <Notice key={`${w.code}:${w.entityType}:${w.field}`} tone="warning" icon={AlertTriangle}>{w.message}</Notice>
+      ))}
       {budget?.verdict === 'refused' && (
         <Notice tone="danger" icon={Ban}>
           This graph has almost no room left for new property names, so <span className="font-mono">{newName}</span> can’t be added. Reuse a name it already holds.
