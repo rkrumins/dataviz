@@ -60,18 +60,20 @@ function typeOfValue(v: unknown): ValueType {
   return 'text'
 }
 
-export function WhatStep({ op, onChange, properties, viewId }: {
+export function WhatStep({ op, onChange, properties, viewId, edges = false }: {
   op: OpDraft
   onChange: (op: OpDraft) => void
   /** Every property the view's entities carry, most carried first. */
   properties: readonly SearchCatalogProperty[]
   /** The view whose values a clean-up previews. */
   viewId: string
+  /** It changes relationships: `properties` are the keys the view's relationships carry, uncounted. */
+  edges?: boolean
 }) {
   const set = (patch: Partial<OpDraft>) => onChange({ ...op, ...patch })
   const known = useMemo(() => properties.find((p) => p.key === op.key.trim()) ?? null, [properties, op.key])
-  const keyError = op.key ? nameProblem(op.key) : null
-  const toError = needsTo(op.kind) && op.to ? (op.to.trim() === op.key.trim() ? 'The new name is the same as the old one' : nameProblem(op.to)) : null
+  const keyError = op.key ? nameProblem(op.key, edges) : null
+  const toError = needsTo(op.kind) && op.to ? (op.to.trim() === op.key.trim() ? 'The new name is the same as the old one' : nameProblem(op.to, edges)) : null
   const toHeldBy = needsTo(op.kind) ? properties.find((p) => p.key === op.to.trim()) : undefined
   // A convert starts from the kind most of its entities hold it as.
   const pick = (kind: PropertyOpKind) => set(kind === 'convert' && !op.toKind ? { kind, toKind: dominantKind(known) } : { kind })
@@ -80,17 +82,21 @@ export function WhatStep({ op, onChange, properties, viewId }: {
     <div className="space-y-5">
       <div>
         <span className={LABEL} id="op-kind-label">Operation</span>
-        <OpPicker value={op.kind} onChange={pick} />
-        <p className="mt-1.5 text-[11.5px] text-ink-muted">{KIND_HINT[op.kind]}</p>
+        <OpPicker value={op.kind} onChange={pick} edges={edges} />
+        <p className="mt-1.5 text-[11.5px] text-ink-muted">
+          {edges ? KIND_HINT[op.kind].replace(/entities/g, 'relationships').replace(/entity/g, 'relationship') : KIND_HINT[op.kind]}
+        </p>
       </div>
 
       <div>
         <label className={LABEL} htmlFor="op-key">Property</label>
-        <KeyCombobox id="op-key" value={op.key} onChange={(key) => set({ key })} properties={properties} />
+        <KeyCombobox id="op-key" value={op.key} onChange={(key) => set({ key })} properties={properties} counted={!edges} />
         {keyError ? <p role="alert" className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">{keyError}</p>
           : op.key.trim() && (
             <p className="mt-1 text-[11px] text-ink-muted">
-              {known
+              {edges ? (known ? 'The view’s relationships carry it.'
+                : needsValue(op.kind) ? 'A new property — none of the view’s relationships carries it yet.' : 'None of the view’s relationships carries it.')
+                : known
                 ? <>Held by <span className="font-semibold text-ink-secondary tabular-nums">{known.count.toLocaleString()}</span> entities in this view.</>
                 : needsValue(op.kind) ? 'A new property — none of the view’s entities holds it yet.' : 'None of the view’s entities holds it.'}
             </p>
@@ -106,7 +112,7 @@ export function WhatStep({ op, onChange, properties, viewId }: {
           {toHeldBy && !toError && (
             <fieldset className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] p-2.5">
               <legend className="px-1 text-[11px] text-amber-700 dark:text-amber-300">
-                {toHeldBy.count.toLocaleString()} entities already hold <span className="font-mono">{op.to.trim()}</span>. For those:
+                {edges ? 'Some relationships' : `${toHeldBy.count.toLocaleString()} entities`} already hold <span className="font-mono">{op.to.trim()}</span>. For those:
               </legend>
               {(['skip', 'overwrite'] as const).map((choice) => (
                 <label key={choice} className="flex items-center gap-2 py-0.5 text-[12px] text-ink">
@@ -129,9 +135,11 @@ export function WhatStep({ op, onChange, properties, viewId }: {
 }
 
 /** The operation: a change of the property, or a clean-up of its values — one choice, in two rows.
- *  A radiogroup: one tab stop, arrow keys move the choice. */
-function OpPicker({ value, onChange }: { value: PropertyOpKind; onChange: (kind: PropertyOpKind) => void }) {
-  const all = OPS.flatMap((g) => g.kinds.map((k) => k.value))
+ *  A radiogroup: one tab stop, arrow keys move the choice. A relationship's values aren't
+ *  catalogued, so its clean-ups (which preview them) aren't offered. */
+function OpPicker({ value, onChange, edges }: { value: PropertyOpKind; onChange: (kind: PropertyOpKind) => void; edges: boolean }) {
+  const groups = edges ? OPS.slice(0, 1) : OPS
+  const all = groups.flatMap((g) => g.kinds.map((k) => k.value))
   const refs = useRef(new Map<PropertyOpKind, HTMLButtonElement | null>())
   const move = (e: KeyboardEvent, from: PropertyOpKind) => {
     const at = all.indexOf(from)
@@ -145,7 +153,7 @@ function OpPicker({ value, onChange }: { value: PropertyOpKind; onChange: (kind:
   }
   return (
     <div role="radiogroup" aria-labelledby="op-kind-label" className="space-y-1.5">
-      {OPS.map((g) => (
+      {groups.map((g) => (
         <div key={g.group} className="flex flex-wrap items-center gap-1.5">
           <span className="w-24 shrink-0 text-[10.5px] text-ink-muted">{g.group}</span>
           <div className="inline-flex flex-wrap items-center gap-0.5 rounded-lg bg-black/[0.05] p-0.5 dark:bg-white/[0.05]">
@@ -170,11 +178,13 @@ function OpPicker({ value, onChange }: { value: PropertyOpKind; onChange: (kind:
 }
 
 /** A property's name, offered from every property the view carries — most carried first. */
-function KeyCombobox({ id, value, onChange, properties }: {
+function KeyCombobox({ id, value, onChange, properties, counted = true }: {
   id: string
   value: string
   onChange: (key: string) => void
   properties: readonly SearchCatalogProperty[]
+  /** Each property's count is how many hold it. */
+  counted?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
@@ -217,7 +227,7 @@ function KeyCombobox({ id, value, onChange, properties }: {
               onMouseEnter={() => setActive(i)}
               className={cn('flex items-center gap-2 px-2 h-8 rounded-md cursor-pointer text-[12px]', i === active ? 'bg-accent-lineage/10 text-ink' : 'text-ink-secondary')}>
               <span className="flex-1 min-w-0 truncate font-mono">{p.key}</span>
-              <span className="text-[10.5px] tabular-nums text-ink-muted">{p.count.toLocaleString()}</span>
+              {counted && <span className="text-[10.5px] tabular-nums text-ink-muted">{p.count.toLocaleString()}</span>}
             </li>
           ))}
         </ul>

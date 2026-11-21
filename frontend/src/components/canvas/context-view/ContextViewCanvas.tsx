@@ -111,7 +111,7 @@ import { renderedAggregationTargets, unparentedRows } from './aggregationTargets
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/entity/EntityDrawer'
 import { RelationshipDrawer } from '../../panels/RelationshipDrawer'
-import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
+import { lineForTarget, targetFromLine, targetFromMembers, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel, type ContractRowLayer } from '../create/buildmode/BuildPanel'
@@ -375,7 +375,7 @@ import {
 import { questionsFromHere } from '../search/session/queryFromHere'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { PropertyOpHost } from '../property-manager/PropertyOpHost'
-import { MAX_CONTAINERS, propertyJobLabel, type TargetPreset } from '../property-manager/op/opModel'
+import { MAX_CONTAINERS, propertyJobLabel, searchPreset, type TargetPreset } from '../property-manager/op/opModel'
 import { usePropertyJobs } from '@/features/versioning/hooks/usePropertyJobs'
 import { usePropertyJobsStore, type TrackedJob } from '@/store/propertyJobsStore'
 import type { PropertyJob } from '@/services/versioningApiService'
@@ -4929,10 +4929,8 @@ export function ContextViewCanvas({
   // A property changed on every match of a search — the exact match set, every page — on the draft.
   const editFromSearch = useCallback((query: SearchQuery, count: number | null) => {
     usePropertyJobsStore.getState().requestOp({
-      target: {
-        kind: 'search', predicate: query.predicate, label: 'the search’s matches', count: count ?? undefined,
-        scopeMode: query.scope?.scopeMode === 'data_source' ? 'data_source' : 'view',
-      },
+      // A Connections search's relationships, or any other search's matches.
+      target: searchPreset(query.predicate, query.scope?.scopeMode === 'data_source' ? 'data_source' : 'view', count ?? undefined),
     })
   }, [])
   const narrowFromSearch = useCallback((query: SearchQuery) => {
@@ -7169,6 +7167,10 @@ export function ContextViewCanvas({
         onEditPicked={canvasWritable
           ? (urns) => usePropertyJobsStore.getState().requestOp({ target: { kind: 'selection', ids: urns } })
           : undefined}
+        onEditPickedEdges={canvasWritable
+          ? (ids) => usePropertyJobsStore.getState().requestOp({ target: { kind: 'relationships', ids } })
+          : undefined}
+        onComparePickedEdges={(members) => useCanvasStore.getState().openEdgeDrawer(targetFromMembers(members))}
         onSaveMatchesAsView={(canSaveSearchAsView || editingSubset) ? onSaveMatchesAsView : undefined}
         saveMatchesLabel={editingSubset ? `Update “${editingSubset.name}”…` : undefined}
       />

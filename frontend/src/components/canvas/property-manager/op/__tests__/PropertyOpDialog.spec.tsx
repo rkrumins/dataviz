@@ -42,6 +42,9 @@ vi.mock('../useAllValues', () => ({ useAllValues: () => ({ values: allValues, lo
 vi.mock('@/hooks/usePropertyInsights', () => ({
   useAffectedSample: () => ({ data: { entities: [{ urn: 'u1', displayName: 'orders', entityType: 'Table' }], truncated: true }, loading: false, error: null }),
 }))
+vi.mock('../../../search/builder/useDiscovery', () => ({
+  useDiscovery: () => ({ keysByEdgeType: { FLOWS_TO: ['owner', 'confidence'], FEEDS: ['owner', 'sla'] } }),
+}))
 vi.mock('../useReviewCounts', () => ({ useReviewCounts: (_v: string, items: unknown) => (items ? counts : { counts: new Map(), complete: false, percent: 0, error: null, unavailable: false }) }))
 
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
@@ -298,5 +301,39 @@ describe('PropertyOpDialog — cleaning up a property’s values', () => {
     await user.click(next())
     expect(await screen.findByRole('button', { name: 'Apply to 2' })).toBeEnabled()
     expect(screen.getByText(/1 of them hold a value that won’t convert/)).toBeInTheDocument()
+  })
+
+  it('changes picked relationships: named from their keys, counted on the draft, the roll-ups among them left alone', async () => {
+    const user = userEvent.setup()
+    api.preview.mockResolvedValue({ refusal: null, nameBudget: null, activeJobId: null, counts: { matched: 2, haveKey: 1, haveTo: 0, missing: 0, derived: 1 } })
+    open({ target: { kind: 'relationships', ids: ['e1', 'e2', 'r1'] } })
+    expect(screen.getByText(/On every relationship it should reach/)).toBeInTheDocument()
+    // An edge's own field can't be named.
+    await user.type(screen.getByRole('combobox', { name: 'Property' }), 'confidence')
+    expect(screen.getByRole('alert')).toHaveTextContent(/kept by the platform/)
+    await user.clear(screen.getByRole('combobox', { name: 'Property' }))
+    await user.click(screen.getByRole('combobox', { name: 'Property' }))
+    await user.click(screen.getByRole('option', { name: /sla/ }))
+    await user.type(screen.getByRole('textbox', { name: 'Value' }), '4h')
+    await user.click(next())
+    // Only the relationships it was opened on; no scope to choose.
+    expect(screen.getAllByRole('radio').map((r) => r.textContent)).toEqual([expect.stringMatching(/The 3 relationships/)])
+    expect(screen.queryByText('Search in')).toBeNull()
+    await user.click(next())
+    expect(api.preview.mock.calls.at(-1)![4]).toEqual({ edgeIds: ['e1', 'e2', 'r1'] })
+    expect(await screen.findByText(/1 of them is a roll-up/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Apply to 2' }))
+    expect(api.create.mock.calls[0][4]).toEqual({ edgeIds: ['e1', 'e2', 'r1'] })
+    expect(usePropertyJobsStore.getState().jobs[0]).toMatchObject({ entityKind: 'edge', targetLabel: 'the 3 selected relationships' })
+  })
+
+  it('a Connections search\'s relationships are its predicate, in the view or the whole data source', async () => {
+    const user = userEvent.setup()
+    const edges = { kind: 'edges', edgeTypes: ['FLOWS_TO'] }
+    open({ kind: 'remove', key: 'owner', target: { kind: 'connections', predicate: edges, scopeMode: 'view', label: 'the search’s relationships', count: 40 } })
+    expect(screen.getByRole('radio', { name: /The search’s relationships/ })).toHaveTextContent('— 40')
+    await user.click(next())
+    await user.click(screen.getByRole('button', { name: /^Apply/ }))
+    expect(api.create.mock.calls[0][4]).toEqual({ viewId: 'v1', predicate: edges, scopeMode: 'view' })
   })
 })

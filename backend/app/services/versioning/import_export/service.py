@@ -967,10 +967,12 @@ class ImportExportService:
     async def create_property_job(
         self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, branch_id: str,
         actor: str, op: Dict[str, Any], target: Dict[str, Any], message: Optional[str], key: str,
+        entity_kind: str = "node",
     ) -> Dict[str, Any]:
         """Queue a bulk property job (:mod:`.property_job`) on draft ``branch_id``: ``op`` over
         ``target`` — ``{"ids": [...]}``, whose chunk files are written here, or ``{"viewId",
-        "predicate", "scopeMode"}``, a search the job runs first. One job per ``key`` (the request's
+        "predicate", "scopeMode"}``, a search the job runs first — the entities, or with
+        ``entity_kind`` ``edge`` the relationships, they name. One job per ``key`` (the request's
         Idempotency-Key) and actor: asked again, it answers with the same job, whatever it asks.
 
         Under the draft's lock, as a save is: main is :class:`MainWriteForbidden`, a closed draft
@@ -1012,7 +1014,8 @@ class ImportExportService:
             s.add(JobORM(
                 id=job_id, job_type="property", graph_id=graph_id, workspace_id=workspace_id,
                 data_source_id=data_source_id, branch_id=branch_id, scope_view_id=target.get("viewId"),
-                field_scope={"actor": actor, "key": key, "op": op, "target": stored, "message": message},
+                field_scope={"actor": actor, "key": key, "op": op, "target": stored, "message": message,
+                             **({"entityKind": entity_kind} if entity_kind != "node" else {})},
                 last_cursor=cursor, total=total, summary=summary,
                 # Where its targets are: kept from the object store's sweep while it may run.
                 payload_uri=property_job.targets_key(job_id, 0),
@@ -1074,6 +1077,7 @@ class ImportExportService:
             "phase": row.current_phase, "progress": round(progress, 4), "processed": row.processed or 0,
             "total": row.total or 0, "error": error, "summary": shown, "op": fields.get("op"),
             "target": fields.get("target"), "message": fields.get("message"),
+            "entityKind": fields.get("entityKind") or "node",
             "createdBy": fields.get("actor"), "createdAt": row.created_at, "completedAt": row.completed_at,
             # Running, but its worker has not beaten in a takeover's time: about to be resumed.
             "stale": row.status == "running" and _silent_secs(row) > config.INGEST_STALE_SECS,
@@ -1094,14 +1098,19 @@ class ImportExportService:
         return active.id if active is not None else None
 
     async def preview_property_counts(self, *, graph_id: str, branch_id: str, op: Dict[str, Any],
-                                      ids: List[str]) -> Dict[str, Any]:
+                                      ids: List[str], entity_kind: str = "node") -> Dict[str, Any]:
         """What an id target finds in the draft, as it stands: the entities it names
         (``matched``), how many hold ``op``'s key and its ``to`` (null for an op without one), and
         the ids that name nothing there — deleted in the draft, or never in it (``missing``). Exactly
         how many the op would change (``wouldChange``: its plan, run over each one), and, for a
-        ``convert``, how many hold a value that doesn't convert (``unconvertible``; else null)."""
+        ``convert``, how many hold a value that doesn't convert (``unconvertible``; else null). For
+        relationships (``entity_kind`` ``edge``), also the roll-ups among them (``derived``)."""
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
-        found, deleted, missing = await property_job.read_targets(snap, ids)
+        derived: Dict[str, str] = {}
+        if entity_kind == "edge":
+            found, deleted, missing, derived = await property_job.read_edge_targets(snap, ids)
+        else:
+            found, deleted, missing = await property_job.read_targets(snap, ids)
         props = {eid: p for eid, p, _urn in found.values()}
         to = op.get("to") if op.get("kind") in ("rename", "copy") else None
         rewrite = property_job.rewriter(op)
@@ -1110,7 +1119,40 @@ class ImportExportService:
                 "missing": len(deleted) + len(missing),
                 "wouldChange": sum(property_job.plan_patch(op, p, rewrite) is not None for p in props.values()),
                 "unconvertible": sum(property_job.unconvertible(op, p, rewrite) for p in props.values())
-                if op.get("kind") == "convert" else None}
+                if op.get("kind") == "convert" else None,
+                **({"derived": len(set(derived.values()))} if entity_kind == "edge" else {})}
+
+    async def read_edges(self, *, graph_id: str, branch_id: Optional[str],
+                         refs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Several relationships as the line being read has them (a draft: main where it began,
+        then its own changes), for comparing and editing them together: each ref by its ``id`` —
+        else, given its ``source``, ``edgeType`` and ``target``, the one edge of that type between
+        them — with its entity id, value and token (``version``, an edit's ``baseVersion``). The
+        refs that name no relationship there are ``deleted`` (in the draft) or ``missing``."""
+        snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
+        found, deleted, missing = await property_job.edge_winners(snap, [r["id"] for r in refs])
+        by_triple = {f"{r['source']}|{r['edgeType']}|{r['target']}": r["id"] for r in refs
+                     if r["id"] not in found and r.get("source") and r.get("target") and r.get("edgeType")}
+        if by_triple:
+            more, gone, _none = await property_job.edge_winners(snap, list(by_triple))
+            for triple, w in more.items():
+                found[by_triple[triple]] = w
+            for triple, eid in gone.items():
+                deleted.setdefault(by_triple[triple], eid)
+        deleted = {k: v for k, v in deleted.items() if k not in found}
+
+        def view(ref_id: str, w) -> Dict[str, Any]:
+            payload = json.loads(w.payload) if w.payload else {}
+            return {"id": ref_id, "entityId": w.entity_id, "version": w.content_hash,
+                    "edgeType": w.edge_type or payload.get("edgeType"),
+                    "sourceEntityId": w.source_id, "targetEntityId": w.target_id,
+                    "confidence": payload.get("confidence"),
+                    "properties": dict(payload.get("properties") or {})}
+
+        asked = list(dict.fromkeys(r["id"] for r in refs))
+        edges = await asyncio.to_thread(lambda: [view(i, found[i]) for i in asked if i in found])
+        return {"edges": edges, "deleted": [i for i in asked if i in deleted],
+                "missing": [i for i in asked if i not in found and i not in deleted]}
 
     async def start_publish(self, job_id: str) -> str:
         """Queue the publish job (see :meth:`_start`). Returns the status to report."""

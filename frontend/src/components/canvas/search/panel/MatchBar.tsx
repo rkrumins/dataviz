@@ -177,7 +177,7 @@ export const MatchBar: FC<MatchBarProps> = ({
                 onClear={onClear}
                 onExport={!isRunning && !isError && (count ?? 0) > 0 ? onExport : undefined}
                 onNarrow={!isRunning && !isError && (count ?? 0) > 0 && unit === 'match' ? onNarrow : undefined}
-                onEditProperties={!isRunning && !isError && (count ?? 0) > 0 && unit === 'match' ? onEditProperties : undefined}
+                onEditProperties={!isRunning && !isError && (count ?? 0) > 0 && (unit === 'match' || unit === 'connection') ? onEditProperties : undefined}
                 onSaveAsView={!isRunning && !isError && (count ?? 0) > 0 && unit === 'match' ? onSaveAsView : undefined}
                 saveAsViewLabel={saveAsViewLabel}
                 saveAsViewBlocked={saveAsViewBlocked ?? null}
@@ -450,7 +450,8 @@ function SummaryStrip({
                     </button>
                 )}
                 {onEditProperties && (
-                    <HoverTip label="Change a property on every match" detail="All of them, on every page — set, fill, rename, copy or remove it, on your draft">
+                    <HoverTip label={unit === 'connection' ? 'Change a property on every relationship found' : 'Change a property on every match'}
+                        detail="All of them, on every page — set, fill, rename, copy or remove it, on your draft">
                         <button
                             type="button"
                             onClick={onEditProperties}

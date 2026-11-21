@@ -328,9 +328,6 @@ def test_what_a_job_refuses_before_it_is_made(V):
                  {"ids": [f"u{i}" for i in range(config.PROPERTY_JOB_MAX_IDS + 1)]}) == (422, "too_many_ids")
     assert _code(V, {"kind": "remove", "key": "owner"},
                  {"viewId": "v", "predicate": pred, "scopeMode": "visible"}) == (422, "visible_scope")
-    for edges in ({"kind": "edges"}, {"kind": "group", "op": "and", "children": [{"kind": "edges"}]}):
-        assert _code(V, {"kind": "remove", "key": "owner"},
-                     {"viewId": "v", "predicate": edges}) == (422, "edge_predicate")
     assert _code(V, {"kind": "rename", "key": "owner", "to": "steward"}) is None
 
 
@@ -577,3 +574,82 @@ async def test_a_search_the_engine_refuses_stops_the_job_saying_why(monkeypatch,
     with pytest.raises(pj.PropertyJobStopped) as stopped:
         [urn async for urn in V._property_targets_from_job(_SEARCH_JOB)]
     assert stopped.value.code == "search_refused" and "view_not_found" in str(stopped.value)
+
+
+# ── relationships: an edge job ───────────────────────────────────────────────
+def test_an_edge_window_writes_edge_updates():
+    found = {"e1": ("e1", {"owner": "x"}, None), "e2": ("edge:e2", {}, None)}
+    ops, counts, refused = pj.plan_window(_op("set", value="ana"), found, "edge")
+    assert ops == [{"op": "update", "entity_kind": "edge", "entity_id": eid,
+                    "payload": {"properties": {"owner": "ana"}}} for eid in ("e1", "edge:e2")]
+    assert counts["changed"] == 2 and refused == []
+
+
+def test_an_edge_is_named_by_its_id_or_as_a_search_names_one_without():
+    assert pj._triple("urn:a|FLOWS_TO|urn:b") == ("urn:a", "FLOWS_TO", "urn:b")
+    for not_one in ("e1", "edge:e1", "a|b", "a||b", "a|b|c|d"):
+        assert pj._triple(not_one) is None
+
+
+def test_a_target_names_relationships_by_id_or_by_a_connections_search(V):
+    op = {"kind": "remove", "key": "owner"}
+    edges = {"kind": "edges", "edgeTypes": ["FLOWS_TO"]}
+    for bad in ({"edgeIds": []}, {"ids": ["a"], "edgeIds": ["e"]},
+                {"edgeIds": ["e"], "viewId": "v", "predicate": edges}):
+        with pytest.raises(ValidationError):
+            _request(V, op, bad)
+    named = _request(V, op, {"edgeIds": ["e1", "urn:a|FLOWS_TO|urn:b"]}).target
+    assert named.entity_kind == "edge" and named.wire() == {"ids": ["e1", "urn:a|FLOWS_TO|urn:b"]}
+    for pred in (edges, {"kind": "group", "op": "and", "children": [edges]}):
+        assert _request(V, op, {"viewId": "v", "predicate": pred}).target.entity_kind == "edge"
+    assert _request(V, op).target.entity_kind == "node"
+    assert _request(V, op, {"viewId": "v", "predicate": {"kind": "all"}}).target.entity_kind == "node"
+
+
+def test_what_an_edge_job_refuses_before_it_is_made(V):
+    ids = {"edgeIds": ["e1", "e2"]}
+    search = {"viewId": "v", "predicate": {"kind": "edges"}}
+    # An edge's own fields, not an entity's, are the platform's.
+    for key in ("confidence", "id", "gvHash"):
+        assert _code(V, {"kind": "set", "key": key, "value": 1}, ids) == (422, "reserved_key")
+    assert _code(V, {"kind": "rename", "key": "owner", "to": "weight"}, search) == (422, "reserved_key")
+    assert _code(V, {"kind": "set", "key": "displayName", "value": "x"}, ids) is None
+    assert _code(V, {"kind": "remove", "key": "owner"}, search) is None
+    assert _code(V, {"kind": "remove", "key": "owner"},
+                 {"edgeIds": [f"e{i}" for i in range(config.PROPERTY_JOB_MAX_IDS + 1)]}) == (422, "too_many_ids")
+    # A unique field is an entity type's: a relationship's properties have none.
+    rules = OntologyRules(entity_types={"Dataset": EntityRule(unique_fields=frozenset({"code"}))})
+    assert _code(V, {"kind": "set", "key": "code", "value": "X"}, ids, rules=rules) is None
+    assert _code(V, {"kind": "set", "key": "code", "value": "X"}, search, rules=rules) is None
+
+
+async def test_an_edge_key_costs_the_graph_no_property_name(monkeypatch, V):
+    """An edge keeps its user properties in one JSON text: however full the graph's names, a new
+    edge key is ok — and the store isn't asked."""
+    from backend.app.services.view_transfer import sources
+
+    async def engine_for(*_a, **_kw):
+        raise AssertionError("an edge key needs no name budget")
+    monkeypatch.setattr(sources, "engine_for", engine_for)
+    body = _request(V, {"kind": "set", "key": "brand-new", "value": 1}, {"edgeIds": ["e1"]})
+    budget = await V._property_name_budget(None, "ws1", {"data_source_id": "ds1"}, body.op, edges=True)
+    assert (budget["verdict"], budget["isNew"], budget["registered"]) == ("ok", False, None)
+
+
+async def test_a_connections_search_target_reads_each_edge_id(monkeypatch, V):
+    from types import SimpleNamespace
+    from backend.app.services import advanced_search_service
+
+    seen = _search_hook(monkeypatch)
+    Search = advanced_search_service.AdvancedSearchService
+
+    class EdgeSearch(Search):
+        async def open_export(self, session_id, scope_hash):
+            async def body():
+                yield b'{"edgeId": "e1", "urn": null}\n{"edgeId": "urn:a|FLOWS_TO|urn:b"}\n{"edgeId": null}\n'
+            return SimpleNamespace(), body()
+    monkeypatch.setattr(advanced_search_service, "AdvancedSearchService", EdgeSearch)
+    job = {**_SEARCH_JOB, "entityKind": "edge",
+           "target": {**_SEARCH_JOB["target"], "predicate": {"kind": "edges"}}}
+    assert [k async for k in V._property_targets_from_job(job)] == ["e1", "urn:a|FLOWS_TO|urn:b"]
+    assert seen["exports"] == [None, "s1"]

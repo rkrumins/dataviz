@@ -42,6 +42,9 @@ function JobRow({ tracked }: { tracked: TrackedJob }) {
   const refused = s.refused?.byReason?.write_refused ?? 0
   const notFound = (s.missing ?? 0) + (s.deletedInDraft ?? 0)
   const listed = s.refused?.count ?? 0
+  // A change of relationships says so, and the roll-ups it left alone.
+  const relationships = tracked.entityKind === 'edge' || job?.entityKind === 'edge'
+  const rollups = s.refused?.byReason?.derived ?? 0
   const cancel = () => {
     cancelPropertyJob(tracked.wsId, tracked.graphId, tracked.jobId)
       .then((j) => usePropertyJobsStore.getState().update(tracked.jobId, j))
@@ -64,7 +67,7 @@ function JobRow({ tracked }: { tracked: TrackedJob }) {
               <span className="text-[10.5px] tabular-nums text-ink-muted shrink-0">
                 {job?.total ? `${(job.processed ?? 0).toLocaleString()} of ${job.total.toLocaleString()}`
                   : status === 'pending' ? 'Waiting to start'
-                    : job?.phase === 'resolve' ? `Finding the entities${job.processed ? ` — ${job.processed.toLocaleString()} so far` : '…'}` : `${pct}%`}
+                    : job?.phase === 'resolve' ? `Finding the ${relationships ? 'relationships' : 'entities'}${job.processed ? ` — ${job.processed.toLocaleString()} so far` : '…'}` : `${pct}%`}
               </span>
             </div>
           ) : (
@@ -72,13 +75,14 @@ function JobRow({ tracked }: { tracked: TrackedJob }) {
               {status === 'failed'
                 ? <>Stopped{typeof job?.error === 'string' ? `: ${job.error}` : job?.error?.message ? `: ${job.error.message}` : ''}. </>
                 : status === 'cancelled' ? 'Stopped on request. ' : ''}
-              <span className="tabular-nums">{(s.changed ?? 0).toLocaleString()}</span> changed
+              <span className="tabular-nums">{(s.changed ?? 0).toLocaleString()}</span>{relationships ? ' relationships' : ''} changed
               {(s.unchanged ?? 0) + (s.conflicts ?? 0) > 0 && <> · <span className="tabular-nums">{((s.unchanged ?? 0) + (s.conflicts ?? 0)).toLocaleString()}</span> left as they were</>}
               {notFound > 0 && <> · <span className="tabular-nums">{notFound.toLocaleString()}</span> not in the draft</>}
               {(s.unconvertible ?? 0) > 0 && (
                 <> · <span className="tabular-nums text-amber-700 dark:text-amber-300">{(s.unconvertible ?? 0).toLocaleString()}</span>{' '}
                   {tracked.op.onFail === 'remove' ? 'removed — they wouldn’t convert' : 'wouldn’t convert'}</>
               )}
+              {rollups > 0 && <> · <span className="tabular-nums">{rollups.toLocaleString()}</span> {rollups === 1 ? 'roll-up' : 'roll-ups'} left alone</>}
               {refused > 0 && <> · <span className="tabular-nums text-amber-700 dark:text-amber-300">{refused.toLocaleString()}</span> couldn’t be</>}
             </p>
           )}

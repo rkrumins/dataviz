@@ -23,6 +23,7 @@ export type { Impact } from './opModel'
 
 export function ReviewStep({
   op, preset, scopeMode, counts, impact, exact, preview, previewLoading, sample, sampleLoading, stagedCount, reason = '', onReason,
+  edges = false,
 }: {
   op: OpDraft
   preset: TargetPreset
@@ -39,8 +40,12 @@ export function ReviewStep({
   /** Why it is made — kept as its message, in the draft's history and the publish's audit. */
   reason?: string
   onReason?: (reason: string) => void
+  /** It changes relationships, not entities. */
+  edges?: boolean
 }) {
   const budget = preview?.nameBudget
+  const noun = edges ? 'relationship' : 'entity'
+  const derived = preview?.counts?.derived ?? 0
   const newName = needsTo(op.kind) ? op.to.trim() : op.key.trim()
   // On a draft, why a count is the published graph's rather than the draft's.
   const approximate = counts ? [...counts.counts.values()].find((c) => c.approximate)?.note ?? null : null
@@ -57,7 +62,7 @@ export function ReviewStep({
             {needsValue(op.kind) && <> = <span className="font-mono">{String(op.value)}</span></>}
           </>
         )}
-        {' '}on {targetLabel(preset)}{preset.kind !== 'selection' && scopeMode === 'data_source' ? ', across the whole data source' : ''}.
+        {' '}on {targetLabel(preset)}{preset.kind !== 'selection' && preset.kind !== 'relationships' && scopeMode === 'data_source' ? ', across the whole data source' : ''}.
       </p>
 
       <div className="grid grid-cols-3 gap-2" aria-live="polite">
@@ -82,7 +87,7 @@ export function ReviewStep({
       {counts && !counts.complete && !counts.error && !counts.unavailable && (
         <div className="flex items-center gap-2 text-[11px] text-ink-muted">
           <ProgressBar value={counts.percent} label="Counting the entities" className="w-32" />
-          Counting every entity{scopeMode === 'data_source' ? ' in the data source' : ' in the view'}… {Math.round(counts.percent)}%
+          Counting every {noun}{scopeMode === 'data_source' ? ' in the data source' : ' in the view'}… {Math.round(counts.percent)}%
         </div>
       )}
       {counts?.error && (
@@ -97,7 +102,7 @@ export function ReviewStep({
       )}
       {exact && impact?.changes === 0 && (
         <p className="flex items-start gap-1.5 text-[11.5px] text-ink-muted">
-          <Info className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden /> Nothing would change — none of these entities would end up different.
+          <Info className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden /> Nothing would change — none of these {edges ? 'relationships' : 'entities'} would end up different.
         </p>
       )}
 
@@ -120,6 +125,11 @@ export function ReviewStep({
 
       {previewLoading && <p className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Checking it can be applied…</p>}
       {preview?.refusal && <Notice tone="danger" icon={Ban}>{preview.refusal.message}</Notice>}
+      {derived > 0 && (
+        <Notice tone="neutral" icon={Info}>
+          {derived.toLocaleString()} of them {derived === 1 ? 'is a roll-up' : 'are roll-ups'} — a summary the aggregation computes — and {derived === 1 ? 'is' : 'are'} left as {derived === 1 ? 'it is' : 'they are'}.
+        </Notice>
+      )}
       {preview?.activeJobId && <Notice tone="danger" icon={Ban}>Another change is still being applied to this draft. Wait for it to finish, then apply this one.</Notice>}
       {/* What publishing would refuse (the entity types' fields): said, never a block. */}
       {preview?.warnings?.map((w) => (
@@ -159,11 +169,18 @@ export function ReviewStep({
 
       <div className="flex items-start gap-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] p-2.5 text-[11.5px] leading-snug text-ink-secondary">
         <GitBranch className="mt-px h-3.5 w-3.5 shrink-0 text-ink-muted" aria-hidden />
-        <span>
-          Applied to your draft by the server — every matching entity, however many, a batch at a time — and
-          published from there. The entities are found as published; ones new in this draft aren’t matched (select
-          them on the canvas instead). Counts, rule tags and the catalog follow your draft, batch by batch.
-        </span>
+        {edges ? (
+          <span>
+            Applied to your draft by the server — every relationship it reaches, however many, a batch at a time — and
+            published from there. Roll-ups are never changed: they follow the relationships they summarise.
+          </span>
+        ) : (
+          <span>
+            Applied to your draft by the server — every matching entity, however many, a batch at a time — and
+            published from there. The entities are found as published; ones new in this draft aren’t matched (select
+            them on the canvas instead). Counts, rule tags and the catalog follow your draft, batch by batch.
+          </span>
+        )}
       </div>
     </div>
   )

@@ -3,14 +3,17 @@
  * property, how many hold the new name — counted over the whole view (or data source) by the
  * server, a slice per request, each answer shown as it lands. A change of target or operation
  * cancels the count under way and starts again, after a pause for typing.
+ *
+ * A Connections search's relationships are not counted by `/search/counts`: each count is the
+ * search itself, followed until it has counted every edge (`countConnections`).
  */
 import { useEffect, useState } from 'react'
 import { useDraftDataKey } from '@/features/versioning/hooks/useDraftDataKey'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { countRules, type RuleCount } from '@/services/ruleCounts'
-import type { Predicate } from '@/types/search'
-import type { ScopeMode } from './opModel'
+import type { Predicate, SearchResultPage } from '@/types/search'
+import { isConnectionsPredicate, type ScopeMode } from './opModel'
 
 const DEBOUNCE_MS = 400
 
@@ -55,6 +58,12 @@ export function useReviewCounts(
       }
     }
     const timer = setTimeout(() => {
+      if (items.every((i) => isConnectionsPredicate(i.predicate))) {
+        countConnections(provider, viewId, items, scopeMode, controller.signal,
+          (counts) => { if (!controller.signal.aborted) setState({ key, value: read(counts) }) })
+          .catch(() => { /* the last update carries why it stopped */ })
+        return
+      }
       countRules(provider, viewId, items, {
         signal: controller.signal,
         scope: { viewId, scopeMode },
@@ -70,4 +79,38 @@ export function useReviewCounts(
   if (!key) return EMPTY
   if (!remote) return UNAVAILABLE
   return state.key === key ? state.value : EMPTY
+}
+
+/** Follow-ups of one Connections search before its count is given up on. */
+const CONNECTIONS_MAX_REQUESTS = 120
+
+/** Each item's relationships counted by running its search to the end — one at a time, each
+ *  answer passed on as it lands. A count the search could only bound is not complete. */
+async function countConnections(
+  provider: RemoteGraphProvider,
+  viewId: string,
+  items: ReadonlyArray<{ id: string; predicate: Predicate }>,
+  scopeMode: ScopeMode,
+  signal: AbortSignal,
+  onUpdate: (counts: ReadonlyMap<string, RuleCount>) => void,
+): Promise<void> {
+  const counts = new Map<string, RuleCount>()
+  for (const item of items) {
+    try {
+      let page: SearchResultPage | null = null
+      for (let i = 0; i < CONNECTIONS_MAX_REQUESTS && (!page || (page.status === 'running' && page.sessionId)); i++) {
+        page = await provider.searchAdvanced({
+          predicate: item.predicate, scope: { viewId, scopeMode },
+          options: { results: 'hits', pageSize: 1, waitMs: 2000, ...(page?.sessionId ? { sessionId: page.sessionId } : {}) },
+        } as Parameters<RemoteGraphProvider['searchAdvanced']>[0], { signal })
+      }
+      const complete = page?.status === 'complete' && typeof page.totalCount === 'number' && page.countStatus !== 'lowerBound'
+      counts.set(item.id, { count: page?.totalCount ?? 0, complete, percent: complete ? 100 : 0,
+        error: complete ? undefined : 'The search could not count every relationship' })
+    } catch (err) {
+      if (signal.aborted) return
+      counts.set(item.id, { count: 0, complete: false, percent: 0, error: `The count stopped: ${(err as Error).message}` })
+    }
+    onUpdate(new Map(counts))
+  }
 }

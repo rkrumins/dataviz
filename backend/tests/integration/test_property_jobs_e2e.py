@@ -11,6 +11,10 @@ checkpoint — and never on main.
 * A search target is resolved by the job itself (a stub here: the search engine needs FalkorDB),
   and one that matches too much is refused; a draft closed under a job stops it, saying why.
 * The routes: preview, create, follow, cancel, the refused rows as CSV.
+* Relationships (an edge job): named by id — ``edge:<id>`` re-keyed ones by the id the graph calls
+  them — or as a Connections search names one without (``source|TYPE|target``); deleted in the
+  draft, a roll-up (refused ``derived``); a Connections search target; their routes, and the read
+  the relationship drawer compares several relationships by.
 """
 import asyncio
 import os
@@ -477,3 +481,150 @@ async def _routes() -> None:
 
 def test_the_routes_preview_create_follow_cancel_and_list_refused_rows():
     asyncio.run(_routes())
+
+
+# ── relationships ─────────────────────────────────────────────────────────────
+def _edge(eid, src, tgt, etype="FLOWS_TO", **props):
+    return {"op": "create", "entity_kind": "edge", "entity_id": eid,
+            "payload": {"edgeType": etype, "sourceEntityId": src, "targetEntityId": tgt, "properties": props}}
+
+
+#: N0 → N1 → N2 → N3 and more: E3 kept as ``edge:E3`` (a graph copied in re-keys an edge whose id a
+#: node held, and still calls it E3), E4 found by its ends and type, E5 deleted in the draft, R1 a
+#: roll-up.
+EDGE_KEYS = ["E1", "E2", "E3", "urn:n0|FEEDS|urn:n2", "E5", "R1", "nope", "urn:n0|NOPE|urn:n1"]
+
+
+async def _edge_draft(owner="alice"):
+    svc, ds, gid, draft = await _draft(owner=owner, nodes=[_node(i) for i in range(4)] + [
+        _edge("E1", "N0", "N1", owner="a"), _edge("E2", "N1", "N2", owner="b", steward="x"),
+        _edge("edge:E3", "N2", "N3", owner="c"), _edge("E4", "N0", "N2", "FEEDS"),
+        _edge("E5", "N0", "N3", owner="d"), _edge("R1", "N0", "N3", "AGGREGATED", owner="r")])
+    await svc.apply_ops(graph_id=gid, branch_id=draft, actor=owner, message="drop E5",
+                        ops=[{"op": "delete", "entity_kind": "edge", "entity_id": "E5"}])
+    return svc, ds, gid, draft
+
+
+async def _edge_jobs() -> None:
+    svc, ds, gid, draft = await _edge_draft()
+    ie = ImportExportService(versioning=svc)
+    job_id = await ie.create_property_job(
+        workspace_id="ws1", data_source_id=ds, graph_id=gid, branch_id=draft, actor="alice", op=RENAME,
+        target={"ids": EDGE_KEYS}, message=None, key="key-edges-00001", entity_kind="edge")
+    summary = await ie.run_property(job_id["job_id"])
+    assert (summary["changed"], summary["unchanged"], summary["conflicts"], summary["deletedInDraft"],
+            summary["missing"], summary["commits"]) == (2, 1, 1, 1, 2, 1)
+    assert summary["refused"]["byReason"] == {"conflict": 1, "deleted_in_draft": 1, "missing": 2, "derived": 1}
+    assert await _props(svc, gid, draft, "E1") == {"steward": "a"}
+    assert await _props(svc, gid, draft, "edge:E3") == {"steward": "c"}        # by the id the graph calls it
+    assert await _props(svc, gid, draft, "E2") == {"owner": "b", "steward": "x"}
+    assert await _props(svc, gid, draft, "R1") == {"owner": "r"}               # a roll-up is never edited
+    assert await _props(svc, gid, None, "E1") == {"owner": "a"}                # main untouched
+    assert (await svc.entity_value(graph_id=gid, entity_id="E1", branch_id=draft))["targetEntityId"] == "N1"
+    job = await ie.get_property_job(job_id["job_id"])
+    assert (job["entityKind"], job["target"]) == ("edge", {"kind": "ids", "count": len(EDGE_KEYS)})
+    rows = {r.split(",")[0]: r for r in (await _csv(ie, job_id["job_id"]))[1:]}
+    assert rows["E2"].startswith("E2,E2,conflict") and rows["E5"].startswith("E5,E5,deleted_in_draft")
+    assert rows["R1"].startswith("R1,R1,derived") and rows["nope"] == "nope,,missing,Not in this draft."
+
+    # Named twice — by its id and by its ends — an edge is written once.
+    tier = await ie.create_property_job(
+        workspace_id="ws1", data_source_id=ds, graph_id=gid, branch_id=draft, actor="alice",
+        op={"kind": "set", "key": "tier", "value": "gold", "onConflict": "skip"},
+        target={"ids": ["urn:n0|FEEDS|urn:n2", "E4"]}, message=None, key="key-edges-00002", entity_kind="edge")
+    summary = await ie.run_property(tier["job_id"])
+    assert (summary["changed"], summary["unchanged"]) == (1, 1)
+    assert await _props(svc, gid, draft, "E4") == {"tier": "gold"}
+    assert (await ie.get_property_job(tier["job_id"]))["entityKind"] == "edge"
+
+    counts = await ie.preview_property_counts(graph_id=gid, branch_id=draft, op=RENAME, ids=EDGE_KEYS,
+                                              entity_kind="edge")
+    assert counts == {"matched": 4, "haveKey": 1, "haveTo": 3, "missing": 3, "derived": 1,
+                      "wouldChange": 0, "unconvertible": None}
+    await db.dispose_engine()
+
+
+def test_an_edge_job_edits_relationships_by_id_by_their_ends_and_never_a_roll_up():
+    asyncio.run(_edge_jobs())
+
+
+async def _edge_search(monkeypatch) -> None:
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 2)
+    asked = []
+
+    async def targets(job):
+        asked.append((job["entityKind"], job["target"]["predicate"]))
+        for key in ("E1", "urn:n0|FEEDS|urn:n2", "E2", "R1"):
+            yield key
+
+    svc, ds, gid, draft = await _edge_draft()
+    ie = ImportExportService(versioning=svc, property_targets=targets)
+    search = {"viewId": "v1", "predicate": {"kind": "edges", "edgeTypes": ["FLOWS_TO"]}, "scopeMode": "view"}
+    job_id = (await ie.create_property_job(
+        workspace_id="ws1", data_source_id=ds, graph_id=gid, branch_id=draft, actor="alice",
+        op={"kind": "remove", "key": "owner", "onConflict": "skip"}, target=search, message=None,
+        key="key-edge-search1", entity_kind="edge"))["job_id"]
+    await TransferRunner(lambda: ie).run_job(await lease_job(job_id))
+    job = await ie.get_property_job(job_id)
+    assert asked == [("edge", search["predicate"])] and job["status"] == "completed", job
+    assert (job["summary"]["changed"], job["summary"]["unchanged"], job["summary"]["commits"]) == (2, 1, 2)
+    assert job["summary"]["refused"]["byReason"] == {"derived": 1}
+    assert await _props(svc, gid, draft, "E1") == {} and await _props(svc, gid, draft, "E2") == {"steward": "x"}
+    await db.dispose_engine()
+
+
+def test_a_connections_search_target_edits_every_relationship_it_matches(monkeypatch):
+    asyncio.run(_edge_search(monkeypatch))
+
+
+async def _edge_routes() -> None:
+    from httpx import ASGITransport, AsyncClient
+    from backend.app.api.v1.endpoints.versioning import get_import_export_service
+    from .test_versioning_main_write_publish import MIA, PAT, V1, _app
+
+    svc, ds, gid, draft = await _edge_draft(owner="pat")
+    app, _G = _app()
+    ie = get_import_export_service()
+    body = {"op": RENAME, "target": {"edgeIds": EDGE_KEYS}}
+    jobs = f"{V1}/graphs/{gid}/branches/{draft}/property-jobs"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(f"{jobs}/preview", json=body, headers=PAT)
+        assert r.status_code == 200, r.text
+        preview = r.json()
+        assert preview["refusal"] is None and preview["nameBudget"]["verdict"] == "ok"
+        assert preview["counts"] == {"matched": 4, "haveKey": 3, "haveTo": 1, "missing": 3, "derived": 1,
+                                     "wouldChange": 2, "unconvertible": None}
+        reserved = {"op": {"kind": "set", "key": "confidence", "value": 1}, "target": {"edgeIds": ["E1"]}}
+        assert (await c.post(f"{jobs}/preview", json=reserved, headers=PAT)).json()["refusal"]["code"] == "reserved_key"
+        r = await c.post(jobs, json=body, headers={**PAT, "Idempotency-Key": "key-edge-route-1"})
+        assert r.status_code == 202, r.text
+        assert (r.json()["entityKind"], r.json()["target"]) == ("edge", {"kind": "ids", "count": len(EDGE_KEYS)})
+        await ie.run_property(r.json()["jobId"])
+        assert await _props(svc, gid, draft, "edge:E3") == {"steward": "c"}
+
+        # Several relationships read as the draft has them, each with the token an edit is sent with.
+        read = f"{V1}/graphs/{gid}/edges/read"
+        refs = [{"id": "E1"}, {"id": "E3"}, {"id": "bundle:x", "source": "urn:n0", "target": "urn:n2",
+                                             "edgeType": "FEEDS"}, {"id": "E5"}, {"id": "nope"}]
+        r = await c.post(read, params={"branchId": draft}, json={"refs": refs}, headers=PAT)
+        assert r.status_code == 200, r.text
+        got = r.json()
+        by_id = {e["id"]: e for e in got["edges"]}
+        assert [e["id"] for e in got["edges"]] == ["E1", "E3", "bundle:x"]
+        assert (got["deleted"], got["missing"]) == (["E5"], ["nope"])
+        assert (by_id["E3"]["entityId"], by_id["E3"]["properties"]) == ("edge:E3", {"steward": "c"})
+        assert (by_id["bundle:x"]["entityId"], by_id["bundle:x"]["edgeType"]) == ("E4", "FEEDS")
+        assert (by_id["E1"]["sourceEntityId"], by_id["E1"]["targetEntityId"]) == ("N0", "N1")
+        summary = await c.get(f"{V1}/graphs/{gid}/entities/E1/summary",
+                              params={"branchId": draft, "kind": "edge", "include": "value"}, headers=PAT)
+        assert by_id["E1"]["version"] == summary.json()["version"], summary.text
+        r = await c.post(read, json={"refs": refs}, headers=PAT)                    # main, as published
+        assert {e["id"]: e["properties"] for e in r.json()["edges"]}["E1"] == {"owner": "a"}
+        assert "E5" in {e["id"] for e in r.json()["edges"]} and r.json()["deleted"] == []
+        assert (await c.post(read, params={"branchId": draft}, json={"refs": refs}, headers=MIA)).status_code == 404
+        assert (await c.post(read, json={"refs": []}, headers=PAT)).status_code == 422
+    await db.dispose_engine()
+
+
+def test_the_edge_routes_preview_create_and_read_several_relationships():
+    asyncio.run(_edge_routes())

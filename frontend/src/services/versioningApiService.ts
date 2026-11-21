@@ -2004,9 +2004,12 @@ export interface PropertyJobOp {
   onFail?: 'skip' | 'remove'
 }
 
-/** Which entities: named ones, or every entity criteria match — in the view, or the whole data source. */
+/** Which entities: named ones, or every entity criteria match — in the view, or the whole data source.
+ *  Relationships: named ones (`edgeIds`: an edge's own id, or `source|TYPE|target`), or every one a
+ *  Connections search (an `edges` predicate) matches. */
 export type PropertyJobTarget =
   | { ids: string[] }
+  | { edgeIds: string[] }
   | { viewId: string; predicate: Predicate; scopeMode: 'view' | 'data_source' }
 
 export interface PropertyJobSummary {
@@ -2041,6 +2044,8 @@ export interface PropertyJob {
   error?: string | { code?: string; message?: string } | null
   summary?: Partial<PropertyJobSummary> | null
   op?: PropertyJobOp
+  /** `edge`: it edits relationships. */
+  entityKind?: 'node' | 'edge'
   branchId?: string
   createdAt?: string
 }
@@ -2059,10 +2064,11 @@ export interface PropertyJobPreview {
   nameBudget: PropertyNameBudget | null
   activeJobId: string | null
   /** Exact, read from the draft — for a target of named entities only: what they hold, how many
-   *  the change would change, and how many hold a value a convert can't convert. */
+   *  the change would change, how many hold a value a convert can't convert, and `derived`: the
+   *  roll-ups among named relationships, which are never edited. */
   counts: {
     matched: number; haveKey: number; haveTo: number | null; missing: number
-    wouldChange?: number; unconvertible?: number | null
+    wouldChange?: number; unconvertible?: number | null; derived?: number
   } | null
   /** What it would leave that publishing the draft refuses (the entity types' fields) — said,
    *  never a refusal: the change applies all the same. */
@@ -2112,6 +2118,44 @@ export function cancelPropertyJob(wsId: string, graphId: string, jobId: string):
 /** The entities it could not change, and why — a CSV to download. */
 export const refusedPropertyJobUrl = (wsId: string, graphId: string, jobId: string) =>
   `${propertyJobs(wsId, graphId)}/${jobId}/refused?format=csv`
+
+/** A relationship to read: its id — and, for one the canvas names by another id, its ends and type. */
+export interface EdgeReadRef { id: string; source?: string; target?: string; edgeType?: string }
+
+/** A relationship as the line being read has it, with the token an edit of it is sent with. */
+export interface EdgeRecord {
+  /** The ref's id, as asked. */
+  id: string
+  /** The versioned entity id — what an edit addresses. */
+  entityId: string
+  version: string | null
+  edgeType: string
+  sourceEntityId: string
+  targetEntityId: string
+  confidence?: number | null
+  properties: Record<string, unknown>
+}
+
+export interface EdgeReadResult {
+  edges: EdgeRecord[]
+  /** Refs whose relationship this draft deleted. */
+  deleted: string[]
+  /** Refs that name no relationship here. */
+  missing: string[]
+}
+
+/** The most relationships one read names. */
+export const EDGE_READ_MAX = 1000
+
+/** Several relationships at once, as main — or the open draft — has them (`POST …/edges/read`). */
+export function readEdges(
+  wsId: string, graphId: string, branchId: string | null | undefined, refs: EdgeReadRef[], signal?: AbortSignal,
+): Promise<EdgeReadResult> {
+  const qs = branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''
+  return vfetch<EdgeReadResult>(`${base(wsId)}/graphs/${graphId}/edges/read${qs}`, {
+    method: 'POST', body: JSON.stringify({ refs }), signal,
+  })
+}
 
 /** Follow a job until it ends — through blips, and paused while the tab is hidden. */
 export function followPropertyJob(

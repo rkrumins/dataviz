@@ -3,7 +3,8 @@
  * value or new name — or how a clean-up tidies its values, with a before → after) → **Where**
  * (which entities) → **Review** (counted exactly, with anything that would stop it, and an optional
  * reason kept with it), then applied to the draft by a job on the server: every entity the target
- * reaches, however many — not only the ones loaded on the canvas.
+ * reaches, however many — not only the ones loaded on the canvas. Relationships the same way: named
+ * ones, or every one a Connections search matches (an edge target, `isEdgeTarget`).
  *
  * A removal, a rename or an overwrite of many entities (or across the whole data source) asks for
  * the property's name to be typed first. The request carries a key made from what it applies, so
@@ -23,11 +24,13 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
 import { useAffectedSample } from '@/hooks/usePropertyInsights'
 import { createPropertyJob, previewPropertyJob, type PropertyJobPreview } from '@/services/versioningApiService'
+import type { SearchCatalogProperty } from '@/types/search'
+import { useDiscovery } from '../../search/builder/useDiscovery'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
 import {
-  impactOf, isCleanup, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel, reviewCounts, scopeFixedToView, targetLabel, targetOf,
-  type OpDraft, type ScopeMode, type TargetPreset,
+  EDGE_RESERVED_KEYS, impactOf, isCleanup, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
+  reviewCounts, scopeFixedToView, targetLabel, targetOf, type OpDraft, type ScopeMode, type TargetPreset,
 } from './opModel'
 import { useReviewCounts } from './useReviewCounts'
 import { WhatStep } from './WhatStep'
@@ -58,11 +61,13 @@ export function PropertyOpDialog({
     ...(seed.map ? { map: seed.map } : {}), ...(seed.toKind ? { toKind: seed.toKind } : {}),
   }))
   const [preset, setPreset] = useState<TargetPreset>(() => seed.target ?? (seed.key ? { kind: 'hasKey', key: seed.key } : { kind: 'view' }))
-  const [scopeMode, setScopeMode] = useState<ScopeMode>(() => (seed.target?.kind === 'search' ? seed.target.scopeMode : 'view'))
+  const [scopeMode, setScopeMode] = useState<ScopeMode>(() => (seed.target?.kind === 'search' || seed.target?.kind === 'connections' ? seed.target.scopeMode : 'view'))
   const [sourceConfirmed, setSourceConfirmed] = useState(false)
+  // Relationships, not entities (`EdgeWhatStep`).
+  const edges = isEdgeTarget(preset)
   // A change whose What is already whole (Remove from a row) opens on Where; a clean-up opens on
   // What, where its before → after is shown.
-  const [step, setStep] = useState(() => (isCleanup(op.kind) || opProblem(op) ? 0 : 1))
+  const [step, setStep] = useState(() => (isCleanup(op.kind) || opProblem(op, !!seed.target && isEdgeTarget(seed.target)) ? 0 : 1))
   const [reason, setReason] = useState('')
   const cleanup = isCleanup(op.kind)
 
@@ -71,16 +76,16 @@ export function PropertyOpDialog({
   const target = targetOf(preset, viewId, scopeMode)
   const predicate = predicateOf(preset)
   const effectiveScope: ScopeMode = scopeFixedToView(preset) ? 'view' : scopeMode
-  const whatProblem = opProblem(op)
+  const whatProblem = opProblem(op, edges)
   const whereProblem = !target
-    ? (preset.kind === 'custom' ? 'Add a condition to say which entities' : 'Choose which entities')
-    : preset.kind !== 'selection' && effectiveScope === 'data_source' && !sourceConfirmed ? 'Confirm the whole data source is meant' : null
+    ? (preset.kind === 'custom' ? 'Add a condition to say which entities' : `Choose which ${edges ? 'relationships' : 'entities'}`)
+    : preset.kind !== 'selection' && preset.kind !== 'relationships' && effectiveScope === 'data_source' && !sourceConfirmed ? 'Confirm the whole data source is meant' : null
 
   // ── Review: counted, checked and sampled once it is reached ──
   const reviewing = step === 2 && !whatProblem && !whereProblem
   const countItems = useMemo(() => (reviewing && predicate ? reviewCounts(op, predicate) : null), [reviewing, predicate, op])
   const counts = useReviewCounts(viewId, countItems, effectiveScope)
-  const sample = useAffectedSample(viewId, reviewing && predicate && effectiveScope === 'view' ? predicate : null, reviewing && !!predicate)
+  const sample = useAffectedSample(viewId, reviewing && predicate && !edges && effectiveScope === 'view' ? predicate : null, reviewing && !!predicate && !edges)
   // The server's check, kept with the request it answers: a newer request reads as checking.
   const requestKey = reviewing && target ? JSON.stringify({ op: jobOp(op), target }) : ''
   const [checked, setChecked] = useState<{ key: string; data: PropertyJobPreview | null }>({ key: '', data: null })
@@ -95,7 +100,7 @@ export function PropertyOpDialog({
   }, [requestKey, graphWrite.wsId, graphWrite.graphId, graphWrite.branchId])
   const preview = { data: checked.key === requestKey ? checked.data : null, loading: !!requestKey && checked.key !== requestKey }
 
-  const ids = preset.kind === 'selection'
+  const ids = preset.kind === 'selection' || preset.kind === 'relationships'
   const tally = ids
     ? preview.data?.counts ? {
       target: preview.data.counts.matched, haveKey: preview.data.counts.haveKey, haveTo: preview.data.counts.haveTo ?? 0,
@@ -131,7 +136,7 @@ export function PropertyOpDialog({
         reason.trim() || `Bulk property: ${propertyJobLabel(jobOp(op))} on ${targetLabel(preset)}`)
       usePropertyJobsStore.getState().track({
         jobId: job.jobId, ...graphWrite, viewId, op: jobOp(op), targetLabel: targetLabel(preset),
-        startedAt: new Date().toISOString(), job,
+        ...(edges ? { entityKind: 'edge' as const } : {}), startedAt: new Date().toISOString(), job,
       })
       notify('success', `Applying ${propertyJobLabel(jobOp(op))} to ${targetLabel(preset)} on your draft — follow it in Property Manager.`)
       onClose()
@@ -180,7 +185,7 @@ export function PropertyOpDialog({
             <div className="min-w-0 flex-1">
               <h3 id="property-op-title" className="text-[15px] font-semibold leading-tight text-ink">{cleanup ? 'Clean up a property' : 'Change a property'}</h3>
               <p className="mt-0.5 text-[11.5px] text-ink-muted">
-                {cleanup ? 'Tidy the values it holds' : 'On'} every entity it should reach — applied to your draft by the server.
+                {cleanup ? 'Tidy the values it holds' : 'On'} every {edges ? 'relationship' : 'entity'} it should reach — applied to your draft by the server.
               </p>
               <ol className="mt-3 flex items-center gap-1" aria-label="Steps">
                 {STEPS.map((label, i) => {
@@ -207,7 +212,9 @@ export function PropertyOpDialog({
 
           <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-5 py-4">
             <motion.div key={step} initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} transition={MOTION.stepSwap}>
-              {step === 0 && <WhatStep op={op} onChange={setOp} properties={properties} viewId={viewId} />}
+              {step === 0 && (edges
+                ? <EdgeWhatStep viewId={viewId} op={op} onChange={setOp} />
+                : <WhatStep op={op} onChange={setOp} properties={properties} viewId={viewId} />)}
               {step === 1 && (
                 <WhereStep
                   viewId={viewId} preset={preset} onPreset={setPreset} scopeMode={scopeMode} onScope={setScopeMode}
@@ -219,7 +226,7 @@ export function PropertyOpDialog({
                 <ReviewStep
                   op={op} preset={preset} scopeMode={effectiveScope} counts={ids ? null : counts} impact={impact} exact={exact}
                   preview={preview.data} previewLoading={preview.loading} sample={sample.data} sampleLoading={sample.loading}
-                  stagedCount={stagedCount} reason={reason} onReason={setReason}
+                  stagedCount={stagedCount} reason={reason} onReason={setReason} edges={edges}
                 />
               )}
             </motion.div>
@@ -241,12 +248,13 @@ export function PropertyOpDialog({
       {confirming && impact && (
         <DangerConfirmDialog
           isOpen
-          title={`${propertyJobLabel(jobOp(op))} on ${impact.changes.toLocaleString()} entities?`}
+          title={`${propertyJobLabel(jobOp(op))} on ${impact.changes.toLocaleString()} ${edges ? 'relationships' : 'entities'}?`}
           subtitle={`On ${targetLabel(preset)}${effectiveScope === 'data_source' ? ', across the whole data source' : ''} — in your draft, until it is published.`}
           confirmPhrase={op.key.trim()}
           confirmLabel="Apply"
           sections={[{
-            label: 'Entities', count: impact.changes, tone: op.kind === 'remove' || (op.kind === 'convert' && op.onFail === 'remove') ? 'destructive' : 'warning',
+            label: edges ? 'Relationships' : 'Entities', count: impact.changes,
+            tone: op.kind === 'remove' || (op.kind === 'convert' && op.onFail === 'remove') ? 'destructive' : 'warning',
             consequence: op.kind === 'remove' ? `Lose ${op.key.trim()}` : op.kind === 'rename' ? `${op.key.trim()} becomes ${op.to.trim()}`
               : cleanup ? `${op.key.trim()} is rewritten${op.kind === 'convert' && op.onFail === 'remove' ? ', or removed where it won’t convert' : ''}`
                 : `${op.key.trim()} is replaced`,
@@ -261,6 +269,26 @@ export function PropertyOpDialog({
     </>,
     document.body,
   )
+}
+
+/** The What step for relationships: a property named from the keys the view's relationships carry. */
+function EdgeWhatStep({ viewId, op, onChange }: { viewId: string; op: OpDraft; onChange: (op: OpDraft) => void }) {
+  const { keysByEdgeType } = useDiscovery(viewId)
+  const properties = useMemo(() => edgePropertiesOf(keysByEdgeType), [keysByEdgeType])
+  return <WhatStep op={op} onChange={onChange} properties={properties} viewId={viewId} edges />
+}
+
+/** The keys the view's relationships carry, as the What step names a property from — the ones most
+ *  relationship types carry first (`count`: how many types do). An edge's own fields are not offered. */
+function edgePropertiesOf(keysByEdgeType: Record<string, string[]>): SearchCatalogProperty[] {
+  const types = new Map<string, number>()
+  for (const keys of Object.values(keysByEdgeType)) {
+    for (const k of keys) if (!EDGE_RESERVED_KEYS.has(k)) types.set(k, (types.get(k) ?? 0) + 1)
+  }
+  return [...types].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([key, count]): SearchCatalogProperty => ({
+      key, count, distinct: 0, distinctExact: false, values: [], byEntityType: {}, kinds: {}, residual: 0,
+    }))
 }
 
 /** A short, stable digest of what a request applies. */

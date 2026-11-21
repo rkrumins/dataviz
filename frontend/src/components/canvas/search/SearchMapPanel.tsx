@@ -73,6 +73,7 @@ import {
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { SavedViewQuery } from '@/services/viewLibraryService'
 import type { AncestorRef, Predicate, SearchQuery, SearchResultPage } from '@/types/search'
+import type { EdgeMemberRef } from '@/store/canvas'
 import { unsaveableReason } from '@/features/search-views/model'
 
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
@@ -165,6 +166,11 @@ export interface SearchMapPanelProps {
     onEditMatches?: (query: SearchQuery, count: number | null) => void
     /** Change a property on the entities of the rows picked in the table. */
     onEditPicked?: (urns: string[]) => void
+    /** Change a property on the relationships of the Connections rows picked in the table (by
+     *  their ids — an edge's own, or `source|TYPE|target`), on the server. */
+    onEditPickedEdges?: (edgeIds: string[]) => void
+    /** Compare and edit the relationships of the Connections rows picked, in the drawer. */
+    onComparePickedEdges?: (members: EdgeMemberRef[]) => void
     /** Keep the matches of the search on screen as a view of their own (a
      *  subset view), with the result's first hits for its layers by type.
      *  Omitted by canvases that cannot. */
@@ -176,7 +182,7 @@ export interface SearchMapPanelProps {
 
 export const SearchMapPanel: FC<SearchMapPanelProps> = ({
     open, onClose, viewId, onRevealNode, onOpenNode, onFrameMatches, session, onClear, onNarrowMatches,
-    onEditMatches, onEditPicked, onSaveMatchesAsView, saveMatchesLabel,
+    onEditMatches, onEditPicked, onEditPickedEdges, onComparePickedEdges, onSaveMatchesAsView, saveMatchesLabel,
 }) => {
     const [width, setWidth] = useState<number>(() => readPersistedWidth())
     const [dragging, setDragging] = useState(false)
@@ -227,6 +233,8 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
                                     onNarrowMatches={onNarrowMatches}
                                     onEditMatches={onEditMatches}
                                     onEditPicked={onEditPicked}
+                                    onEditPickedEdges={onEditPickedEdges}
+                                    onComparePickedEdges={onComparePickedEdges}
                                     onSaveMatchesAsView={onSaveMatchesAsView}
                                     saveMatchesLabel={saveMatchesLabel}
                                 />
@@ -273,6 +281,8 @@ interface PanelInnerProps {
     onNarrowMatches?: (query: SearchQuery) => void
     onEditMatches?: (query: SearchQuery, count: number | null) => void
     onEditPicked?: (urns: string[]) => void
+    onEditPickedEdges?: (edgeIds: string[]) => void
+    onComparePickedEdges?: (members: EdgeMemberRef[]) => void
     onSaveMatchesAsView?: (query: SearchQuery, result: SearchResultPage) => void
     saveMatchesLabel?: string
 }
@@ -290,7 +300,7 @@ function OwnedSessionPanel(props: Omit<PanelInnerProps, 'session' | 'onClear'>) 
 
 function PanelInner({
     onClose, viewId, session, onClear, onRevealNode, onOpenNode, onFrameMatches, onNarrowMatches,
-    onEditMatches, onEditPicked, onSaveMatchesAsView, saveMatchesLabel,
+    onEditMatches, onEditPicked, onEditPickedEdges, onComparePickedEdges, onSaveMatchesAsView, saveMatchesLabel,
 }: PanelInnerProps) {
     const {
         view, runState, runPredicate, cancel, stop, resume, run,
@@ -903,6 +913,8 @@ function PanelInner({
                                     onReveal={revealNode}
                                     onOpen={onOpenNode}
                                     onFrame={frameMatches}
+                                    onEditPicked={onEditPickedEdges}
+                                    onComparePicked={onComparePickedEdges}
                                     canLoadMore={!!view.result.cursor}
                                     isLoadingMore={isLoadingMore}
                                     loadMoreError={loadMoreError}

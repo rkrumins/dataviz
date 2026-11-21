@@ -308,6 +308,24 @@ describe('EdgeResultsTable', () => {
         render(<EdgeResultsTable edges={EDGES} canLoadMore isLoadingMore={false} onLoadMore={onLoadMore} />)
         expect(onLoadMore).toHaveBeenCalled()
     })
+
+    it('compares and edits the picked rows’ relationships, or changes a property on them on the server', () => {
+        const onComparePicked = vi.fn()
+        const onEditPicked = vi.fn()
+        render(<EdgeResultsTable edges={EDGES} onComparePicked={onComparePicked} onEditPicked={onEditPicked}
+                                 canLoadMore={false} isLoadingMore={false} />)
+        fireEvent.click(screen.getByRole('checkbox', { name: 'Pick amount to amount_usd' }))
+        // One relationship is opened from its row: comparing takes two.
+        expect(screen.queryByRole('button', { name: /Compare & edit/ })).toBeNull()
+        fireEvent.click(screen.getByRole('checkbox', { name: 'Pick every loaded row' }))
+        fireEvent.click(screen.getByRole('button', { name: /Compare & edit/ }))
+        expect(onComparePicked).toHaveBeenCalledWith([
+            { id: 'e1', source: 'urn:amount', target: 'urn:amount_usd', edgeType: 'TRANSFORMS', rollup: false },
+            { id: 'e2', source: 'urn:amount', target: 'urn:margin', edgeType: 'TRANSFORMS', rollup: false },
+        ])
+        fireEvent.click(screen.getByRole('button', { name: /Edit properties/ }))
+        expect(onEditPicked).toHaveBeenCalledWith(['e1', 'e2'])
+    })
 })
 
 

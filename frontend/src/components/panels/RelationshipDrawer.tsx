@@ -6,7 +6,9 @@
  * it joins (each a click away, on the same back/forward trail as the entity
  * drawer), when and by whom it was created and last changed, its properties,
  * and its full revision history. A line that stands for several shows the
- * connection and lists them.
+ * connection and lists them. Several relationships — a connection's, the Edge
+ * Explorer's selection, a Connections search's picked rows — are compared and
+ * edited as one (`MultiRelationshipView`).
  *
  * Raw lineage relationships — the ones a graph's owners author and keep — can
  * be edited (properties), reversed and deleted, in a draft, staged like every
@@ -33,6 +35,7 @@ import { edgeKind } from '@/services/ontologyPreflightService'
 import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
 import { useEntityBaseline } from '@/features/versioning/hooks/useEntityBaseline'
 import { userProperties } from '@/lib/nodeFields'
+import { stageEdgeEdits } from '@/features/versioning/model/stageEdgeEdit'
 import { EntityChangeDigest } from './entity/EntityChangeDigest'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { edgeIndexOf } from '@/lib/storeIndex'
@@ -51,6 +54,7 @@ import { CopyableId, EntityRef } from './shell/EntityRef'
 import { JsonView } from './shell/JsonView'
 import { StageBar } from './shell/StageBar'
 import { ConnectionView } from './relationship/ConnectionView'
+import { MultiRelationshipView } from './relationship/multi/MultiRelationshipView'
 import { Bridge, DetailRow, DetailList, Notice, TypeChip } from './relationship/RelationshipParts'
 import { useEndpoints, useOpenEndpoint } from './relationship/useEndpoints'
 import { KIND_COPY, openInEdgeExplorer, relationshipCopy } from './relationship/relationshipModel'
@@ -99,6 +103,17 @@ export const RelationshipDrawer = memo(function RelationshipDrawer(props: Relati
     <DrawerFrame panel="relationship-drawer" label="Relationship details">
       {target.kind === 'relationship' ? (
         <RelationshipPanel key={`r:${target.id}`} {...props} target={target} onClose={closeDrawer} />
+      ) : target.kind === 'relationships' ? (
+        <MultiRelationshipView
+          key={`m:${target.id}`}
+          target={target}
+          onClose={closeDrawer}
+          canEdit={props.canEdit}
+          writesLocked={props.writesLocked}
+          resolveNode={props.resolveNode}
+          onLocateMany={props.onLocateMany}
+          onStartEditing={props.onStartEditing}
+        />
       ) : (
         <ConnectionView
           key={`c:${target.id}`}
@@ -253,20 +268,17 @@ function RelationshipPanel({
 
   const stagedTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => () => clearTimeout(stagedTimer.current), [])
+  // What was read, and its token — the diff base for the save and its concurrency check. A later
+  // re-stage keeps the first one (`stageEdgeEdits`).
+  const editOf = (after: Record<string, unknown>) => ({
+    edgeId: entityId!,
+    current: { properties: storedProps, ...(baseVersion ? { version: baseVersion } : {}) },
+    after,
+    summary: `Edit relationship '${source.name}' → '${dest.name}'`,
+  })
   const stage = () => {
     if (!record || !entityId || !hasChanges) return
-    useStagedChangesStore.getState().stageOrReplace(
-      (c) => c.type === 'edit_edge' && c.targetId === entityId,
-      {
-        type: 'edit_edge',
-        targetId: entityId,
-        // What was read, and its token — the diff base for the save and its concurrency check.
-        // A later re-stage keeps the first one.
-        before: { properties: storedProps, ...(baseVersion ? { version: baseVersion } : {}) },
-        after: { properties: draft },
-        summary: `Edit relationship '${source.name}' → '${dest.name}'`,
-      },
-    )
+    stageEdgeEdits([editOf(draft)])
     setHasChanges(false)
     setMode('view')
     setJustStaged(true)
@@ -279,20 +291,7 @@ function RelationshipPanel({
   const [addingInline, setAddingInline] = useState(false)
   const stageInline = (next: Record<string, unknown>) => {
     if (!record || !entityId) return
-    const store = useStagedChangesStore.getState()
-    const isThis = (c: { type: string; targetId?: string }) => c.type === 'edit_edge' && c.targetId === entityId
-    if (JSON.stringify(next) === JSON.stringify(storedProps)) {
-      const existing = store.changes.find(isThis)
-      if (existing) store.replace(existing, null)
-      return
-    }
-    store.stageOrReplace(isThis, {
-      type: 'edit_edge',
-      targetId: entityId,
-      before: { properties: storedProps, ...(baseVersion ? { version: baseVersion } : {}) },
-      after: { properties: next },
-      summary: `Edit relationship '${source.name}' → '${dest.name}'`,
-    })
+    stageEdgeEdits([editOf(next)])
   }
 
   const canDelete = !!onDeleteEdge && kind === 'lineage' && !writesLocked && !!canvasEdge
