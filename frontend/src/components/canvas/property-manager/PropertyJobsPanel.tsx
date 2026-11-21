@@ -24,7 +24,7 @@ export function PropertyJobsPanel({ jobs }: { jobs: readonly TrackedJob[] }) {
         {newestFirst.map((t) => <JobRow key={t.jobId} tracked={t} />)}
       </ul>
       <p className="px-3.5 py-2 text-[10.5px] text-ink-muted bg-black/[0.02] dark:bg-white/[0.02] border-t border-glass-border">
-        Applied to your draft — the counts above show them once it is published.
+        Applied to your draft — the counts and the catalog above follow it, batch by batch.
       </p>
     </section>
   )

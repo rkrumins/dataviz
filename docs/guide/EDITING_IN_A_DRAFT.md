@@ -232,8 +232,24 @@ keeps what it already changed), and keeps following it if you reload the
 page. When it ends, it says how many entities changed and which it couldn't
 change; **Which, and why** downloads them. Then the canvas reloads, or offers
 **Refresh canvas** if you have staged changes. Like any change in a draft, it
-reaches Published when the draft is published. Until then, counts and the
-property list still show the published graph.
+reaches Published when the draft is published.
+
+Your draft's counts follow it as it goes: the display rules' tags and counts,
+the **Properties** tab's catalog and the counts on **Review** are your draft's
+— its new, changed and deleted entities included — and are read again as each
+batch lands, so they move while the change runs, not only once it is
+published. Each batch is folded into the last count rather than counted from
+the start, so a change to a million entities keeps them up to date as it goes.
+A few things are still the published graph's, and say so:
+
+- a rule that follows relationships, tests the View's layers, reads a field
+  only the platform keeps, or names an entity your draft changes — its count
+  reads **About *N***, and hovering it says why; for what your draft changed,
+  its tags are the published graph's (a note under the rules says so);
+- a property's least and greatest value, where your draft took out the value
+  at either end: every value is still within the range shown, which may be
+  wider than it is (**Numbers within …**);
+- Advanced Search's matches and exports.
 
 Entities are found as they are published: an entity new in this draft isn't
 matched — select it on the canvas instead.

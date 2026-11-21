@@ -1143,7 +1143,8 @@ steps tests reach.
 | What you see | Why | What to do |
 | --- | --- | --- |
 | **No matches**, but you know it's there | The property name or value differs from what you typed, or the entity is outside the View | Pick the property and value from the suggestions; check the scope menu; try **Entire data source** |
-| A **draft**'s new entity isn't found | Search reads the published graph; changes on a draft aren't searchable until they're published | Publish, or look in the draft's canvas directly |
+| A **draft**'s new entity isn't found | Search's matches come from the published graph; changes on a draft aren't searchable until they're published. Counts as you build, display rules and the Properties tab do follow the draft | Publish, or look in the draft's canvas directly |
+| A display rule's count on a **draft** reads **About *N*** | The rule follows relationships, tests the View's layers or names an entity the draft changes, so its count is the published graph's — hover it for why | Publish to count it exactly, or count it without that part |
 | "*This view has no boundaries yet, so searching for a word on its own…*" | A plain word over **Everything**, in a View that doesn't limit itself to any entities or types, would read the whole data source | Add a type, tag or property filter, or set **Look in** to **Name** |
 | "*…only allowed in the top-level AND group*" | *Within N hops* or *Path* sits inside an OR or NOT group | Move it to the top level of the query |
 | "*between needs a lower and an upper value*", "*give a duration like P30D*" | A value can't be compared the way the filter asks | Fix the value the message names |

@@ -3,7 +3,7 @@
  * entities it changes, whose values it replaces, which it leaves alone — with a few of them by
  * name, anything that would stop it (a name the platform keeps, the property-name ceiling, another
  * change still running on the draft), and how it lands: on the draft, a window of entities at a
- * time, in counts after publish.
+ * time, in its counts and catalog as each window does.
  */
 import { AlertTriangle, Ban, GitBranch, Info, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -34,6 +34,8 @@ export function ReviewStep({
 }) {
   const budget = preview?.nameBudget
   const newName = needsTo(op.kind) ? op.to.trim() : op.key.trim()
+  // On a draft, why a count is the published graph's rather than the draft's.
+  const approximate = counts ? [...counts.counts.values()].find((c) => c.approximate)?.note ?? null : null
   return (
     <div className="space-y-4">
       <p className="text-[13px] leading-relaxed text-ink">
@@ -58,6 +60,11 @@ export function ReviewStep({
       {counts?.error && (
         <p className="flex items-start gap-1.5 text-[11.5px] text-amber-700 dark:text-amber-300">
           <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden /> {counts.error} — the numbers are what was counted before it stopped.
+        </p>
+      )}
+      {approximate && (
+        <p className="flex items-start gap-1.5 text-[11.5px] text-ink-muted">
+          <Info className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden /> Some of these are the published graph’s counts: {approximate}
         </p>
       )}
       {exact && impact?.changes === 0 && (
@@ -114,7 +121,7 @@ export function ReviewStep({
         <span>
           Applied to your draft by the server — every matching entity, however many, a batch at a time — and
           published from there. The entities are found as published; ones new in this draft aren’t matched (select
-          them on the canvas instead). Counts and the catalog show the change once it is published.
+          them on the canvas instead). Counts, rule tags and the catalog follow your draft, batch by batch.
         </span>
       </div>
     </div>

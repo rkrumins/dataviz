@@ -103,7 +103,8 @@ export function PropertyBrowser({
 
     const knownKeys = useMemo(() => new Set(properties.map((p) => p.key)), [properties])
     // Properties a change on the draft gives entities that none held before (a set, a fill, or the
-    // new name of a rename or a copy) — not in the published catalog until the draft is published.
+    // new name of a rename or a copy). The catalog is the draft's, so each joins it with its real
+    // counts as the change's first batch lands; until then it is shown here, as what is coming.
     const pendingNewKeys = useMemo(() => {
         const keys = new Set<string>()
         for (const t of jobs) {
@@ -589,8 +590,11 @@ function PropertyRow({
 
                     {property.min !== undefined && property.min !== null && (
                         <div className="text-[11px] text-ink-muted">
-                            Numbers from <span className="font-mono text-ink">{String(property.min)}</span>
+                            Numbers {property.rangeExact === false ? 'within' : 'from'}{' '}
+                            <span className="font-mono text-ink">{String(property.min)}</span>
                             {' '}to <span className="font-mono text-ink">{String(property.max)}</span>
+                            {/* A draft took out a value at an end: every value is still in this range. */}
+                            {property.rangeExact === false && ' — your draft changed values at its ends'}
                         </div>
                     )}
 

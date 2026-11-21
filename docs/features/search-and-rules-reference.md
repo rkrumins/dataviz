@@ -624,9 +624,9 @@ primary data source; one outside the workspace is `404`) and `branchId`.
 | `GET /search/discover?samplePerLabel=` | → `{labels, tagValues, edges, blobOnlyLabels, missingContainment, missingSearchableText, elapsedMs}` | Samples 1–2,000 (default 200) nodes per type; `edges[].storedAs` says where each edge key is kept. Not for share links |
 | `POST /search/resolve` | `{scope, refs}` → `{results: [{count, matches: [{urn, displayName, entityType, ancestorPath}], error}], dataVersion, elapsedMs}` | What each of up to 32 [name references](#names-instead-of-urns) names in the View — how many, the first 10 with their containers. What the name picker checks as a path is typed |
 | `GET /search/values?viewId=&key=&q=&limit=` | → `{key, values: [{value, count}], complete, truncated, elapsedMs}` | A property's most common values in the View; `limit` 1–50 (25); about 1.5 s. Not for share links |
-| `POST /search/membership` | `{scope, items: [{id, predicate}], urns}` → `{matches: {id: [urn]}, errors: {id: why}, dataVersion, elapsedMs}` | Which of these entities (≤ 1,000) match which rules (≤ 32). What display-rule chips use. A Connections search is no rule (`400`) |
-| `POST /search/counts` | `{scope, items, waitMs, sessions}` → `{counts: {id: {count, status, sessionId, progress, error}}, dataVersion, elapsedMs}` | Exact matches per rule (≤ 32). Repeat with `sessions` until each is `complete`; a request works for at most 5 s whatever `waitMs` (0–60,000, default 1,000) says |
-| `POST /search/catalog` | `{scope, waitMs, sessionId, refresh}` → every property of the View's entities, exactly | Repeat with `sessionId` until `complete` |
+| `POST /search/membership` | `{scope, items: [{id, predicate}], urns}` → `{matches: {id: [urn]}, errors: {id: why}, notes, dataVersion, elapsedMs}` | Which of these entities (≤ 1,000) match which rules (≤ 32). What display-rule chips use. A Connections search is no rule (`400`). On a draft, the entities it changed are answered on the draft; `notes` says which rules keep the published answer for them |
+| `POST /search/counts` | `{scope, items, waitMs, sessions}` → `{counts: {id: {count, status, sessionId, progress, error, lowerBound, approximate, note}}, dataVersion, elapsedMs}` | Exact matches per rule (≤ 32). Repeat with `sessions` until each is `complete`; a request works for at most 5 s whatever `waitMs` (0–60,000, default 1,000) says. On a draft, the published count moved by what the draft changed; `approximate` (with `note`): the published count, not moved |
+| `POST /search/catalog` | `{scope, waitMs, sessionId, refresh}` → every property of the View's entities, exactly | Repeat with `sessionId` until `complete`. On a draft, the draft's; a property's `rangeExact` is false where the draft took out a value at an end of its range (still a bound, maybe wider), and `notes` says so |
 | `POST /search/ancestor-counts` | `{scope, sessionId, urns}` → `{counts: {urn: {count, typeCounts, displayName, entityType}}, status}` | Matches inside each container (≤ 2,000), from a search's session. `expired`: run the search again |
 | `POST /search/exports` | `{scope, predicate, format: csv\|ndjson, columns, waitMs, sessionId}` → `{sessionId, status, rows, progress, format, columns, filename, downloadToken}` | Every match to a file; ≤ 200 property columns — a Connections search's edges with their [fixed columns](#connections-edges-as-results). Repeat until `complete`. Needs the **Export graph data** feature |
 | `GET /search/exports/{sessionId}/download?token=` | → the file | For the user who exported it, for an hour |
@@ -1107,8 +1107,14 @@ curl -s -b "$JAR" -o pii.csv \
   with. Its order is fixed, and it has no facets.
 - **`fulltext` and `regex` text matches** and **`subAggregation`** are in the
   model but refused.
-- **Draft data isn't searchable**: searches, counts and chips read the published
-  graph. Draft *rules* are kept per draft.
+- **A draft's matches aren't searchable**: searches and exports read the
+  published graph. Counts, chips and the catalog are the draft's — main's answer
+  corrected for each entity the draft changed, in Python on the draft's values
+  (`common.predicate_eval`), a commit's entities folded in as it lands — except
+  for a rule that follows relationships, tests the View's layers, reads a field
+  only the platform keeps or names an entity the draft changes: that rule keeps
+  main's answer for what the draft changed, flagged `approximate`. Not on a fork.
+  Draft *rules* are kept per draft.
 - **No live updates**: other open sessions see a rule change when they next
   load the View.
 - **An import's dry run needs edit permission**: readers can't preview one.

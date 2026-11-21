@@ -8,12 +8,14 @@
  * turns back into partial ones. The last complete catalog of each view is
  * kept for the session, so reopening the tab shows it at once.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { useDraftDataKey } from '@/features/versioning/hooks/useDraftDataKey'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { followCatalog } from '@/services/propertyCatalog'
 import { httpStatusOf } from '@/services/graphRequestFailure'
+import { useBranchStore } from '@/store/branchStore'
 import type { SearchCatalogResult } from '@/types/search'
 
 
@@ -31,7 +33,8 @@ export interface PropertyCatalogState {
 }
 
 
-/** The last complete catalog, per provider and view. */
+/** The last complete catalog, per provider and view (and the draft open: a
+ *  draft's catalog is its own, never Published's). */
 const lastComplete = new WeakMap<object, Map<string, SearchCatalogResult>>()
 
 function remembered(provider: object, viewId: string): SearchCatalogResult | null {
@@ -56,23 +59,33 @@ interface ViewState {
 
 export function usePropertyCatalog(viewId: string): PropertyCatalogState {
     const provider = useGraphProvider()
+    // On a draft the server's catalog is the draft's, so it is read again as
+    // the draft changes — a bulk change window by window — showing the last
+    // complete one until the new one is.
+    const draftKey = useDraftDataKey()
+    const branchId = useBranchStore((s) => s.currentBranchId) ?? ''
+    const kept = `${branchId}|${viewId}`
     const [held, setHeld] = useState<ViewState | null>(null)
-    // A refresh belongs to the view it was asked for.
+    // A refresh belongs to the view it was asked for — and to the read it
+    // started: one the draft moving on starts reads what the server has.
     const [refreshOf, setRefreshOf] = useState({ viewId: '', n: 0 })
+    const refreshed = useRef(refreshOf)
 
     useEffect(() => {
         if (!viewId || !(provider instanceof RemoteGraphProvider)) return
         const controller = new AbortController()
+        const refresh = refreshOf !== refreshed.current && refreshOf.viewId === viewId && refreshOf.n > 0
+        refreshed.current = refreshOf
         // Every update names its view: an answer for a view switched away
         // from never shows under the new one.
         const update = (next: (s: ViewState) => ViewState) => setHeld((s) => next(
-            s && s.viewId === viewId ? s : fresh(provider, viewId)))
+            s && s.viewId === kept ? s : fresh(provider, kept)))
         followCatalog(provider, viewId, {
             signal: controller.signal,
-            refresh: refreshOf.viewId === viewId && refreshOf.n > 0,
+            refresh,
             onUpdate: (answer) => {
                 if (controller.signal.aborted) return
-                if (answer.status === 'complete') remember(provider, viewId, answer)
+                if (answer.status === 'complete') remember(provider, kept, answer)
                 update((s) => (answer.status === 'complete'
                     ? { ...s, complete: answer, running: null, error: null, refused: false }
                     : { ...s, running: answer, error: null }))
@@ -85,13 +98,15 @@ export function usePropertyCatalog(viewId: string): PropertyCatalogState {
                              error: refused ? null : (e as Error).message }))
         })
         return () => controller.abort()
-    }, [provider, viewId, refreshOf])
+        // ``kept`` is the view and the branch; ``draftKey`` how far the draft has got.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [provider, kept, draftKey, refreshOf])
 
     const refresh = useCallback(
         () => setRefreshOf((r) => ({ viewId, n: r.viewId === viewId ? r.n + 1 : 1 })),
         [viewId],
     )
-    const state = held && held.viewId === viewId ? held : fresh(provider, viewId)
+    const state = held && held.viewId === kept ? held : fresh(provider, kept)
     const { complete, running } = state
     const progress = running?.progress
     return {

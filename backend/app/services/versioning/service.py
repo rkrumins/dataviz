@@ -8029,6 +8029,72 @@ class GraphVersioningService:
             return [_graphedge_dict(eid, v, urns) for eid, v in values.items() if v]
         return [_graphnode_dict(eid, v.get("urn") or f"gv:{eid}", v) for eid, v in values.items() if v]
 
+    async def draft_search_window(self, *, graph_id: str, branch_id: str,
+                                  commit_id: Optional[str], since_seq: Optional[int] = None,
+                                  limit: int = 0) -> Dict[str, object]:
+        """What a draft's search answers fold in one step (``providers.draft_search``): the seq of
+        the draft's commit ``commit_id`` — its head, as :meth:`overlay_version` read it — and,
+        given ``since_seq``, the nodes the draft's commits after that seq wrote, by entity id
+        (``None`` past ``limit``), and whether those commits wrote an edge too. Index-backed, as
+        :meth:`_changed_in_window` is: a commit writes rows only for what it changed."""
+        out: Dict[str, object] = {"seq": None, "nodes": None, "edges": False}
+        async with self._session() as s:
+            if commit_id:
+                out["seq"] = await s.scalar(select(CommitORM.commit_seq).where(
+                    CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id,
+                    CommitORM.id == commit_id))
+            seq = out["seq"]
+            if seq is None or since_seq is None:
+                return out
+
+            def window(model):
+                return (model.graph_id == graph_id, model.branch_id == branch_id,
+                        model.commit_seq > since_seq, model.commit_seq <= seq)
+
+            nodes = (await s.execute(select(NodeVersionORM.entity_id).where(
+                *window(NodeVersionORM)).distinct().limit(limit + 1))).scalars().all()
+            out["edges"] = await s.scalar(
+                select(EdgeVersionORM.entity_id).where(*window(EdgeVersionORM)).limit(1)) is not None
+            out["nodes"] = sorted(nodes) if len(nodes) <= limit else None
+        return out
+
+    async def draft_nodes_as_of(self, *, graph_id: str, branch_id: str,
+                                entity_ids: Sequence[str], seq: int) -> Dict[str, dict]:
+        """Each of ``entity_ids`` the draft held apart from main as of its commit ``seq``: what the
+        draft had written of it by then, or — main changed it after the draft's branch point and
+        the draft had not — main's value at the branch point, which the draft reads instead.
+        ``{entity id: {"urn", "node": reader-shaped node, or None when not a live node}}``; an id
+        the draft read as main does is absent. What a draft's search answers subtract when they
+        fold the commits after ``seq`` in (``providers.draft_search``)."""
+        ids = list(dict.fromkeys(entity_ids))
+        if not ids:
+            return {}
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            base_seq = branch.base_commit_seq or 0
+            head_seq = graph.main_head_commit_seq if graph is not None else base_seq
+            values = await self._values_at(s, graph_id, branch_id, ids, seq)
+            rest = [i for i in ids if i not in values]
+            if rest and head_seq > base_seq:
+                advanced: set = set()
+                for chunk in _chunks(rest, _IN_LIST_MAX):
+                    advanced.update((await s.execute(select(NodeVersionORM.entity_id).where(
+                        NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id == main_id,
+                        NodeVersionORM.entity_id.in_(chunk), NodeVersionORM.commit_seq > base_seq,
+                        NodeVersionORM.commit_seq <= head_seq).distinct())).scalars().all())
+                if advanced:
+                    at_base = await self._values_at(s, graph_id, main_id, sorted(advanced), base_seq)
+                    values.update({i: at_base.get(i) for i in advanced})
+            urns = await self._current_urns(s, graph_id, branch_id, list(values))
+        out: Dict[str, dict] = {}
+        for eid, v in values.items():
+            urn = (v or {}).get("urn") or urns.get(eid) or f"gv:{eid}"
+            live = isinstance(v, dict) and bool(v) and not v.get("edgeType")
+            out[eid] = {"urn": urn, "node": _graphnode_dict(eid, urn, v) if live else None}
+        return out
+
     async def diff_branch_summary(
         self, *, graph_id: str, branch_id: str, containment_edge_types, limit: int = 200,
         viewer: Optional[Viewer] = None,

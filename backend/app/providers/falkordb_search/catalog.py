@@ -91,13 +91,18 @@ class CatalogStats:
     def __init__(self, entities: Optional[Dict[str, int]] = None,
                  keys: Optional[Dict[str, Dict[str, Any]]] = None,
                  tags: Optional[Dict[str, int]] = None, tagged: int = 0,
-                 tags_counted: bool = True) -> None:
+                 tags_counted: bool = True,
+                 gone: Optional[Dict[str, List[Any]]] = None) -> None:
         self.entities: Dict[str, int] = entities or {}
         self.keys: Dict[str, Dict[str, Any]] = keys or {}
         self.tags: Dict[str, int] = tags or {}
         self.tagged = tagged
         # False once a unit held more distinct tag sets than are read.
         self.tags_counted = tags_counted
+        # A change's statistics only (``add_entity`` with a sign of -1): per key, the least and
+        # greatest numeric value taken out. A range is not narrowed by taking a value out — it
+        # can't be, without reading again — so this says where it may be wider than it is.
+        self.gone: Dict[str, List[Any]] = gone or {}
 
     @classmethod
     def from_json(cls, raw: Optional[str]) -> "CatalogStats":
@@ -105,12 +110,92 @@ class CatalogStats:
             return cls()
         d = json.loads(raw)
         return cls(d.get("entities") or {}, d.get("keys") or {}, d.get("tags") or {},
-                   int(d.get("tagged") or 0), bool(d.get("tagsCounted", True)))
+                   int(d.get("tagged") or 0), bool(d.get("tagsCounted", True)),
+                   d.get("gone") or {})
 
     def to_json(self) -> str:
-        return json.dumps({"entities": self.entities, "keys": self.keys, "tags": self.tags,
-                           "tagged": self.tagged, "tagsCounted": self.tags_counted},
-                          separators=(",", ":"))
+        held = {"entities": self.entities, "keys": self.keys, "tags": self.tags,
+                "tagged": self.tagged, "tagsCounted": self.tags_counted}
+        if self.gone:
+            held["gone"] = self.gone
+        return json.dumps(held, separators=(",", ":"))
+
+    def add_entity(self, label: str, properties: Dict[str, Any], tags: Any,
+                   skip: FrozenSet[str], sign: int = 1) -> None:
+        """One entity's part of the catalog, counted as the scan counts it — its label, each
+        key's kind and values (a list's per distinct element), its numeric values' range, its
+        tags. ``sign`` -1 takes the entity out: these statistics are then a change's, signed, to
+        fold into a catalog (``folded``). (Which keys an entity keeps raw is not known here, so
+        a change leaves ``residual`` as it is.)"""
+        self.add_entities(label, sign)
+        for key, value in (properties or {}).items():
+            kind = _kind_of(value)
+            if key in skip or kind is None:
+                continue
+            self.add_kind(label, key, kind, sign)
+            if kind in ("Integer", "Float"):
+                if sign > 0:
+                    self.add_bounds(key, [value, value, None, None] if value >= 0
+                                    else [None, None, value, value])
+                else:
+                    lo, hi = self.gone.get(key, (value, value))
+                    self.gone[key] = [min(lo, value), max(hi, value)]
+            k = self.keys[key]
+            if k["values"] is None:
+                continue
+            elements = value if kind == "List" else [value]
+            for slot in {_slot(_kind_of(e) or "Null", e) for e in elements}:
+                n = k["values"].get(slot, 0) + sign
+                if n:
+                    k["values"][slot] = n
+                else:
+                    k["values"].pop(slot, None)
+            # A change to more distinct values than a catalog lists makes the key one whose
+            # values are not listed.
+            if len(k["values"]) > 2 * VALUES_MAX:
+                self._too_many(k, 0)
+        held = _tags_of(tags)
+        if held:
+            self.tagged += sign
+            for tag in held:
+                self.tags[tag] = self.tags.get(tag, 0) + sign
+
+    def folded(self, change: "CatalogStats") -> Tuple["CatalogStats", FrozenSet[str]]:
+        """This catalog with ``change`` (signed, ``add_entity``) folded in — and the keys whose
+        range may now be wider than it is: a value taken out reached one of its ends. What no
+        entity holds any more is dropped; a key whose values are past ``VALUES_MAX`` stops
+        listing them."""
+        out = CatalogStats.from_json(self.to_json())
+        for label, n in change.entities.items():
+            _add_count(out.entities, label, n)
+        for key, d in change.keys.items():
+            k = out._key(key)
+            for label, n in d["labels"].items():
+                _add_count(k["labels"], label, n)
+            for kind, n in d["kinds"].items():
+                _add_count(k["kinds"], kind, n)
+            out.add_bounds(key, d["range"])
+            if k["values"] is not None:
+                if d["values"] is None:
+                    out._too_many(k, len(k["values"]))
+                else:
+                    for slot, n in d["values"].items():
+                        _add_count(k["values"], slot, n)
+                    if len(k["values"]) > VALUES_MAX:
+                        out._too_many(k, len(k["values"]))
+            if sum(k["labels"].values()) <= 0:
+                del out.keys[key]
+        if out.tags_counted:
+            for tag, n in change.tags.items():
+                _add_count(out.tags, tag, n)
+            out.tagged = max(0, out.tagged + change.tagged)
+        wide = set()
+        for key, (lo, hi) in change.gone.items():
+            if key in out.keys:
+                least, greatest = _ends(out.keys[key]["range"])
+                if (least is not None and lo <= least) or (greatest is not None and hi >= greatest):
+                    wide.add(key)
+        return out, frozenset(wide)
 
     def add_tag_sets(self, rows: List[List[Any]]) -> None:
         """One unit's distinct stored tag sets and the entities holding
@@ -210,9 +295,9 @@ class CatalogStats:
         k["distinct"] = max(k["distinct"], seen, len(k["values"] or {}))
         k["values"] = None
 
-    def describe(self, key: str, complete: bool) -> Dict[str, Any]:
+    def describe(self, key: str, complete: bool, range_exact: bool = True) -> Dict[str, Any]:
         k = self.keys[key]
-        lo_pos, hi_pos, lo_neg, hi_neg = k["range"]
+        least, greatest = _ends(k["range"])
         values = k["values"]
         listed = []
         if values is not None:
@@ -225,13 +310,30 @@ class CatalogStats:
             "count": sum(k["labels"].values()),
             "byEntityType": dict(k["labels"]),
             "kinds": dict(k["kinds"]),
-            "min": lo_neg if lo_neg is not None else lo_pos,
-            "max": hi_pos if hi_pos is not None else hi_neg,
+            "min": least,
+            "max": greatest,
+            "rangeExact": range_exact,
             "distinct": len(values) if values is not None else k["distinct"],
             "distinctExact": values is not None and complete,
             "values": listed,
             "residual": k["residual"],
         }
+
+
+def _ends(held: List[Any]) -> Tuple[Any, Any]:
+    """A key's least and greatest numeric value, from its range by sign."""
+    lo_pos, hi_pos, lo_neg, hi_neg = held
+    return (lo_neg if lo_neg is not None else lo_pos,
+            hi_pos if hi_pos is not None else hi_neg)
+
+
+def _add_count(counts: Dict[str, int], key: str, n: int) -> None:
+    """``counts[key] += n``, gone once nothing is counted there."""
+    total = counts.get(key, 0) + int(n)
+    if total > 0:
+        counts[key] = total
+    else:
+        counts.pop(key, None)
 
 
 def _tags_of(stored: Any) -> List[str]:
@@ -499,9 +601,16 @@ def _skipped_keys() -> FrozenSet[str]:
 
 async def _answer(store: SessionStore, session: Session, context: SearchRunContext
                   ) -> Dict[str, Any]:
-    stats = CatalogStats.from_json(await store.load_accumulator(session.sid))
+    return answer_of(CatalogStats.from_json(await store.load_accumulator(session.sid)),
+                     session, context)
+
+
+def answer_of(stats: CatalogStats, session: Session, context: SearchRunContext,
+              wide: FrozenSet[str] = frozenset()) -> Dict[str, Any]:
+    """The catalog answer of ``stats`` as read by ``session`` — ``wide``: the keys whose range
+    may be wider than it is (``CatalogStats.folded``)."""
     complete = session.status == COMPLETE
-    properties = sorted((stats.describe(key, complete) for key in stats.keys),
+    properties = sorted((stats.describe(key, complete, key not in wide) for key in stats.keys),
                         key=lambda p: (-p["count"], p["key"]))
     return {
         "sessionId": session.sid,
