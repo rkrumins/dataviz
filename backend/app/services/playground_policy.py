@@ -10,7 +10,9 @@ and in the Playground only:
   graph, no data source moved in. Its graphs are blank graphs, made on the one provider
   the administrator set aside for it (``sandboxProviderId``).
 * **Your own work.** A data source or a view there can be changed or deleted only by the
-  person who made it (or a workspace admin).
+  person who made it (or a workspace admin). Drafts are opened, staged and resolved only on a
+  graph you made, and start private. Its maker finishes it without the publish permission:
+  publishes its drafts, merges their reviews (:func:`is_playground_maker`).
 * **Never everyone.** Nothing in it is published to every signed-in person; sharing is
   with people, inside the Playground.
 * **A quota.** Each person may have ``graphQuota`` graphs there at once (default 5).
@@ -111,6 +113,28 @@ async def assert_owner(session: AsyncSession, ws_id: str, created_by: Optional[s
             status.HTTP_403_FORBIDDEN, "playground_not_yours",
             "In the Playground you can change only what you made.",
         )
+
+
+async def is_playground_maker(session: AsyncSession, ds: Optional[WorkspaceDataSourceORM],
+                              user_id: Optional[str], claims: PermissionClaims) -> bool:
+    """Whether the caller finishes their own work on ``ds`` without ``workspace:datasource:publish``
+    — publishes its drafts, merges their reviews, loads it and publishes an import into it: ``ds``
+    is in the Playground and they made it, or they are a Playground or platform admin, and they may
+    still build there. A person only, never an API key."""
+    if ds is None or claims.key_scope is not None or await playground_of(session, ds.workspace_id) is None:
+        return False
+    return (has_permission(claims, "workspace:datasource:manage", workspace_id=ds.workspace_id)
+            and is_owner_or_admin(ds.workspace_id, ds.created_by, user_id, claims))
+
+
+async def assert_graph_maker(session: AsyncSession, ws_id: str, data_source_id: Optional[str],
+                             user_id: Optional[str], claims: PermissionClaims) -> None:
+    """Opening, staging or resolving a draft on a graph: in the playground, only on one the caller
+    made (or as an admin). Another member's graph is theirs to read, not to change."""
+    if await playground_of(session, ws_id) is None:
+        return
+    ds = await session.get(WorkspaceDataSourceORM, data_source_id) if data_source_id else None
+    await assert_owner(session, ws_id, ds.created_by if ds is not None else None, user_id, claims)
 
 
 async def assert_visibility(session: AsyncSession, ws_id: Optional[str], visibility: Optional[str]) -> None:

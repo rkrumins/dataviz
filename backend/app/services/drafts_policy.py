@@ -5,8 +5,9 @@ approvals a review needs, and whether open threads hold its merge.
 Each field resolves on its own, most specific first: the data source's override
 (``WorkspaceDataSourceORM``), then its workspace's setting (``WorkspaceORM``), then the built-in
 default — drafts start public, may be either level, the opener may approve and merge, a review
-needs everyone asked to approve it, and open threads don't hold it. NULL at a level means "not set
-here". The policy is read where a draft is created or changes level, and wherever a review is
+needs everyone asked to approve it, and open threads don't hold it. The Playground's drafts start
+private (``KIND_DEFAULTS``): an experiment's draft is its maker's until they share it. NULL at a
+level means "not set here". The policy is read where a draft is created or changes level, and wherever a review is
 reviewed, read, merged or published; it is never cached: a tightened rule holds from the next
 request.
 """
@@ -31,6 +32,10 @@ FIELDS = (
     ("review_required_approvals", "requiredApprovals", 0),
     ("review_threads_hold", "threadsHold", False),
 )
+
+
+#: Built-in defaults a kind of workspace has of its own, by API field.
+KIND_DEFAULTS = {"playground": {"defaultVisibility": "private"}}
 
 
 @dataclass(frozen=True)
@@ -75,8 +80,9 @@ def settings_of(row: Any) -> dict:
 def resolve(workspace: Any = None, data_source: Any = None) -> EffectiveDraftsPolicy:
     """The effective policy for a data source and its workspace (either may be None). Pure."""
     values, sources = {}, {}
+    kind_defaults = KIND_DEFAULTS.get(getattr(workspace, "kind", None), {})
     for column, api, default in FIELDS:
-        values[api], sources[api] = default, SOURCE_DEFAULT
+        values[api], sources[api] = kind_defaults.get(api, default), SOURCE_DEFAULT
         for row, source in ((data_source, SOURCE_DATA_SOURCE), (workspace, SOURCE_WORKSPACE)):
             value = getattr(row, column, None) if row is not None else None
             if value is not None:

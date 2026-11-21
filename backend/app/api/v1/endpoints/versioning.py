@@ -72,7 +72,7 @@ from backend.app.services.managed_sources import (
     register_aggregation,
     same_server_providers,
 )
-from backend.app.services import permission_service
+from backend.app.services import permission_service, playground_policy
 from backend.app.services.feature_flags import FeatureDisabledError
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.projection_target import repair_projection_target
@@ -964,7 +964,8 @@ class BranchResponse(_ApiModel):
     # public | private: who reads and writes it (``main`` is public).
     visibility: str = "private"
     # What the caller may do with it (the list and the branch read set it): {canRead, canWrite,
-    # canManage}. A client renders this rather than working it out.
+    # canManage, canPublish}. A client renders this rather than working it out. ``canPublish``:
+    # whether they may advance main here — publish, or as the graph's Playground maker.
     access: Optional[Dict[str, bool]] = None
     # The branch read only: who committed to it, most commits first, then the latest (50 at most).
     contributors: Optional[List[str]] = None
@@ -2055,6 +2056,7 @@ async def list_branches(
     scope: Literal["all", "mine", "shared", "public"] = Query("all"),
     visibility: Optional[Literal["public", "private"]] = Query(None),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -2075,6 +2077,7 @@ async def list_branches(
     if next_cursor is not None:
         response.headers["X-Next-Cursor"] = next_cursor
     await _attach_user_names(session, branches)
+    await _with_can_publish(session, ws_id, _meta, viewer.actor, claims, branches)
     return branches
 
 
@@ -2136,7 +2139,8 @@ async def resolve_graph_open(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Resolve and ensure the caller has an open draft to edit on (opens one if none, at the level
-    its data source's policy starts a draft at). None opens on a fork while forks are off.
+    its data source's policy starts a draft at). None opens on a fork while forks are off, nor, in
+    the Playground, on a graph the caller didn't make (403 ``playground_not_yours``).
 
     An API key must cover the data source (an id in the body is invisible to ``requires()``'s key
     scope), and a draft it opens for a view is for a view of this workspace it may edit."""
@@ -2145,6 +2149,7 @@ async def resolve_graph_open(
         await _check_import_view(session, ws_id, body.originating_view_id, user, claims)
     if body.data_source_id.startswith("dsfork_"):
         await require_forks_enabled()
+    await playground_policy.assert_graph_maker(session, ws_id, body.data_source_id, user.id, claims)
     res = await svc.resolve_graph(
         data_source_id=body.data_source_id, actor=user.id, workspace_id=ws_id,
         open_draft_if_absent=True, originating_view_id=body.originating_view_id,
@@ -2286,6 +2291,77 @@ async def _pr_policy(svc: GraphVersioningService, session: AsyncSession, pr: dic
     return await _drafts_policy_of(session, (target or {}).get("data_source_id"))
 
 
+async def _playground_maker(session: AsyncSession, ws_id: str, data_source_id: Optional[str],
+                            user_id: str, claims: PermissionClaims) -> bool:
+    """Whether the caller made ``data_source_id`` in the Playground (or is an admin there), and so
+    finishes their own work on it without publish (``playground_policy.is_playground_maker``).
+    Nothing is read outside the Playground."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+    if claims.key_scope is not None or not data_source_id \
+            or await playground_policy.playground_of(session, ws_id) is None:
+        return False
+    return await playground_policy.is_playground_maker(
+        session, await session.get(WorkspaceDataSourceORM, data_source_id), user_id, claims)
+
+
+async def _playground_maker_of_graph(svc: GraphVersioningService, session: AsyncSession, ws_id: str,
+                                     graph_id: Optional[str], user_id: str,
+                                     claims: PermissionClaims) -> bool:
+    """:func:`_playground_maker` of a graph of ``ws_id``: of its data source."""
+    if claims.key_scope is not None or not graph_id \
+            or await playground_policy.playground_of(session, ws_id) is None:
+        return False
+    meta = await svc.get_graph(str(graph_id))
+    return bool(meta) and meta.get("workspace_id") == ws_id and await _playground_maker(
+        session, ws_id, meta.get("data_source_id"), user_id, claims)
+
+
+async def _may_publish(session: AsyncSession, ws_id: str, data_source_id: Optional[str], user_id: str,
+                       claims: PermissionClaims) -> bool:
+    """Whether the caller may advance main here — publish a draft, merge its review: with publish
+    (an API key: its owner's), or as the data source's Playground maker."""
+    key = claims.key_scope
+    if key.owner_publishes(ws_id) if key is not None else has_permission(claims, _PUBLISH, workspace_id=ws_id):
+        return True
+    return await _playground_maker(session, ws_id, data_source_id, user_id, claims)
+
+
+async def _with_can_publish(session: AsyncSession, ws_id: str, meta: Optional[dict], user_id: str,
+                            claims: PermissionClaims, branches: Iterable[dict]) -> None:
+    """``access.canPublish`` on each branch that says what its reader may do with it: whether they
+    may advance main (:func:`_may_publish`), one answer for the graph."""
+    accesses = [b["access"] for b in branches if b.get("access") is not None]
+    if accesses:
+        can = await _may_publish(session, ws_id, (meta or {}).get("data_source_id"), user_id, claims)
+        for access in accesses:
+            access["canPublish"] = can
+
+
+async def require_publish_or_maker(
+    request: Request,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """``require_publish`` — or, in the Playground, the maker of the graph it publishes into (the
+    draft's own; a draft review's target), who finishes their own work without publish. Anyone
+    else is refused as ``require_publish`` refuses them."""
+    ws_id = request.path_params["ws_id"]
+    if claims.key_scope is None and not has_permission(claims, _PUBLISH, workspace_id=ws_id):
+        graph_id = request.path_params.get("graph_id")
+        if graph_id is None and await playground_policy.playground_of(session, ws_id) is not None:
+            pr = await svc.get_pr(request.path_params["pr_id"]) or {}
+            if pr.get("source_graph_id") == pr.get("target_graph_id"):      # a draft's review
+                graph_id = pr.get("target_graph_id")
+        if await _playground_maker_of_graph(svc, session, ws_id, graph_id, user.id, claims):
+            return user
+    return await require_publish(request, user, claims, session)
+
+
+require_publish_or_maker.gate_label = require_publish.gate_label + "; in the Playground, the graph's maker"
+
+
 async def draft_level(session: AsyncSession, data_source_id: Optional[str],
                       asked: Optional[str] = None) -> str:
     """The level a new draft of ``data_source_id`` starts at: ``asked``, else its policy's default
@@ -2305,12 +2381,15 @@ async def draft_level(session: AsyncSession, data_source_id: Optional[str],
 async def open_draft(
     ws_id: str, graph_id: str, body: OpenDraftRequest,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Open a draft at ``visibility``, else at the level its data source's policy starts one. The
-    deprecated ``shared`` asks for a private draft, as it always opened one only its people see."""
+    deprecated ``shared`` asks for a private draft, as it always opened one only its people see.
+    In the Playground, only on a graph the caller made (403 ``playground_not_yours``)."""
+    await playground_policy.assert_graph_maker(session, ws_id, _meta.get("data_source_id"), user.id, claims)
     asked = body.visibility or ("private" if body.shared else None)
     level = await draft_level(session, _meta.get("data_source_id"), asked)
     with _domain_errors():
@@ -2326,6 +2405,7 @@ async def open_draft(
 async def get_branch(
     ws_id: str, graph_id: str, branch_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -2336,6 +2416,7 @@ async def get_branch(
     with _domain_errors():
         branch = await svc.get_branch(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
     await _attach_user_names(session, [branch])
+    await _with_can_publish(session, ws_id, _meta, viewer.actor, claims, [branch])
     return branch
 
 
@@ -2562,10 +2643,14 @@ async def draft_visibility_impact(
 async def stage_changes(
     ws_id: str, graph_id: str, branch_id: str, body: StageRequest,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
+    """Stage changes on a draft. In the Playground, only on a graph the caller made (403
+    ``playground_not_yours``)."""
+    await playground_policy.assert_graph_maker(session, ws_id, _meta.get("data_source_id"), user.id, claims)
     rules = await _rules_for_meta(session, ws_id, _meta)
     ops = _stage_ops(body.ops)
     with _domain_errors():
@@ -2652,7 +2737,7 @@ async def publish(
     ws_id: str, graph_id: str, branch_id: str, body: PublishRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
-    _publisher: User = Depends(require_publish),
+    _publisher: User = Depends(require_publish_or_maker),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -2661,7 +2746,8 @@ async def publish(
     """Publish a draft. One that changes more than ``SYNC_PUBLISH_MAX_CHANGES`` entities is
     published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``). Where
     the data source's policy says nobody merges their own changes, 409 ``review_required``. An API
-    key publishes where the person or service account it belongs to may (``require_publish``)."""
+    key publishes where the person or service account it belongs to may (``require_publish``); in
+    the Playground, the graph's maker publishes without publish (``require_publish_or_maker``)."""
     policy = await _drafts_policy_of(session, _meta.get("data_source_id"))
     if await svc.branch_change_count(graph_id=graph_id, branch_id=branch_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
         with _domain_errors():                   # queuing takes the draft: closed → 409, unknown → 404
@@ -2780,10 +2866,11 @@ async def _publish_from_job(job: dict) -> dict:
                     # As it is now: a rule tightened since the job was queued holds.
                     policy = await _drafts_policy_of(session, (meta or {}).get("data_source_id"))
                     # An import publishing itself was allowed to when it was asked for, perhaps
-                    # hours ago: its owner must still hold publish (an API key's too).
-                    if job.get("autoPublish") and not has_permission(
-                            await permission_service.resolve(session, actor), _PUBLISH,
-                            workspace_id=job["workspaceId"]):
+                    # hours ago: its owner must still hold publish (an API key's too), or still be
+                    # the graph's Playground maker.
+                    if job.get("autoPublish") and not await _may_publish(
+                            session, job["workspaceId"], (meta or {}).get("data_source_id"), actor,
+                            await permission_service.resolve(session, actor)):
                         raise PublishRequired(_AUTO_PUBLISH_NEEDS)
                 if job.get("mergeRequestId"):
                     commit_id = await svc.merge_mr(
@@ -2965,6 +3052,7 @@ async def get_branch_freshness(
     since_seq: Optional[int] = Query(None, alias="sinceSeq", ge=0,
                                      description="the headCommitSeq of the last poll"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -2979,6 +3067,7 @@ async def get_branch_freshness(
     with _domain_errors():
         f = await svc.branch_freshness(graph_id=graph_id, branch_id=branch_id, since_seq=since_seq,
                                        viewer=viewer)
+    await _with_can_publish(session, ws_id, _meta, viewer.actor, claims, [f])
     names = {}
     if f["saved_since"] and f["saved_since"]["by"]:
         resolved = await resolve_user_ids(session, set(f["saved_since"]["by"]))
@@ -3961,13 +4050,19 @@ async def bulk_ingest(
     claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Day-0 / large-delta import: POST an ndjson body (one node/edge per line) →
     one ``import`` commit. Invalid lines are reported, not fatal. Idempotent on
     ``idempotencyKey``. New entities take ids as an import mints them: a ``urn:uuid`` the row
     brings, else one derived from its urn or its own id. (Raw body streams; the object-store upload-URL flow for
-    very large loads plugs in here.) It writes main, so it needs publish: a key, its owner's."""
-    require_publish_for_main(claims, ws_id)
+    very large loads plugs in here.) It writes main, so it needs publish: a key, its owner's; in the
+    Playground, the graph's maker loads it without."""
+    try:
+        require_publish_for_main(claims, ws_id)
+    except PublishRequired:
+        if not await _playground_maker(session, ws_id, _meta.get("data_source_id"), user.id, claims):
+            raise
     rows: List[dict] = []
     content = await request.body()
     for line in content.splitlines():
@@ -4256,12 +4351,13 @@ async def _check_import_view(session, ws_id: str, view_id: Optional[str], user, 
 
 
 async def _may_auto_publish(session, claims: PermissionClaims, ws_id: str, meta: dict,
-                            branch_id: Optional[str]) -> None:
+                            branch_id: Optional[str], user_id: str) -> None:
     """An import that publishes itself (``autoPublish``) is held to what its publish will be held
     to, before anything is created or stored: the caller holds publish (an API key: its owner,
-    403 ``publish_required``), and the data source's policy lets them merge their own changes
-    (409 ``review_required``). It opens a draft of its own, so it publishes nobody else's: 422 with
-    ``branchId``. The publish job checks again when it runs."""
+    403 ``publish_required``; in the Playground, the graph's maker needs none), and the data
+    source's policy lets them merge their own changes (409 ``review_required``). It opens a draft of
+    its own, so it publishes nobody else's: 422 with ``branchId``. The publish job checks again when
+    it runs."""
     if branch_id:
         raise HTTPException(status_code=422, detail={
             "type": "auto_publish_needs_own_draft",
@@ -4270,7 +4366,8 @@ async def _may_auto_publish(session, claims: PermissionClaims, ws_id: str, meta:
     try:
         require_publish_for_main(claims, ws_id)
     except PublishRequired:
-        raise PublishRequired(_AUTO_PUBLISH_NEEDS) from None
+        if not await _playground_maker(session, ws_id, meta.get("data_source_id"), user_id, claims):
+            raise PublishRequired(_AUTO_PUBLISH_NEEDS) from None
     if not (await _drafts_policy_of(session, meta.get("data_source_id"))).self_merge:
         raise ReviewRequired(None)
 
@@ -4409,9 +4506,10 @@ async def create_import(
     identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier,
                                                       fork=bool(meta.get("fork_parent_graph_id")))
     settings = _with_replace_scope(_with_refused_budget(settings, max_refused_rows), replace_scope)
+    await playground_policy.assert_graph_maker(session, ws_id, meta.get("data_source_id"), user.id, claims)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
-        await _may_auto_publish(session, claims, ws_id, meta, branch_id)
+        await _may_auto_publish(session, claims, ws_id, meta, branch_id, user.id)
     key = _callers_key(user, idempotency_key)
     job = await _job_for_key(ie, graph_id, key, "ingest")
     if job is None:
@@ -4680,9 +4778,10 @@ async def complete_import_upload(
                                                       fork=bool(meta.get("fork_parent_graph_id")))
     settings = _with_replace_scope(_with_refused_budget(settings, max_refused_rows), replace_scope)
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
+    await playground_policy.assert_graph_maker(session, ws_id, meta.get("data_source_id"), user.id, claims)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
-        await _may_auto_publish(session, claims, ws_id, meta, branch_id)
+        await _may_auto_publish(session, claims, ws_id, meta, branch_id, user.id)
     key = f"upload:{upload_id}"
     job = await ie.get_job(record["jobId"]) if record.get("jobId") else None
     if job is None:
@@ -5911,8 +6010,9 @@ async def _viewer_can(svc: GraphVersioningService, session: AsyncSession, pr: di
                       claims: PermissionClaims, ws_id: str) -> dict:
     """Whether ``viewer`` may approve a review and merge it, with the code a refusal would carry
     (``None`` where they may), decided as the approve and merge routes decide: a settled review
-    takes neither; approving needs a person with manage; merging needs manage and publish; and
-    the data source's policy may leave both to someone other than whoever opened it."""
+    takes neither; approving needs a person with manage; merging needs manage and publish (or, in
+    the Playground, making the graph); and the data source's policy may leave both to someone
+    other than whoever opened it."""
     settled = pr.get("status") if pr.get("status") in ("merged", "closed") else None
     policy = await _pr_policy(svc, session, pr)
     opened = pr.get("actor") == viewer
@@ -5932,6 +6032,10 @@ async def _viewer_can(svc: GraphVersioningService, session: AsyncSession, pr: di
     publishes = (key.owner_publishes(ws_id) if key is not None
                  and pr.get("source_graph_id") == pr.get("target_graph_id")
                  else has_permission(claims, _PUBLISH, workspace_id=ws_id))
+    # In the Playground, a draft review's maker merges it without publish (``require_publish_or_maker``).
+    publishes = publishes or (pr.get("source_graph_id") == pr.get("target_graph_id") and await
+                              _playground_maker_of_graph(svc, session, ws_id, pr.get("target_graph_id"),
+                                                         viewer, claims))
     merge = _first_refusal(
         (settled is not None, settled),
         (not manages, "manage_required"),
@@ -6846,7 +6950,7 @@ async def merge_merge_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
-    _publisher: User = Depends(require_publish),
+    _publisher: User = Depends(require_publish_or_maker),
     claims: PermissionClaims = Depends(get_permission_claims),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -6856,7 +6960,8 @@ async def merge_merge_request(
     """Merge a merge request. A draft that changes more than ``SYNC_PUBLISH_MAX_CHANGES``
     entities is merged by a job instead: 202 with the job to poll, as for publish; so is a fork's
     review that does (``…/pulls/{id}/merge``), which merges only up to date with its parent. An API
-    key merges a draft's review where its owner may publish (``require_publish``), never a fork's."""
+    key merges a draft's review where its owner may publish (``require_publish``), never a fork's;
+    in the Playground, the graph's maker merges without publish (``require_publish_or_maker``)."""
     target, source = str(_pr["target_graph_id"]), _pr.get("source_branch_id")
     if claims.key_scope is not None and _pr.get("source_graph_id") != target:     # a fork's review
         raise api_key_errors.key_forbidden(
