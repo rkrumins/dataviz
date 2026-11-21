@@ -645,6 +645,9 @@ export function WorkspaceDetailPage() {
                     onAddSource={canManageDataSources ? () => setShowAddDs(true) : undefined}
                     onNewGraph={openNewGraph}
                     onOpenGraph={setSelectedDsId}
+                    onMoveGraph={wsId ? (dsId, label) => setMoving({
+                        sourceWorkspace: { id: wsId, name: workspace.name }, dataSource: { id: dsId, label },
+                    }) : undefined}
                 />
             )}
 
@@ -893,7 +896,10 @@ export function WorkspaceDetailPage() {
                 // built on it moves for whoever manages data sources in both places.
                 // The server decides either way, and the wizard says why when it won't.
                 onMove={selectedDs && !isFork && wsId && (canManageMembers
-                    || (canManageDataSources && (viewsByDs[selectedDs.id] || []).length === 0))
+                    || (canManageDataSources && (viewsByDs[selectedDs.id] || []).length === 0)
+                    // In the Playground a graph's maker takes it out, or asks to (the server
+                    // knows whose it is; the wizard says so to anyone else).
+                    || (workspace.kind === 'playground' && canManageDataSources))
                     ? () => {
                         setMoving({
                             sourceWorkspace: { id: wsId, name: workspace.name },

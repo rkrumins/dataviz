@@ -66,6 +66,8 @@ interface WorkspaceOverviewProps {
     onNewGraph?: (providerId?: string) => void
     /** The Playground: open one of the reader's graphs. */
     onOpenGraph?: (dataSourceId: string) => void
+    /** The Playground: take one of the reader's graphs into a workspace of theirs. */
+    onMoveGraph?: (dataSourceId: string, label: string) => void
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
@@ -82,7 +84,7 @@ const ATTENTION_ICONS = {
 
 export function WorkspaceOverview({
     workspace, views, readinessMap, aggregateStats, canManageSources, canManageMembers, canAddMembers,
-    versioningEnabled, showActivity, onGoTo, onNewView, onAddSource, onNewGraph, onOpenGraph,
+    versioningEnabled, showActivity, onGoTo, onNewView, onAddSource, onNewGraph, onOpenGraph, onMoveGraph,
 }: WorkspaceOverviewProps) {
     const wsId = workspace.id
     const isPlayground = workspace.kind === 'playground'
@@ -223,7 +225,7 @@ export function WorkspaceOverview({
                 {isPlayground
                     ? (
                         <>
-                            <PlaygroundExperiments workspace={workspace} views={views} layout={layout} onNewGraph={onNewGraph} onOpenGraph={onOpenGraph ?? (() => onGoTo('data', 'sources'))} />
+                            <PlaygroundExperiments workspace={workspace} views={views} layout={layout} onNewGraph={onNewGraph} onOpenGraph={onOpenGraph ?? (() => onGoTo('data', 'sources'))} onMoveGraph={onMoveGraph} />
                             {/* Found their feet? The way to a workspace of their own, bringing their graphs. */}
                             <WorkspaceRequestPrompt preselectedSourceIds={sources.filter(ds => !!me && ds.createdBy === me).map(ds => ds.id)} />
                         </>

@@ -203,6 +203,12 @@ def _refuse(blockers: list[TransferIssue]) -> None:
         raise _conflict("blocked", blockers[0].message, blockers)
 
 
+def _playground_maker(source: WorkspaceORM, ds: WorkspaceDataSourceORM, actor_id: Optional[str]) -> bool:
+    """In the Playground nobody administers anyone's work: a graph's maker stands where a
+    workspace admin would to move it out (or ask to) — into a workspace they belong in."""
+    return getattr(source, "kind", None) == "playground" and bool(actor_id) and ds.created_by == actor_id
+
+
 def _is_admin(claims: PermissionClaims, ws_id: str) -> bool:
     return has_permission(claims, _ADMIN, workspace_id=ws_id)
 
@@ -656,6 +662,7 @@ async def preflight(
     claims: PermissionClaims,
     purpose: Optional[str] = None,
     transfer: Optional[DataSourceTransferORM] = None,
+    actor_id: Optional[str] = None,
 ) -> Preflight:
     """Everything a move of ``ds`` to ``to_ws_id`` would do, and everything in its way, without
     changing anything.
@@ -680,9 +687,10 @@ async def preflight(
     was_default = defaults.get(source.id) == ds.id
     views = await _views_on(session, ds, was_default)
     need = _ADMIN if views else _MANAGE
-    direct = (has_permission(claims, need, workspace_id=source.id)
+    maker = _playground_maker(source, ds, actor_id)
+    direct = ((has_permission(claims, need, workspace_id=source.id) or maker)
               and has_permission(claims, need, workspace_id=target.id))
-    mode = "direct" if direct else ("request" if _is_admin(claims, source.id) else None)
+    mode = "direct" if direct else ("request" if _is_admin(claims, source.id) or maker else None)
     effective = purpose or {"direct": "move", "request": "propose"}.get(mode or "")
 
     blockers, facts = await _destination_blockers(session, ds, target)
@@ -711,8 +719,9 @@ async def preflight(
         if ds.workspace_id != transfer.from_workspace_id:
             blockers.append(_issue(
                 "moved_since", "The data source has moved since this request was made.", "blocker"))
-        proposer_admin = False
-        if transfer.created_by:
+        # In the Playground the graph's maker asked in an admin's place.
+        proposer_admin = _playground_maker(source, ds, transfer.created_by)
+        if transfer.created_by and not proposer_admin:
             with contextlib.suppress(Exception):
                 proposer_admin = _is_admin(await resolve(session, transfer.created_by), source.id)
         if not proposer_admin:
@@ -1252,7 +1261,7 @@ async def move(session: AsyncSession, *, ds_id: str, from_ws_id: str, claims: Pe
         raise _conflict("aggregation_running",
                         "An aggregation run is starting on this source. Try again once it finishes.")
     pre = await preflight(session, ds=ds, to_ws_id=req.target_workspace_id, claims=claims,
-                          purpose="move")
+                          purpose="move", actor_id=user_id)
     if pre.mode != "direct":
         need = _ADMIN if pre.has_views else _MANAGE
         missing = (pre.source.id if not has_permission(claims, need, workspace_id=pre.source.id)
@@ -1290,7 +1299,11 @@ async def propose(session: AsyncSession, *, ds_id: str, from_ws_id: str,
     await _expire_lapsed(session)
     ds = await source_in(session, ds_id, from_ws_id, lock=True)
     pre = await preflight(session, ds=ds, to_ws_id=req.target_workspace_id, claims=claims,
-                          purpose="propose")
+                          purpose="propose", actor_id=user_id)
+    if not (_is_admin(claims, pre.source.id) or _playground_maker(pre.source, ds, user_id)):
+        await _deny(session, user_id, _ADMIN, pre.source.id,
+                    "Asking to move a data source takes administering its workspace — or, in the "
+                    "Playground, having made it.")
     plan = _plan(pre)
     waiting = await transfer_repo.pending_for_source(session, ds.id)
     if (waiting is not None and waiting.created_by == user_id
@@ -1856,9 +1869,9 @@ async def _invalidate_reads(*, ds_id: str, provider_id: Optional[str], graph_nam
 
 
 async def preview(session: AsyncSession, *, ds: WorkspaceDataSourceORM, to_ws_id: str,
-                  claims: PermissionClaims) -> TransferPreview:
+                  claims: PermissionClaims, actor_id: Optional[str] = None) -> TransferPreview:
     await _expire_lapsed(session)
-    pre = await preflight(session, ds=ds, to_ws_id=to_ws_id, claims=claims)
+    pre = await preflight(session, ds=ds, to_ws_id=to_ws_id, claims=claims, actor_id=actor_id)
     owners = await _person_names(session, {v.created_by for v in pre.views[:_VIEW_LIST_CAP]})
     return _preview(pre, mode=pre.mode, owners=owners)
 
@@ -1880,7 +1893,7 @@ async def _can_see(session: AsyncSession, claims: PermissionClaims, ws: Workspac
 
 
 async def destinations(session: AsyncSession, *, ds: WorkspaceDataSourceORM,
-                       claims: PermissionClaims) -> list[TransferDestination]:
+                       claims: PermissionClaims, actor_id: Optional[str] = None) -> list[TransferDestination]:
     """Where the source could go, and for each, whether the caller may move it there now, ask,
     or neither — and why not. Workspaces the caller couldn't otherwise see stay unlisted."""
     source_id = ds.workspace_id
@@ -1892,7 +1905,8 @@ async def destinations(session: AsyncSession, *, ds: WorkspaceDataSourceORM,
             select(func.count()).select_from(ViewORM).where(
                 ViewORM.workspace_id == source_id, ViewORM.data_source_id.is_(None))) or 0) > 0
     need = _ADMIN if has_views else _MANAGE
-    can_ask = _is_admin(claims, source_id)
+    maker = _playground_maker(await _live_workspace(session, source_id), ds, actor_id)
+    can_ask = _is_admin(claims, source_id) or maker
     directory = await _directory_on(session)
 
     workspaces = (await session.execute(
@@ -1919,7 +1933,7 @@ async def destinations(session: AsyncSession, *, ds: WorkspaceDataSourceORM,
     for ws in workspaces:
         if not await _can_see(session, claims, ws, directory=directory):
             continue
-        direct = (has_permission(claims, need, workspace_id=source_id)
+        direct = ((has_permission(claims, need, workspace_id=source_id) or maker)
                   and has_permission(claims, need, workspace_id=ws.id))
         mode = "direct" if direct else ("request" if can_ask else None)
         reason = None

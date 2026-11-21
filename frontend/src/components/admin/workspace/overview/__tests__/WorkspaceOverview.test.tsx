@@ -206,6 +206,13 @@ describe('In the Playground', () => {
         expect(screen.queryByText('No views here yet')).toBeNull()
     })
 
+    it('takes one of the reader’s graphs into a workspace of theirs', () => {
+        const onMoveGraph = vi.fn()
+        renderOverview({ workspace: playground(), onMoveGraph })
+        fireEvent.click(screen.getByRole('button', { name: 'Move My experiment to a workspace' }))
+        expect(onMoveGraph).toHaveBeenCalledWith('ds_mine', 'My experiment')
+    })
+
     it('opens one of the reader’s graphs', () => {
         const onOpenGraph = vi.fn()
         renderOverview({ workspace: playground(), onOpenGraph })

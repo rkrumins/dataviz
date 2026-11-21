@@ -60,6 +60,20 @@ Experiments never expire — the number is the only limit. When you've used them
 all, delete one you're done with to start another. A deleted graph waits in the
 trash as usual, and stops counting at once.
 
+## Take an experiment further
+
+When a graph is ready for real work, take it out of the Playground with its views:
+
+* **Into a workspace you run.** Click the move button beside it under **Your
+  experiments** (or **Move** in its details). It moves at once.
+* **Into a workspace you're in but don't run.** The same button asks that
+  workspace's admins to take it; you'll hear when they answer.
+* **Into a workspace of your own.** Ask for one with **Request a workspace** and
+  tick the graph to bring along (see [Requesting a Workspace](/guide/requesting-a-workspace)).
+
+Only the person who made a graph can take it out. People in the Playground who
+aren't in the destination stop seeing its views — the move tells you who, first.
+
 ## Share what you made
 
 The Playground is a common area, so a view you make there starts **shared with

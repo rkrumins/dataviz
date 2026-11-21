@@ -9,7 +9,7 @@
  */
 import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Database, FlaskConical, Plus, Sparkles } from 'lucide-react'
+import { ArrowRight, ArrowRightLeft, Database, FlaskConical, Plus, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { View } from '@/services/viewApiService'
@@ -26,7 +26,7 @@ const FIRST_STEPS = [
     { title: 'Explore it in a view', detail: 'A map, a hierarchy or a table — share it here when you’re ready.' },
 ]
 
-export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNewGraph, onOpenGraph }: {
+export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNewGraph, onOpenGraph, onMoveGraph }: {
     workspace: WorkspaceResponse
     views: View[]
     /** How the Overview lays out views: the reader's choice. */
@@ -34,6 +34,8 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
     /** Start a blank graph on the Playground's sandbox provider. */
     onNewGraph?: (providerId?: string) => void
     onOpenGraph: (dataSourceId: string) => void
+    /** Take one of the reader's graphs, with its views, into a workspace of theirs (or ask to). */
+    onMoveGraph?: (dataSourceId: string, label: string) => void
 }) {
     const me = useAuthStore(s => s.user?.id)
     const info = usePlayground().data
@@ -126,11 +128,11 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                     <div className="mt-5 space-y-4">
                         <ul aria-label="Your graphs" className="grid gap-2 sm:grid-cols-2">
                             {graphs.map(ds => (
-                                <li key={ds.id}>
+                                <li key={ds.id} className="group flex items-center rounded-2xl border border-glass-border bg-canvas/60 hover:border-violet-500/40 hover:shadow-md hover:shadow-violet-500/10 transition">
                                     <button
                                         type="button"
                                         onClick={() => onOpenGraph(ds.id)}
-                                        className="group flex w-full items-center gap-3 rounded-2xl border border-glass-border bg-canvas/60 p-3 text-left hover:border-violet-500/40 hover:shadow-md hover:shadow-violet-500/10 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
+                                        className="flex min-w-0 flex-1 items-center gap-3 rounded-2xl p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
                                     >
                                         <span className="w-9 h-9 rounded-xl bg-violet-500/10 text-violet-600 dark:text-violet-300 flex items-center justify-center shrink-0">
                                             <Database className="w-4 h-4" aria-hidden />
@@ -141,6 +143,14 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                                         </span>
                                         <ArrowRight className="w-4 h-4 text-ink-muted opacity-0 group-hover:opacity-100 transition" aria-hidden />
                                     </button>
+                                    {onMoveGraph && (
+                                        <button type="button" onClick={() => onMoveGraph(ds.id, ds.label || ds.graphName || 'Untitled graph')}
+                                            title="Move it, with its views, into one of your workspaces"
+                                            aria-label={`Move ${ds.label || ds.graphName || 'this graph'} to a workspace`}
+                                            className="mr-2 shrink-0 rounded-lg p-2 text-ink-muted hover:bg-violet-500/10 hover:text-violet-700 dark:hover:text-violet-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40">
+                                            <ArrowRightLeft className="h-4 w-4" aria-hidden />
+                                        </button>
+                                    )}
                                 </li>
                             ))}
                         </ul>

@@ -655,3 +655,58 @@ async def test_the_flag_is_absent_when_no_graph_comes_along_or_every_workspace_i
     with _as(OLGA, APPROVER):
         ok = await test_client.get(f"/api/v1/admin/workspace-requests/{req['id']}")
     assert ok.json()["sandboxAdmitsNew"] is True
+
+
+# ── Moving an experiment out of the Playground ──────────────────────────
+
+SRC = f"/api/v1/admin/workspaces/{PG}/data-sources"
+
+
+@pytest.mark.asyncio
+async def test_a_playground_maker_moves_their_graph_into_a_workspace_they_run(
+    test_client: AsyncClient, estate, db_session,
+):
+    ada = PermissionClaims(sid="s_a", ws_perms={PG: MEMBER_PERMS, "ws_team": ("workspace:admin",)})
+    with _as(ADA, ada):
+        dests = await test_client.get(f"{SRC}/ds_ada_a/move-destinations")
+        preview = await test_client.get(f"{SRC}/ds_ada_a/move-preview", params={"to": "ws_team"})
+        moved = await test_client.post(f"{SRC}/ds_ada_a/move", json={
+            "targetWorkspaceId": "ws_team", "previewToken": preview.json()["token"]})
+    assert {d["id"]: d["mode"] for d in dests.json()}["ws_team"] == "direct"
+    assert preview.json()["mode"] == "direct"
+    assert moved.status_code == 200, moved.text
+    ds = (await db_session.execute(
+        select(WorkspaceDataSourceORM).where(WorkspaceDataSourceORM.id == "ds_ada_a")
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    assert ds.workspace_id == "ws_team"
+
+
+@pytest.mark.asyncio
+async def test_a_playground_maker_asks_a_workspace_to_take_their_graph(test_client: AsyncClient, estate):
+    ada = PermissionClaims(sid="s_a", ws_perms={PG: MEMBER_PERMS, "ws_team": MEMBER_PERMS})
+    with _as(ADA, ada):
+        dests = await test_client.get(f"{SRC}/ds_ada_a/move-destinations")
+        preview = await test_client.get(f"{SRC}/ds_ada_a/move-preview", params={"to": "ws_team"})
+        asked = await test_client.post(f"{SRC}/ds_ada_a/transfer-requests", json={
+            "targetWorkspaceId": "ws_team", "previewToken": preview.json()["token"]})
+    assert {d["id"]: d["mode"] for d in dests.json()}["ws_team"] == "request"
+    assert asked.status_code == 201, asked.text
+    with _as(OLGA, APPROVER):
+        detail = (await test_client.get(f"/api/v1/admin/data-source-transfers/{asked.json()['id']}")).json()
+        accepted = await test_client.post(f"/api/v1/admin/data-source-transfers/{asked.json()['id']}/accept",
+                                          json={"previewToken": detail["preview"]["token"]})
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_nobody_else_moves_or_asks_to_move_someone_elses_experiment(test_client: AsyncClient, estate):
+    ben = PermissionClaims(sid="s_b", ws_perms={PG: MEMBER_PERMS, "ws_team": ("workspace:admin",)})
+    with _as(BEN, ben):
+        dests = await test_client.get(f"{SRC}/ds_ada_a/move-destinations")
+        asked = await test_client.post(f"{SRC}/ds_ada_a/transfer-requests", json={"targetWorkspaceId": "ws_team"})
+        moved = await test_client.post(f"{SRC}/ds_ada_a/move", json={"targetWorkspaceId": "ws_team"})
+    assert {d["id"]: d["mode"] for d in dests.json()}["ws_team"] is None
+    assert asked.status_code == 403
+    assert moved.status_code == 403
