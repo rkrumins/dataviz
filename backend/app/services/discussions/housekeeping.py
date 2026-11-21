@@ -304,7 +304,7 @@ async def run_sweeper(session_factory, shutdown: asyncio.Event, *, interval: flo
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=interval)
         except asyncio.TimeoutError:
-            pass
+            pass                                        # the interval ran out: the next pass
     logger.info("Discussions housekeeping stopped")
 
 

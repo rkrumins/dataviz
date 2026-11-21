@@ -64,9 +64,10 @@ async def _awareness_run(monkeypatch) -> None:
             assert r.status_code == 200, r.text
             first = r.json()
             assert (first["headCommitSeq"], first["visibility"], first["savedSince"]) == (0, "public", None), first
-            assert first["access"] == {"canRead": True, "canWrite": True, "canManage": True}, first
+            assert first["access"] == {"canRead": True, "canWrite": True, "canManage": True, "canPublish": True}, first
             r = await poll(d, "vic", manage=False)                  # reads the data source only
-            assert r.json()["access"] == {"canRead": True, "canWrite": False, "canManage": False}, r.text
+            assert r.json()["access"] == {"canRead": True, "canWrite": False, "canManage": False,
+                                         "canPublish": True}, r.text
 
             # Bob saves twice and Carol once; Alice's own save is not news to her.
             await saved(d, "bob", "urn:t:child", description="bob 1")

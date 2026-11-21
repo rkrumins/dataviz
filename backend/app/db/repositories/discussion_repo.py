@@ -395,7 +395,7 @@ async def watch(session: AsyncSession, user_id: str, subject_type: str, subject_
             session.add(WatchORM(user_id=user_id, subject_type=subject_type, subject_id=subject_id, created_at=now))
             await session.flush()
     except IntegrityError:
-        pass
+        pass                                            # already watching: nothing to add
 
 
 async def unwatch(session: AsyncSession, user_id: str, subject_type: str, subject_id: str) -> None:

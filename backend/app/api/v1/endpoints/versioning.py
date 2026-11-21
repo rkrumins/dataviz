@@ -4506,7 +4506,8 @@ async def create_import(
     identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier,
                                                       fork=bool(meta.get("fork_parent_graph_id")))
     settings = _with_replace_scope(_with_refused_budget(settings, max_refused_rows), replace_scope)
-    await playground_policy.assert_graph_maker(session, ws_id, meta.get("data_source_id"), user.id, claims)
+    if session is not None:                                         # a direct caller may hold none
+        await playground_policy.assert_graph_maker(session, ws_id, meta.get("data_source_id"), user.id, claims)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
         await _may_auto_publish(session, claims, ws_id, meta, branch_id, user.id)

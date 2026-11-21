@@ -20,7 +20,7 @@ from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.versioning import (
-    InboxQueue, PrResponse, ReviewInboxCountsResponse, _ApiModel, _MANAGE, _READ,
+    InboxQueue, PrResponse, ReviewInboxCountsResponse, _MANAGE, _READ,
     _attach_user_names, _drafts_policy_of, _inbox, _review_out, _you, _your_groups,
     get_versioning_service,
 )

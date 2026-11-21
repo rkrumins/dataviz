@@ -187,9 +187,11 @@ async def _levels_run(monkeypatch) -> None:
             assert r.status_code == 200, r.text
             r = await c.post(f"{B}/{pub}/publish", json={"message": "m"}, headers=h("bob"))
             assert (r.status_code, r.json()["detail"]["code"]) == (403, "not_draft_owner"), r.text
-            assert (await read(pub, "bob"))["access"] == {"canRead": True, "canWrite": True, "canManage": False}
+            assert (await read(pub, "bob"))["access"] == {"canRead": True, "canWrite": True, "canManage": False,
+                                                          "canPublish": True}
             assert (await read(pub, "bob", manage=False))["access"]["canWrite"] is False
-            assert (await read(pub))["access"] == {"canRead": True, "canWrite": True, "canManage": True}
+            assert (await read(pub))["access"] == {"canRead": True, "canWrite": True, "canManage": True,
+                                                   "canPublish": True}
             assert (await c.get(f"{B}/{prv}", headers=h("bob"))).status_code == 404
 
             # The list's scopes, each without main.
@@ -213,7 +215,7 @@ async def _levels_run(monkeypatch) -> None:
                 actor="alice")
             assert await listed("bob", scope="shared") == [prv]
             assert (await read(prv, "bob"))["access"] == {"canRead": True, "canWrite": False,
-                                                          "canManage": False}
+                                                          "canManage": False, "canPublish": True}
 
             # isShared is no longer a PATCH field.
             r = await c.patch(f"{B}/{pub}", json={"isShared": False}, headers=setup)
