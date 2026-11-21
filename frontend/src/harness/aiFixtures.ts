@@ -73,7 +73,7 @@ const IMPACT_BLOCK: Block = {
     id: 'blk_impact', type: 'impact', data: {
         direction: 'downstream', target: firstName, change: 'drop', severity: 'high',
         severityReasons: ['Feeds 3 dashboards', '2 owning teams', 'Read nightly'],
-        summary: 'Dropping first_name breaks 3 dashboards and 12 columns in 4 tables.',
+        summary: 'Dropping first_name breaks 3 dashboards and 31 columns in 9 tables.',
         totals: { entities: 47, exact: true, byType: [
             { type: 'schemaField', label: 'Column', count: 31 }, { type: 'dataset', label: 'Table', count: 9 },
             { type: 'chart', label: 'Chart', count: 4 }, { type: 'dashboard', label: 'Dashboard', count: 3 },
@@ -163,7 +163,7 @@ export const AI_FIXTURES: Record<string, AiFixture> = {
             step('s3', 'Finding owners and schedules', 'running'),
             step('s3', 'Finding owners and schedules', 'done', '2 owning teams · 1 scheduled job'),
             ...words('Dropping **first_name** would break **3 dashboards** — Customer 360, Churn watch and the CRM contact list — '
-                + 'through 12 columns in 4 tables. Tell **data-platform-team** first: they own most of the tables in between. '
+                + 'through 31 columns in 9 tables. Tell **data-platform-team** first: they own most of the tables in between. '
                 + 'The first job to fail would be `nightly_customers`, tonight at 04:00 UTC.'),
             block(IMPACT_BLOCK),
             { event: 'followups', data: ['Which of these dashboards are used most?', 'Is there a column that could replace it?'] },
