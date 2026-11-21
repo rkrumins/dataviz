@@ -58,10 +58,10 @@ export function PropertyOpDialog({
 
   const [op, setOp] = useState<OpDraft>(() => ({
     kind: seed.kind ?? 'set', key: seed.key ?? '', to: '', value: '', onConflict: 'skip',
-    ...(seed.map ? { map: seed.map } : {}), ...(seed.toKind ? { toKind: seed.toKind } : {}),
+    ...(seed.map ? { map: seed.map } : {}), ...(seed.toKind ? { toKind: seed.toKind } : {}), ...seed.op,
   }))
   const [preset, setPreset] = useState<TargetPreset>(() => seed.target ?? (seed.key ? { kind: 'hasKey', key: seed.key } : { kind: 'view' }))
-  const [scopeMode, setScopeMode] = useState<ScopeMode>(() => (seed.target?.kind === 'search' || seed.target?.kind === 'connections' ? seed.target.scopeMode : 'view'))
+  const [scopeMode, setScopeMode] = useState<ScopeMode>(() => (seed.target?.kind === 'search' || seed.target?.kind === 'connections' ? seed.target.scopeMode : seed.scopeMode ?? 'view'))
   const [sourceConfirmed, setSourceConfirmed] = useState(false)
   // Relationships, not entities (`EdgeWhatStep`).
   const edges = isEdgeTarget(preset)

@@ -11,8 +11,8 @@ vi.mock('../apiClient', () => ({ authFetch }))
 import type { DisplayRuleConfig } from '@/types/schema'
 
 import {
-    LIBRARY_PACK_FORMAT, deleteViewQuery, getViewLibrary, importViewLibrary, orderViewRules, putViewRule,
-    type LibraryPack,
+    LIBRARY_PACK_FORMAT, deleteViewQuery, deleteViewRecipe, getViewLibrary, importViewLibrary, listRecipesFromOtherViews,
+    orderViewRules, putViewRecipe, putViewRule, type BulkRecipeInput, type LibraryPack,
 } from '../viewLibraryService'
 
 
@@ -48,6 +48,22 @@ describe('viewLibraryService', () => {
         expect(authFetch.mock.calls).toEqual([
             ['/api/v1/views/v1/library/rules', { method: 'PUT', body: '{"ids":["b","a"]}' }],
             ['/api/v1/views/v1/library/queries/q1', { method: 'DELETE' }],
+        ])
+    })
+
+    it('keeps a bulk recipe under its own (encoded) id, removes it, and lists other views\'', async () => {
+        const recipe: BulkRecipeInput = {
+            name: 'Own them', op: { kind: 'set', key: 'owner', value: 'data-team' },
+            target: { kind: 'layer', layerName: 'Gold', scopeMode: 'view' },
+        }
+        const signal = new AbortController().signal
+        await putViewRecipe('v1', 'recipe/1', recipe)
+        await deleteViewRecipe('v1', 'recipe/1')
+        await listRecipesFromOtherViews('v1', signal)
+        expect(authFetch.mock.calls).toEqual([
+            ['/api/v1/views/v1/library/recipes/recipe%2F1', { method: 'PUT', body: JSON.stringify(recipe) }],
+            ['/api/v1/views/v1/library/recipes/recipe%2F1', { method: 'DELETE' }],
+            ['/api/v1/views/v1/library/recipes/from-other-views', { signal }],
         ])
     })
 

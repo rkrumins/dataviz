@@ -16,6 +16,7 @@ import type { PropertyJobPreview } from '@/services/versioningApiService'
 import {
   OP_LABEL, isCleanup, jobOp, needsTo, needsValue, propertyJobLabel, targetLabel, type Impact, type OpDraft, type ScopeMode, type TargetPreset,
 } from './opModel'
+import { SaveRecipe } from './SaveRecipe'
 import { FIELD, LABEL } from './styles'
 import type { ReviewCounts } from './useReviewCounts'
 
@@ -182,6 +183,8 @@ export function ReviewStep({
           </span>
         )}
       </div>
+
+      <SaveRecipe op={op} preset={preset} scopeMode={scopeMode} />
     </div>
   )
 }
