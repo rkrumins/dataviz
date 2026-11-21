@@ -1196,6 +1196,187 @@ class DataRequestORM(Base):
         )
 
 
+class DataSourceContactORM(Base):
+    """A data source's named data contacts: at most one ``owner`` and up to ten
+    ``steward`` rows, each a person (``subject_type='user'``) or a group.
+
+    Who to ask about a source's data. When a source names nobody, its contacts are
+    worked out when read (``services.discussions.readers``); the first save writes
+    them down. A save replaces the whole set, so every row of one save carries the
+    same ``created_at`` and the newest of them is the set's ``updatedAt``.
+    The person or group is named by id (no FK out of the workspace domain).
+    """
+    __tablename__ = "data_source_contacts"
+
+    id = Column(Text, primary_key=True, default=lambda: f"dsct_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(
+        Text, ForeignKey("workspace_data_sources.id", ondelete="CASCADE"), nullable=False,
+    )
+    role = Column(Text, nullable=False)
+    subject_type = Column(Text, nullable=False)
+    subject_id = Column(Text, nullable=False)
+    added_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("data_source_id", "subject_type", "subject_id", name="uq_data_source_contacts"),
+        Index("uq_data_source_contacts_owner", "data_source_id", unique=True,
+              postgresql_where=text("role = 'owner'"),
+              sqlite_where=text("role = 'owner'")),
+        Index("idx_data_source_contacts_subject", "subject_type", "subject_id"),
+        CheckConstraint("role IN ('owner', 'steward')", name="ck_data_source_contacts_role"),
+        CheckConstraint("subject_type IN ('user', 'group')", name="ck_data_source_contacts_subject"),
+    )
+
+
+# ------------------------------------------------------------------ #
+# collaboration: questions and conversations about views and sources  #
+# ------------------------------------------------------------------ #
+
+class DiscussionORM(Base):
+    """A question about a view or a data source (``subject_type`` / ``subject_id``),
+    optionally about one entity in it (``entity_id``), and the conversation after it.
+
+    ``visibility`` ``open`` (everyone who can open the subject) or ``private`` (the
+    people in it, the subject's maintainers and the workspace's admins — who must
+    still be able to open the subject). ``status`` ``open`` → ``answered`` (a reply
+    accepted: ``answer_message_id``) or ``closed``. ``version`` is bumped by status,
+    answer and delete changes only, which are checked against it.
+
+    The counters (``message_count``, ``participant_count``, ``last_activity_at``,
+    ``last_message_by``, ``first_response_at``) are kept by the same conditional
+    UPDATE that adds a message, so lists never aggregate. The subject's workspace
+    is not stored: a data source can move, so it is looked up when read.
+    """
+    __tablename__ = "discussions"
+
+    id = Column(Text, primary_key=True, default=lambda: f"dis_{uuid.uuid4().hex[:12]}")
+    subject_type = Column(Text, nullable=False)
+    subject_id = Column(Text, nullable=False)
+    entity_id = Column(Text, nullable=True)
+    entity_label = Column(Text, nullable=True)
+    visibility = Column(Text, nullable=False, default="open")
+    status = Column(Text, nullable=False, default="open")
+    asked_by = Column(Text, nullable=False)
+    excerpt = Column(Text, nullable=False)
+    answer_message_id = Column(Text, nullable=True)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    message_count = Column(Integer, nullable=False, default=1)
+    participant_count = Column(Integer, nullable=False, default=0)
+    last_activity_at = Column(Text, nullable=False, default=_now)
+    last_message_by = Column(Text, nullable=False)
+    first_response_at = Column(Text, nullable=True)
+    reminded_at = Column(Text, nullable=True)
+    escalated_at = Column(Text, nullable=True)
+    watchers_notified_at = Column(Text, nullable=True)
+    watchers_cursor = Column(Text, nullable=True)
+    archived_at = Column(Text, nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now)
+    deleted_at = Column(Text, nullable=True)
+    deleted_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_discussions_subject_activity", "subject_type", "subject_id", "last_activity_at", "id"),
+        Index("idx_discussions_subject_updated", "subject_type", "subject_id", "updated_at"),
+        Index("idx_discussions_subject_entity", "subject_type", "subject_id", "entity_id",
+              postgresql_where=text("entity_id IS NOT NULL"),
+              sqlite_where=text("entity_id IS NOT NULL")),
+        Index("idx_discussions_status_response", "status", "first_response_at", "created_at"),
+        Index("idx_discussions_asker_activity", "asked_by", "last_activity_at", "id"),
+        # The watcher fan-out's queue: open questions whose watchers have not all heard.
+        Index("idx_discussions_fanout", "created_at",
+              postgresql_where=text("watchers_notified_at IS NULL AND visibility = 'open' AND deleted_at IS NULL"),
+              sqlite_where=text("watchers_notified_at IS NULL AND visibility = 'open' AND deleted_at IS NULL")),
+        CheckConstraint("subject_type IN ('view', 'data_source')", name="ck_discussions_subject_type"),
+        CheckConstraint("visibility IN ('open', 'private')", name="ck_discussions_visibility"),
+        CheckConstraint("status IN ('open', 'answered', 'closed')", name="ck_discussions_status"),
+    )
+
+
+class DiscussionMessageORM(Base):
+    """The question (``kind='question'``, one per thread) or a reply. ``mentions`` is a
+    JSON list of person ids. ``(author_id, client_key)`` is unique: a post retried with
+    the same key is answered with the original. A deleted message keeps its row; its
+    body is blanked 30 days later."""
+    __tablename__ = "discussion_messages"
+
+    id = Column(Text, primary_key=True, default=lambda: f"dmsg_{uuid.uuid4().hex[:12]}")
+    discussion_id = Column(Text, ForeignKey("discussions.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(Text, nullable=False)
+    author_id = Column(Text, nullable=False)
+    body = Column(Text, nullable=False)
+    mentions = Column(Text, nullable=False, default="[]")                # JSON
+    client_key = Column(Text, nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(Text, nullable=False, default=_now)
+    edited_at = Column(Text, nullable=True)
+    deleted_at = Column(Text, nullable=True)
+    deleted_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("author_id", "client_key", name="uq_discussion_messages_client_key"),
+        Index("idx_discussion_messages_thread", "discussion_id", "created_at", "id"),
+        Index("uq_discussion_messages_question", "discussion_id", unique=True,
+              postgresql_where=text("kind = 'question'"),
+              sqlite_where=text("kind = 'question'")),
+        CheckConstraint("kind IN ('question', 'reply')", name="ck_discussion_messages_kind"),
+        CheckConstraint("length(body) <= 10000", name="ck_discussion_messages_body"),
+    )
+
+
+class DiscussionParticipantORM(Base):
+    """Someone in a thread: how they joined (``joined_via``), whether it was asked of
+    them (``asked_to``), when they were last mentioned, last posted and last read, and
+    whether they follow it (hear about replies) or muted it (hear nothing).
+
+    Unread = the thread's ``last_activity_at`` is after ``last_read_at`` and its last
+    message is not theirs. No per-message receipts."""
+    __tablename__ = "discussion_participants"
+
+    id = Column(Text, primary_key=True, default=lambda: f"dpt_{uuid.uuid4().hex[:12]}")
+    discussion_id = Column(Text, ForeignKey("discussions.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Text, nullable=False)
+    joined_via = Column(Text, nullable=False)
+    asked_to = Column(Boolean, nullable=False, default=False, server_default="false")
+    mentioned_at = Column(Text, nullable=True)
+    muted = Column(Boolean, nullable=False, default=False, server_default="false")
+    following = Column(Boolean, nullable=False, default=True, server_default="true")
+    last_read_at = Column(Text, nullable=True)
+    posted_at = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("discussion_id", "user_id", name="uq_discussion_participants"),
+        Index("idx_discussion_participants_user", "user_id", "discussion_id"),
+        Index("idx_discussion_participants_mentions", "user_id", "mentioned_at"),
+        CheckConstraint(
+            "joined_via IN ('asked', 'asked_to', 'mentioned', 'replied', 'followed')",
+            name="ck_discussion_participants_joined_via",
+        ),
+    )
+
+
+class WatchORM(Base):
+    """Someone watching a view or a data source: they hear about each new open
+    question on it (``services.discussions.housekeeping``'s fan-out)."""
+    __tablename__ = "watches"
+
+    id = Column(Text, primary_key=True, default=lambda: f"wch_{uuid.uuid4().hex[:12]}")
+    user_id = Column(Text, nullable=False)
+    subject_type = Column(Text, nullable=False)
+    subject_id = Column(Text, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("subject_type", "subject_id", "user_id", name="uq_watches_subject_user"),
+        Index("idx_watches_user", "user_id", "created_at"),
+        CheckConstraint("subject_type IN ('view', 'data_source')", name="ck_watches_subject_type"),
+    )
+
+
 # ------------------------------------------------------------------ #
 # context_models  (how to visualize/organize the graph)               #
 # ------------------------------------------------------------------ #

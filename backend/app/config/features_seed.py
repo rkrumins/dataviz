@@ -102,6 +102,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "dataRequestsEnabled":
         "Asking for data is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "conversationsEnabled":
+        "Questions and conversations are turned off for this deployment, so they are read-only. "
+        "An administrator can enable them under Admin → Features.",
     "allowedViewModes":
         "That view type is not available in this deployment. "
         "An administrator chooses the available types under Admin → Features.",
@@ -1239,6 +1242,33 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "The fastest way to silence every banner at once without going through them one by one."
         ),
         "sort_order": 0,
+        "deprecated": False,
+    },
+    {
+        "key": "conversationsEnabled",
+        "name": "Questions and conversations",
+        "description": (
+            "Let anyone who can open a view or a data source ask the people behind it about it — "
+            "its owners and the people named as its data contacts — openly or privately, mention "
+            "colleagues who can open it too, answer and accept answers, and watch a view or a "
+            "source for new questions. Workspace admins name each source's Owner and Stewards."
+        ),
+        "impact_when_off": (
+            "Conversations become read-only: nobody can ask, reply, edit, watch or change a "
+            "source's data contacts, and reminders and watcher notices stop. Everything already "
+            "said can still be read, marked read, muted, closed or deleted. Nothing is deleted."
+        ),
+        "category_id": "notifications",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A preview. A question reaches only people who can open what it is about; private "
+            "questions are seen by the people in them, the view's owners or the source's data "
+            "contacts, and the workspace's admins."
+        ),
+        "sort_order": 1,
         "deprecated": False,
     },
     # ── Experimental ───────────────────────────────────────────────────────────

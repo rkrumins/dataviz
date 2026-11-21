@@ -281,6 +281,7 @@ feature open to anyone who knows the URL.
 | Switch | Key | Default | When it is off | Notes |
 |---|---|---|---|---|
 | Announcements | `announcementsEnabled` | On | Not refused: `GET /announcements` answers an empty list | Announcements are hidden, not deactivated |
+| Questions and conversations | `conversationsEnabled` | `false` | `POST /discussions/subjects/{type}/{id}` (ask), `POST /discussions/{id}/messages` (reply), `PATCH /discussions/{id}/messages/{mid}` (edit), `PUT /discussions/subjects/{type}/{id}/watch`, `PUT /discussions/{id}/me` with `following: true`, and `PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts` are refused `403 feature_disabled`; watcher notices and reminders pause. Reading, `POST /discussions/{id}/read`, muting, unfollowing, unwatching, closing, reopening, accepting answers and deleting still work | Preview. Unreadable means off |
 
 ### Experimental
 

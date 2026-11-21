@@ -593,6 +593,30 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Announcements are hidden, not deactivated — turning this back on restores them",
         ),
     ),
+    # Preview, like data requests: it ships OFF and every gate passes default=False.
+    "conversationsEnabled": FeatureWiring(
+        key="conversationsEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "POST /discussions/subjects/{type}/{id} — asking is refused while off",
+            "POST /discussions/{id}/messages, PATCH /discussions/{id}/messages/{mid} — replying and editing",
+            "PUT /discussions/subjects/{type}/{id}/watch, PUT /discussions/{id}/me (following) — watching",
+            "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts — naming data contacts",
+            "Watcher notices and reminders pause",
+        ),
+        ui_surfaces=(
+            "Questions — the view header, the Explorer preview, a data source's Questions tab",
+            "Ask about this — a canvas node's menu",
+            "Who to ask and Data contacts — a view's About sheet, a data source's Overview",
+            "Conversations and Watching — your profile",
+        ),
+        still_allowed=(
+            "Reading every conversation already started",
+            "Marking read, muting, unfollowing, unwatching, closing and deleting",
+            "Data contacts already named are kept and shown; nothing is deleted",
+        ),
+    ),
     # ── Data governance ────────────────────────────────────────────────────────
     "graphExportEnabled": FeatureWiring(
         key="graphExportEnabled",

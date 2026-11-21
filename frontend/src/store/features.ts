@@ -79,6 +79,7 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     playgroundEnabled: false,             // fail CLOSED — it lets people in
     workspaceRequestsEnabled: false,      // experimental preview — ships OFF
     dataRequestsEnabled: false,           // experimental preview — ships OFF
+    conversationsEnabled: false,          // experimental preview — ships OFF
     // Fail OPEN, unlike signupEnabled, and the asymmetry is the point: seeding
     // this `false` would re-create the bug it exists to control. A visitor
     // holding an invite would be turned away by a value we had not fetched yet,

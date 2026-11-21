@@ -3,7 +3,7 @@
 *For Administrators.* Turn whole capabilities on or off for everyone in your
 deployment — editing, tracing, exports, sign-up, Analytics and more — and know
 who will notice before you do. This page shows you how to change a switch
-safely, then describes all 37 switches on **Administration → Features**.
+safely, then describes all 38 switches on **Administration → Features**.
 
 > **Before you start:** You need the **Super admin** role (the `system:admin`
 > permission). Nobody else sees **Features** under **Administration**, and the
@@ -248,6 +248,7 @@ will ask for.
 | Switch (key) | Default | What it does | When it's off, who notices | Read more |
 | --- | --- | --- | --- | --- |
 | **Announcements** (`announcementsEnabled`) | On | Shows announcement banners to everyone. | Everyone. Banners stop appearing because the server serves none. Your announcements are hidden, not deactivated, and return when you turn this back on. | [The Admin Console](/guide/governance-ops) |
+| **Questions and conversations** (`conversationsEnabled`) | Off (preview) | Lets anyone who can open a view or a data source ask the people behind it about it — the view's owners and the source's data contacts — openly or privately, mention colleagues who can open it too, answer and accept answers, and watch a view or a source for new questions. A question reaches only people who can open what it is about. Workspace admins name each source's **Owner** and **Stewards** on its Overview; whoever manages the source changes the Stewards, and only workspace admins or the current Owner change the Owner. | Everyone asking or answering. Off, conversations become read-only: nobody can ask, reply, edit, watch or change data contacts, and reminders and watcher notices stop. Everything already said can still be read, marked read, muted, closed or deleted. | — |
 
 ### Analytics
 

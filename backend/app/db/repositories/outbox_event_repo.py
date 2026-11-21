@@ -50,6 +50,7 @@ _VALID_DOMAINS = frozenset({
     "stats",
     "platform",
     "events",
+    "collaboration",
 })
 
 _EVENT_TYPE_PATTERN = re.compile(r"^([a-z]+)\.[a-z_]+(?:\.[a-z_]+)+$")
