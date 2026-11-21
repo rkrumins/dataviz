@@ -687,8 +687,8 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         ),
         "impact_when_off": (
             "Ask for data disappears and the server refuses new requests. Requests already sent "
-            "can still be read, withdrawn and answered, and data sources connected for them are "
-            "kept. Nothing is deleted."
+            "can still be read, withdrawn and answered, but nobody is reminded of them, and data "
+            "sources connected for them are kept. Nothing is deleted."
         ),
         "category_id": "auth",
         "type": "boolean",

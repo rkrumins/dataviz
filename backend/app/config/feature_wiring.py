@@ -570,6 +570,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         stage="experimental",
         server_gates=(
             "POST /admin/workspaces/{ws_id}/data-requests — refused while off",
+            "Reminders and escalations of requests left waiting pause",
         ),
         ui_surfaces=(
             "Ask for data — the wizard, from a workspace's Data → Sources and its Overview",
