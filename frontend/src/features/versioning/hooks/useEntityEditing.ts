@@ -18,6 +18,8 @@ import { AT_REVISION } from '../model/ensureDraftOpen'
 
 export const NO_VERSION_CONTROL = "Version control isn't set up for this data source yet"
 export const NO_DRAFT = 'Switch to a draft to make changes'
+/** In a draft this person can view but not write to: someone else's, shared with them to view. */
+export const VIEW_ONLY_DRAFT = 'You can view this draft but not change it — make changes in a draft of your own'
 
 export interface EntityEditing {
   /** False where editing isn't offered at all: an admin has turned version

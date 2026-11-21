@@ -29,7 +29,7 @@ import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useRelationshipRecords, type RelationshipRecordOf } from '@/hooks/useRelationshipRecords'
 import { edgeKind } from '@/services/ontologyPreflightService'
-import { NO_VERSION_CONTROL, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { stageEdgeEdits, type EdgeEdit } from '@/features/versioning/model/stageEdgeEdit'
 import { targetFromMember } from '@/lib/drawerEdgeTarget'
 import { userProperties } from '@/lib/nodeFields'
@@ -231,7 +231,7 @@ export function MultiRelationshipView({
       ? `Up to ${MULTI_RELATIONSHIP_MAX.toLocaleString()} relationships are compared and edited here; these ${target.members.length.toLocaleString()} are changed on the server instead.`
       : !read.versioned ? NO_VERSION_CONTROL
         : held.length === 0 ? null
-          : editing.blocked ?? (canEdit ? null : 'Changes to relationships are kept in a draft, and published from there.')
+          : editing.blocked ?? (canEdit ? null : VIEW_ONLY_DRAFT)
     : null
 
   return (

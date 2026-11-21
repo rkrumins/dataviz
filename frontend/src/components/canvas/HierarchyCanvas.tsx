@@ -476,6 +476,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           onAddNode={() => useHierarchyBuilderStore.getState().open()}
           onOpenBuild={() => useHierarchyBuilderStore.getState().openBuild()}
           onSave={handleSave}
+          onDelete={canvasWritable ? interactions.deleteSelected : undefined}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}
@@ -534,6 +535,13 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               <LucideIcons.ChevronsDownUp className="w-4 h-4" />
             </button>
           </div>
+
+          {/* Advanced search — in the row, so it covers none of the buttons above. */}
+          <CanvasSearchTrigger
+            open={advancedSearchOpen}
+            onToggle={() => setAdvancedSearchOpen((v) => !v)}
+            inline
+          />
         </div>
 
         {/* Search Results */}
@@ -683,12 +691,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       </AnimatePresence>
 
       {/* Advanced search — same SearchMapPanel surface mounted on every
-          canvas. Trigger handles ⌘⇧F globally; panel is a flex-sibling
-          drawer alongside EntityDrawer. */}
-      <CanvasSearchTrigger
-        open={advancedSearchOpen}
-        onToggle={() => setAdvancedSearchOpen((v) => !v)}
-      />
+          canvas; its trigger (⌘⇧F) is in the header. The panel is a
+          flex-sibling drawer alongside EntityDrawer. */}
       <AnimatePresence>
         {activeView?.id && advancedSearchOpen && (
           <SearchMapPanel
@@ -851,11 +855,6 @@ function HierarchyContainer({
   const ruleLook = useDisplayRuleLook(changeDeco || isFocusNode || isHighlighted ? undefined : (node.urn ?? node.id))
   const isDimmed = (isTraceActive && !isHighlighted) || isSpotlightDim
 
-  // Canvas filter Isolate / Hide modes drop this row entirely. Same
-  // null-return pattern as GenericNode — keeps the hook order intact
-  // while collapsing the row out of the rendered tree.
-  if (isHiddenByCanvasFilter) return null
-
   // Calculate roll-up counts
   const rollUpCounts = useMemo(() => {
     if (hasChildren && !isExpanded) {
@@ -878,6 +877,10 @@ function HierarchyContainer({
 
     return parts.join(', ')
   }, [rollUpCounts, schema])
+
+  // Canvas filter Isolate / Hide modes drop this row entirely — after every
+  // hook, so a row that is hidden and shown again runs the same hooks.
+  if (isHiddenByCanvasFilter) return null
 
   // Indentation based on depth
   const indent = depth * 24

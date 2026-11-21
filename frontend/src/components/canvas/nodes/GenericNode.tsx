@@ -344,7 +344,13 @@ export const GenericNode = memo(function GenericNode({
           shapeClasses[visual.shape],
           borderClasses[visual.borderStyle],
           "bg-canvas-elevated",
-          !!selected && !isTraced && "ring-2 ring-offset-2",
+          // Every ring and glow below is a class: Tailwind draws a ring as a box-shadow and composes
+          // it with the glow, where an inline box-shadow would paint over the ring. A ring's offset
+          // is the canvas, not white.
+          "ring-offset-canvas",
+          !!selected && !isTraced && "ring-2 ring-offset-2 ring-[color:var(--ring-color)] shadow-[0_0_20px_var(--ring-glow)]",
+          !selected && !isFocus && !isUpstream && !isDownstream && !isTraced && !changeDeco && !search.isDirectMatch
+            && "shadow-[0_4px_12px_rgba(0,0,0,0.1)]",
           !!dragging && "opacity-80 cursor-grabbing",
           isGhost && "opacity-60",
           // W2.1 — advanced-search direct-match glow (reuses the
@@ -376,23 +382,8 @@ export const GenericNode = memo(function GenericNode({
         style={{
           borderColor: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
           borderLeftWidth: visual.borderStyle !== 'none' ? '4px' : undefined,
-          boxShadow: isFocus
-            ? '0 0 30px rgba(251,191,36,0.5)'
-            : isUpstream 
-              ? '0 0 20px rgba(96,165,250,0.4)'
-              : isDownstream
-                ? '0 0 20px rgba(74,222,128,0.4)'
-                : isTraced
-                  ? '0 0 20px rgba(192,132,252,0.4)'
-                  : selected
-                    ? `0 0 20px ${visual.color}40`
-                    : changeDeco
-                      // Decorated + default state: defer to the Tailwind ring+glow from
-                      // nodeDecorationClass (an inline boxShadow would override the box-shadow-based
-                      // ring, hiding the committed/staged colour highlight on the graph).
-                      ? undefined
-                      : '0 4px 12px rgba(0,0,0,0.1)',
           ['--ring-color' as string]: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
+          ['--ring-glow' as string]: `${visual.color}40`,
           ...(ruleLook.fillColor && {
             backgroundColor: `color-mix(in srgb, ${ruleLook.fillColor} 14%, var(--nx-bg-elevated))`,
           }),

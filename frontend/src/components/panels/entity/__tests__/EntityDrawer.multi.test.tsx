@@ -248,6 +248,13 @@ describe('several entities in the drawer', () => {
     await user.click(screen.getByRole('button', { name: 'Edit in a draft' }))
     expect(onStartEditing).toHaveBeenCalled()
   })
+  it('in a draft this person can only view, says so — not that changes are kept in a draft', () => {
+    editingNow.blocked = null
+    render(<EntityDrawer canEdit={false} onStartEditing={vi.fn()} />)
+    expect(screen.getByText(/You can view this draft but not change it/)).toBeInTheDocument()
+    expect(screen.queryByText(/kept in a draft/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Edit in a draft' })).toBeInTheDocument()
+  })
 })
 
 describe('several entities: what the fields of their type ask', () => {

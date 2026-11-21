@@ -1489,6 +1489,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           onAddNode={() => useHierarchyBuilderStore.getState().open()}
           onOpenBuild={() => useHierarchyBuilderStore.getState().openBuild()}
           onSave={handleSave}
+          onDelete={canvasWritable ? interactions.deleteSelected : undefined}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}

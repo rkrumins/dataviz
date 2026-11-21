@@ -4,8 +4,10 @@
  *
  * The REAL canvases, mounted on a stub provider: the store is the one selection (the rings, the
  * selection bar and every bulk action read it), ⌘A selects what is on screen in one write, a
- * right-click offers the several together, Esc closes the drawer comparing them, and Backspace
- * stages a delete rather than taking the entity out of the canvas.
+ * right-click offers the several together, Esc closes the drawer comparing them, and Backspace —
+ * or the edit toolbar's Delete — stages a delete rather than taking the entity out of the canvas.
+ * On the Hierarchy, the search button sits in the header it used to cover, and a row the canvas
+ * filter hides and shows again keeps rendering.
  */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -24,6 +26,7 @@ import { useBranchStore } from '@/store/branchStore'
 import { useFeaturesStore } from '@/store/features'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useAuthStore } from '@/store/auth'
+import { useSearchStore } from '@/store/searchStore'
 import { useNotificationStore } from '@/components/ui/notifications'
 import { installJsdomLayout } from '@/test/canvasHarness'
 import type { GraphDataProvider, GraphNode } from '@/providers/GraphDataProvider'
@@ -164,7 +167,7 @@ function countSelectionWrites() {
 }
 
 beforeEach(() => { useCanvasStore.getState().clearSelection() })
-afterEach(() => { restoreFetch() })
+afterEach(() => { restoreFetch(); useCanvasStore.getState().setEditing(false) })
 
 describe('GraphCanvas — several at once', () => {
   async function mountGraph(opts?: { draft?: boolean }) {
@@ -277,6 +280,23 @@ describe('GraphCanvas — several at once', () => {
     const orders = useCanvasStore.getState().nodes.find((n) => n.id === 'orders')
     expect(orders?.data.isPending).toBe('delete')
     expect(useStagedChangesStore.getState().changes.map((c) => c.type)).toEqual(['delete_entity'])
+  }, 20000)
+
+  it('the edit toolbar\'s Delete stages it too — it never takes the entity out of the canvas', async () => {
+    await mountGraph({ draft: true })
+    act(() => { useCanvasStore.getState().setEditing(true) })
+    fireEvent.click(graphCard('orders')!)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Delete' })) })
+    await settle()
+    expect(useCanvasStore.getState().nodes.find((n) => n.id === 'orders')?.data.isPending).toBe('delete')
+    expect(useStagedChangesStore.getState().changes.map((c) => c.type)).toEqual(['delete_entity'])
+  }, 20000)
+
+  it('outside a draft the edit toolbar\'s Delete is off', async () => {
+    await mountGraph()
+    act(() => { useCanvasStore.getState().setEditing(true) })
+    fireEvent.click(graphCard('orders')!)
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeDisabled()
   }, 20000)
 
   it('Backspace typed in the drawer deletes nothing — React Flow\'s own delete key is off', async () => {
@@ -407,5 +427,41 @@ describe('HierarchyCanvas — several at once', () => {
     await saveOneFromTheCanvas()
     expect(requests.some((u) => u.includes('/graph/changes'))).toBe(true)
     expect(messages()).toContain('success: Saved to draft.')
+  }, 20000)
+})
+
+describe('HierarchyCanvas — its header, and rows the canvas filter hides', () => {
+
+  it('the edit toolbar\'s Delete stages the delete, as on the Graph', async () => {
+    await mount(HierarchyCanvas, 'hierarchy', { draft: true })
+    await waitFor(() => { if (!hierarchyRow('orders')) throw new Error('no rows yet') }, { timeout: 4000 })
+    act(() => { useCanvasStore.getState().setEditing(true); useCanvasStore.getState().setSelection(['orders']) })
+    await settle()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Delete' })) })
+    await settle()
+    expect(useCanvasStore.getState().nodes.map((n) => n.id)).toEqual(ROOTS)
+    expect(useStagedChangesStore.getState().changes.map((c) => c.type)).toEqual(['delete_entity'])
+  }, 20000)
+
+  it('the search button sits in the header beside Expand / Collapse all, not floating over them', async () => {
+    await mount(HierarchyCanvas, 'hierarchy')
+    const search = screen.getByRole('button', { name: /open advanced search/i })
+    expect(search.className).not.toMatch(/\babsolute\b/)
+    expect(search.parentElement!.contains(screen.getByRole('button', { name: 'Collapse All' }))).toBe(true)
+  }, 20000)
+
+  afterEach(() => { useSearchStore.setState({ matchUrnSet: new Set(), canvasFilterMode: 'highlight' } as never) })
+
+  it('a row shown, then hidden by Isolate, then shown again keeps rendering', async () => {
+    await mount(HierarchyCanvas, 'hierarchy')
+    await waitFor(() => { if (!hierarchyRow('orders')) throw new Error('no rows yet') }, { timeout: 4000 })
+    // Isolate the one match: every other row drops out — the same component, fewer hooks run.
+    act(() => { useSearchStore.setState({ matchUrnSet: new Set(['orders']), canvasFilterMode: 'isolate' } as never) })
+    await settle()
+    expect(hierarchyRow('orders')).not.toBeNull()
+    expect(hierarchyRow('customers')).toBeNull()
+    act(() => { useSearchStore.setState({ canvasFilterMode: 'highlight' } as never) })
+    await settle()
+    expect(hierarchyRow('customers')).not.toBeNull()
   }, 20000)
 })

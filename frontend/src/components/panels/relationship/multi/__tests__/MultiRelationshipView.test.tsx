@@ -185,6 +185,13 @@ describe('several relationships in the relationship drawer', () => {
     expect(startEditing).toHaveBeenCalled()
   })
 
+  it('in a draft this person can only view, says so — not that changes are kept in a draft', () => {
+    h.editing = { offered: true, blocked: null }
+    render(<RelationshipDrawer canEdit={false} onStartEditing={vi.fn()} />)
+    expect(screen.getByText(/You can view this draft but not change it/)).toBeInTheDocument()
+    expect(screen.queryByText(/kept in a draft/)).toBeNull()
+  })
+
   it('more than it compares are changed on the server, every one of them', () => {
     const many = Array.from({ length: 1001 }, (_, i) => member(`m${i}`, 'a', 'b'))
     h.records = new Map(many.map((m) => [m.id, record(m.id, { owner: 'ana' })]))

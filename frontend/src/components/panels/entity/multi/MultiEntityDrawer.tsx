@@ -25,7 +25,7 @@ import { usePersonaStore } from '@/store/persona'
 import { nodeIndexOf } from '@/lib/storeIndex'
 import { resolveEntityName } from '@/lib/entityDisplayName'
 import { governedFields } from '@/lib/fieldRules'
-import { NO_VERSION_CONTROL, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Badge } from '@/components/ui/Badge'
 import { Button, IconButton } from '@/components/ui/Button'
@@ -184,7 +184,7 @@ export function MultiEntityDrawer({
   const blockedNote = !editable && editOffered
     ? tooMany
       ? `Up to ${MULTI_EDIT_MAX.toLocaleString()} entities are edited here at once. Select fewer — or change them all from Property Manager.`
-      : editing.blocked ?? (canEdit ? null : 'Changes to entities are kept in a draft, and published from there.')
+      : editing.blocked ?? (canEdit ? null : VIEW_ONLY_DRAFT)
     : null
 
   return (
