@@ -323,6 +323,8 @@ def _aggregate_rows(page: dict, index: int) -> list[dict]:
 async def run_search(ctx: ToolContext, predicate: dict, *, title: str, scope_mode: str,
                      limit: int = 25, emit: bool = True) -> dict:
     target = await ensure_searchable(ctx)
+    # What actually runs: a view read through a share stays inside the view.
+    scope_mode = target.scope(scope_mode)["scopeMode"]
     query = {
         "predicate": predicate,
         "scope": target.scope(scope_mode),

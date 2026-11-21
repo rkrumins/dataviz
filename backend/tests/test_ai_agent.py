@@ -572,9 +572,12 @@ async def test_a_shared_view_keeps_searches_inside_it(world):
     world.script([[("search_entities", {"title": "All", "scope": "data_source",
                                         "predicate": {"kind": "tag", "op": "has", "values": ["pii"]}})],
                   "Done."])
-    await chat(world.app, {"message": "everything tagged pii", "context": CONTEXT}, headers={"X-AI-Reach": "view"})
+    events = await chat(world.app, {"message": "everything tagged pii", "context": CONTEXT},
+                        headers={"X-AI-Reach": "view"})
     sent = next(c for c in world.platform.calls if c[1].endswith("/search/advanced"))[2]
     assert sent["scope"]["scopeMode"] == "view"
+    results = next(b["data"] for b in of(events, "block") if b["type"] == "results")
+    assert results["query"]["scopeMode"] == "view"            # the card says what ran
     brief = (await context_card(world.app, headers={"X-AI-Reach": "view"}, viewId=VIEW)).json()
     assert "view_only" in {c["code"] for c in brief["caveats"]}
 
