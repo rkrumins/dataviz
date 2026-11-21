@@ -22,7 +22,7 @@ import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
     Activity, AlertTriangle, ArrowRightLeft, Clock, Database, Eye, Flame, Gauge, GitPullRequestArrow, History,
-    Network, Plus, Shapes, UserPlus, UserX,
+    LayoutGrid, List, Network, Plus, Rows3, Shapes, UserPlus, UserX,
 } from 'lucide-react'
 import type { ComponentType } from 'react'
 import { cn } from '@/lib/utils'
@@ -41,6 +41,8 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { AttentionCard, type AttentionItem } from './AttentionCard'
 import { SetupChecklist, type SetupStep } from './SetupChecklist'
 import { OverviewViewGrid } from './OverviewViewGrid'
+import { useOverviewLayout, type OverviewLayout } from './overviewLayout'
+import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { SectionTitle } from './SectionTitle'
 import { PlaygroundExperiments } from './PlaygroundExperiments'
 import type { DataSection, WorkspaceTab } from '../workspaceTabs'
@@ -66,6 +68,12 @@ interface WorkspaceOverviewProps {
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+
+const LAYOUTS: readonly SegmentedOption<OverviewLayout>[] = [
+    { value: 'compact', label: 'Compact', icon: Rows3 },
+    { value: 'cards', label: 'Cards', icon: LayoutGrid },
+    { value: 'list', label: 'List', icon: List },
+]
 
 const ATTENTION_ICONS = {
     reviews: GitPullRequestArrow, access: UserPlus, transfer: ArrowRightLeft, ownerLeft: UserX, source: AlertTriangle,
@@ -178,6 +186,9 @@ export function WorkspaceOverview({
     const recentHere = recent.filter(r => r.workspaceId === wsId && byId.has(r.viewId)).slice(0, 4)
     const favourites = views.filter(v => v.isFavourited && !recentHere.some(r => r.viewId === v.id)).slice(0, 4 - Math.min(4, recentHere.length))
     const jumpBackIn = [...recentHere.map(r => byId.get(r.viewId)!), ...favourites]
+    const openedAt = new Map(recentHere.map(r => [r.viewId, r.visitedAt]))
+    const jumpMeta = (v: View) => openedAt.has(v.id) ? `Opened ${timeAgo(openedAt.get(v.id)!)}` : 'In your favourites'
+    const [layout, setLayout] = useOverviewLayout()
 
     const popularQ = useQuery({
         queryKey: ['workspace-overview', 'popular', wsId],
@@ -204,7 +215,7 @@ export function WorkspaceOverview({
                 {attention.length > 0 && <AttentionCard items={attention} />}
                 {/* The Playground has nothing to set up: it leads with the reader's own experiments. */}
                 {isPlayground
-                    ? <PlaygroundExperiments workspace={workspace} views={views} onNewGraph={onNewGraph} onOpenGraph={onOpenGraph ?? (() => onGoTo('data', 'sources'))} />
+                    ? <PlaygroundExperiments workspace={workspace} views={views} layout={layout} onNewGraph={onNewGraph} onOpenGraph={onOpenGraph ?? (() => onGoTo('data', 'sources'))} />
                     : isManager && <SetupChecklist wsId={wsId} steps={steps} />}
 
                 {views.length === 0 ? (isPlayground ? null : (
@@ -220,13 +231,17 @@ export function WorkspaceOverview({
                     </section>
                 )) : (
                     <>
-                        <Shelf title="Jump back in" subtitle="Views you opened or favourited here" onSeeAll={() => onGoTo('views')} icon={History} tone="text-indigo-500 bg-indigo-500/10">
+                        <Shelf
+                            title="Jump back in" subtitle="Views you opened or favourited here" onSeeAll={() => onGoTo('views')}
+                            icon={History} tone="text-indigo-500 bg-indigo-500/10"
+                            extra={<Segmented label="Show views as" options={LAYOUTS} value={layout} onChange={setLayout} />}
+                        >
                             {jumpBackIn.length === 0 ? (
                                 <p className="rounded-2xl border border-dashed border-glass-border px-4 py-6 text-center text-sm text-ink-muted">
                                     Views you open or favourite in this workspace will wait for you here.
                                 </p>
                             ) : (
-                                <OverviewViewGrid wsId={wsId} views={jumpBackIn} />
+                                <OverviewViewGrid wsId={wsId} views={jumpBackIn} layout={layout} meta={jumpMeta} />
                             )}
                         </Shelf>
 
@@ -235,7 +250,7 @@ export function WorkspaceOverview({
                             subtitle={isPlayground ? 'What people in the Playground open most — open one for ideas' : 'What people in this workspace open most'}
                             onSeeAll={() => onGoTo('views')} icon={Flame} tone="text-amber-500 bg-amber-500/10"
                         >
-                            <OverviewViewGrid wsId={wsId} views={popular} />
+                            <OverviewViewGrid wsId={wsId} views={popular} layout={layout} />
                         </Shelf>
                     </>
                 )}
@@ -274,10 +289,12 @@ export function WorkspaceOverview({
     )
 }
 
-function Shelf({ title, subtitle, onSeeAll, icon, tone, children }: {
+function Shelf({ title, subtitle, onSeeAll, icon, tone, extra, children }: {
     title: string
     subtitle: string
     onSeeAll: () => void
+    /** Controls beside "All views" — the layout switch. */
+    extra?: React.ReactNode
     icon: ComponentType<{ className?: string }>
     tone: string
     children: React.ReactNode
@@ -286,7 +303,12 @@ function Shelf({ title, subtitle, onSeeAll, icon, tone, children }: {
         <section aria-label={title}>
             <SectionTitle
                 icon={icon} tone={tone} title={title} subtitle={subtitle} className="mb-3"
-                action={<button type="button" onClick={onSeeAll} className="shrink-0 text-xs font-semibold text-accent-lineage hover:underline">All views</button>}
+                action={
+                    <span className="flex shrink-0 items-center gap-3">
+                        {extra}
+                        <button type="button" onClick={onSeeAll} className="text-xs font-semibold text-accent-lineage hover:underline">All views</button>
+                    </span>
+                }
             />
             {children}
         </section>

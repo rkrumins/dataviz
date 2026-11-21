@@ -242,3 +242,41 @@ describe('Views, shown the way the Explorer shows them', () => {
         expect(within(shelf).getByTitle('Unfavorite')).toHaveAttribute('aria-pressed', 'true')
     })
 })
+
+describe('The reader chooses how views are laid out', () => {
+    const view = (id: string, name: string, over: Partial<View> = {}) => ({
+        id, name, viewType: 'graph', workspaceId: 'ws1', workspaceName: 'Sales', dataSourceId: 'ds1', dataSourceName: 'Ledger',
+        visibility: 'workspace', isFavourited: true, favouriteCount: 1, tags: [], config: {},
+        createdAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-19T00:00:00Z', createdBy: 'usr_ada', createdByName: 'Ada',
+        ...over,
+    }) as unknown as View
+    const views = [view('v1', 'Zeta flows'), view('v2', 'Alpha map')]
+
+    it('opens on the Explorer’s cards', () => {
+        renderOverview({ views })
+        const shelf = screen.getByRole('region', { name: 'Jump back in' })
+        expect(within(shelf).getByRole('radio', { name: /Cards/ })).toBeChecked()
+        expect(within(shelf).getByRole('button', { name: /Zeta flows/ })).toBeInTheDocument()
+    })
+
+    it('shows compact tiles that open the view, and remembers the choice', () => {
+        const { unmount } = renderOverview({ views })
+        const shelf = screen.getByRole('region', { name: 'Jump back in' })
+        fireEvent.click(within(shelf).getByRole('radio', { name: /Compact/ }))
+        expect(within(shelf).getByRole('link', { name: /Zeta flows/ })).toHaveAttribute('href', '/views/v1')
+        expect(within(shelf).getAllByText('In your favourites').length).toBeGreaterThan(0)
+        unmount()
+        renderOverview({ views })
+        expect(within(screen.getByRole('region', { name: 'Jump back in' })).getByRole('radio', { name: /Compact/ })).toBeChecked()
+    })
+
+    it('lists views under the Explorer’s columns, sortable in place', () => {
+        renderOverview({ views })
+        const shelf = screen.getByRole('region', { name: 'Jump back in' })
+        fireEvent.click(within(shelf).getByRole('radio', { name: /List/ }))
+        const names = () => within(shelf).getAllByText(/Zeta flows|Alpha map/).map(n => n.textContent)
+        expect(names()).toEqual(['Zeta flows', 'Alpha map'])
+        fireEvent.click(within(shelf).getByRole('button', { name: /^Sort by Name/ }))
+        expect(names()).toEqual(['Alpha map', 'Zeta flows'])
+    })
+})

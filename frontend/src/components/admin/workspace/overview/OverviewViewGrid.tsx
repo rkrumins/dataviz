@@ -1,30 +1,80 @@
 /**
- * OverviewViewGrid — views on the workspace's front page, shown the way the
- * Explorer shows them.
+ * OverviewViewGrid — views on the workspace's front page, in the layout the
+ * reader chose:
  *
- * The Overview used to draw its own compact tiles, so the same view looked one
- * way here and another in the Explorer and on the Views tab. This renders the
- * Explorer's card in the Explorer's grid, and answers it the same way: a click
- * previews the view in the Explorer's drawer, the heart favourites it, the link
- * button copies its address and Manage sharing opens the Share dialog.
+ *   * **Compact** — one-line tiles that open the view, for getting back to work fast;
+ *   * **Cards** — the Explorer's card in the Explorer's grid;
+ *   * **List** — the Explorer's rows under its column headers, sortable in place.
+ *
+ * Cards and rows answer the way they do in the Explorer: a click previews the view
+ * in the Explorer's drawer, the heart favourites it, the link button copies its
+ * address and Manage sharing opens the Share dialog.
  */
-import { useContext, useState } from 'react'
+import { useContext, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { favouriteView, unfavouriteView, type View } from '@/services/viewApiService'
+import type { SortOption } from '@/hooks/useExplorerViews'
 import { useViewUsage } from '@/hooks/useContentInsights'
 import { useCopyViewLink } from '@/lib/viewShareLink'
+import { viewTypeLabel } from '@/lib/viewUtils'
+import { compact } from '@/lib/formatMetric'
 import { invalidateOtherViewLists } from '@/features/view-filters/invalidate'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
+import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
+import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
 import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDrawer'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { ViewTile } from './ViewTile'
+import type { OverviewLayout } from './overviewLayout'
 
-/** The Explorer's grid, sized for the Overview's main column: two across, so a shelf of four
- *  fills its rows at every width. */
+/** Two across, so a shelf of four fills its rows at every width. */
 const GRID = 'grid items-start grid-cols-1 sm:grid-cols-2 gap-4'
+const COMPACT_GRID = 'grid gap-2.5 sm:grid-cols-2'
 
-export function OverviewViewGrid({ wsId, views }: { wsId: string; views: View[] }) {
+/** A shelf keeps its own order (most recent, most opened…) until a column is chosen;
+ *  this sort marks no column. */
+const SHELF_ORDER: SortOption = 'most-opened'
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+
+const changedAt = (v: View) => Math.max(Date.parse(v.updatedAt ?? '') || 0, Date.parse(v.dataUpdatedAt ?? '') || 0)
+
+/** The few views on a shelf, sorted by a list-header click. */
+function sortShelf(views: View[], sort: SortOption): View[] {
+    const by = (key: (v: View) => string | number, dir: 1 | -1) =>
+        [...views].sort((a, b) => {
+            const x = key(a), y = key(b)
+            return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y))) * dir
+        })
+    switch (sort) {
+        case 'az': return by(v => v.name, 1)
+        case 'za': return by(v => v.name, -1)
+        case 'type-az': return by(v => viewTypeLabel(v.viewType), 1)
+        case 'type-za': return by(v => viewTypeLabel(v.viewType), -1)
+        case 'owner-az': return by(v => v.createdByName ?? v.createdBy ?? '', 1)
+        case 'owner-za': return by(v => v.createdByName ?? v.createdBy ?? '', -1)
+        case 'likes-asc': return by(v => v.favouriteCount ?? 0, 1)
+        case 'popular': return by(v => v.favouriteCount ?? 0, -1)
+        case 'modified-asc': return by(changedAt, 1)
+        case 'recently-modified': return by(changedAt, -1)
+        default: return views
+    }
+}
+
+/** "120 opens · 9 people", or that nobody opened it lately. */
+function usedLine(u: { opens: number; uniqueViewers: number } | undefined): string {
+    return u && u.opens > 0 ? `${compact(u.opens)} opens · ${plural(u.uniqueViewers, 'person', 'people')}` : 'Not opened lately'
+}
+
+export function OverviewViewGrid({ wsId, views, layout = 'cards', meta }: {
+    wsId: string
+    views: View[]
+    layout?: OverviewLayout
+    /** Compact tiles' line of context ("Opened 2h ago"); by default, how much it is used. */
+    meta?: (view: View) => string | undefined
+}) {
     const queryClient = useQueryClient()
     const { notify } = useAppNotifications()
     const copyLink = useCopyViewLink()
@@ -35,12 +85,13 @@ export function OverviewViewGrid({ wsId, views }: { wsId: string; views: View[] 
     const [favourite, setFavourite] = useState<Record<string, boolean>>({})
     const [preview, setPreview] = useState<{ view: View; editing: boolean } | null>(null)
     const [sharing, setSharing] = useState<View | null>(null)
+    const [sort, setSort] = useState<SortOption>(SHELF_ORDER)
 
-    const shown = views.map(v => {
+    const shown = useMemo(() => views.map(v => {
         if (!(v.id in favourite) || favourite[v.id] === v.isFavourited) return v
         const on = favourite[v.id]
         return { ...v, isFavourited: on, favouriteCount: Math.max(0, (v.favouriteCount ?? 0) + (on ? 1 : -1)) }
-    })
+    }), [views, favourite])
 
     const refresh = () => {
         void queryClient.invalidateQueries({ queryKey: ['workspace-detail-phase2', wsId] })
@@ -60,24 +111,44 @@ export function OverviewViewGrid({ wsId, views }: { wsId: string; views: View[] 
         }
     }
 
+    const actions = (v: View) => ({
+        view: v,
+        usage: usage?.[v.id],
+        hideWorkspaceInScope: true,
+        onToggleFavourite: () => void toggleFavourite(v),
+        onShare: () => void copyLink(v.id),
+        onPreview: () => setPreview({ view: v, editing: false }),
+        onEdit: () => setPreview({ view: v, editing: true }),
+        onEditLayout: viewEditor ? () => viewEditor.openViewEditor(v.id) : undefined,
+    })
+
     return (
         <>
-            <div className={GRID}>
-                {shown.map(v => (
-                    <ExplorerViewCard
-                        key={v.id}
-                        view={v}
-                        usage={usage?.[v.id]}
-                        hideWorkspaceInScope
-                        onToggleFavourite={() => void toggleFavourite(v)}
-                        onShare={() => void copyLink(v.id)}
-                        onManageSharing={() => setSharing(v)}
-                        onPreview={() => setPreview({ view: v, editing: false })}
-                        onEdit={() => setPreview({ view: v, editing: true })}
-                        onEditLayout={viewEditor ? () => viewEditor.openViewEditor(v.id) : undefined}
-                    />
-                ))}
-            </div>
+            {layout === 'compact' && (
+                <div className={COMPACT_GRID}>
+                    {shown.map(v => (
+                        <ViewTile key={v.id} view={{ ...v, favourite: v.isFavourited }} meta={meta?.(v) ?? usedLine(usage?.[v.id])} />
+                    ))}
+                </div>
+            )}
+            {layout === 'cards' && (
+                <div className={GRID}>
+                    {shown.map(v => (
+                        <ExplorerViewCard key={v.id} {...actions(v)} onManageSharing={() => setSharing(v)} />
+                    ))}
+                </div>
+            )}
+            {layout === 'list' && (
+                // The Explorer's columns need their width: a narrow screen scrolls the list sideways.
+                <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-x-auto custom-scrollbar">
+                    <div className="min-w-[760px]">
+                        <ExplorerListHeader sort={sort} onSortChange={setSort} withCheckbox={false} />
+                        <div className="divide-y divide-glass-border/50">
+                            {sortShelf(shown, sort).map(v => <ExplorerListRow key={v.id} {...actions(v)} />)}
+                        </div>
+                    </div>
+                </div>
+            )}
 
             <ExplorerPreviewDrawer
                 view={preview?.view ?? null}

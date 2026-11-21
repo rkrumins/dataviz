@@ -16,6 +16,7 @@ import type { View } from '@/services/viewApiService'
 import { useAuthStore } from '@/store/auth'
 import { usePlayground } from '@/hooks/usePlayground'
 import { OverviewViewGrid } from './OverviewViewGrid'
+import type { OverviewLayout } from './overviewLayout'
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
@@ -25,9 +26,11 @@ const FIRST_STEPS = [
     { title: 'Explore it in a view', detail: 'A map, a hierarchy or a table — share it here when you’re ready.' },
 ]
 
-export function PlaygroundExperiments({ workspace, views, onNewGraph, onOpenGraph }: {
+export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNewGraph, onOpenGraph }: {
     workspace: WorkspaceResponse
     views: View[]
+    /** How the Overview lays out views: the reader's choice. */
+    layout?: OverviewLayout
     /** Start a blank graph on the Playground's sandbox provider. */
     onNewGraph?: (providerId?: string) => void
     onOpenGraph: (dataSourceId: string) => void
@@ -146,7 +149,8 @@ export function PlaygroundExperiments({ workspace, views, onNewGraph, onOpenGrap
                                 <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-ink-secondary">
                                     <Sparkles className="w-3.5 h-3.5 text-fuchsia-500" aria-hidden /> Your views
                                 </p>
-                                <OverviewViewGrid wsId={workspace.id} views={mine.slice(0, 4)} />
+                                <OverviewViewGrid wsId={workspace.id} views={mine.slice(0, 4)} layout={layout}
+                                    meta={v => v.visibility === 'private' ? 'Only you' : 'Shared in the Playground'} />
                             </div>
                         )}
                     </div>
