@@ -768,6 +768,38 @@ export class UniqueViolationError extends Error {
   }
 }
 
+/** One property value a publish refused by its entity type's fields: not of the field's type
+ *  (`field_type`), not one of its allowed values (`field_not_allowed`), or a required field left
+ *  without one (`field_required`). `entity_id` is the server's; `urn` and `name` as the entity
+ *  carries them; `reason` says it in a sentence. */
+export interface FieldViolation {
+  entity_id: string
+  kind: 'node'
+  type: string
+  name?: string | null
+  urn?: string | null
+  rule: 'field_type' | 'field_not_allowed' | 'field_required'
+  field: string
+  fieldName?: string
+  value: unknown
+  reason: string
+}
+
+/** A publish refused because property values break the fields their entity types define. Nothing
+ *  was published. `total`: how many there are — `violations` may list fewer. */
+export class FieldViolationError extends Error {
+  violations: FieldViolation[]
+  total: number
+  constructor(violations: FieldViolation[], total?: number) {
+    const n = total ?? violations.length
+    super(`${n === 1 ? 'A value breaks' : `${n} values break`} the fields their entity types define. `
+      + violations.slice(0, 2).map((v) => `${v.name || v.urn || v.entity_id}: ${v.reason}`).join('; '))
+    this.name = 'FieldViolationError'
+    this.violations = violations
+    this.total = n
+  }
+}
+
 /** A fork's review merges only up to date with its parent: the parent has changed since the fork
  *  last took its changes, so it updates from its parent first. `behind`: the entities the parent
  *  changed that the fork has not taken in; `graphId`: the fork. Not a draft's NotUpToDateError: a
@@ -1061,6 +1093,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && d?.type === 'unique_violation') {
     return new UniqueViolationError((d.violations ?? []) as unknown as UniqueViolation[], d.total)
+  }
+  if (status === 409 && d?.type === 'field_violation') {
+    return new FieldViolationError((d.violations ?? []) as unknown as FieldViolation[], d.total)
   }
   if (status === 409 && d?.type === 'not_up_to_date' && d.reason === 'parent_moved') {
     return new ForkNotUpToDateError(d)
@@ -1993,6 +2028,17 @@ export interface PropertyJobPreview {
   activeJobId: string | null
   /** Exact, read from the draft — for a target of named entities only. */
   counts: { matched: number; haveKey: number; haveTo: number | null; missing: number } | null
+  /** What it would leave that publishing the draft refuses (the entity types' fields) — said,
+   *  never a refusal: the change applies all the same. */
+  warnings?: PropertyJobWarning[]
+}
+
+/** One thing a bulk change would leave that a publish refuses, per entity type defining the key. */
+export interface PropertyJobWarning {
+  code: 'field_type' | 'field_not_allowed' | 'field_required' | 'field_checked'
+  entityType: string
+  field: string
+  message: string
 }
 
 const propertyJobs = (wsId: string, graphId: string) => `${base(wsId)}/graphs/${graphId}/property-jobs`

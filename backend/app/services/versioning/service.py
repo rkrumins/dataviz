@@ -54,7 +54,7 @@ from .change_index import (ROOT, ChangeIndex, ChangeIndexBuilder, ChangeOrigin, 
                            review_requirements, stat_changes)
 from .errors import (ChangesRequested, DraftMoved, AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen, ChangeListBusy,
                      ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable, DraftPruned,
-                     EdgeEndsMissing, EntityExists, StagedChangesUnsaved, UniqueViolation,
+                     EdgeEndsMissing, EntityExists, FieldViolation, StagedChangesUnsaved, UniqueViolation,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, ForkNotUpToDate,
                      ForkUpdateConflicts, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
@@ -72,7 +72,7 @@ from . import main_activity, provenance, review_state
 from .review_state import ReviewRule
 from .provenance import commit_provenance
 from .ontology import (
-    Ontology, OntologyRules, canonicalize_payload_types,
+    Ontology, OntologyRules, canonicalize_payload_types, field_violations,
     validate_entities, validate_entities_rich,
 )
 from .models import (
@@ -1879,6 +1879,10 @@ class GraphVersioningService:
             s, graph.id, main_id, {d.entity_id: d.payload for d in deltas}, ontology_rules)
         if unique:
             raise UniqueViolation(unique)
+        fields = await self._field_violations(
+            s, graph.id, main_id, {d.entity_id: d.payload for d in deltas}, ontology_rules)
+        if fields:
+            raise FieldViolation(fields)
         # Re-gated at merge time against CURRENT main, with rules resolved from the CURRENT
         # published ontology by the caller — the same gate as every other write path, on what the
         # publish writes: a draft opened before an ontology tightening cannot merge violating
@@ -2147,6 +2151,10 @@ class GraphVersioningService:
                                                source=(gid, draft.id))
         if unique:
             raise UniqueViolation(unique)
+        fields = await self._field_violations(s, gid, main_id, written, ontology_rules,
+                                              source=(gid, draft.id))
+        if fields:
+            raise FieldViolation(fields)
         del written, prior, known, heads, main, live, ends, standing   # per change: not into the writes
 
         await self._copy_versions(s, gid, main_id, squash, copies, actor)
@@ -2255,6 +2263,10 @@ class GraphVersioningService:
                                                    seen=unique_seen, source=(gid, draft.id))
             if unique:
                 raise UniqueViolation(unique)
+            fields = await self._field_violations(s, gid, main_id, written, ontology_rules,
+                                                  source=(gid, draft.id))
+            if fields:
+                raise FieldViolation(fields)
 
         # 1. What the draft deleted, and the edges on it that the draft left alone.
         async for heads in self._head_pages(s, gid, draft.id, live=False):
@@ -2547,6 +2559,10 @@ class GraphVersioningService:
                                                    source=(fork.id, fork_main))
             if unique:
                 raise UniqueViolation(unique)
+            fields = await self._field_violations(s, gid, parent_main, written, ontology_rules,
+                                                  source=(fork.id, fork_main))
+            if fields:
+                raise FieldViolation(fields)
 
         async def planned(heads, held, gone=()):
             rows, slow = await asyncio.to_thread(_plan_squash, heads, held, gone, reread)
@@ -13188,6 +13204,38 @@ class GraphVersioningService:
                     holders[key].add(eid)
         return [{"type": t, "field": f, "value": val, "entities": sorted(ids)}
                 for (t, f, val), ids in sorted(holders.items()) if len(ids) > 1]
+
+    async def _field_violations(self, s, graph_id: str, main_id: str,
+                                written: Mapping[str, Optional[dict]],
+                                ontology_rules: Optional[OntologyRules],
+                                source: Optional[Tuple[str, str]] = None) -> List[dict]:
+        """The property values a publish would write that their type's fields refuse
+        (``EntityRule.fields``; :func:`~.ontology.field_violations`), judged against each node's
+        value on ``main`` before the publish, so only what it changes is judged. Read for the nodes
+        of a type that has field rules only: nothing when none has. ``source``: as
+        :meth:`_unique_violations` takes it — the ``(graph, branch)`` whose values ``written``
+        holds only as identity columns, read in full here."""
+        if ontology_rules is None or not any(r.fields for r in ontology_rules.entity_types.values()):
+            return []
+
+        def governed(v: Optional[dict]) -> bool:
+            if not v or _is_edge_payload(v):
+                return False
+            rule = ontology_rules.entity_types.get(
+                ontology_rules.canonical_entity_type(v.get("entityType")) or "")
+            return bool(rule and rule.fields)
+
+        ids = [eid for eid, v in written.items() if governed(v)]
+        if not ids:
+            return []
+        after = dict(written)
+        if source is not None:
+            need = [eid for eid in ids if "properties" not in written[eid]]
+            if need:
+                full = await self._current_values(s, source[0], source[1], need)
+                after.update({e: full[e] for e in need if full.get(e) is not None})
+        before = await self._current_values(s, graph_id, main_id, ids)
+        return field_violations([(eid, after[eid], before.get(eid)) for eid in ids], ontology_rules)
 
     async def identities_taken(self, *, graph_id: str, branch_id: str,
                                names: Collection[str]) -> Tuple[set, Dict[str, str]]:

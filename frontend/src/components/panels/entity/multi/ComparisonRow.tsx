@@ -6,6 +6,10 @@
  * In a draft, the value is edited where it is read — a value typed here is set on all of them —
  * and the row offers the rest: fill where missing, rename, copy to a new name, remove from all.
  * One change is pending per property; choosing another replaces it, and ↺ takes it back.
+ *
+ * A field of the entities' type (`rule`) offers its allowed values with one click, and a change
+ * publishing would refuse — a value it doesn't allow, a required one removed — is warned of under
+ * the row. It is still staged: the publish is the gate.
  */
 import { memo, useState, type KeyboardEvent } from 'react'
 import { motion } from 'framer-motion'
@@ -17,7 +21,10 @@ import { Badge } from '@/components/ui/Badge'
 import { Button, IconButton } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { SharedField } from '@/components/canvas/context-view/bulkEdit'
+import { fieldWarning } from '@/lib/fieldRules'
+import type { EntityFieldDefinition } from '@/types/schema'
 import { InlineValue } from '../../property/InlineValue'
+import { AllowedValuePicker, FieldNote } from '../../property/FieldGovernance'
 import { RichValue } from '../../property/RichValue'
 import type { FieldType } from '../../property/fieldTypes'
 import type { KeyChange } from './editOps'
@@ -25,6 +32,9 @@ import { ValueBreakdown, type Member } from './ValueBreakdown'
 import { OTHER_TONE, toneOf } from './tones'
 
 const NAME_MAX = 128
+
+/** A field a publish judges, and the entities' type as its warnings name it ("Tables"). */
+export interface GovernedRule { field: EntityFieldDefinition; typeLabel: string }
 
 export interface ComparisonRowProps {
   index: number
@@ -36,6 +46,8 @@ export interface ComparisonRowProps {
   editable: boolean
   /** Why a value can't be given to all of them (a field no two may share), or null. */
   sharedValueRefused: string | null
+  /** The entity type's field this property is, when a publish judges it (allowed values, required). */
+  rule?: GovernedRule | null
   expanded: boolean
   onToggle: (key: string) => void
   onChange: (key: string, change: KeyChange | null) => void
@@ -62,7 +74,7 @@ const sameRow = (a: ComparisonRowProps, b: ComparisonRowProps) => {
 }
 
 export const ComparisonRow = memo(function ComparisonRow({
-  index, keyName, field, total, change, editable, sharedValueRefused, expanded, onToggle, onChange,
+  index, keyName, field, total, change, editable, sharedValueRefused, rule = null, expanded, onToggle, onChange,
   conflictsFor, missing, memberOf, onFocusNode, onOpenNode, staged = false,
 }: ComparisonRowProps) {
   const [form, setForm] = useState<Form>(null)
@@ -145,8 +157,17 @@ export const ComparisonRow = memo(function ComparisonRow({
           refused={sharedValueRefused}
           onSet={set}
         />
+        {rule && editable && !sharedValueRefused && (rule.field.allowedValues?.length ?? 0) > 0
+          && !removing && change?.kind !== 'move' && change?.kind !== 'fill' && form !== 'fill' && (
+          <div className="mt-1.5 flex items-start gap-1.5 min-w-0">
+            <span className="shrink-0 pt-px text-2xs text-ink-muted">{rule.field.allowOther ? 'Suggested' : 'Must be one of'}</span>
+            <AllowedValuePicker field={rule.field} label={keyName}
+              value={change?.kind === 'set' ? change.value : field?.kind === 'same' ? field.value : undefined} onPick={set} />
+          </div>
+        )}
+        {rule && editable && <PendingWarning rule={rule} change={change} />}
         {form === 'fill' && !pending && (
-          <FillForm keyName={keyName} type={type} count={total - has}
+          <FillForm keyName={keyName} type={type} count={total - has} rule={rule}
             onFill={(value) => { onChange(keyName, { kind: 'fill', value }); setForm(null) }} onCancel={() => setForm(null)} />
         )}
         {(form === 'rename' || form === 'copy') && !pending && (
@@ -172,6 +193,15 @@ export const ComparisonRow = memo(function ComparisonRow({
     </div>
   )
 }, sameRow)
+
+/** What publishing would refuse of the change pending — never a block: it is staged all the same. */
+function PendingWarning({ rule, change }: { rule: GovernedRule; change: KeyChange | null }) {
+  const removed = change?.kind === 'unset' || (change?.kind === 'move' && !change.keep)
+  const warning = change?.kind === 'set' || change?.kind === 'fill'
+    ? fieldWarning(rule.field, change.value, rule.typeLabel)
+    : removed && rule.field.required ? fieldWarning(rule.field, undefined, rule.typeLabel) : null
+  return warning ? <FieldNote className="mt-1.5">{warning}</FieldNote> : null
+}
 
 function StateBadge({ field }: { field: SharedField | null }) {
   if (!field) return <Badge tone="accent">New · for all</Badge>
@@ -276,10 +306,11 @@ export function Distribution({ field }: { field: SharedField }) {
   )
 }
 
-function FillForm({ keyName, type, count, onFill, onCancel }: {
+function FillForm({ keyName, type, count, rule, onFill, onCancel }: {
   keyName: string
   type: FieldType
   count: number
+  rule?: GovernedRule | null
   onFill: (value: unknown) => void
   onCancel: () => void
 }) {
@@ -297,6 +328,10 @@ function FillForm({ keyName, type, count, onFill, onCancel }: {
       ) : (
         <InlineValue value={undefined} fieldType={type} fieldLabel={`${keyName} where missing`} onCommit={onFill}
           readView={<span className="text-xs text-ink-muted">Click to type it — the others keep theirs</span>} />
+      )}
+      {rule && (rule.field.allowedValues?.length ?? 0) > 0 && type !== 'boolean' && (
+        <AllowedValuePicker field={rule.field} label={`${keyName} where missing`} value={undefined}
+          onPick={onFill} className="mt-1.5" />
       )}
     </div>
   )

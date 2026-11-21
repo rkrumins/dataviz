@@ -24,6 +24,7 @@ import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { nodeIndexOf } from '@/lib/storeIndex'
 import { resolveEntityName } from '@/lib/entityDisplayName'
+import { governedFields } from '@/lib/fieldRules'
 import { NO_VERSION_CONTROL, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Badge } from '@/components/ui/Badge'
@@ -36,7 +37,7 @@ import { Section } from '../../DrawerSection'
 import { InlineValue } from '../../property/InlineValue'
 import { RichValue } from '../../property/RichValue'
 import { peerPropertyStats } from '../peerPropertyStats'
-import { Distribution } from './ComparisonRow'
+import { Distribution, type GovernedRule } from './ComparisonRow'
 import { EMPTY_EDIT, withChange, type KeyChange } from './editOps'
 import { MultiEntityHeader, type TypeCount } from './MultiEntityHeader'
 import { MultiProperties } from './MultiProperties'
@@ -96,6 +97,21 @@ export function MultiEntityDrawer({
     return { types, refusals }
   }, [held, entityTypes])
   const sharedValueRefused = useCallback((key: string) => refusals.get(key) ?? null, [refusals])
+  // The fields a publish judges, by key — the most-selected type's, where two types define one.
+  // Their rows offer the allowed values and warn (never block) of a change publishing would refuse.
+  // Kept while the types held stay the same, so a write to one of them re-renders no row for it.
+  const typeOrder = types.map((t) => t.id).join('\u0000')
+  const rules = useMemo(() => {
+    const out = new Map<string, GovernedRule>()
+    for (const id of typeOrder ? typeOrder.split('\u0000') : []) {
+      const type = entityTypes?.find((e) => e.id === id)
+      for (const [key, field] of governedFields(type?.fields)) {
+        if (!out.has(key)) out.set(key, { field, typeLabel: type?.pluralName ?? `${type?.name ?? id}s` })
+      }
+    }
+    return out
+  }, [typeOrder, entityTypes])
+  const fieldRuleFor = useCallback((key: string) => rules.get(key) ?? null, [rules])
   const suggestions = useCallback(() => peerPropertyStats('', types[0]?.id ?? ''), [types])
 
   // The canvas selection, when it has moved on from what is compared.
@@ -222,6 +238,7 @@ export function MultiEntityDrawer({
           onAddAll={onAddAll}
           editable={editable}
           sharedValueRefused={sharedValueRefused}
+          fieldRuleFor={fieldRuleFor}
           memberOf={memberOf}
           onFocusNode={onFocusNode ? focusNode : undefined}
           onOpenNode={openNode}

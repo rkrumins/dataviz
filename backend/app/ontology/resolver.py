@@ -78,10 +78,25 @@ def _entity_def_from_dict(data: Dict[str, Any]) -> EntityTypeDefEntry:
                 format=f.get("format"),
                 reconciliation_key=bool(f.get("reconciliation_key", f.get("reconciliationKey", False))),
                 unique=bool(f.get("unique", False)),
+                allowed_values=_allowed_values(f.get("allowed_values", f.get("allowedValues"))),
+                allow_other=bool(f.get("allow_other", f.get("allowOther", False))),
             )
             for f in raw_fields
         ],
     )
+
+
+def _allowed_values(raw: Any) -> List[str]:
+    """A field's allowed values as stored — each its text, trimmed, once, in order; a blank dropped.
+    A value stored as a number or a boolean reads as its text (``3``, ``true``)."""
+    out: List[str] = []
+    for v in raw if isinstance(raw, list) else []:
+        if v is None or isinstance(v, (dict, list)):
+            continue
+        text = ("true" if v else "false") if isinstance(v, bool) else str(v).strip()
+        if text and text not in out:
+            out.append(text)
+    return out
 
 
 def _rel_def_from_dict(data: Dict[str, Any]) -> RelationshipTypeDefEntry:

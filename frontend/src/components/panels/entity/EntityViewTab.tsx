@@ -16,6 +16,7 @@ import { peerPropertyStats } from './peerPropertyStats'
 import { usePersonaMode } from '@/store/persona'
 import { usePreferencesStore, type DrawerSectionId } from '@/store/preferences'
 import type { EntityFieldDefinition } from '@/types/schema'
+import { governedFields } from '@/lib/fieldRules'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { Button, IconButton } from '@/components/ui/Button'
@@ -121,6 +122,12 @@ export function EntityViewTab({
   const [addingFor, setAddingFor] = useState<string | null>(null)
   const adding = addingFor === nodeId
   const suggestions = useMemo(() => (editsProps ? peerPropertyStats(nodeId, typeId) : []), [editsProps, nodeId, typeId])
+  // The type's fields a publish judges: edited in place, their rows offer the allowed values and
+  // warn of a value publishing would refuse.
+  const governed = useMemo(() => {
+    const byKey = editsProps ? governedFields(fields) : new Map()
+    return byKey.size ? { fields: byKey, typeLabel: typeName || typeId } : null
+  }, [editsProps, fields, typeName, typeId])
   // A property removed is still listed (struck through, with Restore while editing).
   const removedSome = [originalProps, publishedProps].some((base) => !!base && Object.keys(base).some((k) => !(k in userProps)))
 
@@ -176,7 +183,8 @@ export function EntityViewTab({
               <PropertyEditor key={nodeId} value={userProps} onChange={(next) => onCommitProperties!(next as Data)}
                 inline original={originalProps} published={publishedProps} startAdding={adding && !hasProps} suggestions={suggestions}
                 searchable groupByPath bare sectionsKey={typeId ? `entity:${typeId}` : undefined}
-                featuredKeys={featuredKeys} onToggleFeatured={glanceShown && typeId ? toggleFeatured : undefined} />
+                featuredKeys={featuredKeys} onToggleFeatured={glanceShown && typeId ? toggleFeatured : undefined}
+                governed={governed} />
             ) : Object.keys(listedProps).length > 0 || removedSome ? (
               <PropertyEditor value={listedProps} onChange={() => {}} readOnly published={listedPublished} searchable groupByPath bare
                 sectionsKey={typeId ? `entity:${typeId}` : undefined}

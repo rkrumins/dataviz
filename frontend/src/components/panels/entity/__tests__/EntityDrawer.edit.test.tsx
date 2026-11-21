@@ -307,3 +307,61 @@ describe("EntityDrawer — the source's own name and identity properties", () =>
     expect(within(facts()).getAllByText('Set from the name when saved')).toHaveLength(2)
   })
 })
+
+describe("EntityDrawer — what the type's fields ask of a value", () => {
+  beforeEach(() => {
+    const schema = useSchemaStore.getState().schema!
+    useSchemaStore.setState({
+      schema: { ...schema, entityTypes: [{ ...schema.entityTypes[0], fields: [
+        { id: 'retention', name: 'Retention', type: 'number' },
+        { id: 'tier', name: 'Tier', type: 'status', allowedValues: ['gold', 'silver'] },
+        { id: 'owner', name: 'Owner', type: 'string', required: true },
+      ] as never }] },
+    } as never)
+  })
+  const rowOf = (key: string) => screen.getAllByText(key).map((el) => el.closest('.group')).find(Boolean) as HTMLElement
+
+  it('edits a schema field as its type: a number field keeps a number', async () => {
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    await user.click(screen.getByRole('tab', { name: /^Edit/ }))
+    const retention = screen.getByLabelText('Retention')
+    await user.clear(retention)
+    await user.type(retention, '30')
+    await user.tab()
+    expect(ops()[0].payload).toEqual({ properties: { retention: 30 } })
+  })
+
+  it('marks a required field, offers the allowed values, and warns of a value publishing refuses — never blocking it', async () => {
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    await user.click(screen.getByRole('tab', { name: /^Edit/ }))
+    expect(screen.getByLabelText(/^Owner/)).toHaveValue('ana')
+    expect(screen.getByText('(required)')).toBeInTheDocument()
+
+    await user.click(within(screen.getByRole('group', { name: 'Allowed values of Tier' })).getByRole('button', { name: 'gold' }))
+    expect(ops()[0].payload).toEqual({ properties: { tier: 'gold' } })
+
+    const retention = screen.getByLabelText('Retention')
+    await user.clear(retention)
+    await user.type(retention, 'soon')
+    await user.tab()
+    expect(screen.getAllByRole('status').map((s) => s.textContent)).toContain(
+      'Should be a number — “soon” isn’t. Publishing will refuse it.')
+    expect(ops()[0].payload).toMatchObject({ properties: { retention: 'soon', tier: 'gold' } })
+  })
+
+  it('in place on the View tab: a changed value its field refuses, and a required one removed, are said', async () => {
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    await user.click(within(rowOf('retention')).getByRole('button', { name: 'Edit retention' }))
+    const field = screen.getByRole('textbox', { name: 'retention' })
+    await user.clear(field)
+    await user.type(field, 'soon{Enter}')
+    expect(within(rowOf('retention')).getByRole('status')).toHaveTextContent('Should be a number — “soon” isn’t.')
+
+    await user.click(within(rowOf('owner')).getByRole('button', { name: 'Delete owner' }))
+    expect(screen.getByText(/Owner is required for Dataset/)).toBeInTheDocument()
+    expect(ops()[0].unsetProperties).toEqual(['owner'])
+  })
+})

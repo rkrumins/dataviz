@@ -6,7 +6,7 @@
  * other graph data source.
  */
 
-import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition, ScopeFilterConfig, EntityAssignmentConfig } from '../types/schema'
+import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition, ScopeFilterConfig, EntityAssignmentConfig, type FieldFormat } from '../types/schema'
 import type { TraceMeta } from '@/services/traceApi'
 import type { MembershipPlan, MembershipRequest, MembershipResolving, MembershipResult, PlanRequest } from '@/types/membership'
 import type { ViewFeedPage, ViewFeedRequest, ViewMembersRequest } from '@/types/searchView'
@@ -181,6 +181,11 @@ export interface FieldSchema {
     showInPanel: boolean
     showInTooltip: boolean
     displayOrder: number
+    reconciliationKey?: boolean
+    unique?: boolean
+    format?: FieldFormat | null
+    allowedValues?: string[]
+    allowOther?: boolean
 }
 
 export interface EntityVisualSchema {
