@@ -14,6 +14,8 @@ import type { ReviewCounts } from '../useReviewCounts'
 const api = vi.hoisted(() => ({
   preview: vi.fn(),
   create: vi.fn(),
+  /** How many times the counts were asked again (`useReviewCounts`' retry), as each render asked. */
+  countRetries: [] as number[],
 }))
 let counts: ReviewCounts
 
@@ -45,7 +47,12 @@ vi.mock('@/hooks/usePropertyInsights', () => ({
 vi.mock('../../../search/builder/useDiscovery', () => ({
   useDiscovery: () => ({ keysByEdgeType: { FLOWS_TO: ['owner', 'confidence'], FEEDS: ['owner', 'sla'] } }),
 }))
-vi.mock('../useReviewCounts', () => ({ useReviewCounts: (_v: string, items: unknown) => (items ? counts : { counts: new Map(), complete: false, percent: 0, error: null, unavailable: false }) }))
+vi.mock('../useReviewCounts', () => ({
+  useReviewCounts: (_v: string, items: unknown, _s: string, retry = 0) => {
+    api.countRetries.push(retry)
+    return items ? counts : { counts: new Map(), complete: false, percent: 0, error: null, unavailable: false }
+  },
+}))
 
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { usePropertyJobsStore } from '@/store/propertyJobsStore'
@@ -76,6 +83,7 @@ beforeEach(() => {
   api.preview.mockReset().mockResolvedValue({ refusal: null, nameBudget: { registered: 10, nativeBudget: 50000, ceiling: 65534, isNew: false, verdict: 'ok' }, activeJobId: null, counts: null })
   api.create.mockReset().mockResolvedValue({ jobId: 'job-1', status: 'pending' })
   counts = exact(120, 30)
+  api.countRetries.length = 0
   allValues = null
   useStagedChangesStore.setState({ changes: [] } as never)
   usePropertyJobsStore.setState({ jobs: [], request: null } as never)
@@ -202,6 +210,75 @@ describe('PropertyOpDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Try again' }))
     expect(api.create).toHaveBeenCalledTimes(2)
     expect(api.create.mock.calls[0][5]).toBe(api.create.mock.calls[1][5])
+  })
+
+  it('applies only on a final count: not while counting, nor once a count stops — Try again counts afresh', async () => {
+    const user = userEvent.setup()
+    const counting = { count: 10, complete: false, percent: 40 }
+    counts = { counts: new Map([['target', { ...counting, count: 40 }], ['haveKey', counting]]), complete: false, percent: 40, error: null, unavailable: false }
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    expect(screen.getByRole('button', { name: 'Apply to 10+' })).toBeDisabled()
+
+    counts = { ...counts, error: 'The count stopped: timed out' }
+    await user.click(screen.getByRole('button', { name: /Where/ }))
+    await user.click(next())
+    expect(screen.getByText(/The count stopped: timed out/)).toHaveTextContent(/can’t be applied until a count finishes/)
+    expect(screen.getByRole('button', { name: /^Apply/ })).toBeDisabled()
+    counts = exact(120, 30)
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(api.countRetries.at(-1)).toBe(1)
+    expect(screen.getByRole('button', { name: 'Apply to 30' })).toBeEnabled()
+  })
+
+  it('keeps a failed check as its own error, with Try again', async () => {
+    const user = userEvent.setup()
+    api.preview.mockRejectedValueOnce(new Error('The server is busy'))
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    expect(await screen.findByText(/Couldn’t check it can be applied: The server is busy/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Apply to 30' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByRole('button', { name: 'Apply to 30' })).toBeEnabled()
+    expect(api.preview).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText(/Couldn’t check it can be applied/)).toBeNull()
+  })
+
+  it('asks for the name to be typed when the counts are only approximate, however few', async () => {
+    const user = userEvent.setup()
+    counts = exact(120, 30)
+    counts.counts = new Map([...counts.counts].map(([id, c]) => [id, { ...c, approximate: true, note: 'Your draft changed more than 200,000 entities' }]))
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    await user.click(screen.getByRole('button', { name: 'Apply to about 30' }))
+    expect(api.create).not.toHaveBeenCalled()
+    expect(screen.getByText(/Remove owner on about 30 entities/)).toBeInTheDocument()
+  })
+
+  it('asks for the name to be typed when nothing could count it, and says the number is unknown', async () => {
+    const user = userEvent.setup()
+    counts = { counts: new Map(), complete: false, percent: 0, error: null, unavailable: true }
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    await user.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(api.create).not.toHaveBeenCalled()
+    expect(screen.getByText('Remove owner on an unknown number of entities?')).toBeInTheDocument()
+    expect(screen.getByText(/We couldn.t check what this will affect/)).toBeInTheDocument()
+    await user.type(screen.getByPlaceholderText('owner'), 'owner')
+    // The confirmation's own Apply — the dialog's sits behind it.
+    await user.click(screen.getAllByRole('button', { name: 'Apply' }).at(-1)!)
+    expect(api.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a selection past 20,000 whole — never a part of it — and says what to use instead', async () => {
+    const user = userEvent.setup()
+    const ids = Array.from({ length: 20_001 }, (_, i) => `n${i}`)
+    open({ kind: 'remove', key: 'owner', target: { kind: 'selection', ids } }, ids)
+    expect(screen.getByRole('radio', { name: /The 20,001 selected/ })).toHaveAttribute('aria-checked', 'true')
+    expect(next()).toBeDisabled()
+    expect(screen.getAllByText('20,000 is the most a selection can change — use Whole view, Has key or a layer instead.').length).toBeGreaterThan(0)
+    await user.click(screen.getByRole('radio', { name: /Every entity with owner/ }))
+    expect(next()).toBeEnabled()
   })
 
   it('says what publishing the draft would refuse of it — and applies it all the same', async () => {

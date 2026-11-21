@@ -1,6 +1,7 @@
 /**
  * Several entities at once on the Graph and Hierarchy canvases — selected the way a reader selects
- * them, compared and edited in the entity drawer, and saved from Review & Save.
+ * them, compared and edited in the entity drawer, and saved from Review & Save — or changed in bulk
+ * on the server, through the one dialog each canvas hosts.
  *
  * The REAL canvases, mounted on a stub provider: the store is the one selection (the rings, the
  * selection bar and every bulk action read it), ⌘A selects what is on screen in one write, a
@@ -28,6 +29,7 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useAuthStore } from '@/store/auth'
 import { useSearchStore } from '@/store/searchStore'
 import { useNotificationStore } from '@/components/ui/notifications'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { installJsdomLayout } from '@/test/canvasHarness'
 import type { GraphDataProvider, GraphNode } from '@/providers/GraphDataProvider'
 
@@ -118,7 +120,7 @@ async function mount(Canvas: ComponentType, layout: 'graph' | 'hierarchy', opts?
   stubFetch()
   seed(layout, opts)
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  render(
+  const view = render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ProviderOverride value={{
@@ -133,6 +135,7 @@ async function mount(Canvas: ComponentType, layout: 'graph' | 'hierarchy', opts?
     </MemoryRouter>,
   )
   await settle()
+  return view
 }
 
 /** A card on the Graph canvas, or a row on the Hierarchy. */
@@ -427,6 +430,43 @@ describe('HierarchyCanvas — several at once', () => {
     await saveOneFromTheCanvas()
     expect(requests.some((u) => u.includes('/graph/changes'))).toBe(true)
     expect(messages()).toContain('success: Saved to draft.')
+  }, 20000)
+})
+
+describe.each([
+  ['GraphCanvas', GraphCanvas, 'graph'],
+  ['HierarchyCanvas', HierarchyCanvas, 'hierarchy'],
+] as const)('%s — a bulk property change', (_name, Canvas, layout) => {
+  beforeEach(() => { usePropertyJobsStore.setState({ request: null } as never) })
+  const dialog = () => screen.queryByRole('dialog', { name: 'Change a property' })
+  // What the entity drawer (Edit inside…) and the Property Manager's rows ask for.
+  const ask = () => act(() => { usePropertyJobsStore.getState().requestOp({ kind: 'set', key: 'owner' }) })
+
+  it('in a draft, a change asked for from the drawer or the Property Manager opens the dialog here', async () => {
+    await mount(Canvas, layout, { draft: true })
+    ask()
+    expect(await screen.findByRole('dialog', { name: 'Change a property' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Property' })).toHaveValue('owner')
+  }, 20000)
+
+  it('outside a draft, says to open one instead', async () => {
+    await mount(Canvas, layout)
+    ask()
+    await settle()
+    expect(dialog()).toBeNull()
+    expect(messages()).toContain('info: Open a draft to change properties.')
+    expect(usePropertyJobsStore.getState().request).toBeNull()
+  }, 20000)
+
+  it('never opens a request made before it was there, and takes an open one with it when it goes', async () => {
+    ask()
+    const { unmount } = await mount(Canvas, layout, { draft: true })
+    await settle()
+    expect(dialog()).toBeNull()
+    ask()
+    expect(await screen.findByRole('dialog', { name: 'Change a property' })).toBeInTheDocument()
+    unmount()
+    expect(usePropertyJobsStore.getState().request).toBeNull()
   }, 20000)
 })
 

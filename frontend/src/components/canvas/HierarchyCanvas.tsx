@@ -34,6 +34,7 @@ import { SelectionBar } from './context-view/SelectionBar'
 import { StagedChangesPanel } from './context-view/StagedChangesPanel'
 import { DraftSaveControls } from '@/features/versioning/canvas/DraftSaveControls'
 import { remapIdSet, useCanvasEditGate, useDraftSave, useStagedUndoShortcuts } from '@/features/versioning/canvas/useDraftSave'
+import { useCanvasPropertyJobs } from '@/features/versioning/canvas/useCanvasPropertyJobs'
 import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
 import { useCreateLinkStore } from './edge-create/createLinkStore'
 import { InlineNodeEditor } from './InlineNodeEditor'
@@ -56,6 +57,7 @@ import { EntityDrawer } from '../panels/entity/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
+import { PropertyOpHost } from './property-manager/PropertyOpHost'
 import { DisplayRuleTagChips } from './property-manager/DisplayRuleTagChips'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
@@ -198,8 +200,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const editModeEnabled = useFeature('editModeEnabled')
   // Graph edits are kept only in a draft the caller may write, with edit mode on — and a trace is
   // read-only for its whole life. The same gate as the Context View's, and the same save.
-  const { scopeWsId, dataSourceId, viewId, graphId, isDraft, canEditGraph } = useCanvasEditGate()
+  const { scopeWsId, dataSourceId, viewId, graphId, branchId, isDraft, canEditGraph } = useCanvasEditGate()
   const canvasWritable = canEditGraph && !trace.isTracing
+  // Bulk property changes: the one dialog writes to the draft open here, and its jobs are followed.
+  const propertyGraphWrite = useCanvasPropertyJobs({ wsId: scopeWsId, graphId, branchId, writable: canvasWritable })
   const saveToDraft = useDraftSave({
     wsId: scopeWsId,
     viewId,
@@ -723,6 +727,11 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           />
         )}
       </AnimatePresence>
+      <PropertyOpHost
+        viewId={activeView?.id ?? ''}
+        graphWrite={propertyGraphWrite}
+        knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
+      />
 
       {/* === UX-FIRST INTERACTION COMPONENTS (Unified with LineageCanvas) === */}
 

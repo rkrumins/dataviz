@@ -6,10 +6,11 @@
  * reaches, however many — not only the ones loaded on the canvas. Relationships the same way: named
  * ones, or every one a Connections search matches (an edge target, `isEdgeTarget`).
  *
- * A removal, a rename or an overwrite of many entities (or across the whole data source) asks for
- * the property's name to be typed first. The request carries a key made from what it applies, so
- * retrying after a failure never applies it twice. Portal-mounted: a scrim beside an inert wrapper,
- * only the panel interactive.
+ * It is applied only once Review's count is final. A removal, a rename or an overwrite of many
+ * entities (or across the whole data source) asks for the property's name to be typed first — of
+ * any number, when the count is approximate or unknown. The request carries a key made from what it
+ * applies, so retrying after a failure never applies it twice. Portal-mounted: a scrim beside an
+ * inert wrapper, only the panel interactive.
  */
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
@@ -30,7 +31,7 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
 import {
   EDGE_RESERVED_KEYS, impactOf, isCleanup, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
-  reviewCounts, scopeFixedToView, targetLabel, targetOf, type OpDraft, type ScopeMode, type TargetPreset,
+  reviewCounts, scopeFixedToView, targetLabel, targetOf, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset,
 } from './opModel'
 import { useReviewCounts } from './useReviewCounts'
 import { WhatStep } from './WhatStep'
@@ -78,27 +79,34 @@ export function PropertyOpDialog({
   const effectiveScope: ScopeMode = scopeFixedToView(preset) ? 'view' : scopeMode
   const whatProblem = opProblem(op, edges)
   const whereProblem = !target
-    ? (preset.kind === 'custom' ? 'Add a condition to say which entities' : `Choose which ${edges ? 'relationships' : 'entities'}`)
+    ? (tooManyIds(preset) ?? (preset.kind === 'custom' ? 'Add a condition to say which entities' : `Choose which ${edges ? 'relationships' : 'entities'}`))
     : preset.kind !== 'selection' && preset.kind !== 'relationships' && effectiveScope === 'data_source' && !sourceConfirmed ? 'Confirm the whole data source is meant' : null
 
   // ── Review: counted, checked and sampled once it is reached ──
   const reviewing = step === 2 && !whatProblem && !whereProblem
+  // Try again: the check and the counts asked afresh.
+  const [attempt, setAttempt] = useState(0)
+  const retry = () => setAttempt((n) => n + 1)
   const countItems = useMemo(() => (reviewing && predicate ? reviewCounts(op, predicate) : null), [reviewing, predicate, op])
-  const counts = useReviewCounts(viewId, countItems, effectiveScope)
+  const counts = useReviewCounts(viewId, countItems, effectiveScope, attempt)
   const sample = useAffectedSample(viewId, reviewing && predicate && !edges && effectiveScope === 'view' ? predicate : null, reviewing && !!predicate && !edges)
   // The server's check, kept with the request it answers: a newer request reads as checking.
-  const requestKey = reviewing && target ? JSON.stringify({ op: jobOp(op), target }) : ''
-  const [checked, setChecked] = useState<{ key: string; data: PropertyJobPreview | null }>({ key: '', data: null })
+  const changeKey = reviewing && target ? JSON.stringify({ op: jobOp(op), target }) : ''
+  const requestKey = changeKey && `${changeKey}#${attempt}`
+  const [checked, setChecked] = useState<{ key: string; data: PropertyJobPreview | null; error: string | null }>({ key: '', data: null, error: null })
   useEffect(() => {
     if (!requestKey || !target) return
     const controller = new AbortController()
     previewPropertyJob(graphWrite.wsId, graphWrite.graphId, graphWrite.branchId, jobOp(op), target, controller.signal)
-      .then((data) => { if (!controller.signal.aborted) setChecked({ key: requestKey, data }) })
-      .catch(() => { if (!controller.signal.aborted) setChecked({ key: requestKey, data: null }) })
+      .then((data) => { if (!controller.signal.aborted) setChecked({ key: requestKey, data, error: null }) })
+      .catch((e: unknown) => {
+        if (!controller.signal.aborted) setChecked({ key: requestKey, data: null, error: (e as Error).message || 'the server didn’t answer' })
+      })
     return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestKey, graphWrite.wsId, graphWrite.graphId, graphWrite.branchId])
-  const preview = { data: checked.key === requestKey ? checked.data : null, loading: !!requestKey && checked.key !== requestKey }
+  const answered = checked.key === requestKey
+  const preview = { data: answered ? checked.data : null, error: answered ? checked.error : null, loading: !!requestKey && !answered }
 
   const ids = preset.kind === 'selection' || preset.kind === 'relationships'
   const tally = ids
@@ -113,15 +121,19 @@ export function PropertyOpDialog({
   // A convert's bound, from how the view's entities store the property (the target is in the view).
   const kinds = effectiveScope === 'view' ? properties.find((p) => p.key === op.key.trim())?.kinds : null
   const impact = tally && tally.target !== undefined ? impactOf(op, tally, kinds) : null
-  const exact = ids ? !!preview.data?.counts : counts.complete
+  // Counted to the end (or, where nothing can count it, never to be); `exact` when it is also the
+  // draft's own count, not Published's or a floor.
+  const final = ids ? !!preview.data?.counts : counts.complete || counts.unavailable
+  const exact = final && (ids || ![...counts.counts.values()].some((c) => c.approximate || c.lowerBound))
   const stagedCount = useStagedChangesStore((s) => s.changes.length)
+  // Applied only on a final count: what it says it changes is what it changes.
   const blocked = !!preview.data?.refusal || !!preview.data?.activeJobId || preview.data?.nameBudget?.verdict === 'refused'
-    || stagedCount > 0 || preview.loading || (exact && impact?.changes === 0)
+    || stagedCount > 0 || preview.loading || !!preview.error || !final || (!ids && !!counts.error) || (exact && impact?.changes === 0)
 
   // ── Apply ──
   // The same change sent again — a retry — carries the same key; a different one, a new key.
   const salt = useMemo(() => generateId('propjob'), [])
-  const idempotencyKey = `${salt}:${hash(requestKey)}`
+  const idempotencyKey = `${salt}:${hash(changeKey)}`
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)
@@ -147,8 +159,7 @@ export function PropertyOpDialog({
     }
   }
   const apply = () => {
-    if (!impact) { void submit(); return }
-    if (needsTypedConfirm(op, impact, effectiveScope)) setConfirming(true)
+    if (needsTypedConfirm(op, impact, effectiveScope, exact)) setConfirming(true)
     else void submit()
   }
 
@@ -225,7 +236,8 @@ export function PropertyOpDialog({
               {step === 2 && (
                 <ReviewStep
                   op={op} preset={preset} scopeMode={effectiveScope} counts={ids ? null : counts} impact={impact} exact={exact}
-                  preview={preview.data} previewLoading={preview.loading} sample={sample.data} sampleLoading={sample.loading}
+                  preview={preview.data} previewLoading={preview.loading} previewError={preview.error} onRetry={retry}
+                  sample={sample.data} sampleLoading={sample.loading}
                   stagedCount={stagedCount} reason={reason} onReason={setReason} edges={edges}
                 />
               )}
@@ -240,20 +252,21 @@ export function PropertyOpDialog({
             <Button size="sm" variant={step === 2 && (op.kind === 'remove') ? 'danger' : 'primary'} rightIcon={step < 2 ? ArrowRight : undefined}
               disabled={!canNext} loading={submitting} onClick={next}>
               {step < 2 ? 'Next' : error ? 'Try again'
-                : `Apply${impact ? ` to ${impact.upTo ? 'up to ' : ''}${impact.changes.toLocaleString()}${exact ? '' : '+'}` : ''}`}
+                : `Apply${impact ? ` to ${impact.upTo ? 'up to ' : ''}${final && !exact ? 'about ' : ''}${impact.changes.toLocaleString()}${final ? '' : '+'}` : ''}`}
             </Button>
           </div>
         </motion.div>
       </div>
-      {confirming && impact && (
+      {confirming && (
         <DangerConfirmDialog
           isOpen
-          title={`${propertyJobLabel(jobOp(op))} on ${impact.changes.toLocaleString()} ${edges ? 'relationships' : 'entities'}?`}
+          title={`${propertyJobLabel(jobOp(op))} on ${impact ? `${exact ? '' : 'about '}${impact.changes.toLocaleString()}` : 'an unknown number of'} ${edges ? 'relationships' : 'entities'}?`}
           subtitle={`On ${targetLabel(preset)}${effectiveScope === 'data_source' ? ', across the whole data source' : ''} — in your draft, until it is published.`}
           confirmPhrase={op.key.trim()}
           confirmLabel="Apply"
+          impactUnknown={!impact}
           sections={[{
-            label: edges ? 'Relationships' : 'Entities', count: impact.changes,
+            label: edges ? 'Relationships' : 'Entities', count: impact?.changes ?? 0,
             tone: op.kind === 'remove' || (op.kind === 'convert' && op.onFail === 'remove') ? 'destructive' : 'warning',
             consequence: op.kind === 'remove' ? `Lose ${op.key.trim()}` : op.kind === 'rename' ? `${op.key.trim()} becomes ${op.to.trim()}`
               : cleanup ? `${op.key.trim()} is rewritten${op.kind === 'convert' && op.onFail === 'remove' ? ', or removed where it won’t convert' : ''}`

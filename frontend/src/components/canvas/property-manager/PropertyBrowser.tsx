@@ -443,6 +443,9 @@ function valuePredicate(key: string, v: SearchCatalogValue): Predicate {
     return { kind: 'property', key, op: 'eq', value: v.value, valueType } as Predicate
 }
 
+/** One value, as its kind and itself: the text "1" and the number 1 are two values. */
+const valueKey = (v: { value: unknown; kind: string }) => JSON.stringify([v.kind, v.value])
+
 /** The kind most of a property's entities store it as (a list's elements aside). */
 function dominantKind(kinds: Readonly<Record<string, number>>): ValueKind {
     const held = Object.entries(kinds).filter(([k]) => k in KIND_LABEL && k !== 'List').sort((a, b) => b[1] - a[1])
@@ -481,19 +484,28 @@ function PropertyRow({
     // Values that differ only in case or in spaces around them: a merge waiting to be made.
     const similar = useMemo(() => similarGroups(property.values), [property.values])
     const dominant = dominantKind(property.kinds)
-    // Values picked from the bars, by index, to merge into one.
-    const [picked, setPicked] = useState<ReadonlySet<number>>(() => new Set())
+    // Values picked from the bars to merge into one — by value, not by place: the values reorder
+    // while the catalog is read.
+    const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set())
     const togglePicked = (i: number) => setPicked((s) => {
         const next = new Set(s)
-        if (!next.delete(i)) next.add(i)
+        const k = valueKey(property.values[i]!)
+        if (!next.delete(k)) next.add(k)
         return next
     })
+    const pickedAt = useMemo(
+        () => new Set(property.values.flatMap((v, i) => (picked.has(valueKey(v)) ? [i] : []))),
+        [property.values, picked],
+    )
     const mergePicked = () => {
-        // Into the most held of them; the dialog offers to keep another.
-        const chosen = [...picked].sort((a, b) => a - b).map((i) => property.values[i]).filter((v): v is SearchCatalogValue => !!v)
+        // Into the most held of them as they stand now; the dialog offers to keep another.
+        const held = new Map(property.values.map((v) => [valueKey(v), v.count]))
+        const chosen = [...picked]
+            .map((k) => { const [kind, value] = JSON.parse(k) as [ValueKind, unknown]; return { kind, value, count: held.get(k) ?? -1 } })
+            .sort((a, b) => b.count - a.count)
         const [into, ...rest] = chosen
         if (!into || !onMerge) return
-        onMerge(rest.map((v) => ({ from: v.value, fromKind: v.kind as ValueKind, to: into.value, toKind: into.kind as ValueKind })))
+        onMerge(rest.map((v) => ({ from: v.value, fromKind: v.kind, to: into.value, toKind: into.kind })))
         setPicked(new Set())
     }
     const byType = useMemo(
@@ -701,7 +713,7 @@ function PropertyRow({
                                 total={property.count}
                                 limit={values.length}
                                 onItemClick={searchLabel ? (it) => searchLabel(it.label) : undefined}
-                                selectable={onMerge && !blocked && values.length > 1 ? { selected: picked, onToggle: togglePicked } : undefined}
+                                selectable={onMerge && !blocked && values.length > 1 ? { selected: pickedAt, onToggle: togglePicked } : undefined}
                             />
                             {picked.size > 0 && onMerge && (
                                 <div className="flex items-center gap-2 rounded-lg border border-accent-lineage/30 bg-accent-lineage/[0.06] px-2.5 py-1.5 text-[11px] text-ink-secondary" aria-live="polite">
