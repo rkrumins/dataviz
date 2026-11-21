@@ -56,13 +56,11 @@ export function useFulfilRights(workspaceId: string | null | undefined): FulfilR
     return { full, contactSourceIds }
 }
 
-/** May this person take on this workspace's requests — the one asked by `requestedBy`, when
- *  given? The platform team, the workspace's admins, or a named Owner or Steward of one of
- *  its sources; never the person who asked. */
-export function useCanFulfil(workspaceId: string | null | undefined, requestedBy?: string | null): boolean {
+/** May this person take on this workspace's requests? The platform team, the workspace's
+ *  admins, or a named Owner or Steward of one of its sources — and never one they asked for
+ *  themselves, which the lists and the review leave out. */
+export function useCanFulfil(workspaceId: string | null | undefined): boolean {
     const { full, contactSourceIds } = useFulfilRights(workspaceId)
-    const meId = useAuthStore(s => s.user?.id)
-    if (requestedBy && requestedBy === meId) return false
     return full || contactSourceIds.length > 0
 }
 
