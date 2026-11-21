@@ -248,11 +248,13 @@ export function reviewCounts(op: OpDraft, target: Predicate): Array<{ id: 'targe
   return items
 }
 
-/** The entities a find & replace or a merge could change: text containing what it finds (or being
- *  it), or one of the values merged — compared as text exactly, as numbers or as yes/no. A bound:
- *  a number reads as text too, and 1 and 1.0 compare as one number. */
+/** The entities a fill, a find & replace or a merge could change: an empty value; text containing
+ *  what it finds (or being it); or one of the values merged — compared as text exactly, as numbers
+ *  or as yes/no. A bound: a number reads as text too, and 1 and 1.0 compare as one number. */
 function matchPredicate(op: OpDraft): Predicate | null {
   const key = op.key.trim()
+  // A fill reaches every entity whose value is empty — none, null, "" or [] — as the job judges it.
+  if (op.kind === 'fillEmpty') return { kind: 'property', key, op: 'isEmpty' } as Predicate
   if (op.kind === 'replace' && op.find) {
     return { kind: 'property', key, op: op.wholeValue ? 'eq' : 'contains', value: op.find, valueType: 'string', caseSensitive: !!op.matchCase } as Predicate
   }
@@ -307,7 +309,11 @@ export function impactOf(
   }
   switch (op.kind) {
     case 'set': return { changes: target, replaced: haveKey, untouched: 0 }
-    case 'fillEmpty': return { changes: Math.max(0, target - haveKey), replaced: 0, untouched: haveKey }
+    case 'fillEmpty':
+      // Those with an empty value, at most (a value of only spaces reads as empty to the search, and
+      // is left alone); without that count, those without the key.
+      if (c.match !== undefined) return { changes: c.match, replaced: 0, untouched: Math.max(0, target - c.match), upTo: true }
+      return { changes: Math.max(0, target - haveKey), replaced: 0, untouched: haveKey }
     case 'remove': return { changes: haveKey, replaced: 0, untouched: Math.max(0, target - haveKey) }
     case 'rename':
     case 'copy': {

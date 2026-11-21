@@ -17,7 +17,7 @@
  * (with Restore).
  */
 
-import { Fragment, useState, useCallback, useMemo, useRef, useEffect, memo, createContext, useContext, type ReactNode } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, memo, createContext, useContext, type ReactNode } from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
@@ -71,9 +71,9 @@ import { detectValue, parsePastedLines, rankSuggestions, type PastedProperty, ty
 import { useRecentPropertyKeys } from '@/store/recentPropertyKeys'
 import { usePersonaMode } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
-import { fieldWarning, requiredMissing } from '@/lib/fieldRules'
+import { fieldWarning } from '@/lib/fieldRules'
 import { GovernedFieldsContext, type GovernedFields } from './property/governedFields'
-import { AllowedValuePicker, FieldNote, FillMissingButton } from './property/FieldGovernance'
+import { AllowedValuePicker, FieldNote } from './property/FieldGovernance'
 
 // ============================================
 // Types
@@ -815,9 +815,6 @@ const PropertyRow = memo(function PropertyRow({
             <AllowedValuePicker field={rule} value={value} label={rule.name || rowKey} onPick={onValueChange} className="mt-1" />
           )}
           {warning && <FieldNote className="mt-1">{warning}</FieldNote>}
-          {warning && rule && governed?.onFillMissing && requiredMissing(rule, value) && (
-            <FillMissingButton className="mt-0.5" typeName={governed.typeLabel} onClick={() => governed.onFillMissing!(governKey!)} />
-          )}
         </div>
 
         {/* Inline, the row reads as a value: its type and actions float over its end when you
@@ -2286,7 +2283,7 @@ function RemovedRows({ rows, onRestore, unsaved }: {
   const warnings = onRestore && governed ? rows.flatMap(([key]) => {
     const rule = governed.fields.get(key)
     const warning = rule ? fieldWarning(rule, undefined, governed.typeLabel) : null
-    return warning ? [{ key, warning }] : []
+    return warning ? [warning] : []
   }) : []
   if (rows.length === 0) return null
   return (
@@ -2310,14 +2307,7 @@ function RemovedRows({ rows, onRestore, unsaved }: {
           </button>}
         </div>
       ))}
-      {warnings.map(({ key, warning }) => (
-        <Fragment key={key}>
-          <FieldNote className="pl-5">{warning}</FieldNote>
-          {governed?.onFillMissing && (
-            <FillMissingButton className="ml-5" typeName={governed.typeLabel} onClick={() => governed.onFillMissing!(key)} />
-          )}
-        </Fragment>
-      ))}
+      {warnings.map((w) => <FieldNote key={w} className="pl-5">{w}</FieldNote>)}
     </div>
   )
 }

@@ -17,8 +17,6 @@ import { usePersonaMode } from '@/store/persona'
 import { usePreferencesStore, type DrawerSectionId } from '@/store/preferences'
 import type { EntityFieldDefinition } from '@/types/schema'
 import { governedFields } from '@/lib/fieldRules'
-import { usePropertyJobsStore } from '@/store/propertyJobsStore'
-import { fillRequiredRequest } from '@/components/canvas/property-manager/op/fillRequired'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { Button, IconButton } from '@/components/ui/Button'
@@ -125,17 +123,10 @@ export function EntityViewTab({
   const adding = addingFor === nodeId
   const suggestions = useMemo(() => (editsProps ? peerPropertyStats(nodeId, typeId) : []), [editsProps, nodeId, typeId])
   // The type's fields a publish judges: edited in place, their rows offer the allowed values and
-  // warn of a value publishing would refuse — a required one left without one, with the way to
-  // fill it on every entity of the type missing it (the bulk dialog, in the view).
+  // warn of a value publishing would refuse.
   const governed = useMemo(() => {
-    const byKey = editsProps ? governedFields(fields) : new Map<string, EntityFieldDefinition>()
-    const typeLabel = typeName || typeId
-    return byKey.size ? {
-      fields: byKey, typeLabel,
-      onFillMissing: typeId ? (key: string) => usePropertyJobsStore.getState().requestOp(fillRequiredRequest({
-        entityType: typeId, entityTypeName: typeLabel, field: key, fieldName: byKey.get(key)?.name, scopeMode: 'view',
-      })) : undefined,
-    } : null
+    const byKey = editsProps ? governedFields(fields) : new Map()
+    return byKey.size ? { fields: byKey, typeLabel: typeName || typeId } : null
   }, [editsProps, fields, typeName, typeId])
   // A property removed is still listed (struck through, with Restore while editing).
   const removedSome = [originalProps, publishedProps].some((base) => !!base && Object.keys(base).some((k) => !(k in userProps)))
