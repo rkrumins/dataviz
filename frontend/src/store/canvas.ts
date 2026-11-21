@@ -103,6 +103,9 @@ export type DrawerEdgeTarget =
       summaryOnly?: boolean
       members: EdgeMemberRef[]
     }
+  /** Several relationships, compared and edited as one — a snapshot of the ones it was opened on.
+   *  `id` stands for exactly those (`targetFromMembers`); `lineId`, the line they came from. */
+  | { kind: 'relationships'; id: string; members: EdgeMemberRef[]; lineId?: string }
 
 export type DrawerEntry =
   | { kind: 'node'; id: string }

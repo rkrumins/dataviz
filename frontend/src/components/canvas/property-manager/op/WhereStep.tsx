@@ -2,10 +2,11 @@
  * Step 2 — Where: which entities the change reaches. The ways in are ready-made — the whole view,
  * every entity with the property, the canvas selection, a layer, a container's children or
  * everything inside it, a search's matches — or criteria built like any search. In the view by
- * default; the whole data source on purpose, behind a warning.
+ * default; the whole data source on purpose, behind a warning. A change of relationships reaches
+ * the ones it was opened on: those picked, or a Connections search's.
  */
 import { useMemo, type ComponentType, type ReactNode } from 'react'
-import { AlertTriangle, Filter, FolderTree, Globe2, Layers, ListTree, MousePointerSquareDashed, ScanSearch, Tag } from 'lucide-react'
+import { AlertTriangle, Filter, FolderTree, Globe2, Layers, ListTree, MousePointerSquareDashed, ScanSearch, Tag, Waypoints } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Segmented } from '@/components/ui/Segmented'
 import type { Predicate } from '@/types/search'
@@ -48,6 +49,14 @@ export function WhereStep({
   const key = op.key.trim()
   const choices = useMemo(() => {
     const out: Choice[] = []
+    // Relationships: the ones it was opened on — nothing here reaches others.
+    if (seed?.kind === 'relationships' || seed?.kind === 'connections') {
+      out.push(seed.kind === 'relationships'
+        ? { id: seed.kind, icon: Waypoints, title: `The ${seed.ids.length.toLocaleString()} relationships`, detail: 'Exactly the relationships picked', preset: seed }
+        : { id: seed.kind, icon: ScanSearch, title: 'The search’s relationships',
+          detail: `Every relationship it matches${seed.count !== undefined ? ` — ${seed.count.toLocaleString()}` : ''}, on every page`, preset: seed })
+      return out
+    }
     if (seed && (seed.kind === 'children' || seed.kind === 'inside' || seed.kind === 'search')) {
       out.push({
         id: seed.kind,
@@ -136,7 +145,7 @@ export function WhereStep({
         })}
       </div>
 
-      {preset.kind !== 'selection' && (
+      {preset.kind !== 'selection' && preset.kind !== 'relationships' && (
         <div>
           <span className={LABEL}>Search in</span>
           <Segmented<ScopeMode>

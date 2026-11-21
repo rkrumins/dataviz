@@ -4,10 +4,13 @@
  * layer is searched in the view), the operation is sent only once it is whole, and Review counts
  * what it will change, replace and leave alone.
  */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
-  impactOf, jobOp, needsTypedConfirm, opProblem, predicateOf, reviewCounts, targetLabel, targetOf, type OpDraft,
+  EDGE_RESERVED_KEYS, impactOf, isConnectionsPredicate, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, reviewCounts,
+  searchPreset, targetLabel, targetOf, type OpDraft,
 } from '../opModel'
 
 const op = (patch: Partial<OpDraft>): OpDraft => ({ kind: 'set', key: 'owner', to: '', value: 'ana', onConflict: 'skip', ...patch })
@@ -88,5 +91,53 @@ describe('review', () => {
     expect(needsTypedConfirm(op({ kind: 'set' }), { changes: 5000, replaced: 0 }, 'view')).toBe(false)
     expect(needsTypedConfirm(op({ kind: 'set' }), { changes: 5000, replaced: 1200 }, 'view')).toBe(true)
     expect(needsTypedConfirm(op({ kind: 'fillEmpty' }), { changes: 5000, replaced: 0 }, 'data_source')).toBe(false)
+  })
+})
+
+describe('relationships', () => {
+  const edges = { kind: 'edges', edgeTypes: ['FLOWS_TO'] } as never
+
+  it('named ones are sent as edge ids; a Connections search as its predicate', () => {
+    expect(targetOf({ kind: 'relationships', ids: ['e1', 'urn:a|FLOWS_TO|urn:b'] }, 'v1', 'view'))
+      .toEqual({ edgeIds: ['e1', 'urn:a|FLOWS_TO|urn:b'] })
+    expect(targetOf({ kind: 'relationships', ids: [] }, 'v1', 'view')).toBeNull()
+    expect(targetOf({ kind: 'connections', predicate: edges, scopeMode: 'data_source', label: 'x' }, 'v1', 'data_source'))
+      .toEqual({ viewId: 'v1', predicate: edges, scopeMode: 'data_source' })
+    expect(targetLabel({ kind: 'relationships', ids: ['e1', 'e2'] })).toBe('the 2 selected relationships')
+    expect(isEdgeTarget({ kind: 'connections', predicate: edges, scopeMode: 'view', label: 'x' })).toBe(true)
+    expect(isEdgeTarget({ kind: 'selection', ids: ['u'] })).toBe(false)
+  })
+
+  it('a search\'s matches are its relationships for a Connections search, alone or as an AND of one', () => {
+    expect(searchPreset(edges, 'view', 12)).toEqual({ kind: 'connections', predicate: edges, scopeMode: 'view', label: 'the search’s relationships', count: 12 })
+    const wrapped = { kind: 'group', op: 'and', children: [edges] } as never
+    expect(searchPreset(wrapped, 'view').kind).toBe('connections')
+    expect(searchPreset({ kind: 'all' } as never, 'view').kind).toBe('search')
+    expect(isConnectionsPredicate({ kind: 'group', op: 'or', children: [edges] } as never)).toBe(false)
+  })
+
+  it('an edge\'s own fields can\'t be named; an entity\'s reserved names can', () => {
+    expect(opProblem(op({ key: 'confidence' }), true)).toMatch(/kept by the platform/)
+    expect(opProblem(op({ key: 'displayName' }), true)).toBeNull()
+    expect(opProblem(op({ kind: 'rename', key: 'owner', to: 'weight' }), true)).toMatch(/kept by the platform/)
+    expect(opProblem(op({ key: 'confidence' }))).toBeNull()
+  })
+
+  it('Review counts a Connections search\'s relationships holding the key by the same search, each edge holding it', () => {
+    const items = reviewCounts(op({ kind: 'rename', key: 'owner', to: 'steward' }), edges)
+    expect(items.map((i) => i.id)).toEqual(['target', 'haveKey', 'haveTo'])
+    expect(items[1]!.predicate).toEqual({ kind: 'edges', edgeTypes: ['FLOWS_TO'], edgePredicate: { kind: 'edgeHasProperty', key: 'owner', negate: false } })
+    const narrowed = { kind: 'edges', edgePredicate: { kind: 'edgeProperty', key: 'x', op: 'eq', value: 1 } } as never
+    expect(reviewCounts(op({}), narrowed)[1]!.predicate).toEqual({ kind: 'edges', edgePredicate: {
+      kind: 'edgeGroup', op: 'and', children: [{ kind: 'edgeProperty', key: 'x', op: 'eq', value: 1 }, { kind: 'edgeHasProperty', key: 'owner', negate: false }],
+    } })
+  })
+
+  it('an edge\'s own fields are exactly EDGE_NATIVE_KEYS in backend/common/edge_properties.py', () => {
+    const py = readFileSync(resolve(__dirname, '../../../../../../../backend/common/edge_properties.py'), 'utf8')
+    const body = py.match(/EDGE_NATIVE_KEYS = frozenset\(\{([\s\S]*?)\}\)/)
+    expect(body, 'EDGE_NATIVE_KEYS must still be a frozenset literal').not.toBeNull()
+    const python = new Set([...body![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]))
+    expect([...EDGE_RESERVED_KEYS].sort()).toEqual([...python].sort())
   })
 })

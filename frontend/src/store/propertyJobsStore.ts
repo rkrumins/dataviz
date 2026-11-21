@@ -28,6 +28,8 @@ export interface TrackedJob {
   op: PropertyJobOp
   /** The target in words ("the children of Orders"). */
   targetLabel: string
+  /** `edge`: it changes relationships. */
+  entityKind?: 'node' | 'edge'
   startedAt: string
   /** How it last stood. */
   job: PropertyJob | null
@@ -124,6 +126,7 @@ export function usePropertyCatalogOverlay(jobs: readonly TrackedJob[]): Readonly
     const map = new Map<string, CatalogOverlayEntry>()
     for (const t of jobs) {
       if (t.job?.status === 'failed' || t.job?.status === 'cancelled') continue
+      if (t.entityKind === 'edge') continue                 // the catalog lists entities' properties
       const entry = map.get(t.op.key) ?? { kinds: new Set<PropertyOpKind>(), count: 0, running: false }
       entry.kinds.add(t.op.kind)
       entry.count += 1

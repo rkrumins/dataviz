@@ -7325,7 +7325,8 @@ _PROPERTY_VALUE_MAX_BYTES = 64 * 1024
 
 
 async def _property_targets_from_job(job: dict):
-    """The urns a bulk property job's search target matches: an export of the search, run here as
+    """The urns a bulk property job's search target matches — for an edge job (a Connections
+    search) each edge's ``edgeId`` — an export of the search, run here as
     ``POST /search/exports`` runs it (and not behind that route's ``graphExportEnabled``), read
     back from its file. The view is held to the job's own — still in its workspace and data source
     (a view gone or moved is not found, and the job fails) — and its scope is the search's own
@@ -7343,6 +7344,7 @@ async def _property_targets_from_job(job: dict):
 
     target, ws, ds, bid = job["target"], job["workspaceId"], job["dataSourceId"], job["branchId"]
     actor, view_id, signing_key = job["actor"], target["viewId"], secrets.token_urlsafe(32)
+    field = "edgeId" if job.get("entityKind") == "edge" else "urn"
     async with get_async_session() as session:
         engine = await engine_for(session, ws, ds, branch_id=bid, actor=actor)
 
@@ -7379,10 +7381,10 @@ async def _property_targets_from_job(job: dict):
             buf += chunk
             *lines, buf = buf.split(b"\n")
             for line in lines:
-                urn = json.loads(line).get("urn") if line.strip() else None
+                urn = json.loads(line).get(field) if line.strip() else None
                 if urn:
                     yield urn
-        if buf.strip() and (urn := json.loads(buf).get("urn")):
+        if buf.strip() and (urn := json.loads(buf).get(field)):
             yield urn
 
 
@@ -7429,25 +7431,42 @@ class PropertyJobOp(_ApiModel):
 
 
 class PropertyJobTarget(_ApiModel):
-    """Entities named by id (urns, or ``gv:<entity id>``), or every entity a search predicate
-    matches in a view (``scopeMode`` ``view``, or ``data_source`` for the whole data source)."""
+    """Entities named by id (urns, or ``gv:<entity id>``), relationships named by id (``edgeIds``:
+    an edge's own, or ``source|TYPE|target`` as a Connections search names one without), or every
+    entity a search predicate matches in a view (``scopeMode`` ``view``, or ``data_source`` for
+    the whole data source) — every relationship, for a Connections search."""
     ids: Optional[List[Annotated[str, StringConstraints(min_length=1, max_length=2048)]]] = Field(
         default=None, min_length=1)
+    edge_ids: Optional[List[Annotated[str, StringConstraints(min_length=1, max_length=4352)]]] = Field(
+        default=None, alias="edgeIds", min_length=1)
     view_id: Optional[str] = Field(default=None, alias="viewId", min_length=1, max_length=128)
     predicate: Optional[Predicate] = None
     scope_mode: Literal["view", "data_source", "visible"] = Field(default="view", alias="scopeMode")
 
     @model_validator(mode="after")
     def _one(self):
-        if (self.ids is None) == (self.predicate is None):
-            raise ValueError("a target is `ids`, or a `viewId` with a `predicate`")
+        if sum(x is not None for x in (self.ids, self.edge_ids, self.predicate)) != 1:
+            raise ValueError("a target is `ids`, `edgeIds`, or a `viewId` with a `predicate`")
         if self.predicate is not None and not self.view_id:
             raise ValueError("a predicate target needs `viewId`")
         return self
 
+    @property
+    def named(self) -> Optional[List[str]]:
+        """The ids it names — entities' or relationships' — or None for a search."""
+        return self.ids if self.ids is not None else self.edge_ids
+
+    @property
+    def entity_kind(self) -> str:
+        """``edge`` for relationships — named by id, or a Connections search's — else ``node``."""
+        from backend.common.models.search import EdgesPredicate, unwrap_edges
+        if self.edge_ids is not None or isinstance(unwrap_edges(self.predicate), EdgesPredicate):
+            return "edge"
+        return "node"
+
     def wire(self) -> Dict[str, Any]:
-        if self.ids is not None:
-            return {"ids": self.ids}
+        if self.named is not None:
+            return {"ids": self.named}
         return {"viewId": self.view_id, "scopeMode": self.scope_mode,
                 "predicate": self.predicate.model_dump(mode="json", by_alias=True)}
 
@@ -7462,25 +7481,26 @@ def _check_property_job(op: PropertyJobOp, target: PropertyJobTarget, rules) -> 
     """Why a bulk property job can't be made as asked — ``(status, code, message)`` — or None.
     ``rules``: the data source's ``OntologyRules``, when it has them."""
     from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
-    from backend.common.models.search import EdgesPredicate, unwrap_edges
+    from backend.common.edge_properties import EDGE_NATIVE_KEYS
+    edges = target.entity_kind == "edge"
     for name in (op.key, op.to if op.kind in ("rename", "copy") else None):
-        if name in _RESERVED_NODE_KEYS:
+        if name in (EDGE_NATIVE_KEYS if edges else _RESERVED_NODE_KEYS):
             return 422, "reserved_key", (f"{name} is kept by the platform, not a property: it can't be "
                                          "edited in bulk.")
     if op.kind in ("rename", "copy") and op.to == op.key:
         return 422, "same_key", f"A {op.kind} writes to another key than {op.key}."
-    if target.ids is not None and len(target.ids) > vconfig.PROPERTY_JOB_MAX_IDS:
-        return 422, "too_many_ids", (f"A job names up to {vconfig.PROPERTY_JOB_MAX_IDS:,} entities by id; "
+    if target.named is not None and len(target.named) > vconfig.PROPERTY_JOB_MAX_IDS:
+        return 422, "too_many_ids", (f"A job names up to {vconfig.PROPERTY_JOB_MAX_IDS:,} "
+                                     f"{'relationships' if edges else 'entities'} by id; "
                                      "target the rest by a search instead.")
     if target.predicate is not None:
         if target.scope_mode == "visible":
             return 422, "visible_scope", ("A job edits what a search matches in the view or the data "
                                           "source, not only what is on the canvas: use scopeMode view.")
-        if isinstance(unwrap_edges(target.predicate), EdgesPredicate):
-            return 422, "edge_predicate", "A Connections search finds relationships; a job edits entities."
     field = {"set": op.key, "fillEmpty": op.key, "copy": op.to}.get(op.kind)
-    many = target.predicate is not None or len(set(target.ids or ())) > 1
-    if field and many and rules is not None and any(
+    many = target.predicate is not None or len(set(target.named or ())) > 1
+    # A unique field is an entity type's: a relationship's properties have none.
+    if field and many and not edges and rules is not None and any(
             field in rule.unique_fields for rule in rules.entity_types.values()):
         return 422, "unique_field", (f"{field} must be unique for its entity type, so it can't be given "
                                      "one value on several entities at once.")
@@ -7511,16 +7531,20 @@ async def _property_refusal(session: AsyncSession, ws_id: str, meta: dict, body:
     return refusal
 
 
-async def _property_name_budget(session: AsyncSession, ws_id: str, meta: dict, op: PropertyJobOp) -> dict:
+async def _property_name_budget(session: AsyncSession, ws_id: str, meta: dict, op: PropertyJobOp,
+                                edges: bool = False) -> dict:
     """Whether the key the op writes fits the graph's property names. FalkorDB numbers each name a
     graph ever held and never frees one: a new name past the native budget is stored raw (it
     works, searched more slowly), and within ``_PROPERTY_NAME_MARGIN`` of the ceiling it is refused
     — at the ceiling a graph takes no new name ever again. Unknown (``null``) on a store that won't
-    say, which never refuses. A draft's names register when it is published: this protects that."""
+    say, which never refuses. A draft's names register when it is published: this protects that.
+    ``edges``: a relationship keeps its properties in one JSON text, so a key costs no name (ok)."""
     from backend.app.providers.falkordb_materialize import _ATTRIBUTE_NAME_LIMIT
     name = {"set": op.key, "fillEmpty": op.key, "rename": op.to, "copy": op.to}.get(op.kind)
     out = {"registered": None, "nativeBudget": None, "ceiling": _ATTRIBUTE_NAME_LIMIT,
-           "isNew": None if name else False, "verdict": "ok"}
+           "isNew": None if name and not edges else False, "verdict": "ok"}
+    if edges:
+        return out
     try:
         from backend.app.providers.falkordb_provider import _native_property_budget
         from backend.app.services.view_transfer.sources import engine_for
@@ -7594,7 +7618,8 @@ async def preview_property_job(
     (``refusal``: ``{code, message}``, or null), whether its key fits the graph's property names
     (``nameBudget``), the import or bulk property job already running on the draft
     (``activeJobId``), and — for an id target — what its ids find in the draft as it stands
-    (``counts``: ``matched``, ``haveKey``, ``haveTo``, ``missing``)."""
+    (``counts``: ``matched``, ``haveKey``, ``haveTo``, ``missing``; for relationships also
+    ``derived``, the roll-ups among them, which are never edited)."""
     main = branch_id == "main"
     if not main:
         with _property_job_errors():
@@ -7602,13 +7627,16 @@ async def preview_property_job(
             main = branch_id == await svc.main_branch_id(graph_id)
     refusal = ((409, "main_write_forbidden", "Bulk edits go to a draft; main changes only by publishing it.")
                if main else await _property_refusal(session, ws_id, meta, body, user, claims))
-    budget = await _property_name_budget(session, ws_id, meta, body.op)
+    edges = body.target.entity_kind == "edge"
+    budget = await _property_name_budget(session, ws_id, meta, body.op, edges=edges)
     if refusal is None and budget["verdict"] == "refused":
         refusal = _property_ceiling(budget)
     counts = None
-    if body.target.ids is not None and not main and len(body.target.ids) <= vconfig.PROPERTY_JOB_MAX_IDS:
+    named = body.target.named
+    if named is not None and not main and len(named) <= vconfig.PROPERTY_JOB_MAX_IDS:
         counts = await ie.preview_property_counts(graph_id=graph_id, branch_id=branch_id,
-                                                  op=body.op.wire(), ids=body.target.ids)
+                                                  op=body.op.wire(), ids=named,
+                                                  entity_kind=body.target.entity_kind)
     return {"refusal": {"code": refusal[1], "message": refusal[2]} if refusal else None,
             "nameBudget": budget, "activeJobId": None if main else await ie.active_draft_job(branch_id),
             "counts": counts}
@@ -7628,8 +7656,9 @@ async def create_property_job(
     """Edit one property of many entities of a draft, as a job (202, with the job to follow at
     ``…/property-jobs/{jobId}``): ``set``, ``fillEmpty``, ``remove``, ``rename`` or ``copy`` a key
     over up to 20,000 entities named by id, or over everything a search matches in a view (or its
-    whole data source). Written a window of 10,000 entities at a time, each window one commit on
-    the draft, never on main. The same Idempotency-Key answers with the same job. 409 ``job_active``
+    whole data source) — or the same over relationships (``edgeIds``, or a Connections search).
+    Written a window of 10,000 entities at a time, each window one commit on the draft, never on
+    main. The same Idempotency-Key answers with the same job. 409 ``job_active``
     while an import or another bulk property job runs on the draft, ``property_name_ceiling``
     when the graph can't take the key's name, ``main_write_forbidden`` for main; 422 for a job
     that can't be made as asked (its ``code`` says why), 404 ``view_not_found``."""
@@ -7641,7 +7670,8 @@ async def create_property_job(
     if existing is None:
         refusal = await _property_refusal(session, ws_id, meta, body, user, claims)
         if refusal is None:
-            budget = await _property_name_budget(session, ws_id, meta, body.op)
+            budget = await _property_name_budget(session, ws_id, meta, body.op,
+                                                 edges=body.target.entity_kind == "edge")
             refusal = _property_ceiling(budget) if budget["verdict"] == "refused" else None
         if refusal is not None:
             raise HTTPException(status_code=refusal[0], detail=_refusal_detail(refusal))
@@ -7649,7 +7679,7 @@ async def create_property_job(
             existing = (await ie.create_property_job(
                 workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                 branch_id=branch_id, actor=user.id, op=body.op.wire(), target=body.target.wire(),
-                message=body.message, key=idempotency_key))["job_id"]
+                message=body.message, key=idempotency_key, entity_kind=body.target.entity_kind))["job_id"]
     return await ie.get_property_job(existing)
 
 
@@ -7701,6 +7731,44 @@ async def property_job_refused(
     return StreamingResponse(await ie.property_refused_rows(job_id), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="refused-{job_id}.csv"',
                                       "Cache-Control": "no-store"})
+
+
+#: Relationships one read names: what the relationship drawer compares and edits at once.
+_EDGE_READ_MAX = 1000
+
+
+class EdgeReadRef(_ApiModel):
+    """A relationship by its id — and, for one the canvas names by another id (a trace's), its
+    ends (urns) and type."""
+    id: str = Field(min_length=1, max_length=4352)
+    source: Optional[str] = Field(default=None, max_length=2048)
+    target: Optional[str] = Field(default=None, max_length=2048)
+    edge_type: Optional[str] = Field(default=None, alias="edgeType", max_length=256)
+
+
+class EdgeReadRequest(_ApiModel):
+    refs: List[EdgeReadRef] = Field(min_length=1, max_length=_EDGE_READ_MAX)
+
+
+@router.post("/graphs/{graph_id}/edges/read")
+async def read_edges(
+    ws_id: str, graph_id: str, body: EdgeReadRequest,
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Up to 1,000 relationships as the line being read has them (a draft: main where it began,
+    then its own changes) — each one's entity id, type, ends, properties and token (``version``,
+    the ``baseVersion`` an edit of it is sent with) — and the refs that name none: ``deleted`` in
+    the draft, or ``missing``. What the relationship drawer compares several relationships by."""
+    branch_id = None if branch_id == "main" else branch_id
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
+    with _domain_errors():
+        return await ie.read_edges(graph_id=graph_id, branch_id=branch_id,
+                                   refs=[r.model_dump(by_alias=True) for r in body.refs])
 
 
 # --------------------------------------------------------------------------- #

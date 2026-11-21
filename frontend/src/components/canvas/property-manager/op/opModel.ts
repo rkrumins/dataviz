@@ -7,6 +7,9 @@
  * however many, a window at a time. Structural targets are plain searches the server walks from
  * an entity — a container's children, everything inside it, a layer — so they reach entities the
  * canvas has never loaded.
+ *
+ * Relationships are changed the same way (`isEdgeTarget`): named ones, or every one a Connections
+ * search matches.
  */
 import type { Predicate } from '@/types/search'
 import type { PropertyJobOp, PropertyJobTarget, PropertyOpKind } from '@/services/versioningApiService'
@@ -24,6 +27,35 @@ export type TargetPreset =
   | { kind: 'inside'; urns: readonly string[]; label: string; includeSelf: boolean }
   | { kind: 'search'; predicate: Predicate; scopeMode: ScopeMode; label: string; count?: number }
   | { kind: 'custom'; predicate: Predicate | null }
+  /** Relationships by id: an edge's own, or `source|TYPE|target`. */
+  | { kind: 'relationships'; ids: readonly string[] }
+  /** Every relationship a Connections search (an `edges` predicate) matches. */
+  | { kind: 'connections'; predicate: Predicate; scopeMode: ScopeMode; label: string; count?: number }
+
+/** A change of relationships, not entities. */
+export const isEdgeTarget = (preset: TargetPreset) => preset.kind === 'relationships' || preset.kind === 'connections'
+
+/** A Connections search — an `edges` predicate, alone or as the one condition of an AND. */
+export function isConnectionsPredicate(p: Predicate | null | undefined): boolean {
+  const q = p as { kind?: string; op?: string; children?: Predicate[] } | null | undefined
+  if (q?.kind === 'edges') return true
+  return q?.kind === 'group' && (q.op ?? 'and') === 'and' && q.children?.length === 1 && isConnectionsPredicate(q.children[0])
+}
+
+/** A search's matches as a target: its relationships, for a Connections search. */
+export function searchPreset(predicate: Predicate, scopeMode: ScopeMode, count?: number): TargetPreset {
+  return isConnectionsPredicate(predicate)
+    ? { kind: 'connections', predicate, scopeMode, label: 'the search’s relationships', ...(count !== undefined ? { count } : {}) }
+    : { kind: 'search', predicate, scopeMode, label: 'the search’s matches', ...(count !== undefined ? { count } : {}) }
+}
+
+/** An edge's own fields — never a property of one: the mirror of `EDGE_NATIVE_KEYS` in
+ *  `backend/common/edge_properties.py` (a parity test pins the two). */
+export const EDGE_RESERVED_KEYS: ReadonlySet<string> = new Set([
+  'id', 'confidence', 'gvHash',
+  'aggKey', 'weight', 'sourceEdgeTypes', 'sourceLevel', 'targetLevel',
+  'sourceDepth', 'targetDepth', 'levelDigest', 'gvSeq', 'latestUpdate',
+])
 
 /** Structural targets name at most this many containers: the search's limit on one OR. */
 export const MAX_CONTAINERS = 24
@@ -58,6 +90,8 @@ export function predicateOf(preset: TargetPreset): Predicate | null {
       : anyOf(preset.urns.map((urn) => ({ kind: 'related', axis: 'ancestor', where: is(urn) } as Predicate)))
     case 'search': return preset.predicate
     case 'custom': return preset.predicate
+    case 'relationships': return null
+    case 'connections': return preset.predicate
   }
 }
 
@@ -67,6 +101,7 @@ export const scopeFixedToView = (preset: TargetPreset) => preset.kind === 'layer
 /** What the server is sent as the change's target, or null while it can't be. */
 export function targetOf(preset: TargetPreset, viewId: string, scopeMode: ScopeMode): PropertyJobTarget | null {
   if (preset.kind === 'selection') return preset.ids.length > 0 ? { ids: [...preset.ids].slice(0, MAX_IDS) } : null
+  if (preset.kind === 'relationships') return preset.ids.length > 0 ? { edgeIds: [...preset.ids].slice(0, MAX_IDS) } : null
   const predicate = predicateOf(preset)
   if (!predicate) return null
   return { viewId, predicate, scopeMode: scopeFixedToView(preset) ? 'view' : scopeMode }
@@ -83,6 +118,8 @@ export function targetLabel(preset: TargetPreset): string {
     case 'inside': return `everything inside ${preset.label}${preset.includeSelf ? ', and it' : ''}`
     case 'search': return preset.label
     case 'custom': return 'the entities matching your criteria'
+    case 'relationships': return `the ${preset.ids.length.toLocaleString()} selected relationships`
+    case 'connections': return preset.label
   }
 }
 
@@ -97,21 +134,22 @@ export interface OpDraft {
 export const needsValue = (kind: PropertyOpKind) => kind === 'set' || kind === 'fillEmpty'
 export const needsTo = (kind: PropertyOpKind) => kind === 'rename' || kind === 'copy'
 
-/** Why a name can't be used, or null. */
-export function nameProblem(name: string): string | null {
+/** Why a name can't be used, or null. `edges`: a relationship's property, which an edge's own
+ *  fields can't be named. */
+export function nameProblem(name: string, edges = false): string | null {
   const n = name.trim()
   if (!n) return 'Name the property'
-  if (RESERVED_PROPERTY_KEYS.has(n)) return `“${n}” is kept by the platform — pick another name`
+  if ((edges ? EDGE_RESERVED_KEYS : RESERVED_PROPERTY_KEYS).has(n)) return `“${n}” is kept by the platform — pick another name`
   if (n.length > NAME_MAX) return `Names are at most ${NAME_MAX} characters`
   return null
 }
 
 /** Why the operation can't be applied yet, or null when it can. */
-export function opProblem(op: OpDraft): string | null {
-  const keyProblem = nameProblem(op.key)
+export function opProblem(op: OpDraft, edges = false): string | null {
+  const keyProblem = nameProblem(op.key, edges)
   if (keyProblem) return keyProblem
   if (needsTo(op.kind)) {
-    const toProblem = nameProblem(op.to)
+    const toProblem = nameProblem(op.to, edges)
     if (toProblem) return toProblem === 'Name the property' ? 'Name the new property' : toProblem
     if (op.to.trim() === op.key.trim()) return 'The new name is the same as the old one'
   }
@@ -134,11 +172,27 @@ export function jobOp(op: OpDraft): PropertyJobOp {
  *  rename or a copy — those already holding the new name. */
 export function reviewCounts(op: OpDraft, target: Predicate): Array<{ id: 'target' | 'haveKey' | 'haveTo'; predicate: Predicate }> {
   const and = (...children: Predicate[]) => ({ kind: 'group', op: 'and', children } as Predicate)
+  // A Connections search's relationships that hold a key: the same search, each edge also holding it.
+  if (isConnectionsPredicate(target)) {
+    const items: Array<{ id: 'target' | 'haveKey' | 'haveTo'; predicate: Predicate }> = [{ id: 'target', predicate: target }]
+    if (op.key.trim()) items.push({ id: 'haveKey', predicate: withEdgeKey(target, op.key.trim()) })
+    if (needsTo(op.kind) && op.to.trim()) items.push({ id: 'haveTo', predicate: withEdgeKey(target, op.to.trim()) })
+    return items
+  }
   const has = (key: string) => ({ kind: 'hasProperty', key, negate: false } as Predicate)
   const items: Array<{ id: 'target' | 'haveKey' | 'haveTo'; predicate: Predicate }> = [{ id: 'target', predicate: target }]
   if (op.key.trim()) items.push({ id: 'haveKey', predicate: and(target, has(op.key.trim())) })
   if (needsTo(op.kind) && op.to.trim()) items.push({ id: 'haveTo', predicate: and(target, has(op.to.trim())) })
   return items
+}
+
+/** A Connections search whose every edge also holds `key`. */
+function withEdgeKey(predicate: Predicate, key: string): Predicate {
+  const q = predicate as { kind: string; children?: Predicate[]; edgePredicate?: unknown }
+  const edges = (q.kind === 'edges' ? q : q.children![0]) as { edgePredicate?: unknown }
+  const has = { kind: 'edgeHasProperty', key, negate: false }
+  const edgePredicate = edges.edgePredicate ? { kind: 'edgeGroup', op: 'and', children: [edges.edgePredicate, has] } : has
+  return { ...edges, edgePredicate } as Predicate
 }
 
 /** What the change does to the entities counted: how many it changes, replaces, leaves alone. */

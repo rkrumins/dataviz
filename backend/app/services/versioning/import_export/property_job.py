@@ -5,6 +5,10 @@ property key — over a target: up to ``PROPERTY_JOB_MAX_IDS`` entities named by
 ``gv:<entity id>`` as the canvas names them), or every entity an Advanced Search predicate matches
 in a view (``PROPERTY_JOB_MAX_TARGETS`` at most). It writes only to its draft, never to main.
 
+An EDGE job (``entityKind`` ``edge``) is the same over relationships: named by id (an edge's own,
+or ``source|TYPE|target`` as a Connections search names one without), or every edge a Connections
+search matches (:func:`read_edge_targets`). A roll-up is never edited: it is refused ``derived``.
+
 Its targets are kept as chunk files in the object store, ``property-jobs/{job}/targets/{i}.ndjson``,
 ``PROPERTY_JOB_WINDOW`` keys each: an id target's are written when the job is made; a search
 target's by the job itself, from an export of the search (the injected ``targets`` hook). Each chunk
@@ -20,8 +24,8 @@ no longer running) stops it at its next checkpoint, keeping the windows already 
 What a window could not write as asked is kept in ``property-jobs/{job}/refused/{i}.ndjson`` (the
 job's refused rows, as CSV through the API) and counted in the summary by reason: ``missing`` (no
 such entity in the draft), ``deleted_in_draft``, ``conflict`` (a rename or copy whose new key is
-held already, skipped) and ``write_refused`` (the write gate turned it away; the window's other
-entities are written, as an import's are).
+held already, skipped), ``write_refused`` (the write gate turned it away; the window's other
+entities are written, as an import's are) and, for an edge job, ``derived`` (a roll-up).
 """
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Mapping, NamedTuple
 from sqlalchemy import select
 
 from backend.app.services.storage.object_store import storage_key
+from backend.common.derived_artifacts import is_derived_edge_type
 from backend.common.property_patch import PROP_DELETE
 
 from .. import config, db
@@ -44,7 +49,7 @@ from ..errors import BranchNotOpen
 from ..job_lease import Lease, Superseded
 from ..models import BranchORM, CommitORM, JobORM
 from ..service import OntologyViolation
-from .snapshot import Snapshot, open_snapshot
+from .snapshot import Snapshot, Winner, open_snapshot
 from .stream import resolve_placements
 
 logger = logging.getLogger(__name__)
@@ -130,9 +135,10 @@ class Planned(NamedTuple):
     refused: List[Dict[str, Any]]
 
 
-def plan_window(op: Mapping[str, Any], found: Mapping[str, Tuple[str, Dict[str, Any], Optional[str]]]) -> Planned:
+def plan_window(op: Mapping[str, Any], found: Mapping[str, Tuple[str, Dict[str, Any], Optional[str]]],
+                entity_kind: str = "node") -> Planned:
     """A window's update ops, from what its keys found (``key -> (entity id, properties, urn)``):
-    one an entity, however many of its keys name it. Pure."""
+    one an entity, however many of its keys name it — ``entity_kind`` ``edge`` for an edge job. Pure."""
     ops: List[Dict[str, Any]] = []
     counts = dict.fromkeys(COUNTERS, 0)
     refused: List[Dict[str, Any]] = []
@@ -144,7 +150,7 @@ def plan_window(op: Mapping[str, Any], found: Mapping[str, Tuple[str, Dict[str, 
         seen.add(eid)
         patch = plan_patch(op, props)
         if patch is not None:
-            ops.append({"op": "update", "entity_kind": "node", "entity_id": eid,
+            ops.append({"op": "update", "entity_kind": entity_kind, "entity_id": eid,
                         "payload": {"properties": patch}})
             counts["changed"] += 1
         elif is_conflict(op, props):
@@ -199,6 +205,85 @@ async def read_targets(snap: Snapshot, keys: Iterable[str]):
         return out
 
     return await asyncio.to_thread(parse), deleted, missing
+
+
+def _triple(key: str) -> Optional[Tuple[str, str, str]]:
+    """``(source urn, type, target urn)`` of a ``source|TYPE|target`` key — how a Connections
+    search names an edge that has no id of its own — or None."""
+    parts = key.split("|")
+    return (parts[0], parts[1], parts[2]) if len(parts) == 3 and all(parts) else None
+
+
+async def _edges_at(snap: Snapshot, keys: List[str]) -> Dict[str, str]:
+    """``key -> entity id`` of the live edge each key names in ``snap``: its id — or ``edge:<id>``,
+    the id a graph copied in gave an edge whose id a node held (the graph still calls it ``<id>``) —
+    else, for ``source|TYPE|target``, the edge of that type between the nodes those urns name."""
+    live = await snap.lookup_live("edge", set(keys) | {f"edge:{k}" for k in keys})
+    at = {k: k if k in live else f"edge:{k}" for k in keys if k in live or f"edge:{k}" in live}
+    triples = {k: t for k in keys if k not in at and (t := _triple(k)) is not None}
+    if triples:
+        nodes = await snap.nodes_by_urn({u for s, _t, g in triples.values() for u in (s, g)})
+        between = await snap.edges_between({nodes[s] for s, _t, _g in triples.values() if s in nodes},
+                                           {nodes[g] for _s, _t, g in triples.values() if g in nodes})
+        by_type = {(s, g, t.upper()): eid for (s, g, t), eid in between.items()}
+        for k, (s, t, g) in triples.items():
+            eid = by_type.get((nodes.get(s), nodes.get(g), t.upper()))
+            if eid is not None:
+                at[k] = eid
+    return at
+
+
+async def edge_winners(snap: Snapshot, keys: Iterable[str]):
+    """What ``keys`` name in the draft ``snap`` reads, as edges (:func:`_edges_at`): ``key -> its
+    winner`` (with its payload) for the edges live there; ``key -> entity id`` for those main
+    holds and the draft deleted; and the keys neither holds."""
+    keys = list(dict.fromkeys(k for k in keys if k))
+    at = await _edges_at(snap, keys)
+    rest = [k for k in keys if k not in at]
+    deleted: Dict[str, str] = {}
+    missing: List[str] = []
+    if rest and snap.is_draft:
+        on_main = await _edges_at(snap.main_at_base(), rest)
+        live = await snap.lookup_live("edge", set(on_main.values()))
+        for k in rest:
+            eid = on_main.get(k)
+            if eid is None:
+                missing.append(k)
+            elif eid in live:
+                at[k] = eid
+            else:
+                deleted[k] = eid
+    else:
+        missing = rest
+    winners = await snap.lookup_live("edge", set(at.values()), payload=True)
+    found: Dict[str, Winner] = {}
+    for k, eid in at.items():
+        if eid in winners:
+            found[k] = winners[eid]
+        else:                                   # gone between the two reads
+            missing.append(k)
+    return found, deleted, missing
+
+
+async def read_edge_targets(snap: Snapshot, keys: Iterable[str]):
+    """:func:`read_targets` for an edge job: ``key -> (entity id, properties, None)`` for the edges
+    live in the draft, those it deleted, the keys that name none — and ``key -> entity id`` for
+    the roll-ups among them (``derived``: a summary the aggregation job computes, never edited)."""
+    winners, deleted, missing = await edge_winners(snap, keys)
+
+    def parse():
+        found: Dict[str, Tuple[str, Dict[str, Any], Optional[str]]] = {}
+        derived: Dict[str, str] = {}
+        for k, w in winners.items():
+            if is_derived_edge_type(w.edge_type or ""):
+                derived[k] = w.entity_id
+                continue
+            payload = json.loads(w.payload) if w.payload else {}
+            found[k] = (w.entity_id, dict(payload.get("properties") or {}), None)
+        return found, derived
+
+    found, derived = await asyncio.to_thread(parse)
+    return found, deleted, missing, derived
 
 
 # --------------------------------------------------------------------------- #
@@ -387,13 +472,19 @@ class PropertyJobWorker:
         if status != "open":
             raise self._closed(status, pos)
         keys = await read_lines(self._store, targets_key(job_id, i))
-        found, deleted, missing = await read_targets(
-            await open_snapshot(graph_id=graph_id, branch_id=branch_id), keys)
-        ops, counts, refused = await asyncio.to_thread(plan_window, op, found)
+        snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
+        kind = job.get("entityKind") or "node"
+        if kind == "edge":
+            found, deleted, missing, derived = await read_edge_targets(snap, keys)
+        else:
+            (found, deleted, missing), derived = await read_targets(snap, keys), {}
+        ops, counts, refused = await asyncio.to_thread(plan_window, op, found, kind)
         counts["missing"] += len(missing)
         counts["deletedInDraft"] += len(deleted)
         refused += [_refused(k, eid, "deleted_in_draft", "Deleted in this draft.") for k, eid in deleted.items()]
         refused += [_refused(k, None, "missing", "Not in this draft.") for k in missing]
+        refused += [_refused(k, eid, "derived", "A roll-up: change the relationships it summarises.")
+                    for k, eid in derived.items()]
         message = window_message(op, job.get("message"), i + 1, chunks)
         processed = pos.processed + len(keys)
         started = _now()

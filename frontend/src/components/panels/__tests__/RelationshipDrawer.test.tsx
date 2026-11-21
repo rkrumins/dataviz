@@ -37,6 +37,13 @@ vi.mock('@/hooks/useRelationshipRecord', () => ({
     refetch: vi.fn(),
   }),
 }))
+vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/features/versioning/hooks/useEntityEditing')>()),
+  useEntityEditing: () => ({ offered: true, blocked: null }),
+}))
+vi.mock('@/hooks/useRelationshipRecords', () => ({
+  useRelationshipRecords: () => ({ records: new Map(), deleted: new Set(), missing: new Set(), versioned: true, isLoading: true, isError: false, refetch: vi.fn() }),
+}))
 vi.mock('@/hooks/useRelationshipsBeneath', () => ({
   useRelationshipsBeneath: (...args: unknown[]) => {
     h.beneathCalls.push(args)
@@ -315,6 +322,16 @@ describe('RelationshipDrawer — a connection', () => {
     await user.click(rows[1])
     const s = useCanvasStore.getState()
     expect(s.drawerEdge).toMatchObject({ kind: 'relationship', id: 'e2', lineId: 'bundle-a->b' })
+    expect(s.drawerHistory.entries).toHaveLength(2)
+  })
+
+  it('compares and edits its relationships as one, on the trail', async () => {
+    const user = userEvent.setup()
+    setup(connection)
+    render(<RelationshipDrawer canEdit />)
+    await user.click(screen.getByRole('button', { name: 'Compare & edit 2' }))
+    const s = useCanvasStore.getState()
+    expect(s.drawerEdge).toMatchObject({ kind: 'relationships', lineId: 'bundle-a->b', members: connection.kind === 'connection' ? connection.members : [] })
     expect(s.drawerHistory.entries).toHaveLength(2)
   })
 
