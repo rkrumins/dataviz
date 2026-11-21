@@ -22,14 +22,21 @@
  * panel reads it, and it reads it to decide which next steps this reader can
  * actually take — with no claims at all, the shot shows the one step everybody
  * gets and the permission-gated half goes unchecked.
+ *
+ * `tab=collaboration` draws the Collaboration tab, `tab=drilldown` one
+ * workspace's drill-in panel (its document seeded into the query cache, as the
+ * panel reads it). `&conversations=off` turns questions off, as a deployment
+ * with the switch off sees the tab.
  */
 import { StrictMode, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import '../styles/globals.css'
 import { usePreferencesStore } from '../store/preferences'
 import { useAuthStore } from '../store/auth'
+import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { ANALYTICS_FIXTURES, type AnalyticsFixtureName } from './analyticsFixtures'
 import { OverviewTab } from '../components/analytics/OverviewTab'
 import { GrowthTab } from '../components/analytics/GrowthTab'
@@ -38,16 +45,27 @@ import { EngagementTab } from '../components/analytics/EngagementTab'
 import { ContentTab } from '../components/analytics/ContentTab'
 import { HealthTab } from '../components/analytics/HealthTab'
 import { WorkspacesTab } from '../components/analytics/WorkspacesTab'
+import { CollaborationTab } from '../components/analytics/CollaborationTab'
+import { WorkspaceInsightsPanel } from '../components/analytics/WorkspaceInsightsPanel'
 import { RedactionNotice } from '../components/analytics/Redacted'
-import type { AnalyticsRangeSelection } from '../services/analyticsService'
+import { rangeKey, type AnalyticsRangeSelection } from '../services/analyticsService'
 
 const params = new URLSearchParams(window.location.search)
 const fixtureName = (params.get('fixture') ?? 'privileged') as AnalyticsFixtureName
 const tab = params.get('tab') ?? 'overview'
 const dark = params.get('theme') === 'dark'
 const asAdmin = params.get('perms') === 'admin'
+const conversations = params.get('conversations') !== 'off'
 
 const RANGE: AnalyticsRangeSelection = { kind: 'preset', days: 14 }
+
+useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, conversationsEnabled: conversations } })
+
+// The drill-in reads its document through react-query; seeding the cache is
+// what lets it render with no API behind it.
+const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
+const DETAIL = ANALYTICS_FIXTURES[fixtureName].detail
+queryClient.setQueryData(['analytics', 'workspace', DETAIL.workspaceId, rangeKey(RANGE)], DETAIL)
 
 function Harness() {
     const setTheme = usePreferencesStore((s) => s.setTheme)
@@ -77,14 +95,15 @@ function Harness() {
         } as never)
     }, [])
 
-    const { summary, rows, data, usage: usageDoc } = ANALYTICS_FIXTURES[fixtureName]
+    const { summary, rows, data, usage: usageDoc, collaboration } = ANALYTICS_FIXTURES[fixtureName]
     const common = { data: summary, range: RANGE, isStale: false }
     // As the page hands it over once the usage document has arrived.
     const usage = { data: usageDoc, isLoading: false, isFetching: false, error: null }
 
     return (
+        <QueryClientProvider client={queryClient}>
         <MemoryRouter>
-            <div className="min-h-screen bg-canvas p-6">
+            <div className="min-h-screen bg-canvas p-4 sm:p-6">
                 <div className="mx-auto max-w-[1600px] space-y-5">
                     <p className="text-[11px] font-mono text-ink-muted">
                         fixture={fixtureName} · tab={tab} · theme={dark ? 'dark' : 'light'}
@@ -107,9 +126,16 @@ function Harness() {
                             usage={usage}
                         />
                     )}
+                    {tab === 'collaboration' && (
+                        <CollaborationTab data={collaboration} range={RANGE} isStale={false} />
+                    )}
                 </div>
             </div>
+            {tab === 'drilldown' && (
+                <WorkspaceInsightsPanel workspaceId={DETAIL.workspaceId} range={RANGE} onClose={() => {}} />
+            )}
         </MemoryRouter>
+        </QueryClientProvider>
     )
 }
 
