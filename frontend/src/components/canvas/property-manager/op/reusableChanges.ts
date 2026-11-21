@@ -34,7 +34,8 @@ export function reusableChangeTargetOf(preset: TargetPreset, scopeMode: ScopeMod
 export function reusableChangeTargetLabel(target: ReusableChangeTarget, withScope = true): string {
   const across = withScope && target.scopeMode === 'data_source' ? ', across the whole data source' : ''
   switch (target.kind) {
-    case 'view': return `every entity in the view${across}`
+    // The whole view across the whole data source is the data source.
+    case 'view': return target.scopeMode === 'data_source' ? 'every entity in the data source' : 'every entity in the view'
     case 'hasKey': return `every entity with ${target.key}${across}`
     case 'layer': return `the ${target.layerName} layer`
     case 'search': return `a search’s matches${across}`

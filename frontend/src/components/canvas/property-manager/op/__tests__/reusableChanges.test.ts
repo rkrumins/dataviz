@@ -72,6 +72,10 @@ describe('reusableChangeTargetLabel', () => {
   it('says where it reaches, and when that is the whole data source', () => {
     expect(reusableChangeTargetLabel({ kind: 'hasKey', key: 'owner', scopeMode: 'data_source' })).toBe('every entity with owner, across the whole data source')
     expect(reusableChangeTargetLabel({ kind: 'layer', layerName: 'Gold' })).toBe('the Gold layer')
+    // The whole view, across the whole data source, is the data source — never "in the view".
+    expect(reusableChangeTargetLabel({ kind: 'view', scopeMode: 'data_source' })).toBe('every entity in the data source')
+    expect(reusableChangeTargetLabel({ kind: 'view', scopeMode: 'data_source' }, false)).toBe('every entity in the data source')
+    expect(reusableChangeTargetLabel({ kind: 'view', scopeMode: 'view' })).toBe('every entity in the view')
     // Said apart, as the Reusable changes list does with a badge.
     expect(reusableChangeTargetLabel({ kind: 'hasKey', key: 'owner', scopeMode: 'data_source' }, false)).toBe('every entity with owner')
   })
