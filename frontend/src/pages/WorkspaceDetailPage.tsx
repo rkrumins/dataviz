@@ -209,6 +209,9 @@ export function WorkspaceDetailPage() {
         // address, so closing its panel leaves the reader on Data, not the Overview.
         const pinData = !!desired && !searchParams.get('tab')
         if (!pinData && (current === desired || (!current && !desired))) return
+        // A link waits for the workspace to load (a notification's lands on an empty cache);
+        // the effect above opens its panel then.
+        if (!desired && current && !workspace) return
         // A fork's link waits for the list that includes forks, rather than being dropped as unknown.
         if (!desired && isForkDataSourceId(current) && !forkSources) return
         const next = new URLSearchParams(searchParams)

@@ -18,14 +18,25 @@ const WORKSPACE = {
     id: 'ws1', name: 'Sales Analytics', description: '',
     dataSources: [{ id: 'ds1', label: 'Sales', isPrimary: true, isActive: true, ontologyId: 'o1' }],
 }
-vi.mock('@/components/admin/workspace/useWorkspaceDetailData', () => ({
-    useWorkspaceDetailData: () => ({
-        workspace: WORKSPACE, catalogItems: [], providers: [], ontologies: [], ontologyMap: {},
+// `loadsLater`: the workspace arrives after the first render, as it does from the server.
+const load = vi.hoisted(() => ({ later: false }))
+vi.mock('@/components/admin/workspace/useWorkspaceDetailData', async () => {
+    const { useEffect, useState } = await vi.importActual<typeof import('react')>('react')
+    return { useWorkspaceDetailData: () => {
+    const [workspace, setWorkspace] = useState(load.later ? null : WORKSPACE)
+    useEffect(() => {
+        if (workspace) return
+        const t = setTimeout(() => setWorkspace(WORKSPACE), 0)
+        return () => clearTimeout(t)
+    }, [workspace])
+    return {
+        workspace, catalogItems: [], providers: [], ontologies: [], ontologyMap: {},
         dsStatsMap: {}, dsProviderMap: {}, viewsByDs: {}, allWorkspaceViews: [], readinessMap: {},
         healthStatus: 'healthy', aggregateStats: { totalNodes: 0, totalEdges: 0, totalTypes: 0, totalViews: 0 },
-        isLoading: false, isRefreshing: false, error: null, reload: vi.fn(),
-    }),
-}))
+        isLoading: !workspace, isRefreshing: false, error: null, reload: vi.fn(),
+    }
+    } }
+})
 
 // What this reader may do in the workspace; and each tab's content, as a marker.
 const { granted, marker } = vi.hoisted(() => ({
@@ -87,7 +98,7 @@ function renderPage(at: string) {
 
 const tabNames = () => screen.getAllByRole('tab').map(t => t.textContent?.replace(/\d+/g, '').trim())
 
-beforeEach(() => granted.clear())
+beforeEach(() => { granted.clear(); load.later = false })
 
 describe('the workspace page tabs', () => {
     it('opens on the Overview', () => {
@@ -133,6 +144,15 @@ describe('the workspace page tabs', () => {
         fireEvent.click(await screen.findByRole('button', { name: 'close Sales' }))
         await waitFor(() => expect(screen.getByTestId('address')).not.toHaveTextContent('ds='))
         expect(screen.getByRole('tab', { name: /Data/ })).toHaveAttribute('aria-selected', 'true')
+    })
+
+    it('keeps a data source link while the workspace is still loading, then opens it', async () => {
+        // A notification's link lands on a page that has nothing cached yet.
+        load.later = true
+        renderPage('/workspaces/ws1?tab=data&section=sources&ds=ds1&dstab=questions')
+        expect(await screen.findByRole('button', { name: 'close Sales' })).toBeInTheDocument()
+        expect(screen.getByTestId('address')).toHaveTextContent('ds=ds1')
+        expect(screen.getByTestId('address')).toHaveTextContent('dstab=questions')
     })
 
     it('reads a tab the reader cannot open as the Overview', () => {
