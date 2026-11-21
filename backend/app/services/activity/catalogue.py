@@ -827,6 +827,39 @@ def _summary_graph_loaded(p: dict) -> str:
             f"{_detail(p, 'master') or '?'}{took} ({_bytes(_detail(p, 'bytes'))})")
 
 
+def _and(parts: list[str]) -> str:
+    return parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
+
+
+def _summary_ds_details(p: dict) -> str:
+    """Which of a source's details changed — never what they say."""
+    fields = [f for f in ("description", "links", "tags") if f in (_detail(p, "fields") or ())]
+    return f"Changed the {_and(fields) if fields else 'details'} of {_subject(p)}"
+
+
+_STATUS_WORDS = {"certified": "Certified {s}", "in_review": "Marked {s} in review",
+                 "deprecated": "Marked {s} deprecated", None: "Cleared the status of {s}"}
+
+
+def _summary_ds_trust(p: dict) -> str:
+    """A source's status and classification, as what happened: "Certified Ledger", "Marked
+    Ledger deprecated and classified it as Confidential"."""
+    s = _subject(p)
+    status, classed = _detail(p, "trustStatus"), _detail(p, "classification")
+    parts = []
+    if isinstance(status, dict):
+        parts.append(_STATUS_WORDS.get(status.get("to"), "Changed the status of {s}").format(s=s))
+    if isinstance(classed, dict):
+        to = classed.get("to")
+        if parts:
+            parts.append(f"classified it as {str(to).capitalize()}" if to else "cleared its classification")
+        else:
+            parts.append(f"Classified {s} as {str(to).capitalize()}" if to else f"Cleared the classification of {s}")
+    if not parts:
+        return f"Changed the status note of {s}" if _detail(p, "noteChanged") else f"Changed the status of {s}"
+    return " and ".join(parts)
+
+
 def _transfer_summary(leaving: str, arriving: str) -> Callable[[dict], str]:
     """A data-source transfer is recorded once in each workspace; the summary reads from the
     side it is filed under. ``leaving`` / ``arriving`` hold ``{s}`` (the source) and ``{ws}``
@@ -879,6 +912,8 @@ _EVENT_META.update({
     "workspace.data_source.contacts_changed": (
         "info", lambda p: f"Changed the data contacts of data source {p.get('data_source_id') or '?'}",
     ),
+    "workspace.data_source.metadata_changed": ("info", _summary_ds_details),
+    "workspace.data_source.trust_changed": ("info", _summary_ds_trust),
     "workspace.data_source.moved": ("info", _transfer_summary(
         "Moved data source {s} to {ws}", "Moved data source {s} in from {ws}")),
     "workspace.data_source.move_undone": ("info", _transfer_summary(
@@ -999,6 +1034,8 @@ LABELS: dict[str, str] = {
     "workspace.data_source.projection_changed": "Changed rollup placement",
     "workspace.data_source.native_query_run": "Ran a native query",
     "workspace.data_source.contacts_changed": "Changed a data source's data contacts",
+    "workspace.data_source.metadata_changed": "Changed a data source's details",
+    "workspace.data_source.trust_changed": "Changed a data source's status",
     "workspace.data_source.moved": "Moved a data source",
     "workspace.data_source.move_undone": "Undid a data source move",
     "workspace.data_source.transfer_requested": "Requested a data source transfer",

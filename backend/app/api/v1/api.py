@@ -21,7 +21,7 @@ from .endpoints import (
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
     workspace_directory, data_source_transfers, workspace_requests, workspace_groups, data_requests,
-    discussions, data_source_contacts, people,
+    discussions, data_source_contacts, data_source_metadata, people,
     versioning,
     versioning_admin,
     review_center,
@@ -333,6 +333,12 @@ api_router.include_router(
     data_source_contacts.router,
     prefix="/admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts",
     tags=["admin:data-source-contacts"],
+)
+# A data source's details: description, links, tags, and whether to trust it.
+api_router.include_router(
+    data_source_metadata.router,
+    prefix="/admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata",
+    tags=["admin:data-source-metadata"],
 )
 # Access reviews — a workspace admin keeps or removes each grant.
 api_router.include_router(

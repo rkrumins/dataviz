@@ -359,3 +359,54 @@ async def test_view_grants_router_rejects_unauthenticated(
     with _auth(user=None, claims=None):
         r = await test_client.request(method, path, json=body)
     assert r.status_code == 401, (method, path, r.status_code)
+
+
+# A data source's details — reading takes workspace:datasource:read, the description, links
+# and tags workspace:datasource:manage; trust is read at the route and checked in the service.
+_DS_METADATA = "/api/v1/admin/workspaces/ws_a/data-sources/ds_ghost/metadata"
+_DS_DETAILS_BODY = {"description": None, "links": [], "tags": [], "expectedUpdatedAt": None}
+_DS_TRUST_BODY = {"classification": None, "trustStatus": None, "trustNote": None, "expectedUpdatedAt": None}
+_DS_METADATA_CALLS = [
+    ("GET", _DS_METADATA, None),
+    ("PUT", _DS_METADATA, _DS_DETAILS_BODY),
+    ("PUT", f"{_DS_METADATA}/trust", _DS_TRUST_BODY),
+]
+_READER = PermissionClaims(sid="sess_reader", ws_perms={"ws_a": ("workspace:datasource:read",)})
+
+
+@pytest.fixture
+def _details_on():
+    import time
+
+    from backend.app.services.feature_flags import feature_flags
+
+    feature_flags._cache = {**(feature_flags._cache or {}), "dataSourceMetadataEnabled": True}
+    feature_flags._cache_ts = time.monotonic()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,path,body", _DS_METADATA_CALLS)
+async def test_data_source_details_reject_the_unauthenticated_and_other_workspaces(
+    test_client: AsyncClient, _details_on, method: str, path: str, body
+):
+    with _auth(user=None, claims=None):
+        r = await test_client.request(method, path, json=body)
+    assert r.status_code == 401, (method, path, r.status_code)
+    other = PermissionClaims(sid="sess_other_ws", ws_perms={"ws_b": ("workspace:datasource:*",)})
+    with _auth(user=_NON_ADMIN, claims=other):
+        r = await test_client.request(method, path, json=body)
+    assert r.status_code == 403, (method, path, r.status_code)
+
+
+@pytest.mark.asyncio
+async def test_data_source_details_take_manage_to_edit_and_read_to_read(test_client: AsyncClient, _details_on):
+    with _auth(user=_NON_ADMIN, claims=_READER):
+        read = await test_client.get(_DS_METADATA)
+        edit = await test_client.put(_DS_METADATA, json=_DS_DETAILS_BODY)
+        trust = await test_client.put(f"{_DS_METADATA}/trust", json=_DS_TRUST_BODY)
+    assert read.status_code == 404          # through the gate; the source doesn't exist
+    assert edit.status_code == 403
+    assert trust.status_code == 404         # through the route's gate; the service decides who
+    manager = PermissionClaims(sid="sess_mgr", ws_perms={"ws_a": ("workspace:datasource:*",)})
+    with _auth(user=_NON_ADMIN, claims=manager):
+        assert (await test_client.put(_DS_METADATA, json=_DS_DETAILS_BODY)).status_code == 404

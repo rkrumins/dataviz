@@ -13,8 +13,9 @@
   group at most 50 members (422 ``group_too_large``).
 
 Each change writes ``workspace.data_source.contacts_changed`` (ids only) and tells the
-people newly named directly (``data_source.contact_added``). The switch
-(``conversationsEnabled``) gates saving; reading never.
+people newly named directly (``data_source.contact_added``). Saving is open while either
+``conversationsEnabled`` or ``dataSourceMetadataEnabled`` is on — conversations ask the
+contacts, and data source details lets them certify the source; reading never needs one.
 """
 from __future__ import annotations
 
@@ -46,9 +47,17 @@ from backend.common.service_accounts import is_service_account
 logger = logging.getLogger(__name__)
 
 FLAG = "conversationsEnabled"
+#: Naming contacts is open under this switch too: only a named Owner or Steward may certify.
+METADATA_FLAG = "dataSourceMetadataEnabled"
 READ = "workspace:datasource:read"
 MANAGE = "workspace:datasource:manage"
 GROUP_MAX = 50
+
+
+async def editing_on() -> bool:
+    """Whether contacts may be changed: either switch on."""
+    return (await feature_flags.is_enabled_self_session(FLAG, default=False)
+            or await feature_flags.is_enabled_self_session(METADATA_FLAG, default=False))
 
 
 def source_link(workspace_id: str, data_source_id: str) -> str:
@@ -124,7 +133,7 @@ async def read(session: AsyncSession, user: User, claims: PermissionClaims,
                             member_count=counts.get(sid, 0) if kind == "group" else None)
 
     entries = [(role, entry(role, kind, sid)) for role, kind, sid in refs]
-    on = await feature_flags.is_enabled_self_session(FLAG, default=False)
+    on = await editing_on()
     can_edit = on and not is_service_account(user.id) and has_permission(claims, MANAGE, workspace_id=ds.workspace_id)
     can_edit_owner = can_edit and (
         has_permission(claims, "workspace:admin", workspace_id=ds.workspace_id)

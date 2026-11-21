@@ -10,11 +10,13 @@ are told.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from httpx import AsyncClient
 
 from backend.app.db.models import DataRequestORM, GroupMemberORM, GroupORM
+from backend.app.services.feature_flags import feature_flags
 from tests.common import discussions_world as w
 
 URL = f"/api/v1/admin/workspaces/{w.WS}/data-sources/{w.DS}/contacts"
@@ -177,3 +179,16 @@ async def test_a_viewer_or_a_service_account_cannot_change_them(world, on, db_se
     with w.acting(w.SAM, await w.claims_for(db_session, w.SAM)):
         r = await test_client.get(f"/api/v1/admin/workspaces/{w.WS}/data-sources/{w.DS_OPS}/contacts")
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_data_source_details_alone_opens_naming_contacts(world, db_session, test_client):
+    """Only a named Owner or Steward may certify a source, so the details switch opens
+    naming them too — with or without conversations."""
+    feature_flags._cache = {**(feature_flags._cache or {}), "dataSourceMetadataEnabled": True}
+    feature_flags._cache_ts = time.monotonic()
+    got = (await _get(test_client, db_session)).json()
+    assert got["canEdit"] and got["canEditOwner"]
+    r = await _put(test_client, db_session, w.BEN, {"owner": _u(w.BEN), "stewards": [], "expectedUpdatedAt": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["provenance"] == "named"

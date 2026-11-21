@@ -77,6 +77,15 @@ async def get(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def first_connected_as(session: AsyncSession, data_source_id: str) -> Optional[DataRequestORM]:
+    """The request connected first as this data source, or None (``idx_data_requests_source``)."""
+    return (await session.execute(
+        select(DataRequestORM).where(
+            DataRequestORM.data_source_id == data_source_id, DataRequestORM.status == "connected",
+        ).order_by(DataRequestORM.resolved_at, DataRequestORM.id).limit(1)
+    )).scalar_one_or_none()
+
+
 def _status_clause(status: Optional[str]):
     """``None`` or ``'all'`` → every request; ``'open'`` → the two open states;
     otherwise one status."""
