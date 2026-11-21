@@ -4,7 +4,7 @@ export interface ViewEditorOpenOptions {
   workspaceId?: string
   dataSourceId?: string
   /** 'import' opens the wizard on the Import journey (a view from a file) instead of building;
-   *  'blank' on a new blank graph (the Playground's "Start a new graph"). */
+   *  'blank' on a new blank graph (the Playground's "Start a blank graph"). */
   journey?: 'build' | 'import' | 'blank'
   /** Blank graph: the provider it goes on, chosen already. */
   providerId?: string

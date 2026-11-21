@@ -175,7 +175,7 @@ export function WorkspaceDetailPage() {
     const openNewView = viewEditor && canCreateView && wsId
         ? () => viewEditor.openViewEditor(undefined, { workspaceId: wsId })
         : undefined
-    // The Playground's "Start a new graph": the wizard on a blank graph, on its sandbox provider.
+    // The Playground's "Start a blank graph": the wizard on a blank graph, on its sandbox provider.
     const openNewGraph = viewEditor && canCreateView && wsId
         ? (providerId?: string) => viewEditor.openViewEditor(undefined, { workspaceId: wsId, journey: 'blank', providerId })
         : undefined
