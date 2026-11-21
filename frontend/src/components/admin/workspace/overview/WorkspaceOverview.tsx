@@ -174,7 +174,7 @@ export function WorkspaceOverview({
         },
         {
             id: 'view', label: 'Create the first view', done: views.length > 0,
-            description: 'A view is what people open: a map, a hierarchy or a table of your data.',
+            description: 'A view is what people open: a graph, a hierarchy or a context view of your data.',
             actionLabel: 'New view', onAction: onNewView,
         },
         {
@@ -241,7 +241,7 @@ export function WorkspaceOverview({
                             icon={Eye}
                             title="No views here yet"
                             description={onNewView
-                                ? 'A view is how people explore this workspace’s data — a map, a hierarchy or a table. Create the first one.'
+                                ? 'A view is how people explore this workspace’s data — a graph, a hierarchy or a context view. Create the first one.'
                                 : 'Views are how people explore this workspace’s data. Once someone creates one, it shows up here.'}
                             action={onNewView ? { label: 'New view', onClick: onNewView, icon: Plus } : undefined}
                         />

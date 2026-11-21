@@ -5,9 +5,10 @@
  * the person a Playground member if they aren't one yet (the server records it, so
  * access stays audited) and opens it. Every way in — the sidebar, the cards on the
  * Dashboard and Workspaces, a shared link to the Playground itself — comes here.
+ * `?start=samples|import` comes along, so it opens on the samples or on Bring your own data.
  */
 import { useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { FlaskConical, RotateCcw } from 'lucide-react'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -19,15 +20,17 @@ export function PlaygroundPage() {
     const { data: info, isError: unreadable, refetch } = usePlayground()
     const join = useJoinPlayground()
     const asked = useRef(false)
+    const start = useSearchParams()[0].get('start')
+    const startQuery = start === 'samples' || start === 'import' ? `?start=${start}` : ''
 
     useEffect(() => {
         if (!info?.enabled || !info.exists || !info.workspaceId) return
-        const open = (wsId: string) => navigate(`/workspaces/${wsId}`, { replace: true })
+        const open = (wsId: string) => navigate(`/workspaces/${wsId}${startQuery}`, { replace: true })
         if (info.joined) { open(info.workspaceId); return }
         if (asked.current) return
         asked.current = true
         join.mutate(undefined, { onSuccess: (joined) => open(joined.workspaceId ?? info.workspaceId!) })
-    }, [info, join, navigate])
+    }, [info, join, navigate, startQuery])
 
     if (unreadable || join.isError) {
         return (

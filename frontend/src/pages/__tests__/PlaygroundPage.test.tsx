@@ -4,7 +4,7 @@
  */
 import { StrictMode } from 'react'
 import { render, screen } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PlaygroundInfo } from '@/services/playgroundService'
 
@@ -25,13 +25,17 @@ const INFO: PlaygroundInfo = {
     graphQuota: 5, graphsUsed: 0, canSetUp: false,
 }
 
-function renderPage() {
+function Opened() {
+    return <p>the playground{useLocation().search}</p>
+}
+
+function renderPage(at = '/playground') {
     return render(
         <StrictMode>
-        <MemoryRouter initialEntries={['/playground']}>
+        <MemoryRouter initialEntries={[at]}>
             <Routes>
                 <Route path="/playground" element={<PlaygroundPage />} />
-                <Route path="/workspaces/:wsId" element={<p>the playground</p>} />
+                <Route path="/workspaces/:wsId" element={<Opened />} />
             </Routes>
         </MemoryRouter>
         </StrictMode>,
@@ -58,6 +62,15 @@ describe('PlaygroundPage', () => {
         renderPage()
         expect(await screen.findByText('the playground')).toBeInTheDocument()
         expect(join).not.toHaveBeenCalled()
+    })
+
+    it('opens it on the start it was sent for — samples, or your own data — and nothing else', async () => {
+        state.info = { ...INFO, joined: true }
+        const { unmount } = renderPage('/playground?start=import')
+        expect(await screen.findByText('the playground?start=import')).toBeInTheDocument()
+        unmount()
+        renderPage('/playground?start=somewhere')
+        expect(await screen.findByText('the playground')).toBeInTheDocument()
     })
 
     it('says so while it isn’t set up, and offers an administrator to set it up', () => {

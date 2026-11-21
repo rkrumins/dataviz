@@ -5,28 +5,31 @@
  * steps left to set it up. Neither means anything in the Playground: nobody joins
  * it to run it, they come to try something. So it leads with their own work — the
  * graphs they started and the views they built — how many more graphs they may
- * start, and the one button that starts the next. Beside it, samples: a ready-made
- * graph to explore — first of all, for someone who has never built one.
+ * start, and the three ways to start the next: explore a sample, bring their own
+ * data, or start blank. Then the samples themselves, and their first steps — from a
+ * first graph to a change of their own, published.
+ *
+ * `?start=samples` arrives at the samples and `?start=import` opens Bring your own
+ * data: where the View wizard's blank path sends someone with no data model to start from.
  */
-import { useEffect } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, ArrowRightLeft, Database, FlaskConical, Plus, Sparkles } from 'lucide-react'
+import { ArrowRight, ArrowRightLeft, Database, FlaskConical, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { View } from '@/services/viewApiService'
 import { useAuthStore } from '@/store/auth'
-import { usePlayground } from '@/hooks/usePlayground'
+import { useFeature } from '@/store/features'
+import { usePlayground, usePlaygroundSamples } from '@/hooks/usePlayground'
 import { SampleGallery } from '@/components/playground/SampleGallery'
+import { PlaygroundStarts } from '@/components/playground/PlaygroundStarts'
+import { BringYourOwnData } from '@/components/playground/BringYourOwnData'
+import { BuilderChecklist } from '@/components/playground/BuilderChecklist'
 import { OverviewViewGrid } from './OverviewViewGrid'
 import type { OverviewLayout } from './overviewLayout'
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
-
-const FIRST_STEPS = [
-    { title: 'Start a blank graph', detail: 'Pick a starter data model — it decides what kinds of things your graph holds.' },
-    { title: 'Add things and how they connect', detail: 'Draw them on the canvas, or bring them in from a file.' },
-    { title: 'Explore it in a view', detail: 'A map, a hierarchy or a table — share it here when you’re ready.' },
-]
 
 export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNewGraph, onOpenGraph, onMoveGraph }: {
     workspace: WorkspaceResponse
@@ -41,7 +44,16 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
 }) {
     const me = useAuthStore(s => s.user?.id)
     const info = usePlayground().data
+    const samples = usePlaygroundSamples().data
     const queryClient = useQueryClient()
+    // A graph from files is a blank graph too: it needs what blank graphs need.
+    const blankModels = useFeature('blankModelsEnabled')
+    const versioning = useFeature('versioningEnabled')
+    const [importing, setImporting] = useState(false)
+    const closeImport = useCallback(() => setImporting(false), [])
+    const gallery = useRef<HTMLElement>(null)
+    const [params, setParams] = useSearchParams()
+    const asked = params.get('start')
 
     const graphs = workspace.dataSources.filter(ds => !!me && ds.createdBy === me)
     const mine = views.filter(v => !!me && v.createdBy === me)
@@ -55,7 +67,37 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
     const quota = info?.graphQuota ?? 0
     const used = info?.graphsUsed ?? graphs.length
     const full = quota > 0 && used >= quota
-    const start = onNewGraph && !full ? () => onNewGraph(info?.sandboxProviderId ?? undefined) : undefined
+    const startBlank = onNewGraph ? () => onNewGraph(info?.sandboxProviderId ?? undefined) : undefined
+    // Starting a graph is for someone who may (`onNewGraph`); samples, once there are some.
+    const hasSamples = !!onNewGraph && !!samples?.samples.length
+    const showSamples = useCallback(() => {
+        gallery.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        gallery.current?.querySelector<HTMLElement>('h3')?.focus({ preventScroll: true })
+    }, [])
+
+    // Sent here to start (`?start=samples|import`): do it once what it needs is here, then forget it.
+    const [answered, setAnswered] = useState<string | null>(null)
+    if (asked !== answered) {
+        setAnswered(asked)
+        if (asked === 'import') setImporting(true)
+    }
+    useEffect(() => {
+        if (asked !== 'samples' && asked !== 'import') return
+        if (asked === 'samples' && !hasSamples) return
+        if (asked === 'samples') showSamples()
+        setParams(prev => { const next = new URLSearchParams(prev); next.delete('start'); return next }, { replace: true })
+    }, [asked, hasSamples, showSamples, setParams])
+
+    const starts = (className: string) => (
+        <PlaygroundStarts
+            first={graphs.length === 0}
+            full={full}
+            onSample={hasSamples ? showSamples : undefined}
+            onImport={onNewGraph && blankModels && versioning ? () => setImporting(true) : undefined}
+            onBlank={startBlank}
+            className={className}
+        />
+    )
 
     return (
         <section
@@ -65,30 +107,16 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
         >
             <div aria-hidden className="pointer-events-none absolute inset-0 bg-gradient-to-br from-violet-500/[0.07] via-transparent to-fuchsia-500/[0.05]" />
             <div className="relative">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="flex items-start gap-3 min-w-0">
-                        <span className="w-10 h-10 rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white flex items-center justify-center shadow-md shadow-violet-500/20 shrink-0">
-                            <FlaskConical className="w-5 h-5" aria-hidden />
-                        </span>
-                        <div className="min-w-0">
-                            <h2 id="experiments-title" className="font-display text-lg font-bold text-ink">Your experiments</h2>
-                            <p className="text-sm text-ink-secondary">
-                                Shared with everyone in the Playground — make one private any time. Only you can change what you made.
-                            </p>
-                        </div>
+                <div className="flex items-start gap-3 min-w-0">
+                    <span className="w-10 h-10 rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white flex items-center justify-center shadow-md shadow-violet-500/20 shrink-0">
+                        <FlaskConical className="w-5 h-5" aria-hidden />
+                    </span>
+                    <div className="min-w-0">
+                        <h2 id="experiments-title" className="font-display text-lg font-bold text-ink">Your experiments</h2>
+                        <p className="text-sm text-ink-secondary">
+                            Shared with everyone in the Playground — make one private any time. Only you can change what you made.
+                        </p>
                     </div>
-                    {onNewGraph && (
-                        <button
-                            type="button"
-                            data-tour="playground-new-graph"
-                            onClick={start}
-                            disabled={!start}
-                            title={full ? 'You’ve used all your graphs — delete one you’re done with to start another.' : undefined}
-                            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold text-white bg-gradient-to-r from-violet-500 to-fuchsia-500 shadow-md shadow-violet-500/25 hover:brightness-110 disabled:opacity-50 disabled:shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/50"
-                        >
-                            <Plus className="w-4 h-4" aria-hidden /> Start a new graph
-                        </button>
-                    )}
                 </div>
 
                 {quota > 0 && (
@@ -120,17 +148,9 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
 
                 {graphs.length === 0 ? (
                     <>
-                        {/* Before their first graph, a sample is the quickest way to see what one is for. */}
-                        {onNewGraph && <SampleGallery workspaceId={workspace.id} className="mt-5" />}
-                        <ol className="mt-5 grid gap-3 sm:grid-cols-3">
-                            {FIRST_STEPS.map((s, i) => (
-                                <li key={s.title} className="rounded-2xl border border-glass-border bg-canvas/60 p-4">
-                                    <span className="inline-flex w-6 h-6 items-center justify-center rounded-full bg-violet-500/10 text-xs font-bold text-violet-600 dark:text-violet-300">{i + 1}</span>
-                                    <p className="mt-2 text-sm font-semibold text-ink">{s.title}</p>
-                                    <p className="mt-0.5 text-xs text-ink-muted">{s.detail}</p>
-                                </li>
-                            ))}
-                        </ol>
+                        {/* Before their first graph: the ways to start, then the samples that show what one is for. */}
+                        {starts('mt-5')}
+                        {onNewGraph && <SampleGallery ref={gallery} workspaceId={workspace.id} className="mt-5" />}
                     </>
                 ) : (
                     <div className="mt-5 space-y-4">
@@ -171,10 +191,13 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                                     meta={v => v.visibility === 'private' ? 'Only you' : 'Shared with everyone here'} />
                             </div>
                         )}
-                        {onNewGraph && <SampleGallery workspaceId={workspace.id} className="border-t border-glass-border pt-4" />}
+                        {starts('border-t border-glass-border pt-4')}
+                        {onNewGraph && <SampleGallery ref={gallery} workspaceId={workspace.id} />}
                     </div>
                 )}
+                <BuilderChecklist workspace={workspace} views={views} className="mt-5" />
             </div>
+            {importing && <BringYourOwnData workspaceId={workspace.id} onClose={closeImport} quotaLeft={samples?.quotaLeft ?? (quota > 0 ? quota - used : undefined)} />}
         </section>
     )
 }

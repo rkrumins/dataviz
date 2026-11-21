@@ -24,7 +24,10 @@ vi.mock('@/hooks/usePlayground', () => ({
     usePlayground: () => ({ data: state.playground }),
     usePlaygroundSamples: () => ({ data: state.samples }),
     useStartSample: () => ({ mutate: vi.fn(), isPending: false }),
+    useImportOwnData: () => ({ mutate: vi.fn(), isPending: false }),
 }))
+// The Playground's first steps read their own signals, and have their own suite.
+vi.mock('@/components/playground/BuilderChecklist', () => ({ BuilderChecklist: () => null }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
     useReviewInboxCounts: () => ({ data: { counts: state.reviews } }),
     useDraftsWhoseOwnerLeft: (ws: string | null) => ({ data: ws ? state.ownerLeft : undefined }),
@@ -193,7 +196,7 @@ describe('In the Playground', () => {
         renderOverview({ workspace: playground(), onNewGraph })
         expect(screen.getByText('1 of 3 graphs used')).toBeInTheDocument()
         expect(screen.getByRole('meter', { name: 'Graphs used' })).toHaveAttribute('aria-valuenow', '1')
-        fireEvent.click(screen.getByRole('button', { name: /Start a new graph/ }))
+        fireEvent.click(screen.getByRole('button', { name: 'Start a blank graph' }))
         expect(onNewGraph).toHaveBeenCalledWith('prov_sb')
     })
 
@@ -201,13 +204,13 @@ describe('In the Playground', () => {
         state.playground = { graphQuota: 3, graphsUsed: 3, sandboxProviderId: 'prov_sb' }
         const onNewGraph = vi.fn()
         renderOverview({ workspace: playground(), onNewGraph })
-        expect(screen.getByRole('button', { name: /Start a new graph/ })).toBeDisabled()
+        expect(screen.getByRole('button', { name: 'Start a blank graph' })).toBeDisabled()
         expect(screen.getByText(/Delete one you’re done with/)).toBeInTheDocument()
     })
 
-    it('shows the first steps before the reader has a graph', () => {
-        renderOverview({ workspace: playground({ dataSources: [] }) })
-        expect(screen.getByText('Start a blank graph')).toBeInTheDocument()
+    it('shows the ways to start before the reader has a graph', () => {
+        renderOverview({ workspace: playground({ dataSources: [] }), onNewGraph: vi.fn() })
+        expect(screen.getByRole('region', { name: 'Start your first graph' })).toBeInTheDocument()
         expect(screen.queryByText('No views here yet')).toBeNull()
     })
 
@@ -216,8 +219,8 @@ describe('In the Playground', () => {
         const panel = screen.getByRole('region', { name: 'Your experiments' })
         const gallery = within(panel).getByRole('region', { name: 'Start from a sample' })
         expect(within(gallery).getByRole('button', { name: 'Start Retail data pipeline' })).toBeEnabled()
-        // Above the first steps of a blank graph.
-        expect(gallery.compareDocumentPosition(within(panel).getByText('Start a blank graph')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+        // Right under the three ways to start.
+        expect(within(panel).getByRole('region', { name: 'Start your first graph' }).compareDocumentPosition(gallery) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
         unmount()
 
         renderOverview({ workspace: playground(), onNewGraph: vi.fn() })
