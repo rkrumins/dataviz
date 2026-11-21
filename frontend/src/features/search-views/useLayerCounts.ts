@@ -8,6 +8,7 @@
  */
 import { useEffect, useState } from 'react'
 
+import { useDraftDataKey } from '@/features/versioning/hooks/useDraftDataKey'
 import { useGraphProvider } from '@/providers'
 import type { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { countRules, type RuleCount } from '@/services/ruleCounts'
@@ -30,7 +31,9 @@ const ROUNDS = 3
 
 export function useLayerCounts(viewId: string | null, layers: LayerToCount[], wholeDataSource: boolean): LayerCounts {
   const provider = useGraphProvider() as unknown as RemoteGraphProvider & { searchCounts?: unknown }
-  const key = viewId && layers.length ? JSON.stringify({ viewId, layers, wholeDataSource }) : null
+  // A draft is counted as it stands: its moving on is a new question.
+  const draftKey = useDraftDataKey()
+  const key = viewId && layers.length ? JSON.stringify({ viewId, layers, wholeDataSource, draftKey }) : null
   const [state, setState] = useState<{ key: string | null; value: LayerCounts }>({ key: null, value: { status: 'idle' } })
 
   useEffect(() => {

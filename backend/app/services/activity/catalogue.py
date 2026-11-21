@@ -731,6 +731,22 @@ def _commit_summary(template: str) -> Callable[[dict], str]:
     return _build
 
 
+def _published_summary(p: dict) -> str:
+    """A publish, naming the first bulk property job it took to main and counting the rest
+    (``details.propertyJobs``, ``property_job.audit_entry``): "Published 27,110 changes to Sales,
+    including Rename owner → steward"."""
+    said = _commit_summary("Published {changes} to {}")(p)
+    jobs = _detail(p, "propertyJobs")
+    listed = jobs.get("jobs") if isinstance(jobs, dict) else None
+    first = listed[0] if isinstance(listed, list) and listed and isinstance(listed[0], dict) else None
+    if first is None or not first.get("label"):
+        return said
+    total = jobs.get("total")
+    more = max(0, (total if isinstance(total, int) else len(listed)) - 1)
+    said += f", including {'part of ' if first.get('partial') else ''}{first['label']}"
+    return said + (f" and {more:,} more bulk edit{'' if more == 1 else 's'}" if more else "")
+
+
 def _summary_job_triggered(p: dict) -> str:
     source = _detail(p, "triggerSource")
     mode = {"onboarding": " (onboarding)", "api": " (via the API)"}.get(source or "", "")
@@ -932,7 +948,7 @@ _EVENT_META.update({
     "workspace.versioning.retried": ("info", _envelope_summary("Retried turning on version control for {}")),
     "workspace.versioning.abandoned": ("warning", _envelope_summary("Abandoned turning on version control for {}")),
     "workspace.versioning.resynced": ("info", _envelope_summary("Re-synced the versioned graph of {}")),
-    "workspace.versioning.published": ("info", _commit_summary("Published {changes} to {}")),
+    "workspace.versioning.published": ("info", _published_summary),
     "workspace.versioning.main_edited": ("info", _commit_summary("Changed the published data of {} ({changes})")),
     "workspace.versioning.ingested": ("info", _commit_summary("Imported {changes} into {}")),
     "workspace.versioning.synced": ("info", _commit_summary("Synced {changes} into {}")),

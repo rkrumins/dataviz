@@ -8,6 +8,8 @@ export interface EditorToolbarProps {
     /** "Build a lot at once" — opens the wider Build Mode surface. Optional: omitted where not wired. */
     onOpenBuild?: () => void
     onSave?: () => void
+    /** Deletes the selection — the canvas's staged delete. Absent where the canvas can't be
+     *  written to, and Delete is off. */
     onDelete?: () => void
     edgeTypes: any[] // RelationshipTypeSchema[]
     activeEdgeType: string
@@ -18,6 +20,7 @@ export function EditorToolbar({
     onAddNode,
     onOpenBuild,
     onSave,
+    onDelete,
     edgeTypes = [],
     activeEdgeType,
     onSelectEdgeType
@@ -27,16 +30,7 @@ export function EditorToolbar({
         setEditing,
         selectedNodeIds,
         selectedEdgeIds,
-        removeNode,
-        removeEdge,
-        clearSelection
     } = useCanvasStore()
-
-    const handleDelete = () => {
-        selectedNodeIds.forEach(id => removeNode(id))
-        selectedEdgeIds.forEach(id => removeEdge(id))
-        clearSelection()
-    }
 
     const handleSave = () => {
         // Placeholder for save logic
@@ -96,8 +90,8 @@ export function EditorToolbar({
                 <ToolbarButton
                     icon={<Trash2 className="w-4 h-4" />}
                     label="Delete"
-                    onClick={handleDelete}
-                    disabled={selectedNodeIds.length === 0 && selectedEdgeIds.length === 0}
+                    onClick={() => onDelete?.()}
+                    disabled={!onDelete || (selectedNodeIds.length === 0 && selectedEdgeIds.length === 0)}
                     variant="destructive"
                 />
 

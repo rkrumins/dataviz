@@ -6,7 +6,9 @@ history. Now each such commit records one event, filed under its data source. Th
 
 * the commit, its kind and its counts;
 * who made it, through which API key and in which request — read from the commit itself
-  (:mod:`.provenance`), so the event and the commit can never disagree.
+  (:mod:`.provenance`), so the event and the commit can never disagree;
+* for a publish, the bulk property jobs that edited the draft it took to main
+  (``propertyJobs``: ``{total, jobs}``, as the commit lists them — ``property_job.audit_entry``).
 
 So the activity log answers "what changed this data source, and who or what changed it" for people
 and automation alike, and filters and exports like every other event.
@@ -67,6 +69,7 @@ def details_of(graph_id: str, commit: Any) -> Dict[str, Any]:
         "actorKind": kind,
         "automation": provenance.is_automation(kind, commit.actor, commit.api_key_id),
         "sourceBranchId": commit.source_branch_id,
+        "propertyJobs": (commit.stats or {}).get("propertyJobs"),
     }
     return {k: v for k, v in out.items() if v is not None}
 

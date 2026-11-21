@@ -40,7 +40,7 @@ export interface RankedItem { label: string; count: number }
  * label's entity-type identity; otherwise the accent gradient.
  */
 export function RankedValueBars({
-    items, total, limit = 6, colorByEntityType = false, showPct = true, onItemClick,
+    items, total, limit = 6, colorByEntityType = false, showPct = true, onItemClick, selectable,
 }: {
     items: RankedItem[]
     total: number
@@ -49,6 +49,8 @@ export function RankedValueBars({
     showPct?: boolean
     /** When set, each row becomes a button that searches for the item. */
     onItemClick?: (item: RankedItem) => void
+    /** When set, each row can be picked — a checkbox beside it — by its index in ``items``. */
+    selectable?: { selected: ReadonlySet<number>; onToggle: (index: number) => void }
 }) {
     const shown = items.slice(0, limit)
     const max = Math.max(...shown.map((i) => i.count), 1)
@@ -62,7 +64,7 @@ export function RankedValueBars({
                 const pct = total > 0 ? Math.round((it.count / total) * 100) : 0
                 const clickable = !!onItemClick
                 const RowTag = clickable ? 'button' : 'div'
-                return (
+                const row = (
                     <RowTag
                         key={`${it.label}-${idx}`}
                         {...(clickable
@@ -101,6 +103,19 @@ export function RankedValueBars({
                             <span className="w-9 shrink-0 text-right tabular-nums text-ink-muted/70">{pct}%</span>
                         )}
                     </RowTag>
+                )
+                if (!selectable) return row
+                return (
+                    <div key={`${it.label}-${idx}`} className="flex items-center gap-1.5">
+                        <input
+                            type="checkbox"
+                            className="shrink-0 accent-indigo-500"
+                            checked={selectable.selected.has(idx)}
+                            onChange={() => selectable.onToggle(idx)}
+                            aria-label={`Pick ${it.label || '∅'}`}
+                        />
+                        <div className="flex-1 min-w-0">{row}</div>
+                    </div>
                 )
             })}
         </div>

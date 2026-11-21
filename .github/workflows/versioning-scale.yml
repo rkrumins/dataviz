@@ -1,16 +1,23 @@
 # A versioned graph of a million nodes and a million edges, end to end, each step in its own
 # process (backend/scripts/bench_versioning.py): a view package is generated, inspected and
 # imported into a new graph's draft; the draft is published; the published window is projected
-# into FalkorDB; the graph is rebuilt there from nothing; and it is exported.
+# into FalkorDB; the graph is rebuilt there from nothing; and it is exported. Then a bulk property
+# job gives every node a property in a new draft, that draft's rule counts and property catalog
+# are read as the draft-aware search answers them, and the job is undone; a second job's draft is
+# published with field rules every node holds, so every page's field check runs.
 #
 # A step fails the job when it does not complete, when its peak memory passes its ceiling, or
-# when FalkorDB and Postgres disagree after it. The ceilings hold at any size: a step that holds a
-# page at a time stays under them, and one that starts holding the whole graph again does not.
+# when FalkorDB and Postgres disagree after it; a bulk property job or its undo also when a window
+# takes more than 15 s or 100 SQL statements, or its last windows run 20% slower than its first, or
+# it leaves nodes as they were (the undo: as the job wrote them); the draft's search when it takes
+# more than 60 requests, or answers wrong. These hold at any size: a step that holds a page at a
+# time stays under them, and one that starts holding the whole graph again does not.
 # docs/versioning/09-scale-limits-and-roadmap.md §2 has what this measured, and how to measure at
 # your own size.
 #
-# It took 35 minutes on a 4-CPU machine, so it runs weekly, on demand (at any size), and on a
-# pull request that changes the harness or this file.
+# The first six steps took 35 minutes on a 4-CPU machine and the five after them about 20 more,
+# so it runs weekly, on demand (at any size), and on a pull request that changes the harness or
+# this file.
 name: versioning-scale
 
 on:
@@ -100,7 +107,7 @@ jobs:
           python -c "import asyncio; from backend.app.services.versioning import models; asyncio.run(models.create_schema_and_partitions())"
       - name: Generate the graph
         run: python -m backend.scripts.bench_versioning gen-package --nodes "$NODES" --edges "$EDGES" --out "$RUNNER_TEMP/graph.zip"
-      - name: Import, publish, project, rebuild and export it
+      - name: Import, publish, project, rebuild and export it, then edit, search and publish a draft
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/results"
@@ -113,27 +120,55 @@ jobs:
           step import import --target empty
           step publish publish
           step project project
-          step rebuild project --full
+          step rebuild project --full --keep     # kept: the draft's search reads it
           step export export
+          step property property
+          # Its search sessions in the cache Redis, as the API keeps them: the bus's, in a db of its own.
+          REDIS_CACHE_HOST=localhost REDIS_CACHE_PORT=6380 REDIS_CACHE_DB=1 step draft-search draft-search
+          # Undone after its search (an undone draft reads as the published graph); another job's
+          # draft is published.
+          step undo undo
+          step property-again property
+          step publish-fields publish --field-rules hold
       - name: Report
         if: always()
         run: python -m backend.scripts.bench_versioning report --state "$RUNNER_TEMP/state.json" --md "$GITHUB_STEP_SUMMARY"
       - name: Hold each step to its ceiling
         run: |
           python - "$RUNNER_TEMP/results" <<'EOF'
-          import json, pathlib, sys
+          import json, os, pathlib, sys
           # Peak memory (MB) each step may reach at any size. A publish holds the Merkle
-          # fingerprint's list of changes, up to 1,000,000 entries, besides its page.
+          # fingerprint's list of changes, up to 1,000,000 entries, besides its page. The draft's
+          # search is not flat: any read of a draft builds its overlay, about 1.2 KB a changed
+          # entity and more while it is built — 1.7 GB at its peak for a job over a million
+          # nodes, nearly all of it that — so it may take 1.6 KB a node besides 512 MB.
           CEILING_MB = {"inspect": 512, "import": 512, "publish": 1024, "project": 512,
-                        "rebuild": 512, "export": 512}
+                        "rebuild": 512, "export": 512, "property": 512,
+                        "draft-search": 512 + int(os.environ["NODES"]) * 16 // 10240,
+                        "undo": 512, "property-again": 512, "publish-fields": 1024}
+          # What else holds at any size: a bulk property job's window is 10,000 entities (an
+          # undo's, one commit of the job), and past 200,000 changes the draft's search answers as
+          # the published graph, saying so.
+          WINDOWS = [("window_max_s", 15, "its longest window took {} s"),
+                     ("window_statements_max", 100, "a window sent {} statements"),
+                     ("decile_growth", 0.2, "its last windows ran {:.0%} slower than its first")]
+          LIMITS = {"property": WINDOWS, "undo": WINDOWS, "property-again": WINDOWS,
+                    "draft-search": [("requests", 60, "it took {} requests")]}
+          WRONG = {"falkor_eq_pg": "FalkorDB and Postgres disagree",
+                   "changed_all": "the job left nodes unchanged",
+                   "restored_ok": "the undo left nodes as the job wrote them",
+                   "answered_ok": "the draft's counts or catalog came back wrong",
+                   "refusal_ok": "the publish was refused"}
           missed = []
           for name, ceiling in CEILING_MB.items():
               m = json.loads((pathlib.Path(sys.argv[1]) / f"{name}.json").read_text())["metrics"]
               print(f"{name}: {m['total_s']:.0f} s, peak {m['rss_peak_mb']:.0f} MB (ceiling {ceiling})")
               if m["rss_peak_mb"] > ceiling:
                   missed.append(f"{name} peaked at {m['rss_peak_mb']:.0f} MB, past {ceiling} MB")
-              if m.get("falkor_eq_pg") is False:
-                  missed.append(f"{name}: FalkorDB and Postgres disagree")
+              for key, most, said in LIMITS.get(name, []):
+                  if m.get(key) is not None and m[key] > most:
+                      missed.append(f"{name}: {said.format(m[key])}, past {most}")
+              missed += [f"{name}: {said}" for key, said in WRONG.items() if m.get(key) is False]
           if missed:
               sys.exit("\n".join(missed))
           EOF

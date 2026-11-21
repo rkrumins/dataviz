@@ -31,11 +31,13 @@ import {
   applyNodeChanges,
   applyEdgeChanges,
   SelectionMode,
+  useStoreApi,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { AnimatePresence } from 'framer-motion'
 import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { isApplePlatform } from '@/lib/platform'
 import { generateColorFromType } from '@/lib/type-visuals'
 import { FeedMoreChip } from './FeedMoreChip'
 
@@ -53,6 +55,7 @@ import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeT
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
+import { PropertyOpHost } from './property-manager/PropertyOpHost'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useEffectiveBranchId } from '@/store/branchStore'
@@ -61,8 +64,15 @@ import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
 
 // UX components
-import { CanvasContextMenu } from './CanvasContextMenu'
+import { CanvasContextMenu, type ContextMenuAction } from './CanvasContextMenu'
 import { useAskAboutNode } from '@/features/discussions/useAskAboutNode'
+import { compareSelectionAction, menuSelection } from './selectionMenu'
+import { SelectionBar } from './context-view/SelectionBar'
+import { StagedChangesPanel } from './context-view/StagedChangesPanel'
+import { Kbd } from '@/components/ui/Kbd'
+import { DraftSaveControls } from '@/features/versioning/canvas/DraftSaveControls'
+import { remapIdSet, useCanvasEditGate, useDraftSave, useStagedUndoShortcuts } from '@/features/versioning/canvas/useDraftSave'
+import { useCanvasPropertyJobs } from '@/features/versioning/canvas/useCanvasPropertyJobs'
 import { InlineNodeEditor } from './InlineNodeEditor'
 import { CommandPalette } from './CommandPalette'
 import { EditorToolbar } from './EditorToolbar'
@@ -104,7 +114,8 @@ import {
   useViewSchemaIsReady,
 } from '@/hooks/useViewSchema'
 import { useShallow } from 'zustand/react/shallow'
-import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
+import { isSelectableNode, useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useSearchStore } from '@/store/searchStore'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { usePreferencesStore } from '@/store/preferences'
@@ -139,9 +150,9 @@ export function GraphCanvas({ className }: { className?: string }) {
   const { notify } = useAppNotifications()
   // 2. Canvas store
   // Actions only (stable) — never the whole store, which re-rendered this canvas on every write.
-  const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges } = useCanvasStore(useShallow((s) => ({
+  const { setNodes, setEdges, selectNode, selectEdge, setSelection, clearSelection, addEdges } = useCanvasStore(useShallow((s) => ({
     setNodes: s.setNodes, setEdges: s.setEdges, selectNode: s.selectNode, selectEdge: s.selectEdge,
-    clearSelection: s.clearSelection, addEdges: s.addEdges,
+    setSelection: s.setSelection, clearSelection: s.clearSelection, addEdges: s.addEdges,
   })))
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
   const rawNodes = useCanvasStore((s) => s.nodes)
@@ -154,6 +165,9 @@ export function GraphCanvas({ className }: { className?: string }) {
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  const drawerNodeIds = useCanvasStore((s) => s.drawerNodeIds)
+  // One entity's details or several compared — either way the entity drawer holds the rail.
+  const entityDrawerOpen = !!drawerNodeId || !!drawerNodeIds
   const drawerEdge = useCanvasStore((s) => s.drawerEdge)
   const openEdgeDrawer = useCanvasStore((s) => s.openEdgeDrawer)
   // 3. Schema / ontology
@@ -964,6 +978,20 @@ export function GraphCanvas({ className }: { className?: string }) {
   // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
   // routes are hidden rather than left to fail.
   const editModeEnabled = useFeature('editModeEnabled')
+  // Graph edits are kept only in a draft the caller may write, with edit mode on — and a trace is
+  // read-only for its whole life. The same gate as the Context View's, and the same save.
+  const { scopeWsId, dataSourceId, viewId, graphId, branchId, isDraft, canEditGraph } = useCanvasEditGate()
+  const canvasWritable = canEditGraph && !trace.isTracing
+  // Bulk property changes: the one dialog writes to the draft open here, and its jobs are followed.
+  const propertyGraphWrite = useCanvasPropertyJobs({ wsId: scopeWsId, graphId, branchId, writable: canvasWritable })
+  const saveToDraft = useDraftSave({
+    wsId: scopeWsId,
+    viewId,
+    // An entity open before the save stays open after it: its expansion was keyed by its temp urn.
+    remapEntityIds: (ids) => setExpandedNodes((prev) => remapIdSet(prev, ids)),
+  })
+  useStagedUndoShortcuts(isDraft)
+  const isStagedPanelOpen = useStagedChangesStore((s) => s.isReviewPanelOpen)
 
   // A card's More button opens the menu its right-click does. interactions is
   // defined later, so this and the edge menu below reach it through a ref.
@@ -1061,19 +1089,57 @@ export function GraphCanvas({ className }: { className?: string }) {
     hiddenChildCounts,
   ])
 
+  // 17. The store's selection, drawn. It is the ONE selection: React Flow's own is ignored (see
+  // onNodesChange), so the rings, the selection bar and every bulk action read the same thing. A
+  // card whose selection did not change keeps its object, so ⌘-clicking one re-renders that one.
+  const selectedIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
+  const flowNodes = useMemo(
+    () => displayNodes.map((n) => (!!n.selected === selectedIdSet.has(n.id) ? n : { ...n, selected: !n.selected })),
+    [displayNodes, selectedIdSet],
+  )
+
+  // ⇧-drag draws a box; what it holds becomes the selection when it is let go — one write, not one
+  // per pointer move. React Flow reports the box as select changes, starting from what it draws as
+  // selected (the store's selection, as far as it is on the canvas).
+  const boxRef = useRef<Set<string> | null>(null)
+  const rfStore = useStoreApi()
+  const onSelectionStart = useCallback(() => {
+    const held = new Set(useCanvasStore.getState().selectedNodeIds)
+    boxRef.current = new Set((rfInstance?.getNodes() ?? []).filter((n) => held.has(n.id)).map((n) => n.id))
+  }, [rfInstance])
+  const onSelectionEnd = useCallback(() => {
+    const box = boxRef.current
+    boxRef.current = null
+    if (box) setSelection([...box])
+    // React Flow then frames the box's cards in a layer of its own, over them, that swallows their
+    // clicks and right-clicks until the pane is clicked. The selection bar is this canvas's frame.
+    queueMicrotask(() => rfStore.setState({ nodesSelectionActive: false }))
+  }, [setSelection, rfStore])
+
   // 18. Handlers
   // Apply position/selection changes to layoutedNodes so drags are preserved.
   // We DON'T update rawNodes (the store) for position changes — those are layout-managed.
   // We DO update the store for selection changes.
   const onNodesChange: OnNodesChange = useCallback(
     (changes) => {
+      // Selection is the store's (selectedNodeIds): a select change is kept only as the box being
+      // drawn — a click is answered by onNodeClick. Never written into the nodes, where every click
+      // rewrote the whole graph.
+      const box = boxRef.current
+      const rest = changes.filter((c) => {
+        if (c.type !== 'select') return true
+        if (box && c.selected) box.add(c.id)
+        else if (box) box.delete(c.id)
+        return false
+      })
+      if (rest.length === 0) return
       // Update layouted nodes with position changes (drag support)
       setLayoutedNodes((prev) => {
         if (prev.length === 0) return prev
-        return applyNodeChanges(changes, prev) as LineageNode[]
+        return applyNodeChanges(rest, prev) as LineageNode[]
       })
-      // Update the store for non-position changes (selection, etc.)
-      const nonPositionChanges = changes.filter(c => c.type !== 'position')
+      // Update the store for non-position changes (measured sizes, etc.)
+      const nonPositionChanges = rest.filter(c => c.type !== 'position')
       if (nonPositionChanges.length > 0) {
         setNodes(applyNodeChanges(nonPositionChanges, rawNodes) as LineageNode[])
       }
@@ -1083,13 +1149,20 @@ export function GraphCanvas({ className }: { className?: string }) {
 
   const onEdgesChange: OnEdgesChange = useCallback(
     (changes) => {
-      setEdges(applyEdgeChanges(changes, rawEdges) as LineageEdgeType[])
+      // A line's selection is the drawer's (openLine) — React Flow's own select changes are not kept.
+      const rest = changes.filter((c) => c.type !== 'select')
+      if (rest.length > 0) setEdges(applyEdgeChanges(rest, rawEdges) as LineageEdgeType[])
     },
     [rawEdges, setEdges],
   )
 
+  // ⌘/Ctrl- or ⇧-click adds a card to the selection (or takes it out); a plain click selects it alone.
   const onNodeClick: NodeMouseHandler = useCallback(
-    (_, node) => selectNode(node.id),
+    (event, node) => {
+      // A Mac Ctrl-click is the secondary click: the context menu answers it.
+      if (isApplePlatform() && event.ctrlKey && !event.metaKey) return
+      selectNode(node.id, event.metaKey || event.ctrlKey || event.shiftKey)
+    },
     [selectNode],
   )
 
@@ -1354,7 +1427,12 @@ export function GraphCanvas({ className }: { className?: string }) {
       return false
     },
     onCloseEntityDrawer: () => {
-      if (drawerEdge) {
+      // Review & Save takes Esc first — held while a save or a publish from it runs.
+      if (isStagedPanelOpen) {
+        if (useStagedChangesStore.getState().applyStatus !== 'applying') useStagedChangesStore.getState().closeReviewPanel()
+        return true
+      }
+      if (drawerEdge || drawerNodeIds) {
         useCanvasStore.getState().requestDrawerMove(() => {
           useCanvasStore.getState().closeNodeDrawer()
           clearSelection()
@@ -1368,10 +1446,20 @@ export function GraphCanvas({ className }: { className?: string }) {
       return false
     },
     onExitTrace: exitTrace,
+    // ⌘A: the cards on the canvas — not what is collapsed away or culled off screen.
+    selectableIds: () => (rfInstance?.getNodes() ?? []).filter((n) => !n.hidden).map((n) => n.id),
   })
 
   useCanvasKeyboard({ enabled: true, handlers: interactions.keyboardHandlers })
   interactionsRef.current = interactions
+
+  // A right-click on a card that is part of a selection of several offers the several together.
+  const contextTarget = interactions.state.contextMenu.target
+  const selectionMenuActions = useMemo<ContextMenuAction[]>(() => {
+    if (contextTarget?.type !== 'node' || !isSelectableNode(contextTarget.id)) return []
+    const ids = menuSelection(contextTarget.id, selectedNodeIds)
+    return ids.length > 1 ? [compareSelectionAction(ids, interactions.closeContextMenu)] : []
+  }, [contextTarget, selectedNodeIds, interactions.closeContextMenu])
 
   // 20. Minimap color
   const minimapNodeColor = useCallback(
@@ -1412,6 +1500,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           onAddNode={() => useHierarchyBuilderStore.getState().open()}
           onOpenBuild={() => useHierarchyBuilderStore.getState().openBuild()}
           onSave={handleSave}
+          onDelete={canvasWritable ? interactions.deleteSelected : undefined}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}
@@ -1424,6 +1513,8 @@ export function GraphCanvas({ className }: { className?: string }) {
             onToggle={() => setPropertyManagerOpen((v) => !v)}
           />
         )}
+        {/* In a draft: Undo, Redo and the way to Review & Save what was staged here. */}
+        {isDraft && <DraftSaveControls />}
       </div>
 
       {/* Header */}
@@ -1504,7 +1595,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         <ReactFlow
           onInit={setRfInstance}
           onMoveEnd={(_, viewport) => handleViewportChange(viewport)}
-          nodes={displayNodes}
+          nodes={flowNodes}
           edges={displayEdges}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
@@ -1533,9 +1624,14 @@ export function GraphCanvas({ className }: { className?: string }) {
             animated: true,
             interactionWidth: 20,
           }}
-          selectionOnDrag
+          // ⇧-drag draws a box (React Flow's selection key); plain drag pans.
+          onSelectionStart={onSelectionStart}
+          onSelectionEnd={onSelectionEnd}
           multiSelectionKeyCode="Shift"
           selectionMode={SelectionMode.Partial}
+          // Delete is the canvas keyboard's: a STAGED delete (useCanvasKeyboard → deleteSelected).
+          // React Flow's own Backspace removed the selected nodes from the store outright.
+          deleteKeyCode={null}
           fitView
           fitViewOptions={{ padding: 0.2 }}
           minZoom={0.05}
@@ -1581,6 +1677,18 @@ export function GraphCanvas({ className }: { className?: string }) {
         {rawNodes.length === 0 && !isHydratingInitial && <BuilderEmptyState />}
         {/* Roots/orphans beyond the first page — above the stats bar. */}
         <FeedMoreChip loadingNodes={loadingNodes} failedNodes={failedNodes} onLoadMore={keys => void loadMoreFeeds(keys)} bottomClass="bottom-16" />
+        {/* What is selected, and what can be done with several at once — above the stats bar and
+            the load-more chip, between the zoom controls and the minimap. */}
+        <SelectionBar
+          nodeIds={selectedNodeIds}
+          labelFor={(id) => displayMap.get(id)?.name || id}
+          onRemove={(id) => selectNode(id, true)}
+          onClear={clearSelection}
+          onOpenShared={() => useCanvasStore.getState().openNodesDrawer(selectedNodeIds)}
+          sharedEditable={canvasWritable}
+          placementClassName={cn('left-16 bottom-24', showMinimap ? 'right-[14.5rem]' : 'right-16')}
+          hint={<><Kbd shortcut="mod" /> click adds one<span className="mx-0.5 text-ink-muted/60" aria-hidden>·</span><Kbd shortcut="shift" /> drag selects a box</>}
+        />
       </div>
 
       {/* Stats Bar */}
@@ -1634,9 +1742,9 @@ export function GraphCanvas({ className }: { className?: string }) {
       <div
         className={cn(
           'absolute bottom-40 z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
-          !(drawerNodeId || drawerEdge) && 'right-4',
+          !(entityDrawerOpen || drawerEdge) && 'right-4',
         )}
-        style={drawerNodeId || drawerEdge ? { right: `calc(${drawerWidthCss(drawerWidth)} + 1rem)` } : undefined}
+        style={entityDrawerOpen || drawerEdge ? { right: `calc(${drawerWidthCss(drawerWidth)} + 1rem)` } : undefined}
       >
         <EdgeLegend defaultExpanded={false} visibleEdges={allVisibleEdges} />
       </div>
@@ -1658,7 +1766,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         <BuildPanel onClose={() => useHierarchyBuilderStore.getState().close()} />
       )}
       <AnimatePresence>
-        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !entityDrawerOpen && !drawerEdge && isEdgePanelOpen && (
           <EdgeDetailPanel
             isOpen={isEdgePanelOpen}
             onClose={closeEdgePanel}
@@ -1669,6 +1777,9 @@ export function GraphCanvas({ className }: { className?: string }) {
       </AnimatePresence>
       {!builderOpen && !buildOpen && (
         <EntityDrawer
+          // Edits are draft-only, and a trace is read-only for its whole life.
+          canEdit={canvasWritable}
+          writesLocked={trace.isTracing}
           onTraceUp={trace.traceUpstream}
           onTraceDown={trace.traceDownstream}
           onFullTrace={trace.traceFullLineage}
@@ -1676,9 +1787,15 @@ export function GraphCanvas({ className }: { className?: string }) {
           onLocateMany={locateManyOnCanvas}
         />
       )}
-      {/* Read-only here: this canvas has no save path for graph edits. */}
       {!builderOpen && !buildOpen && drawerEdge && (
-        <RelationshipDrawer onFocusNode={revealAndFocus} onLocateMany={locateManyOnCanvas} />
+        <RelationshipDrawer
+          canEdit={canvasWritable}
+          writesLocked={trace.isTracing}
+          onFocusNode={revealAndFocus}
+          onLocateMany={locateManyOnCanvas}
+          onDeleteEdge={canvasWritable ? interactions.deleteEdge : undefined}
+          onReverseEdge={canvasWritable ? interactions.reverseEdge : undefined}
+        />
       )}
       </div>{/* end canvas + right-rail row */}
 
@@ -1720,6 +1837,12 @@ export function GraphCanvas({ className }: { className?: string }) {
           />
         )}
       </AnimatePresence>
+      <PropertyOpHost
+        viewId={activeView?.id ?? ''}
+        graphWrite={propertyGraphWrite}
+        onOpenManager={() => setPropertyManagerOpen(true)}
+        knownEntityTypes={schemaEntityTypes.map((et) => et.id)}
+      />
 
       {/* UX Components */}
       <CanvasContextMenu
@@ -1746,6 +1869,17 @@ export function GraphCanvas({ className }: { className?: string }) {
         onReverseEdge={editModeEnabled ? interactions.reverseEdge : undefined}
         onCreateNode={editModeEnabled ? () => useHierarchyBuilderStore.getState().open() : undefined}
         onSelectAll={interactions.selectAll}
+        customActions={selectionMenuActions}
+      />
+      {/* Review & Save — opened from the controls above, a drawer's "Review & Save", or a
+          notification; saves this canvas's staged edits to the draft as one commit. */}
+      <StagedChangesPanel
+        wsId={scopeWsId} graphId={graphId} dataSourceId={dataSourceId} viewId={viewId}
+        onReveal={(id) => {
+          useCanvasStore.getState().openNodeDrawer(id)
+          void revealAndFocus(id)
+        }}
+        onConfirm={saveToDraft}
       />
       <InlineNodeEditor
         nodeId={interactions.state.inlineEdit.nodeId}

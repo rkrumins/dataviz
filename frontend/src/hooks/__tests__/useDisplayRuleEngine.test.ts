@@ -12,7 +12,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { countRules } from '@/services/ruleCounts'
+import { useBranchStore } from '@/store/branchStore'
 import { type LineageNode, useCanvasStore } from '@/store/canvas'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { useDisplayRuleMatchStore } from '@/store/displayRuleMatchStore'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import type { DisplayRuleConfig } from '@/types/schema'
@@ -218,6 +220,33 @@ describe('useDisplayRuleEngine', () => {
         ).toBeTruthy())
         expect(countRules).not.toHaveBeenCalled()
         expect(membership()).not.toHaveBeenCalled()
+    })
+
+    it('asks again as the open draft changes — a bulk change, window by window', async () => {
+        useBranchStore.setState({ graphId: 'g1', mainBranchId: 'main', currentBranchId: 'd1', draftEpoch: 0 })
+        const job = (commits: number) => ({
+            jobId: 'j1', wsId: 'ws', graphId: 'g1', branchId: 'd1', viewId: 'view-1',
+            op: { kind: 'set' as const, key: 'tier', value: 'gold' }, targetLabel: 'the view', startedAt: '',
+            job: { jobId: 'j1', status: 'running' as const, summary: { commits } },
+        })
+        usePropertyJobsStore.setState({ jobs: [job(1)], writtenEpochs: {} })
+        useReferenceModelStore.setState({ displayRules: [rule('pii')] })
+        useCanvasStore.setState({ nodes: nodes(5) })
+        membership().mockImplementation(async () => ({
+            matches: { pii: [] }, errors: {},
+            notes: ['1 of your rules shows the published graph’s answer for what your draft changed.'],
+        }))
+        renderHook(() => useDisplayRuleEngine('view-1'))
+        await waitFor(() => expect(membership()).toHaveBeenCalledTimes(1))
+        await waitFor(() => expect(countRules).toHaveBeenCalledTimes(1))
+        expect(useDisplayRuleMatchStore.getState().membershipNote).toMatch(/published graph/)
+
+        // The job's next window lands: the chips and the counts are the draft's again.
+        act(() => { usePropertyJobsStore.getState().update('j1', job(2).job) })
+        await waitFor(() => expect(membership()).toHaveBeenCalledTimes(2))
+        await waitFor(() => expect(countRules).toHaveBeenCalledTimes(2))
+        usePropertyJobsStore.setState({ jobs: [] })
+        useBranchStore.setState({ currentBranchId: null })
     })
 
     it('wipes the match store on unmount', async () => {

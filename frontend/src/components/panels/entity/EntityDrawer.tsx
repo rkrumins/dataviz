@@ -15,11 +15,14 @@
  *   canvas click, the trail, Esc, a trace — asks first.
  *
  * The drawer shows whichever entity it was last opened on (`drawerNodeId`), independent of the
- * canvas highlight; it stays open until closed.
+ * canvas highlight; it stays open until closed. Opened on several (`drawerNodeIds`), it compares
+ * them and edits them as one (`multi/MultiEntityDrawer`) — in the same frame, so moving between
+ * one and several never re-mounts the rail.
  */
 import { memo, useCallback, useId, useMemo, useState } from 'react'
-import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { useCanvasStore, isSelectableNode, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { stagedIndexOf } from '@/store/stagedIndex'
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
@@ -34,6 +37,8 @@ import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { userProperties } from '@/lib/nodeFields'
 import { nodeIndexOf } from '@/lib/storeIndex'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
+import { Layers } from 'lucide-react'
+import { Button } from '@/components/ui/Button'
 import { Tabs, TabsContent } from '@/components/ui/Tabs'
 import { DrawerBody, DrawerFrame, DrawerShell } from '../shell/DrawerShell'
 import { JsonView } from '../shell/JsonView'
@@ -45,6 +50,7 @@ import { EntityEditTab, withPropertyBag } from './EntityEditTab'
 import { EntityFooter } from './EntityFooter'
 import { EntityChangeDigest } from './EntityChangeDigest'
 import { changedFieldCount, useStagedNodeEdit } from './EntityChangeStrip'
+import { MultiEntityDrawer } from './multi/MultiEntityDrawer'
 
 export interface EntityDrawerProps {
   /** The canvas owning this drawer accepts graph edits — a draft, in edit mode.
@@ -78,14 +84,22 @@ export interface EntityDrawerProps {
 
 /** Memoised: a canvas re-rendering (a pan, a hover, a pulse) never re-renders the drawer. */
 export const EntityDrawer = memo(function EntityDrawer({ resolveNode, ...props }: EntityDrawerProps) {
+  const drawerNodeIds = useCanvasStore((s) => s.drawerNodeIds)
   // Logical nodes ("logical:…") are virtual groupings, not entities — they have no drawer.
   const drawerNodeId = useCanvasStore((s) => (s.drawerNodeId && !s.drawerNodeId.startsWith('logical:') ? s.drawerNodeId : null))
   const storeNode = useCanvasStore((s) => (drawerNodeId ? nodeIndexOf(s.nodes).get(drawerNodeId) ?? null : null))
   // A trace draws its partners from the walk model and writes nothing to the store; the surface
   // drawing them can answer for them — asked only after the store has missed.
   const node = storeNode ?? (drawerNodeId ? resolveNode?.(drawerNodeId) ?? null : null)
-  if (!node) return null
-  return <OpenEntityDrawer node={node} {...props} />
+  if (!drawerNodeIds && !node) return null
+  return (
+    <DrawerFrame panel="entity-drawer" label="Entity details">
+      {drawerNodeIds ? (
+        <MultiEntityDrawer ids={drawerNodeIds} canEdit={props.canEdit} onStartEditing={props.onStartEditing}
+          writesLocked={props.writesLocked} onFocusNode={props.onFocusNode} onLocateMany={props.onLocateMany} />
+      ) : <OpenEntityDrawer node={node!} {...props} />}
+    </DrawerFrame>
+  )
 })
 
 function OpenEntityDrawer({
@@ -198,117 +212,136 @@ function OpenEntityDrawer({
 
   const titleId = useId()
   return (
-    <DrawerFrame panel="entity-drawer" label="Entity details">
-      <DrawerShell
-        titleId={titleId}
-        focusKey={node.id}
-        dirty={dirty}
-        dirtyWhat={<>your changes to <span className="font-semibold text-ink">{title}</span></>}
-        onClose={close}
-        onStage={stage}
-        canStage={dirty}
-        onDiscard={discard}
-      >
-        <Tabs value={shownTab} onValueChange={(v) => setTab(v as EntityTab)} className="flex flex-col flex-1 min-h-0">
-          <EntityHeader
-            nodeId={node.id}
-            titleId={titleId}
-            typeName={entityType?.name || typeId}
-            colors={colors}
-            confidence={typeof form.confidence === 'number' ? form.confidence : undefined}
-            title={title}
-            technicalLine={technicalLine}
-            isGhost={isGhost}
-            onRestore={() => restoreGhost((data.urn as string | undefined) || node.id)}
-            onTraceUp={onTraceUp}
-            onTraceDown={onTraceDown}
-            onFullTrace={onFullTrace}
-            onFocusConnections={onFocusConnections}
-            copiedUrn={copiedUrn}
-            onCopyUrn={copyUrn}
-            externalUrl={externalUrl}
-            editable={editable}
-            dirty={dirty}
-            editBlocked={editOffered && !editable ? editing.blocked : null}
-            onStartEditing={editOffered && editing.blocked !== NO_VERSION_CONTROL ? onStartEditing : undefined}
-            onClose={close}
-            onFocusNode={onFocusNode}
-            customizing={customizing}
-            onCustomize={toggleCustomize}
-          />
+    <DrawerShell
+      titleId={titleId}
+      focusKey={node.id}
+      dirty={dirty}
+      dirtyWhat={<>your changes to <span className="font-semibold text-ink">{title}</span></>}
+      onClose={close}
+      onStage={stage}
+      canStage={dirty}
+      onDiscard={discard}
+    >
+      <Tabs value={shownTab} onValueChange={(v) => setTab(v as EntityTab)} className="flex flex-col flex-1 min-h-0">
+        <EntityHeader
+          nodeId={node.id}
+          titleId={titleId}
+          typeName={entityType?.name || typeId}
+          colors={colors}
+          confidence={typeof form.confidence === 'number' ? form.confidence : undefined}
+          title={title}
+          technicalLine={technicalLine}
+          isGhost={isGhost}
+          onRestore={() => restoreGhost((data.urn as string | undefined) || node.id)}
+          onTraceUp={onTraceUp}
+          onTraceDown={onTraceDown}
+          onFullTrace={onFullTrace}
+          onFocusConnections={onFocusConnections}
+          copiedUrn={copiedUrn}
+          onCopyUrn={copyUrn}
+          externalUrl={externalUrl}
+          editable={editable}
+          dirty={dirty}
+          editBlocked={editOffered && !editable ? editing.blocked : null}
+          onStartEditing={editOffered && editing.blocked !== NO_VERSION_CONTROL ? onStartEditing : undefined}
+          onClose={close}
+          onFocusNode={onFocusNode}
+          customizing={customizing}
+          onCustomize={toggleCustomize}
+        />
 
-          <DrawerBody>
-            <TabsContent value="view">
-              <EntityViewTab
+        <DrawerBody>
+          <SelectionNudge />
+          <TabsContent value="view">
+            <EntityViewTab
+              nodeId={node.id}
+              form={form}
+              original={unsavedCreate || stagedBefore !== undefined || dirty ? original : undefined}
+              urn={urn}
+              childCount={Number(form.childCount || form._collapsedChildCount || 0)}
+              tagColors={colors}
+              userProps={userProps}
+              copiedUrn={copiedUrn}
+              onCopyUrn={copyUrn}
+              canEdit={editable}
+              originalProps={originalProps}
+              publishedProps={publishedProps}
+              digest={<EntityChangeDigest baseline={baseline} unsavedFields={unsavedFields} />}
+              onCommitProperties={commitProperties}
+              onFocusNode={onFocusNode}
+              onLocateMany={onLocateMany}
+              onRevealPath={onRevealPath}
+              history={scope}
+              typeId={typeId}
+              typeName={entityType?.name || typeId}
+              fields={entityType?.fields}
+              identity={identity}
+              customizing={customizing}
+              onDoneCustomizing={() => setCustomizing(false)}
+              showHistory={historyFor === node.id}
+              onRestoreDeleted={isGhost ? () => restoreGhost((data.urn as string | undefined) || node.id) : undefined}
+              onEditInside={editable && Number(form.childCount || form._collapsedChildCount || 0) > 0
+                ? () => usePropertyJobsStore.getState().requestOp({ target: { kind: 'children', urns: [urn], label: title } })
+                : undefined}
+            />
+          </TabsContent>
+          {editable && (
+            <TabsContent value="edit">
+              <EntityEditTab
                 nodeId={node.id}
                 form={form}
-                original={unsavedCreate || stagedBefore !== undefined || dirty ? original : undefined}
+                original={original}
+                entityType={entityType}
                 urn={urn}
-                childCount={Number(form.childCount || form._collapsedChildCount || 0)}
-                tagColors={colors}
                 userProps={userProps}
-                copiedUrn={copiedUrn}
-                onCopyUrn={copyUrn}
-                canEdit={editable}
                 originalProps={originalProps}
                 publishedProps={publishedProps}
-                digest={<EntityChangeDigest baseline={baseline} unsavedFields={unsavedFields} />}
-                onCommitProperties={commitProperties}
-                onFocusNode={onFocusNode}
-                onLocateMany={onLocateMany}
-                onRevealPath={onRevealPath}
-                history={scope}
-                typeId={typeId}
-                typeName={entityType?.name || typeId}
-                fields={entityType?.fields}
-                identity={identity}
-                customizing={customizing}
-                onDoneCustomizing={() => setCustomizing(false)}
-                showHistory={historyFor === node.id}
-                onRestoreDeleted={isGhost ? () => restoreGhost((data.urn as string | undefined) || node.id) : undefined}
+                onEdit={edit}
+                onCommit={commit}
+                onCancel={discard}
+                onCopyUrn={copyUrn}
               />
             </TabsContent>
-            {editable && (
-              <TabsContent value="edit">
-                <EntityEditTab
-                  nodeId={node.id}
-                  form={form}
-                  original={original}
-                  entityType={entityType}
-                  urn={urn}
-                  userProps={userProps}
-                  originalProps={originalProps}
-                  publishedProps={publishedProps}
-                  onEdit={edit}
-                  onCommit={commit}
-                  onCancel={discard}
-                  onCopyUrn={copyUrn}
-                />
-              </TabsContent>
-            )}
-            {technical && (
-              <TabsContent value="json">
-                <JsonView data={form} label="Entity data" />
-              </TabsContent>
-            )}
-          </DrawerBody>
+          )}
+          {technical && (
+            <TabsContent value="json">
+              <JsonView data={form} label="Entity data" />
+            </TabsContent>
+          )}
+        </DrawerBody>
 
-          <EntityFooter
-            nodeId={node.id}
-            editing={(editable && shownTab === 'edit') || dirty || justStaged}
-            dirty={dirty}
-            justStaged={justStaged}
-            onCancel={discard}
-            summary={summaryQ.data}
-            summaryLoading={summaryQ.isLoading}
-            wsId={scope.wsId}
-            graphId={scope.graphId}
-            inDraft={!!draftId}
-            externalUrl={externalUrl}
-            onSeeHistory={versioningEnabled && scope.wsId && scope.graphId ? seeHistory : undefined}
-          />
-        </Tabs>
-      </DrawerShell>
-    </DrawerFrame>
+        <EntityFooter
+          nodeId={node.id}
+          editing={(editable && shownTab === 'edit') || dirty || justStaged}
+          dirty={dirty}
+          justStaged={justStaged}
+          onCancel={discard}
+          summary={summaryQ.data}
+          summaryLoading={summaryQ.isLoading}
+          wsId={scope.wsId}
+          graphId={scope.graphId}
+          inDraft={!!draftId}
+          externalUrl={externalUrl}
+          onSeeHistory={versioningEnabled && scope.wsId && scope.graphId ? seeHistory : undefined}
+        />
+      </Tabs>
+    </DrawerShell>
+  )
+}
+
+/** Several entities selected on the canvas while the drawer reads one: compare them instead. */
+function SelectionNudge() {
+  const count = useCanvasStore((s) => (s.selectedNodeIds.length < 2 ? 0 : s.selectedNodeIds.filter(isSelectableNode).length))
+  if (count < 2) return null
+  const compare = () => {
+    const s = useCanvasStore.getState()
+    s.openNodesDrawer(s.selectedNodeIds)
+  }
+  return (
+    <div className="mx-5 mt-3 flex items-center gap-2 rounded-lg border border-accent-lineage/25 bg-accent-lineage/[0.05] px-2.5 py-1.5">
+      <Layers aria-hidden className="h-3.5 w-3.5 shrink-0 text-accent-lineage" />
+      <span className="flex-1 min-w-0 text-[11px] text-ink-secondary">{count.toLocaleString()} selected on the canvas</span>
+      <Button size="sm" variant="ghost" className="h-6 px-2 text-2xs" onClick={compare}>Compare them</Button>
+    </div>
   )
 }

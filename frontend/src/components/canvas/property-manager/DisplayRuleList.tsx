@@ -12,10 +12,11 @@
  */
 import { motion } from 'framer-motion'
 import {
-    AlertTriangle, ArrowDown, ArrowUp, Crosshair, Pencil, Plus, Tags, Trash2,
+    AlertTriangle, ArrowDown, ArrowUp, Crosshair, Info, Pencil, Plus, Tags, Trash2,
 } from 'lucide-react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { cn } from '@/lib/utils'
 import type { DisplayRuleConfig } from '@/types/schema'
 import { useDisplayRuleMatchStore, useRuleCount } from '@/store/displayRuleMatchStore'
@@ -55,6 +56,20 @@ function CheckFailure() {
             >
                 Retry
             </button>
+        </div>
+    )
+}
+
+
+/** On a draft, why some rules' tags on what the draft changed are the
+ *  published graph's — so a missing tag reads as that, not as no match. */
+function DraftNote() {
+    const note = useDisplayRuleMatchStore((s) => s.membershipNote)
+    if (!note) return null
+    return (
+        <div className="flex items-start gap-2 rounded-xl border border-glass-border/70 bg-glass/20 px-3 py-2">
+            <Info className="w-3.5 h-3.5 mt-0.5 shrink-0 text-ink-muted" />
+            <p className="flex-1 min-w-0 text-[11.5px] leading-snug text-ink-muted">{note}</p>
         </div>
     )
 }
@@ -144,6 +159,7 @@ export function DisplayRuleList({
             )}
 
             <CheckFailure />
+            <DraftNote />
 
             <div className="flex flex-col gap-2">
                 {rules.map((rule, index) => (
@@ -183,6 +199,15 @@ function RuleCountLine({ enabled, count }: {
         return <span title={count.error}>At least {n} · <span className="text-rose-400">count stopped</span></span>
     }
     if (!count.complete) return <>{n} so far · counting {count.percent}%</>
+    if (count.approximate) {
+        return (
+            <HoverTip label="Counted on the published graph"
+                detail={count.note ?? 'Your draft’s changes aren’t in this count'}
+                className="inline-flex">
+                <span>About {n} {count.count === 1 ? 'match' : 'matches'} in this view</span>
+            </HoverTip>
+        )
+    }
     if (count.lowerBound) {
         return (
             <span title="Part of the view couldn’t be checked in time and was left out">

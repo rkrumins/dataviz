@@ -18,11 +18,16 @@ import { useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { GitPullRequest, Rocket, Loader2, AlertTriangle, ArrowRight, ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { nodeIndexOf } from '@/lib/storeIndex'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { CopyButton } from '@/components/ui/CopyButton'
+import { useCanvasStore } from '@/store/canvas'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
+import { fillRefusedRequest } from '@/components/canvas/property-manager/op/fillRequired'
 import { useStagedChangesStore, useUnsavedCountOnBranch } from '@/store/stagedChangesStore'
 import {
   usePublishBranch, useOpenMergeRequest, useLivePrForBranch, useBranchViewChanges, useDataSourceDraftsPolicy,
@@ -31,7 +36,8 @@ import { invalidateViewVersions } from '@/hooks/useViewVersions'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { queryClient } from '@/lib/queryClient'
 import {
-  describeUniqueViolation, MergeConflictError, NotUpToDateError, PullRequestExistsError, UniqueViolationError,
+  describeUniqueViolation, FieldViolationError, MergeConflictError, NotUpToDateError, PullRequestExistsError,
+  UniqueViolationError, type FieldViolation, type FieldViolationCount,
 } from '@/services/versioningApiService'
 import { ChangeCountChips } from './ChangesPanel'
 import { DraftViewChanges } from './DraftViewChanges'
@@ -41,6 +47,13 @@ import { refusalCopy } from '../model/provenance'
 
 /** Shared values a refused publish lists before it says how many more there are. */
 const UNIQUE_SHOWN = 10
+
+/** What a field refusal's count says, by rule. */
+const FIELD_RULE_PHRASE: Record<FieldViolation['rule'], string> = {
+  field_required: 'missing',
+  field_not_allowed: 'not allowed',
+  field_type: 'of the wrong type',
+}
 
 export interface PublishFlowOptions {
   workspaceId: string
@@ -79,6 +92,8 @@ export function usePublishFlow({
   const [notUpToDate, setNotUpToDate] = useState<NotUpToDateError | null>(null)
   /** A publish refused because values that must be unique are shared: which, said here. */
   const [unique, setUnique] = useState<UniqueViolationError | null>(null)
+  /** A publish refused because values break their entity types' fields: each one, said here. */
+  const [fieldRefusal, setFieldRefusal] = useState<FieldViolationError | null>(null)
   /** A review we discovered only when the server rejected our open (the race backstop). */
   const [raced, setRaced] = useState<{ prId: string; title?: string | null } | null>(null)
   /** "Publish now" while a review is open bypasses it — make that an explicit second step. */
@@ -128,6 +143,8 @@ export function usePublishFlow({
       setNotUpToDate(e)
     } else if (e instanceof UniqueViolationError) {
       setUnique(e)
+    } else if (e instanceof FieldViolationError) {
+      setFieldRefusal(e)
     } else if (e instanceof PullRequestExistsError) {
       // We lost a race (or the list was stale). Don't dead-end — show the review that won.
       setRaced({ prId: e.prId, title: e.prTitle })
@@ -140,6 +157,7 @@ export function usePublishFlow({
     setConflicts(null)
     setNotUpToDate(null)
     setUnique(null)
+    setFieldRefusal(null)
     openMr.mutate(
       {
         branchId, title: message || undefined, description: description || undefined,
@@ -167,6 +185,7 @@ export function usePublishFlow({
     setConflicts(null)
     setNotUpToDate(null)
     setUnique(null)
+    setFieldRefusal(null)
     publish.mutate(
       { branchId, message: message || 'Publish draft' },
       {
@@ -191,7 +210,7 @@ export function usePublishFlow({
   return {
     workspaceId, branchId, dataSourceId, changeSet, onClose, onLeave, canPublishDraft, changesLoading,
     message, setMessage, description, setDescription, reviewers, setReviewers, reviewerGroups, setReviewerGroups,
-    conflicts, notUpToDate, unique, confirmBypass, canManage, canPublish, reviewOnly,
+    conflicts, notUpToDate, unique, fieldRefusal, confirmBypass, canManage, canPublish, reviewOnly,
     publish, openMr, prPending, busy, viewChanges, viewChangesQ, viewChangeCount, changeCount, hasChanges, unsaved,
     existingPr, inReview, goToReview, handleOpenMr, handlePublish,
   }
@@ -207,9 +226,13 @@ export function PublishBody({ flow, offerSave = true }: {
 }) {
   const {
     branchId, changeSet, onClose, onLeave, changesLoading, message, setMessage, description, setDescription,
-    reviewers, setReviewers, reviewerGroups, setReviewerGroups, conflicts, notUpToDate, unique, confirmBypass, viewChanges, viewChangesQ,
+    reviewers, setReviewers, reviewerGroups, setReviewerGroups, conflicts, notUpToDate, unique, fieldRefusal, confirmBypass, viewChanges, viewChangesQ,
     viewChangeCount, changeCount, hasChanges, unsaved, existingPr, inReview, goToReview, workspaceId, dataSourceId,
   } = flow
+  // A required field left empty is filled on the entities refused by one bulk change — offered on
+  // the draft open on the canvas, which the bulk dialog writes to.
+  const fillHere = useBranchStore((s) => s.currentBranchId === branchId)
+  const fills = (c: FieldViolationCount) => fillHere && c.rule === 'field_required' && !!c.ids?.length
   return (
     <div className="px-6 pb-4 space-y-3">
       {changeCount > 0 && (
@@ -296,7 +319,7 @@ export function PublishBody({ flow, offerSave = true }: {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="text-[11px] text-ink-muted leading-relaxed">
-            <span className="font-medium text-amber-500">{unsaved} unsaved edit{unsaved === 1 ? '' : 's'} on the canvas.</span>{' '}
+            <span className="font-medium text-amber-700 dark:text-amber-300">{unsaved} unsaved edit{unsaved === 1 ? '' : 's'} on the canvas.</span>{' '}
             They aren’t part of this draft yet, so publishing now would leave them behind. Save them
             in Review &amp; Save first, or discard them.
             {offerSave && (
@@ -316,7 +339,7 @@ export function PublishBody({ flow, offerSave = true }: {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <ShieldAlert className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="text-[11px] text-ink-muted leading-relaxed">
-            <span className="font-medium text-amber-500">This skips the open review.</span>{' '}
+            <span className="font-medium text-amber-700 dark:text-amber-300">This skips the open review.</span>{' '}
             Publishing sends these changes straight to the Published version. The review will be
             closed as merged, without its reviewers seeing it. Press{' '}
             <span className="font-medium text-ink">Publish anyway</span> to continue.
@@ -328,7 +351,7 @@ export function PublishBody({ flow, offerSave = true }: {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="text-[11px] text-ink-muted">
-            <span className="font-medium text-amber-500">The Published version changed — {conflicts} conflict{conflicts === 1 ? '' : 's'}.</span>{' '}
+            <span className="font-medium text-amber-700 dark:text-amber-300">The Published version changed — {conflicts} conflict{conflicts === 1 ? '' : 's'}.</span>{' '}
             Submit for review to resolve them, or archive this draft and start again from the latest.
           </div>
         </div>
@@ -338,7 +361,7 @@ export function PublishBody({ flow, offerSave = true }: {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="min-w-0 text-[11px] text-ink-muted">
-            <span className="font-medium text-amber-500">
+            <span className="font-medium text-amber-700 dark:text-amber-300">
               Nothing was published — {unique.total === 1
                 ? '1 value that must be unique is'
                 : `${unique.total} values that must be unique are`} used more than once.
@@ -354,11 +377,48 @@ export function PublishBody({ flow, offerSave = true }: {
         </div>
       )}
 
+      {fieldRefusal && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1 text-[11px] text-ink-muted">
+            <span className="font-medium text-amber-700 dark:text-amber-300">
+              Nothing was published — {fieldRefusal.total === 1
+                ? '1 value breaks'
+                : `${fieldRefusal.total.toLocaleString()} values break`} the fields their entity types define.
+            </span>{' '}
+            Change them in the draft, then publish.
+            {(fieldRefusal.total > Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN) || fieldRefusal.byField.some(fills))
+              && fieldRefusal.byField.length > 0 && (
+              <ul aria-label="Values to change by field" className="mt-1.5 space-y-1 text-ink">
+                {fieldRefusal.byField.map((c) => (
+                  <li key={`${c.entityType}:${c.field}:${c.rule}`} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2">
+                    <span className="min-w-0">
+                      <span className="font-medium">{c.entityType} · {c.fieldName || c.field}</span>
+                      <span className="text-ink-muted">: {c.count.toLocaleString()} {FIELD_RULE_PHRASE[c.rule]}</span>
+                    </span>
+                    {fills(c) && <FillRefused count={c} onOpen={() => { onClose(); onLeave?.() }} />}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {/* Some six rows, then it scrolls: the fills above stay in sight. */}
+            <ul aria-label="Values to change" className="mt-1.5 max-h-56 overflow-y-auto custom-scrollbar pr-1 space-y-1 text-ink">
+              {fieldRefusal.violations.slice(0, UNIQUE_SHOWN).map((v, i) => (
+                <FieldViolationRow key={`${v.entity_id}:${v.field}:${i}`} v={v} onOpen={() => { onClose(); onLeave?.() }} />
+              ))}
+            </ul>
+            {fieldRefusal.total > Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN) && (
+              <p className="mt-1">…and {(fieldRefusal.total - Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN)).toLocaleString()} more.</p>
+            )}
+          </div>
+        </div>
+      )}
+
       {notUpToDate && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="text-[11px] text-ink-muted">
-            <span className="font-medium text-amber-500">
+            <span className="font-medium text-amber-700 dark:text-amber-300">
               {notUpToDate.reason === 'overlap' ? 'Automation changed something you changed.' : 'Updates are available for this draft.'}
             </span>{' '}
             {refusalCopy(notUpToDate.reason)} Use “Get latest updates” on the toolbar.
@@ -366,6 +426,59 @@ export function PublishBody({ flow, offerSave = true }: {
         </div>
       )}
     </div>
+  )
+}
+
+/** "Fill N missing…": the bulk dialog, "Fill if empty" on the entities the publish refused for a
+ *  required field left empty — by id, so ones new in the draft too. One change takes at most the
+ *  first 20,000; the next publish names the rest. */
+function FillRefused({ count, onOpen }: { count: FieldViolationCount; onOpen: () => void }) {
+  const ids = count.ids ?? []
+  const complete = !!count.idsComplete
+  const fill = () => {
+    onOpen()
+    usePropertyJobsStore.getState().requestOp(fillRefusedRequest({
+      entityType: count.entityType, field: count.field, fieldName: count.fieldName, ids, complete,
+    }))
+  }
+  // A column of their own at the row's end; the rest said under the fill, across the row.
+  return (
+    <>
+      <button type="button" onClick={fill}
+        className="-mt-0.5 px-1.5 h-5 rounded text-[10.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10">
+        {complete ? `Fill ${count.count.toLocaleString()} missing…` : `Fill the first ${ids.length.toLocaleString()}…`}
+      </button>
+      {!complete && <span className="col-span-2 px-1.5 text-right text-[10.5px] text-ink-muted"> then publish again for the rest</span>}
+    </>
+  )
+}
+
+/** One value a publish refused by its field: the entity by name, what is wrong — and the way to it:
+ *  opened in the drawer when it is on the canvas, else its id to find it by. */
+function FieldViolationRow({ v, onOpen }: { v: FieldViolation; onOpen: () => void }) {
+  const id = v.urn || `gv:${v.entity_id}`
+  const onCanvas = useCanvasStore((s) => nodeIndexOf(s.nodes).has(id))
+  const name = v.name || v.urn || v.entity_id
+  return (
+    <li className="flex items-start gap-2 min-w-0">
+      <div className="min-w-0 flex-1 break-words">
+        <span className="font-medium">{name}</span>
+        <span className="text-ink-muted"> · {v.type} · </span>
+        {v.reason}
+      </div>
+      {onCanvas ? (
+        <button
+          type="button"
+          onClick={() => { onOpen(); useCanvasStore.getState().openNodeDrawer(id) }}
+          aria-label={`Open ${name}`}
+          className="shrink-0 px-1.5 h-5 rounded text-[10.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10"
+        >
+          Open
+        </button>
+      ) : (
+        <CopyButton value={id} label={`Copy the id of ${name}`} className="shrink-0" />
+      )}
+    </li>
   )
 }
 

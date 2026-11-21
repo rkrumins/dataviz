@@ -582,7 +582,7 @@ def _job_words(types: list[str]) -> str:
              "projection": "a projection", "rebuild": "a rebuild",
              "package_inspect": "a package check",
              "fork_update": "a fork's update from its parent", "fork_merge": "a fork's merge",
-             "save": "a save to a draft"}
+             "save": "a save to a draft", "property": "a bulk property edit"}
     return ", ".join(words.get(t, t) for t in types)
 
 

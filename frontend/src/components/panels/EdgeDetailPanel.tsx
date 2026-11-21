@@ -37,6 +37,7 @@ import {
     Pencil,
     Trash2,
     PanelRightOpen,
+    Columns3,
 } from 'lucide-react'
 import { useCanvasStore, type LineageEdge, type LineageNode } from '@/store/canvas'
 import {
@@ -51,7 +52,7 @@ import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { edgeKind } from '@/services/ontologyPreflightService'
-import { targetFromEdge } from '@/lib/drawerEdgeTarget'
+import { memberFromEdge, targetFromEdge, targetFromMembers } from '@/lib/drawerEdgeTarget'
 import { useFeature } from '@/store/features'
 import { cn } from '@/lib/utils'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
@@ -532,6 +533,16 @@ export function EdgeDetailPanel({
             <div className="flex-1 overflow-y-auto custom-scrollbar">
                 {activeTab === 'selected' && selectedEdges.length > 0 && (
                     <div className="p-3 space-y-2">
+                        {selectedEdges.length > 1 && (
+                            <button
+                                type="button"
+                                onClick={() => useCanvasStore.getState().openEdgeDrawer(targetFromMembers(selectedEdges.map(memberFromEdge)))}
+                                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium text-accent-lineage bg-accent-lineage/10 hover:bg-accent-lineage/20 transition-colors"
+                            >
+                                <Columns3 className="w-3.5 h-3.5" aria-hidden />
+                                Compare &amp; edit {selectedEdges.length}
+                            </button>
+                        )}
                         {selectedEdges.map(edge => (
                             <EdgeCard
                                 key={edge.id}

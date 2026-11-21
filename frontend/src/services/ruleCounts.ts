@@ -25,6 +25,10 @@ export interface RuleCount {
     /** Counted to the end, but a floor: part of the view couldn't be read
      *  in time and was left out. */
     lowerBound?: boolean
+    /** On a draft: Published's count for this rule, not moved by what the
+     *  draft changed — ``note`` says why. */
+    approximate?: boolean
+    note?: string
 }
 
 export interface RuleToCount {
@@ -129,6 +133,7 @@ async function countGroup(
                 percent: done ? 100 : percentOf(c.progress),
                 ...(c.error ? { error: c.error } : {}),
                 ...(c.lowerBound ? { lowerBound: true } : {}),
+                ...(c.approximate ? { approximate: true, ...(c.note ? { note: c.note } : {}) } : {}),
             })
         }
         opts.onUpdate?.(new Map(counts))

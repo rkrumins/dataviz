@@ -189,6 +189,34 @@ describe('SelectionBar', () => {
       expect(within(bar).getByText('⌘').tagName).toBe('KBD')
       expect(within(bar).getByText('⇧').tagName).toBe('KBD')
     })
+
+    it('says the gestures of the canvas it is on, where that canvas has its own', () => {
+      renderBar(['a', 'b'], { hint: <>⇧ drag selects a box</> })
+      const bar = screen.getByRole('region', { name: /selected entities/i })
+      expect(bar.textContent).toContain('drag selects a box')
+      expect(bar.textContent).not.toContain('click adds a range')
+    })
+  })
+
+  describe('where it sits', () => {
+    it('in the Context View\'s lane by default: above its trace dock and layer strip, short of its right-hand dock', () => {
+      renderBar(['a', 'b'])
+      const lane = screen.getByRole('region', { name: /selected entities/i })
+      expect(lane.className).toContain('left-4')
+      // 20rem + 1.75rem: the right-hand dock's width and gutter (jsdom folds the sum).
+      expect(lane.style.right).toBe('calc(21.75rem)')
+      expect(lane.style.bottom).toContain('var(--trace-dock-height, 0px)')
+      expect(lane.style.bottom).toContain('var(--layer-strip-height, 0px)')
+    })
+
+    it('where another canvas places it — none of the Context View\'s chrome to clear', () => {
+      renderBar(['a', 'b'], { placementClassName: 'left-16 right-16 bottom-24' })
+      const lane = screen.getByRole('region', { name: /selected entities/i })
+      expect(lane.className).toContain('left-16 right-16 bottom-24')
+      expect(lane.className).toContain('absolute')
+      expect(lane.style.right).toBe('')
+      expect(lane.style.bottom).toBe('')
+    })
   })
 
   it('narrows the canvas to the selection, when the preview is on', async () => {

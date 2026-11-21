@@ -142,6 +142,13 @@ export function convertBackendEntityType(backendEntity: EntityTypeDefinition): E
       showInPanel: f.showInPanel,
       showInTooltip: f.showInTooltip,
       displayOrder: f.displayOrder,
+      // What a publish holds the field to, and how it reads (the multi-entity drawer's unique
+      // refusal, the drawers' allowed-values pickers and warnings).
+      ...(f.format ? { format: f.format } : {}),
+      ...(f.reconciliationKey ? { reconciliationKey: true } : {}),
+      ...(f.unique ? { unique: true } : {}),
+      ...(f.allowedValues?.length ? { allowedValues: [...f.allowedValues] } : {}),
+      ...(f.allowOther ? { allowOther: true } : {}),
     })),
     hierarchy: {
       level: backendEntity.hierarchy.level,

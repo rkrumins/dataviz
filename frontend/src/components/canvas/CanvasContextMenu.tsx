@@ -50,6 +50,8 @@ export interface LayerMenuModel {
     onStartEditing?: () => void
     /** Narrow the canvas to what is in this layer (and what that reaches). */
     onNarrow?: () => void
+    /** Change a property on every entity in this layer (on the draft). */
+    onEditProperties?: () => void
     /** The layer's settings — its essentials and its own properties; its
      *  details, read-only, outside a draft. */
     onOpenSettings?: () => void
@@ -455,6 +457,15 @@ export function CanvasContextMenu({
                     icon: 'ScanSearch',
                     dividerAfter: true,
                     onClick: () => { m.onNarrow?.(); onClose() },
+                })
+            }
+            if (m.onEditProperties) {
+                result.push({
+                    id: 'layer-edit-properties',
+                    label: 'Change properties in this layer…',
+                    icon: 'PencilLine',
+                    dividerAfter: true,
+                    onClick: () => { m.onEditProperties?.(); onClose() },
                 })
             }
             if (m.canEdit) {

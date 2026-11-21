@@ -155,6 +155,10 @@ export type Status = 'complete' | 'running' | 'expired'
  */
 export type Refresh = boolean
 export type Sessionid1 = string | null
+/**
+ * A key whose every value the catalog keeps (up to 1,000) is listed, not only the 20 most held — for merging near-duplicate values.
+ */
+export type Valuesfor = string | null
 export type Waitms = number
 /**
  * When the read began (UTC).
@@ -199,6 +203,10 @@ export type Max = number | null
  * Least numeric value, exact.
  */
 export type Min = number | null
+/**
+ * False on a draft that changed a value at either end of the range: ``min`` and ``max`` still bound every value, but may be wider than they are.
+ */
+export type Rangeexact = boolean
 /**
  * Entities holding it in propertiesRaw, past the native-key budget.
  */
@@ -620,6 +628,10 @@ export type Items = SearchRuleItem[]
 export type Purpose = 'rule' | 'search'
 export type Waitms1 = number
 /**
+ * On a draft: the published graph's count, not corrected for what the draft changed — ``note`` says why.
+ */
+export type Approximate = boolean
+/**
  * Matches found so far — exact once complete.
  */
 export type Count6 = number
@@ -628,6 +640,10 @@ export type Error = string | null
  * Complete, but a floor: part of the view couldn't be read in time and was left out, so there may be more matches.
  */
 export type Lowerbound = boolean
+/**
+ * Why the count is approximate.
+ */
+export type Note = string | null
 export type Sessionid3 = string | null
 export type Status2 = 'running' | 'complete'
 export type Dataversion1 = string | null
@@ -772,6 +788,10 @@ export type Items1 = SearchRuleItem[]
 export type Urns3 = string[]
 export type Dataversion3 = string | null
 export type Elapsedms3 = number
+/**
+ * On a draft: the rules whose matches among the entities the draft changed are the published graph's, and why.
+ */
+export type Notes4 = string[]
 export type $Schemaversion = '1'
 /**
  * Parallel facets — each spec produces its own bucket list in the response. Omit for hits-only requests.
@@ -990,7 +1010,7 @@ export type Estimatedrows = number | null
 /**
  * Diagnostic hints — e.g. 'no index on properties.foo'.
  */
-export type Notes4 = string[]
+export type Notes5 = string[]
 /**
  * The search session this page came from. Send it back as ``options.sessionId`` to continue a running one.
  */
@@ -1219,6 +1239,7 @@ export interface SearchCatalogRequest {
     refresh?: Refresh
     scope: SearchScope
     sessionId?: Sessionid1
+    valuesFor?: Valuesfor
     waitMs?: Waitms
 }
 export interface SearchCatalogResult {
@@ -1258,6 +1279,7 @@ export interface SearchCatalogProperty {
     kinds?: Kinds
     max?: Max
     min?: Min
+    rangeExact?: Rangeexact
     residual?: Residual
     values?: Values
 }
@@ -1691,9 +1713,11 @@ export interface Counts1 {
     [k: string]: SearchRuleCount
 }
 export interface SearchRuleCount {
+    approximate?: Approximate
     count: Count6
     error?: Error
     lowerBound?: Lowerbound
+    note?: Note
     progress?: SearchProgress | null
     sessionId?: Sessionid3
     status: Status2
@@ -1815,6 +1839,7 @@ export interface SearchMembershipResult {
     elapsedMs?: Elapsedms3
     errors?: Errors
     matches?: Matches
+    notes?: Notes4
 }
 /**
  * Rule id → why it could not be evaluated. Such a rule matches nothing here.
@@ -2063,7 +2088,7 @@ export interface QueryExplain {
     costScore?: Costscore
     cypher: Cypher1
     estimatedRows?: Estimatedrows
-    notes?: Notes4
+    notes?: Notes5
 }
 /**
  * Response shape for ``GET /search/values``: a property's most common

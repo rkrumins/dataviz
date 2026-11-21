@@ -29,13 +29,12 @@ from typing import Any, Dict, List, Optional, Sequence
 from backend.app.services.deep_search import CompileError
 from backend.app.services.deep_search.settings import get_deep_search_settings
 from backend.app.services.view_placement import NodeFacts, place_all
+from backend.common.predicate_eval import NODE_FIELDS as _NODE_FIELDS
+from backend.common.predicate_eval import matches as _matches
 from backend.common.search_semantics import (
-    SemanticsError,
     element_texts,
     evaluate,
-    evaluate_keys,
     fold_case,
-    resolve_comparison,
     resolve_predicate,
     value_slot,
 )
@@ -47,7 +46,6 @@ from backend.common.models.search import (
     NODE_REF_MATCHES_MAX,
     AncestorRef,
     DegreePredicate,
-    DescendantOfPredicate,
     EdgeEnd,
     EdgeHit,
     EdgeRef,
@@ -55,26 +53,13 @@ from backend.common.models.search import (
     EdgeHasPropertyPredicate,
     EdgePropertyPredicate,
     EdgesPredicate,
-    EntityTypePredicate,
     GroupPredicate,
-    HasIncomingPredicate,
-    HasOutgoingPredicate,
-    HasPropertyPredicate,
-    IsLeafPredicate,
-    IsOrphanPredicate,
-    IsPredicate,
-    IsRootPredicate,
-    LayerPredicate,
-    MatchAllPredicate,
     PathHit,
     PathPredicate,
-    PropertyPredicate,
     RelatedPredicate,
     SearchHit,
     SearchQuery,
     SearchResultPage,
-    TagPredicate,
-    TextPredicate,
 )
 
 #: How far below its anchor a ``"**"`` in a name path looks.
@@ -86,15 +71,8 @@ REF_ANY_DEPTH_MAX = 20
 # ``description`` (optional strs), ``tags`` (list[str], optional),
 # ``layerAssignment`` (str, optional), and any number of arbitrary
 # property keys. Edge dict shape: ``source`` / ``target`` / ``type``
-# (all strs) plus optional property keys.
-
-# The fixture fields that are the node's own, not user properties — what a
-# search BY property name must not match (the FalkorDB compiler excludes
-# ``platform_property_names()`` for the same reason).
-_NODE_FIELDS = frozenset({
-    "urn", "entityType", "displayName", "qualifiedName", "description",
-    "tags", "layerAssignment", "searchableText",
-})
+# (all strs) plus optional property keys. Predicates are answered by the
+# shared evaluator (``common.predicate_eval``), as a draft's are.
 
 
 class StubDeepSearchProvider:
@@ -773,13 +751,6 @@ class StubDeepSearchProvider:
 # ---------------------------------------------------------------------------
 
 
-_SUGAR = {
-    IsOrphanPredicate: ("both", "eq", 0), IsLeafPredicate: ("out", "eq", 0),
-    IsRootPredicate: ("in", "eq", 0), HasIncomingPredicate: ("in", "gt", 0),
-    HasOutgoingPredicate: ("out", "gt", 0),
-}
-
-
 def _path_of(predicate) -> Optional[PathPredicate]:
     """The path a query asks for: at its top, or in its top-level AND."""
     if isinstance(predicate, PathPredicate):
@@ -813,182 +784,6 @@ def _edge_passes(edge: Dict[str, Any], ep) -> bool:
             return evaluate(edge.get(ep.key), resolve_predicate(ep))
         return json_holds(edge.get("properties"), ep.key, resolve_predicate(ep))
     raise CompileError(f"stub: unsupported edge predicate {type(ep).__name__}")
-
-
-def _matches(node: Dict[str, Any], predicate, graph=None, depth: int = 12) -> bool:
-    """Walk the predicate tree against an in-memory node dict.
-
-    ``graph`` (the stub) answers what needs more than the node: its
-    relationships and degree. Unsupported kinds raise ``CompileError`` with
-    a clear message — the stub is honest about what it can do rather than
-    silently returning wrong results. ``depth``: how far below its
-    containers a ``descendantOf`` naming no ``maxDepth`` reaches (the
-    scope's).
-    """
-    if isinstance(predicate, GroupPredicate):
-        if predicate.op == "and":
-            return all(_matches(node, c, graph, depth) for c in predicate.children)
-        if predicate.op == "or":
-            return any(_matches(node, c, graph, depth) for c in predicate.children)
-        if predicate.op == "not":
-            # Validator enforces exactly one child.
-            return not _matches(node, predicate.children[0], graph, depth)
-        raise CompileError(f"stub: unsupported group op {predicate.op!r}")
-
-    if isinstance(predicate, DescendantOfPredicate) and graph is not None:
-        urns = set(predicate.urns)
-        for ref in predicate.refs or ():
-            if ref.urn is None:
-                raise CompileError(
-                    f"descendantOf: the name reference '{ref.label()}' was not resolved")
-            urns.add(ref.urn)
-        reach = int(predicate.max_depth or depth)
-        return node.get("urn") in urns or any(
-            a in urns for a in graph._ancestors(node)[:reach])
-
-    if isinstance(predicate, RelatedPredicate) and graph is not None:
-        return graph._relation_holds(node, predicate)
-
-    if isinstance(predicate, DegreePredicate) and graph is not None:
-        return graph._degree(node["urn"], predicate)
-
-    if type(predicate) in _SUGAR and graph is not None:
-        direction, op, value = _SUGAR[type(predicate)]
-        return graph._degree(node["urn"], DegreePredicate(
-            direction=direction, op=op, value=value, edgeClass=predicate.edge_class,
-            edgeTypes=predicate.edge_types))
-
-    if isinstance(predicate, MatchAllPredicate):
-        return True
-
-    if isinstance(predicate, IsPredicate):
-        urns = set()
-        for ref in predicate.refs:
-            if ref.urn is None:
-                raise CompileError(f"is: the name reference '{ref.label()}' was not resolved")
-            urns.add(ref.urn)
-        return node.get("urn") in urns
-
-    if isinstance(predicate, EntityTypePredicate):
-        et = node.get("entityType")
-        if predicate.op == "in":
-            return et in set(predicate.values)
-        if predicate.op == "notIn":
-            return et not in set(predicate.values)
-        raise CompileError(f"stub: unsupported entityType op {predicate.op!r}")
-
-    if isinstance(predicate, LayerPredicate):
-        target = getattr(predicate, "_placement", None)
-        if target is not None and graph is not None:
-            placement = graph._placement_of(node["urn"], target)
-            if placement is None:
-                return False
-            if target.layer_id is None:     # in any of the view's layers, as a member
-                return placement.member
-            return placement.layer_id == target.layer_id
-        return node.get("layerAssignment") == predicate.layer_assignment
-
-    if isinstance(predicate, TextPredicate):
-        # Mirror the FalkorDB compiler's column mapping (see
-        # ``_visit_text`` in ``falkordb_deep_search.py``):
-        #   name           → displayName + qualifiedName
-        #   qualifiedName  → qualifiedName
-        #   description    → description
-        #   tags           → tag list
-        #   any            → searchableText + displayName + qualifiedName
-        # Otherwise the stub silently produces different results than
-        # production for the same predicate. Each column is evaluated
-        # SEPARATELY (a match on displayName OR a match on
-        # qualifiedName) — never a space-joined haystack across fields
-        # — so exact/prefix/suffix semantics hold per field.
-        target = predicate.target or "any"
-        if target == "property" and predicate.property_key:
-            # Same typed text comparison the compiler makes for it.
-            op = {"exact": "eq", "prefix": "startsWith",
-                  "suffix": "endsWith"}.get(predicate.match, "contains")
-            return evaluate(
-                node.get(predicate.property_key),
-                resolve_comparison(op, predicate.value, value_type="string",
-                                   case_sensitive=predicate.case_sensitive),
-            )
-        needle = (predicate.value or "").lower()
-        if not needle:
-            return True
-        if target == "name":
-            cols = ("displayName", "qualifiedName")
-        elif target == "qualifiedName":
-            cols = ("qualifiedName",)
-        elif target == "description":
-            cols = ("description",)
-        elif target == "tags":
-            cols = ("tags",)
-        elif target == "any":
-            cols = ("searchableText", "displayName", "qualifiedName")
-        else:
-            cols = (target,)
-
-        def _field(key: str) -> str:
-            v = node.get(key)
-            if isinstance(v, list):
-                return " ".join(str(x) for x in v).lower()
-            return str(v or "").lower()
-
-        for key in cols:
-            value = _field(key)
-            if predicate.match == "exact":
-                matched = value == needle
-            elif predicate.match == "prefix":
-                matched = value.startswith(needle)
-            elif predicate.match == "suffix":
-                matched = value.endswith(needle)
-            else:  # substring (default)
-                matched = needle in value
-            if matched:
-                return True
-        return False
-
-    if isinstance(predicate, PropertyPredicate):
-        # The reference evaluator IS the compiled Cypher's meaning (the
-        # live parity test holds them together), so the stub answers a
-        # typed comparison exactly as FalkorDB would.
-        try:
-            cmp = resolve_predicate(predicate)
-        except SemanticsError as exc:
-            raise CompileError(f"property {predicate.key!r}: {exc}") from exc
-        if predicate.value_key:
-            return evaluate_keys(node.get(predicate.key), node.get(predicate.value_key), cmp)
-        return evaluate(node.get(predicate.key), cmp)
-
-    if isinstance(predicate, HasPropertyPredicate):
-        if predicate.key_match == "exact":
-            present = node.get(predicate.key) is not None
-        else:
-            needle = fold_case(predicate.key)
-            present = any(
-                (fold_case(k).startswith(needle) if predicate.key_match == "prefix"
-                 else needle in fold_case(k))
-                for k, v in node.items()
-                if k not in _NODE_FIELDS and v is not None
-            )
-        return not present if predicate.negate else present
-
-    if isinstance(predicate, TagPredicate):
-        tags = set(node.get("tags") or [])
-        wanted = set(predicate.values)
-        if predicate.op == "has":
-            return bool(wanted & tags) and len(wanted) == 1
-        if predicate.op == "hasAny":
-            return bool(wanted & tags)
-        if predicate.op == "hasAll":
-            return wanted <= tags
-        if predicate.op == "notHas":
-            return not (wanted & tags)
-        raise CompileError(f"stub: unsupported tag op {predicate.op!r}")
-
-    raise CompileError(
-        f"stub: predicate kind {type(predicate).__name__} not implemented. "
-        f"Extend backend/graph/adapters/stub_deep_search.py as tests need it."
-    )
 
 
 def _name_of(node: Dict[str, Any]) -> str:

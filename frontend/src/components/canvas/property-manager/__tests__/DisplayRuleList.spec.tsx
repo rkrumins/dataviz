@@ -74,6 +74,24 @@ describe('DisplayRuleList count line', () => {
             'title', 'Part of the view couldn’t be checked in time and was left out')
     })
 
+    it('reads a draft count that is the published graph’s as about that many, and says why', async () => {
+        renderList(rule(), {
+            count: 310, complete: true, percent: 100, approximate: true,
+            note: 'This rule follows relationships, so for the entities your draft changed it shows the published graph’s answer.',
+        })
+        expect(screen.getByText(/About/)).toHaveTextContent('About 310 matches in this view')
+        await userEvent.setup().hover(screen.getByText(/About/))
+        expect(await screen.findByText('Counted on the published graph')).toBeInTheDocument()
+        expect(screen.getByText(/follows relationships/)).toBeInTheDocument()
+    })
+
+    it('says why some tags on what the draft changed are the published graph’s', () => {
+        useDisplayRuleMatchStore.getState().setMembershipNote(
+            '1 of your rules can’t be answered on your draft’s values alone.')
+        renderList(rule(), { count: 3, complete: true, percent: 100 })
+        expect(screen.getByText(/can’t be answered on your draft’s values alone/)).toBeInTheDocument()
+    })
+
     it('says "match" for exactly one', () => {
         renderList(rule(), { count: 1, complete: true, percent: 100 })
         expect(screen.getByText(/match in this view/)).toBeInTheDocument()
