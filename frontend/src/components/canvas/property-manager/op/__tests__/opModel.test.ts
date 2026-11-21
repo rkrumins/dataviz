@@ -10,8 +10,8 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
-  EDGE_RESERVED_KEYS, impactOf, isConnectionsPredicate, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
-  reviewCounts, searchPreset, targetLabel, targetOf, type OpDraft,
+  EDGE_RESERVED_KEYS, MAX_IDS, impactOf, isConnectionsPredicate, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
+  reviewCounts, searchPreset, targetLabel, targetOf, tooManyIds, type OpDraft,
 } from '../opModel'
 import { cleanValue, convertValue, mergeMap, normalizeText, replaceText, similarGroups } from '../cleanup'
 
@@ -41,6 +41,15 @@ describe('targets', () => {
   it('a selection is sent as its ids; criteria not finished are not sent at all', () => {
     expect(targetOf({ kind: 'selection', ids: ['a', 'b'] }, 'v1', 'view')).toEqual({ ids: ['a', 'b'] })
     expect(targetOf({ kind: 'custom', predicate: null }, 'v1', 'view')).toBeNull()
+  })
+
+  it('a selection past the most one can change is refused whole — never cut short — and says what to use instead', () => {
+    const ids = Array.from({ length: MAX_IDS + 1 }, (_, i) => `e${i}`)
+    expect(targetOf({ kind: 'selection', ids }, 'v1', 'view')).toBeNull()
+    expect(tooManyIds({ kind: 'selection', ids })).toBe('20,000 is the most a selection can change — use Whole view, Has key or a layer instead.')
+    expect(targetOf({ kind: 'selection', ids: ids.slice(0, MAX_IDS) }, 'v1', 'view')).toEqual({ ids: ids.slice(0, MAX_IDS) })
+    expect(tooManyIds({ kind: 'selection', ids: ids.slice(0, MAX_IDS) })).toBeNull()
+    expect(tooManyIds({ kind: 'view' })).toBeNull()
   })
 
   it('reads as a sentence', () => {
@@ -93,6 +102,20 @@ describe('review', () => {
     expect(needsTypedConfirm(op({ kind: 'set' }), { changes: 5000, replaced: 0 }, 'view')).toBe(false)
     expect(needsTypedConfirm(op({ kind: 'set' }), { changes: 5000, replaced: 1200 }, 'view')).toBe(true)
     expect(needsTypedConfirm(op({ kind: 'fillEmpty' }), { changes: 5000, replaced: 0 }, 'data_source')).toBe(false)
+  })
+
+  it('asks for the name whenever what it would destroy is unknown or only approximate', () => {
+    for (const kind of ['remove', 'rename', 'set', 'normalize', 'mapValues', 'replace', 'convert'] as const) {
+      expect(needsTypedConfirm(op({ kind, to: 'x' }), null, 'view')).toBe(true)
+      expect(needsTypedConfirm(op({ kind, to: 'x' }), { changes: 3, replaced: 3 }, 'view', false)).toBe(true)
+    }
+    expect(needsTypedConfirm(op({ kind: 'copy', to: 'x', onConflict: 'overwrite' }), null, 'view')).toBe(true)
+    expect(needsTypedConfirm(op({ kind: 'copy', to: 'x', onConflict: 'overwrite' }), { changes: 3, replaced: 1 }, 'view', false)).toBe(true)
+    // Nothing it does can be lost: a fill, a copy that leaves what is there.
+    expect(needsTypedConfirm(op({ kind: 'fillEmpty' }), null, 'view')).toBe(false)
+    expect(needsTypedConfirm(op({ kind: 'copy', to: 'x' }), null, 'view', false)).toBe(false)
+    // Known exactly and small: no name to type.
+    expect(needsTypedConfirm(op({ kind: 'remove' }), { changes: 3, replaced: 0 }, 'view', true)).toBe(false)
   })
 })
 
@@ -194,6 +217,10 @@ describe('relationships', () => {
     expect(targetOf({ kind: 'relationships', ids: ['e1', 'urn:a|FLOWS_TO|urn:b'] }, 'v1', 'view'))
       .toEqual({ edgeIds: ['e1', 'urn:a|FLOWS_TO|urn:b'] })
     expect(targetOf({ kind: 'relationships', ids: [] }, 'v1', 'view')).toBeNull()
+    const many = Array.from({ length: MAX_IDS + 1 }, (_, i) => `e${i}`)
+    expect(targetOf({ kind: 'relationships', ids: many }, 'v1', 'view')).toBeNull()
+    expect(tooManyIds({ kind: 'relationships', ids: many }))
+      .toBe('20,000 is the most a selection of relationships can change — use a Connections search instead.')
     expect(targetOf({ kind: 'connections', predicate: edges, scopeMode: 'data_source', label: 'x' }, 'v1', 'data_source'))
       .toEqual({ viewId: 'v1', predicate: edges, scopeMode: 'data_source' })
     expect(targetLabel({ kind: 'relationships', ids: ['e1', 'e2'] })).toBe('the 2 selected relationships')

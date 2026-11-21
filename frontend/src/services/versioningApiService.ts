@@ -1045,6 +1045,8 @@ type RefusalDetail = string | {
   branchId?: string
   /** A closed draft's status (`branch_closed`). */
   status?: string
+  /** The job already running (`job_active`). */
+  jobId?: string
   /** Which refusal an `access_denied` is, e.g. `not_draft_owner`. */
   code?: string
   owner?: string
@@ -1094,6 +1096,28 @@ export class DiffTooLargeError extends Error {
     this.name = 'DiffTooLargeError'
   }
 }
+
+/** Another job is already running on the draft (409 `job_active`) — an import, or another bulk
+ *  property change: `jobId` names it, to follow. */
+export class JobActiveError extends Error {
+  readonly status = 409
+  constructor(readonly jobId: string, message?: string) {
+    super(message ?? 'Another change is still being applied to this draft.')
+    this.name = 'JobActiveError'
+  }
+}
+
+/** Why the server won't make a bulk property change as asked (422): `reserved_key`, `same_key`,
+ *  `too_many_ids`, `visible_scope` or `unique_field`. */
+export class PropertyJobRefusedError extends Error {
+  readonly status = 422
+  constructor(readonly code: string, message: string) {
+    super(message)
+    this.name = 'PropertyJobRefusedError'
+  }
+}
+
+const PROPERTY_JOB_REFUSALS = new Set(['reserved_key', 'same_key', 'too_many_ids', 'visible_scope', 'unique_field'])
 
 /** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
  *  from the request or from a job the request queued (a large draft's publish). */
@@ -1150,6 +1174,12 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && d?.type === 'graph_not_writable') {
     return new GraphNotWritableError(d.message)
+  }
+  if (status === 409 && d?.type === 'job_active' && d.jobId) {
+    return new JobActiveError(d.jobId, d.message)
+  }
+  if (status === 422 && d?.code && PROPERTY_JOB_REFUSALS.has(d.code)) {
+    return new PropertyJobRefusedError(d.code, d.message ?? fallback)
   }
   if (status === 409 && d?.type === 'pull_request_exists') {
     return new PullRequestExistsError(d as { prId: string })
@@ -2069,6 +2099,8 @@ export interface PropertyJob {
   error?: string | { code?: string; message?: string } | null
   summary?: Partial<PropertyJobSummary> | null
   op?: PropertyJobOp
+  /** What it was started on: named ones (how many), or a search's matches. */
+  target?: { kind: 'ids'; count?: number } | { kind: 'predicate'; scopeMode?: string } | null
   /** `edge`: it edits relationships. */
   entityKind?: 'node' | 'edge'
   branchId?: string

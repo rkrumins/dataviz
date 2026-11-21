@@ -7,6 +7,10 @@
  * follow it, say how it ended, and pick it up again after a reload — the list is kept in
  * localStorage. `requestOp` is how any surface (a catalog row, the layer menu, a container, a
  * search's matches) opens the one dialog, seeded with what it already knows.
+ *
+ * And how far each draft's jobs have written, as its counts and catalog are asked again
+ * (`writtenEpochs`): moved when a job ends, and while one runs at most every `WRITTEN_EVERY_MS` —
+ * a 5M-entity job writes some 500 windows, and each would otherwise re-read them all.
  */
 import { useMemo } from 'react'
 import { create } from 'zustand'
@@ -18,6 +22,10 @@ import type { OpDraft, ScopeMode, TargetPreset } from '@/components/canvas/prope
 const STORAGE_KEY = 'property-jobs:v1'
 /** Ended jobs kept for the panel — the newest; older ones are forgotten. */
 const KEEP_ENDED = 20
+/** A job this browser lost track of is forgotten this long after it was lost. */
+const KEEP_LOST_MS = 7 * 24 * 60 * 60 * 1000
+/** While a job runs, its draft's written epoch moves at most this often. */
+const WRITTEN_EVERY_MS = 30_000
 
 export interface TrackedJob {
   jobId: string
@@ -33,6 +41,9 @@ export interface TrackedJob {
   startedAt: string
   /** How it last stood. */
   job: PropertyJob | null
+  /** It couldn't be followed: since when (the first time), and why. `gone`: the server no longer
+   *  has it. `checking`: it is being asked about again. */
+  lost?: { at: string; message: string; gone?: boolean; checking?: boolean }
 }
 
 /** What a surface knows when it asks for a change: any of it seeds the dialog — a merge, the values
@@ -51,11 +62,41 @@ export interface OpRequest {
 const ENDED = new Set(['completed', 'failed', 'cancelled'])
 export const jobEnded = (t: TrackedJob) => !!t.job && ENDED.has(t.job.status)
 
+/** How far a draft's jobs have written, as what reads the draft sees it. */
+export interface WrittenEpoch {
+  epoch: number
+  /** When it last moved (ms). */
+  at: number
+  /** The job it last moved for, and how many commits that job had written then. */
+  jobId: string
+  commits: number
+}
+
+/** The draft a written epoch is kept for. */
+export const draftOf = (graphId: string | null | undefined, branchId: string | null | undefined) => `${graphId ?? ''}|${branchId ?? ''}`
+
+/** `epochs` with the draft of `after` moved on — when its job ended just now, or when it has written
+ *  past what the epoch last saw and `WRITTEN_EVERY_MS` has gone by — or `epochs` as it was. */
+function written(epochs: Record<string, WrittenEpoch>, before: TrackedJob, after: TrackedJob): Record<string, WrittenEpoch> {
+  const draft = draftOf(after.graphId, after.branchId)
+  const last = epochs[draft]
+  const commits = after.job?.summary?.commits ?? 0
+  const now = Date.now()
+  const ended = !jobEnded(before) && jobEnded(after)
+  const further = commits > (last?.jobId === after.jobId ? last.commits : 0)
+  if (!ended && !(further && now - (last?.at ?? 0) >= WRITTEN_EVERY_MS)) return epochs
+  return { ...epochs, [draft]: { epoch: (last?.epoch ?? 0) + 1, at: now, jobId: after.jobId, commits } }
+}
+
+/** Lost long enough ago to forget. */
+const lostForGood = (t: TrackedJob) => !!t.lost && Date.now() - Date.parse(t.lost.at) > KEEP_LOST_MS
+
 function load(): TrackedJob[] {
   try {
     const raw = remembered(STORAGE_KEY)
     const parsed = raw ? (JSON.parse(raw) as unknown) : []
-    return Array.isArray(parsed) ? (parsed as TrackedJob[]).filter((j) => j && typeof j.jobId === 'string') : []
+    return Array.isArray(parsed)
+      ? (parsed as TrackedJob[]).filter((j) => j && typeof j.jobId === 'string' && !lostForGood(j)) : []
   } catch {
     return []
   }
@@ -71,31 +112,48 @@ interface PropertyJobsState {
   request: OpRequest | null
   /** Counts requests: each opens the dialog afresh. */
   requestSeq: number
+  /** Per draft (`draftOf`), how far its jobs have written. */
+  writtenEpochs: Record<string, WrittenEpoch>
   track: (job: TrackedJob) => void
   update: (jobId: string, job: PropertyJob) => void
+  /** Its follow failed: it is lost (`gone` when the server no longer has it), until it answers. */
+  lose: (jobId: string, message: string, gone?: boolean) => void
+  /** Ask about lost jobs again. */
+  checkAgain: (jobIds: readonly string[]) => void
   dismiss: (jobId: string) => void
   requestOp: (request?: OpRequest) => void
   consumeRequest: () => OpRequest | null
 }
 
 export const usePropertyJobsStore = create<PropertyJobsState>((set, get) => {
-  const write = (jobs: TrackedJob[]) => {
-    // Running ones always kept; of the ended, the newest.
-    const running = jobs.filter((j) => !jobEnded(j))
+  const write = (jobs: TrackedJob[], also: Partial<PropertyJobsState> = {}) => {
+    // Running ones always kept (a lost one for a week); of the ended, the newest.
+    const running = jobs.filter((j) => !jobEnded(j) && !lostForGood(j))
     const ended = jobs.filter(jobEnded).slice(-KEEP_ENDED)
     const kept = jobs.filter((j) => running.includes(j) || ended.includes(j))
     save(kept)
-    set({ jobs: kept })
+    set({ jobs: kept, ...also })
   }
   return {
     jobs: load(),
     request: null,
     requestSeq: 0,
+    writtenEpochs: {},
     track: (job) => write([...get().jobs.filter((j) => j.jobId !== job.jobId), job]),
     update: (jobId, job) => {
       const jobs = get().jobs
-      if (!jobs.some((j) => j.jobId === jobId)) return
-      write(jobs.map((j) => (j.jobId === jobId ? { ...j, job } : j)))
+      const before = jobs.find((j) => j.jobId === jobId)
+      if (!before) return
+      // An answer: it is followed again, whatever was lost.
+      const after = { ...before, job, lost: undefined }
+      write(jobs.map((j) => (j.jobId === jobId ? after : j)), { writtenEpochs: written(get().writtenEpochs, before, after) })
+    },
+    lose: (jobId, message, gone = false) => write(get().jobs.map((j) => (j.jobId === jobId
+      ? { ...j, lost: { at: j.lost?.at ?? new Date().toISOString(), message, ...(gone ? { gone } : {}) } } : j))),
+    checkAgain: (jobIds) => {
+      const asked = new Set(jobIds)
+      if (!get().jobs.some((j) => asked.has(j.jobId) && j.lost && !j.lost.checking)) return
+      write(get().jobs.map((j) => (asked.has(j.jobId) && j.lost ? { ...j, lost: { ...j.lost, checking: true } } : j)))
     },
     dismiss: (jobId) => write(get().jobs.filter((j) => j.jobId !== jobId)),
     requestOp: (request = {}) => set((s) => ({ request, requestSeq: s.requestSeq + 1 })),

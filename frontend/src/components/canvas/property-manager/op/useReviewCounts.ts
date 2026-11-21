@@ -35,13 +35,15 @@ export function useReviewCounts(
   viewId: string,
   items: ReadonlyArray<{ id: string; predicate: Predicate }> | null,
   scopeMode: ScopeMode,
+  /** Asked again: a count that stopped is counted afresh. */
+  retry = 0,
 ): ReviewCounts {
   const provider = useGraphProvider()
   const remote = provider instanceof RemoteGraphProvider
   // Answers are kept with the request they answer: a newer request reads as counting afresh. The
   // draft is counted as it stands, so its moving on (a save, a running change's next window) is one.
   const draftKey = useDraftDataKey()
-  const key = items && items.length > 0 ? JSON.stringify(items) + scopeMode + draftKey : ''
+  const key = items && items.length > 0 ? JSON.stringify(items) + scopeMode + draftKey + `#${retry}` : ''
   const [state, setState] = useState<{ key: string; value: ReviewCounts }>({ key: '', value: EMPTY })
   useEffect(() => {
     if (!key || !items || !(provider instanceof RemoteGraphProvider)) return

@@ -116,4 +116,15 @@ describe('PropertyOpDialog — filling a required field', () => {
     expect(api.create).toHaveBeenCalledWith('ws', 'g1', 'd1', { kind: 'fillEmpty', key: 'tier', value: 'silver' },
       { ids: ['gv:a', 'gv:b'] }, expect.any(String), 'Bulk property: Fill tier on every table the publish refused for missing Tier')
   })
+
+  it('holds a list of refused entities to what one change takes', async () => {
+    const user = userEvent.setup()
+    const ids = Array.from({ length: 20_001 }, (_, i) => `gv:${i}`)
+    open(fillRefusedRequest({ entityType: 'table', field: 'tier', fieldName: 'Tier', ids, complete: false }))
+    await user.click(screen.getByRole('button', { name: 'gold' }))
+    await user.click(next())
+    expect(screen.getByRole('radio', { name: /The first 20,001 the publish refused/ })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getAllByText(/20,000 is the most a selection can change/).length).toBeGreaterThan(0)
+    expect(next()).toBeDisabled()
+  })
 })

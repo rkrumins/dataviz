@@ -115,10 +115,19 @@ export function predicateOf(preset: TargetPreset): Predicate | null {
 /** A layer is placed by the view: it is only ever searched in the view. */
 export const scopeFixedToView = (preset: TargetPreset) => preset.kind === 'layer'
 
+/** Why a selection can't be sent as its ids — more of them than one change names — or null. It is
+ *  never cut short: a change applied to part of what it says it changes is the wrong change. */
+export function tooManyIds(preset: TargetPreset): string | null {
+  if ((preset.kind !== 'selection' && preset.kind !== 'relationships') || preset.ids.length <= MAX_IDS) return null
+  return preset.kind === 'selection'
+    ? `${MAX_IDS.toLocaleString()} is the most a selection can change — use Whole view, Has key or a layer instead.`
+    : `${MAX_IDS.toLocaleString()} is the most a selection of relationships can change — use a Connections search instead.`
+}
+
 /** What the server is sent as the change's target, or null while it can't be. */
 export function targetOf(preset: TargetPreset, viewId: string, scopeMode: ScopeMode): PropertyJobTarget | null {
-  if (preset.kind === 'selection') return preset.ids.length > 0 ? { ids: [...preset.ids].slice(0, MAX_IDS) } : null
-  if (preset.kind === 'relationships') return preset.ids.length > 0 ? { edgeIds: [...preset.ids].slice(0, MAX_IDS) } : null
+  if (preset.kind === 'selection') return preset.ids.length > 0 && !tooManyIds(preset) ? { ids: [...preset.ids] } : null
+  if (preset.kind === 'relationships') return preset.ids.length > 0 && !tooManyIds(preset) ? { edgeIds: [...preset.ids] } : null
   const predicate = predicateOf(preset)
   if (!predicate) return null
   return { viewId, predicate, scopeMode: scopeFixedToView(preset) ? 'view' : scopeMode }
@@ -313,11 +322,16 @@ export function impactOf(
 }
 
 /** Whether applying it asks for the property's name to be typed first: a removal, a rename or a
- *  clean-up, or a set that replaces values — past `CONFIRM_ABOVE` entities, or anywhere across the
- *  data source. */
-export function needsTypedConfirm(op: OpDraft, impact: { changes: number; replaced: number }, scopeMode: ScopeMode): boolean {
+ *  clean-up, or a set (or a copy onto a name held) that replaces values — past `CONFIRM_ABOVE`
+ *  entities, or anywhere across the data source. And always when what it changes isn't known
+ *  exactly (`impact` null, or not `exact`): what it may lose can't be said to be small. */
+export function needsTypedConfirm(
+  op: OpDraft, impact: { changes: number; replaced: number } | null, scopeMode: ScopeMode, exact = true,
+): boolean {
   const rewrites = op.kind === 'remove' || op.kind === 'rename' || isCleanup(op.kind)
-  const affected = op.kind === 'set' ? impact.replaced : rewrites ? impact.changes : 0
+  const overwrites = op.kind === 'set' || (op.kind === 'copy' && op.onConflict === 'overwrite')
+  if (!impact || !exact) return rewrites || overwrites
+  const affected = overwrites ? impact.replaced : rewrites ? impact.changes : 0
   if (affected === 0 && !(scopeMode === 'data_source' && rewrites)) return false
   return affected >= CONFIRM_ABOVE || scopeMode === 'data_source'
 }
