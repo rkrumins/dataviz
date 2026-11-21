@@ -15,6 +15,7 @@ import { useFeaturesStore } from '@/store/features'
 import { convertBackendEntityType, useSchemaStore } from '@/store/schema'
 import type { EntityTypeDefinition } from '@/providers/GraphDataProvider'
 import { useNotificationStore } from '@/components/ui/notifications'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { stagedChangesToOps } from '@/features/versioning/model/stagedChangesToOps'
 
 vi.mock('../../useDrawerHistoryScope', () => ({
@@ -285,6 +286,24 @@ describe('several entities: what the fields of their type ask', () => {
     await user.click(within(rowOf('owner')).getByRole('button', { name: 'Remove owner from all' }))
     expect(within(rowOf('owner')).getByRole('status')).toHaveTextContent(/Owner is required for Datasets/)
     expect(screen.getByRole('button', { name: 'Stage for 3' })).toBeEnabled()
+  })
+
+  it('a required field some of them lack offers to fill it on every one of the type missing it', async () => {
+    const user = userEvent.setup()
+    useCanvasStore.setState({ nodes: [
+      node('orders', { owner: 'ana', sla: '1h' }), node('returns', { sla: '4h' }), node('refunds', { owner: '', sla: '1h' }),
+    ] } as never)
+    usePropertyJobsStore.setState({ request: null } as never)
+    render(<EntityDrawer canEdit />)
+    expect(within(rowOf('owner')).getByText('Owner is required for Datasets — 2 of these have none.')).toBeInTheDocument()
+    await user.click(within(rowOf('owner')).getByRole('button', { name: 'Fill missing on every Dataset…' }))
+    expect(usePropertyJobsStore.getState().request).toEqual({
+      op: { kind: 'fillEmpty', key: 'owner' }, scopeMode: 'view',
+      target: { kind: 'search', scopeMode: 'view', label: 'every Dataset missing Owner', predicate: { kind: 'group', op: 'and', children: [
+        { kind: 'entityType', op: 'in', values: ['dataset'] }, { kind: 'property', key: 'owner', op: 'isEmpty' }] } },
+    })
+    // Not offered where none lacks it, nor outside a draft.
+    expect(within(rowOf('sla')).queryByRole('button', { name: /Fill missing/ })).toBeNull()
   })
 })
 

@@ -106,7 +106,7 @@ export function MultiEntityDrawer({
     for (const id of typeOrder ? typeOrder.split('\u0000') : []) {
       const type = entityTypes?.find((e) => e.id === id)
       for (const [key, field] of governedFields(type?.fields)) {
-        if (!out.has(key)) out.set(key, { field, typeLabel: type?.pluralName ?? `${type?.name ?? id}s` })
+        if (!out.has(key)) out.set(key, { field, typeLabel: type?.pluralName ?? `${type?.name ?? id}s`, typeId: id, typeName: type?.name ?? id })
       }
     }
     return out

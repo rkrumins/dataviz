@@ -23,7 +23,9 @@ export type ScopeMode = 'view' | 'data_source'
 export type TargetPreset =
   | { kind: 'view' }
   | { kind: 'hasKey'; key: string }
-  | { kind: 'selection'; ids: readonly string[] }
+  /** `label`: what the ids are, when they aren't the canvas selection (a publish's refusals), and
+   *  `entityTypes` their types, when known. */
+  | { kind: 'selection'; ids: readonly string[]; label?: string; entityTypes?: readonly string[] }
   | { kind: 'layer'; layerId: string; name: string }
   | { kind: 'children'; urns: readonly string[]; label: string }
   | { kind: 'inside'; urns: readonly string[]; label: string; includeSelf: boolean }
@@ -136,7 +138,7 @@ export function targetLabel(preset: TargetPreset): string {
   switch (preset.kind) {
     case 'view': return 'every entity in this view'
     case 'hasKey': return `every entity with ${preset.key}`
-    case 'selection': return `the ${preset.ids.length.toLocaleString()} selected`
+    case 'selection': return preset.label ?? `the ${preset.ids.length.toLocaleString()} selected`
     case 'layer': return `the ${preset.name} layer`
     case 'children': return `the children of ${preset.label}`
     case 'inside': return `everything inside ${preset.label}${preset.includeSelf ? ', and it' : ''}`

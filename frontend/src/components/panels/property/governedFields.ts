@@ -11,6 +11,9 @@ export interface GovernedFields {
   fields: ReadonlyMap<string, EntityFieldDefinition>
   /** The entity's type, as the warnings name it ("Table"). */
   typeLabel: string
+  /** Fill the property on every entity of the type missing it (the bulk dialog), where a required
+   *  one is said to be left without a value; absent, it isn't offered. */
+  onFillMissing?: (key: string) => void
 }
 
 export const GovernedFieldsContext = createContext<GovernedFields | null>(null)

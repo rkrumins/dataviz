@@ -511,9 +511,10 @@ class UniqueViolation(_HttpMapped, RuntimeError):
 class FieldViolation(_HttpMapped, RuntimeError):
     """A publish would give entities property values their type's fields refuse — not of the
     field's type, not one of its allowed values — or leave a required field without one: refused,
-    naming each entity, field and value (the first 100), how many in all (``total``), and how many
-    per entity type, field and rule (``byField``). ``found``: the publish's
-    :class:`~.ontology.FieldFindings`."""
+    naming each entity, field and value (the first 100), how many in all (``total``), and per
+    entity type, field and rule how many and which (``byField``: ``count``, and ``ids`` as a bulk
+    property job names them, up to 20,000, ``idsComplete`` when that is all). ``found``: the
+    publish's :class:`~.ontology.FieldFindings`."""
 
     def __init__(self, found):
         self.violations = list(found.examples)

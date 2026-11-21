@@ -313,6 +313,25 @@ what it changed has landed (**in part** when only some has).
 Entities are found as they are published: an entity new in this draft isn't
 matched — select it on the canvas instead.
 
+### Fill missing required fields
+
+A field its entity type marks required can be filled wherever it is said to be
+missing. Missing means no value: no property, or an empty one.
+
+- **When a publish is refused** because entities were left without a required
+  field, each field it counts offers **Fill N missing…**. The dialog opens on
+  **Fill if empty** for exactly the entities the publish refused, including
+  ones new in this draft. One change fills up to 20,000. Past that it fills the
+  first 20,000 and says so: publish again for the rest.
+- **In the drawer**, a required field that some of the entities lack, or one
+  you removed or emptied, offers **Fill missing on every Type…**. That reaches
+  every entity of the type in the View without a value for it, as Published
+  holds them.
+
+Give the value on **What**. A field with allowed values offers them; when it
+takes no other value, they are the only choice. Then review and apply it like
+any other change.
+
 ### Keep a change as a recipe
 
 A change you make often — fill a missing owner, tidy a department's spelling —

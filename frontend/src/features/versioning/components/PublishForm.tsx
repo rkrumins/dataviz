@@ -26,6 +26,8 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
+import { fillRefusedRequest } from '@/components/canvas/property-manager/op/fillRequired'
 import { useStagedChangesStore, useUnsavedCountOnBranch } from '@/store/stagedChangesStore'
 import {
   usePublishBranch, useOpenMergeRequest, useLivePrForBranch, useBranchViewChanges, useDataSourceDraftsPolicy,
@@ -35,7 +37,7 @@ import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { queryClient } from '@/lib/queryClient'
 import {
   describeUniqueViolation, FieldViolationError, MergeConflictError, NotUpToDateError, PullRequestExistsError,
-  UniqueViolationError, type FieldViolation,
+  UniqueViolationError, type FieldViolation, type FieldViolationCount,
 } from '@/services/versioningApiService'
 import { ChangeCountChips } from './ChangesPanel'
 import { DraftViewChanges } from './DraftViewChanges'
@@ -227,6 +229,10 @@ export function PublishBody({ flow, offerSave = true }: {
     reviewers, setReviewers, reviewerGroups, setReviewerGroups, conflicts, notUpToDate, unique, fieldRefusal, confirmBypass, viewChanges, viewChangesQ,
     viewChangeCount, changeCount, hasChanges, unsaved, existingPr, inReview, goToReview, workspaceId, dataSourceId,
   } = flow
+  // A required field left empty is filled on the entities refused by one bulk change — offered on
+  // the draft open on the canvas, which the bulk dialog writes to.
+  const fillHere = useBranchStore((s) => s.currentBranchId === branchId)
+  const fills = (c: FieldViolationCount) => fillHere && c.rule === 'field_required' && !!c.ids?.length
   return (
     <div className="px-6 pb-4 space-y-3">
       {changeCount > 0 && (
@@ -381,12 +387,14 @@ export function PublishBody({ flow, offerSave = true }: {
                 : `${fieldRefusal.total.toLocaleString()} values break`} the fields their entity types define.
             </span>{' '}
             Change them in the draft, then publish.
-            {fieldRefusal.total > Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN) && fieldRefusal.byField.length > 0 && (
+            {(fieldRefusal.total > Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN) || fieldRefusal.byField.some(fills))
+              && fieldRefusal.byField.length > 0 && (
               <ul aria-label="Values to change by field" className="mt-1.5 space-y-0.5 text-ink">
                 {fieldRefusal.byField.map((c) => (
                   <li key={`${c.entityType}:${c.field}:${c.rule}`}>
                     <span className="font-medium">{c.entityType} · {c.fieldName || c.field}</span>
                     <span className="text-ink-muted">: {c.count.toLocaleString()} {FIELD_RULE_PHRASE[c.rule]}</span>
+                    {fills(c) && <FillRefused count={c} onOpen={() => { onClose(); onLeave?.() }} />}
                   </li>
                 ))}
               </ul>
@@ -415,6 +423,29 @@ export function PublishBody({ flow, offerSave = true }: {
         </div>
       )}
     </div>
+  )
+}
+
+/** "Fill N missing…": the bulk dialog, "Fill if empty" on the entities the publish refused for a
+ *  required field left empty — by id, so ones new in the draft too. One change takes at most the
+ *  first 20,000; the next publish names the rest. */
+function FillRefused({ count, onOpen }: { count: FieldViolationCount; onOpen: () => void }) {
+  const ids = count.ids ?? []
+  const complete = !!count.idsComplete
+  const fill = () => {
+    onOpen()
+    usePropertyJobsStore.getState().requestOp(fillRefusedRequest({
+      entityType: count.entityType, field: count.field, fieldName: count.fieldName, ids, complete,
+    }))
+  }
+  return (
+    <>
+      <button type="button" onClick={fill}
+        className="ml-1.5 px-1.5 h-5 rounded text-[10.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10">
+        {complete ? `Fill ${count.count.toLocaleString()} missing…` : `Fill the first ${ids.length.toLocaleString()}…`}
+      </button>
+      {!complete && <span className="text-ink-muted"> then publish again for the rest</span>}
+    </>
   )
 }
 
