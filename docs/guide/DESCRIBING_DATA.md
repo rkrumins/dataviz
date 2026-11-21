@@ -104,7 +104,7 @@ a few seconds to appear.
 ## Finding sources
 
 Once a workspace has more than six sources, or any of them is tagged, a filter sits above
-**Data → Sources**: type in **Find a source by name, description or tag**, or narrow the
+**Data → Sources**: type in **Find by name, description or tag**, or narrow the
 grid with **Any tag**, **Any sensitivity** and **Any status**. Clicking a tag on a card does
 the same. The bar says how many match ("2 of 9"); **Clear** shows them all again.
 

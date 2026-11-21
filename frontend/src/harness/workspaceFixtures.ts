@@ -13,20 +13,105 @@ const SOURCES = [
         isPrimary: true, isActive: true, ontologyId: 'ont_fin', aggregationStatus: 'ready',
         lastAggregatedAt: ago(5), projectionMode: 'in_source', identityProperty: 'urn',
         createdAt: ago(900), updatedAt: ago(30), sourceMode: 'federated', aggregationEdgeCount: 182_400,
+        // Certified and confidential, described, linked and tagged.
+        description: 'Every balance and journal line Finance signs off at month-end, from the ERP ledger to the trial balance. The source of truth for the regulatory returns.',
+        catalogDescription: 'SAP S/4 general ledger, nightly extract.',
+        tags: ['finance', 'month-end', 'gl', 'sox', 'audit'], classification: 'confidential', trustStatus: 'certified',
     },
     {
         id: 'ds_risk', workspaceId: 'ws_fin', catalogItemId: 'cat_risk', label: 'Risk Models',
         isPrimary: false, isActive: true, ontologyId: 'ont_fin', aggregationStatus: 'ready',
         lastAggregatedAt: ago(26), projectionMode: 'dedicated', identityProperty: 'qualifiedName',
         createdAt: ago(600), updatedAt: ago(48), sourceMode: 'federated', aggregationEdgeCount: 41_250,
+        // Untagged, undescribed: the catalog's words stand in.
+        description: null, catalogDescription: 'Market and credit risk models, with the inputs each one reads.',
+        tags: [], classification: 'internal', trustStatus: null,
     },
     {
         id: 'ds_reg', workspaceId: 'ws_fin', catalogItemId: 'cat_reg', label: 'Regulatory Reporting',
         isPrimary: false, isActive: true, ontologyId: 'ont_fin', aggregationStatus: 'ready',
         lastAggregatedAt: ago(72), projectionMode: 'in_source', identityProperty: 'urn',
         createdAt: ago(300), updatedAt: ago(70), sourceMode: 'managed', aggregationEdgeCount: 9_800,
+        // On its way out, with a note saying what to use instead.
+        description: 'The 2024 reporting graph, kept while the last FR Y-9C returns move across.',
+        catalogDescription: null, tags: ['finance', 'regulatory'], classification: 'restricted', trustStatus: 'deprecated',
     },
 ]
+
+// ── Data source details, as GET …/metadata answers for each reader ──────
+const personOf = (id: string, displayName: string) => ({ id, displayName, email: null, avatarId: null, hasImage: false, deleted: false })
+export const PEOPLE = {
+    usr_ada: personOf('usr_ada', 'Ada Okafor'), usr_ana: personOf('usr_ana', 'Ana Ruiz'),
+    usr_ben: personOf('usr_ben', 'Ben Hall'), usr_me: personOf('usr_me', 'Sam Reader'),
+}
+const DETAILS: Record<string, object> = {
+    ds_ledger: {
+        links: [
+            { label: 'Runbook', url: 'https://wiki.example.com/finance/gl-runbook' },
+            { label: 'Data dictionary', url: 'https://wiki.example.com/finance/gl-dictionary' },
+            { label: 'Month-end calendar', url: 'https://calendar.example.com/finance' },
+        ],
+        trustNote: 'Reconciled to the trial balance every month-end; the sign-off is in the runbook.',
+        trustStatusBy: PEOPLE.usr_ada, trustStatusAt: ago(200), updatedAt: ago(30), updatedBy: PEOPLE.usr_ana,
+        onboarding: { at: ago(900), by: PEOPLE.usr_ana, how: 'catalog',
+            fromRequest: { id: 'dr_0', title: 'The general ledger', requesterName: 'Priya Nair', requestedAt: ago(950), connectedAt: ago(900) } },
+    },
+    ds_risk: {
+        links: [], trustNote: null, trustStatusBy: null, trustStatusAt: null, updatedAt: null, updatedBy: null,
+        onboarding: { at: ago(600), by: PEOPLE.usr_ben, how: 'provider', fromRequest: null },
+    },
+    ds_reg: {
+        links: [{ label: 'Migration plan', url: 'https://wiki.example.com/finance/reg-v2' }],
+        trustNote: 'Use Regulatory Reporting v2 instead — this one stops refreshing on 31 December.',
+        trustStatusBy: PEOPLE.usr_ada, trustStatusAt: ago(30), updatedAt: ago(30), updatedBy: PEOPLE.usr_ada,
+        onboarding: { at: ago(300), by: PEOPLE.usr_ada, how: 'blank', fromRequest: null },
+    },
+}
+
+/** What GET …/metadata says to this reader: a viewer reads, a member edits the details,
+ *  an admin (or, with `steward`, anyone) changes the status too. */
+export function metadataOf(dsId: string, as: 'viewer' | 'member' | 'admin', steward = false) {
+    const ds = SOURCES.find(d => d.id === dsId) ?? SOURCES[0]
+    return {
+        dataSourceId: ds.id, description: ds.description, catalogDescription: ds.catalogDescription, tags: ds.tags,
+        classification: ds.classification, trustStatus: ds.trustStatus, ...DETAILS[ds.id],
+        canEdit: as !== 'viewer', canEditTrust: as === 'admin' || steward,
+    }
+}
+
+/** Who to ask: the ledger's are named, the others' worked out. */
+export function contactsOf(dsId: string, as: 'viewer' | 'member' | 'admin') {
+    const named = dsId === 'ds_ledger'
+    return {
+        owner: { subjectType: 'user', subjectId: named ? 'usr_ada' : 'usr_ben', name: named ? 'Ada Okafor' : 'Ben Hall', memberCount: null,
+            via: named ? 'named_owner' : 'created_source' },
+        stewards: named ? [{ subjectType: 'group', subjectId: 'grp_eng', name: 'Finance Risk · Engineers', memberCount: 7, via: 'named_steward' }] : [],
+        provenance: named ? 'named' : 'derived', updatedAt: named ? ago(400) : null,
+        canEdit: as !== 'viewer', canEditOwner: as === 'admin', people: PEOPLE,
+    }
+}
+
+/** A source's history, newest first, as the activity ledger answers it. */
+export function sourceActivityOf(dsId: string) {
+    const ds = SOURCES.find(d => d.id === dsId) ?? SOURCES[0]
+    const ev = (i: number, eventType: string, summary: string, h: number, who: keyof typeof PEOPLE | null) => ({
+        id: `sa_${dsId}_${i}`, eventType, label: summary, category: 'data', severity: 'info', outcome: 'success', summary,
+        occurredAt: ago(h), recordedAt: ago(h), actorKind: who ? 'user' : 'system',
+        actor: who ? { id: who, name: PEOPLE[who].displayName, email: null, deleted: false, avatarId: null, hasImage: false } : null,
+        workspaceId: 'ws_fin', workspaceName: 'Finance Risk', dataSourceId: dsId, dataSourceName: ds.label,
+        correlationId: null, apiKeyId: null, apiKeyName: null, payload: null, details: {}, resolvedNames: {},
+    })
+    return [
+        ev(1, 'workspace.data_source.metadata_changed', `Changed the description and tags of ${ds.label}`, 0.5, 'usr_ana'),
+        ev(2, 'workspace.data_source.trust_changed', ds.trustStatus === 'deprecated' ? `Marked ${ds.label} deprecated` : `Certified ${ds.label}`, 3, 'usr_ada'),
+        ev(3, 'workspace.data_source.trust_changed', `Classified ${ds.label} as Confidential`, 3.2, 'usr_ada'),
+        ev(4, 'workspace.data_source.contacts_changed', `Named Ada Okafor the Owner of ${ds.label}`, 30, 'usr_ada'),
+        ev(5, 'workspace.data_source.primary_set', `Made ${ds.label} the primary data source`, 80, 'usr_me'),
+        ev(6, 'workspace.data_source.projection_changed', `Changed where ${ds.label} keeps its connections`, 200, 'usr_ben'),
+        ev(7, 'workspace.data_request.connected', `Connected the data request “The general ledger” as ${ds.label}`, 900, 'usr_ana'),
+        ev(8, 'workspace.data_source.added', `Added ${ds.label} to Finance Risk`, 900.1, 'usr_ana'),
+    ]
+}
 
 // The Playground: two graphs of the reader's, one of someone else's.
 const PLAYGROUND_SOURCES = [

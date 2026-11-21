@@ -13,7 +13,7 @@ import {
 } from '@/services/dataSourceMetadataService'
 import type { DataSourceResponse } from '@/services/workspaceService'
 
-const SELECT = 'h-9 min-w-0 rounded-xl border px-2.5 text-xs font-semibold outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
+const SELECT = 'h-9 flex-auto sm:flex-none rounded-xl border px-2.5 text-xs font-semibold outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
 const IDLE = 'border-glass-border bg-black/[0.03] text-ink-secondary hover:text-ink dark:bg-white/[0.04]'
 const SET = 'border-accent-lineage/40 bg-accent-lineage/[0.08] text-accent-lineage'
 
@@ -32,11 +32,11 @@ export function DataSourceFilterBar({ sources, filter, onChange, shown }: {
     return (
         <div role="search" aria-label="Filter the sources"
             className="mb-3 flex flex-wrap items-center gap-2 rounded-2xl border border-glass-border bg-canvas-elevated p-2 shadow-sm">
-            <label className="relative min-w-[200px] flex-1">
+            <label className="relative w-full sm:w-auto sm:min-w-[200px] sm:flex-1">
                 <span className="sr-only">Find a source</span>
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-muted" aria-hidden />
                 <input type="search" value={filter.text} onChange={e => onChange({ ...filter, text: e.target.value })}
-                    placeholder="Find a source by name, description or tag"
+                    placeholder="Find by name, description or tag"
                     className="h-9 w-full rounded-xl border border-transparent bg-black/[0.03] pl-9 pr-3 text-sm text-ink placeholder:text-ink-muted/70 outline-none focus:border-accent-lineage/40 focus:ring-2 focus:ring-accent-lineage/30 dark:bg-white/[0.04]" />
             </label>
             {tags.length > 0 && (

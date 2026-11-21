@@ -82,7 +82,7 @@ export function AboutDataSourceCard({ wsId, dsId, tagSuggestions = [], onShowReq
                 <div className="flex flex-wrap items-start justify-between gap-3">
                     <h3 id={`ds-about-${dsId}`} className="flex items-center gap-2 text-sm font-bold text-ink">
                         <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-sky-500 to-indigo-500 text-white shadow-sm shadow-indigo-500/20">
-                            <BookOpen className="h-3.5 w-3.5" aria-hidden />
+                            {mode === 'trust' ? <ShieldCheck className="h-3.5 w-3.5" aria-hidden /> : <BookOpen className="h-3.5 w-3.5" aria-hidden />}
                         </span>
                         {mode === 'details' ? 'Edit details' : mode === 'trust' ? 'Change status' : 'About this data'}
                     </h3>
@@ -210,8 +210,8 @@ function ReadView({ meta, onEdit, onShowRequests, unnamed }: {
 
             {meta.updatedAt && (
                 <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-muted">
-                    <PencilLine className="h-3 w-3" aria-hidden /> Details last edited
-                    {meta.updatedBy && <>by <PersonChip id={meta.updatedBy.id} person={meta.updatedBy} size="xs" /></>}
+                    <PencilLine className="h-3 w-3" aria-hidden /> <span>Details last edited</span>
+                    {meta.updatedBy && <><span>by</span> <PersonChip id={meta.updatedBy.id} person={meta.updatedBy} size="xs" /></>}
                     <span aria-hidden>·</span> <DateTime at={meta.updatedAt} />
                 </p>
             )}
@@ -228,8 +228,8 @@ function TrustSummary({ meta }: { meta: DataSourceMetadata }) {
                 {meta.classification && <ClassificationBadge classification={meta.classification} size="md" />}
                 {meta.trustStatus && meta.trustStatusAt && (
                     <span className="inline-flex flex-wrap items-center gap-x-1.5 text-[11px] text-ink-muted">
-                        {STATUS_BY[meta.trustStatus]}
-                        {meta.trustStatusBy && <>by <PersonChip id={meta.trustStatusBy.id} person={meta.trustStatusBy} size="xs" /></>}
+                        <span>{STATUS_BY[meta.trustStatus]}</span>
+                        {meta.trustStatusBy && <><span>by</span> <PersonChip id={meta.trustStatusBy.id} person={meta.trustStatusBy} size="xs" /></>}
                         <span aria-hidden>·</span> <DateTime at={meta.trustStatusAt} />
                     </span>
                 )}
@@ -369,7 +369,7 @@ function DetailsForm({ wsId, dsId, meta, suggestions, onDone }: {
                                 <div className="flex flex-col gap-1.5 sm:flex-row">
                                     <input aria-label={`Link ${i + 1} name`} value={r.label} maxLength={LIMITS.linkLabel}
                                         onChange={e => setRow(r.key, { label: e.target.value })} placeholder="e.g. Runbook"
-                                        className={cn(INPUT, 'py-2 sm:w-40')} />
+                                        className={cn(INPUT, 'py-2 sm:w-48')} />
                                     <div className="flex flex-1 gap-1.5">
                                         <input aria-label={`Link ${i + 1} address`} value={r.url} maxLength={LIMITS.url} type="url" inputMode="url"
                                             onChange={e => setRow(r.key, { url: e.target.value })} placeholder="https://…"
@@ -468,14 +468,14 @@ function TrustForm({ wsId, dsId, meta, onDone }: { wsId: string; dsId: string; m
                     })}
                 </div>
                 <p className="mt-1.5 text-[11px] text-ink-muted">
-                    {classification ? CLASSIFICATION_META[classification].tip : 'How carefully its data has to be shared.'}
+                    {classification ? `${CLASSIFICATION_META[classification].tip}.` : 'How carefully its data has to be shared.'}
                     {classification === 'restricted' && ' Not the same as restricted publishing, which an admin sets.'}
                 </p>
             </div>
 
             <div>
                 <label htmlFor={`ds-note-${dsId}`} className={LABEL}>Note</label>
-                <textarea id={`ds-note-${dsId}`} value={note} onChange={e => setNote(e.target.value)} rows={2} maxLength={LIMITS.note}
+                <textarea id={`ds-note-${dsId}`} value={note} onChange={e => setNote(e.target.value)} rows={3} maxLength={LIMITS.note}
                     placeholder={NOTE_PLACEHOLDER[status ?? 'none']} className={cn(INPUT, 'resize-none')} />
                 <p className="mt-1 text-[10px] text-ink-muted">Shown beside the status, to everyone who can open this source.</p>
             </div>

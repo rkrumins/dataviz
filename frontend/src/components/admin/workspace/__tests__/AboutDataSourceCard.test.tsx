@@ -88,9 +88,10 @@ describe('AboutDataSourceCard — reading', () => {
                 fromRequest: { id: 'dr_1', title: 'Finance marts', requesterName: 'Sam Reader', requestedAt: '2026-11-01T09:00:00Z', connectedAt: '2026-11-03T09:00:00Z' } },
         }))
         renderCard({ onShowRequests })
-        expect(await screen.findByText('Deprecated')).toBeInTheDocument()
+        expect(await screen.findByText('Use Ledger v2 instead')).toBeInTheDocument()
         expect(screen.getByText('Confidential')).toBeInTheDocument()
-        expect(screen.getByText(/^Deprecated\s*by/)).toBeInTheDocument()
+        expect(screen.getAllByText('Deprecated')).toHaveLength(2)   // the badge, and who set it
+        expect(screen.getAllByText('Ada Okafor').length).toBeGreaterThan(0)
         expect(screen.getByText('Use Ledger v2 instead')).toBeInTheDocument()
         expect(within(screen.getByRole('list', { name: 'Tags' })).getAllByRole('listitem').map(li => li.textContent)).toEqual(['finance', 'month-end'])
         expect(screen.getByText('Ana Ruiz')).toBeInTheDocument()

@@ -25,6 +25,10 @@
  *            for data. On page=workspace, Data → Sources lists the workspace's data requests too
  *   creator  1 — the reader may create workspaces (and so answers requests for them)
  *   tour / step — start that tour at that step (0-based) once the page has loaded
+ *   details  0 — data source details off (on by default): the About card, badges, tags,
+ *            the Sources filter and a source's Activity tab (open one with &ds=…&dstab=activity)
+ *   steward  1 — the reader is a named Steward of every source, so may change its status
+ *   click    a button's text, clicked once the page has loaded (e.g. "Edit details")
  *
  * `npm run harness:workspace` drives Chromium over the main combinations and
  * writes PNGs to .harness/.
@@ -57,7 +61,7 @@ import { DataRequestsPanel } from '../components/data-requests/DataRequestsPanel
 import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { useWorkspacesStore } from '../store/workspaces'
 import {
-    ONTOLOGIES, STATS, readinessOf, viewsOf, workspaceOf, type WorkspaceFixtureName,
+    ONTOLOGIES, STATS, contactsOf, metadataOf, readinessOf, sourceActivityOf, viewsOf, workspaceOf, type WorkspaceFixtureName,
 } from './workspaceFixtures'
 
 const params = new URLSearchParams(window.location.search)
@@ -69,6 +73,8 @@ const page = params.get('page') ?? 'workspace'
 const tour = params.get('tour')
 const tourStep = Number(params.get('step') ?? 0)
 const platform = params.get('platform') === '1'
+const steward = params.get('steward') === '1'
+const click = params.get('click')
 
 // The People tab's groups: two of the workspace's own, one following the directory and one
 // whose link waits; and a platform-wide group bound here.
@@ -178,6 +184,21 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const ws = workspaceOf(fixture)
     const views = viewsOf(fixture)
     let m: RegExpMatchArray | null
+    // A data source's details, contacts and history.
+    if ((m = p.match(/^\/api\/v1\/admin\/workspaces\/ws_fin\/data-sources\/([^/]+)\/metadata(\/trust)?$/))) {
+        const current = metadataOf(m[1], as, steward)
+        if (init?.method !== 'PUT') return json(current)
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>
+        const trust = m[2] ? { trustStatusBy: body.trustStatus ? { id: 'usr_me', displayName: 'Sam Reader', email: null, avatarId: null, hasImage: false, deleted: false } : null,
+            trustStatusAt: body.trustStatus ? new Date().toISOString() : null } : {}
+        return json({ ...current, ...body, ...trust, updatedAt: new Date().toISOString() })
+    }
+    if ((m = p.match(/^\/api\/v1\/admin\/workspaces\/ws_fin\/data-sources\/([^/]+)\/contacts$/))) return json(contactsOf(m[1], as))
+    // The drawer's "Where this lives" card: no graph store here, so it stays out of the way.
+    if (p === '/api/v1/admin/graph-store/placement') return new Response('{"detail":"Not Found"}', { status: 404 })
+    if ((m = p.match(/^\/api\/v1\/admin\/workspaces\/ws_fin\/data-sources\/([^/]+)\/activity\/events$/))) {
+        return json({ events: sourceActivityOf(m[1]), nextCursor: null })
+    }
     if (p === '/api/v1/me/workspace-requests') {
         const status = params.get('status')
         return json(status ? [{ ...WS_REQUEST, requesterId: 'usr_me', status,
@@ -310,7 +331,8 @@ useAuthStore.setState({
     permissions: { sid: 'harness', global: platform ? ['system:admin'] : page === 'workspace-requests' || page === 'data-requests' || params.get('creator') === '1' ? ['system:workspaces:create'] : [], ws: { ws_fin: PERMS[as] } },
 } as never)
 usePersonaStore.setState({ mode })
-useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, workspaceRequestsEnabled: true, dataRequestsEnabled: true, toursEnabled: !!tour } })
+useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, workspaceRequestsEnabled: true, dataRequestsEnabled: true, toursEnabled: !!tour,
+    dataSourceMetadataEnabled: params.get('details') !== '0' } })
 if (page === 'dashboard') {
     useProviderStatusStore.setState({ statuses: {
         prov_fdb: { id: 'prov_fdb', name: 'FalkorDB · finance', status: 'ready', lastCheckedAt: null },
@@ -324,12 +346,27 @@ if (page === 'reviews') useWorkspacesStore.setState({ workspaces: REVIEW_WS.map(
 
 function Harness() {
     const setTheme = usePreferencesStore((s) => s.setTheme)
-    const [qc] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
+    const [qc] = useState(() => {
+        const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        // `&ds=` opens a source's drawer only once the page knows the workspace: the page
+        // drops a `ds` it cannot check yet, so the workspace is there from the first render.
+        if (params.get('ds')) client.setQueryData(['workspace', 'ws_fin'], workspaceOf(fixture))
+        return client
+    })
     useEffect(() => {
         setTheme(dark ? 'dark' : 'light')
         document.documentElement.classList.toggle('dark', dark)
         document.body.style.background = getComputedStyle(document.documentElement).getPropertyValue('--nx-bg-canvas').trim() || '#fff'
     }, [setTheme])
+    // A button pressed once the page has loaded, for a form a screenshot cannot open.
+    useEffect(() => {
+        if (!click) return
+        const t = window.setTimeout(() => {
+            const hit = [...document.querySelectorAll('button')].find(b => b.textContent?.trim() === click)
+            hit?.click()
+        }, 1200)
+        return () => window.clearTimeout(t)
+    }, [])
     // A tour, at a step, once the page has had time to load what it spotlights.
     useEffect(() => {
         if (!tour) return
