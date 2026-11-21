@@ -297,6 +297,8 @@ export function PropertyOpDialog({
           subtitle={`On ${targetLabel(preset)}${effectiveScope === 'data_source' ? ', across the whole data source' : ''} — in your draft, until it is published.`}
           confirmPhrase={op.key.trim()}
           confirmLabel="Apply"
+          icon={Database}
+          busyLabel="Starting…"
           impactUnknown={!impact}
           sections={[{
             label: edges ? 'Relationships' : 'Entities', count: impact?.changes ?? 0,

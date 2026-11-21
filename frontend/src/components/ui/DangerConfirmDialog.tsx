@@ -21,7 +21,7 @@ import { useState, useCallback, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
-    X, Trash2, AlertTriangle, ChevronDown, CheckCircle2, Loader2,
+    X, Trash2, AlertTriangle, ChevronDown, CheckCircle2, Loader2, type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -59,6 +59,10 @@ export function DangerConfirmDialog({
     impactHeading = 'This will destroy',
     /** The closing warning; null for an action that can still be taken back. */
     irreversibleNote = 'This cannot be undone',
+    /** The action's icon, beside the title and on its button — for one that isn't a deletion. */
+    icon: Icon = Trash2,
+    /** What its button says while it runs. */
+    busyLabel = 'Deleting…',
     onClose,
     onConfirm,
 }: {
@@ -74,6 +78,8 @@ export function DangerConfirmDialog({
     caveat?: string
     impactHeading?: string
     irreversibleNote?: string | null
+    icon?: LucideIcon
+    busyLabel?: string
     onClose: () => void
     onConfirm: () => void | Promise<void>
 }) {
@@ -136,7 +142,7 @@ export function DangerConfirmDialog({
                         <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-red-500 to-rose-500" />
                         <div className="flex items-center gap-3.5 px-6 pt-6 pb-4">
                             <div className="w-11 h-11 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 flex items-center justify-center shrink-0">
-                                <Trash2 className="w-5 h-5 text-red-500" />
+                                <Icon className="w-5 h-5 text-red-500" />
                             </div>
                             <div className="flex-1 min-w-0">
                                 <h3 className="text-lg font-bold text-ink">{title}</h3>
@@ -314,8 +320,8 @@ export function DangerConfirmDialog({
                                     : 'bg-slate-300 dark:bg-slate-700 cursor-not-allowed',
                             )}
                         >
-                            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
-                            {busy ? 'Deleting…' : confirmLabel}
+                            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Icon className="w-4 h-4" />}
+                            {busy ? busyLabel : confirmLabel}
                         </button>
                     </div>
                 </motion.div>

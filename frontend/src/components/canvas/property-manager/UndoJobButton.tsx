@@ -98,6 +98,8 @@ export function UndoJobButton({ tracked }: { tracked: TrackedJob }) {
         subtitle={`Puts back what ${n.toLocaleString()} ${things} held before — on your draft.`}
         confirmPhrase=""
         confirmLabel="Undo"
+        icon={Undo2}
+        busyLabel="Starting the undo…"
         sections={[{ label: relationships ? 'Relationships' : 'Entities', count: n, tone: 'warning',
           consequence: 'put back to what they held before the change' }]}
         impactHeading="This will put back"
