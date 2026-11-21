@@ -1491,11 +1491,15 @@ class ImportWorker:
                 return
             try:
                 # A row's _op=delete takes what the node contains, as a delete on the canvas does.
+                # The ontology's rules too: on a strict graph a link its types may not join (or a
+                # containment the parent's type may not hold) is refused here, row by row, rather
+                # than landing on the draft for the publish to refuse.
                 await self._svc.apply_ops(graph_id=graph_id, ops=ops, actor=actor,
                                           branch_id=branch_id, message="import", on_commit=on_commit,
                                           node_identity=self._node_identity,
                                           containment_edge_types=(self._ontology or {}).get(
-                                              "containment") or None)
+                                              "containment") or None,
+                                          ontology_rules=(self._ontology or {}).get("rules"))
                 return
             except OntologyViolation as exc:
                 rest = _quarantine(ops, resolutions, exc.violations) if attempt < _QUARANTINE_ROUNDS else None

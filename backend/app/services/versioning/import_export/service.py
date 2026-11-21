@@ -1246,6 +1246,14 @@ class ImportExportService:
         importing it as it is would change. Built in memory, returned inline."""
         records = contract.template_records(ontology) or example_template_records()
         extra = contract.template_columns(ontology, identity_property)
+        # Every way to name a link's ends, and its confidence, as blank cells of the worked link
+        # rows: a workbook's Edges sheet keeps the columns its rows hold, so a person filling in
+        # links finds them all — by entity id, urn, qualifiedName or a key.
+        for rec in records:
+            if rec.get("kind") == "edge":
+                for col in ("source_entity_id", "target_entity_id", "sourceUrn", "targetUrn",
+                            "sourceQualifiedName", "targetQualifiedName", "confidence", *extra["edge"]):
+                    rec.setdefault(col, "")
         columns = column_order(records, schema_props={
             "node": [c[len("prop."):] for c in extra["node"]]})
         if any(r.get("kind") == "edge" for r in records):

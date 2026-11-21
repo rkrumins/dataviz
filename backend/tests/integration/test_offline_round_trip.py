@@ -17,6 +17,11 @@ change in it is either made or refused with a reason — Postgres.
   "Links", from JSON. Ends are found by urn, qualifiedName or entity id; a link carries its
   confidence and properties; a bad cell refuses its own row; a delete by a link's id alone deletes
   it; a urn two entities carry names neither. A replace of links only deletes nothing.
+* **A strict graph's rules at import.** A link whose types the ontology says it may not join is
+  refused on its row, with the reason, while the file's other links import — rather than landing
+  on the draft for the publish to refuse.
+* **Containment that points up.** BELONGS_TO links run from the child to its parent: a parent takes
+  many children by them, and a child given a second parent is refused, as with CONTAINS.
 * **A selection with its children.** Entities picked on the canvas, exported from a draft with
   everything inside them (containment either way round, never lineage or a sibling), edited, and
   imported back onto that draft: exactly the edit lands.
@@ -334,6 +339,56 @@ async def _links(h):
     assert {X, Y, Z, V, "q1"} <= set(nodes)
 
 
+async def _strict_rules(h):
+    from backend.app.services.versioning.ontology import EdgeRule, EntityRule, OntologyRules
+
+    rules = OntologyRules(entity_types={"Table": EntityRule(), "Column": EntityRule()},
+                          edge_types={"LINEAGE": EdgeRule(source_types=frozenset({"Table"}),
+                                                          target_types=frozenset({"Table"}))},
+                          edge_type_canonical={"LINEAGE": "LINEAGE"})
+
+    async def _with_rules(_ws, _ds):
+        return {"node_types": ["Table", "Column"], "edge_types": ["LINEAGE"], "rules": rules}
+
+    h.ie._ontology_resolver = _with_rules
+    h.ds = "ds_" + os.urandom(4).hex()
+    h.gid = (await h.svc.create_graph(data_source_id=h.ds, workspace_id="ws1", actor="u",
+                                      ontology_spec={"entityTypes": ["Table", "Column"],
+                                                     "edgeTypes": ["LINEAGE"]},
+                                      ontology_enforcement="strict"))["graph_id"]
+    col = {"op": "create", "entity_kind": "node", "entity_id": V,
+           "payload": {"urn": V, "entityType": "Column", "displayName": "amount"}}
+    await h.svc.apply_ops(graph_id=h.gid, actor="u", message="seed",
+                          ops=[_node(X, "orders"), _node(Y, "revenue"), col])
+    draft = await h.svc.open_draft(graph_id=h.gid, owner="u")
+
+    _d, summary, rows = await h.upload(
+        f"edgeType,sourceUrn,targetUrn\nLINEAGE,{X},{Y}\nLINEAGE,{X},{V}\n".encode(), "csv", branch_id=draft)
+    assert _counts(summary)["new"] == 1 and _counts(summary)["invalid"] == 1, summary
+    op, reasons = rows[1]
+    assert op == "invalid" and any("Column" in r for r in reasons), rows
+    _nodes, edges = await h.state(draft)
+    assert (X, Y) in edges and (X, V) not in edges
+
+
+async def _belongs_to(h):
+    async def _containment(_ws, _ds):
+        return {**ONTOLOGY, "containment": ["CONTAINS", "BELONGS_TO"]}
+
+    h.ie._ontology_resolver = _containment
+    await h.graph([_node(X, "sales"), _node(Y, "orders"), _node(Z, "customers"), _node(V, "finance")])
+    draft = await h.svc.open_draft(graph_id=h.gid, owner="u")
+    _d, summary, rows = await h.upload(
+        f"edgeType,sourceUrn,targetUrn\nBELONGS_TO,{Y},{X}\nBELONGS_TO,{Z},{X}\n".encode(), "csv",
+        branch_id=draft)
+    assert _counts(summary)["new"] == 2 and _counts(summary)["invalid"] == 0, (summary, rows)
+    _d, summary, rows = await h.upload(
+        f"edgeType,sourceUrn,targetUrn\nBELONGS_TO,{Y},{V}\n".encode(), "csv", branch_id=draft)
+    assert _counts(summary)["invalid"] == 1 and "already has a parent" in rows[0][1][0], rows
+    _nodes, edges = await h.state(draft)
+    assert {(Y, X), (Z, X)} <= edges and (Y, V) not in edges
+
+
 async def _nothing_silent(h):
     e1 = "urn:uuid:0192f5a4-0000-7000-8000-0000000000e2"
     await h.graph([_node(X, "orders"), _node(Y, "revenue"), _node(Z, "legacy"), _edge(e1, X, Y)])
@@ -352,8 +407,10 @@ async def _nothing_silent(h):
     assert summary["invalid"] == 2 and summary["updated"] == 1, summary
 
 
-@pytest.mark.parametrize("scenario", [_excel, _stale, _script, _nothing_silent, _selection, _links],
-                         ids=["excel", "stale-workbook", "script", "nothing-silent", "selection", "links"])
+@pytest.mark.parametrize("scenario", [_excel, _stale, _script, _nothing_silent, _selection, _links,
+                                      _strict_rules, _belongs_to],
+                         ids=["excel", "stale-workbook", "script", "nothing-silent", "selection", "links",
+                              "strict-rules", "belongs-to"])
 def test_offline_edits_come_back_reconciled(scenario):
     async def run():
         await models.create_schema_and_partitions()

@@ -4101,6 +4101,10 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
         async with get_async_session() as session:
             resolved = await LocalOntologyService(SQLAlchemyOntologyRepository(session)).resolve(
                 workspace_id=workspace_id, data_source_id=data_source_id)
+            # The assigned ontology's rules (the types each relationship may join, what may
+            # contain what): a strict graph's write gate judges imported rows by them, as it
+            # judges a checkpoint's and a publish's — None where none is assigned.
+            rules = await _live_ontology_rules(session, workspace_id, data_source_id)
         node_types = list(getattr(resolved, "entity_type_definitions", {}) or {})
         edge_types = list(getattr(resolved, "relationship_type_definitions", {}) or {})
         edge_types += list(getattr(resolved, "containment_edge_types", []) or [])
@@ -4128,7 +4132,8 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
                 "containment": list(getattr(resolved, "containment_edge_types", []) or []),
                 "keys": {t: fs for t, fs in flagged("reconciliation_key").items() if fs},
                 "unique": {t: fs for t, fs in flagged("unique").items() if fs},
-                "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends}
+                "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends,
+                "rules": rules}
     except Exception:
         logger.exception("ontology type resolution failed for import (ds=%s)", data_source_id)
         return None
