@@ -14,6 +14,7 @@ import { triggerBrowserDownload } from '@/services/importExportApiService'
 import { cancelPropertyJob, refusedPropertyJobUrl } from '@/services/versioningApiService'
 import { jobEnded, usePropertyJobsStore, type TrackedJob } from '@/store/propertyJobsStore'
 import { propertyJobLabel } from './op/opModel'
+import { UndoJobButton } from './UndoJobButton'
 
 export function PropertyJobsPanel({ jobs }: { jobs: readonly TrackedJob[] }) {
   if (jobs.length === 0) return null
@@ -114,6 +115,7 @@ function JobRow({ tracked }: { tracked: TrackedJob }) {
               <CheckCircle2 className="h-3 w-3" aria-hidden /> Published — listed in the publish’s audit
             </p>
           )}
+          {ended && <UndoJobButton tracked={tracked} />}
         </div>
         {!ended && !lost && <IconButton icon={Square} label="Stop" detail="What it already changed stays on the draft" size="sm" onClick={cancel} />}
         {(ended || lost) && <IconButton icon={X} label="Dismiss" size="sm" onClick={() => usePropertyJobsStore.getState().dismiss(tracked.jobId)} />}

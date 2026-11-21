@@ -313,6 +313,26 @@ what it changed has landed (**in part** when only some has).
 Entities are found as they are published: an entity new in this draft isn't
 matched — select it on the canvas instead.
 
+### Undo a bulk change
+
+A bulk change that has ended — finished, stopped or failed part-way — can be
+undone while it is still only in your draft. Under **Changes on this draft**,
+choose **Undo** on its row: it says how many entities it puts back, then runs
+like any other change, a batch at a time, and is listed as **Undo: …** (a
+rename's undo, for instance, is **Undo: Rename owner → steward**).
+
+Each entity is put back to what it held just before the change — a property
+the change added is removed, one it removed comes back, and each value is
+stored as the kind it was. An entity changed again since, by hand or by
+another change, is left as it is: the undo counts it as **changed since** and
+lists it under **Which, and why**. One deleted in the draft since is left out
+too. When the undo has finished, the change's row says **Undone**.
+
+**Undo** isn't offered for a change the draft has published, in whole or in
+part (make a new change instead), one that changed nothing, one already
+undone, or an undo itself. While another change is running on the draft, wait
+for it to finish.
+
 ### Keep a change as a recipe
 
 A change you make often — fill a missing owner, tidy a department's spelling —
