@@ -40,6 +40,13 @@ search no longer matches it, :func:`predicate_recheck`) and, for an edge job, ``
 When the draft is published, the jobs that wrote to it are listed in the publish's commit
 (``stats.propertyJobs``, :func:`audit_entry`) and its activity event, and stamped with that commit
 (``summary.publishedCommitId``), so a later publish never lists them again.
+
+An UNDO is a job too (op ``undo``): it puts back what another job's windows wrote, from the version
+history — no file of what was there. Its target is the source's window commits, newest first, one
+window each: the entities a commit wrote, read as they were just before it
+(``values_before``), as it wrote them, and as the draft holds them now — and each put back where
+it still holds what the commit wrote (:func:`plan_undo`); one changed since is left as it is
+(``changed_since``). Once every window is written, the source is stamped ``summary.undoneBy``.
 """
 from __future__ import annotations
 
@@ -53,7 +60,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import Text, cast, null, select
 
 from backend.app.services.storage.object_store import storage_key
 from backend.common.derived_artifacts import is_derived_edge_type
@@ -65,7 +72,7 @@ from .. import config, db
 from ..change_csv import cell
 from ..errors import BranchNotOpen
 from ..job_lease import Lease, Superseded
-from ..models import BranchORM, CommitORM, JobORM
+from ..models import BranchORM, CommitORM, EdgeVersionORM, JobORM, NodeVersionORM
 from ..service import OntologyViolation
 from .import_worker import _analyze_graph
 from .snapshot import Snapshot, Winner, open_snapshot
@@ -87,7 +94,7 @@ _QUARANTINE_ROUNDS = 4
 _DETAIL_CHARS = 300
 #: What a job's summary counts, before its first window.
 COUNTERS = ("changed", "unchanged", "missing", "deletedInDraft", "conflicts", "unconvertible",
-            "noLongerMatches")
+            "noLongerMatches", "changedSince")
 #: The bulk property jobs a publish lists in its commit; past these it counts them.
 AUDIT_LISTED = 20
 
@@ -414,6 +421,8 @@ def _quoted(text: str, most: int = 40) -> str:
 def describe(op: Mapping[str, Any]) -> str:
     """The operation as its commits name it."""
     key, to, kind = op["key"], op.get("to"), op["kind"]
+    if kind == "undo":
+        return f"Undo: {op.get('sourceLabel') or 'a bulk change'}"
     if kind == "replace":
         return f"Replace {_quoted(op['find'])} → {_quoted(op.get('replaceWith') or '')} in {key}"
     if kind == "normalize":
@@ -515,6 +524,68 @@ def plan_window(op: Mapping[str, Any], found: Mapping[str, Tuple[str, Dict[str, 
 
 def _refused(urn: Optional[str], eid: Optional[str], reason: str, detail: str) -> Dict[str, Any]:
     return {"urn": urn, "entityId": eid, "reason": reason, "detail": detail[:_DETAIL_CHARS]}
+
+
+# --------------------------------------------------------------------------- #
+# An undo: what one of a job's commits wrote, put back (pure)                  #
+# --------------------------------------------------------------------------- #
+def _holds_same(a: Mapping[str, Any], b: Mapping[str, Any], key: str) -> bool:
+    """Whether ``a`` and ``b`` hold ``key`` alike: both without it, or both with one value, as stored."""
+    return (key in a) == (key in b) and (key not in a or _same(a[key], b[key]))
+
+
+def plan_undo(before: Mapping[str, Any], after: Mapping[str, Any], current: Optional[Mapping[str, Any]]):
+    """What undoing one commit does to one entity it wrote — given its properties just before the
+    commit (``before``), as the commit wrote them (``after``) and as the draft holds them now
+    (``current``; None: deleted in the draft):
+
+    * the properties patch that puts back each key the commit changed (those ``before`` and
+      ``after`` hold differently: a rename's both keys) — ``before``'s value, kind and all, or
+      :data:`PROP_DELETE` for a key it didn't hold — when the entity still holds what the commit
+      wrote on every one of them;
+    * ``None`` when there is nothing to put back: it holds what it held before already;
+    * else ``(reason, detail)``, and it is left as it is: ``changed_since``, or ``deleted_in_draft``."""
+    if current is None:
+        return "deleted_in_draft", "Deleted in this draft."
+    touched = sorted(k for k in {*before, *after} if not _holds_same(before, after, k))
+    if all(_holds_same(current, before, k) for k in touched):
+        return None
+    changed = next((k for k in touched if not _holds_same(current, after, k)), None)
+    if changed is not None:
+        return "changed_since", f"Its {changed} changed since the bulk change — left as it is."
+    return {k: before[k] if k in before else PROP_DELETE for k in touched}
+
+
+def plan_undo_window(rows: Iterable[Tuple[str, Optional[str], Optional[str]]],
+                     before: Mapping[str, Optional[dict]], current: Mapping[str, Winner],
+                     entity_kind: str = "node") -> Tuple[Planned, Dict[str, Optional[str]]]:
+    """An undo window's update ops, from what one commit wrote — ``rows``: ``(entity id, payload as
+    JSON text, urn)`` — what each entity held before it (``before``: payloads) and the live ones
+    now (``current``: their winners, with payloads), :func:`plan_undo` each; and each entity's urn,
+    for its refused rows. Pure (parses JSON: run it off the event loop)."""
+    ops: List[Dict[str, Any]] = []
+    counts = dict.fromkeys(COUNTERS, 0)
+    refused: List[Dict[str, Any]] = []
+    urns: Dict[str, Optional[str]] = {}
+    for eid, payload, urn in rows:
+        urns[eid] = urn
+        w = current.get(eid)
+        now = None
+        if w is not None:
+            now = (json.loads(w.payload) if w.payload else {}).get("properties") or {}
+        was = (before.get(eid) or {}).get("properties") or {}
+        wrote = (json.loads(payload) if payload else {}).get("properties") or {}
+        planned = plan_undo(was, wrote, now)
+        if isinstance(planned, dict):
+            ops.append({"op": "update", "entity_kind": entity_kind, "entity_id": eid,
+                        "payload": {"properties": planned}})
+            counts["changed"] += 1
+        elif planned is None:
+            counts["unchanged"] += 1
+        else:
+            counts["deletedInDraft" if planned[0] == "deleted_in_draft" else "changedSince"] += 1
+            refused.append(_refused(urn, eid, *planned))
+    return Planned(ops, counts, refused), urns
 
 
 # --------------------------------------------------------------------------- #
@@ -701,6 +772,40 @@ async def read_edge_targets(snap: Snapshot, keys: Iterable[str]):
     return found, deleted, missing, derived
 
 
+async def window_commits(s, graph_id: str, branch_id: str, job) -> List[List[Any]]:
+    """The commits a bulk property job's windows wrote on its draft, newest first, as
+    ``[commit id, seq]`` — found as a publish's audit finds them: on the draft between its first
+    and last commit, by its actor, named as its windows are. ``job``: its row."""
+    fields = job.field_scope if isinstance(job.field_scope, dict) else {}
+    summary = job.summary if isinstance(job.summary, dict) else {}
+    ends = [summary.get("firstCommitId"), summary.get("lastCommitId")]
+    seqs = dict((await s.execute(select(CommitORM.id, CommitORM.commit_seq).where(
+        CommitORM.graph_id == graph_id, CommitORM.id.in_([e for e in ends if e])))).all())
+    if not all(e in seqs for e in ends) or not isinstance(fields.get("op"), dict):
+        return []
+    rows = (await s.execute(select(CommitORM.id, CommitORM.commit_seq).where(
+        CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id,
+        CommitORM.commit_seq.between(seqs[ends[0]], seqs[ends[1]]),
+        CommitORM.actor == fields.get("actor"),
+        CommitORM.message.in_(window_messages(fields["op"], fields.get("message"),
+                                              int(summary.get("chunks") or 0))),
+    ).order_by(CommitORM.commit_seq.desc()))).all()
+    return [[r.id, r.commit_seq] for r in rows]
+
+
+async def commit_writes(graph_id: str, branch_id: str, commit_id: str, seq: int,
+                        entity_kind: str = "node") -> List[Tuple[str, Optional[str], Optional[str]]]:
+    """What one commit wrote on the branch, of ``entity_kind``: ``(entity id, payload as JSON text,
+    urn)`` per version row (an edge has no urn) — read by the branch's changeset index."""
+    model = NodeVersionORM if entity_kind == "node" else EdgeVersionORM
+    urn = model.urn if entity_kind == "node" else null()
+    async with db.graphver_session() as s:
+        rows = (await s.execute(select(model.entity_id, cast(model.payload, Text), urn).where(
+            model.graph_id == graph_id, model.branch_id == branch_id, model.commit_seq == seq,
+            model.commit_id == commit_id, model.op != "delete"))).all()
+    return [(r[0], r[1], r[2]) for r in rows]
+
+
 # --------------------------------------------------------------------------- #
 # Chunk files                                                                  #
 # --------------------------------------------------------------------------- #
@@ -839,7 +944,16 @@ class PropertyJobWorker:
                 await _analyze_graph(job["graphId"])
                 first = False
         summary = (await self._position(job_id)).summary
-        if not await lease.finish("completed", progress=100, summary=summary):
+        source = job["op"].get("sourceJobId") if job["op"]["kind"] == "undo" else None
+
+        async def undone(s) -> None:
+            # An undo: its source is undone once every window is written, and with the undo's end.
+            row = await s.get(JobORM, source, with_for_update=True)
+            if row is not None:
+                row.summary = {**(row.summary if isinstance(row.summary, dict) else {}), "undoneBy": job_id}
+
+        if not await lease.finish("completed", progress=100, summary=summary,
+                                  then=undone if source else None):
             raise Superseded(f"property job {job_id} (epoch {lease.epoch}) was taken over before it "
                              "could finish")
         return summary
@@ -905,26 +1019,39 @@ class PropertyJobWorker:
             status = await s.scalar(select(BranchORM.status).where(BranchORM.id == branch_id))
         if status != "open":
             raise self._closed(status, pos)
-        keys = await read_lines(self._store, targets_key(job_id, i))
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         kind = job.get("entityKind") or "node"
-        stale: Dict[str, str] = {}
-        if kind == "edge":
-            found, deleted, missing, derived = await read_edge_targets(snap, keys)
+        if op["kind"] == "undo":
+            # One of the source's commits, newest first: what it wrote, as it was just before it.
+            commit_id, seq = job["target"]["commits"][i]
+            rows = await commit_writes(graph_id, branch_id, commit_id, seq, kind)
+            ids = [eid for eid, _payload, _urn in rows]
+            before = await self._svc.values_before(graph_id, branch_id, ids, seq)
+            current = await snap.lookup_live(kind, ids, payload=True)
+            (ops, counts, refused), urns = await asyncio.to_thread(plan_undo_window, rows, before, current, kind)
+            n = len(rows)
         else:
-            (found, deleted, missing, stale), derived = await read_targets(snap, keys, self._recheck), {}
-        ops, counts, refused = await asyncio.to_thread(plan_window, op, found, kind)
-        counts["missing"] += len(missing)
-        counts["deletedInDraft"] += len(deleted)
-        counts["noLongerMatches"] += len(stale)
-        refused += [_refused(k, eid, "deleted_in_draft", "Deleted in this draft.") for k, eid in deleted.items()]
-        refused += [_refused(k, None, "missing", "Not in this draft.") for k in missing]
-        refused += [_refused(k, eid, "no_longer_matches", "In this draft it no longer matches the "
-                             "search.") for k, eid in stale.items()]
-        refused += [_refused(k, eid, "derived", "A roll-up: change the relationships it summarises.")
-                    for k, eid in derived.items()]
+            keys = await read_lines(self._store, targets_key(job_id, i))
+            stale: Dict[str, str] = {}
+            if kind == "edge":
+                found, deleted, missing, derived = await read_edge_targets(snap, keys)
+            else:
+                (found, deleted, missing, stale), derived = await read_targets(snap, keys, self._recheck), {}
+            ops, counts, refused = await asyncio.to_thread(plan_window, op, found, kind)
+            counts["missing"] += len(missing)
+            counts["deletedInDraft"] += len(deleted)
+            counts["noLongerMatches"] += len(stale)
+            refused += [_refused(k, eid, "deleted_in_draft", "Deleted in this draft.")
+                        for k, eid in deleted.items()]
+            refused += [_refused(k, None, "missing", "Not in this draft.") for k in missing]
+            refused += [_refused(k, eid, "no_longer_matches", "In this draft it no longer matches the "
+                                 "search.") for k, eid in stale.items()]
+            refused += [_refused(k, eid, "derived", "A roll-up: change the relationships it summarises.")
+                        for k, eid in derived.items()]
+            urns = {eid: urn or key for key, (eid, _props, urn) in found.items()}
+            n = len(keys)
         message = window_message(op, job.get("message"), i + 1, chunks)
-        processed = pos.processed + len(keys)
+        processed = pos.processed + n
         started = _now()
 
         async def on_commit(s) -> None:
@@ -939,7 +1066,6 @@ class PropertyJobWorker:
                 summary=_tally(pos.summary, counts, refused, commit_id), current_phase="apply",
                 progress=min(99, processed * 100 // pos.total) if pos.total else 0)
 
-        urns = {eid: urn or key for key, (eid, _props, urn) in found.items()}
         try:
             await self._apply(graph_id, branch_id, job["actor"], ops, counts, refused, urns,
                               message, on_commit, context)

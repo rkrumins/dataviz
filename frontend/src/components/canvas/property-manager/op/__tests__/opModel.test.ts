@@ -95,6 +95,17 @@ describe('review', () => {
     expect(impactOf(op({ kind: 'rename', to: 'x', onConflict: 'overwrite' }), c)).toEqual({ changes: 40, replaced: 10, untouched: 60 })
   })
 
+  it('a fill counts the entities whose value is empty — none, null, "" or [] — not only those without the key', () => {
+    const target = { kind: 'layer', layerAssignment: 'L1' } as never
+    const items = reviewCounts(op({ kind: 'fillEmpty' }), target)
+    expect(items.map((i) => i.id)).toEqual(['target', 'haveKey', 'match'])
+    expect(items[2]!.predicate).toEqual({ kind: 'group', op: 'and', children: [target, { kind: 'property', key: 'owner', op: 'isEmpty' }] })
+    // 40 hold the key, but 15 of them hold an empty value: the fill gives 75 a value, at most —
+    // a value of only spaces reads as empty to the search and is left alone by the fill.
+    expect(impactOf(op({ kind: 'fillEmpty' }), { target: 100, haveKey: 40, match: 75 }))
+      .toEqual({ changes: 75, replaced: 0, untouched: 25, upTo: true })
+  })
+
   it('asks for the name to be typed for a large or source-wide removal, rename or overwrite', () => {
     expect(needsTypedConfirm(op({ kind: 'remove' }), { changes: 1000, replaced: 0 }, 'view')).toBe(true)
     expect(needsTypedConfirm(op({ kind: 'remove' }), { changes: 10, replaced: 0 }, 'data_source')).toBe(true)
@@ -143,6 +154,8 @@ describe('a clean-up of the values a property holds', () => {
       .toBe('Normalize dept (trim, collapse spaces, lower case)')
     expect(propertyJobLabel({ kind: 'mapValues', key: 'dept', map: [...merge, ...merge, ...merge] })).toBe('Merge 3 values of dept')
     expect(propertyJobLabel({ kind: 'convert', key: 'tier', toKind: 'Float' })).toBe('Convert tier to Decimal')
+    expect(propertyJobLabel({ kind: 'undo', key: 'owner', sourceJobId: 'vjob_1', sourceLabel: 'Rename owner → steward' }))
+      .toBe('Undo: Rename owner → steward')
   })
 
   it('counts at most the entities holding what it finds, or the values it merges', () => {

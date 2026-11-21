@@ -364,4 +364,14 @@ describe("EntityDrawer — what the type's fields ask of a value", () => {
     expect(screen.getByText(/Owner is required for Dataset/)).toBeInTheDocument()
     expect(ops()[0].unsetProperties).toEqual(['owner'])
   })
+
+  it('a required one removed is fixed here — it offers no fill, which would reach only the other Datasets', async () => {
+    // Publishing refuses this one because the draft emptied it; a search of the type's entities
+    // reads Published, where it still holds a value, so a fill from here would never reach it.
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    await user.click(within(rowOf('owner')).getByRole('button', { name: 'Delete owner' }))
+    expect(screen.getByText(/Owner is required for Dataset/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Fill missing/ })).toBeNull()
+  })
 })

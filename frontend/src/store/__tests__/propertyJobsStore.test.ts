@@ -93,6 +93,17 @@ describe('propertyJobsStore', () => {
     }
   })
 
+  it('says what a draft\'s jobs do to each property — an undo, and a change it undid, leave it as it was', async () => {
+    const { renderHook } = await import('@testing-library/react')
+    const { usePropertyCatalogOverlay } = await import('../propertyJobsStore')
+    const done = (jobId: string, patch: Partial<TrackedJob> = {}) => tracked(jobId, { job: { jobId, status: 'completed' }, ...patch })
+    const undo = done('u1', { op: { kind: 'undo', key: 'owner', to: 'steward', sourceJobId: 'r1', sourceLabel: 'Rename owner → steward' } })
+    const remove = done('m1', { op: { kind: 'remove', key: 'tier' }, job: { jobId: 'm1', status: 'completed', summary: { undoneBy: 'u9' } } })
+    const { result } = renderHook(() => usePropertyCatalogOverlay([done('r1'), undo, remove, tracked('s1', { op: { kind: 'set', key: 'dept' } })]))
+    expect([...result.current.keys()]).toEqual(['dept'])
+    expect(result.current.get('dept')).toMatchObject({ count: 1, running: true })
+  })
+
   it('hands a request to the dialog once', async () => {
     const { usePropertyJobsStore } = await import('../propertyJobsStore')
     usePropertyJobsStore.getState().requestOp({ kind: 'remove', key: 'owner' })

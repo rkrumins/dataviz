@@ -77,8 +77,10 @@ def test_a_publish_giving_values_their_fields_refuse_is_refused(path, monkeypatc
         assert found[1]["reason"] == "Tier must be one of 'gold', 'silver' — 'bronze' isn't."
         assert exc.value.detail["total"] == 2
         assert exc.value.detail["byField"] == [
-            {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 1},
-            {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 1}]
+            {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 1,
+             "ids": ["gv:urn:New"], "idsComplete": True},
+            {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 1,
+             "ids": ["gv:urn:New"], "idsComplete": True}]
     _run(case)
 
 
@@ -138,9 +140,54 @@ def test_a_refusal_counts_every_value_to_change_by_field_page_after_page(path, m
                               ontology_rules=RULES)
         detail = exc.value.detail
         assert detail["total"] == 10 and len(detail["violations"]) == 3
+        news = [f"gv:urn:New{i}" for i in range(5)]
         assert detail["byField"] == [
-            {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 5},
-            {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 5}]
+            {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 5,
+             "ids": news, "idsComplete": True},
+            {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 5,
+             "ids": news, "idsComplete": True}]
         assert [v["entity_id"] for v in detail["violations"]] == ["urn:New0", "urn:New0", "urn:New1"]
         assert await svc.commit_log(graph_id=gid, branch_id=main) == published      # nothing published
+    _run(case)
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_a_refusal_names_the_entities_to_fix_and_one_bulk_job_on_them_lets_it_publish(path, monkeypatch):
+    """Per field, the refusal names the entities it refused as a bulk property job's ``ids`` target
+    names them — new in the draft, or emptied there, which a search of Published never reaches —
+    up to as many as one job takes (``idsComplete`` says when that is all), across pages. A
+    "Fill if empty" on them is what the publish needed."""
+    from backend.app.services.versioning import ontology
+    from backend.app.services.versioning.import_export.service import ImportExportService
+    _take(path, monkeypatch)
+    monkeypatch.setattr(config, "FIELD_CHECK_PAGE", 2)
+    monkeypatch.setattr(ontology, "FIELD_IDS_MAX", 3)
+
+    async def case(svc):
+        gid = await _graph(svc)
+        draft = await _draft(svc, gid, [_table(f"urn:New{i}", tier="gold") for i in range(4)]
+                             + [_table("urn:Owned", op="update", owner=PROP_DELETE)])
+        with pytest.raises(FieldViolation) as exc:
+            await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go",
+                              ontology_rules=RULES)
+        [owner] = exc.value.detail["byField"]
+        assert (owner["rule"], owner["count"], owner["idsComplete"]) == ("field_required", 5, False)
+        assert len(owner["ids"]) == 3 and set(owner["ids"]) < {
+            "gv:urn:New0", "gv:urn:New1", "gv:urn:New2", "gv:urn:New3", "gv:urn:Owned"}
+
+        monkeypatch.setattr(ontology, "FIELD_IDS_MAX", config.PROPERTY_JOB_MAX_IDS)
+        with pytest.raises(FieldViolation) as exc:
+            await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go",
+                              ontology_rules=RULES)
+        [owner] = exc.value.detail["byField"]
+        assert owner["idsComplete"] is True and len(owner["ids"]) == 5
+
+        ie = ImportExportService(versioning=svc)
+        job = (await ie.create_property_job(
+            workspace_id="ws1", data_source_id=None, graph_id=gid, branch_id=draft, actor="alice",
+            op={"kind": "fillEmpty", "key": "owner", "value": "ana"}, target={"ids": owner["ids"]},
+            message=None, key="key-fill-required-1"))["job_id"]
+        assert (await ie.run_property(job))["changed"] == 5
+        assert await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go",
+                                 ontology_rules=RULES)
     _run(case)

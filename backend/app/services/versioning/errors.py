@@ -270,6 +270,16 @@ class JobActive(_HttpMapped, RuntimeError):
         super().__init__(message, {"type": "job_active", "jobId": job_id})
 
 
+class UndoRefused(_HttpMapped, RuntimeError):
+    """A bulk property job that can't be undone, and why (``type``): it is published
+    (``job_published``, 409), undone already (``already_undone``, 409, the undo's ``jobId``), wrote
+    nothing (``nothing_to_undo``, 422), or is an undo itself (``undo_of_undo``, 422)."""
+
+    def __init__(self, code: str, message: str, status_code: int = 409, job_id: Optional[str] = None):
+        self.code, self.status_code = code, status_code
+        super().__init__(message, {"type": code, **({"jobId": job_id} if job_id else {})})
+
+
 class CurationAtRisk(_HttpMapped, RuntimeError):
     """A re-sync would treat people's edits on main as drift and undo them."""
 
@@ -511,9 +521,10 @@ class UniqueViolation(_HttpMapped, RuntimeError):
 class FieldViolation(_HttpMapped, RuntimeError):
     """A publish would give entities property values their type's fields refuse — not of the
     field's type, not one of its allowed values — or leave a required field without one: refused,
-    naming each entity, field and value (the first 100), how many in all (``total``), and how many
-    per entity type, field and rule (``byField``). ``found``: the publish's
-    :class:`~.ontology.FieldFindings`."""
+    naming each entity, field and value (the first 100), how many in all (``total``), and per
+    entity type, field and rule how many and which (``byField``: ``count``, and ``ids`` as a bulk
+    property job names them, up to 20,000, ``idsComplete`` when that is all). ``found``: the
+    publish's :class:`~.ontology.FieldFindings`."""
 
     def __init__(self, found):
         self.violations = list(found.examples)
@@ -682,7 +693,7 @@ class PartialMergeUnsupported(_HttpMapped, RuntimeError):
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
                LockBusy, ChangeListBusy, RevisionUnsupported, RevisionTooFar, RevisionReadOnly,
-               JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
+               JobActive, UndoRefused, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionAlreadyAdopted,
                ProjectionPassInFlight, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,

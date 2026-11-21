@@ -287,10 +287,30 @@ def test_a_refusal_keeps_a_hundred_values_and_counts_them_all_by_field():
         found.add(field_violations([(f"t{page}-{i}", {"entityType": "Table", "properties": {"tier": "x"}}, None)
                                     for i in range(50)], rules))
     assert found.total == 300 and len(found.examples) == 100 and found.examples[0]["entity_id"] == "t0-0"
+    ids = [f"gv:t{page}-{i}" for page in range(3) for i in range(50)]
     assert found.by_field() == [
-        {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 150},
-        {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 150}]
+        {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 150,
+         "ids": ids, "idsComplete": True},
+        {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 150,
+         "ids": ids, "idsComplete": True}]
     refusal = FieldViolation(found)
     assert refusal.detail["total"] == 300 and len(refusal.detail["violations"]) == 100
     assert refusal.detail["byField"] == found.by_field()
     assert str(refusal).startswith("300 values break the fields their entity types define")
+
+
+def test_a_refusal_names_the_refused_entities_per_field_up_to_what_one_bulk_job_takes(monkeypatch):
+    """Each per-field count names its entities as a bulk property job's ``ids`` target names them,
+    so one job can fill a required field on all of them — at most as many as a job takes."""
+    from backend.app.services.versioning import config, ontology
+    from backend.app.services.versioning.ontology import FieldFindings, FieldRule, field_violations
+    assert ontology.FIELD_IDS_MAX == config.PROPERTY_JOB_MAX_IDS
+    monkeypatch.setattr(ontology, "FIELD_IDS_MAX", 4)
+    rules = OntologyRules(entity_types={"Table": EntityRule(fields={"owner": FieldRule(required=True, name="Owner")})})
+    found = FieldFindings()
+    for page in range(2):
+        found.add(field_violations([(f"t{page}-{i}", {"entityType": "Table", "properties": {}}, None)
+                                    for i in range(3)], rules))
+    [owner] = found.by_field()
+    assert owner["count"] == 6 and owner["ids"] == ["gv:t0-0", "gv:t0-1", "gv:t0-2", "gv:t1-0"]
+    assert owner["idsComplete"] is False

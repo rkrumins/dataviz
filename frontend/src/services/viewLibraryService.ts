@@ -13,7 +13,7 @@ import type { DisplayRuleConfig } from '@/types/schema'
 import type { Predicate } from '@/types/search'
 
 import { authFetch } from './apiClient'
-import type { PropertyJobOp } from './versioningApiService'
+import type { PropertyJobOp, PropertyOpKind } from './versioningApiService'
 
 
 export interface SavedViewQuery {
@@ -58,8 +58,8 @@ export interface BulkRecipe {
     id: string
     name: string
     description?: string | null
-    /** The change, as a job keeps it. */
-    op: PropertyJobOp
+    /** The change, as a job keeps it — never an undo, which only undoes a change already made. */
+    op: PropertyJobOp & { kind: PropertyOpKind }
     target: RecipeTarget
     createdAt?: string | null
     createdBy?: string | null

@@ -18,6 +18,11 @@ checkpoint — and never on main.
   them — or as a Connections search names one without (``source|TYPE|target``); deleted in the
   draft, a roll-up (refused ``derived``); a Connections search target; their routes, and the read
   the relationship drawer compares several relationships by.
+* An undo puts back what a job's windows wrote, newest window first, from the draft's history — a
+  rename's both keys, a clean-up's values in the kind they were, a relationship's properties, what
+  a draft that pulled since held then; leaves one changed since alone (``changed_since``), listed;
+  is one job a key, resumes and cancels as a job does; and is refused for a job published in whole
+  or in part, undone already, that wrote nothing, or is an undo.
 """
 import asyncio
 import os
@@ -26,7 +31,7 @@ import pytest
 from sqlalchemy import select, update
 
 from backend.app.services.versioning import config, db, models
-from backend.app.services.versioning.errors import JobActive
+from backend.app.services.versioning.errors import BranchNotOpen, JobActive, UndoRefused
 from backend.app.services.versioning.import_export.import_worker import lease_job
 from backend.app.services.versioning.import_export.runner import TransferRunner
 from backend.app.services.versioning.import_export.service import ImportExportService
@@ -739,3 +744,306 @@ async def _edge_routes() -> None:
 
 def test_the_edge_routes_preview_create_and_read_several_relationships():
     asyncio.run(_edge_routes())
+
+
+# ── undo a bulk job, from the draft's history ─────────────────────────────────
+async def _undo(ie, ds, gid, job_id, key="key-undo-00001", actor="alice"):
+    return (await ie.create_undo_job(workspace_id="ws1", data_source_id=ds, graph_id=gid, job_id=job_id,
+                                     actor=actor, key=key))["job_id"]
+
+
+async def _undo_a_rename(monkeypatch) -> None:
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 3)
+    svc, ds, gid, draft = await _draft()
+    ie = ImportExportService(versioning=svc)
+    rename = await _create(ie, ds, gid, draft, RENAME, {"ids": [f"urn:n{i}" for i in range(8)]})
+    await ie.run_property(rename)
+    # Since: one entity's new key edited by hand, one entity deleted.
+    await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="by hand", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "N1", "payload": {"properties": {"steward": "mine"}}},
+        {"op": "delete", "entity_kind": "node", "entity_id": "N2"}])
+    seen = await _messages(gid, draft)
+
+    undo = await _undo(ie, ds, gid, rename)
+    assert await _undo(ie, ds, gid, rename) == undo                         # the same key: the same undo
+    job = await ie.get_property_job(undo)
+    assert job["op"] == {"kind": "undo", "key": "owner", "to": "steward", "sourceJobId": rename,
+                         "sourceLabel": "Rename owner → steward"}
+    assert job["target"]["kind"] == "undo" and len(job["target"]["commits"]) == 3
+    summary = await ie.run_property(undo)
+    assert (summary["changed"], summary["changedSince"], summary["deletedInDraft"],
+            summary["commits"]) == (6, 1, 1, 3)
+    assert await _messages(gid, draft) == seen + [
+        f"Bulk property: Undo: Rename owner → steward ({i}/3)" for i in (1, 2, 3)]
+    for i in (0, 3, 4, 5, 6, 7):
+        assert await _props(svc, gid, draft, f"N{i}") == {"owner": f"o{i}"}
+    assert await _props(svc, gid, draft, "N1") == {"steward": "mine"}            # changed since: left as it is
+    assert sorted((await _csv(ie, undo))[1:]) == [
+        "urn:n1,N1,changed_since,Its steward changed since the bulk change — left as it is.",
+        "urn:n2,N2,deleted_in_draft,Deleted in this draft."]
+    job = await ie.get_property_job(undo)
+    assert (job["status"], job["processed"], job["total"], job["progress"]) == ("completed", 8, 8, 1.0)
+    assert (await ie.get_property_job(rename))["summary"]["undoneBy"] == undo
+
+    with pytest.raises(UndoRefused) as again:
+        await _undo(ie, ds, gid, rename, key="key-undo-00002")
+    assert (again.value.code, again.value.status_code, again.value.detail["jobId"]) == (
+        "already_undone", 409, undo)
+    with pytest.raises(UndoRefused) as twice:
+        await _undo(ie, ds, gid, undo, key="key-undo-00003")
+    assert (twice.value.code, twice.value.status_code) == ("undo_of_undo", 422)
+
+    # A publish lists both, by what they did.
+    published = await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="Back")
+    listed = (await _stats(gid, published))["propertyJobs"]
+    assert [j["label"] for j in listed["jobs"]] == ["Rename owner → steward", "Undo: Rename owner → steward"]
+    assert await _props(svc, gid, None, "N0") == {"owner": "o0"}
+    await db.dispose_engine()
+
+
+def test_an_undo_puts_back_what_a_job_wrote_and_leaves_what_changed_since(monkeypatch):
+    asyncio.run(_undo_a_rename(monkeypatch))
+
+
+async def _undo_clean_ups(monkeypatch) -> None:
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 3)
+    svc, ds, gid, draft = await _draft(nodes=[
+        _node(0, dept="a", tier="42", score=1.0), _node(1, dept="b", tier="7"), _node(2, dept="x", tier="x")])
+    ie = ImportExportService(versioning=svc)
+    ids = ["urn:n0", "urn:n1", "urn:n2"]
+
+    async def run(op, target, key):
+        job_id = await _create(ie, ds, gid, draft, op, {"ids": target}, key=key)
+        await ie.run_property(job_id)
+        return job_id
+
+    # Named twice, in two windows: N0's dept is merged a → b by the first, then b → c by the second.
+    merge = await run(_cleanup("mapValues", "dept", map=[
+        {"from": "a", "fromKind": "String", "to": "b", "toKind": "String"},
+        {"from": "b", "fromKind": "String", "to": "c", "toKind": "String"}]), ids + ["gv:N0"], "key-merge-twice1")
+    convert = await run(_cleanup("convert", "tier", toKind="Integer", onFail="skip"), ids, "key-convert-0002")
+    score = await run(_cleanup("set", "score", value=1), ids[:1], "key-set-score-02")
+    assert [await _props(svc, gid, draft, f"N{i}") for i in range(3)] == [
+        {"dept": "c", "tier": 42, "score": 1}, {"dept": "c", "tier": 7}, {"dept": "x", "tier": "x"}]
+
+    # Undone newest window first, N0 ends as it began; each value in the kind it was stored as.
+    for job_id, key, changed in ((merge, "key-undo-merge01", 3), (convert, "key-undo-conv001", 2),
+                                 (score, "key-undo-score01", 1)):
+        summary = await ie.run_property(await _undo(ie, ds, gid, job_id, key=key))
+        assert (summary["changed"], summary["changedSince"]) == (changed, 0), summary
+    props = [await _props(svc, gid, draft, f"N{i}") for i in range(3)]
+    assert props == [{"dept": "a", "tier": "42", "score": 1.0}, {"dept": "b", "tier": "7"},
+                     {"dept": "x", "tier": "x"}]
+    assert (type(props[0]["score"]), type(props[0]["tier"])) == (float, str)
+    await db.dispose_engine()
+
+
+def test_an_undo_of_clean_ups_goes_newest_window_first_and_keeps_each_kind(monkeypatch):
+    asyncio.run(_undo_clean_ups(monkeypatch))
+
+
+async def _undo_after_a_pull() -> None:
+    """What a draft held before a job is what it read then: a pull since moved its base."""
+    svc, ds, gid, draft = await _draft(n=2)
+    ie = ImportExportService(versioning=svc)
+    tier = await _create(ie, ds, gid, draft, {"kind": "set", "key": "tier", "value": "gold", "onConflict": "skip"},
+                         {"ids": ["urn:n0", "urn:n1"]})
+    await ie.run_property(tier)
+    other = await svc.open_draft(graph_id=gid, owner="bob")
+    await svc.apply_ops(graph_id=gid, branch_id=other, actor="bob", message="new owner", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "N0", "payload": {"properties": {"owner": "bob"}}}])
+    await svc.publish(graph_id=gid, branch_id=other, actor="bob", message="new owner")
+    assert (await svc.rebase_draft(graph_id=gid, branch_id=draft, actor="alice"))["clean"]
+    assert await _props(svc, gid, draft, "N0") == {"owner": "bob", "tier": "gold"}
+
+    summary = await ie.run_property(await _undo(ie, ds, gid, tier))
+    assert (summary["changed"], summary["changedSince"]) == (2, 0), summary
+    assert [await _props(svc, gid, draft, f"N{i}") for i in (0, 1)] == [{"owner": "bob"}, {"owner": "o1"}]
+    await db.dispose_engine()
+
+
+def test_an_undo_reads_what_the_draft_held_before_the_job_even_after_a_pull():
+    asyncio.run(_undo_after_a_pull())
+
+
+async def _undo_relationships_removals_and_fills() -> None:
+    svc, ds, gid, draft = await _edge_draft()
+    ie = ImportExportService(versioning=svc)
+    edges = await ie.create_property_job(
+        workspace_id="ws1", data_source_id=ds, graph_id=gid, branch_id=draft, actor="alice",
+        op={"kind": "remove", "key": "owner", "onConflict": "skip"}, target={"ids": ["E1", "E2", "E3"]},
+        message=None, key="key-edge-undo-01", entity_kind="edge")
+    await ie.run_property(edges["job_id"])
+    fill = await _create(ie, ds, gid, draft,
+                         {"kind": "fillEmpty", "key": "owner", "value": "ana", "onConflict": "skip"},
+                         {"ids": ["urn:n0", "urn:n1"]}, key="key-fill-undo-01")
+    await ie.run_property(fill)
+    assert await _props(svc, gid, draft, "E2") == {"steward": "x"}
+    assert await _props(svc, gid, draft, "N0") == {"owner": "ana"}
+
+    undo = await _undo(ie, ds, gid, edges["job_id"])
+    assert (await ie.get_property_job(undo))["entityKind"] == "edge"
+    assert (await ie.run_property(undo))["changed"] == 3
+    assert [await _props(svc, gid, draft, e) for e in ("E1", "E2", "edge:E3")] == [
+        {"owner": "a"}, {"owner": "b", "steward": "x"}, {"owner": "c"}]
+    assert (await ie.run_property(await _undo(ie, ds, gid, fill, key="key-undo-fill01")))["changed"] == 2
+    assert [await _props(svc, gid, draft, f"N{i}") for i in (0, 1)] == [{}, {}]
+    await db.dispose_engine()
+
+
+def test_an_undo_covers_relationship_jobs_removals_and_fills():
+    asyncio.run(_undo_relationships_removals_and_fills())
+
+
+async def _undo_resumes_and_cancels(monkeypatch) -> None:
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 3)
+    svc, ds, gid, draft = await _draft()
+    ie = ImportExportService(versioning=svc)
+    ids = [f"urn:n{i}" for i in range(8)]
+    source = await _create(ie, ds, gid, draft, RENAME, {"ids": ids})
+    with pytest.raises(JobActive) as busy:                   # the job itself, while it may run
+        await _undo(ie, ds, gid, source)
+    assert busy.value.job_id == source
+    await ie.run_property(source)
+
+    # Superseded as its second window writes: that window rolls back, and the undo resumes from its
+    # cursor, writing each window once.
+    undo = await _undo(ie, ds, gid, source)
+    with pytest.raises(JobActive):                           # one job a draft: a second undo waits
+        await _undo(ie, ds, gid, source, key="key-undo-other1")
+    seen = await _messages(gid, draft)
+    lease = await lease_job(undo)
+    _on_window(svc, 2, lambda: lease_job(undo))
+    with pytest.raises(Superseded):
+        await ie.run_property(undo, lease=lease)
+    assert [await _props(svc, gid, draft, f"N{i}") for i in (7, 3)] == [{"owner": "o7"}, {"steward": "o3"}]
+    assert (await ie.get_property_job(source))["summary"].get("undoneBy") is None
+    svc.apply_ops = GraphVersioningService.apply_ops.__get__(svc)
+    summary = await ie.run_property(undo)
+    assert (summary["changed"], summary["commits"]) == (8, 3)
+    assert await _messages(gid, draft) == seen + [
+        f"Bulk property: Undo: Rename owner → steward ({i}/3)" for i in (1, 2, 3)]
+
+    # Cancelled as its second window writes: the first stays put back, and the source is not undone
+    # until an undo asked again puts back the rest — what is back already is left as it is.
+    again = await _create(ie, ds, gid, draft, RENAME, {"ids": ids}, key="key-property-0002")
+    await ie.run_property(again)
+    cancelled = await _undo(ie, ds, gid, again, key="key-undo-cancel1")
+    _on_window(svc, 2, lambda: ie.cancel_property_job(cancelled, actor="alice"))
+    await ie.run_property_safe(cancelled, await lease_job(cancelled))
+    job = await ie.get_property_job(cancelled)
+    assert (job["status"], job["summary"]["changed"], job["summary"]["commits"]) == ("cancelled", 2, 1)
+    assert [await _props(svc, gid, draft, f"N{i}") for i in (7, 3)] == [{"owner": "o7"}, {"steward": "o3"}]
+    assert (await ie.get_property_job(again))["summary"].get("undoneBy") is None
+    svc.apply_ops = GraphVersioningService.apply_ops.__get__(svc)
+    rest = await _undo(ie, ds, gid, again, key="key-undo-rest001")
+    summary = await ie.run_property(rest)
+    assert (summary["changed"], summary["unchanged"], summary["changedSince"]) == (6, 2, 0)
+    assert (await ie.get_property_job(again))["summary"]["undoneBy"] == rest
+
+    # A cancelled job is undone for the windows it wrote.
+    third = await _create(ie, ds, gid, draft, RENAME, {"ids": ids}, key="key-property-0003")
+    _on_window(svc, 2, lambda: ie.cancel_property_job(third, actor="alice"))
+    await ie.run_property_safe(third, await lease_job(third))
+    svc.apply_ops = GraphVersioningService.apply_ops.__get__(svc)
+    assert (await ie.get_property_job(third))["status"] == "cancelled"
+    summary = await ie.run_property(await _undo(ie, ds, gid, third, key="key-undo-third01"))
+    assert (summary["changed"], summary["commits"]) == (3, 1)
+    assert [await _props(svc, gid, draft, f"N{i}") for i in range(8)] == [{"owner": f"o{i}"} for i in range(8)]
+    await db.dispose_engine()
+
+
+def test_an_undo_resumes_after_a_takeover_and_a_cancelled_one_keeps_what_it_put_back(monkeypatch):
+    asyncio.run(_undo_resumes_and_cancels(monkeypatch))
+
+
+async def _undo_refused() -> None:
+    cont = ["CONTAINS"]
+    svc, ds, gid, draft = await _draft(n=4)
+    ie = ImportExportService(versioning=svc)
+    rename = await _create(ie, ds, gid, draft, RENAME, {"ids": ["urn:n0", "urn:n1"]}, key="key-refused-001")
+    await ie.run_property(rename)
+    nothing = await _create(ie, ds, gid, draft, _cleanup("replace", "owner", find="zzz", replaceWith="y"),
+                            {"ids": ["urn:n0"]}, key="key-refused-002")
+    await ie.run_property(nothing)
+    with pytest.raises(UndoRefused) as empty:
+        await _undo(ie, ds, gid, nothing)
+    assert (empty.value.code, empty.value.status_code) == ("nothing_to_undo", 422)
+
+    # Part of it merged to main by a review: not undone on the draft, nor once the rest lands.
+    pr = await svc.open_draft_mr(graph_id=gid, branch_id=draft, actor="alice", title="Stewards")
+    await svc.decide_changes(pr_id=pr, actor="bo", verdict="accepted", entity_ids=["N0"],
+                             containment_edge_types=cont)
+    await svc.decide_changes(pr_id=pr, actor="bo", verdict="rejected", entity_ids=["N1"],
+                             reason="Later", containment_edge_types=cont)
+    await svc.merge_mr(mr_id=pr, actor="cy", message="Some", containment_edge_types=cont, mode="accepted")
+    with pytest.raises(UndoRefused) as part:
+        await _undo(ie, ds, gid, rename)
+    assert (part.value.code, part.value.status_code) == ("job_published", 409)
+    rest = await svc.open_draft_mr(graph_id=gid, branch_id=draft, actor="alice", title="The rest")
+    await svc.merge_mr(mr_id=rest, actor="cy", message="Rest", containment_edge_types=cont)
+    with pytest.raises(UndoRefused, match="published") as whole:
+        await _undo(ie, ds, gid, rename, key="key-undo-00002")
+    assert whole.value.code == "job_published"
+
+    # A draft discarded under a job that never reached main: closed.
+    later = await svc.open_draft(graph_id=gid, owner="alice")
+    tier = await _create(ie, ds, gid, later, {"kind": "set", "key": "tier", "value": "gold", "onConflict": "skip"},
+                         {"ids": ["urn:n2"]}, key="key-refused-003")
+    await ie.run_property(tier)
+    await svc.abandon_draft(graph_id=gid, branch_id=later, actor="alice")
+    with pytest.raises(BranchNotOpen):
+        await _undo(ie, ds, gid, tier, key="key-undo-00003")
+    await db.dispose_engine()
+
+
+def test_an_undo_is_refused_once_published_in_whole_or_part_for_nothing_and_on_a_closed_draft():
+    asyncio.run(_undo_refused())
+
+
+async def _undo_routes() -> None:
+    from httpx import ASGITransport, AsyncClient
+    from backend.app.api.v1.endpoints.versioning import get_import_export_service
+    from .test_versioning_main_write_publish import MIA, PAT, V1, _app
+
+    svc, ds, gid, draft = await _draft(owner="pat", n=2)
+    app, _G = _app()
+    ie = get_import_export_service()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(f"{V1}/graphs/{gid}/branches/{draft}/property-jobs",
+                         json={"op": RENAME, "target": {"ids": ["urn:n0", "urn:n1"]}},
+                         headers={**PAT, "Idempotency-Key": "key-route-undo1"})
+        source = r.json()["jobId"]
+        url = f"{V1}/graphs/{gid}/property-jobs/{source}/undo"
+        r = await c.post(url, headers={**PAT, "Idempotency-Key": "key-route-undo2"})
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "job_active", r.text
+        await ie.run_property(source)
+
+        assert (await c.post(url, headers=PAT)).status_code == 422                  # no key
+        key = {**PAT, "Idempotency-Key": "key-route-undo3"}
+        r = await c.post(url, headers=key)
+        assert r.status_code == 202, r.text
+        undo = r.json()
+        assert (undo["status"], undo["op"]["kind"], undo["op"]["sourceJobId"], undo["total"]) == (
+            "pending", "undo", source, 2)
+        assert (await c.post(url, headers=key)).json()["jobId"] == undo["jobId"]
+        r = await c.post(url, headers={**PAT, "Idempotency-Key": "key-route-undo4"})
+        assert r.status_code == 409, r.text
+        assert (r.json()["detail"]["code"], r.json()["detail"]["jobId"]) == ("job_active", undo["jobId"])
+        assert (await c.post(url, headers={**MIA, "Idempotency-Key": "key-route-undo5"})).status_code == 404
+
+        await ie.run_property(undo["jobId"])
+        r = await c.get(f"{V1}/graphs/{gid}/property-jobs/{source}", headers=PAT)
+        assert r.json()["summary"]["undoneBy"] == undo["jobId"], r.text
+        r = await c.post(url, headers={**PAT, "Idempotency-Key": "key-route-undo6"})
+        assert r.status_code == 409, r.text
+        assert (r.json()["detail"]["code"], r.json()["detail"]["jobId"]) == ("already_undone", undo["jobId"])
+        r = await c.post(f"{V1}/graphs/{gid}/property-jobs/{undo['jobId']}/undo",
+                         headers={**PAT, "Idempotency-Key": "key-route-undo7"})
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "undo_of_undo", r.text
+        assert await _props(svc, gid, draft, "N0") == {"owner": "o0"}
+    await db.dispose_engine()
+
+
+def test_the_undo_route_answers_with_the_undo_and_says_why_it_refuses():
+    asyncio.run(_undo_routes())

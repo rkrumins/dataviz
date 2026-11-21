@@ -25,7 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
 from .. import config, db, provenance
-from ..errors import JobActive, MainWriteForbidden, _HttpMapped
+from ..errors import JobActive, MainWriteForbidden, UndoRefused, _HttpMapped
 from ..ids import prefixed_id
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import BranchORM, GraphORM, ImportMentionORM, ImportRowORM, JobORM, MergeRequestORM
@@ -1022,6 +1022,71 @@ class ImportExportService:
                 status="pending", current_phase=QUEUED, updated_at=_now(), provenance=provenance.snapshot()))
         return {"job_id": job_id, "created": True}
 
+    async def create_undo_job(self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str,
+                              job_id: str, actor: str, key: str) -> Dict[str, Any]:
+        """Queue an undo of bulk property job ``job_id`` (:mod:`.property_job`) on its draft: a job
+        that puts back what the source's window commits wrote, a window per commit, newest first.
+        One job per ``key`` and actor, as :meth:`create_property_job`, under the same lock and
+        checks (:class:`BranchNotOpen`, ``_require_edit``, :class:`JobActive` — the source itself,
+        while it runs). Refused (:class:`UndoRefused`) for an undo (``undo_of_undo``), a job a
+        publish took to main in whole or in part (``job_published``), one undone already
+        (``already_undone``), and one that wrote nothing (``nothing_to_undo``). Undoes a cancelled
+        or failed job's windows as well. Returns ``{job_id, created}``."""
+        async with db.graphver_session() as s:
+            source = await s.get(JobORM, job_id)
+        if source is None or source.job_type != "property" or source.graph_id != graph_id:
+            raise ValueError("property job not found")
+        branch_id = source.branch_id
+        existing = await self.find_property_job(graph_id=graph_id, branch_id=branch_id, actor=actor, key=key)
+        if existing is not None:
+            return {"job_id": existing, "created": False}
+        undo_id = prefixed_id("vjob")
+        async with db.graphver_session() as s:
+            await self._svc._lock_lifecycle(s, graph_id, shared=True)
+            await self._lock_in_workspace(s, graph_id, workspace_id)
+            await self._svc._assert_writable(s, graph_id)
+            branch = await self._svc._lock_branch(s, graph_id, branch_id)
+            again = await self._property_job_of(s, graph_id=graph_id, branch_id=branch_id, actor=actor, key=key)
+            if again is not None:                    # the same request, sent twice at once
+                return {"job_id": again, "created": False}
+            source = await s.get(JobORM, job_id)     # as it stands under the draft's lock
+            fields = source.field_scope if isinstance(source.field_scope, dict) else {}
+            summary = source.summary if isinstance(source.summary, dict) else {}
+            op = fields.get("op") if isinstance(fields.get("op"), dict) else {}
+            if op.get("kind") == "undo":
+                raise UndoRefused("undo_of_undo", "An undo can't itself be undone. Make the change again "
+                                                  "instead.", 422)
+            if summary.get("publishedCommitId") or summary.get("landedCommitIds"):
+                raise UndoRefused("job_published", "This change has been published, so it can't be undone "
+                                                   "here. Make a new change instead.")
+            if summary.get("undoneBy"):
+                raise UndoRefused("already_undone", f"This change has been undone already (job "
+                                                    f"{summary['undoneBy']}).", job_id=summary["undoneBy"])
+            self._svc._require_open(branch)
+            await self._svc._require_edit(s, branch, actor, ())
+            active = await self._svc._active_draft_job(s, branch_id)
+            if active is not None:
+                what = "A bulk property edit" if active.job_type == "property" else "An import"
+                raise JobActive(active.id, f"{what} is running on this draft (job {active.id}). "
+                                           "Undo this change once it has finished.")
+            commits = (await property_job.window_commits(s, graph_id, branch_id, source)
+                       if int(summary.get("commits") or 0) > 0 else [])
+            if not commits:
+                raise UndoRefused("nothing_to_undo", "This change wrote nothing to the draft, so there is "
+                                                     "nothing to undo.", 422)
+            undo = {"kind": "undo", "key": op.get("key"), **({"to": op["to"]} if op.get("to") else {}),
+                    "sourceJobId": job_id, "sourceLabel": property_job.describe(op)}
+            s.add(JobORM(
+                id=undo_id, job_type="property", graph_id=graph_id, workspace_id=workspace_id,
+                data_source_id=data_source_id, branch_id=branch_id,
+                field_scope={"actor": actor, "key": key, "op": undo, "message": None,
+                             "target": {"kind": "undo", "commits": commits},
+                             **({"entityKind": fields["entityKind"]} if fields.get("entityKind") else {})},
+                last_cursor="apply:0", total=int(summary.get("changed") or 0),
+                summary=property_job.empty_summary(len(commits)),
+                status="pending", current_phase=QUEUED, updated_at=_now(), provenance=provenance.snapshot()))
+        return {"job_id": undo_id, "created": True}
+
     async def run_property(self, job_id: str, lease: Optional[Lease] = None) -> Dict[str, Any]:
         """Run a bulk property job on ``lease`` (taken here without one), from its cursor."""
         lease = lease or await lease_job(job_id)
@@ -1076,6 +1141,9 @@ class ImportExportService:
             shown["recheck"] = summary["recheck"]
         if summary.get("cancelled"):
             shown["cancelled"] = True
+        if summary.get("undoneBy"):
+            # The undo that put back what it wrote.
+            shown["undoneBy"] = summary["undoneBy"]
         done = row.status == "completed"
         progress = 1.0 if done else min(1.0, (row.processed or 0) / row.total) if row.total else 0.0
         return {

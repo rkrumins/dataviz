@@ -9,7 +9,8 @@
  *
  * A field of the entities' type (`rule`) offers its allowed values with one click, and a change
  * publishing would refuse — a value it doesn't allow, a required one removed — is warned of under
- * the row. It is still staged: the publish is the gate.
+ * the row. It is still staged: the publish is the gate. A required one some of them lack offers to
+ * fill it on every entity of the type missing it, from the bulk dialog.
  */
 import { memo, useState, type KeyboardEvent } from 'react'
 import { motion } from 'framer-motion'
@@ -23,8 +24,10 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import type { SharedField } from '@/components/canvas/context-view/bulkEdit'
 import { fieldWarning } from '@/lib/fieldRules'
 import type { EntityFieldDefinition } from '@/types/schema'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
+import { fillRequiredRequest } from '@/components/canvas/property-manager/op/fillRequired'
 import { InlineValue } from '../../property/InlineValue'
-import { AllowedValuePicker, FieldNote } from '../../property/FieldGovernance'
+import { AllowedValuePicker, FieldNote, FillMissingButton } from '../../property/FieldGovernance'
 import { RichValue } from '../../property/RichValue'
 import type { FieldType } from '../../property/fieldTypes'
 import type { KeyChange } from './editOps'
@@ -33,8 +36,9 @@ import { OTHER_TONE, toneOf } from './tones'
 
 const NAME_MAX = 128
 
-/** A field a publish judges, and the entities' type as its warnings name it ("Tables"). */
-export interface GovernedRule { field: EntityFieldDefinition; typeLabel: string }
+/** A field a publish judges, and the entities' type as its warnings name it ("Tables") — and by its
+ *  id and name, as a fill of every one missing it names it. */
+export interface GovernedRule { field: EntityFieldDefinition; typeLabel: string; typeId: string; typeName: string }
 
 export interface ComparisonRowProps {
   index: number
@@ -166,6 +170,16 @@ export const ComparisonRow = memo(function ComparisonRow({
           </div>
         )}
         {rule && editable && <PendingWarning rule={rule} change={change} />}
+        {rule?.field.required && editable && field && has < total && !pending && form === null && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            <FieldNote>
+              {rule.field.name || keyName} is required for {rule.typeLabel} — {(total - has).toLocaleString()} of these {total - has === 1 ? 'has' : 'have'} none.
+            </FieldNote>
+            <FillMissingButton typeName={rule.typeName} onClick={() => usePropertyJobsStore.getState().requestOp(fillRequiredRequest({
+              entityType: rule.typeId, entityTypeName: rule.typeName, field: keyName, fieldName: rule.field.name, scopeMode: 'view',
+            }))} />
+          </div>
+        )}
         {form === 'fill' && !pending && (
           <FillForm keyName={keyName} type={type} count={total - has} rule={rule}
             onFill={(value) => { onChange(keyName, { kind: 'fill', value }); setForm(null) }} onCancel={() => setForm(null)} />

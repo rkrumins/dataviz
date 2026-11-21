@@ -2,14 +2,16 @@
  * PublishForm — a publish refused because values break the fields their entity types define says
  * so, entity by entity: its name, its type, what is wrong — and the way to it: an entity on the
  * canvas opens in the drawer, one that isn't offers its id to find it by. Past the values it lists,
- * it counts them all, field by field. Nothing was published.
+ * it counts them all, field by field. Nothing was published. A required field left empty is filled on
+ * the entities refused (by id) from the bulk dialog — on the draft open on the canvas.
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useCanvasStore } from '@/store/canvas'
-import { FieldViolationError, type FieldViolation } from '@/services/versioningApiService'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
+import { FieldViolationError, type FieldViolation, type FieldViolationCount } from '@/services/versioningApiService'
 
 const publishMutate = vi.fn()
 vi.mock('../../hooks/useVersioning', () => ({
@@ -21,8 +23,9 @@ vi.mock('../../hooks/useVersioning', () => ({
 }))
 vi.mock('@/store/auth', () => ({ usePermission: () => true }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
+const branch = vi.hoisted(() => ({ currentBranchId: null as string | null }))
 vi.mock('@/store/branchStore', () => ({
-  useBranchStore: (sel: (s: unknown) => unknown) => sel({ switchToMain: vi.fn() }),
+  useBranchStore: (sel: (s: unknown) => unknown) => sel({ switchToMain: vi.fn(), currentBranchId: branch.currentBranchId }),
 }))
 vi.mock('@/store/publishReceiptStore', () => ({
   usePublishReceiptStore: (sel: (s: unknown) => unknown) => sel({ setReceipt: vi.fn() }),
@@ -43,6 +46,8 @@ const violations: FieldViolation[] = [
 ]
 
 beforeEach(() => {
+  branch.currentBranchId = null
+  usePropertyJobsStore.setState({ request: null } as never)
   publishMutate.mockReset()
   publishMutate.mockImplementation((_vars, { onError }) => onError(new FieldViolationError(violations, 1214, [
     { entityType: 'Table', field: 'owner', fieldName: 'Owner', rule: 'field_required', count: 1204 },
@@ -77,5 +82,57 @@ describe('PublishForm — a publish refused by field rules', () => {
     await user.click(within(orders).getByRole('button', { name: 'Open Orders' }))
     expect(onClose).toHaveBeenCalled()
     expect(useCanvasStore.getState().drawerNodeId).toBe('urn:orders')
+  })
+})
+
+describe('PublishForm — filling a required field the publish refused', () => {
+  const refuse = (byField: FieldViolationCount[], total = 2) =>
+    publishMutate.mockImplementation((_vars, { onError }) => onError(new FieldViolationError(violations, total, byField)))
+  const publish = async (onClose = vi.fn()) => {
+    const user = userEvent.setup()
+    render(
+      <MemoryRouter>
+        <CommitDialog workspaceId="ws1" graphId="g1" branchId="br_1" changeSet={changeSet} onClose={onClose} />
+      </MemoryRouter>,
+    )
+    await user.click(screen.getByRole('button', { name: /publish now/i }))
+    return { user, onClose }
+  }
+  const owner: FieldViolationCount = {
+    entityType: 'Table', field: 'owner', fieldName: 'Owner', rule: 'field_required', count: 2, ids: ['gv:e9', 'gv:e7'], idsComplete: true,
+  }
+  const tier: FieldViolationCount = {
+    entityType: 'Table', field: 'tier', fieldName: 'Tier', rule: 'field_not_allowed', count: 1, ids: ['gv:e1'], idsComplete: true,
+  }
+
+  it('fills every entity refused for it from the bulk dialog — a required field only — closing the publish', async () => {
+    branch.currentBranchId = 'br_1'
+    refuse([owner, tier])
+    const { user, onClose } = await publish()
+    const [ownerRow, tierRow] = within(screen.getByRole('list', { name: 'Values to change by field' })).getAllByRole('listitem')
+    expect(within(tierRow).queryByRole('button')).toBeNull()
+    await user.click(within(ownerRow).getByRole('button', { name: 'Fill 2 missing…' }))
+    expect(onClose).toHaveBeenCalled()
+    expect(usePropertyJobsStore.getState().request).toEqual({
+      op: { kind: 'fillEmpty', key: 'owner' },
+      target: { kind: 'selection', ids: ['gv:e9', 'gv:e7'], entityTypes: ['Table'], label: 'every Table the publish refused for missing Owner' },
+    })
+  })
+
+  it('past what one change takes, fills the first and says the next publish finds the rest', async () => {
+    branch.currentBranchId = 'br_1'
+    refuse([{ ...owner, count: 25_000, ids: ['gv:e9'], idsComplete: false }], 25_000)
+    const { user } = await publish()
+    const row = within(screen.getByRole('list', { name: 'Values to change by field' })).getByRole('listitem')
+    expect(row).toHaveTextContent('Table · Owner: 25,000 missingFill the first 1… then publish again for the rest')
+    await user.click(within(row).getByRole('button', { name: 'Fill the first 1…' }))
+    expect(usePropertyJobsStore.getState().request?.target).toMatchObject({ ids: ['gv:e9'], label: 'the first 1 the publish refused for missing Owner on Table' })
+  })
+
+  it('is not offered for a draft the canvas isn’t on — the bulk dialog writes to that one', async () => {
+    branch.currentBranchId = 'br_other'
+    refuse([owner])
+    await publish()
+    expect(screen.queryByRole('button', { name: /^Fill/ })).toBeNull()
   })
 })

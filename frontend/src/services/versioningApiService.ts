@@ -785,13 +785,17 @@ export interface FieldViolation {
   reason: string
 }
 
-/** How many values a publish refused for one field of one entity type, by one rule. */
+/** How many values a publish refused for one field of one entity type, by one rule — and which:
+ *  `ids`, as a bulk property job's `ids` target names them (the first 20,000), all of them when
+ *  `idsComplete`. */
 export interface FieldViolationCount {
   entityType: string
   field: string
   fieldName?: string
   rule: FieldViolation['rule']
   count: number
+  ids?: string[]
+  idsComplete?: boolean
 }
 
 /** A publish refused because property values break the fields their entity types define. Nothing
@@ -1115,6 +1119,18 @@ export class PropertyJobRefusedError extends Error {
 
 const PROPERTY_JOB_REFUSALS = new Set(['reserved_key', 'same_key', 'too_many_ids', 'visible_scope', 'unique_field'])
 
+/** Why a bulk property change can't be undone: `job_published` or `already_undone` (409; `jobId`
+ *  names the undo that did it), `nothing_to_undo` or `undo_of_undo` (422). Another change running on
+ *  the draft is a {@link JobActiveError}. */
+export class PropertyJobUndoRefusedError extends Error {
+  constructor(readonly status: number, readonly code: string, message: string, readonly jobId?: string) {
+    super(message)
+    this.name = 'PropertyJobUndoRefusedError'
+  }
+}
+
+const UNDO_REFUSALS = new Set(['job_published', 'already_undone', 'nothing_to_undo', 'undo_of_undo'])
+
 /** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
  *  from the request or from a job the request queued (a large draft's publish). */
 function versioningError(status: number, detail: RefusalDetail, fallback: string): Error {
@@ -1176,6 +1192,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 422 && d?.code && PROPERTY_JOB_REFUSALS.has(d.code)) {
     return new PropertyJobRefusedError(d.code, d.message ?? fallback)
+  }
+  if ((status === 409 || status === 422) && d?.code && UNDO_REFUSALS.has(d.code)) {
+    return new PropertyJobUndoRefusedError(status, d.code, d.message ?? fallback, d.jobId)
   }
   if (status === 409 && d?.type === 'pull_request_exists') {
     return new PullRequestExistsError(d as { prId: string })
@@ -2023,7 +2042,8 @@ export interface ValueMapping {
 }
 
 export interface PropertyJobOp {
-  kind: PropertyOpKind
+  /** `undo`: it puts back what another change (`sourceJobId`, named `sourceLabel`) wrote. */
+  kind: PropertyOpKind | 'undo'
   key: string
   /** The new name — rename and copy. */
   to?: string
@@ -2046,6 +2066,9 @@ export interface PropertyJobOp {
   /** Convert: the kind every value is stored as; one that won't convert is left (`skip`) or removed. */
   toKind?: ValueKind
   onFail?: 'skip' | 'remove'
+  /** Undo: the change it undoes, and what that one did. */
+  sourceJobId?: string
+  sourceLabel?: string
 }
 
 /** Which entities: named ones, or every entity criteria match — in the view, or the whole data source.
@@ -2068,9 +2091,11 @@ export interface PropertyJobSummary {
   unconvertible: number
   /** A search target's matches the draft has changed so the search no longer matches them, left alone. */
   noLongerMatches?: number
+  /** An undo's entities changed again since the change it undoes, left as they are. */
+  changedSince?: number
   /** Every target not written as asked — by reason: `missing`, `deleted_in_draft`, `conflict`,
-   *  `unconvertible`, `no_longer_matches` and `write_refused` (the write gate turned it away). Its
-   *  rows download as a CSV. */
+   *  `unconvertible`, `no_longer_matches`, `changed_since` and `write_refused` (the write gate turned
+   *  it away). Its rows download as a CSV. */
   refused: { count: number; byReason: Record<string, number>; examples: Array<Record<string, unknown>> }
   commits: number
   firstCommitId?: string | null
@@ -2082,6 +2107,8 @@ export interface PropertyJobSummary {
   landedCommitIds?: string[]
   /** A search target: whether its matches were checked again on the draft's values, and why not. */
   recheck?: { exact: boolean; note: string | null }
+  /** The undo that put back what it wrote. */
+  undoneBy?: string | null
 }
 
 export interface PropertyJob {
@@ -2166,6 +2193,15 @@ export function getPropertyJob(wsId: string, graphId: string, jobId: string, sig
 /** Stop it at its next window. What it already applied stays on the draft. */
 export function cancelPropertyJob(wsId: string, graphId: string, jobId: string): Promise<PropertyJob> {
   return vfetch<PropertyJob>(`${propertyJobs(wsId, graphId)}/${jobId}/cancel`, { method: 'POST' })
+}
+
+/** Undo a change that has ended: what it wrote is put back on the draft by another change, returned
+ *  to follow. The same key answers with the same undo. Refused as a {@link JobActiveError}, a
+ *  {@link BranchClosedError} or a {@link PropertyJobUndoRefusedError}. */
+export function undoPropertyJob(wsId: string, graphId: string, jobId: string, idempotencyKey: string): Promise<PropertyJob> {
+  return vfetch<PropertyJob>(`${propertyJobs(wsId, graphId)}/${jobId}/undo`, {
+    method: 'POST', headers: { 'Idempotency-Key': idempotencyKey },
+  })
 }
 
 /** The entities it could not change, and why — a CSV to download. */

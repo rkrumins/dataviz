@@ -39,6 +39,7 @@ import {
   reviewCounts, scopeFixedToView, targetLabel, targetOf, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset,
 } from './opModel'
 import { useReviewCounts } from './useReviewCounts'
+import { entityTypesOf } from './fillRequired'
 import { WhatStep } from './WhatStep'
 import { WhereStep, type LayerOption } from './WhereStep'
 import { ReviewStep } from './ReviewStep'
@@ -248,7 +249,8 @@ export function PropertyOpDialog({
               <motion.div key={step} initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} transition={MOTION.stepSwap}>
                 {step === 0 && (edges
                   ? <EdgeWhatStep viewId={viewId} op={op} onChange={setOp} />
-                  : <WhatStep op={op} onChange={setOp} properties={properties} viewId={viewId} />)}
+                  : <WhatStep op={op} onChange={setOp} properties={properties} viewId={viewId}
+                    entityTypes={entityTypesOf(preset) ?? knownEntityTypes} />)}
                 {step === 1 && (
                   <WhereStep
                     viewId={viewId} preset={preset} onPreset={setPreset} scopeMode={scopeMode} onScope={setScopeMode}
