@@ -63,6 +63,9 @@ yours on, you can **Withdraw** it.
 | **Your data is connected** | It's in the workspace — the message says which data source it became, with a note if they left one. | Open it from the message, and build a view on it. |
 | **Declined** | They said no, usually with a reason. | Read the reason — often the data is already in another workspace you can ask to join. You can ask again. |
 
+You don't need to chase it: if nobody connects it, {brand} brings it up again for you
+— see [A request left waiting](#a-request-left-waiting).
+
 ## For the platform team: connect requests
 
 *Needs `system:workspaces:create` — Org Admins and Super Admins hold it.*
@@ -91,6 +94,22 @@ team's.
 
 Nobody answers their own request: if you asked for the data, someone else starts and
 connects it, even when you are an admin or on the platform team.
+
+### A request left waiting
+
+A request that isn't connected yet — asked, or in progress — is brought up again, sooner
+the sooner it's needed:
+
+| Needed | The workspace's admins are reminded after… | the platform team hears after… |
+| --- | --- | --- |
+| **This week** | a day | three days |
+| **This month** | three days | a week |
+| **No rush** | a week | two weeks |
+
+The wait counts from when it was asked. Whoever took the request on is reminded with
+the admins. Each message goes out once, never to the person who asked, and none while
+**Data requests** is off. A data source's Owner and Stewards aren't reminded: a
+request names its data source only when it's connected.
 
 ## Where to next
 

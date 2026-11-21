@@ -1145,7 +1145,9 @@ one pending per group, 409 `link_pending`). Answered under
 mapping) and `POST /{id}/decline` (`reason`). A mapping made on the SSO mappings
 page for a group waiting on the same identity-provider group answers its request
 too. Notifications: platform administrators get `idp_link.requested`, linking to
-`/workspaces?tab=requests`; the requester gets `idp_link.linked` or
+`/workspaces?tab=requests`, then `idp_link.reminder` when one has waited three days
+and `idp_link.escalated`, the last reminder, after a week (`reminded_at`,
+`escalated_at`; never the requester); the requester gets `idp_link.linked` or
 `idp_link.declined`, linking to `/workspaces/{ws}?tab=members`. Events:
 `rbac.idp_link_request.created`, `.linked`, `.declined`, `.cancelled`.
 
@@ -1387,7 +1389,7 @@ last 7 days. Through the API:
 | Identity-provider link requests, sign-in group snapshots | `backend/app/services/idp_links.py`         |
 | Access requests and Find a workspace   | `backend/app/api/v1/endpoints/access_requests.py`, `workspace_directory.py` |
 | Access reviews                         | `backend/app/api/v1/endpoints/access_reviews.py`              |
-| Access reminders (ending, waiting, overdue reviews) | `backend/app/services/access_housekeeping.py` |
+| Access reminders (ending, waiting, overdue reviews; workspace, data and link requests left waiting) | `backend/app/services/access_housekeeping.py` |
 | Activity catalogue (category, audience)| `backend/app/services/activity/catalogue.py`                  |
 | Activity retention sweep               | `backend/app/services/activity_retention.py`                  |
 | Outbox → ledger relay                  | `backend/app/services/outbox_relay.py`                        |

@@ -236,8 +236,9 @@ suggested — nobody sees anyone else's. Linking is a Super Admin's call: when y
 click **Ask to link**, the group's card shows the link waiting, Super Admins
 find it under **Workspaces → Requests** (with how many people have that group,
 and the connection to link it from), and you hear in your Inbox whether it was
-linked or declined. People the identity provider put in a group are marked
-**From the directory**; they leave it there, not here.
+linked or declined. A link still waiting after three days is brought up to the
+Super Admins again, and a last time after a week. People the identity provider
+put in a group are marked **From the directory**; they leave it there, not here.
 
 ### Answering access requests
 
