@@ -132,7 +132,8 @@ async def _run(root: str) -> None:
     reference = await import_job()                         # an import that never stops
     want_summary = await ImportWorker(svc, store).run(reference["job_id"])
     assert {k: v for k, v in want_summary.items() if k != "refused"} == {
-        "new": 2 * _NODES - 1, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 1}, want_summary
+        "new": 2 * _NODES - 1, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 1,
+        "byKind": {"node": {"new": _NODES}, "edge": {"new": _NODES - 1, "invalid": 1}}}, want_summary
     assert want_summary["refused"]["total"] == 1, "a resumed run must report its refused row once too"
     want = await _state(svc, gid, reference["branch_id"])
 

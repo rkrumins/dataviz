@@ -138,7 +138,8 @@ async def _replace(svc, ie, store) -> None:
         {"kind": "edge", "edgeType": "LINEAGE", "sourceUrn": "urn:A", "targetUrn": "urn:B"},
     ], mode="replace")
     # C and B->C were in the graph and in no row: deleted. D is new; the rest unchanged.
-    assert summary == {"new": 1, "updated": 0, "unchanged": 3, "deleted": 2, "invalid": 0}, summary
+    assert summary == {"new": 1, "updated": 0, "unchanged": 3, "deleted": 2, "invalid": 0,
+                       "byKind": {"node": {"new": 1, "unchanged": 2}, "edge": {"unchanged": 1}}}, summary
     nodes, edges = await _state(svc, gid, branch_id)
     assert set(nodes) == {"urn:A", "urn:B", "urn:D"}, nodes
     assert edges == {("urn:A", "urn:B", "LINEAGE")}, edges

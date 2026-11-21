@@ -7103,14 +7103,29 @@ class GraphVersioningService:
         targets are read once (without payloads) and indexed, and cycles are found with one
         batched ancestor climb and one strongly-connected-components pass — never a scan of
         every live edge per created edge, which held an import window's CPU for minutes."""
+        from backend.app.services.view_placement import child_is_source
+
         cset = {t.upper() for t in (containment_edge_types or [])}
+        # Containment types whose edges point from the child up to its parent (BELONGS_TO): their
+        # parent is the target. Every other containment type's parent is its source.
+        upward = {t for t in cset if child_is_source(t, None)}
 
         def _etype(p: Mapping) -> str:
             return str(p.get("edgeType") or p.get("edge_type") or "").upper()
 
+        def _parent_child(src, tgt, etype):
+            return (tgt, src) if etype in upward else (src, tgt)
+
         create_targets = {t for _e, v in edge_creates for _s2, t in [_edge_src_tgt(v)] if t}
         existing_incident = (await self._incident_live_edge_skeletons(
             s, graph_id, branch_id, create_targets, sides=("target",)) if create_targets else {})
+        if upward:
+            # A child's upward edges start at it: read those of each containment create's child.
+            kids = {_parent_child(*_edge_src_tgt(v), _etype(v))[1] for _e, v in edge_creates
+                    if _etype(v) in cset} - {None, ""}
+            if kids:
+                existing_incident = {**existing_incident, **(await self._incident_live_edge_skeletons(
+                    s, graph_id, branch_id, kids, sides=("source",), edge_types=upward))}
         # An edge this batch re-points is judged where it now points, never where it was.
         rewritten = {eid for eid, _v in edge_creates}
         # Index the live edges into the batch's targets once: (source, target, type) → their ids,
@@ -7123,8 +7138,12 @@ class GraphVersioningService:
             osrc, otgt = _edge_src_tgt(op_)
             oet = _etype(op_)
             by_triple.setdefault((osrc, otgt, oet), set()).add(oeid)
-            if oet in cset and osrc:
-                parents_of.setdefault(otgt, {})[oeid] = osrc
+            if oet in cset and osrc and otgt:
+                # Inline, not _parent_child: this runs once per live edge into the batch's targets.
+                if oet in upward:
+                    parents_of.setdefault(osrc, {})[oeid] = otgt
+                else:
+                    parents_of.setdefault(otgt, {})[oeid] = osrc
         viol: List[dict] = []
         batch_parent: Dict[str, set] = {}     # target → containment sources added in THIS batch
         batch_seen: set = set()               # (src,tgt,type) created in THIS batch
@@ -7141,13 +7160,14 @@ class GraphVersioningService:
             batch_seen.add(key)
             # (b) second containment parent.
             if etype in cset:
-                parents = {osrc for oeid, osrc in parents_of.get(tgt, {}).items() if oeid != eid}
-                parents |= batch_parent.get(tgt, set())
-                if parents - {src}:
+                parent, child = _parent_child(src, tgt, etype)
+                parents = {op for oeid, op in parents_of.get(child, {}).items() if oeid != eid}
+                parents |= batch_parent.get(child, set())
+                if parents - {parent}:
                     viol.append({"entity_id": eid, "kind": "edge",
                                  "reason": "This entity already has a parent — use “Move to” to change it, "
                                            "rather than adding a second parent."})
-                batch_parent.setdefault(tgt, set()).add(src)
+                batch_parent.setdefault(child, set()).add(parent)
         # (c) containment cycle — a new parent→child edge cycles if the child is an ancestor
         #     of the parent in the EFFECTIVE post-batch graph: live edges MINUS this batch's
         #     deletes PLUS its other creates. Overlaying the batch both admits a legitimate

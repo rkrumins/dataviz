@@ -68,7 +68,7 @@ from . import keys as matching
 from .formats import AT, get_adapter
 from .resolve import (KeyIndex, _canonical_map, edge_pointer_id, key_pointer_id, key_value,
                       pointer_id, pointer_seed, pointers, resolve_rows)
-from .rowmodel import PROP_DELETE, normalize
+from .rowmodel import PROP_DELETE, normalize, record_kind
 from .snapshot import open_snapshot
 from .stream import view_entities
 from .uploads import WHOLE_FILE_FORMATS, is_archive_source, open_source, source_size, too_large
@@ -318,15 +318,23 @@ def _fixes(by_code: Mapping[str, int]) -> Dict[str, str]:
     return {code: FIXES[code] for code in by_code if code in FIXES}
 
 
+def _end_name(row: Mapping[str, Any], end: str) -> Optional[str]:
+    """How an edge row names its ``end``: as given, by urn, qualifiedName, entity id or a key."""
+    keys = row.get(f"{end}Keys") or {}
+    return next((str(v) for v in (row.get(end), row.get(f"{end}Urn"), row.get(f"{end}QualifiedName"),
+                                  row.get(f"{end}_entity_id"), *keys.values()) if v), None)
+
+
 def _label(row: Mapping[str, Any]) -> str:
-    """What a staged row is called: its name, else its key; an edge, by its type and ends."""
+    """What a staged row is called: an entity by its name, else its key; a link by its type and
+    its ends, source first — by its own id only when it names neither end (a delete by id)."""
+    if row.get("kind") == "edge":
+        source, target = _end_name(row, "source"), _end_name(row, "target")
+        if source or target:
+            return f"{row.get('edgeType') or 'link'} {source or '?'} → {target or '?'}"
+        return str(row.get("entity_id") or row.get("edgeType") or "")
     named = row.get("displayName") or row.get("qualifiedName") or row.get("urn") or row.get("entity_id")
-    if named or row.get("kind") != "edge":
-        return str(named or "")
-    ends = [row.get(k) for k in ("source", "target", "sourceUrn", "targetUrn",
-                                  "source_entity_id", "target_entity_id")]
-    ends = [str(e) for e in ends if e][:2]
-    return f"{row.get('edgeType') or 'edge'} {' → '.join(ends)}".strip()
+    return str(named or "")
 
 
 def where_text(row: Mapping[str, Any]) -> str:
@@ -385,6 +393,12 @@ async def _persist_mentions(s, job_id: str, resolutions) -> None:
         if rest:
             await s.execute(pg_insert(ImportMentionORM.__table__).values(
                 [{"job_id": job_id, "entity_id": m} for m in rest]).on_conflict_do_nothing())
+
+
+class ReplaceOfLinksOnly(Exception):
+    """A replace whose file holds no entity rows, only links: it would delete every entity no link
+    names as an end. Stopped before it deletes anything; the links it read are on the draft."""
+    code, action = "links_only", "upsert"
 
 
 class IdentifierMatchedNothing(Exception):
@@ -878,9 +892,7 @@ class ImportWorker:
         checkpoint (``cursor``, the tallies and progress the slim rows add) in ONE transaction,
         fenced like :meth:`_flush`. Returns the tallies and progress as the row now holds them."""
         slim, whole = await self._decide(snap, kind, rows) if rows else ([], [])
-        summary = dict(summary)
-        for _row, res in slim:
-            summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
+        summary = _counted(summary, [res for _row, res in slim], kind)
         processed += len(slim)
         # Each row names only the columns it sets (an unset one stays NULL, as the parse leaves
         # it), so they go in one INSERT per shape.
@@ -1027,6 +1039,17 @@ class ImportWorker:
                 lambda: self._next_window(job_id, snap, graph_id, branch_id, actor))
         if reconcile_mode == "replace":        # delete-on-absence (not file rows; counted as it goes)
             pos = await self._position(job_id)
+            # Counted by kind as the windows land (a job begun before they were counted has no
+            # count, and is judged as before).
+            by_kind = pos.summary.get("byKind")
+            if (by_kind is not None and not sum((by_kind.get("node") or {}).values())
+                    and sum((by_kind.get("edge") or {}).values()) and not self._allow_mass_delete):
+                raise ReplaceOfLinksOnly(
+                    "Nothing was deleted: the file holds links and no entity rows, and a replace "
+                    "deletes whatever the file leaves out — every entity no link names as an end. "
+                    "Its links are on the draft. To add or update links, import it with Add & update "
+                    "(reconcileMode=upsert); to replace the whole graph, include its entities, or "
+                    "send allowMassDelete=true.")
             invalid = int(pos.summary.get("invalid") or 0)
             if invalid and not within_budget(self._refused_budget, invalid + skipped, pos.total + skipped):
                 report = pos.summary.get("refused") or {}
@@ -1053,6 +1076,8 @@ class ImportWorker:
         tallies = {k: int(summary.get(k) or 0) for k in _TALLIES}
         if summary.get("edgesCascaded"):             # the edges a replace's node deletes took
             tallies["edgesCascaded"] = int(summary["edgesCascaded"])
+        if summary.get("byKind"):                    # the file's rows, entities and links apart
+            tallies["byKind"] = summary["byKind"]
         report = with_not_a_record(summary.get("refused"), skipped)
         if report:
             tallies["refused"] = report
@@ -1093,9 +1118,7 @@ class ImportWorker:
 
         async def on_commit(s) -> None:
             # Tallied at the commit, so a row quarantined on the way counts as what it ended as.
-            summary = {**dict.fromkeys(_TALLIES, 0), **pos.summary}
-            for res in resolutions:
-                summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
+            summary = _counted({**dict.fromkeys(_TALLIES, 0), **pos.summary}, resolutions, kind)
             report = tally_refused(summary.get("refused"), resolutions, labels, where)
             if report:
                 summary["refused"] = report
@@ -1476,11 +1499,15 @@ class ImportWorker:
                 return
             try:
                 # A row's _op=delete takes what the node contains, as a delete on the canvas does.
+                # The ontology's rules too: on a strict graph a link its types may not join (or a
+                # containment the parent's type may not hold) is refused here, row by row, rather
+                # than landing on the draft for the publish to refuse.
                 await self._svc.apply_ops(graph_id=graph_id, ops=ops, actor=actor,
                                           branch_id=branch_id, message="import", on_commit=on_commit,
                                           node_identity=self._node_identity,
                                           containment_edge_types=(self._ontology or {}).get(
-                                              "containment") or None)
+                                              "containment") or None,
+                                          ontology_rules=(self._ontology or {}).get("rules"))
                 return
             except OntologyViolation as exc:
                 rest = _quarantine(ops, resolutions, exc.violations) if attempt < _QUARANTINE_ROUNDS else None
@@ -1521,13 +1548,15 @@ class ImportWorker:
                 .order_by(ImportRowORM.row_index).limit(config.IMPORT_COMMIT_WINDOW))).all()
         return [{**raw, "_row_index": idx} for idx, raw in rows]
 
-    async def _pointer_hits(self, snap, names, by_urn: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    async def _pointer_hits(self, snap, names, by_urn: Optional[Dict[str, str]] = None,
+                            ambiguous: bool = False) -> Dict[str, Optional[str]]:
         """``{name: node id}`` for the names rows point at nodes by: the live node that carries the
         name as its urn (``by_urn``, when the caller read it already); else the live node whose id
         the name derives (one an import made from it); else the node a row of this job gave it to
-        as a second name."""
+        as a second name. ``ambiguous``: a urn several live nodes carry maps to ``None``, so the
+        rows naming it are refused rather than matched to one of them."""
         names = {n for n in names if n}
-        hits = dict(by_urn if by_urn is not None else await snap.nodes_by_urn(names))
+        hits = dict(by_urn if by_urn is not None else await snap.nodes_by_urn(names, ambiguous=ambiguous))
         derived = {n: pointer_id(self._id_scope, pointer_seed(n)) for n in names - set(hits)}
         live = await snap.lookup_live("node", set(derived.values()))
         hits.update({n: d for n, d in derived.items() if d in live})
@@ -1546,9 +1575,9 @@ class ImportWorker:
         wanted = {n for r in rows for n in pointers(
             r.get("urn"), (r.get("properties") or {}).get(ident) if ident else None)}
         by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
-        urn_to_eid = await self._pointer_hits(snap, wanted)
+        urn_to_eid = await self._pointer_hits(snap, wanted, ambiguous=True)
         qname_to_eid = await snap.nodes_by_qname(r.get("qualifiedName") for r in rows if not r.get("urn"))
-        named = set(by_id) | set(urn_to_eid.values()) | {e for e in qname_to_eid.values() if e}
+        named = set(by_id) | {e for e in urn_to_eid.values() if e} | {e for e in qname_to_eid.values() if e}
         # A node an earlier window of this job made, by the file's id for it: read with the rest,
         # so a later row for it is diffed against what it now holds.
         named |= {self._created_from[f] for r in rows if (f := r.get("entity_id")) in self._created_from}
@@ -1647,7 +1676,8 @@ class ImportWorker:
                                                  if not r.get(f"{end}Urn"))
             # An end pointed at by its urn, or by the identifier property's value.
             by_urn = await self._pointer_hits(snap, {n for r in rows for n in pointers(
-                r.get(f"{end}Urn"), (r.get(f"{end}Keys") or {}).get(ident) if ident else None)})
+                r.get(f"{end}Urn"), (r.get(f"{end}Keys") or {}).get(ident) if ident else None)},
+                ambiguous=True)
             # Ends named by the file's id of a node this job created, or by a team key: the
             # edges already between them are found too (a second import updates, never doubles).
             more = {self._created_from.get(r.get(f"{end}_entity_id") or "") for r in rows}
@@ -1657,8 +1687,8 @@ class ImportWorker:
         (src_ids, src_qnames, src_urns, src_more), (tgt_ids, tgt_qnames, tgt_urns, tgt_more) = (
             ends["source"], ends["target"])
         edge_to_eid = await snap.edges_between(
-            set(src_ids) | {e for e in src_qnames.values() if e} | set(src_urns.values()) | src_more,
-            set(tgt_ids) | {e for e in tgt_qnames.values() if e} | set(tgt_urns.values()) | tgt_more)
+            set(src_ids) | {e for e in src_qnames.values() if e} | {e for e in src_urns.values() if e} | src_more,
+            set(tgt_ids) | {e for e in tgt_qnames.values() if e} | {e for e in tgt_urns.values() if e} | tgt_more)
         # And the edges rows name by their own id, as an export writes them: such a row updates
         # that edge, and one whose ends differ from it is refused rather than made a second edge.
         own = {r["entity_id"] for r in rows if r.get("entity_id")}
@@ -1898,6 +1928,21 @@ def _quarantine(ops: List[dict], resolutions: List[dict], violations) -> Optiona
     return [op for op in ops if op["entity_id"] not in reasons]
 
 
+def _counted(summary: Dict[str, Any], resolutions, kind: str) -> Dict[str, Any]:
+    """``summary`` with ``resolutions`` counted in: by status, and by status for each kind of row
+    (``byKind``: entities and links apart), the same whether a row was decided in memory or in its
+    window."""
+    summary = dict(summary)
+    by_kind = {k: dict(v) for k, v in (summary.get("byKind") or {}).items()}
+    for res in resolutions:
+        summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
+        tally = by_kind.setdefault(res.get("kind") or kind, {})
+        tally[res["status"]] = int(tally.get(res["status"]) or 0) + 1
+    if by_kind:
+        summary["byKind"] = by_kind
+    return summary
+
+
 def _whole_row(job_id: str, kind: str, row: Dict[str, Any]) -> Dict[str, Any]:
     """A row staged whole, for its window to resolve: as the parse stages every row."""
     return {"job_id": job_id, "row_index": row["_row_index"], "kind": kind,
@@ -1912,8 +1957,9 @@ def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> Tuple[L
     which no payload reads: a refused row says where to find it."""
     out, skipped = [], 0
     for raw in page:
-        kind = str(raw.get("kind") or "").strip().lower() if isinstance(raw, dict) else ""
+        kind = record_kind(raw)          # a record without a kind column is read by what it carries
         if kind in ("node", "edge"):
+            raw.setdefault("kind", kind)
             at = raw.pop(AT, None)
             row = normalize(raw, kind, native=native)
             if at:

@@ -42,13 +42,21 @@ class XlsxAdapter:
         wb = openpyxl.load_workbook(io.BytesIO(buf), read_only=True, data_only=True)
         del buf   # BytesIO copied it (only exact bytes are shared): don't hold the upload twice
         try:
-            for sheet_name, kind in ((_NODE_SHEET, "node"), (_EDGE_SHEET, "edge")):
-                ws = _find_sheet(wb, sheet_name)
-                if ws is None:
-                    continue
+            named = [(ws, kind) for name, kind in ((_NODE_SHEET, "node"), (_EDGE_SHEET, "edge"))
+                     if (ws := _find_sheet(wb, name)) is not None]
+            for ws, kind in named:
                 for rec in _read_sheet(ws, at=at):
                     rec["kind"] = kind          # kind is the SHEET, not a column
                     yield rec
+            if not named:
+                # A workbook of the user's own (a sheet "Links", "Sheet1"…): every sheet but the
+                # guides is read, and each row is a node or an edge by what it carries
+                # (rowmodel.record_kind) or by a kind column of its own.
+                for ws in wb.worksheets:
+                    if str(ws.title or "").strip().lower() in (_INSTRUCTIONS.lower(), _COLUMNS.lower()):
+                        continue
+                    for rec in _read_sheet(ws, at=at):
+                        yield rec
         finally:
             wb.close()
 
@@ -280,7 +288,11 @@ _INSTRUCTION_LINES = [
     ("• Add a NEW property = add a column named 'prop.<name>' (e.g. prop.owner) and fill only the"
      " rows it applies to. Add a new entity = a new row: give it a urn of your own (a pointer —"
      " importing the file again updates that entity; it isn't stored, so keep your own id in a"
-     " property to see it) or leave entity_id/urn blank.", _PLAIN),
+     " property to see it), or leave entity_id/urn blank and give it a qualifiedName.", _PLAIN),
+    ("• Add a new LINK = a row on the Edges sheet: its edgeType, and each end named by its"
+     " entity id (source_entity_id), its urn (sourceUrn) or its qualifiedName"
+     " (sourceQualifiedName) — the same for the target. A file of links alone, with no entity"
+     " rows, imports too.", _PLAIN),
     ("• DELETE a property value with the token \\N in its cell (or delete the whole row's entity"
      " by setting _op to 'delete').", _PLAIN),
     ("• Save as .xlsx and import — you'll review every change before anything is published.", _PLAIN),

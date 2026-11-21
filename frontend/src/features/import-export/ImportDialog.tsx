@@ -189,7 +189,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
             <div>
               <h3 className="text-xl font-bold text-ink">Import data</h3>
               <p className="text-xs text-ink-muted mt-0.5">
-                Bulk-create and update entities from a file — reviewed before anything is published
+                Bulk-create and update entities and the relationships between them from a file — reviewed before anything is published
               </p>
             </div>
           </div>
@@ -581,6 +581,22 @@ function RunningStep({ job, upload, fileName }: {
 }
 
 // ── done ─────────────────────────────────────────────────────────────────────
+const KIND_OUTCOMES: Array<['new' | 'updated' | 'deleted' | 'invalid' | 'unchanged', string]> = [
+  ['new', 'new'], ['updated', 'updated'], ['deleted', 'deleted'], ['invalid', 'to fix'], ['unchanged', 'unchanged'],
+]
+
+/** The file's rows, entities and relationships apart: "Entities: 2 new, 1 updated · Relationships: 3 new". */
+function KindLine({ byKind }: { byKind: NonNullable<ImportSummary['byKind']> }) {
+  const part = (label: string, counts?: Partial<Record<string, number>>) => {
+    const said = KIND_OUTCOMES.filter(([k]) => (counts?.[k] ?? 0) > 0)
+      .map(([k, word]) => `${(counts![k] as number).toLocaleString()} ${word}`)
+    return said.length ? `${label}: ${said.join(', ')}` : null
+  }
+  const parts = [part('Entities', byKind.node), part('Relationships', byKind.edge)].filter(Boolean)
+  if (!parts.length) return null
+  return <p className="mt-3 text-xs text-ink-secondary" data-testid="import-by-kind">{parts.join(' · ')}</p>
+}
+
 function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
   summary: ImportSummary | null
   previewRows: ImportPreviewRow[]
@@ -593,6 +609,8 @@ function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
   const s = summary
   const changes = s ? s.new + s.updated + s.deleted : 0
   const nothing = s != null && changes === 0
+  // Not one row read as an entity or a relationship: say why, not that the data already matches.
+  const unread = s != null && nothing && !!s.skipped && s.unchanged + s.invalid === 0
   return (
     <div className="px-8 py-8 max-w-2xl mx-auto">
       <div className="flex items-start gap-4">
@@ -605,7 +623,9 @@ function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
             {nothing ? 'No changes to apply' : `${changes} change${changes === 1 ? '' : 's'} ready to review`}
           </h3>
           <p className="text-sm text-ink-muted mt-1">
-            {nothing
+            {unread
+              ? 'None of the file’s rows reads as an entity or a relationship: a row needs an entityType (an entity) or an edgeType (a relationship between two).'
+              : nothing
               ? 'Your data already matches the file — nothing was staged.'
               : 'Staged on your draft. The canvas and the Changes tab show them when this closes — review, then publish or open a pull request.'}
           </p>
@@ -620,6 +640,7 @@ function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
           <Stat n={s.invalid} label="Needs fixing" icon={<AlertTriangle className="w-4 h-4" />} tone="amber" />
         </div>
       )}
+      {s?.byKind && <KindLine byKind={s.byKind} />}
       {s?.refused && <RefusedRowsPanel report={s.refused} wsId={wsId} graphId={graphId} jobId={jobId} />}
       {s && (s.unchanged ?? 0) > 0 && (
         <p className="mt-3 text-[11px] text-ink-muted">
@@ -639,7 +660,7 @@ function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
           <Trash2 className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" />
           <div>
             <p className="text-xs font-semibold text-rose-700 dark:text-rose-400">
-              {s.deleted} {s.deleted === 1 ? 'entity' : 'entities'} will be deleted when you publish
+              {s.deleted} {s.deleted === 1 ? 'item' : 'items'} will be deleted when you publish
             </p>
             <p className="text-[11px] text-ink-muted mt-0.5">
               Replace removes items not in your file. They're only staged for now — review every deletion

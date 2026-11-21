@@ -9,6 +9,96 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Import the links between entities on their own, from any CSV, JSON or Excel sheet
+
+Links could be imported only alongside a `kind` column or on a sheet named Edges. A CSV or a
+workbook of the reader's own imported nothing and said nothing, one bad cell failed the whole file,
+and a strict graph's rules waited for the publish. Now a file of links alone imports from any
+format, refuses what it can't apply row by row with the reason, and says what it made.
+
+### Added
+
+- **A file of links alone** (no entity rows) imports from CSV, TSV, JSON, NDJSON or Excel. A row
+  without a `kind` column is a link when it has an `edgeType` and no `entityType`. A workbook with
+  no Nodes or Edges sheet is read whole, so a sheet named "Links" works.
+- The import summary counts **entities and relationships apart** (`summary.byKind`), and names
+  each link "TYPE source → target".
+- The import template's Edges sheet shows **every way to name an end**: entity id, urn,
+  qualifiedName, the data source's keys, and `confidence`.
+- **Delete a link by its `entity_id` alone** with `_op=delete`.
+
+### Changed
+
+- On a **strict graph**, an import refuses a link between types its relationship may not join, on
+  its row with the reason, as a checkpoint or publish would; the file's other rows import.
+- A **bad `confidence` or `properties_json` cell** refuses its row instead of failing the file.
+- A **urn two live entities carry** is ambiguous: a row naming it is refused (`duplicate_value`)
+  rather than matched to one of them.
+- A **replace whose file holds only links** stops before deleting anything (`links_only`).
+
+### Fixed
+
+- **BELONGS_TO** (child → parent) containment: a parent's second child was refused as "already has
+  a parent", and a child could be given a second parent. The hierarchy check now orients each
+  containment type by its direction.
+
+### Known limitations
+
+- Child → parent containment is recognised by the type name BELONGS_TO (as the canvas places it);
+  other upward names (PART_OF, MEMBER_OF) are read as parent → child.
+
+---
+
+## [Unreleased] — Export what you selected to edit offline, lines as heavy as you like, and traces that open one hop deep
+
+Editing a few entities offline meant exporting the whole data source or a whole view. Now a canvas
+selection exports alone, with everything inside it, and comes back through Import. A trace drew its
+lines thicker than the rest of the canvas, which made a busy one heavy; lines are now one weight
+everywhere, and the reader picks it. And every trace opened on all 25 hops it walks; a trace now
+opens on the reader's own default, one hop each way to begin with.
+
+### Added
+
+- **Export a selection with everything inside it, to edit and import back.**
+  - Select entities and choose **Export…** on the selection bar, or right-click one and choose
+    **Export with children…**. The file holds them, everything inside them at every level, and the
+    relationships among them.
+  - Importing it in Edit mode applies only the cells you changed, as any import does.
+  - In a trace, selected cards bring the selection bar back with **Export…** alone.
+  - API: `withChildren` on `POST …/exports`, `GET …/exports/plan` and `…/exports/stream`. The ids
+    may also come in a JSON body (`{"ids": [...]}`) on `POST …/exports` and a new
+    `POST …/exports/plan`.
+  - Containment is followed in each type's own direction.
+- **Display → Line weight** (Thin, Regular, Thick) for the lines on the canvas and in the Focus Lens.
+- **A default trace depth**, saved in the browser. Set it in **Preferences → Lineage trace**, or
+  with **Make this my default** in a trace's Depth settings.
+
+### Changed
+
+- **A new trace opens at the reader's default depth, 1/1 to begin with, instead of 25/25.**
+  - Root Cause and Impact still go every hop in their direction.
+  - Shared links, saved traces and the trace history open at their own depth.
+  - The walk still fetches every hop, so going deeper is instant.
+- **A trace draws its lines at their usual width**, about 1.4px instead of about 2.8px. It picks
+  its own lines out by colour, opacity and glow.
+
+### Upgrading
+
+- No migrations.
+- Everyone's traces now open one hop each way. To open every trace at every hop again, choose
+  **All hops** in a trace's Depth settings and then **Make this my default**, or set 25 each way in
+  **Preferences → Lineage trace**.
+
+### Known limitations
+
+- Exporting part of the canvas to edit needs version control on the data source: a data source
+  without it can't take the file back.
+- Line weight covers the main canvas and the Focus Lens. The other graph layouts keep their own
+  widths.
+- The default depth lives in one browser, like every other preference.
+
+---
+
 ## [Unreleased] — Traces you can hand on, take away and keep, and views of a quarter of a million members
 
 A trace of twenty selected tables could be read in the dock and nothing else: no link (a link

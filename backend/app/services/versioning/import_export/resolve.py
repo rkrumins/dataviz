@@ -979,6 +979,11 @@ def resolve_rows(
         teid, t_ambiguous = _resolve_endpoint(row, "target", node_eids, qname_to_eid, urn_to_eid,
                                               created_from, qname_from, keys, identity_prop, strict,
                                               prop, dupes, urn_hits, fallback)
+        if row.get("op") == "delete" and own and not (_names_an_end(row, "source")
+                                                       or _names_an_end(row, "target")):
+            # A delete naming an edge by its own id alone: that edge, at the ends it has.
+            seid, teid = held.get("sourceEntityId"), held.get("targetEntityId")
+            row = {**row, "edgeType": row.get("edgeType") or held.get("edgeType")}
         # The nodes it names as its ends: kept by a replace, a node row for them or not.
         ends = [seid, teid, *own_ends] if keeps else []
         if not (row.get("edgeType") and seid and teid):
@@ -1098,6 +1103,9 @@ def _named(eid, names, qname, node_eids, urn_to_eid, qname_to_eid, created_from,
         return eid, None, "entity_id"
     if eid and eid in created_from:
         return created_from[eid], None, "entity_id"
+    if any(n in urn_to_eid and urn_to_eid[n] is None for n in names):
+        return None, ("duplicate_value", "its urn is carried by more than one entity — give it the "
+                      "entity_id of the one it means"), None
     hits = {urn_to_eid[n] for n in names if n in urn_to_eid}
     if len(hits) > 1:
         return None, ("two_entities", "its urn and its identifier value name two different "
@@ -1119,6 +1127,12 @@ def _named(eid, names, qname, node_eids, urn_to_eid, qname_to_eid, created_from,
                           "item in this file — give the rows a urn"), None
         return qname_to_eid[qname], None, "qualifiedName"
     return None, None, None
+
+
+def _names_an_end(row, which: str) -> bool:
+    """Whether an edge row says anything about its ``which`` end (an id, urn, qualifiedName or key)."""
+    return any(row.get(f) for f in (f"{which}_entity_id", f"{which}Urn", f"{which}QualifiedName",
+                                    f"{which}Keys"))
 
 
 def _resolve_endpoint(row, which, node_eids, qname_to_eid, urn_to_eid, created_from,

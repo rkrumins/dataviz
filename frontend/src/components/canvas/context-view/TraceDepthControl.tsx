@@ -259,7 +259,7 @@ function DefaultDepth({ upstreamDepth, downstreamDepth }: { upstreamDepth: numbe
       <p className="flex-1 min-w-0 px-1 text-[11px] text-ink-muted leading-snug">
         New traces open at{' '}
         <span className="font-semibold text-ink tabular-nums">{depth.up}/{depth.down}</span>
-        {isDefault ? ', as this one is.' : '.'}
+        {isDefault ? ', as this one is.' : '.'} Root Cause and Impact go every hop their way.
       </p>
       {!isDefault && (
         <button

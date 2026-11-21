@@ -60,7 +60,8 @@ async def _run() -> None:
         branch_id = job["branch_id"]
 
         summary = await ie.run_import(job["job_id"])
-        assert summary == {"new": 2, "updated": 1, "unchanged": 0, "deleted": 0, "invalid": 0}, summary
+        assert summary == {"new": 2, "updated": 1, "unchanged": 0, "deleted": 0, "invalid": 0,
+                           "byKind": {"node": {"new": 1, "updated": 1}, "edge": {"new": 1}}}, summary
 
         # main is untouched — the import lives on a draft. B keeps the urn its row gives, under the
         # id derived from it.
@@ -90,7 +91,8 @@ async def _run() -> None:
             workspace_id="ws1", data_source_id=G["graph_id"], graph_id=gid, actor="u",
             import_format="ndjson", source_uri=key, branch_id=branch_id)
         summary2 = await ie.run_import(job2["job_id"])
-        assert summary2 == {"new": 0, "updated": 0, "unchanged": 3, "deleted": 0, "invalid": 0}, summary2
+        assert summary2 == {"new": 0, "updated": 0, "unchanged": 3, "deleted": 0, "invalid": 0,
+                            "byKind": {"node": {"unchanged": 2}, "edge": {"unchanged": 1}}}, summary2
 
         # the same rows as ONE JSON array but declared ndjson (a client's format mix-up): the worker
         # sniffs the leading '[' and parses it as json — still the idempotent no-op, not a failure.
@@ -103,7 +105,8 @@ async def _run() -> None:
             workspace_id="ws1", data_source_id=G["graph_id"], graph_id=gid, actor="u",
             import_format="ndjson", source_uri=key3, branch_id=branch_id)
         summary3 = await ie.run_import(job3["job_id"])
-        assert summary3 == {"new": 0, "updated": 0, "unchanged": 3, "deleted": 0, "invalid": 0}, summary3
+        assert summary3 == {"new": 0, "updated": 0, "unchanged": 3, "deleted": 0, "invalid": 0,
+                            "byKind": {"node": {"unchanged": 2}, "edge": {"unchanged": 1}}}, summary3
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

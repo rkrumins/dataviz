@@ -166,6 +166,32 @@ describe('ImportDialog', () => {
     expect(screen.getByText(/when this closes/i)).toBeInTheDocument()
   })
 
+  it('counts entities and relationships apart, so a file of links says what it made', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'completed',
+      summary: { new: 3, updated: 1, unchanged: 0, deleted: 0, invalid: 1,
+                 byKind: { node: { updated: 1 }, edge: { new: 3, invalid: 1 } } } } as Job)
+    vi.mocked(getImportPreview).mockResolvedValue({ sample: [] } as never)
+    await userEvent.upload(open(), file('links.csv', 2048))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+
+    expect(await screen.findByText('4 changes ready to review')).toBeInTheDocument()
+    expect(screen.getByTestId('import-by-kind')).toHaveTextContent('Entities: 1 updated · Relationships: 3 new, 1 to fix')
+  })
+
+  it('says why nothing was imported when no row reads as an entity or a relationship', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'completed',
+      summary: { new: 0, updated: 0, unchanged: 0, deleted: 0, invalid: 0, skipped: 4 } } as Job)
+    vi.mocked(getImportPreview).mockResolvedValue({ sample: [] } as never)
+    await userEvent.upload(open(), file('notes.csv', 2048))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+
+    expect(await screen.findByText('No changes to apply')).toBeInTheDocument()
+    expect(screen.getByText(/None of the file’s rows reads as an entity or a relationship/)).toBeInTheDocument()
+    expect(screen.queryByText(/already matches the file/)).not.toBeInTheDocument()
+  })
+
   it('says why a row was refused, and shows a note on a row that applied', async () => {
     vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
     vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'completed',

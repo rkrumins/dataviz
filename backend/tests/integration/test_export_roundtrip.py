@@ -73,7 +73,8 @@ async def _run() -> None:
             workspace_id="ws1", data_source_id=B["graph_id"], graph_id=gB, actor="u",
             import_format="ndjson", source_uri=exp["result_uri"])
         s2 = await ie.run_import(imp["job_id"])
-        assert s2 == {"new": 3, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0}, s2
+        assert s2 == {"new": 3, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0,
+                      "byKind": {"node": {"new": 2}, "edge": {"new": 1}}}, s2
 
         # In another graph the export's ids (not urn:uuids, which it would keep) name nothing, and
         # its urns find nothing: the nodes are made anew, keeping their urns, under ids derived

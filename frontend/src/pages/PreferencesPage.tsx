@@ -93,7 +93,7 @@ export function PreferencesPage() {
             </AccountCard>
 
             <AccountCard icon={Workflow} title="Lineage trace"
-                         blurb="How many hops a new trace opens on, each way. Any trace can go further; a shared link opens on its sender's.">
+                         blurb="How many hops a new trace opens on, each way. Root Cause and Impact go every hop their way. Any trace can go further; a shared link opens on its sender's.">
                 <div className="grid gap-4 sm:grid-cols-2">
                     {([
                         ['up', ArrowUp, 'Upstream', 'What feeds it (Root Cause)', 'text-lineage-in'],

@@ -346,9 +346,13 @@ indexes (migration `20260927_1000_import_indexes`).
 Each window's ops are applied to the draft before the next window is resolved, via
 `apply_ops(graph_id, ops, actor, branch_id=draft, message="import")`. Each window is one `edit` commit
 on the draft, with the message `import` — so a huge import becomes a sequence of ordinary commits, and the engine's
-referential-integrity, edge-integrity, cascade-delete, and ontology gates all apply. The resolutions
+referential-integrity, edge-integrity, cascade-delete, and ontology gates all apply — the
+ontology's rules too (`ontology_rules`, resolved with the import's ontology), so on a strict graph an
+edge between types its relationship may not join is refused on its row (`write_refused`), as a
+checkpoint or a publish would refuse it. The resolutions
 are recorded on `import_rows` (`_persist_resolutions`, one `UPDATE … FROM unnest()` per 5,000 rows),
-and `job.summary` tallies `{new, updated, unchanged, deleted, invalid}`. A commit's entity heads are
+and `job.summary` tallies `{new, updated, unchanged, deleted, invalid}`, and the same for each kind of
+row (`byKind`: `{node: {...}, edge: {...}}`). A commit's entity heads are
 written in bulk too (`_write_deltas`: multi-row INSERTs for the versions, an `unnest()` UPDATE then
 INSERT for the heads, keeping the per-entity compare-and-swap), so an import writes about 1,500–2,500
 rows a second: six times the row-at-a-time rate.
@@ -629,7 +633,7 @@ Import/export uses **one shared flat schema across every format** (`rowmodel.py:
 |-------|---------|
 | **Locked identity** | `entity_id`, `urn`, `baseVersion` (= content hash / OCC token) — greyed/locked, do not edit |
 | **Node core** | `entityType`, `displayName`, `qualifiedName`, `description`, `sourceSystem`, `layerAssignment`, `tags` |
-| **Edge core** | `edgeType`, `sourceQualifiedName`, `targetQualifiedName`, `source_entity_id`, `target_entity_id`, `confidence` |
+| **Edge core** | `edgeType`, `sourceQualifiedName`, `targetQualifiedName`, `sourceUrn`, `targetUrn`, `source_entity_id`, `target_entity_id`, `confidence`, and `source.<field>` / `target.<field>` (an end by a key its node holds) |
 | **Properties** | one dynamic **`prop.<name>`** column per property + a `properties_json` **overflow** column |
 | **Op** | `_op` — blank/`upsert` (default) or `delete` |
 
@@ -801,7 +805,7 @@ pipeline, staging, reconcile, and diff never change when a format is added. The 
 | Format | Adapter | Streaming? | Notes |
 |--------|---------|-----------|-------|
 | `ndjson` | `NdjsonAdapter` | ✅ | One JSON object per line — the canonical large-scale format |
-| `csv` / `tsv` | `DelimitedAdapter` | ✅ | Quote-aware via stdlib `csv`; cells must not contain raw newlines (nested values go in `properties_json`) |
+| `csv` / `tsv` | `DelimitedAdapter` | ✅ | Quote-aware via stdlib `csv`; a quoted cell may span lines (nested values go in `properties_json`) |
 | `json` | `JsonAdapter` | Export ✅, import ❌ (read whole) | A single `[{…}]` array — human-scale only for import; the client caps the file at 100 MiB |
 | `xlsx` | `XlsxAdapter` (lazy) | Export ✅, import ❌ (read whole) | A real workbook; needs `openpyxl`, registered lazily so a missing lib never breaks the others. Export writes rows into the zip as they come, in flat memory |
 

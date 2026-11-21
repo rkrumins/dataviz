@@ -244,8 +244,8 @@ file of every column with a worked row of each type.
 | Remove a property | Put `\N` (or `\NULL`) in its `prop.<name>` cell, or `null` for it in `properties_json` | Removes the property |
 | Add a property | Add a `prop.<name>` column, or export with `props=<name>` to get one | Sets it where a row gives a value |
 | Add a node | A row with no `entity_id`: its `entityType`, a key, and its fields | Makes it under an id derived from its key. It keeps the urn it gives; with none, its id is its urn |
-| Add an edge | A row with `kind` `edge`, its `edgeType`, and its two ends | Makes it under an id derived from its ends and type, or finds the edge already there |
-| Delete a node or an edge | Set `_op` to `delete` on its row | Deletes it. A node goes with the edges on it and what it contains (its containment subtree, by the ontology's containment types). Under `replace`, a node the file leaves out goes, but nothing a row names goes with it |
+| Add an edge | A row with `kind` `edge` (or none: a row with an `edgeType` and no `entityType` is an edge), its `edgeType`, and its two ends, each by `…_entity_id`, `…Urn`, `…QualifiedName` or `source.<key>`/`target.<key>`. A file of edges alone imports too | Makes it under an id derived from its ends and type, or finds the edge already there |
+| Delete a node or an edge | Set `_op` to `delete` on its row. An edge row may name the edge by its `entity_id` alone | Deletes it. A node goes with the edges on it and what it contains (its containment subtree, by the ontology's containment types). Under `replace`, a node the file leaves out goes, but nothing a row names goes with it |
 | Re-point an edge | Set `_op` to `delete` on its row, and add a row for the new edge | Deletes one, makes the other |
 
 - **Delete a node's edge rows with it.** Remove them from the file, or set `_op` to `delete` on
@@ -1036,11 +1036,14 @@ dropped in silence. The reasons below are the ones the API gives.
 | A qualified name several items carry, a key field several hold, or a unique field's value another holds | Refused | `duplicate_value` |
 | The item changed since the export, in a cell you changed too | Refused; your other rows apply | `changed_since_export`: *"changed since you exported it: description — export again, or clear baseVersion to overwrite"* |
 | A delete row of an item changed since the export | Refused | `changed_since_export`: *"changed since you exported it — export again, or clear baseVersion to delete it anyway"* |
-| An edge end that names no node | Refused | `end_not_found`: *"edge endpoint not found"* |
-| An edge row kept in a file that deletes one of its nodes | Refused when the import runs. The dry run doesn't catch it | `end_not_found`: *"edge endpoint not found"* |
+| An edge end that names no node | Refused | `end_not_found`: *"its target urn:… names no node the graph holds or the file makes"* |
+| An edge end, or a node row, naming a urn two live items carry | Refused | `duplicate_value`: *"its urn is carried by more than one entity — give it the entity_id of the one it means"* |
+| A `confidence` that isn't a number, or `properties_json` that isn't JSON | That row is refused; the file's other rows import | `invalid_row`: *"confidence: 'high' isn't a number; give one from 0 to 1, …"* |
+| An edge row kept in a file that deletes one of its nodes | Refused when the import runs. The dry run doesn't catch it | `end_not_found` |
 | An exported edge given other ends or another type | Refused, rather than made a second edge | `edge_moved`: *"its ends or type differ from edge urn:uuid:…'s — to re-point an edge, mark its row _op=delete and add a new row without an entity_id"* |
 | `_op` is anything but blank, `upsert` or `delete` | Refused: the columns are usually shifted | `invalid_row`: *"unexpected _op value 'remove' — the _op column only accepts blank or 'delete'; …"* |
-| A strict ontology's write gate refuses a row when the draft commits | Refused; the window's other rows apply | `write_refused` |
+| The write gate refuses a row when the draft commits: in every mode, an edge that duplicates one, gives an entity a second parent or closes a containment loop; on a strict ontology, a type it doesn't declare or an edge between types its relationship may not join | Refused; the window's other rows apply | `write_refused` |
+| A `replace` whose file holds edges and no node rows | Stopped before anything is deleted: it would delete every node no edge names. Its edges are on the draft | the job fails with `links_only`; import it with `upsert`, or send `allowMassDelete=true` |
 
 **Rows that aren't refused:**
 

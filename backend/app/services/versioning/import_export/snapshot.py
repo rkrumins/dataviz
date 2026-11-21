@@ -350,10 +350,15 @@ class Snapshot:
             out.setdefault(layer.graph_id, set()).add(layer.branch_id)
         return {gid: sorted(bids) for gid, bids in out.items()}
 
-    async def nodes_by_urn(self, urns: Iterable[str]) -> Dict[str, str]:
-        """``urn -> entity_id`` for the live nodes carrying these URNs."""
+    async def nodes_by_urn(self, urns: Iterable[str], ambiguous: bool = False) -> Dict[str, Optional[str]]:
+        """``urn -> entity_id`` for the live nodes carrying these URNs. ``ambiguous``: a URN that
+        several live nodes carry maps to ``None`` (it names none of them), as a qualifiedName
+        does in :meth:`nodes_by_qname`; otherwise one of them answers."""
         live = await self._nodes_by(NodeVersionORM.urn, "urn", urns)
-        return {w.urn: eid for eid, w in live.items()}
+        out: Dict[str, Optional[str]] = {}
+        for eid, w in live.items():
+            out[w.urn] = None if ambiguous and w.urn in out else eid
+        return out
 
     async def nodes_by_qname(self, qnames: Iterable[str]) -> Dict[str, Optional[str]]:
         """``qualifiedName -> entity_id`` for the live nodes carrying these qualified names — or

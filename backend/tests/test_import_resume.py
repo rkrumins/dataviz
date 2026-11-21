@@ -199,6 +199,7 @@ async def test_a_window_lands_its_ops_resolutions_and_checkpoint_in_one_transact
     assert _checkpoints(log) == [{
         "expect_cursor": "node:-1", "last_cursor": "node:2", "processed": 2, "progress": 50,
         "current_phase": "nodes", "summary": {**_NO_TALLIES, "takeovers": 1, "new": 1, "invalid": 1,
+                                              "byKind": {"node": {"new": 1, "invalid": 1}},
                                               "refused": {
             "total": 1, "byCode": {"missing_type": 1}, "fixes": {"missing_type": FIXES["missing_type"]},
             "byKind": {"node": 1},
@@ -269,7 +270,8 @@ async def test_a_window_with_nothing_to_apply_still_commits_its_checkpoint(monke
     assert [entry[0] for entry in log] == ["sql", "checkpoint"]
     assert _checkpoints(log)[0]["last_cursor"] == "edge:9"
     summary = _checkpoints(log)[0]["summary"]
-    assert {k: v for k, v in summary.items() if k != "refused"} == {**_NO_TALLIES, "new": 5, "invalid": 1}
+    assert {k: v for k, v in summary.items() if k != "refused"} == {
+        **_NO_TALLIES, "new": 5, "invalid": 1, "byKind": {"edge": {"invalid": 1}}}
     assert (summary["refused"]["total"], summary["refused"]["rows"][0]["rowIndex"]) == (1, 9), \
         "the window's refusal is reported in its own checkpoint"
     assert (_checkpoints(log)[0]["processed"], _checkpoints(log)[0]["progress"]) == (9, 90)

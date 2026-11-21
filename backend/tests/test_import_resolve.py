@@ -45,6 +45,39 @@ def test_a_delete_of_what_is_already_gone_is_done():
     assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["reasons"] == [
         "its target urn:GONE names no node the graph holds or the file makes"]
 
+def test_a_delete_naming_an_edge_by_its_id_alone_deletes_it():
+    """An edge row with ``_op=delete`` and its entity_id, but no ends, deletes that edge at the ends
+    it has — it used to read as already gone. A second such row is refused: named already."""
+    idx = {**_indexes(), "urn_to_eid": {"urn:A": "ent_A", "urn:B": "ent_B"}, "node_eids": {"ent_A", "ent_B"},
+           "edge_to_eid": {("ent_A", "ent_B", "LINEAGE"): "E1"}, "edge_eids": {"E1"},
+           "current": {"E1": {"edgeType": "LINEAGE", "sourceEntityId": "ent_A", "targetEntityId": "ent_B"}}}
+    ops, res = resolve_rows([
+        {"_row_index": 0, "kind": "edge", "op": "delete", "entity_id": "E1"},
+        {"_row_index": 1, "kind": "edge", "op": "delete", "entity_id": "E1", "edgeType": "LINEAGE"},
+    ], idx, mint_id=lambda: "unused")
+    by_row = {r["_row_index"]: r for r in res}
+    assert ops == [{"op": "delete", "entity_kind": "edge", "entity_id": "E1", "payload": None}]
+    assert by_row[0]["resolved_op"] == "delete"
+    assert (by_row[1]["resolved_op"], by_row[1]["code"]) == ("invalid", "named_already")
+
+
+def test_a_urn_several_entities_carry_names_none_of_them():
+    """A urn two live entities carry (the lookups map it to None) is ambiguous, as a qualifiedName
+    several carry is: a link end or an entity row naming it is refused, never matched to one."""
+    idx = {**_indexes(), "urn_to_eid": {"urn:A": "ent_A", "urn:TWO": None}}
+    ops, res = resolve_rows([
+        {"_row_index": 0, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "LINEAGE",
+         "sourceUrn": "urn:TWO", "targetUrn": "urn:A"},
+        {"_row_index": 1, "kind": "node", "op": "upsert", "entity_id": "", "urn": "urn:TWO",
+         "entityType": "Table", "displayName": "two"},
+    ], idx, mint_id=lambda: "unused")
+    by_row = {r["_row_index"]: r for r in res}
+    assert ops == []
+    for i in (0, 1):
+        assert by_row[i]["resolved_op"] == "invalid" and by_row[i]["code"] == "duplicate_value", by_row[i]
+        assert "more than one entity" in by_row[i]["reasons"][0]
+
+
 def _run() -> None:
     minted = iter(["ent_B", "ev_1"])
     rows = [

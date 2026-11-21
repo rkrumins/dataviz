@@ -79,3 +79,19 @@ async def test_a_workbook_template_says_what_each_column_means():
             assert header.value in explained and explained[header.value], header.value
     assert "pointer" in explained["urn"] and "reserved" in explained["prop.asset_id"]
     assert "required for a new Table" in explained["prop.owner"]
+
+
+async def test_a_workbook_templates_edges_sheet_shows_every_way_to_name_an_end():
+    """A person filling in links on the Edges sheet finds every way to name an end — by entity id,
+    urn, qualifiedName or a key the data source matches by — and the link's confidence: blank
+    cells of the worked link, never only the columns its example happens to fill."""
+    for ontology in (ONTOLOGY, None):
+        blob = await _service().build_template(export_format="xlsx", ontology=ontology,
+                                               identity_property="asset_id" if ontology else None)
+        book = openpyxl.load_workbook(io.BytesIO(blob))
+        headers = [c.value for c in next(book["Edges"].iter_rows(max_row=1))]
+        for column in ("edgeType", "source_entity_id", "target_entity_id", "sourceUrn", "targetUrn",
+                       "sourceQualifiedName", "targetQualifiedName", "confidence"):
+            assert column in headers, (column, headers)
+        if ontology:
+            assert {"source.asset_id", "target.asset_id", "source.sap_id", "target.sap_id"} <= set(headers)

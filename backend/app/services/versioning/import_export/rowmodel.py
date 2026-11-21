@@ -86,6 +86,19 @@ def _assemble_properties(raw: Dict[str, Any]) -> Dict[str, Any]:
     return props
 
 
+def record_kind(raw: Any) -> str:
+    """A record's kind, ``node`` or ``edge`` (``""`` when neither): its ``kind`` column, in any
+    case, or, without one, what it carries — an ``edgeType`` and no ``entityType`` is an edge, an
+    ``entityType`` and no ``edgeType`` a node. So a sheet of links needs no ``kind`` column."""
+    if not isinstance(raw, dict):
+        return ""
+    kind = str(raw.get("kind") or "").strip().lower()
+    if kind:
+        return kind if kind in ("node", "edge") else ""
+    edge, node = not _blank(raw.get("edgeType")), not _blank(raw.get("entityType"))
+    return "edge" if edge and not node else "node" if node and not edge else ""
+
+
 def normalize(raw: Dict[str, Any], kind: str, *, native: bool = False) -> Dict[str, Any]:
     """Flat file record -> normalized row (``kind`` is 'node' or 'edge'). ``native``: the record
     comes from a view package, whose lines may be format 2 (an object ``payload``) — only there:
@@ -134,7 +147,13 @@ def normalize(raw: Dict[str, Any], kind: str, *, native: bool = False) -> Dict[s
             s.strip() for s in str(tags).split(",") if s.strip()
         ]
     if kind == "edge" and not _blank(raw.get("confidence")):
-        out["confidence"] = float(raw["confidence"])
+        try:
+            out["confidence"] = float(raw["confidence"])
+        except (TypeError, ValueError):
+            # One bad cell refuses its row, never the file.
+            out["op"] = "invalid"
+            out["op_error"] = (f"confidence: {str(raw['confidence']).strip()!r} isn't a number; give "
+                               "one from 0 to 1, or leave the cell blank to keep the value")
     if kind == "edge":
         # An end named by a property of its node: the data source's identifier property or a
         # field its type matches imports by (``source.sap_id``, ``target.sap_id``).
@@ -144,7 +163,13 @@ def normalize(raw: Dict[str, Any], kind: str, *, native: bool = False) -> Dict[s
             if keys:
                 out[f"{end}Keys"] = keys
 
-    out["properties"] = _assemble_properties(raw)
+    try:
+        out["properties"] = _assemble_properties(raw)
+    except ValueError as exc:                  # json.JSONDecodeError is a ValueError
+        out["properties"] = {}
+        out["op"] = "invalid"
+        out["op_error"] = (f"properties_json isn't valid JSON ({exc}); give a JSON object, or leave "
+                           "the cell blank")
     return out
 
 
