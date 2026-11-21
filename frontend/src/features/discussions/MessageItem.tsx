@@ -138,7 +138,7 @@ export function MessageItem({ thread, message, highlighted, onStale, onError }: 
                 </div>
                 {!editing && (
                     <OverflowMenu label="Message actions"
-                        triggerClassName="opacity-0 group-hover/message:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
+                        triggerClassName="sm:opacity-0 sm:group-hover/message:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
                         items={[
                             { label: 'Copy link', icon: Link2, onSelect: copyLink, hidden: deleted },
                             { label: 'Edit', icon: Pencil, onSelect: () => setEditing(true), hidden: !mayEdit },

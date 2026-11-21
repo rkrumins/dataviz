@@ -320,12 +320,12 @@ export function ThreadView({ threadId, focusMessageId, onBack, onShowOnCanvas, o
                 )}
 
                 {ordered.replies.length > 0 && (
-                    <div className="relative ml-[2.15rem] mr-2 pl-3 pt-2 space-y-1 border-l border-glass-border/80">
+                    <div className="relative ml-3 sm:ml-[2.15rem] mr-2 pl-1.5 sm:pl-3 pt-2 space-y-1 border-l border-glass-border/80">
                         {ordered.replies.map((m) => (
                             <div key={m.id}>
                                 {m.id === firstNew && (
                                     <div role="separator" aria-label="New since you last looked"
-                                        className="-ml-3 my-2 flex items-center gap-2 text-[10.5px] font-bold uppercase tracking-[0.12em] text-accent-lineage">
+                                        className="-ml-1.5 sm:-ml-3 my-2 flex items-center gap-2 text-[10.5px] font-bold uppercase tracking-[0.12em] text-accent-lineage">
                                         <span className="h-px flex-1 bg-accent-lineage/40" />New since you last looked<span className="h-px w-3 bg-accent-lineage/40" />
                                     </div>
                                 )}
