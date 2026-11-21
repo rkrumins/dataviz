@@ -19,6 +19,7 @@ on it or fails with it.
 """
 from __future__ import annotations
 
+import json
 import logging
 import statistics
 from collections import Counter, defaultdict
@@ -26,14 +27,17 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
+    DataRequestORM,
+    DataSourceContactORM,
     DataSourceCountRollupORM,
     ProviderORM,
     WorkspaceDataSourceORM,
     WorkspaceORM,
+    WorkspaceRequestORM,
 )
 from backend.app.db.repositories import profiling_repo
 from backend.app.db.repositories.analytics_repo import (
@@ -233,26 +237,35 @@ class _Source:
     name: str
     created_at: Optional[str]
     deleted_at: Optional[str]
+    # Its details (``services.data_source_metadata``), for the coverage section.
+    description: Optional[str] = None
+    tags: Optional[str] = None
+    trust_status: Optional[str] = None
+    classification: Optional[str] = None
+    fork_of: Optional[str] = None
+
+
+_DS = WorkspaceDataSourceORM
+_SOURCE_COLUMNS = (
+    _DS.id, _DS.workspace_id, _DS.provider_id, _DS.label, _DS.graph_name, _DS.created_at,
+    _DS.deleted_at, _DS.description, _DS.tags, _DS.trust_status, _DS.classification,
+    _DS.fork_of_data_source_id,
+)
+
+
+def _source(r) -> _Source:
+    return _Source(
+        id=r[0], workspace_id=r[1], provider_id=r[2],
+        name=r[3] or r[4] or r[0], created_at=r[5], deleted_at=r[6],
+        description=r[7], tags=r[8], trust_status=r[9], classification=r[10], fork_of=r[11],
+    )
 
 
 async def _sources(session: AsyncSession) -> dict[str, _Source]:
     """Every data source ever registered, removed ones included: history
     needs to know when they arrived and when they left."""
-    rows = (await session.execute(
-        select(
-            WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.workspace_id,
-            WorkspaceDataSourceORM.provider_id, WorkspaceDataSourceORM.label,
-            WorkspaceDataSourceORM.graph_name, WorkspaceDataSourceORM.created_at,
-            WorkspaceDataSourceORM.deleted_at,
-        )
-    )).all()
-    return {
-        r[0]: _Source(
-            id=r[0], workspace_id=r[1], provider_id=r[2],
-            name=r[3] or r[4] or r[0], created_at=r[5], deleted_at=r[6],
-        )
-        for r in rows
-    }
+    rows = (await session.execute(select(*_SOURCE_COLUMNS))).all()
+    return {r[0]: _source(r) for r in rows}
 
 
 async def _provider_types(session: AsyncSession) -> dict[str, str]:
@@ -309,6 +322,191 @@ def _percentile(values: list[float], pct: float) -> Optional[float]:
     ordered = sorted(values)
     index = min(len(ordered) - 1, max(0, round(pct * (len(ordered) - 1))))
     return round(ordered[index], 1)
+
+
+# ── Details: how well the sources are described ─────────────────────
+
+#: In the order the Data tab draws them; anything else reads as "none".
+TRUST_STATUSES = ("certified", "in_review", "deprecated")
+CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
+
+#: Tags kept for the most-used list. More than are shown, so the list still
+#: has ten after a reader's redaction drops the ones only others use.
+_TOP_TAGS = 20
+_SHOWN_TAGS = 10
+
+#: Workspaces given their own coverage row: the ones with the most sources.
+_DETAIL_WORKSPACES = 8
+
+
+def _tags_of(raw: Optional[str]) -> list[str]:
+    """A source's tags, as saved (``_clean_tags`` already dropped blanks and
+    case-insensitive repeats)."""
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [str(t).strip() for t in value if str(t).strip()] if isinstance(value, list) else []
+
+
+def _described(s: _Source) -> bool:
+    return bool((s.description or "").strip())
+
+
+def _coverage(sources: list[_Source], contacted: set[str]) -> dict:
+    """How many of ``sources`` say what they are, how they are labelled, who
+    to ask, whether to trust them, and how sensitive they are."""
+    trust = Counter(s.trust_status if s.trust_status in TRUST_STATUSES else "none" for s in sources)
+    classes = Counter(
+        s.classification if s.classification in CLASSIFICATIONS else "none" for s in sources)
+    return {
+        "sources": len(sources),
+        "described": sum(1 for s in sources if _described(s)),
+        "tagged": sum(1 for s in sources if _tags_of(s.tags)),
+        "withContacts": sum(1 for s in sources if s.id in contacted),
+        "trust": [{"key": k, "count": trust.get(k, 0)} for k in (*TRUST_STATUSES, "none")],
+        "classification": [
+            {"key": k, "count": classes.get(k, 0)} for k in (*CLASSIFICATIONS, "none")],
+    }
+
+
+async def _contacted(session: AsyncSession, ids: Optional[list[str]] = None) -> set[str]:
+    """Sources that NAME an Owner or a Steward. A source naming nobody has its
+    contacts worked out when read; that is a default, not a description."""
+    passes = [[]] if ids is None else [
+        [DataSourceContactORM.data_source_id.in_(chunk)] for chunk in _chunked(ids)]
+    out: set[str] = set()
+    for where in passes:
+        out.update(ds for (ds,) in (await session.execute(
+            select(DataSourceContactORM.data_source_id).where(*where)
+            .group_by(DataSourceContactORM.data_source_id)
+        )).all())
+    return out
+
+
+def _details(sources: list[_Source], contacted: set[str]) -> dict:
+    """The platform's coverage, its most-used tags, and the coverage of the
+    workspaces with the most sources."""
+    tags: dict[str, dict] = {}
+    for s in sources:
+        for tag in _tags_of(s.tags):
+            entry = tags.setdefault(tag.casefold(), {"key": tag, "count": 0, "workspaceIds": set()})
+            entry["count"] += 1
+            if s.workspace_id:
+                entry["workspaceIds"].add(s.workspace_id)
+    by_ws: dict[str, list[_Source]] = defaultdict(list)
+    for s in sources:
+        if s.workspace_id:
+            by_ws[s.workspace_id].append(s)
+    ranked = sorted(by_ws, key=lambda ws: (-len(by_ws[ws]), ws))[:_DETAIL_WORKSPACES]
+    return {
+        **_coverage(sources, contacted),
+        "topTags": [
+            # Which workspaces use a tag is carried for the redactor: a tag's
+            # name says what a source is, so a reader sees only the tags used
+            # somewhere they may see.
+            {"key": t["key"], "count": t["count"], "workspaceIds": sorted(t["workspaceIds"])}
+            for t in sorted(tags.values(), key=lambda t: (-t["count"], t["key"].casefold()))[:_TOP_TAGS]
+        ],
+        "byWorkspace": [
+            {
+                "workspaceId": ws,
+                "name": None,   # filled in with the document's other names
+                "sources": len(by_ws[ws]),
+                "described": sum(1 for s in by_ws[ws] if _described(s)),
+                "tagged": sum(1 for s in by_ws[ws] if _tags_of(s.tags)),
+                "withContacts": sum(1 for s in by_ws[ws] if s.id in contacted),
+                "certified": sum(1 for s in by_ws[ws] if s.trust_status == "certified"),
+                "canOpen": True,
+            }
+            for ws in ranked
+        ],
+    }
+
+
+async def workspace_source_details(session: AsyncSession, workspace_id: str) -> dict:
+    """One workspace's coverage, for its drill-in."""
+    sources = [_source(r) for r in (await session.execute(
+        select(*_SOURCE_COLUMNS).where(
+            _DS.workspace_id == workspace_id, _DS.deleted_at.is_(None),
+            _DS.fork_of_data_source_id.is_(None),
+        )
+    )).all()]
+    return _coverage(sources, await _contacted(session, [s.id for s in sources]))
+
+
+# ── Requests: data asked for, and workspaces asked for ───────────────
+
+#: Most urgent first, as the Data tab lists them.
+URGENCIES = ("this_week", "this_month", "no_rush")
+
+
+async def _asked(session: AsyncSession, col, w: Window) -> dict:
+    """All time, this window and the one before, in one read."""
+    total, before, now_n = (await session.execute(select(
+        func.count(),
+        func.sum(case((and_(col >= w.previous_start, col < w.start), 1), else_=0)),
+        func.sum(case((and_(col >= w.start, col < w.end), 1), else_=0)),
+    ))).one()
+    return _metric(int(total or 0), int(now_n or 0), int(before or 0))
+
+
+async def _decided(
+    session: AsyncSession, orm, w: Window, statuses: tuple[str, ...],
+) -> tuple[Counter, list[tuple[str, float]]]:
+    """Requests decided in the window, by outcome, and how long each waited."""
+    outcomes: Counter = Counter()
+    waits: list[float] = []
+    for status, created, resolved in (await session.execute(
+        select(orm.status, orm.created_at, orm.resolved_at).where(
+            orm.resolved_at >= w.start, orm.resolved_at < w.end, orm.status.in_(statuses),
+        )
+    )).all():
+        outcomes[status] += 1
+        if (hours := _hours_between(created, resolved)) is not None:
+            waits.append((status, hours))
+    return outcomes, waits
+
+
+async def _requests(session: AsyncSession, w: Window) -> dict:
+    """Data asked to be connected, and workspaces asked for: how many, how
+    they were answered in the window, what is waiting now, and how long an
+    answer takes."""
+    dr, wr = DataRequestORM, WorkspaceRequestORM
+
+    data_out, data_waits = await _decided(session, dr, w, ("connected", "declined"))
+    data_open = dict((await session.execute(
+        select(dr.urgency, func.count()).where(dr.status.in_(("pending", "in_progress")))
+        .group_by(dr.urgency)
+    )).all())
+    connect_hours = [h for status, h in data_waits if status == "connected"]
+
+    ws_out, ws_waits = await _decided(session, wr, w, ("approved", "declined"))
+    ws_open = dict((await session.execute(
+        select(wr.status, func.count()).where(wr.status.in_(("pending", "changes_requested")))
+        .group_by(wr.status)
+    )).all())
+    decision_hours = [h for _status, h in ws_waits]
+
+    return {
+        "data": {
+            "asked": await _asked(session, dr.created_at, w),
+            "connected": data_out.get("connected", 0),
+            "declined": data_out.get("declined", 0),
+            "open": sum(int(n) for n in data_open.values()),
+            "openByUrgency": [{"key": u, "count": int(data_open.get(u, 0))} for u in URGENCIES],
+            "medianHoursToConnect": round(statistics.median(connect_hours), 1) if connect_hours else None,
+        },
+        "workspaces": {
+            "submitted": await _asked(session, wr.created_at, w),
+            "approved": ws_out.get("approved", 0),
+            "declined": ws_out.get("declined", 0),
+            "open": sum(int(n) for n in ws_open.values()),
+            # Waiting on the person who asked, not on an approver.
+            "changesRequested": int(ws_open.get("changes_requested", 0)),
+            "medianHoursToDecision": round(statistics.median(decision_hours), 1) if decision_hours else None,
+        },
+    }
 
 
 # ── The document ─────────────────────────────────────────────────────
@@ -372,11 +570,19 @@ async def platform_data(
     def onboarded(pick) -> list[int]:
         return w.align(Counter(s.created_at[:10] for s in created_now if pick(s)))
 
+    # Details are measured over the sources people can list: live, and not a
+    # fork's row (a fork reads its parent's graph and is never listed).
+    listed = [s for s in sources.values() if not s.deleted_at and not s.fork_of]
+    details = _details(listed, await _contacted(session))
+
     names = await _workspace_names(
         session,
         set(head) | {sources[ds].workspace_id for ds, _, _ in movers if ds in sources}
-        | {g.workspace_of.get(ds) for ds, _, _ in movers},
+        | {g.workspace_of.get(ds) for ds, _, _ in movers}
+        | {row["workspaceId"] for row in details["byWorkspace"]},
     )
+    for row in details["byWorkspace"]:
+        row["name"] = names.get(row["workspaceId"]) or row["workspaceId"]
 
     doc = {
         "windowDays": days,
@@ -448,6 +654,8 @@ async def platform_data(
             },
         },
         "versionControl": version_control,
+        "details": details,
+        "requests": await _requests(session, w),
     }
     return redact_data(doc, scope) if scope is not None else doc
 
@@ -519,8 +727,31 @@ def redact_data(doc: dict, scope) -> dict:
         for m in growth_doc.get("movers", [])
     ]
     doc["growth"] = growth_doc
+
+    # Absent from a document cached before they existed.
+    if "details" in doc:
+        details = dict(doc["details"])
+        details["topTags"] = [
+            # A tag is a word about what a source is: shown when it is used
+            # somewhere the reader may see. Its count stays platform-wide.
+            {"key": t["key"], "count": t["count"]}
+            for t in details.get("topTags", [])
+            if any(scope.can_see(ws) for ws in t.get("workspaceIds", []))
+        ][:_SHOWN_TAGS]
+        details["byWorkspace"] = [
+            {**r, "canOpen": scope.can_open(r["workspaceId"])} if scope.can_see(r["workspaceId"])
+            else {**r, "workspaceId": None, "name": REDACTED_WORKSPACE, "redacted": True, "canOpen": False}
+            for r in details.get("byWorkspace", [])
+        ]
+        doc["details"] = details
+    # Who is waiting for data or a workspace is an operator's view, like the
+    # summary's access requests: withheld below the posture that shows it.
+    if not scope.shows_operations:
+        doc.pop("requests", None)
+
     doc["redaction"] = {
         "applied": True,
         "reportsAllWorkspaces": scope.reports_all_workspaces,
+        "showsOperations": scope.shows_operations,
     }
     return doc

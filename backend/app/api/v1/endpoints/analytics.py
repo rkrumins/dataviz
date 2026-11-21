@@ -1,9 +1,10 @@
 """Platform Analytics API — business insights over the whole application.
 
 Read-only endpoints backing the Analytics section: a platform-wide summary,
-one aggregate row per workspace, a per-workspace drill-down, and two
+one aggregate row per workspace, a per-workspace drill-down, and three
 documents a tab each — what the platform holds and how it grew
-(``/data``), and how it is used (``/usage``). All aggregation lives in the
+(``/data``), how it is used (``/usage``), and the questions people ask about
+it (``/collaboration``). All aggregation lives in the
 repositories; this module is the HTTP contract.
 
 **Access.** Gated on ``system:analytics:read`` — the dedicated privilege —
@@ -40,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_readonly_db_session
 from backend.app.db.repositories import (
+    analytics_collaboration_repo,
     analytics_data_repo,
     analytics_repo,
     analytics_usage_repo,
@@ -242,6 +244,30 @@ async def analytics_usage(
             _cache_key("usage", args, epoch=epoch),
             lambda: analytics_usage_repo.platform_usage(session, scope=None, **build_args),
             analytics_usage_repo.redact_usage,
+            scope,
+        )
+    except analytics_repo.InvalidWindow as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/collaboration")
+async def analytics_collaboration(
+    days: int = _DAYS,
+    date_from: str | None = _FROM,
+    date_to: str | None = _TO,
+    scope: ViewerScope = Depends(resolve_scope),
+    session: AsyncSession = Depends(get_readonly_db_session),
+) -> dict[str, Any]:
+    """Questions and conversations: how many were asked and answered, how
+    fast, about which views and sources, in which workspaces, and who answers."""
+    args = _window_args(days, date_from, date_to)
+    epoch, build_args = _at_epoch(args)
+    try:
+        return await _serve(
+            _cache_key("collaboration", args, epoch=epoch),
+            lambda: analytics_collaboration_repo.collaboration_doc(
+                session, scope=None, **build_args),
+            analytics_collaboration_repo.redact_collaboration,
             scope,
         )
     except analytics_repo.InvalidWindow as exc:

@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.advisory import claim_this_pass
 from backend.app.db.repositories import (
+    analytics_collaboration_repo,
     analytics_data_repo,
     analytics_repo,
     analytics_usage_repo,
@@ -68,10 +69,11 @@ _SURFACES = {
     "workspaces": (analytics_repo, "workspace_rows"),
     "data": (analytics_data_repo, "platform_data"),
     "usage": (analytics_usage_repo, "platform_usage"),
+    "collaboration": (analytics_collaboration_repo, "collaboration_doc"),
 }
 
 #: How often to recompute. Long enough that the aggregation cost is negligible
-#: (24 documents and the activity explorer's 24 lens views per pass, on one
+#: (30 documents and the activity explorer's 24 lens views per pass, on one
 #: replica), short enough that "as of 4 minutes ago" is not a number anyone
 #: argues with.
 #:

@@ -1386,6 +1386,8 @@ def test_every_insight_rule_is_classified_for_an_audience():
         analytics_repo._PUBLIC_INSIGHTS
         | analytics_repo._PEOPLE_INSIGHTS
         | analytics_repo._OPERATIONS_INSIGHTS
+        # Classified too: deliberately privileged-only, because they name things.
+        | analytics_repo._PRIVILEGED_INSIGHTS
     )
     assert not (emitted - classified), (
         "these rules reach only privileged readers because nothing classified "

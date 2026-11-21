@@ -1098,8 +1098,14 @@ async def platform_summary(
     }
     # Interpretation runs LAST, over the finished document: the rules are a pure
     # function of what the dashboard already says, so they can never disagree
-    # with the charts beneath them.
-    doc["insights"] = _narrative(doc, window_label=_window_label(w))
+    # with the charts beneath them. The questions findings read the
+    # Collaboration tab's own fold, for the same reason.
+    from backend.app.db.repositories import analytics_collaboration_repo
+
+    doc["insights"] = _narrative(
+        doc, window_label=_window_label(w),
+        collaboration=await analytics_collaboration_repo.headline(session, w, now=now),
+    )
     # Redaction is the last thing that happens, over the finished document.
     return redact_summary(doc, scope) if scope is not None else doc
 
@@ -1277,6 +1283,10 @@ def redact_workspace_detail(doc: dict, scope) -> dict:
         if show_people or scope.is_self(c.get("userId"))
     ]
     doc["topViews"] = [_redact_view_row(v, scope) for v in doc.get("topViews", [])]
+    # Absent from a document cached before it existed.
+    if "collaboration" in doc:
+        from backend.app.db.repositories.analytics_collaboration_repo import redact_workspace_block
+        doc["collaboration"] = redact_workspace_block(doc["collaboration"], scope)
     # How often its people rebuild things is operations, as on the summary.
     if not scope.shows_operations:
         doc.pop("operations", None)
@@ -1407,7 +1417,7 @@ def redact_summary(doc: dict, scope) -> dict:
 _PUBLIC_INSIGHTS = frozenset({
     "signups", "active", "views", "signup-mix", "stickiness",
     "trace-empty", "search-miss", "funnel-leak", "concentration",
-    "semantic-coverage", "views-not-opened",
+    "semantic-coverage", "views-not-opened", "questions-waiting",
 })
 
 #: Rules that describe the behaviour of individuals in aggregate ("more people
@@ -1420,6 +1430,11 @@ _PEOPLE_INSIGHTS = frozenset({"dormancy"})
 _OPERATIONS_INSIGHTS = frozenset({
     "refresh-failures", "stale-sources", "access-backlog", "invite-acceptance",
 })
+
+#: Rules that quote a view's or a source's NAME. Whether a reader may know a
+#: name depends on the reader, which an allow-list by key cannot express, so
+#: these reach privileged readers only — on purpose, not by omission.
+_PRIVILEGED_INSIGHTS = frozenset({"most-discussed"})
 
 
 # ── Narrative insights ───────────────────────────────────────────────
@@ -1481,8 +1496,15 @@ def _window_label(w: Window) -> str:
     return f"in the last {w.days} {_plural(w.days, 'day')}"
 
 
-def _narrative(doc: dict, *, window_label: str) -> list[dict]:
-    """Rank what changed, most significant first."""
+def _narrative(
+    doc: dict, *, window_label: str, collaboration: Optional[dict] = None,
+) -> list[dict]:
+    """Rank what changed, most significant first.
+
+    ``collaboration`` is what the Collaboration tab's document would say
+    (``analytics_collaboration_repo.headline``); it is passed rather than
+    stored, because the summary itself carries nothing about questions.
+    """
     out: list[dict] = []
     totals = doc["totals"]
     engagement = doc["engagement"]
@@ -1696,6 +1718,34 @@ def _narrative(doc: dict, *, window_label: str) -> list[dict]:
             # word "active" appears but not the chart that shows the split, so
             # following the finding landed on a tab that could not explain it.
             score=88, tab="growth",
+        ))
+
+    # Questions nobody has answered. One is enough to say: like a pending
+    # access request, it is a person waiting on someone, not a trend.
+    collab = collaboration or {}
+    waiting = collab.get("waitingOverWeek") or 0
+    if waiting:
+        out.append(_insight(
+            "questions-waiting", "watch",
+            f"{waiting:,} {_plural(waiting, 'question')} "
+            f"{'has' if waiting == 1 else 'have'} waited over a week",
+            "Asked about a view or a data source, still open, and without an "
+            "accepted answer after seven days. The people who answer for "
+            "those sources are the ones to ask.",
+            score=58, tab="collaboration",
+        ))
+    # Where the talk is. Names a view or a source, so it is never in a public
+    # allow-list: only privileged readers see it.
+    lead = collab.get("mostDiscussed")
+    if lead and lead["questions"] + lead["replies"] >= _MIN_BASIS:
+        kind = "view" if lead["kind"] == "view" else "data source"
+        out.append(_insight(
+            "most-discussed", "neutral",
+            f"Most discussed: “{lead['name']}”",
+            f"The {kind} with the most said about it {window_label}: "
+            f"{lead['questions']:,} {_plural(lead['questions'], 'question')} and "
+            f"{lead['replies']:,} {_plural(lead['replies'], 'reply', 'replies')}.",
+            score=35, tab="collaboration",
         ))
 
     out.sort(key=lambda i: i["_score"], reverse=True)
@@ -2817,11 +2867,14 @@ async def workspace_detail(
     # What the workspace holds over time, from the Data tab's own rollup read,
     # and how its ingestion was driven. Imported here because both modules
     # build on this one.
-    from backend.app.db.repositories import analytics_data_repo
+    from backend.app.db.repositories import analytics_collaboration_repo, analytics_data_repo
     from backend.app.db.repositories.analytics_usage_repo import ORIGINS, run_origin
     from backend.app.services.aggregation.models import AggregationJobORM
 
     data_growth = await analytics_data_repo.workspace_growth(session, w, workspace_id)
+    collaboration = await analytics_collaboration_repo.workspace_block(
+        session, w, workspace_id, workspace.name, now=now)
+    source_details = await analytics_data_repo.workspace_source_details(session, workspace_id)
     by_person = AggregationJobORM.triggered_by.is_not(None)
     runs: Counter = Counter()
     failed = 0
@@ -2919,6 +2972,10 @@ async def workspace_detail(
             "entityTypes": len(entity_types),
             "sourcesWithStats": len(stats),
         },
+        # Questions about its views and sources, and how well those sources
+        # are described — both from the modules that own those tabs.
+        "collaboration": collaboration,
+        "sourceDetails": source_details,
     }
     # One exit, through the redactor. See the note on the function.
     return redact_workspace_detail(detail, scope)
