@@ -47,7 +47,8 @@ from backend.app.db.repositories import (
     workspace_repo,
     workspace_request_repo as repo,
 )
-from backend.app.services import data_source_transfer, idp_links, workspace_access
+from backend.app.services import data_requests, data_source_transfer, idp_links, workspace_access
+from backend.app.services.feature_flags import feature_flags
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.playground_policy import get_playground, graphs_made_by
 from backend.app.services.revocation_service import revoke_subject_sessions
@@ -70,6 +71,8 @@ logger = logging.getLogger(__name__)
 PURPOSES = ("team", "project", "poc", "reporting", "other")
 NAME_MAX = 120
 APPROVER_PERMISSION = "system:workspaces:create"
+#: Data needs become a tracked data request while this is on.
+DATA_REQUESTS_FLAG = "dataRequestsEnabled"
 #: Linking a group to the identity provider: the SSO rules' own bar.
 IDP_LINK_PERMISSION = idp_links.LINK_PERMISSION
 GROUP_NAME_MAX = 200
@@ -508,6 +511,26 @@ async def _make_groups(session: AsyncSession, row: WorkspaceRequestORM, proposal
     return {"groupsCreated": made, "idpLinksCreated": linked, "idpLinksPending": waiting}
 
 
+async def _ask_for_data(session: AsyncSession, row: WorkspaceRequestORM, ws_id: str, ws_name: str) -> dict:
+    """The data the request said it needs, asked for in the new workspace — one data
+    request, the requester's, tracked until it is connected — while data requests are on.
+    Nothing (and the workspace stands) when they're off or it can't be asked."""
+    needs = (row.data_needs or "").strip()
+    if not needs or not await feature_flags.is_enabled(DATA_REQUESTS_FLAG, session, default=False):
+        return {}
+    try:
+        async with session.begin_nested():
+            made = await data_requests.create_for_workspace(
+                session, workspace_id=ws_id, requested_by=row.requester_id,
+                items=[{"title": f"Data for {ws_name}"[:120], "system": "other", "details": needs[:2000],
+                        "purpose": (row.description or "")[:2000] or None}],
+            )
+    except HTTPException as exc:
+        logger.warning("workspace request %s: data needs not asked for: %s", row.id, exc.detail)
+        return {}
+    return {"dataRequestIds": [r.id for r in made]}
+
+
 async def _sandbox_provider(session: AsyncSession) -> Optional[ProviderORM]:
     """The Playground's sandbox connection, if there is one."""
     playground = await get_playground(session)
@@ -601,8 +624,10 @@ async def approve(session: AsyncSession, approver: User, claims: PermissionClaim
                          "request_id": row.id},
             )
 
+    asked = await _ask_for_data(session, row, ws_id, ws_name)
     source_ids = repo.ids_of(row.playground_source_ids)
-    outcome: dict = {"movedSources": [], "failedSources": [], "membersAdded": added, "workspaceId": ws_id, **made}
+    outcome: dict = {"movedSources": [], "failedSources": [], "membersAdded": added, "workspaceId": ws_id, **made,
+                     **asked}
     row.outcome = json.dumps(outcome)
     await _move(session, row, "approved", "approved", actor_id=approver.id, workspace_id=ws_id)
     await _emit(session, "workspace.request.approved", row, approver.id, workspace_id=ws_id)

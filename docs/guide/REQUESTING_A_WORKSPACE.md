@@ -49,7 +49,9 @@ The wizard asks five things:
    Editors*, because group names are shared across {brand}.
 4. **What it will work with.** Tick the graphs you built in the Playground to bring
    them along — each moves with its views. Then say which data the platform team
-   should connect for you.
+   should connect for you. When [data requests](/guide/requesting-data) are on,
+   approving the workspace turns this into one, so you can follow it to connected
+   on the workspace's **Data → Sources**.
 5. **Review.** Check what the platform team will see, add a note if there's anything
    else they should know, and **Send request**.
 

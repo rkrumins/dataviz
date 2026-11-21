@@ -21,6 +21,7 @@ export function WorkspaceWelcomeBanner({ name, request, onNewView, onInvite, onD
         'you’re its admin',
         joined > 0 && `${joined} teammate${joined === 1 ? '' : 's'} joined`,
         moved > 0 && `${moved} graph${moved === 1 ? '' : 's'} came over from the Playground with ${moved === 1 ? 'its' : 'their'} views`,
+        !!request?.outcome?.dataRequestIds?.length && 'the data you need was asked for — follow it under Data → Sources',
     ].filter(Boolean) as string[]
 
     return (

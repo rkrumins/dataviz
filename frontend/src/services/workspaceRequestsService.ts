@@ -55,6 +55,8 @@ export interface WorkspaceRequestOutcome {
     idpLinksPending?: { groupId: string; groupName: string; idpGroup: string }[]
     /** Links a platform administrator declined, and why. */
     idpLinksDeclined?: { groupId: string; idpGroup: string; reason?: string | null }[]
+    /** The data it said it needs, asked for in the new workspace (while data requests are on). */
+    dataRequestIds?: string[]
 }
 
 export interface WorkspaceRequest {

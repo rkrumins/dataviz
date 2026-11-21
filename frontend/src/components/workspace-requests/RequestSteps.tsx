@@ -356,7 +356,7 @@ export function DataStep({ draft, onChange, graphs, playgroundOn }: {
                 <BigTextarea rows={3} aria-label="Data you’ll need" value={draft.dataNeeds ?? ''} onChange={e => onChange({ dataNeeds: e.target.value })}
                     placeholder="e.g. Snowflake finance marts and the dbt project “core”."
                     maxLength={2000} className="font-sans" />
-                <Hint>Which systems or sources should the platform team connect for you?</Hint>
+                <Hint>Which systems or sources should the platform team connect for you? Once the workspace is approved, you can follow it there.</Hint>
             </StepBlock>
         </StepColumn>
     )

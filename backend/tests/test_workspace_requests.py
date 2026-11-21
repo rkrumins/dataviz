@@ -751,3 +751,35 @@ async def test_the_groups_an_approval_makes_are_the_workspaces_and_their_links_a
     assert outcome["idpLinksDeclined"] == [{"groupId": made["g3"], "idpGroup": "Ops-All", "reason": "No such group"}]
     assert {k: v for k, v in (await _kinds(db_session, ADA.id)).items() if k.startswith("idp_link.")} == {
         "idp_link.linked": f"/workspaces/{ws_id}?tab=members", "idp_link.declined": f"/workspaces/{ws_id}?tab=members"}
+
+
+# ── The data it said it needs ───────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_approval_asks_for_the_data_it_needs_while_data_requests_are_on(
+    test_client: AsyncClient, estate, db_session, flag_on,
+):
+    from backend.app.db.models import DataRequestORM
+
+    needs = "Snowflake FINANCE.GL tables, and the dbt project behind them"
+    off = await _submit(test_client, playgroundSourceIds=[], dataNeeds=needs)
+    with _as(OLGA, APPROVER):
+        r = await test_client.post(f"/api/v1/admin/workspace-requests/{off['id']}/approve", json={"name": "Lab one"})
+    assert r.status_code == 200, r.text
+    assert "dataRequestIds" not in r.json()["outcome"]           # switched off: nothing asked
+
+    feature_flags._cache["dataRequestsEnabled"] = True
+    try:
+        on = await _submit(test_client, playgroundSourceIds=[], dataNeeds=needs)
+        with _as(OLGA, APPROVER):
+            r = await test_client.post(f"/api/v1/admin/workspace-requests/{on['id']}/approve", json={"name": "Lab two"})
+    finally:
+        feature_flags._cache["dataRequestsEnabled"] = False
+    assert r.status_code == 200, r.text
+    out = r.json()["outcome"]
+    asked = (await db_session.execute(
+        select(DataRequestORM).where(DataRequestORM.workspace_id == out["workspaceId"])
+    )).scalars().all()
+    assert [a.id for a in asked] == out["dataRequestIds"]
+    assert [(a.requested_by, a.title, a.system, a.details, a.status) for a in asked] == [
+        (ADA.id, "Data for Lab two", "other", needs, "pending")]

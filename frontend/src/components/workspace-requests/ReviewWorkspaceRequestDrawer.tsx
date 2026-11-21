@@ -21,6 +21,8 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { groupFullName, nameTakenSuggestion, type WorkspaceRequest } from '@/services/workspaceRequestsService'
 import { ssoAdminService } from '@/services/ssoAdminService'
 import { useAuthStore } from '@/store/auth'
+import { useFeature } from '@/store/features'
+import { DATA_REQUESTS_FEATURE } from '@/hooks/useDataRequests'
 import { useWorkspaceRequest, useWorkspaceRequestActions } from '@/hooks/useWorkspaceRequests'
 import { PURPOSES, groupRoleLabel, purposeLabel } from './RequestSteps'
 
@@ -56,6 +58,7 @@ export function ReviewWorkspaceRequestDrawer({ request: listed, onClose }: { req
     const toLink = groups.filter(g => g.idpGroup?.trim())
     // Linking a group to the identity provider is a platform administrator's (the SSO rules' own bar).
     const canLink = useAuthStore(s => s.can('system:admin'))
+    const dataRequestsOn = useFeature(DATA_REQUESTS_FEATURE)
     const providers = useQuery({
         queryKey: ['sso', 'providers'],
         queryFn: () => ssoAdminService.listProviders(),
@@ -282,6 +285,7 @@ export function ReviewWorkspaceRequestDrawer({ request: listed, onClose }: { req
                                                 ? <Will>Link {plural(toLink.length, 'group')} to the identity provider</Will>
                                                 : <Will>Keep {plural(toLink.length, 'identity-provider link')} for a platform administrator</Will>)}
                                             {sources.length > 0 && <Will>Move {plural(sources.length, 'graph')} ({plural(views, 'view')}) from the Playground</Will>}
+                                            {dataRequestsOn && request.dataNeeds?.trim() && <Will>Ask for the data it needs, tracked as a data request in the workspace</Will>}
                                         </ul>
                                     </div>
                                 </div>
@@ -355,6 +359,7 @@ function Approved({ request, onOpen }: { request: WorkspaceRequest; onOpen: () =
                     <li className="text-violet-700 dark:text-violet-300">{plural(o.idpLinksPending.length, 'identity-provider link')} waiting for a platform administrator.</li>
                 )}
                 {!!o?.idpLinksDeclined?.length && <li>{plural(o.idpLinksDeclined.length, 'identity-provider link')} declined.</li>}
+                {!!o?.dataRequestIds?.length && <li>The data it needs was asked for — it’s tracked on the workspace’s Data → Sources.</li>}
                 {!!o?.failedSources.length && (
                     <li className="text-amber-700 dark:text-amber-300">
                         {plural(o.failedSources.length, 'graph')} couldn’t be moved: {o.failedSources.map(f => f.reason).join('; ')}
