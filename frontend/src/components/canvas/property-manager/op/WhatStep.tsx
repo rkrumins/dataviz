@@ -5,7 +5,7 @@
  * click away. A clean-up of the values it holds (find & replace, normalize, merge, convert) is
  * set up with a live before → after (`CleanupFields`).
  */
-import { useMemo, useRef, useState, type ComponentType, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ComponentType, type KeyboardEvent } from 'react'
 import { ArrowRightLeft, CaseSensitive, Combine, CopyPlus, Eraser, PencilLine, Replace, TextCursorInput, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Segmented } from '@/components/ui/Segmented'
@@ -64,7 +64,7 @@ function typeOfValue(v: unknown): ValueType {
   return 'text'
 }
 
-export function WhatStep({ op, onChange, properties, viewId, edges = false, entityTypes }: {
+export function WhatStep({ op, onChange, properties, viewId, edges = false, entityTypes, keySeeded = false }: {
   op: OpDraft
   onChange: (op: OpDraft) => void
   /** Every property the view's entities carry, most carried first. */
@@ -76,8 +76,17 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
   /** The entity types the target reaches, when known: a field of theirs with allowed values offers
    *  them for the value. */
   entityTypes?: readonly string[]
+  /** It was opened with its property named: the focus goes to what is still to give — the new
+   *  name, or the value — not to the property. */
+  keySeeded?: boolean
 }) {
   const set = (patch: Partial<OpDraft>) => onChange({ ...op, ...patch })
+  const valueFirst = keySeeded && (needsValue(op.kind) || needsTo(op.kind))
+  const root = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (valueFirst) root.current?.querySelector<HTMLElement>('#op-to, #op-allowed button, #op-allowed select, #op-value')?.focus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, as the step opens
+  }, [])
   const known = useMemo(() => properties.find((p) => p.key === op.key.trim()) ?? null, [properties, op.key])
   const keyError = op.key ? nameProblem(op.key, edges) : null
   const toError = needsTo(op.kind) && op.to ? (op.to.trim() === op.key.trim() ? 'The new name is the same as the old one' : nameProblem(op.to, edges)) : null
@@ -93,7 +102,7 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
   const [picks, setPicks] = useState(0)
 
   return (
-    <div className="space-y-5">
+    <div ref={root} className="space-y-5">
       <div>
         <span className={LABEL} id="op-kind-label">Operation</span>
         <OpPicker value={op.kind} onChange={pick} edges={edges} />
@@ -104,7 +113,7 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
 
       <div>
         <label className={LABEL} htmlFor="op-key">Property</label>
-        <KeyCombobox id="op-key" value={op.key} onChange={(key) => set({ key })} properties={properties} counted={!edges} />
+        <KeyCombobox id="op-key" value={op.key} onChange={(key) => set({ key })} properties={properties} counted={!edges} autoFocus={!valueFirst} />
         {keyError ? <p role="alert" className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">{keyError}</p>
           : op.key.trim() && (
             <p className="mt-1 text-[11px] text-ink-muted">
@@ -174,7 +183,7 @@ function AllowedValues({ field, value, only, onPick }: {
   const name = field.name || field.id
   const problem = fieldProblem(field, value)
   return (
-    <div>
+    <div id="op-allowed">
       <span className={LABEL}>{only ? 'Value' : 'Suggested values'}</span>
       <AllowedValuePicker field={field} value={value} label={name} onPick={onPick} />
       {problem ? <FieldNote className="mt-1.5">{problem} Publishing will refuse it.</FieldNote>
@@ -227,13 +236,14 @@ function OpPicker({ value, onChange, edges }: { value: PropertyOpKind; onChange:
 }
 
 /** A property's name, offered from every property the view carries — most carried first. */
-function KeyCombobox({ id, value, onChange, properties, counted = true }: {
+function KeyCombobox({ id, value, onChange, properties, counted = true, autoFocus = true }: {
   id: string
   value: string
   onChange: (key: string) => void
   properties: readonly SearchCatalogProperty[]
   /** Each property's count is how many hold it. */
   counted?: boolean
+  autoFocus?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
@@ -252,7 +262,7 @@ function KeyCombobox({ id, value, onChange, properties, counted = true }: {
         aria-expanded={show}
         aria-controls={`${id}-list`}
         aria-autocomplete="list"
-        autoFocus
+        autoFocus={autoFocus}
         value={value}
         placeholder="e.g. owner, certified, retentionDays"
         onFocus={() => setOpen(true)}
@@ -326,6 +336,7 @@ function ValueField({ value, onChange, known }: {
         ) : (
           <div className="flex-1 min-w-0">
             <input
+              id="op-value"
               aria-label="Value"
               type={type === 'date' ? 'date' : type === 'url' ? 'url' : 'text'}
               inputMode={type === 'number' ? 'decimal' : undefined}

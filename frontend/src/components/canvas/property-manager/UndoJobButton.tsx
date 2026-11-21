@@ -2,12 +2,13 @@
  * UndoJobButton — what an ended bulk change's row says about undoing it. **Undo** on a change that
  * wrote to the draft and is still only there: a confirm says how many entities it puts back, and
  * that any changed since are left as they are, and listed; the undo is then another change on the
- * draft, followed like the rest. **Undone** once an undo has finished. On an undo's own row, how
- * many it left because they changed since. Nothing for a change that can't be undone: published,
- * in whole or in part, or one that wrote nothing.
+ * draft, followed like the rest. **Being undone…** while that runs, **Undone** once it has finished.
+ * On an undo's own row, how many it left because they changed since. Nothing for a change that
+ * can't be undone: published, in whole or in part, or one that wrote nothing. The row's other
+ * actions (`children`) sit on the same line.
  */
-import { useState } from 'react'
-import { Undo2 } from 'lucide-react'
+import { useState, type ReactNode } from 'react'
+import { Loader2, Undo2 } from 'lucide-react'
 import { generateId } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
@@ -30,7 +31,16 @@ export function undoErrorCopy(e: unknown): string {
   return `The undo couldn’t start — ${(e as Error).message || 'try again'}.`
 }
 
-export function UndoJobButton({ tracked }: { tracked: TrackedJob }) {
+/** A row's actions, on one line, the first aligned with the text above it. */
+const actions = (...items: ReactNode[]) => (items.some(Boolean)
+  ? <div className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-0.5">{items}</div>
+  : null)
+
+export function UndoJobButton({ tracked, children }: {
+  tracked: TrackedJob
+  /** The row's other actions, beside it. */
+  children?: ReactNode
+}) {
   const { notify } = useAppNotifications()
   // How the undos of this change this browser follows stand: one has finished, or one is running.
   const undoing = usePropertyJobsStore((st) => {
@@ -46,22 +56,32 @@ export function UndoJobButton({ tracked }: { tracked: TrackedJob }) {
 
   if (tracked.op.kind === 'undo') {
     const since = s.changedSince ?? 0
-    return since > 0 ? (
-      <p className="mt-0.5 text-[11px] text-ink-secondary">
-        <span className="tabular-nums text-amber-700 dark:text-amber-300">{since.toLocaleString()}</span> changed again
-        since — left as they are
-      </p>
-    ) : null
-  }
-  if (s.undoneBy || undoing === 'done') {
     return (
-      <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-black/[0.04] dark:bg-white/[0.06] px-1.5 py-0.5 text-[10.5px] font-semibold text-ink-secondary">
-        <Undo2 className="h-3 w-3" aria-hidden /> Undone
-      </p>
+      <>
+        {since > 0 && (
+          <p className="mt-0.5 text-[11px] text-ink-secondary">
+            <span className="tabular-nums text-amber-700 dark:text-amber-300">{since.toLocaleString()}</span> changed again
+            since — left as they are
+          </p>
+        )}
+        {actions(children)}
+      </>
     )
   }
+  if (s.undoneBy || undoing === 'done') {
+    return actions(
+      <p key="undone" className="inline-flex items-center gap-1 rounded-md bg-black/[0.04] dark:bg-white/[0.06] px-1.5 py-0.5 text-[10.5px] font-semibold text-ink-secondary">
+        <Undo2 className="h-3 w-3" aria-hidden /> Undone
+      </p>, children)
+  }
+  if (undoing === 'running') {
+    return actions(
+      <p key="undoing" role="status" className="inline-flex items-center gap-1 rounded-md bg-black/[0.04] dark:bg-white/[0.06] px-1.5 py-0.5 text-[10.5px] font-semibold text-ink-secondary">
+        <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Being undone…
+      </p>, children)
+  }
   const published = !!s.publishedCommitId || (s.landedCommitIds?.length ?? 0) > 0
-  if (published || (s.commits ?? 0) < 1 || undoing === 'running') return null
+  if (published || (s.commits ?? 0) < 1) return actions(children)
 
   const label = propertyJobLabel(tracked.op)
   const n = s.changed ?? 0
@@ -75,7 +95,8 @@ export function UndoJobButton({ tracked }: { tracked: TrackedJob }) {
         targetLabel: tracked.targetLabel, ...(relationships ? { entityKind: 'edge' as const } : {}),
         startedAt: new Date().toISOString(), job: started,
       })
-      notify('success', `Undoing ${label} on your draft — follow it in Property Manager.`)
+      // Started from Property Manager's own list, where it now shows.
+      notify('success', `Undoing “${label}” on your draft — it’s listed under Changes on this draft.`)
     } catch (e) {
       if (e instanceof PropertyJobUndoRefusedError && e.code === 'already_undone' && e.jobId) {
         // Undone from elsewhere: the row says so now.
@@ -88,20 +109,20 @@ export function UndoJobButton({ tracked }: { tracked: TrackedJob }) {
   }
   return (
     <>
-      <Button size="sm" variant="ghost" leftIcon={Undo2} className="mt-1 h-6 px-2 text-2xs"
-        onClick={() => setKey(generateId('propundo'))}>
-        Undo
-      </Button>
+      {actions(
+        <Button key="undo" size="sm" variant="ghost" leftIcon={Undo2} className="first:-ml-2 h-6 px-2 text-2xs"
+          onClick={() => setKey(generateId('propundo'))}>
+          Undo
+        </Button>, children)}
       <DangerConfirmDialog
         isOpen={key !== null}
-        title={`Undo ${label}?`}
-        subtitle={`Puts back what ${n.toLocaleString()} ${things} held before — on your draft.`}
+        title={`Undo “${label}”?`}
+        subtitle="On your draft, as a change of its own — listed with the others."
         confirmPhrase=""
         confirmLabel="Undo"
         icon={Undo2}
         busyLabel="Starting the undo…"
-        sections={[{ label: relationships ? 'Relationships' : 'Entities', count: n, tone: 'warning',
-          consequence: 'put back to what they held before the change' }]}
+        sections={[{ label: things, count: n, tone: 'warning', consequence: 'to what they held before the change' }]}
         impactHeading="This will put back"
         irreversibleNote={null}
         caveat="Any changed since are left as they are, and listed. Nothing is published until the draft is."

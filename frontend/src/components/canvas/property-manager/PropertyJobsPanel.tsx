@@ -20,12 +20,12 @@ export function PropertyJobsPanel({ jobs }: { jobs: readonly TrackedJob[] }) {
   if (jobs.length === 0) return null
   const newestFirst = [...jobs].reverse()
   return (
-    <section aria-label="Changes on this draft" className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
+    <section aria-label="Changes on this draft" className="rounded-2xl border border-black/[0.08] dark:border-white/[0.08] bg-canvas-elevated overflow-hidden">
       <h4 className="px-3.5 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">Changes on this draft</h4>
-      <ul className="divide-y divide-glass-border">
+      <ul className="divide-y divide-black/[0.06] dark:divide-white/[0.06]">
         {newestFirst.map((t) => <JobRow key={t.jobId} tracked={t} />)}
       </ul>
-      <p className="px-3.5 py-2 text-[10.5px] text-ink-muted bg-black/[0.02] dark:bg-white/[0.02] border-t border-glass-border">
+      <p className="px-3.5 py-2 text-[10.5px] text-ink-muted bg-black/[0.02] dark:bg-white/[0.02] border-t border-black/[0.06] dark:border-white/[0.06]">
         Applied to your draft — the counts and the catalog above follow it, batch by batch.
       </p>
     </section>
@@ -74,15 +74,17 @@ function JobRow({ tracked }: { tracked: TrackedJob }) {
                 ? <>This change can’t be found on the server any more — dismiss it here.</>
                 : <>Lost track of this change: {lost.message}. It may still be running on the server.</>}
               {!lost.gone && (
-                <Button size="sm" variant="ghost" leftIcon={RotateCw} className="ml-1 h-6 px-2 text-2xs"
-                  onClick={() => usePropertyJobsStore.getState().checkAgain([tracked.jobId])}>
-                  Check again
-                </Button>
+                <div className="mt-1">
+                  <Button size="sm" variant="ghost" leftIcon={RotateCw} className="-ml-2 h-6 px-2 text-2xs"
+                    onClick={() => usePropertyJobsStore.getState().checkAgain([tracked.jobId])}>
+                    Check again
+                  </Button>
+                </div>
               )}
             </div>
           ) : !ended ? (
             <div className="mt-1.5 flex items-center gap-2" aria-live="polite">
-              <ProgressBar value={pct} label={`${propertyJobLabel(tracked.op)}: ${pct}%`} className="flex-1" />
+              <ProgressBar value={pct} label={`${propertyJobLabel(tracked.op)}: ${pct}%`} className="flex-1 bg-black/[0.08] dark:bg-white/[0.10]" />
               <span className="text-[10.5px] tabular-nums text-ink-muted shrink-0">
                 {job?.total ? `${(job.processed ?? 0).toLocaleString()} of ${job.total.toLocaleString()}`
                   : status === 'pending' ? 'Waiting to start'
@@ -115,19 +117,20 @@ function JobRow({ tracked }: { tracked: TrackedJob }) {
               <CheckCircle2 className="h-3 w-3" aria-hidden /> Published — listed in the publish’s audit
             </p>
           )}
-          {ended && <UndoJobButton tracked={tracked} />}
+          {ended && (
+            <UndoJobButton tracked={tracked}>
+              {listed > 0 && (
+                <Button key="refused" size="sm" variant="ghost" leftIcon={Download} className="first:-ml-2 h-6 px-2 text-2xs"
+                  onClick={() => triggerBrowserDownload(refusedPropertyJobUrl(tracked.wsId, tracked.graphId, tracked.jobId), `refused-${tracked.jobId}.csv`)}>
+                  Which, and why
+                </Button>
+              )}
+            </UndoJobButton>
+          )}
         </div>
         {!ended && !lost && <IconButton icon={Square} label="Stop" detail="What it already changed stays on the draft" size="sm" onClick={cancel} />}
         {(ended || lost) && <IconButton icon={X} label="Dismiss" size="sm" onClick={() => usePropertyJobsStore.getState().dismiss(tracked.jobId)} />}
       </div>
-      {ended && listed > 0 && (
-        <div className="mt-1.5 pl-6">
-          <Button size="sm" variant="ghost" leftIcon={Download} className="h-6 px-2 text-2xs"
-            onClick={() => triggerBrowserDownload(refusedPropertyJobUrl(tracked.wsId, tracked.graphId, tracked.jobId), `refused-${tracked.jobId}.csv`)}>
-            Which, and why
-          </Button>
-        </div>
-      )}
     </li>
   )
 }

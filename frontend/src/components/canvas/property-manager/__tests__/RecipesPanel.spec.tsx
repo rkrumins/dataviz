@@ -50,20 +50,25 @@ beforeEach(() => {
 })
 
 describe('RecipesPanel', () => {
-  it('lists the view’s recipes: the change, and where it reaches', () => {
+  it('lists the view’s recipes: the change, and where it reaches — the whole data source as a badge, all of it on hover', async () => {
+    const user = userEvent.setup()
     render(<RecipesPanel viewId="v1" />)
     expect(screen.getByRole('heading', { name: 'Recipes · 2' })).toBeInTheDocument()
     expect(within(row('Tidy owners')).getByText(/Normalize owner .* on the Silver layer/)).toBeInTheDocument()
-    expect(within(row('Own them')).getByText('Set owner · on every entity with owner, across the whole data source')).toBeInTheDocument()
+    expect(within(row('Tidy owners')).queryByText('Whole data source')).toBeNull()
+    expect(within(row('Own them')).getByText('Set owner · on every entity with owner')).toBeInTheDocument()
+    expect(within(row('Own them')).getByText('Whole data source')).toBeInTheDocument()
+    await user.hover(within(row('Own them')).getByText('Set owner · on every entity with owner'))
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Own themSet owner · on every entity with owner, across the whole data source')
   })
 
   it('runs one: the dialog opens with the whole change, its layer found by name here', async () => {
     const user = userEvent.setup()
     render(<RecipesPanel viewId="v1" />)
     await user.click(within(row('Tidy owners')).getByRole('button', { name: 'Run “Tidy owners”' }))
-    expect(seed()).toEqual({ op: tidy.op, target: { kind: 'layer', layerId: 'L2', name: 'Silver' } })
+    expect(seed()).toEqual({ op: tidy.op, target: { kind: 'layer', layerId: 'L2', name: 'Silver' }, recipe: { name: 'Tidy owners' } })
     await user.click(within(row('Own them')).getByRole('button', { name: 'Run “Own them”' }))
-    expect(seed()).toEqual({ op: own.op, target: { kind: 'hasKey', key: 'owner' }, scopeMode: 'data_source' })
+    expect(seed()).toEqual({ op: own.op, target: { kind: 'hasKey', key: 'owner' }, scopeMode: 'data_source', recipe: { name: 'Own them' } })
   })
 
   it('says when this view has no layer by the recipe’s name, and leaves the dialog to ask where', async () => {
@@ -71,7 +76,7 @@ describe('RecipesPanel', () => {
     useReferenceModelStore.setState({ layers: [{ id: 'L1', name: 'Gold' }] as ViewLayerConfig[] })
     render(<RecipesPanel viewId="v1" />)
     await user.click(within(row('Tidy owners')).getByRole('button', { name: 'Run “Tidy owners”' }))
-    expect(seed()).toEqual({ op: tidy.op })
+    expect(seed()).toEqual({ op: tidy.op, recipe: { name: 'Tidy owners' } })
     expect(useNotificationStore.getState().notifications.map((n) => n.message)).toEqual([
       'This view has no layer named “Silver” — choose where “Tidy owners” should apply.',
     ])
@@ -135,7 +140,7 @@ describe('RecipesPanel', () => {
     expect(api.others).toHaveBeenCalledWith('v1', expect.any(AbortSignal))
     expect(within(group).getByText(/Another data source/)).toBeInTheDocument()
     await user.click(within(group).getByRole('button', { name: 'Run “Own them”' }))
-    expect(seed()).toEqual({ op: own.op, target: { kind: 'hasKey', key: 'owner' }, scopeMode: 'data_source' })
+    expect(seed()).toEqual({ op: own.op, target: { kind: 'hasKey', key: 'owner' }, scopeMode: 'data_source', recipe: { name: 'Own them' } })
   })
 
   it('says when the other views couldn’t be read, and tries again', async () => {

@@ -119,12 +119,16 @@ export function predicateOf(preset: TargetPreset): Predicate | null {
 export const scopeFixedToView = (preset: TargetPreset) => preset.kind === 'layer'
 
 /** Why a selection can't be sent as its ids — more of them than one change names — or null. It is
- *  never cut short: a change applied to part of what it says it changes is the wrong change. */
-export function tooManyIds(preset: TargetPreset): string | null {
+ *  never cut short: a change applied to part of what it says it changes is the wrong change.
+ *  `instead`: the other targets offered, by their titles — named as the way on. */
+export function tooManyIds(preset: TargetPreset, instead: readonly string[] = []): string | null {
   if ((preset.kind !== 'selection' && preset.kind !== 'relationships') || preset.ids.length <= MAX_IDS) return null
-  return preset.kind === 'selection'
-    ? `${MAX_IDS.toLocaleString()} is the most a selection can change — use Whole view, Has key or a layer instead.`
-    : `${MAX_IDS.toLocaleString()} is the most a selection of relationships can change — use a Connections search instead.`
+  if (preset.kind === 'relationships') {
+    return `${MAX_IDS.toLocaleString()} is the most a selection of relationships can change — use a Connections search instead.`
+  }
+  const named = instead.map((title) => `“${title}”`)
+  const choices = named.length > 1 ? `${named.slice(0, -1).join(', ')} or ${named.at(-1)}` : named[0]
+  return `${MAX_IDS.toLocaleString()} is the most a selection can change${choices ? ` — choose ${choices} instead` : ''}.`
 }
 
 /** What the server is sent as the change's target, or null while it can't be. */
@@ -328,6 +332,14 @@ export function impactOf(
         : { changes: Math.max(0, haveKey - conflicts), replaced: 0, untouched: Math.max(0, target - haveKey) + conflicts }
     }
   }
+}
+
+/** What the Apply button says: how many it changes — "at most" for a bound, "about" for a count
+ *  that isn't the draft's own, and "+" while it is still being counted. */
+export function applyLabel(impact: Impact | null, final: boolean, exact: boolean): string {
+  if (!impact) return 'Apply'
+  const n = impact.changes.toLocaleString()
+  return `Apply to ${!final ? `${n}+` : impact.upTo ? `at most ${n}` : exact ? n : `about ${n}`}`
 }
 
 /** Whether applying it asks for the property's name to be typed first: a removal, a rename or a

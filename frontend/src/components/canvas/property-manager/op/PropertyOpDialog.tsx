@@ -36,9 +36,10 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
 import { usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
 import {
-  EDGE_RESERVED_KEYS, impactOf, isCleanup, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
+  EDGE_RESERVED_KEYS, applyLabel, impactOf, isCleanup, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
   reviewCounts, scopeFixedToView, targetLabel, targetOf, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset,
 } from './opModel'
+import { SECONDARY_EDGE } from './styles'
 import { useReviewCounts } from './useReviewCounts'
 import { entityTypesOf } from './fillRequired'
 import { WhatStep } from './WhatStep'
@@ -80,6 +81,13 @@ export function PropertyOpDialog({
   const [step, setStep] = useState(() => (isCleanup(op.kind) || opProblem(op, !!seed.target && isEdgeTarget(seed.target)) ? 0 : 1))
   const [reason, setReason] = useState('')
   const cleanup = isCleanup(op.kind)
+  // Opened with its property named (a fill from a refused publish, a catalog row): What focuses
+  // what is still to give. And the target it was opened with, said on What when it has a name.
+  const keySeeded = !!(seed.op?.key ?? seed.key)
+  const seededFor = seed.target && 'label' in seed.target && seed.target.label ? targetLabel(preset) : null
+  // A recipe run as it was kept has nothing new to keep as one.
+  const [openedAs] = useState(() => JSON.stringify([jobOp(op), preset, scopeMode]))
+  const unchangedRecipe = !!seed.recipe && JSON.stringify([jobOp(op), preset, scopeMode]) === openedAs
 
   // ── Where ──
   // A preset that named the old property follows a new one.
@@ -88,7 +96,8 @@ export function PropertyOpDialog({
   const effectiveScope: ScopeMode = scopeFixedToView(preset) ? 'view' : scopeMode
   const whatProblem = opProblem(op, edges)
   const whereProblem = !target
-    ? (tooManyIds(preset) ?? (preset.kind === 'custom' ? 'Add a condition to say which entities' : `Choose which ${edges ? 'relationships' : 'entities'}`))
+    ? (tooManyIds(preset) ? (edges ? 'Pick fewer relationships' : 'Choose fewer, or another target')
+      : preset.kind === 'custom' ? 'Add a condition to say which entities' : `Choose which ${edges ? 'relationships' : 'entities'}`)
     : preset.kind !== 'selection' && preset.kind !== 'relationships' && effectiveScope === 'data_source' && !sourceConfirmed ? 'Confirm the whole data source is meant' : null
 
   // ── Review: counted, checked and sampled once it is reached ──
@@ -140,9 +149,18 @@ export function PropertyOpDialog({
     const c = s.currentBranchId === graphWrite.branchId ? s.activeChangeSet?.counts : null
     return c ? c.added + c.modified + c.removed : undefined
   })
-  // Applied only on a final count: what it says it changes is what it changes.
-  const blocked = !!preview.data?.refusal || !!preview.data?.activeJobId || preview.data?.nameBudget?.verdict === 'refused'
-    || stagedCount > 0 || preview.loading || !!preview.error || !final || (!ids && !!counts.error) || (exact && impact?.changes === 0)
+  // Applied only on a final count: what it says it changes is what it changes. Why not, said by Apply.
+  const blockedReason = stagedCount > 0 ? 'Save or discard your staged changes first'
+    : preview.data?.activeJobId ? 'Another change is running on this draft'
+      : preview.data?.refusal ? 'The server won’t apply it — see why above'
+        : preview.data?.nameBudget?.verdict === 'refused' ? 'No room for a new property name — reuse one'
+          : preview.error ? 'Couldn’t check it can be applied — try again'
+            : !ids && counts.error ? 'The count stopped — try again'
+              : preview.loading ? 'Checking it can be applied…'
+                : !final ? 'Waiting for the count to finish'
+                  : exact && impact?.changes === 0 ? 'Nothing would change'
+                    : null
+  const blocked = !!blockedReason
 
   // ── Apply ──
   // The same change sent again — a retry — carries the same key; a different one, a new key.
@@ -193,6 +211,8 @@ export function PropertyOpDialog({
   }
 
   const canNext = step === 0 ? !whatProblem : step === 1 ? !whereProblem : !blocked && !submitting
+  // Starting was refused for another change running: following it is the way on.
+  const jobActive = error instanceof JobActiveError ? error : null
   const next = () => {
     if (!canNext) return
     if (step < 2) setStep(step + 1)
@@ -227,13 +247,19 @@ export function PropertyOpDialog({
               <p className="mt-0.5 text-[11.5px] text-ink-muted">
                 {cleanup ? 'Tidy the values it holds' : 'On'} every {edges ? 'relationship' : 'entity'} it should reach — applied to your draft by the server.
               </p>
+              {seed.recipe && (
+                <p className="mt-1 break-words text-[11.5px] text-ink-secondary">From recipe: <span className="font-semibold">{seed.recipe.name}</span></p>
+              )}
+              {step === 0 && seededFor && (
+                <p className="mt-1 break-words text-[11.5px] text-ink-secondary">For: <span className="font-semibold">{seededFor}</span></p>
+              )}
               <ol className="mt-3 flex items-center gap-1" aria-label="Steps">
                 {STEPS.map((label, i) => {
                   const done = i < step
                   const reachable = i < step || (i === 1 && !whatProblem) || (i === 2 && !whatProblem && !whereProblem)
                   return (
                     <li key={label} className="flex items-center gap-1">
-                      {i > 0 && <span className="h-px w-5 bg-glass-border" aria-hidden />}
+                      {i > 0 && <span className="h-px w-5 bg-black/[0.12] dark:bg-white/[0.12]" aria-hidden />}
                       <button type="button" disabled={!reachable} onClick={() => setStep(i)} aria-current={i === step ? 'step' : undefined}
                         className={cn('inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold transition-colors',
                           i === step ? 'bg-accent-lineage text-white' : done ? 'bg-accent-lineage/15 text-accent-lineage hover:bg-accent-lineage/25' : 'text-ink-muted disabled:opacity-60')}>
@@ -256,7 +282,7 @@ export function PropertyOpDialog({
                 {step === 0 && (edges
                   ? <EdgeWhatStep viewId={viewId} op={op} onChange={setOp} />
                   : <WhatStep op={op} onChange={setOp} properties={properties} viewId={viewId}
-                    entityTypes={entityTypesOf(preset) ?? knownEntityTypes} />)}
+                    entityTypes={entityTypesOf(preset) ?? knownEntityTypes} keySeeded={keySeeded} />)}
                 {step === 1 && (
                   <WhereStep
                     viewId={viewId} preset={preset} onPreset={setPreset} scopeMode={scopeMode} onScope={setScopeMode}
@@ -270,7 +296,7 @@ export function PropertyOpDialog({
                     preview={preview.data} previewLoading={preview.loading} previewError={preview.error} onRetry={retry}
                     sample={sample.data} sampleLoading={sample.loading}
                     stagedCount={stagedCount} draftChanges={draftChanges} reason={reason} onReason={setReason} edges={edges}
-                    onFollow={(jobId) => void follow(jobId)} onChangeTarget={() => setStep(1)}
+                    onFollow={(jobId) => void follow(jobId)} onChangeTarget={() => setStep(1)} offerSave={!unchangedRecipe}
                   />
                 )}
               </motion.div>
@@ -279,20 +305,18 @@ export function PropertyOpDialog({
 
           <div className="flex items-center gap-2 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-5 py-3">
             <span role={error ? 'alert' : undefined} className={cn('min-w-0 flex-1 truncate text-[11.5px]', error ? 'text-rose-600 dark:text-rose-400' : 'text-ink-muted')}>
-              {error?.message ?? (step === 0 ? whatProblem : step === 1 ? whereProblem : null) ?? ''}
+              {error?.message ?? (step === 0 ? whatProblem : step === 1 ? whereProblem : blockedReason) ?? ''}
             </span>
-            {error instanceof JobActiveError && (
-              <Button size="sm" variant="ghost" onClick={() => void follow(error.jobId)}>Follow it</Button>
-            )}
             {error instanceof PropertyJobRefusedError && error.code === 'too_many_ids' && (
               <Button size="sm" variant="ghost" onClick={() => { setError(null); setStep(1) }}>Choose another target</Button>
             )}
             {step > 0 && <Button size="sm" variant="ghost" leftIcon={ArrowLeft} onClick={() => setStep(step - 1)}>Back</Button>}
-            <Button size="sm" variant={step === 2 && (op.kind === 'remove') ? 'danger' : 'primary'} rightIcon={step < 2 ? ArrowRight : undefined}
+            <Button size="sm" variant={jobActive ? 'secondary' : step === 2 && (op.kind === 'remove') ? 'danger' : 'primary'}
+              className={cn(jobActive && SECONDARY_EDGE)} rightIcon={step < 2 ? ArrowRight : undefined}
               disabled={!canNext} loading={submitting} onClick={next}>
-              {step < 2 ? 'Next' : error ? 'Try again'
-                : `Apply${impact ? ` to ${impact.upTo ? 'up to ' : ''}${final && !exact ? 'about ' : ''}${impact.changes.toLocaleString()}${final ? '' : '+'}` : ''}`}
+              {step < 2 ? 'Next' : error ? 'Try again' : applyLabel(impact, final, exact)}
             </Button>
+            {jobActive && <Button size="sm" variant="primary" onClick={() => void follow(jobActive.jobId)}>Follow it</Button>}
           </div>
         </motion.div>
       </div>
@@ -306,8 +330,9 @@ export function PropertyOpDialog({
           icon={Database}
           busyLabel="Starting…"
           impactUnknown={!impact}
+          unknownMessage="It can’t be counted here, so it may change more than you expect. Continue only if you are sure."
           sections={[{
-            label: edges ? 'Relationships' : 'Entities', count: impact?.changes ?? 0,
+            label: edges ? 'relationships' : 'entities', count: impact?.changes ?? 0,
             tone: op.kind === 'remove' || (op.kind === 'convert' && op.onFail === 'remove') ? 'destructive' : 'warning',
             consequence: op.kind === 'remove' ? `Lose ${op.key.trim()}` : op.kind === 'rename' ? `${op.key.trim()} becomes ${op.to.trim()}`
               : cleanup ? `${op.key.trim()} is rewritten${op.kind === 'convert' && op.onFail === 'remove' ? ', or removed where it won’t convert' : ''}`

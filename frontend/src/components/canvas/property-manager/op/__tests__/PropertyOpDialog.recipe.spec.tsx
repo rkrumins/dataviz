@@ -29,6 +29,7 @@ vi.mock('../useReviewCounts', () => ({
 }))
 
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { OpRequest } from '@/store/propertyJobsStore'
 import { PropertyOpDialog } from '../PropertyOpDialog'
 
@@ -57,6 +58,19 @@ describe('PropertyOpDialog seeded with a whole change', () => {
     await user.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByRole('combobox', { name: 'Property' })).toHaveValue('tier')
     expect(screen.getByRole('textbox', { name: 'Value' })).toHaveValue('gold')
+  })
+
+  it('names the recipe it runs, and offers to keep it as one only once it is changed', async () => {
+    const user = userEvent.setup()
+    useViewLibraryStore.setState({ viewId: 'v1', branchId: null, status: 'ready', canEdit: true, bulkRecipes: [] })
+    open({ op: { kind: 'set', key: 'tier', value: 'gold', onConflict: 'skip' }, target: { kind: 'view' }, scopeMode: 'view', recipe: { name: 'Gold tier' } })
+    expect(screen.getByText(/^From recipe:/)).toHaveTextContent('From recipe: Gold tier')
+    await user.click(next())
+    expect(screen.queryByRole('button', { name: /Save as recipe/ })).toBeNull()
+    await user.click(screen.getByRole('button', { name: /Where/ }))
+    await user.click(screen.getByRole('radio', { name: /Every entity with tier/ }))
+    await user.click(next())
+    expect(screen.getByRole('button', { name: /Save as recipe/ })).toBeInTheDocument()
   })
 
   it('opens a clean-up on What with every part of it as it was kept', () => {

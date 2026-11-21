@@ -9,9 +9,10 @@
  * step. Renaming and deleting are for people who can edit the view's library; running is offered
  * where a change can be made, as the Properties tab's other change actions are.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { BookMarked, Check, LayoutGrid, Pencil, Play, RefreshCw, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Badge } from '@/components/ui/Badge'
 import { Button, IconButton } from '@/components/ui/Button'
 import { Disclosure } from '@/components/ui/Disclosure'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -25,7 +26,7 @@ import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useViewLibraryStore } from '@/store/viewLibraryStore'
 import { propertyJobLabel } from './op/opModel'
 import { recipeRequest, recipeTargetLabel } from './op/recipes'
-import { FIELD } from './op/styles'
+import { FIELD, SECONDARY_EDGE } from './op/styles'
 
 const NONE: BulkRecipe[] = []
 
@@ -44,13 +45,13 @@ export function RecipesPanel({ viewId }: { viewId: string }) {
 
   if (recipes.length === 0 && !run) return null
   return (
-    <section aria-label="Recipes" className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
+    <section aria-label="Recipes" className="rounded-2xl border border-black/[0.08] dark:border-white/[0.08] bg-canvas-elevated overflow-hidden">
       {recipes.length > 0 && (
         <>
           <h4 className="px-3.5 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">
             Recipes · {recipes.length.toLocaleString()}
           </h4>
-          <ul className="divide-y divide-glass-border">
+          <ul className="divide-y divide-black/[0.06] dark:divide-white/[0.06]">
             {recipes.map((recipe) => (
               <RecipeRow key={recipe.id} recipe={recipe} canEdit={canEdit} blocked={editing.blocked}
                 onRun={run && (() => run(recipe))} />
@@ -60,7 +61,7 @@ export function RecipesPanel({ viewId }: { viewId: string }) {
       )}
       {run && (
         <Disclosure
-          className={cn(recipes.length > 0 && 'border-t border-glass-border')}
+          className={cn(recipes.length > 0 && 'border-t border-black/[0.06] dark:border-white/[0.06]')}
           buttonClassName="px-3.5 py-2 text-[11px] font-medium text-ink-secondary hover:text-ink"
           summary={recipes.length > 0 ? 'From other views' : 'Recipes from other views'}
         >
@@ -75,7 +76,30 @@ function RunButton({ name, onRun, blocked }: { name: string; onRun: () => void; 
   return (
     <HoverTip label="Open it in the bulk change dialog" detail={blocked ?? 'Counted and checked again in this view before anything changes'}
       className="inline-flex shrink-0">
-      <Button size="sm" variant="secondary" leftIcon={Play} disabled={!!blocked} onClick={onRun} aria-label={`Run “${name}”`}>Run</Button>
+      <Button size="sm" variant="secondary" className={SECONDARY_EDGE} leftIcon={Play} disabled={!!blocked} onClick={onRun} aria-label={`Run “${name}”`}>Run</Button>
+    </HoverTip>
+  )
+}
+
+/** A recipe as its row reads it: its name (or the field renaming it), its description, what it does
+ *  and where on two lines at most — the whole data source said as a badge, so a clipped line never
+ *  hides it — and all of it on hover. */
+function RecipeText({ recipe, small = false, renaming }: { recipe: BulkRecipe; small?: boolean; renaming?: ReactNode }) {
+  const lines = (
+    <>
+      {renaming || <span className={cn('block font-semibold text-ink truncate', small ? 'text-[12px]' : 'text-[12.5px]')}>{recipe.name}</span>}
+      {recipe.description && <span className="block text-[11px] text-ink-muted truncate">{recipe.description}</span>}
+      <span className={cn('block text-[11px] line-clamp-2 break-words', small ? 'text-ink-muted' : 'text-ink-secondary')}>
+        {propertyJobLabel(recipe.op)} · on {recipeTargetLabel(recipe.target, false)}
+      </span>
+      {recipe.target.scopeMode === 'data_source' && <Badge tone="warning" className="mt-0.5">Whole data source</Badge>}
+    </>
+  )
+  if (renaming) return <div className="min-w-0 flex-1">{lines}</div>
+  return (
+    <HoverTip className="block min-w-0 flex-1" label={recipe.name}
+      detail={<>{propertyJobLabel(recipe.op)} · on {recipeTargetLabel(recipe.target)}{recipe.description && <><br />{recipe.description}</>}</>}>
+      {lines}
     </HoverTip>
   )
 }
@@ -117,29 +141,21 @@ function RecipeRow({ recipe, canEdit, blocked, onRun }: {
     <li className="px-3.5 py-2.5">
       <div className="flex items-start gap-2.5">
         <BookMarked className="mt-0.5 h-4 w-4 shrink-0 text-accent-lineage" aria-hidden />
-        <div className="min-w-0 flex-1">
-          {renaming !== null ? (
-            <input
-              aria-label={`New name for “${recipe.name}”`}
-              autoFocus
-              value={renaming}
-              maxLength={120}
-              disabled={saving}
-              onChange={(e) => setRenaming(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') { e.preventDefault(); void rename() }
-                else if (e.key === 'Escape') { e.preventDefault(); setRenaming(null) }
-              }}
-              className={cn(FIELD, 'h-7')}
-            />
-          ) : (
-            <p className="text-[12.5px] font-semibold text-ink truncate">{recipe.name}</p>
-          )}
-          {recipe.description && <p className="text-[11px] text-ink-muted truncate">{recipe.description}</p>}
-          <p className="text-[11px] text-ink-secondary truncate">
-            {propertyJobLabel(recipe.op)} · on {recipeTargetLabel(recipe.target)}
-          </p>
-        </div>
+        <RecipeText recipe={recipe} renaming={renaming !== null && (
+          <input
+            aria-label={`New name for “${recipe.name}”`}
+            autoFocus
+            value={renaming}
+            maxLength={120}
+            disabled={saving}
+            onChange={(e) => setRenaming(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); void rename() }
+              else if (e.key === 'Escape') { e.preventDefault(); setRenaming(null) }
+            }}
+            className={cn(FIELD, 'h-7')}
+          />
+        )} />
         {renaming !== null ? (
           <>
             <IconButton icon={Check} label="Save the name" size="sm" disabled={saving || !renaming.trim()} onClick={() => void rename()} />
@@ -221,19 +237,16 @@ function OtherViewRecipes({ viewId, onRun, blocked }: {
     <div className="pb-2">
       {groups.map((g) => (
         <section key={g.viewId} aria-label={`Recipes from ${g.viewName}`}>
-          <div className="flex items-baseline gap-2 px-3.5 pt-1.5">
-            <h5 className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted truncate">{g.viewName}</h5>
+          <div className="flex flex-wrap items-baseline gap-x-2 px-3.5 pt-1.5">
+            <h5 className="min-w-0 max-w-full text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted truncate">{g.viewName}</h5>
             {!g.sameSource && (
-              <span className="text-[10px] text-amber-700 dark:text-amber-300 truncate">Another data source — its keys and layers may differ here</span>
+              <span className="text-[10px] text-amber-700 dark:text-amber-300">Another data source — its keys and layers may differ here</span>
             )}
           </div>
           <ul>
             {g.items.map(({ recipe }) => (
               <li key={recipe.id} className="flex items-start gap-2.5 px-3.5 py-1.5">
-                <div className="min-w-0 flex-1">
-                  <p className="text-[12px] font-semibold text-ink truncate">{recipe.name}</p>
-                  <p className="text-[11px] text-ink-muted truncate">{propertyJobLabel(recipe.op)} · on {recipeTargetLabel(recipe.target)}</p>
-                </div>
+                <RecipeText recipe={recipe} small />
                 <RunButton name={recipe.name} onRun={() => onRun(recipe)} blocked={blocked} />
               </li>
             ))}

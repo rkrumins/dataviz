@@ -154,9 +154,14 @@ describe('PropertyOpDialog', () => {
     counts = exact(5000, 1800)
     open({ kind: 'remove', key: 'owner' })
     await user.click(next())
+    // A removal's second count is what it removes; its reason's example fits a removal.
+    expect(screen.getByText('Values removed').nextSibling).toHaveTextContent('1,800')
+    expect(screen.queryByText('Values replaced')).toBeNull()
+    expect(screen.getByRole('textbox', { name: /Reason/ })).toHaveAttribute('placeholder', 'e.g. No longer used since the catalog moved')
     await user.click(screen.getByRole('button', { name: 'Apply to 1,800' }))
     expect(api.create).not.toHaveBeenCalled()
     expect(screen.getByText(/Remove owner on 1,800 entities/)).toBeInTheDocument()
+    expect(screen.getByText('entities').closest('button')).toHaveTextContent('1,800entities — Lose owner')
     await user.type(screen.getByPlaceholderText('owner'), 'owner')
     await user.click(screen.getByRole('button', { name: 'Apply' }))
     expect(api.create).toHaveBeenCalledTimes(1)
@@ -198,6 +203,12 @@ describe('PropertyOpDialog', () => {
     await user.click(screen.getByRole('radio', { name: /The 3 selected/ }))
     await user.click(next())
     expect(await screen.findByRole('button', { name: 'Apply to 2' })).toBeEnabled()
+    // Found by id on the draft — ones new in it too, unlike a search.
+    expect(screen.getByText(/found by id on your draft — ones new in it too/)).toBeInTheDocument()
+    expect(screen.queryByText(/aren’t matched/)).toBeNull()
+    // A fill never replaces a value: no count of replaced ones.
+    expect(screen.queryByText(/^(Values replaced|Replaced)$/)).toBeNull()
+    expect(screen.getByRole('textbox', { name: /Reason/ })).toHaveAttribute('placeholder', 'e.g. Left empty by the last import')
     await user.click(screen.getByRole('button', { name: 'Apply to 2' }))
     expect(api.create.mock.calls[0][4]).toEqual({ ids: ['a', 'b', 'c'] })
   })
@@ -209,6 +220,8 @@ describe('PropertyOpDialog', () => {
     await user.click(next())
     expect(screen.getByText(/1 staged change not saved yet/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Apply/ })).toBeDisabled()
+    // Apply says why it can't be pressed.
+    expect(screen.getByText('Save or discard your staged changes first')).toBeInTheDocument()
 
     act(() => useStagedChangesStore.setState({ changes: [] } as never))
     api.preview.mockResolvedValue({ refusal: { code: 'reserved_key', message: '“urn” is kept by the platform.' }, nameBudget: null, activeJobId: null, counts: null })
@@ -217,6 +230,7 @@ describe('PropertyOpDialog', () => {
     await user.click(next())
     expect(await screen.findByText('“urn” is kept by the platform.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Apply/ })).toBeDisabled()
+    expect(screen.getByText('The server won’t apply it — see why above')).toBeInTheDocument()
   })
 
   it('retries after a failure with the same key', async () => {
@@ -238,16 +252,22 @@ describe('PropertyOpDialog', () => {
     open({ kind: 'remove', key: 'owner' })
     await user.click(next())
     expect(screen.getByRole('button', { name: 'Apply to 10+' })).toBeDisabled()
+    // Still counting: each number is so far, and Apply says what it waits for.
+    expect(screen.getByText('Will change').nextSibling).toHaveTextContent('10so far')
+    expect(screen.getByText('Left as they are').nextSibling).toHaveTextContent('30so far')
+    expect(screen.getByText('Waiting for the count to finish')).toBeInTheDocument()
 
     counts = { ...counts, error: 'The count stopped: timed out' }
     await user.click(screen.getByRole('button', { name: /Where/ }))
     await user.click(next())
     expect(screen.getByText(/The count stopped: timed out/)).toHaveTextContent(/can’t be applied until a count finishes/)
     expect(screen.getByRole('button', { name: /^Apply/ })).toBeDisabled()
+    expect(screen.getByText('The count stopped — try again')).toBeInTheDocument()
     counts = exact(120, 30)
     await user.click(screen.getByRole('button', { name: 'Try again' }))
     expect(api.countRetries.at(-1)).toBe(1)
     expect(screen.getByRole('button', { name: 'Apply to 30' })).toBeEnabled()
+    expect(screen.queryByText(/so far/)).toBeNull()
   })
 
   it('keeps a failed check as its own error, with Try again', async () => {
@@ -279,10 +299,15 @@ describe('PropertyOpDialog', () => {
     counts = { counts: new Map(), complete: false, percent: 0, error: null, unavailable: true }
     open({ kind: 'remove', key: 'owner' })
     await user.click(next())
+    // Said in the counts' place, not counting for ever.
+    expect(screen.getByText('Can’t be counted here.')).toBeInTheDocument()
+    expect(screen.queryByText('Will change')).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Apply' }))
     expect(api.create).not.toHaveBeenCalled()
     expect(screen.getByText('Remove owner on an unknown number of entities?')).toBeInTheDocument()
-    expect(screen.getByText(/We couldn.t check what this will affect/)).toBeInTheDocument()
+    // Nothing to try again: the confirmation says so, not "try again in a moment".
+    expect(screen.getByText('It can’t be counted here, so it may change more than you expect. Continue only if you are sure.')).toBeInTheDocument()
+    expect(screen.queryByText(/try again in a moment/)).toBeNull()
     await user.type(screen.getByPlaceholderText('owner'), 'owner')
     // The confirmation's own Apply — the dialog's sits behind it.
     await user.click(screen.getAllByRole('button', { name: 'Apply' }).at(-1)!)
@@ -295,7 +320,10 @@ describe('PropertyOpDialog', () => {
     open({ kind: 'remove', key: 'owner', target: { kind: 'selection', ids } }, ids)
     expect(screen.getByRole('radio', { name: /The 20,001 selected/ })).toHaveAttribute('aria-checked', 'true')
     expect(next()).toBeDisabled()
-    expect(screen.getAllByText('20,000 is the most a selection can change — use Whole view, Has key or a layer instead.').length).toBeGreaterThan(0)
+    // The choices as they are titled here — and only those offered; the footer short.
+    expect(screen.getByText(/20,000 is the most a selection can change/)).toHaveTextContent(
+      '20,000 is the most a selection can change — choose “Every entity in the view”, “Every entity with owner”, “A layer” or “Entities matching criteria” instead.')
+    expect(screen.getByText('Choose fewer, or another target')).toBeInTheDocument()
     await user.click(screen.getByRole('radio', { name: /Every entity with owner/ }))
     expect(next()).toBeEnabled()
   })
@@ -324,7 +352,12 @@ describe('PropertyOpDialog', () => {
     await user.click(next())
     await user.click(screen.getByRole('button', { name: 'Apply to 30' }))
     expect(await screen.findByText(/Another bulk property edit is running/)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Follow it' }))
+    // Following it is the way on: the last, primary action; trying again (refused again) beside it.
+    const follow = screen.getByRole('button', { name: 'Follow it' })
+    expect(follow.parentElement!.lastElementChild).toBe(follow)
+    expect(follow.className).toMatch(/bg-accent-lineage/)
+    expect(screen.getByRole('button', { name: 'Try again' }).className).not.toMatch(/bg-accent-lineage/)
+    await user.click(follow)
     expect(usePropertyJobsStore.getState().jobs.map((j) => j.jobId)).toEqual(['job-0'])
     expect(onOpenManager).toHaveBeenCalled()
   })
@@ -384,7 +417,7 @@ describe('PropertyOpDialog — cleaning up a property’s values', () => {
     expect(screen.getByText('Will change').nextSibling).toHaveTextContent(/up to\s*30/)
     expect(screen.getByText(/At most: what it changes is known/)).toBeInTheDocument()
     await user.type(screen.getByRole('textbox', { name: /Reason/ }), 'One spelling per department')
-    await user.click(screen.getByRole('button', { name: 'Apply to up to 30' }))
+    await user.click(screen.getByRole('button', { name: 'Apply to at most 30' }))
     expect(api.create).toHaveBeenCalledWith('ws', 'g1', 'd1',
       { kind: 'normalize', key: 'dept', trim: true, collapseSpaces: false, case: 'lower', dedupeList: false },
       { viewId: 'v1', predicate: { kind: 'hasProperty', key: 'dept', negate: false }, scopeMode: 'view' },
@@ -434,7 +467,7 @@ describe('PropertyOpDialog — cleaning up a property’s values', () => {
     await user.click(next())
     // At most those holding it as another kind, in this view.
     expect(screen.getByText(/A value that won’t convert is removed/)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Apply to up to 7' }))
+    await user.click(screen.getByRole('button', { name: 'Apply to at most 7' }))
     expect(api.create.mock.calls[0][3]).toEqual({ kind: 'convert', key: 'rank', toKind: 'Integer', onFail: 'remove' })
   })
 

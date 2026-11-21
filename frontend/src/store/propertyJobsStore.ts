@@ -60,6 +60,8 @@ export interface OpRequest {
   toKind?: ValueKind
   op?: Partial<OpDraft>
   scopeMode?: ScopeMode
+  /** The recipe it runs, named in the dialog. */
+  recipe?: { name: string }
 }
 
 const ENDED = new Set(['completed', 'failed', 'cancelled'])

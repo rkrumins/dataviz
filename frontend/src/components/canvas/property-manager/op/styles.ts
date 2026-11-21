@@ -7,3 +7,5 @@ export const FIELD = cn(
   'placeholder:text-ink-muted/70 focus-visible:border-accent-lineage/50 focus-visible:ring-2 focus-visible:ring-accent-lineage/20',
 )
 export const LABEL = 'block text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted mb-1.5'
+/** A secondary button's edge, seen on a light surface too — the glass border is white glass. */
+export const SECONDARY_EDGE = 'border-black/[0.10] dark:border-white/[0.10]'

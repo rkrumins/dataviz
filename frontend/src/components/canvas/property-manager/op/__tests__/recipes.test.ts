@@ -46,13 +46,13 @@ describe('recipeRequest', () => {
   const layers = [{ id: 'L1', name: 'Gold' }, { id: 'L2', name: 'Silver' }]
 
   it('opens the dialog with the whole change, the target as the Where step names it, and its scope', () => {
-    const op = recipe({ kind: 'view' }).op
+    const { op, name } = recipe({ kind: 'view' })
     expect(recipeRequest(recipe({ kind: 'view', scopeMode: 'data_source' }), layers))
-      .toEqual({ request: { op, target: { kind: 'view' }, scopeMode: 'data_source' } })
+      .toEqual({ request: { op, target: { kind: 'view' }, scopeMode: 'data_source', recipe: { name } } })
     expect(recipeRequest(recipe({ kind: 'hasKey', key: 'owner' }), layers))
-      .toEqual({ request: { op, target: { kind: 'hasKey', key: 'owner' }, scopeMode: 'view' } })
+      .toEqual({ request: { op, target: { kind: 'hasKey', key: 'owner' }, scopeMode: 'view', recipe: { name } } })
     expect(recipeRequest(recipe({ kind: 'custom', predicate: pii, scopeMode: 'data_source' }), layers))
-      .toEqual({ request: { op, target: { kind: 'custom', predicate: pii }, scopeMode: 'data_source' } })
+      .toEqual({ request: { op, target: { kind: 'custom', predicate: pii }, scopeMode: 'data_source', recipe: { name } } })
     expect(recipeRequest(recipe({ kind: 'search', predicate: pii, scopeMode: 'data_source' }), layers).request.target)
       .toMatchObject({ kind: 'search', predicate: pii, scopeMode: 'data_source' })
     expect(recipeRequest(recipe({ kind: 'connections', predicate: flows }), layers).request.target)
@@ -63,7 +63,7 @@ describe('recipeRequest', () => {
     expect(recipeRequest(recipe({ kind: 'layer', layerName: 'Silver' }), layers).request.target)
       .toEqual({ kind: 'layer', layerId: 'L2', name: 'Silver' })
     const missing = recipeRequest(recipe({ kind: 'layer', layerName: 'Bronze' }), layers)
-    expect(missing).toEqual({ request: { op: recipe({ kind: 'view' }).op }, missingLayer: 'Bronze' })
+    expect(missing).toEqual({ request: { op: recipe({ kind: 'view' }).op, recipe: { name: recipe({ kind: 'view' }).name } }, missingLayer: 'Bronze' })
   })
 })
 
@@ -71,5 +71,7 @@ describe('recipeTargetLabel', () => {
   it('says where it reaches, and when that is the whole data source', () => {
     expect(recipeTargetLabel({ kind: 'hasKey', key: 'owner', scopeMode: 'data_source' })).toBe('every entity with owner, across the whole data source')
     expect(recipeTargetLabel({ kind: 'layer', layerName: 'Gold' })).toBe('the Gold layer')
+    // Said apart, as the recipes list does with a badge.
+    expect(recipeTargetLabel({ kind: 'hasKey', key: 'owner', scopeMode: 'data_source' }, false)).toBe('every entity with owner')
   })
 })
