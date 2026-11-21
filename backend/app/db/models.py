@@ -1325,6 +1325,8 @@ class DiscussionORM(Base):
               sqlite_where=text("entity_id IS NOT NULL")),
         Index("idx_discussions_status_response", "status", "first_response_at", "created_at"),
         Index("idx_discussions_asker_activity", "asked_by", "last_activity_at", "id"),
+        # Analytics: the questions asked in a window, platform-wide.
+        Index("idx_discussions_created", "created_at"),
         # The watcher fan-out's queue: open questions whose watchers have not all heard.
         Index("idx_discussions_fanout", "created_at",
               postgresql_where=text("watchers_notified_at IS NULL AND visibility = 'open' AND deleted_at IS NULL"),
@@ -1358,6 +1360,10 @@ class DiscussionMessageORM(Base):
     __table_args__ = (
         UniqueConstraint("author_id", "client_key", name="uq_discussion_messages_client_key"),
         Index("idx_discussion_messages_thread", "discussion_id", "created_at", "id"),
+        # Analytics: the replies posted in a window, platform-wide.
+        Index("idx_discussion_messages_replies", "created_at",
+              postgresql_where=text("kind = 'reply'"),
+              sqlite_where=text("kind = 'reply'")),
         Index("uq_discussion_messages_question", "discussion_id", unique=True,
               postgresql_where=text("kind = 'question'"),
               sqlite_where=text("kind = 'question'")),
