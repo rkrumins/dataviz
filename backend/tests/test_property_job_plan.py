@@ -216,7 +216,7 @@ def test_a_window_plans_each_entity_once_and_counts_what_it_skips():
     assert ops == [{"op": "update", "entity_kind": "node", "entity_id": "A",
                     "payload": {"properties": {"steward": "x", "owner": PROP_DELETE}}}]
     assert counts == {"changed": 1, "unchanged": 2, "missing": 0, "deletedInDraft": 0, "conflicts": 1,
-                      "unconvertible": 0, "noLongerMatches": 0}
+                      "unconvertible": 0, "noLongerMatches": 0, "changedSince": 0}
     assert refused == [{"urn": "urn:b", "entityId": "B", "reason": "conflict",
                         "detail": "It already has steward."}]
 
@@ -291,6 +291,76 @@ def test_the_running_summary_adds_each_window_and_keeps_twenty_examples():
     assert len(summary["refused"]["examples"]) == pj.REFUSED_EXAMPLES
     assert (summary["commits"], summary["firstCommitId"], summary["lastCommitId"]) == (2, "cmt_1", "cmt_3")
     assert summary["chunks"] == 3
+
+
+# ── an undo: what a commit wrote, put back ────────────────────────────────────
+def test_an_undo_puts_back_what_the_commit_changed_where_the_entity_still_holds_it():
+    """Only the keys the commit changed are put back: what else changed since is kept."""
+    before, after = {"owner": "a", "tier": 1}, {"owner": "b", "tier": 1}
+    assert pj.plan_undo(before, after, {"owner": "b", "tier": 2, "new": 3}) == {"owner": "a"}
+    assert pj.plan_undo(before, after, {"owner": "c", "tier": 1}) == (
+        "changed_since", "Its owner changed since the bulk change — left as it is.")
+    assert pj.plan_undo(before, after, {"tier": 1}) == (
+        "changed_since", "Its owner changed since the bulk change — left as it is.")
+    assert pj.plan_undo(before, after, None) == ("deleted_in_draft", "Deleted in this draft.")
+
+
+def test_an_undo_of_what_is_put_back_already_changes_nothing():
+    """An entity that holds what it held before — put back by hand, or by an undo cancelled part-way
+    and asked again — has nothing to put back, and isn't listed."""
+    assert pj.plan_undo({"owner": "a"}, {"owner": "b"}, {"owner": "a", "x": 1}) is None
+    assert pj.plan_undo({"owner": "a"}, {"owner": "a"}, {"owner": "z"}) is None      # the commit changed nothing
+
+
+def test_an_undo_of_a_rename_puts_both_keys_back():
+    before, after = {"owner": "a", "x": 1}, {"steward": "a", "x": 1}
+    assert pj.plan_undo(before, after, {"steward": "a", "x": 1}) == {"owner": "a", "steward": PROP_DELETE}
+    assert pj.plan_undo(before, after, {"steward": "a", "owner": "z", "x": 1})[0] == "changed_since"
+    assert pj.plan_undo(before, after, {"steward": "b", "x": 1})[0] == "changed_since"
+
+
+def test_a_key_the_entity_did_not_hold_before_is_removed_and_one_removed_is_given_back():
+    assert pj.plan_undo({}, {"owner": "ana"}, {"owner": "ana"}) == {"owner": PROP_DELETE}          # a fill
+    assert pj.plan_undo({"owner": None}, {"owner": "ana"}, {"owner": "ana"}) == {"owner": None}
+    assert pj.plan_undo({"owner": ["a", "b"]}, {}, {}) == {"owner": ["a", "b"]}                     # a remove
+    assert pj.plan_undo({"owner": "a"}, {}, {"owner": "b"})[0] == "changed_since"
+
+
+def test_an_undo_puts_back_each_value_in_the_kind_it_was_stored_as():
+    """1, 1.0, true and "1" are four values: a convert or a set is undone to the very one."""
+    restored = pj.plan_undo({"score": 1.0, "tier": "42"}, {"score": 1, "tier": 42}, {"score": 1, "tier": 42})
+    assert restored == {"score": 1.0, "tier": "42"}
+    assert [type(v) for v in restored.values()] == [float, str]
+    assert pj.plan_undo({"score": 1.0}, {"score": 1}, {"score": True})[0] == "changed_since"
+    assert pj.plan_undo({"score": 1.0}, {"score": 1}, {"score": 1.0}) is None
+
+
+def test_an_undo_window_plans_each_entity_the_commit_wrote_and_lists_what_it_left():
+    from backend.app.services.versioning.import_export.snapshot import Winner
+
+    def payload(**props):
+        return json.dumps({"edgeType": "FLOWS_TO", "properties": props})
+    rows = [("E1", payload(owner="b"), None), ("E2", payload(owner="b"), None), ("E3", payload(owner="b"), None),
+            ("E4", payload(owner="b"), None)]
+    before = {"E1": {"properties": {"owner": "a"}}, "E2": {"properties": {"owner": "a"}},
+              "E3": {"properties": {}}, "E4": {"properties": {"owner": "a"}}}
+    current = {"E1": Winner("E1", True, payload=payload(owner="b", tier=1)),
+               "E2": Winner("E2", True, payload=payload(owner="c")),
+               "E3": Winner("E3", True, payload=payload())}
+    (ops, counts, refused), urns = pj.plan_undo_window(rows, before, current, "edge")
+    assert ops == [
+        {"op": "update", "entity_kind": "edge", "entity_id": "E1", "payload": {"properties": {"owner": "a"}}}]
+    assert {k: v for k, v in counts.items() if v} == {"changed": 1, "unchanged": 1, "changedSince": 1,
+                                                      "deletedInDraft": 1}
+    assert [(r["entityId"], r["reason"]) for r in refused] == [("E2", "changed_since"), ("E4", "deleted_in_draft")]
+    assert urns == {"E1": None, "E2": None, "E3": None, "E4": None}
+
+
+def test_an_undo_is_named_after_what_it_undoes():
+    undo = {"kind": "undo", "key": "owner", "to": "steward", "sourceJobId": "vjob_1",
+            "sourceLabel": "Rename owner → steward"}
+    assert pj.describe(undo) == "Undo: Rename owner → steward"
+    assert pj.window_message(undo, None, 1, 2) == "Bulk property: Undo: Rename owner → steward (1/2)"
 
 
 class _Store:

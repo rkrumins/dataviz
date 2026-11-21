@@ -7745,6 +7745,33 @@ async def cancel_property_job(
     return await ie.get_property_job(job_id)
 
 
+@router.post("/graphs/{graph_id}/property-jobs/{job_id}/undo", status_code=202,
+             dependencies=[Depends(require_feature("editModeEnabled"))])
+async def undo_property_job(
+    ws_id: str, graph_id: str, job_id: str,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=128),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Undo a bulk property job that has ended (202, with the undo — itself a job to follow at
+    ``…/property-jobs/{jobId}``): on its draft, each entity its windows wrote is put back as it was
+    before them, from the draft's history, where it still holds what the job wrote; one changed
+    since is left as it is and listed (``changed_since``). A cancelled or failed job's windows are
+    undone too. The same Idempotency-Key answers with the same undo. 409 ``job_active`` while an
+    import or a bulk property job (this one included) runs on the draft, ``branch_closed``,
+    ``job_published`` once a publish took any of it to main, ``already_undone`` (its ``jobId``:
+    the undo); 422 ``nothing_to_undo`` for a job that wrote nothing, ``undo_of_undo``."""
+    source = await _readable_property_job(svc, ie, graph_id, job_id, viewer)
+    with _property_job_errors():
+        created = await ie.create_undo_job(
+            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+            job_id=source["jobId"], actor=user.id, key=idempotency_key)
+    return await ie.get_property_job(created["job_id"])
+
+
 @router.get("/graphs/{graph_id}/property-jobs/{job_id}/refused")
 async def property_job_refused(
     ws_id: str, graph_id: str, job_id: str,

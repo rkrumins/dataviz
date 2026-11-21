@@ -13121,6 +13121,31 @@ class GraphVersioningService:
             bid = branch_id or await self._main_branch_id(s, graph_id)
             return (await self._current_values(s, graph_id, bid, [entity_id])).get(entity_id)
 
+    async def values_before(self, graph_id: str, branch_id: str, ids, seq: int) -> Dict[str, Optional[dict]]:
+        """Each of ``ids`` as ``branch_id`` held it just before its commit ``seq`` — what undoing
+        that commit puts back. Deleted → ``None``; never held → omitted. A draft's own rows first
+        (:meth:`_values_at`), then ``main`` at the base the draft read then: a pull since moved the
+        base, so it is the ``to_seq`` of the last pull before ``seq``, else the ``from_seq`` of the
+        first one after it. A fork's ``main`` reads its parent's (:meth:`_layers`)."""
+        async with self._session() as s:
+            out = await self._values_at(s, graph_id, branch_id, ids, seq - 1)
+            rest = [i for i in dict.fromkeys(ids) if i not in out]
+            main_id = await self._main_branch_id(s, graph_id)
+            if not rest or branch_id == main_id:
+                return out
+            base = (await s.get(BranchORM, branch_id)).base_commit_seq or 0
+            pulls = (await s.execute(select(CommitORM.commit_seq, CommitORM.stats).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id, CommitORM.kind == "pull",
+            ).order_by(CommitORM.commit_seq))).all()
+            earlier = [p.stats for p in pulls if p.commit_seq < seq]
+            later = [p.stats for p in pulls if p.commit_seq >= seq]
+            if earlier and (earlier[-1] or {}).get("to_seq") is not None:
+                base = earlier[-1]["to_seq"]
+            elif later and (later[0] or {}).get("from_seq") is not None:
+                base = later[0]["from_seq"]
+            out.update(await self._values_at(s, graph_id, main_id, rest, base))
+            return out
+
     async def resolve_edges(
         self, *, graph_id: str, edge_ids: Collection[str], branch_id: Optional[str] = None,
     ) -> Dict[str, Optional[Tuple[str, dict]]]:
