@@ -251,6 +251,7 @@ async def test_capability_cannot_mutate(test_client: AsyncClient, db_session):
          {**q, "branchId": "br_x"}),
         ("DELETE", f"/api/v1/{WS_A}/assets/rule-sets/rs_x", q),
         ("POST", f"/api/v1/{WS_A}/graph/save", q),
+        ("POST", f"/api/v1/{WS_A}/versioning/graphs/g_x/branches/br_x/property-jobs", q),
     ]
     for method, path, params in cases:
         with _auth(user=OUTSIDER, claims=EMPTY_CLAIMS):

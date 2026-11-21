@@ -455,6 +455,11 @@ def object_store_s3() -> dict:
 # window is also what a resumed import redoes at most, and what the job's lease waits out before a
 # stopping worker hands the job back — so a few seconds of work, not minutes.
 IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "10000"))
+# A bulk property job (``import_export.property_job``): the entities one window — one commit —
+# edits, the most a job names by id, and the most a search target may match.
+PROPERTY_JOB_WINDOW: int = int(os.getenv("GRAPHVER_PROPERTY_JOB_WINDOW", "10000"))
+PROPERTY_JOB_MAX_IDS = 20_000
+PROPERTY_JOB_MAX_TARGETS: int = int(os.getenv("GRAPHVER_PROPERTY_JOB_MAX_TARGETS", "5000000"))
 # What an import's rows find their entities by when the request names nothing (``identifier``):
 # ``entity_id`` (an entity id of the graph, else the urn, the identifier property, a field a type
 # matches imports by, then a unique qualifiedName), or ``urn`` (an entity id, else the urn only).

@@ -26,6 +26,7 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 
 from .. import config, db, provenance
 from ..errors import JobActive, MainWriteForbidden, _HttpMapped
+from ..ids import prefixed_id
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import BranchORM, GraphORM, ImportMentionORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, ConcurrencyError, GraphVersioningService, NotUpToDate, Viewer
@@ -38,6 +39,8 @@ from .import_worker import (IdentifierMatchedNothing, ImportWorker, ReplaceBlock
                             _normalize_page,
                             _label as _row_label, _record_pages, lease_job, refused_budget,
                             refused_digest, within_budget)
+from . import property_job
+from .property_job import PropertyJobStopped, PropertyJobWorker
 from .resolve import _ALREADY_GONE, _STATUS
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
@@ -155,6 +158,8 @@ class ImportExportService:
         identity_resolver=None,
         fork_hook=None,
         save_hook=None,
+        property_targets=None,
+        property_write_context=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
@@ -187,6 +192,11 @@ class ImportExportService:
         # The same for a fork's jobs (``fork_update``, ``fork_merge``): ``(job) -> its answer |
         # {"error": …}``.
         self._fork_hook = fork_hook
+        # A bulk property job's (``property``): ``(job) -> async iterator of keys`` — the entities
+        # its search target matches, from an export of the search — and ``(job) -> {ontology_rules,
+        # containment, node_identity}``, what its windows are written with, as a save is.
+        self._property_targets = property_targets
+        self._property_write_context = property_write_context
 
     @property
     def store(self):
@@ -439,10 +449,11 @@ class ImportExportService:
             if isinstance(exc, asyncio.CancelledError):
                 raise
         except (ReplaceBlocked, ReplaceRowsRefused, IdentifierMatchedNothing,
-                matching.MatchingPropertyLimit, matching.NotOnAFork) as exc:
+                matching.MatchingPropertyLimit, matching.NotOnAFork, PropertyJobStopped) as exc:
             # Refused by the replace's own checks: nothing deleted, the rows on the draft. The
-            # failure says why (``summary.failure.code``) and what to do (``action``).
-            logger.warning("import job %s stopped: %s", job_id, exc)
+            # failure says why (``summary.failure.code``) and what to do (``action``). A bulk
+            # property job that can't go on says so the same way.
+            logger.warning("job %s stopped: %s", job_id, exc)
             await lease.fail(str(exc), exc.code, exc.action, phase=getattr(exc, "phase", None))
         except Exception as exc:
             logger.exception("job %s failed", job_id)
@@ -937,6 +948,160 @@ class ImportExportService:
         if not (await self._store.stat(key)).exists:
             return None
         return json.loads(b"".join([c async for c in self._store.open_stream(key)]))
+
+    # ------------------------------------------------------------------ #
+    # A bulk property edit of a draft: one operation over many entities   #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    async def _property_job_of(s, *, graph_id: str, branch_id: str, actor: str, key: str) -> Optional[str]:
+        return (await s.execute(select(JobORM.id).where(
+            JobORM.graph_id == graph_id, JobORM.branch_id == branch_id, JobORM.job_type == "property",
+            JobORM.field_scope["key"].astext == key, JobORM.field_scope["actor"].astext == actor,
+        ).order_by(JobORM.created_at.desc()).limit(1))).scalar_one_or_none()
+
+    async def find_property_job(self, *, graph_id: str, branch_id: str, actor: str, key: str) -> Optional[str]:
+        """The bulk property job ``actor`` started on the draft with Idempotency-Key ``key``."""
+        async with db.graphver_session() as s:
+            return await self._property_job_of(s, graph_id=graph_id, branch_id=branch_id, actor=actor, key=key)
+
+    async def create_property_job(
+        self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, branch_id: str,
+        actor: str, op: Dict[str, Any], target: Dict[str, Any], message: Optional[str], key: str,
+    ) -> Dict[str, Any]:
+        """Queue a bulk property job (:mod:`.property_job`) on draft ``branch_id``: ``op`` over
+        ``target`` — ``{"ids": [...]}``, whose chunk files are written here, or ``{"viewId",
+        "predicate", "scopeMode"}``, a search the job runs first. One job per ``key`` (the request's
+        Idempotency-Key) and actor: asked again, it answers with the same job, whatever it asks.
+
+        Under the draft's lock, as a save is: main is :class:`MainWriteForbidden`, a closed draft
+        :class:`BranchNotOpen`, a draft the actor may not edit refused (``_require_edit``), and one
+        with an import or another bulk property job pending or running :class:`JobActive`. The job
+        is stored already queued. Returns ``{job_id, created}``."""
+        if branch_id == "main":
+            raise MainWriteForbidden()
+        existing = await self.find_property_job(graph_id=graph_id, branch_id=branch_id, actor=actor, key=key)
+        if existing is not None:
+            return {"job_id": existing, "created": False}
+        job_id = prefixed_id("vjob")
+        summary = property_job.empty_summary()
+        if target.get("ids") is not None:
+            keys = list(dict.fromkeys(target["ids"]))
+            summary["chunks"] = await property_job.write_targets(self._store, job_id, keys)
+            stored, total, cursor = {"kind": "ids", "count": len(keys)}, len(keys), "apply:0"
+        else:
+            stored = {"kind": "predicate", "viewId": target["viewId"], "predicate": target["predicate"],
+                      "scopeMode": target["scopeMode"]}
+            total, cursor = 0, None
+        async with db.graphver_session() as s:
+            await self._svc._lock_lifecycle(s, graph_id, shared=True)
+            await self._lock_in_workspace(s, graph_id, workspace_id)
+            await self._svc._assert_writable(s, graph_id)
+            branch = await self._svc._lock_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise MainWriteForbidden()
+            again = await self._property_job_of(s, graph_id=graph_id, branch_id=branch_id, actor=actor, key=key)
+            if again is not None:                    # the same request, sent twice at once
+                return {"job_id": again, "created": False}
+            self._svc._require_open(branch)
+            await self._svc._require_edit(s, branch, actor, ())
+            active = await self._svc._active_draft_job(s, branch_id)
+            if active is not None:
+                what = "Another bulk property edit" if active.job_type == "property" else "An import"
+                raise JobActive(active.id, f"{what} is running on this draft (job {active.id}). "
+                                           "Start this one once it has finished.")
+            s.add(JobORM(
+                id=job_id, job_type="property", graph_id=graph_id, workspace_id=workspace_id,
+                data_source_id=data_source_id, branch_id=branch_id, scope_view_id=target.get("viewId"),
+                field_scope={"actor": actor, "key": key, "op": op, "target": stored, "message": message},
+                last_cursor=cursor, total=total, summary=summary,
+                # Where its targets are: kept from the object store's sweep while it may run.
+                payload_uri=property_job.targets_key(job_id, 0),
+                status="pending", current_phase=QUEUED, updated_at=_now(), provenance=provenance.snapshot()))
+        return {"job_id": job_id, "created": True}
+
+    async def run_property(self, job_id: str, lease: Optional[Lease] = None) -> Dict[str, Any]:
+        """Run a bulk property job on ``lease`` (taken here without one), from its cursor."""
+        lease = lease or await lease_job(job_id)
+        worker = PropertyJobWorker(self._svc, self._store, targets=self._property_targets,
+                                   write_context=self._property_write_context)
+        return await worker.run(job_id, lease=lease)
+
+    async def run_property_safe(self, job_id: str, lease: Lease) -> None:
+        await self._run_safe(job_id, lease, self.run_property)
+
+    async def cancel_property_job(self, job_id: str, *, actor: str) -> bool:
+        """Cancel a bulk property job that hasn't ended. A queued one never starts; a running one
+        stops at its next window's checkpoint, the windows it wrote kept on the draft (its summary
+        says it was cancelled, and what they wrote). False when it had already ended."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id, with_for_update=True)
+            if row is None or row.job_type != "property":
+                raise ValueError("property job not found")
+            if row.status not in ("pending", "running"):
+                return False
+            summary = row.summary if isinstance(row.summary, dict) else {}
+            row.summary = {**summary, "cancelled": True, "cancelledBy": actor}
+            row.status = "cancelled"
+            row.completed_at = row.updated_at = _now()
+        return True
+
+    async def get_property_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """A bulk property job as the client follows it (camelCase), or None. READ-ONLY."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+        if row is None or row.job_type != "property":
+            return None
+        fields = row.field_scope if isinstance(row.field_scope, dict) else {}
+        summary = row.summary if isinstance(row.summary, dict) else {}
+        error = None
+        if row.status == "failed":
+            failure = summary.get("failure") if isinstance(summary.get("failure"), dict) else {}
+            error = {"code": failure.get("code") or "failed",
+                     "message": row.error_message or failure.get("reason") or "The job failed."}
+        shown = {k: int(summary.get(k) or 0) for k in property_job.COUNTERS}
+        shown.update(refused=summary.get("refused") or {"count": 0, "byReason": {}, "examples": []},
+                     commits=int(summary.get("commits") or 0), firstCommitId=summary.get("firstCommitId"),
+                     lastCommitId=summary.get("lastCommitId"))
+        if summary.get("cancelled"):
+            shown["cancelled"] = True
+        done = row.status == "completed"
+        progress = 1.0 if done else min(1.0, (row.processed or 0) / row.total) if row.total else 0.0
+        return {
+            "jobId": row.id, "graphId": row.graph_id, "branchId": row.branch_id, "status": row.status,
+            "phase": row.current_phase, "progress": round(progress, 4), "processed": row.processed or 0,
+            "total": row.total or 0, "error": error, "summary": shown, "op": fields.get("op"),
+            "target": fields.get("target"), "message": fields.get("message"),
+            "createdBy": fields.get("actor"), "createdAt": row.created_at, "completedAt": row.completed_at,
+            # Running, but its worker has not beaten in a takeover's time: about to be resumed.
+            "stale": row.status == "running" and _silent_secs(row) > config.INGEST_STALE_SECS,
+        }
+
+    async def property_refused_rows(self, job_id: str):
+        """A bulk property job's refused rows, as CSV bytes (``property_job.refused_csv``)."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+        chunks = int(((row.summary if row is not None and isinstance(row.summary, dict) else {})
+                      .get("chunks")) or 0)
+        return property_job.refused_csv(self._store, job_id, chunks)
+
+    async def active_draft_job(self, branch_id: str) -> Optional[str]:
+        """The import or bulk property job pending or running on the draft, if any."""
+        async with db.graphver_session() as s:
+            active = await self._svc._active_draft_job(s, branch_id)
+        return active.id if active is not None else None
+
+    async def preview_property_counts(self, *, graph_id: str, branch_id: str, op: Dict[str, Any],
+                                      ids: List[str]) -> Dict[str, Any]:
+        """What an id target finds in the draft, as it stands: the entities it names
+        (``matched``), how many hold ``op``'s key and its ``to`` (null for an op without one), and
+        the ids that name nothing there — deleted in the draft, or never in it (``missing``)."""
+        snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
+        found, deleted, missing = await property_job.read_targets(snap, ids)
+        props = {eid: p for eid, p, _urn in found.values()}
+        to = op.get("to") if op.get("kind") in ("rename", "copy") else None
+        return {"matched": len(props), "haveKey": sum(op["key"] in p for p in props.values()),
+                "haveTo": sum(to in p for p in props.values()) if to else None,
+                "missing": len(deleted) + len(missing)}
 
     async def start_publish(self, job_id: str) -> str:
         """Queue the publish job (see :meth:`_start`). Returns the status to report."""

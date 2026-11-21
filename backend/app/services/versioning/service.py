@@ -9899,19 +9899,26 @@ class GraphVersioningService:
             raise BranchNotOpen(branch.id, branch.status)
 
     @staticmethod
-    async def _require_no_import(s, branch_id: str) -> None:
-        """A draft is not published while an import is pending or running on it
-        (:class:`JobActive`): main would get the windows it has written so far, and the import
-        fail on the closed draft. Under the draft's lock, so no import window lands in between.
-        A pending one the transfer lane's reaper will fail (:func:`never_runs`) does not count."""
-        active = await s.scalar(select(JobORM.id).where(
-            JobORM.branch_id == branch_id, JobORM.job_type == "ingest",
+    async def _active_draft_job(s, branch_id: str):
+        """The import or bulk property job pending or running on draft ``branch_id``, as a row of
+        ``(id, job_type)``, or None. A pending one the transfer lane's reaper will fail
+        (:func:`never_runs`) does not count."""
+        return (await s.execute(select(JobORM.id, JobORM.job_type).where(
+            JobORM.branch_id == branch_id, JobORM.job_type.in_(("ingest", "property")),
             JobORM.status.in_(("pending", "running")),
             # IS NOT TRUE: a phase that is NULL makes the queued rule NULL, not false.
-            and_(JobORM.status == "pending", or_(*never_runs())).is_not(True)).limit(1))
+            and_(JobORM.status == "pending", or_(*never_runs())).is_not(True)).limit(1))).first()
+
+    @staticmethod
+    async def _require_no_import(s, branch_id: str) -> None:
+        """A draft is not published while an import or a bulk property job is pending or running
+        on it (:class:`JobActive`): main would get the windows it has written so far, and the job
+        fail on the closed draft. Under the draft's lock, so no window lands in between."""
+        active = await GraphVersioningService._active_draft_job(s, branch_id)
         if active is not None:
-            raise JobActive(active, f"An import is still running on this draft (job {active}). "
-                                    "Publish once it has finished.")
+            what = "A bulk property edit" if active.job_type == "property" else "An import"
+            raise JobActive(active.id, f"{what} is still running on this draft (job {active.id}). "
+                                       "Publish once it has finished.")
 
     async def _require_edit(self, s, branch: BranchORM, actor: str, groups: Sequence[str], *,
                             can_manage: bool = True) -> None:

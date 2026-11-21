@@ -1214,11 +1214,15 @@ class AdvancedSearchService:
         *,
         run_context: Optional[SearchRunContext] = None,
         principal: str = "",
+        signing_key: Optional[str] = None,
     ) -> SearchExportResult:
         """Every entity in the view matching the request's predicate, written
         to a file — exactly, however many, in the view's scope resolved here
         as a search's is. A large export takes more than one request; the
-        answer that completes it carries a download token for ``principal``."""
+        answer that completes it carries a download token for ``principal``,
+        signed with the API's key — or with ``signing_key``, by a caller that
+        reads the export itself (a bulk property job, on a worker that holds
+        no API key), so the token vouches to that caller alone."""
         request = request.model_copy(update={"predicate": unwrap_edges(request.predicate)})
         leaves = _validate_predicate(request.predicate, path="$.predicate")
         max_leaves = get_deep_search_settings().max_leaf_count
@@ -1247,7 +1251,8 @@ class AdvancedSearchService:
         if result.status == "complete" and result.session_id:
             from backend.auth_service.core import config as auth_config
             result.download_token = mint_download_token(
-                result.session_id, eff.scope_hash, principal, auth_config.JWT_SECRET_KEY)
+                result.session_id, eff.scope_hash, principal,
+                signing_key or auth_config.JWT_SECRET_KEY)
         return result
 
     async def open_export(self, session_id: str, scope_hash: str):
