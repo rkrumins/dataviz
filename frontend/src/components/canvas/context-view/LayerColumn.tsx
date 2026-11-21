@@ -1337,6 +1337,17 @@ export const LayerColumn = React.memo(function LayerColumn({
         return
       }
     }
+    // Cmd/Ctrl+A selects every entity the column shows, in one write — the
+    // selection bar then offers to compare and edit them. Only on the column itself.
+    if ((e.key === 'a' || e.key === 'A') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.target === e.currentTarget) {
+      const ids = navigableItems.filter((item) => !item.node.isLogical).map((item) => item.node.id)
+      if (ids.length > 0) {
+        e.preventDefault()
+        e.stopPropagation()
+        onSelectRange(ids)
+      }
+      return
+    }
     // Space or Cmd/Ctrl+Enter toggles the focused row in the selection — the
     // keyboard's Cmd-click. Only on the column itself: typed into a row's
     // search box or rename field, or on a focused button, the key is theirs.
@@ -1394,7 +1405,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         setFocusIndex(count - 1)
         break
     }
-  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, selectedNodeId, reorderEnabled, onReorderNudge])
+  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, onSelectRange, selectedNodeId, reorderEnabled, onReorderNudge])
 
   // After a keyboard reorder, re-point focus at the moved node's new row
   // (its index shifts by the displaced neighbor's visible subtree size).

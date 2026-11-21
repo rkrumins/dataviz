@@ -61,7 +61,7 @@ export interface SelectionBarProps {
    *  open them; with it, a selection of one gets the bar. */
   onOpenDetails?: () => void
   /** Read — and, in a draft, edit — what several held entities share
-   *  (BulkEditPanel). Absent, not offered. */
+   *  (the entity drawer, comparing them). Absent, not offered. */
   onOpenShared?: () => void
   /** The shared panel edits: the action reads "Edit N…", otherwise "Details". */
   sharedEditable?: boolean

@@ -1,7 +1,7 @@
 /**
  * Several entities held on the canvas: the selection bar opens what they share
- * (outside a draft, Details — read-only), in the right rail, in place of an
- * entity's own details. Opening one entity's details takes the rail back.
+ * (outside a draft, Details — read-only) in the entity drawer, which compares
+ * them. Opening one entity's details turns the same drawer to that entity.
  */
 import { describe, it, expect } from 'vitest'
 import { act, fireEvent, screen, waitFor } from '@testing-library/react'
@@ -23,10 +23,12 @@ describe('several entities, read as one', () => {
     await h.settle()
     expect(screen.getByRole('heading', { name: '2 entities' })).toBeInTheDocument()
     expect(useCanvasStore.getState().drawerNodeId).toBeNull()
+    expect(useCanvasStore.getState().drawerNodeIds).toEqual(['INTERMEDIATE_T2', 'REPORTING'])
 
     act(() => useCanvasStore.getState().openNodeDrawer('tableau'))
     await h.settle()
-    // It leaves through the rail's exit animation.
+    // The same drawer, now on the one entity.
     await waitFor(() => expect(screen.queryByRole('heading', { name: '2 entities' })).toBeNull(), { timeout: 3000 })
+    expect(useCanvasStore.getState().drawerNodeIds).toBeNull()
   })
 })

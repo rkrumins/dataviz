@@ -142,29 +142,56 @@ to confirm.
 ## Change many entities at once
 
 1. Select the entities: hold `⌘` (Mac) or `Ctrl` (Windows) and click each one,
-   or Shift-click to add a range.
-2. In the bar at the bottom of the canvas, choose **Edit N…**. A panel opens on
-   the right with how many you hold, of which types, and what they share:
+   or Shift-click to add a range. With a layer column focused, `⌘A` / `Ctrl-A`
+   selects every entity it shows.
+2. In the bar at the bottom of the canvas, choose **Edit N…**. The entity
+   drawer opens on all of them: how many you hold, of which types, who they are
+   (**and N more** lists them — show one on the canvas, or open it), and for
+   each property how they hold it:
 
    | It says | Meaning |
    | --- | --- |
-   | **Same** | Every one has this value — it's in the box |
-   | **Mixed · 7 of 12** | They differ, or only 7 of the 12 have it — the box is empty |
-   | **None set** | None of them has it |
+   | **Same** | Every one has this value — it is shown |
+   | **Differs · 3 values** | Every one has it, not all alike |
+   | **On 7 of 12** | Only 7 of the 12 have it |
+   | **Not set** | None of them has it |
 
-3. Change what should be the same for all of them:
-   - type a **Description**, or a property's value, to give all of them that
-     value (**Leave each as it is** takes a description back);
-   - the bin beside a property removes it from all of them;
-   - **Add a property to all** adds a new one.
-4. Choose **Stage for N**. Each entity's change is staged on its own, as if you
-   had edited them one by one — an entity you had already changed keeps that
-   change too, and one the edit wouldn't change isn't touched. It is one step
-   however many entities you hold: **Undo** on the message (or the toolbar's
-   **Undo**) takes the whole edit back.
+   Open a property (click its name, or `→`) to see every value it holds, how
+   many hold each, and who — and which ones hold none. **All · Same · Differs ·
+   Partial** narrows the list; **Find a property** searches it. `J` / `K` (or
+   `↑` / `↓`) move between properties.
+3. Change what should be the same for all of them. Each change waits until you
+   stage it, and ↺ takes one back:
+   - click a value (or a description) and type, to give all of them that value
+     — or **Apply to all** beside one of the values a property already holds;
+   - **Fill where missing** (✎) gives a value only to the ones without one;
+   - **Rename** and **Copy to a new property** move a property's values to a new
+     name. An entity that already holds that name is left as it is, unless you
+     tick **replace**;
+   - the bin removes a property from all of them;
+   - **Add to all** adds a new property to every one.
 
-Outside a draft the same bar says **Details**: the panel shows what they share,
-read-only, with **Edit in a draft**. Choosing one entity's own details closes it.
+   A field of the entity type that no two entities may share (a unique field)
+   can't be given one value for all — set it one entity at a time.
+4. Choose **Stage for N** (or `⌘S` / `Ctrl-S`). The footer first says what it
+   will do — how many entities change, and how many values are replaced or left
+   as they are. Each entity's change is staged on its own, as if you had edited
+   them one by one — an entity you had already changed keeps that change too,
+   and one the edit wouldn't change isn't touched. It is one step however many
+   entities you hold: **Undo** on the message (or the toolbar's **Undo**) takes
+   the whole edit back. The drawer stays open on them, the properties you
+   changed marked **Staged**.
+
+The drawer keeps the entities it was opened on: clicking around the canvas
+never changes what an edit would touch. When the selection has moved on, it
+offers **Compare those N**; with one entity open and several selected, the
+drawer offers **Compare them**. Changes not yet staged hold any move of the
+drawer, like an edit to one entity does (**Unsaved changes**). Up to 10,000
+entities are edited here at once; more are compared.
+
+Outside a draft the same bar says **Details**: the drawer compares them,
+read-only, with **Edit in a draft**. Choosing one entity's own details turns
+the drawer to it — **Back** returns to the comparison.
 
 ## Change a relationship
 

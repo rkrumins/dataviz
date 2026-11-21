@@ -104,7 +104,11 @@ export type DrawerEdgeTarget =
       members: EdgeMemberRef[]
     }
 
-export type DrawerEntry = { kind: 'node'; id: string } | { kind: 'edge'; target: DrawerEdgeTarget }
+export type DrawerEntry =
+  | { kind: 'node'; id: string }
+  | { kind: 'edge'; target: DrawerEdgeTarget }
+  /** Several entities, compared and edited as one — a snapshot of the ids it was opened on. */
+  | { kind: 'nodes'; ids: readonly string[] }
 
 /**
  * Where one parent's child pager stands: `offset` is where the next page starts
@@ -309,6 +313,14 @@ interface CanvasState {
   // don't close it; only an explicit close (X) does.
   drawerNodeId: string | null
   openNodeDrawer: (id: string) => void
+  /**
+   * The entities the drawer compares instead of one (exclusive with `drawerNodeId` and
+   * `drawerEdge`). A SNAPSHOT of the ids it was opened on: clicking around the canvas while it is
+   * open never changes what an edit made there would touch.
+   */
+  drawerNodeIds: readonly string[] | null
+  /** Open the drawer on several entities; one opens the plain drawer on it. A move like any other. */
+  openNodesDrawer: (ids: readonly string[]) => void
   /** Closes THE drawer — whichever of node or relationship it shows — and its trail. */
   closeNodeDrawer: () => void
   /**
@@ -698,8 +710,8 @@ export const useCanvasStore = create<CanvasState>()(
         // selection, the way an inspector does. Only a click that moves an
         // open drawer is held by the unsaved-edit gate.
         const opens = !multi && !id.startsWith('logical:')
-          && (opensDetailsOnSelect() || !!s.drawerNodeId || !!s.drawerEdge)
-        const swapsDrawer = opens && (s.drawerNodeId !== id || !!s.drawerEdge)
+          && (opensDetailsOnSelect() || !!s.drawerNodeId || !!s.drawerEdge || !!s.drawerNodeIds)
+        const swapsDrawer = opens && (s.drawerNodeId !== id || !!s.drawerEdge || !!s.drawerNodeIds)
         if (holdDrawerMove(swapsDrawer, () => get().selectNode(id, multi))) return
         set((state) => ({
         selectedNodeIds: multi
@@ -726,12 +738,12 @@ export const useCanvasStore = create<CanvasState>()(
         // not a move; nor is a click in a view whose details open on demand
         // while they are closed.
         ...(opens
-          ? { drawerNodeId: id, drawerEdge: null, drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }) }
+          ? { drawerNodeId: id, drawerNodeIds: null, drawerEdge: null, drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }) }
           : {}),
         }))
       },
       selectEdge: (id, multi = false) => {
-        if (holdDrawerMove(!!get().drawerNodeId, () => get().selectEdge(id, multi))) return
+        if (holdDrawerMove(!!get().drawerNodeId || !!get().drawerNodeIds, () => get().selectEdge(id, multi))) return
         set((state) => ({
         selectedEdgeIds: multi
           ? state.selectedEdgeIds.includes(id)
@@ -742,13 +754,14 @@ export const useCanvasStore = create<CanvasState>()(
         // Mutual exclusion: selecting an edge swaps the right rail to the
         // edge drawer.
         drawerNodeId: null,
+        drawerNodeIds: null,
         }))
       },
       setSelection: (ids) => {
         const next = [...new Set(ids.filter(isSelectableNode))]
         const s = get()
-        const opens = next.length === 1 && (opensDetailsOnSelect() || !!s.drawerNodeId || !!s.drawerEdge)
-        const swapsDrawer = opens && (s.drawerNodeId !== next[0] || !!s.drawerEdge)
+        const opens = next.length === 1 && (opensDetailsOnSelect() || !!s.drawerNodeId || !!s.drawerEdge || !!s.drawerNodeIds)
+        const swapsDrawer = opens && (s.drawerNodeId !== next[0] || !!s.drawerEdge || !!s.drawerNodeIds)
         if (holdDrawerMove(swapsDrawer, () => get().setSelection(ids))) return
         set(() => ({
           selectedNodeIds: next,
@@ -758,7 +771,7 @@ export const useCanvasStore = create<CanvasState>()(
           // drawer (where clicks do, or it is open already); a set of several
           // must not, because the drawer shows ONE entity and a selection of
           // five is not one entity.
-          ...(opens ? { drawerNodeId: next[0], drawerEdge: null } : {}),
+          ...(opens ? { drawerNodeId: next[0], drawerNodeIds: null, drawerEdge: null } : {}),
         }))
       },
       multiSelectArmed: false,
@@ -768,25 +781,46 @@ export const useCanvasStore = create<CanvasState>()(
 
       // Sticky entity drawer
       drawerNodeId: null,
+      drawerNodeIds: null,
       drawerEdge: null,
       drawerEdgeEditRequest: false,
       drawerHistory: { entries: [], cursor: -1 },
       openNodeDrawer: (id) => {
         const s = get()
-        if (holdDrawerMove(s.drawerNodeId !== id || !!s.drawerEdge, () => get().openNodeDrawer(id))) return
+        if (holdDrawerMove(s.drawerNodeId !== id || !!s.drawerEdge || !!s.drawerNodeIds, () => get().openNodeDrawer(id))) return
         set((state) => ({
           drawerNodeId: id,
+          drawerNodeIds: null,
           drawerEdge: null,
           drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }),
         }))
       },
+      openNodesDrawer: (ids) => {
+        const next = [...new Set(ids.filter(isSelectableNode))]
+        if (next.length === 0) return
+        if (next.length === 1) {
+          get().openNodeDrawer(next[0]!)
+          return
+        }
+        const s = get()
+        const same = !!s.drawerNodeIds && sameIds(s.drawerNodeIds, next)
+        if (holdDrawerMove(!same, () => get().openNodesDrawer(next))) return
+        set((state) => ({
+          drawerNodeIds: next,
+          drawerNodeId: null,
+          drawerEdge: null,
+          drawerEdgeEditRequest: false,
+          drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'nodes', ids: next }),
+        }))
+      },
       openEdgeDrawer: (target, opts) => {
         const s = get()
-        const same = !s.drawerNodeId && !!s.drawerEdge && sameDrawerEntry({ kind: 'edge', target: s.drawerEdge }, { kind: 'edge', target })
+        const same = !s.drawerNodeId && !s.drawerNodeIds && !!s.drawerEdge && sameDrawerEntry({ kind: 'edge', target: s.drawerEdge }, { kind: 'edge', target })
         if (holdDrawerMove(!same, () => get().openEdgeDrawer(target, opts))) return
         set((state) => ({
           drawerEdge: target,
           drawerNodeId: null,
+          drawerNodeIds: null,
           drawerEdgeEditRequest: opts?.edit === true,
           drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'edge', target }),
         }))
@@ -798,9 +832,10 @@ export const useCanvasStore = create<CanvasState>()(
       },
       closeNodeDrawer: () => {
         const s = get()
-        if (holdDrawerMove(!!s.drawerNodeId || !!s.drawerEdge, () => get().closeNodeDrawer())) return
+        if (holdDrawerMove(!!s.drawerNodeId || !!s.drawerEdge || !!s.drawerNodeIds, () => get().closeNodeDrawer())) return
         set({
           drawerNodeId: null,
+          drawerNodeIds: null,
           drawerEdge: null,
           drawerEdgeEditRequest: false,
           drawerHistory: { entries: [], cursor: -1 },
@@ -854,6 +889,7 @@ export const useCanvasStore = create<CanvasState>()(
         drawerDirty: false,
         pendingDrawerMove: null,
         drawerNodeId: null,
+        drawerNodeIds: null,
         drawerEdge: null,
         drawerEdgeEditRequest: false,
         drawerHistory: { entries: [], cursor: -1 },
@@ -1143,17 +1179,22 @@ function pushDrawerHistory(
   return { entries, cursor: entries.length - 1 }
 }
 
-const drawerEntryKey = (e: DrawerEntry): string =>
-  e.kind === 'node' ? `node:${e.id}` : `edge:${e.target.kind}:${e.target.id}`
+const sameIds = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((id, i) => id === b[i])
 
-const sameDrawerEntry = (a: DrawerEntry | undefined, b: DrawerEntry): boolean =>
-  !!a && drawerEntryKey(a) === drawerEntryKey(b)
+const sameDrawerEntry = (a: DrawerEntry | undefined, b: DrawerEntry): boolean => {
+  if (!a || a.kind !== b.kind) return false
+  if (a.kind === 'node') return a.id === (b as typeof a).id
+  if (a.kind === 'nodes') return sameIds(a.ids, (b as typeof a).ids)
+  const t = (b as typeof a).target
+  return a.target.kind === t.kind && a.target.id === t.id
+}
 
-/** What the drawer shows for a trail entry — a node or a relationship, never both. */
-function showDrawerEntry(e: DrawerEntry): Pick<CanvasState, 'drawerNodeId' | 'drawerEdge' | 'drawerEdgeEditRequest'> {
-  return e.kind === 'node'
-    ? { drawerNodeId: e.id, drawerEdge: null, drawerEdgeEditRequest: false }
-    : { drawerNodeId: null, drawerEdge: e.target, drawerEdgeEditRequest: false }
+/** What the drawer shows for a trail entry — one entity, several, or a relationship; only one. */
+function showDrawerEntry(e: DrawerEntry): Pick<CanvasState, 'drawerNodeId' | 'drawerNodeIds' | 'drawerEdge' | 'drawerEdgeEditRequest'> {
+  if (e.kind === 'node') return { drawerNodeId: e.id, drawerNodeIds: null, drawerEdge: null, drawerEdgeEditRequest: false }
+  if (e.kind === 'nodes') return { drawerNodeId: null, drawerNodeIds: e.ids, drawerEdge: null, drawerEdgeEditRequest: false }
+  return { drawerNodeId: null, drawerNodeIds: null, drawerEdge: e.target, drawerEdgeEditRequest: false }
 }
 
 /** A logical grouping (`logical:<id>`) is a visual container the view config

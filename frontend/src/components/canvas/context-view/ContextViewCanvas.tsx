@@ -78,7 +78,6 @@ import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { SelectionBar } from './SelectionBar'
-import { BulkEditPanel } from './BulkEditPanel'
 import { LayerSettingsPanel } from './LayerSettingsPanel'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { ChangeNavigator } from './ChangeNavigator'
@@ -499,8 +498,8 @@ function paintedRow(nodeId: string): HTMLElement | null {
 }
 
 
-/** Give the right rail to a panel of the canvas's own (several entities, a
- *  layer's settings) in place of the drawers there — once an unsaved edit in
+/** Give the right rail to a panel of the canvas's own (a layer's settings) in
+ *  place of the drawers there — once an unsaved edit in
  *  one of them is settled, as any move of the drawer waits for. */
 function takeRail(open: () => void) {
   useCanvasStore.getState().requestDrawerMove(() => {
@@ -535,6 +534,9 @@ export function ContextViewCanvas({
   // Set form for the columns, which ask "is this row selected?" per row.
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  // The entity drawer is open on one entity, or on several compared as one.
+  const drawerNodeIds = useCanvasStore((s) => s.drawerNodeIds)
+  const entityDrawerOpen = !!drawerNodeId || !!drawerNodeIds
   const drawerEdge = useCanvasStore((s) => s.drawerEdge)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
@@ -943,13 +945,13 @@ export function ContextViewCanvas({
     },
     onCloseEdgePanel: () => {
       // The Explorer is only on screen when neither drawer is.
-      if (isEdgePanelOpen && !drawerNodeId && !drawerEdge) { closeEdgePanel(); return true }
+      if (isEdgePanelOpen && !entityDrawerOpen && !drawerEdge) { closeEdgePanel(); return true }
       return false
     },
     onCloseEntityDrawer: () => {
       // Held while a save or a publish from it runs.
       if (isStagedPanelOpen) { if (useStagedChangesStore.getState().applyStatus !== 'applying') closeStagedChangesPanel(); return true }
-      if (drawerNodeId || drawerEdge) {
+      if (entityDrawerOpen || drawerEdge) {
         // One move: with unsaved edits in the drawer, neither happens until the reader decides.
         useCanvasStore.getState().requestDrawerMove(() => { closeNodeDrawer(); clearSelection() })
         return true
@@ -2187,7 +2189,7 @@ export function ContextViewCanvas({
     const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
     const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
     return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
-  }, [drawerNodeId, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+  }, [drawerNodeId, drawerNodeIds, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
 
   // A relationship the drawer shows was resolved from THIS view's lines. Leaving
   // the view (or this canvas) closes it, trail and all, rather than carrying a
@@ -2432,21 +2434,16 @@ export function ContextViewCanvas({
   // Where a click doesn't open an entity's details, the selection bar offers
   // them for one held entity while the drawer is closed.
   const opensDetailsOnSelect = useOpensDetailsOnSelect()
-  const offerDetails = !opensDetailsOnSelect && bulkSelection.length === 1 && !drawerNodeId && !drawerEdge
-  // Several held entities, read — and in a draft edited — as one (BulkEditPanel),
-  // as selected when it opened. An entity's or a relationship's own details take
-  // the rail back.
-  const [bulkEditFor, setBulkEditFor] = useState<string[] | null>(null)
-  // Adjusted while rendering, not in an effect: the two never paint together.
-  if (bulkEditFor && (drawerNodeId || drawerEdge)) setBulkEditFor(null)
-  // One layer's settings (LayerSettingsPanel), in the same rail.
+  const offerDetails = !opensDetailsOnSelect && bulkSelection.length === 1 && !entityDrawerOpen && !drawerEdge
+  // One layer's settings (LayerSettingsPanel), in the same rail. An entity's or a
+  // relationship's own details take the rail back — adjusted while rendering, not
+  // in an effect: the two never paint together.
   const [layerSettingsFor, setLayerSettingsFor] = useState<string | null>(null)
-  if (layerSettingsFor && (drawerNodeId || drawerEdge || bulkEditFor)) setLayerSettingsFor(null)
+  if (layerSettingsFor && (entityDrawerOpen || drawerEdge)) setLayerSettingsFor(null)
 
-  const openShared = () => {
-    const ids = [...bulkSelection]
-    takeRail(() => setBulkEditFor(ids))
-  }
+  // Several held entities, read — and in a draft edited — as one, in the entity
+  // drawer: as selected when it opened.
+  const openShared = () => useCanvasStore.getState().openNodesDrawer(bulkSelection)
   const bulkSelectionCount = bulkSelection.length
   // The server refuses trace requests when this is off; the header hides its
   // Trace and Focus for it, and the SelectionBar follows suit.
@@ -6032,7 +6029,7 @@ export function ContextViewCanvas({
         : undefined,
       onDelete: () => deleteLayerWithUndo(layer.id),
       onStartEditing: !isDraft && canEnterEdit ? handleEnterEdit : undefined,
-      onOpenSettings: () => takeRail(() => { setBulkEditFor(null); setLayerSettingsFor(layer.id) }),
+      onOpenSettings: () => takeRail(() => setLayerSettingsFor(layer.id)),
       // The Business view's header keeps to the essentials; its own actions are here.
       ...(personaMode !== 'technical' && {
         onAddEntity: canEditGraph && !serverPlaced ? () => openBuilderForLayer(layer.id) : undefined,
@@ -6050,7 +6047,7 @@ export function ContextViewCanvas({
   }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
     canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, personaMode, canEditGraph, subsetView,
-    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setBulkEditFor, setLayerSettingsFor])
+    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setLayerSettingsFor])
 
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
@@ -8402,7 +8399,7 @@ export function ContextViewCanvas({
             }}
           />
         )}
-        {!builderOpen && !buildOpen && drawerNodeId && (
+        {!builderOpen && !buildOpen && entityDrawerOpen && (
           <EntityDrawer
             key="entity-drawer"
             // Edits are draft-only, and a trace is read-only for its whole life.
@@ -8419,7 +8416,7 @@ export function ContextViewCanvas({
             onLocateMany={drawerLocateMany}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && drawerEdge && (
+        {!builderOpen && !buildOpen && !entityDrawerOpen && drawerEdge && (
           <RelationshipDrawer
             key="relationship-drawer"
             // Edits are draft-only, and a trace is read-only for its whole life.
@@ -8433,7 +8430,7 @@ export function ContextViewCanvas({
             onStartEditing={drawerStartEditing}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && !bulkEditFor && layerSettingsFor
+        {!builderOpen && !buildOpen && !entityDrawerOpen && !drawerEdge && layerSettingsFor
           && sortedLayers.some((l) => l.id === layerSettingsFor) && (
           <LayerSettingsPanel
             // Afresh when a draft starts or ends: its fields are that layout's.
@@ -8447,17 +8444,7 @@ export function ContextViewCanvas({
             onClose={() => setLayerSettingsFor(null)}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && bulkEditFor && (
-          <BulkEditPanel
-            key="bulk-edit-panel"
-            nodeIds={bulkEditFor}
-            // Edits are draft-only, and a trace is read-only for its whole life.
-            canEdit={canvasWritable && !traceActive}
-            onStartEditing={drawerStartEditing}
-            onClose={() => setBulkEditFor(null)}
-          />
-        )}
-        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && !bulkEditFor && !layerSettingsFor && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !entityDrawerOpen && !drawerEdge && !layerSettingsFor && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}

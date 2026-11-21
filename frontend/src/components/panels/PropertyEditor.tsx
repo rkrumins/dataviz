@@ -1173,7 +1173,7 @@ function FieldTypeChip({
 // PropertyComposer — guided add: key + type + value in one step
 // ============================================
 
-function PropertyComposer({
+export function PropertyComposer({
   onAdd,
   onCancel,
   existingKeys,
