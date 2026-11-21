@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   EDGE_RESERVED_KEYS, MAX_IDS, applyLabel, impactOf, isConnectionsPredicate, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
-  reviewCounts, searchPreset, targetLabel, targetOf, tooManyIds, type OpDraft,
+  reviewCounts, scopedTargetLabel, searchPreset, targetLabel, targetOf, tooManyIds, type OpDraft,
 } from '../opModel'
 import { cleanValue, convertValue, mergeMap, normalizeText, replaceText, similarGroups } from '../cleanup'
 
@@ -59,6 +59,15 @@ describe('targets', () => {
   it('reads as a sentence', () => {
     expect(targetLabel({ kind: 'children', urns: ['urn:a'], label: 'Orders' })).toBe('the children of Orders')
     expect(targetLabel({ kind: 'selection', ids: ['a', 'b', 'c'] })).toBe('the 3 selected')
+    // With its scope: the whole view across the data source is the data source; others say it.
+    expect(scopedTargetLabel({ kind: 'view' }, 'data_source')).toBe('every entity in the data source')
+    expect(scopedTargetLabel({ kind: 'view' }, 'view')).toBe('every entity in this view')
+    expect(scopedTargetLabel({ kind: 'hasKey', key: 'owner' }, 'data_source')).toBe('every entity with owner, across the whole data source')
+    expect(scopedTargetLabel({ kind: 'search', predicate: { kind: 'all' } as never, scopeMode: 'data_source', label: 'the search’s matches' }, 'data_source'))
+      .toBe('the search’s matches, across the whole data source')
+    // Picked by id, or a layer (always in the view): the scope doesn't apply.
+    expect(scopedTargetLabel({ kind: 'selection', ids: ['a'] }, 'data_source')).toBe('the 1 selected')
+    expect(scopedTargetLabel({ kind: 'layer', layerAssignment: 'L1', name: 'Gold' } as never, 'data_source')).toBe('the Gold layer')
   })
 })
 

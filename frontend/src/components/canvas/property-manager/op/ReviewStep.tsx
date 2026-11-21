@@ -15,7 +15,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import type { AffectedSample } from '@/services/propertyInsights'
 import type { PropertyJobPreview, PropertyOpKind } from '@/services/versioningApiService'
 import {
-  DRAFT_LARGE, OP_LABEL, isCleanup, jobOp, needsTo, needsValue, propertyJobLabel, targetLabel, type Impact, type OpDraft, type ScopeMode,
+  DRAFT_LARGE, OP_LABEL, isCleanup, jobOp, needsTo, needsValue, propertyJobLabel, scopedTargetLabel, type Impact, type OpDraft, type ScopeMode,
   type TargetPreset,
 } from './opModel'
 import { SaveForReuse } from './SaveForReuse'
@@ -96,7 +96,7 @@ export function ReviewStep({
             {needsValue(op.kind) && <> = <span className="font-mono">{String(op.value)}</span></>}
           </>
         )}
-        {' '}on {targetLabel(preset)}{preset.kind !== 'selection' && preset.kind !== 'relationships' && scopeMode === 'data_source' ? ', across the whole data source' : ''}.
+        {' '}on {scopedTargetLabel(preset, scopeMode)}.
       </p>
 
       {counts?.unavailable ? (

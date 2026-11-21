@@ -37,7 +37,7 @@ import { useBranchStore } from '@/store/branchStore'
 import { usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
 import {
   EDGE_RESERVED_KEYS, applyLabel, impactOf, isCleanup, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
-  reviewCounts, scopeFixedToView, targetLabel, targetOf, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset,
+  reviewCounts, scopeFixedToView, scopedTargetLabel, targetOf, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset,
 } from './opModel'
 import { SECONDARY_EDGE } from './styles'
 import { useReviewCounts } from './useReviewCounts'
@@ -84,7 +84,7 @@ export function PropertyOpDialog({
   // Opened with its property named (a fill from a refused publish, a catalog row): What focuses
   // what is still to give. And the target it was opened with, said on What when it has a name.
   const keySeeded = !!(seed.op?.key ?? seed.key)
-  const seededFor = seed.target && 'label' in seed.target && seed.target.label ? targetLabel(preset) : null
+  const seededFor = seed.target && 'label' in seed.target && seed.target.label ? scopedTargetLabel(preset, scopeMode) : null
   // A reusable change run as it was kept has nothing new to keep.
   const [openedAs] = useState(() => JSON.stringify([jobOp(op), preset, scopeMode]))
   const unchangedReusable = !!seed.reusable && JSON.stringify([jobOp(op), preset, scopeMode]) === openedAs
@@ -177,12 +177,12 @@ export function PropertyOpDialog({
       // The reason, when one is given, is the change's message: in the draft's history, and in the
       // audit of the publish that takes it to Published.
       const job = await createPropertyJob(graphWrite.wsId, graphWrite.graphId, graphWrite.branchId, jobOp(op), target, idempotencyKey,
-        reason.trim() || `Bulk property: ${propertyJobLabel(jobOp(op))} on ${targetLabel(preset)}`)
+        reason.trim() || `Bulk property: ${propertyJobLabel(jobOp(op))} on ${scopedTargetLabel(preset, effectiveScope)}`)
       usePropertyJobsStore.getState().track({
-        jobId: job.jobId, ...graphWrite, viewId, op: jobOp(op), targetLabel: targetLabel(preset),
+        jobId: job.jobId, ...graphWrite, viewId, op: jobOp(op), targetLabel: scopedTargetLabel(preset, effectiveScope),
         ...(edges ? { entityKind: 'edge' as const } : {}), startedAt: new Date().toISOString(), job,
       })
-      notify('success', `Applying ${propertyJobLabel(jobOp(op))} to ${targetLabel(preset)} on your draft — follow it in Property Manager.`)
+      notify('success', `Applying ${propertyJobLabel(jobOp(op))} to ${scopedTargetLabel(preset, effectiveScope)} on your draft — follow it in Property Manager.`)
       onClose()
     } catch (e) {
       setError(e instanceof Error && e.message ? e : new Error('The change could not be started. Try again.'))
@@ -324,7 +324,7 @@ export function PropertyOpDialog({
         <DangerConfirmDialog
           isOpen
           title={`${propertyJobLabel(jobOp(op))} on ${impact ? `${exact ? '' : 'about '}${impact.changes.toLocaleString()}` : 'an unknown number of'} ${edges ? 'relationships' : 'entities'}?`}
-          subtitle={`On ${targetLabel(preset)}${effectiveScope === 'data_source' ? ', across the whole data source' : ''} — in your draft, until it is published.`}
+          subtitle={`On ${scopedTargetLabel(preset, effectiveScope)} — in your draft, until it is published.`}
           confirmPhrase={op.key.trim()}
           confirmLabel="Apply"
           icon={Database}
