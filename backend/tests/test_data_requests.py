@@ -3,10 +3,11 @@
 These pin what makes a request safe: it is off until an administrator turns it on; only
 someone who can read the workspace may ask, and everyone who can read it sees its
 requests; what is asked for is checked (a title, a known system, active contacts, never
-the Playground); only the platform team — or the workspace's own data people — move a
-request on, and only the platform team declines; connecting it names a data source in
-that workspace or none; the requester withdraws only their own, while nobody has taken
-it; and everyone involved is told.
+the Playground); only the platform team or the workspace's admins move a request on —
+and a named Owner or Steward of the source it became may mark it connected — while the
+requester never answers their own, and only the platform team declines; connecting it
+names a data source in that workspace or none; the requester withdraws only their own,
+while nobody has taken it; and everyone involved is told.
 """
 from __future__ import annotations
 
@@ -19,7 +20,8 @@ from sqlalchemy import select
 
 from backend.app.auth.dependencies import get_current_user, get_optional_user, get_permission_claims
 from backend.app.db.models import (
-    DataRequestORM, NotificationORM, OutboxEventORM, RoleBindingORM, UserORM, WorkspaceDataSourceORM, WorkspaceORM,
+    DataRequestORM, DataSourceContactORM, GroupMemberORM, GroupORM, NotificationORM, OutboxEventORM, RoleBindingORM,
+    UserORM, WorkspaceDataSourceORM, WorkspaceORM,
 )
 from backend.app.services import data_requests as service
 from backend.app.services.feature_flags import feature_flags
@@ -37,9 +39,12 @@ def _user(uid: str) -> User:
                 role="user", status="active", created_at=T0, updated_at=T0)
 
 
-ADA, BEN, CAL, EVE, OLGA, WALT = (_user(u) for u in ("usr_ada", "usr_ben", "usr_cal", "usr_eve", "usr_olga", "usr_walt"))
-VIEWER = PermissionClaims(sid="s_v", ws_perms={WS: READ})                                       # Ada
+ADA, BEN, CAL, EVE, GIA, OLGA, WALT = (
+    _user(u) for u in ("usr_ada", "usr_ben", "usr_cal", "usr_eve", "usr_gia", "usr_olga", "usr_walt")
+)
+VIEWER = PermissionClaims(sid="s_v", ws_perms={WS: READ})                                       # Ada, Gia
 MANAGER = PermissionClaims(sid="s_m", ws_perms={WS: (*READ, "workspace:datasource:manage")})   # Ben
+ADMIN = PermissionClaims(sid="s_a", ws_perms={WS: (*READ, "workspace:datasource:manage", "workspace:admin")})  # Walt
 OUTSIDER = PermissionClaims(sid="s_x", ws_perms={"ws_other": READ})                            # Eve
 PLATFORM = PermissionClaims(sid="s_o", global_perms=("system:org-admin", "system:workspaces:create"), ws_perms={})
 
@@ -77,7 +82,7 @@ async def estate(db_session):
     """Finance (Walt its Workspace Admin) with a live source and a deleted one; another
     workspace with its own source; the Playground; Olga an Org Admin; Cal suspended."""
     for user, state in ((ADA, "active"), (BEN, "active"), (CAL, "suspended"), (EVE, "active"),
-                        (OLGA, "active"), (WALT, "active")):
+                        (GIA, "active"), (OLGA, "active"), (WALT, "active")):
         db_session.add(UserORM(id=user.id, email=user.email, password_hash="x", first_name=user.first_name,
                                last_name="T", status=state, created_at=T0, updated_at=T0))
     db_session.add_all([
@@ -96,6 +101,26 @@ async def estate(db_session):
                                label="Old", created_at=T0, updated_at=T0, deleted_at=T0),
         WorkspaceDataSourceORM(id="ds_other", workspace_id="ws_other", provider_id="prov", graph_name="ops",
                                label="Ops", created_at=T0, updated_at=T0),
+    ])
+    await db_session.commit()
+
+
+@pytest.fixture
+async def contacts(estate, db_session):
+    """General ledger names Ben its Steward and the Ledger team (Gia) its Owner; Finance's
+    second source, Payables, names nobody."""
+    db_session.add_all([
+        GroupORM(id="grp_ledger", name="Ledger team"),
+        WorkspaceDataSourceORM(id="ds_ap", workspace_id=WS, provider_id="prov", graph_name="ap",
+                               label="Payables", created_at=T0, updated_at=T0),
+    ])
+    await db_session.flush()
+    db_session.add_all([
+        GroupMemberORM(group_id="grp_ledger", user_id=GIA.id),
+        DataSourceContactORM(data_source_id="ds_fin", role="owner", subject_type="group",
+                             subject_id="grp_ledger", created_at=T0),
+        DataSourceContactORM(data_source_id="ds_fin", role="steward", subject_type="user",
+                             subject_id=BEN.id, created_at=T0),
     ])
     await db_session.commit()
 
@@ -249,31 +274,77 @@ async def test_the_requester_withdraws_their_own_while_nobody_has_taken_it(
 # ── Moving a request on ─────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_only_the_platform_team_or_the_workspaces_data_people_move_it_on(
+async def test_only_the_platform_team_or_the_workspaces_admins_move_it_on(
     test_client: AsyncClient, estate, db_session, flag_on,
 ):
-    req = await _submit(test_client)
-    refused = await _act(test_client, ADA, VIEWER, req["id"], "start")
-    assert refused.status_code == 403 and refused.json()["detail"]["type"] == "not_fulfiller"
-    assert (await _act(test_client, ADA, VIEWER, req["id"], "connect")).status_code == 403
+    req = await _submit(test_client, GIA, VIEWER)
+    for user, claims in ((ADA, VIEWER), (BEN, MANAGER)):   # a reader, and someone who manages its data
+        for verb in ("start", "connect"):
+            refused = await _act(test_client, user, claims, req["id"], verb)
+            assert refused.status_code == 403, (user.id, verb)
+            assert refused.json()["detail"]["type"] == "not_fulfiller"
 
-    started = await _act(test_client, BEN, MANAGER, req["id"], "start")
+    started = await _act(test_client, WALT, ADMIN, req["id"], "start")
     assert started.status_code == 200, started.text
     assert started.json()["status"] == "in_progress"
-    assert (started.json()["assigneeId"], started.json()["assigneeName"]) == (BEN.id, "Ben T")
-    assert (await _kinds(db_session, ADA.id)) == {"data_request.started": "/workspaces/ws_fin?tab=data&section=sources"}
+    assert (started.json()["assigneeId"], started.json()["assigneeName"]) == (WALT.id, "Walt T")
+    assert (await _kinds(db_session, GIA.id)) == {"data_request.started": "/workspaces/ws_fin?tab=data&section=sources"}
     again = await _act(test_client, OLGA, PLATFORM, req["id"], "start")
     assert again.status_code == 409 and again.json()["detail"]["type"] == "wrong_status"
 
     # Declining is the platform team's alone.
-    declined_by_ben = await _act(test_client, BEN, MANAGER, req["id"], "decline", {"reason": "No"})
-    assert declined_by_ben.status_code == 403
+    declined_by_walt = await _act(test_client, WALT, ADMIN, req["id"], "decline", {"reason": "No"})
+    assert declined_by_walt.status_code == 403
     declined = await _act(test_client, OLGA, PLATFORM, req["id"], "decline", {"reason": "  Covered by Finance Data  "})
     assert declined.status_code == 200, declined.text
     body = declined.json()
     assert (body["status"], body["resolvedBy"], body["resolutionNote"]) == ("declined", OLGA.id, "Covered by Finance Data")
-    assert "data_request.declined" in await _kinds(db_session, ADA.id)
+    assert "data_request.declined" in await _kinds(db_session, GIA.id)
     assert (await _act(test_client, OLGA, PLATFORM, req["id"], "connect")).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_the_requester_never_answers_their_own_request(test_client: AsyncClient, estate, flag_on):
+    walts = await _submit(test_client, WALT, ADMIN)
+    olgas = await _submit(test_client, OLGA, PLATFORM, title="Olga's own")
+    for user, claims, req in ((WALT, ADMIN, walts), (OLGA, PLATFORM, olgas)):
+        for verb, body in (("start", None), ("connect", {"dataSourceId": "ds_fin"}), ("decline", {"reason": "x"})):
+            r = await _act(test_client, user, claims, req["id"], verb, body)
+            assert r.status_code == 403, (user.id, verb)
+            assert r.json()["detail"]["type"] == "own_request"
+    # Somebody else can.
+    assert (await _act(test_client, OLGA, PLATFORM, walts["id"], "start")).status_code == 200
+    assert (await _act(test_client, WALT, ADMIN, olgas["id"], "connect")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_named_owner_or_steward_connects_it_as_their_own_source(
+    test_client: AsyncClient, contacts, flag_on,
+):
+    req = await _submit(test_client)
+    # Taking it on, or connecting it as another source or none, stays with the admins and the platform team.
+    for verb, body in (("start", None), ("connect", None), ("connect", {"dataSourceId": "ds_ap"})):
+        r = await _act(test_client, BEN, MANAGER, req["id"], verb, body)
+        assert r.status_code == 403 and r.json()["detail"]["type"] == "not_fulfiller", (verb, body)
+
+    connected = await _act(test_client, BEN, MANAGER, req["id"], "connect", {"dataSourceId": "ds_fin"})
+    assert connected.status_code == 200, connected.text
+    assert (connected.json()["status"], connected.json()["resolvedBy"]) == ("connected", BEN.id)
+
+    # The Owner here is a group: its members count too, with no other right in the workspace.
+    other = await _submit(test_client, title="More ledger")
+    by_gia = await _act(test_client, GIA, VIEWER, other["id"], "connect", {"dataSourceId": "ds_fin"})
+    assert by_gia.status_code == 200, by_gia.text
+
+
+@pytest.mark.asyncio
+async def test_a_source_naming_nobody_gives_its_creator_no_say(test_client: AsyncClient, contacts, db_session, flag_on):
+    ds = await db_session.get(WorkspaceDataSourceORM, "ds_ap")
+    ds.created_by = BEN.id
+    await db_session.commit()
+    req = await _submit(test_client)
+    r = await _act(test_client, BEN, MANAGER, req["id"], "connect", {"dataSourceId": "ds_ap"})
+    assert r.status_code == 403 and r.json()["detail"]["type"] == "not_fulfiller"
 
 
 @pytest.mark.asyncio
@@ -286,12 +357,12 @@ async def test_connecting_names_a_source_in_the_requests_workspace_or_none(
         assert r.status_code == 422, ds
         assert r.json()["detail"]["type"] == "data_source_elsewhere"
 
-    connected = await _act(test_client, BEN, MANAGER, req["id"], "connect",
+    connected = await _act(test_client, WALT, ADMIN, req["id"], "connect",
                            {"dataSourceId": "ds_fin", "note": "Ledger is in — the marts follow on Friday."})
     assert connected.status_code == 200, connected.text
     body = connected.json()
     assert (body["status"], body["dataSourceId"], body["dataSourceLabel"]) == ("connected", "ds_fin", "General ledger")
-    assert body["resolvedBy"] == BEN.id and body["resolutionNote"] == "Ledger is in — the marts follow on Friday."
+    assert body["resolvedBy"] == WALT.id and body["resolutionNote"] == "Ledger is in — the marts follow on Friday."
     assert (await _kinds(db_session, ADA.id)) == {
         "data_request.connected": "/workspaces/ws_fin?tab=data&section=sources",
     }

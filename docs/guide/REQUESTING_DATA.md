@@ -59,7 +59,7 @@ yours on, you can **Withdraw** it.
 
 | You'll hear… | it means… | so… |
 | --- | --- | --- |
-| **Someone is connecting your data** | A member of the platform team, or one of the workspace's data people, has taken it on. | Nothing to do. They may contact the people you named. |
+| **Someone is connecting your data** | A member of the platform team, or one of the workspace's admins, has taken it on. | Nothing to do. They may contact the people you named. |
 | **Your data is connected** | It's in the workspace — the message says which data source it became, with a note if they left one. | Open it from the message, and build a view on it. |
 | **Declined** | They said no, usually with a reason. | Read the reason — often the data is already in another workspace you can ask to join. You can ask again. |
 
@@ -81,12 +81,16 @@ by when, and who knows the data.
   anything the requester should know.
 * **Decline** says no, with a reason they'll see.
 
-### The workspace's own data people
+### The workspace's admins and a source's Owner and Stewards
 
-People who can add sources to a workspace (`workspace:datasource:manage` — Members,
-Data engineers and Workspace Admins, for instance) see **Review** on that workspace's
-open requests under **Data → Sources**, and can start and connect them the same way.
-Declining is the platform team's.
+A workspace's admins (`workspace:admin`) see **Review** on that workspace's open
+requests under **Data → Sources**, and can start and connect them the same way. A data
+source's named Owner and Stewards — named directly, or through a group they are in —
+can mark a request connected when it became their source. Declining is the platform
+team's.
+
+Nobody answers their own request: if you asked for the data, someone else starts and
+connects it, even when you are an admin or on the platform team.
 
 ## Where to next
 

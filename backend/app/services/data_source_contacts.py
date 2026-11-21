@@ -85,6 +85,16 @@ async def _is_owner(session: AsyncSession, user: User, owner: Optional[tuple[str
     return sid in await group_repo.get_user_groups(session, user.id)
 
 
+async def is_named_contact(session: AsyncSession, user: User, data_source_id: str) -> bool:
+    """Whether the source names ``user`` its Owner or a Steward — directly, or through
+    a group they are in. Derived contacts don't count: only someone written down does."""
+    rows = await repo.list_for_source(session, data_source_id)
+    if any(r.subject_type == "user" and r.subject_id == user.id for r in rows):
+        return True
+    named_groups = {r.subject_id for r in rows if r.subject_type == "group"}
+    return bool(named_groups) and not named_groups.isdisjoint(await group_repo.get_user_groups(session, user.id))
+
+
 async def read(session: AsyncSession, user: User, claims: PermissionClaims,
                ds: WorkspaceDataSourceORM) -> DataContactsResponse:
     """The source's contacts as the caller sees them, with what they may change."""

@@ -8,10 +8,11 @@ its requests.
 The platform team — whoever creates workspaces (``system:workspaces:create``: Org and
 Super Admins) — answers every workspace's requests: **start** (takes it on, as its
 assignee), **connect** (optionally naming the data source it became, which must be in
-that workspace) or **decline** (with an optional reason). A workspace's own data
-people (``workspace:datasource:manage`` there) may start and connect their
-workspace's requests too — they can add the source themselves — but declining is the
-platform team's. The requester may withdraw a request nobody has taken yet.
+that workspace) or **decline** (with an optional reason). A workspace's admins
+(``workspace:admin`` there) may start and connect their workspace's requests too, and a
+source's named Owner or Stewards (directly or through a group) may connect a request
+as that source; declining is the platform team's. The requester never answers their
+own request (403 ``own_request``), but may withdraw it while nobody has taken it.
 
 Every transition writes a ``workspace.data_request.*`` outbox event. A new request
 reaches the platform team and the workspace's admins through the Inbox; each answer
@@ -36,6 +37,7 @@ from backend.app.db.repositories import (
     outbox_event_repo,
     user_repo,
 )
+from backend.app.services.data_source_contacts import is_named_contact
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.auth_service.interface import User
 from backend.common.models.rbac import DataRequestCreate, DataRequestResponse, WorkspaceRequestPerson
@@ -48,8 +50,8 @@ TITLE_MAX = 120
 ASK_PERMISSION = "workspace:datasource:read"
 #: The platform team: answers every workspace's requests.
 PLATFORM_PERMISSION = "system:workspaces:create"
-#: A workspace's own data people: may start and connect that workspace's requests.
-WORKSPACE_FULFIL_PERMISSION = "workspace:datasource:manage"
+#: A workspace's admins: may start and connect that workspace's requests.
+WORKSPACE_FULFIL_PERMISSION = "workspace:admin"
 _PLATFORM_LINK = "/workspaces?tab=requests"
 _STATUS_WORDS = {
     "pending": "waiting for someone to take it",
@@ -208,34 +210,44 @@ async def withdraw(session: AsyncSession, user: User, request_id: str) -> DataRe
 
 
 def can_fulfil(claims: PermissionClaims, workspace_id: str) -> bool:
-    """The platform team, or the workspace's own data people."""
+    """The platform team, or the workspace's admins."""
     return has_permission(claims, PLATFORM_PERMISSION) or has_permission(
         claims, WORKSPACE_FULFIL_PERMISSION, workspace_id=workspace_id,
     )
 
 
-async def _to_answer(session: AsyncSession, claims: PermissionClaims, request_id: str, *,
-                     platform_only: bool = False) -> DataRequestORM:
+async def _to_answer(session: AsyncSession, actor: User, claims: PermissionClaims, request_id: str, *,
+                     platform_only: bool = False, as_source: Optional[str] = None) -> DataRequestORM:
     """Lock the request, so two answers decide one after the other — once the caller
     is shown to be someone who may answer it. Anyone else gets a 404 for a workspace
-    they can't read, a 403 for one they can."""
+    they can't read, a 403 for one they can. ``as_source`` is the source a connect
+    names: its named Owner and Stewards may connect it too."""
     row = await repo.get(session, request_id, for_update=True)
     if row is None or not (
         has_permission(claims, PLATFORM_PERMISSION)
         or has_permission(claims, ASK_PERMISSION, workspace_id=row.workspace_id)
     ):
         raise HTTPException(status_code=404, detail="Data request not found")
-    allowed = has_permission(claims, PLATFORM_PERMISSION) if platform_only else can_fulfil(claims, row.workspace_id)
+    if row.requested_by == actor.id:
+        raise _refuse(status.HTTP_403_FORBIDDEN, "own_request",
+                      "You asked for this data, so someone else answers the request.")
+    if platform_only:
+        allowed = has_permission(claims, PLATFORM_PERMISSION)
+    else:
+        allowed = can_fulfil(claims, row.workspace_id) or bool(
+            as_source and await is_named_contact(session, actor, as_source)
+        )
     if not allowed:
         raise _refuse(status.HTTP_403_FORBIDDEN, "not_fulfiller",
                       "Only the platform team can decline a data request." if platform_only
-                      else "Only the platform team, or people who manage this workspace's data, can answer it.")
+                      else "Only the platform team, the workspace's admins, or the Owner and Stewards "
+                           "of the source it became can answer it.")
     return row
 
 
 async def start(session: AsyncSession, actor: User, claims: PermissionClaims, request_id: str) -> DataRequestORM:
     """Take a request on: the caller becomes its assignee."""
-    row = await _to_answer(session, claims, request_id)
+    row = await _to_answer(session, actor, claims, request_id)
     await _move(session, row, "in_progress", "started", actor_id=actor.id)
     await _emit(session, "workspace.data_request.started", row, actor.id)
     await _tell_requester(session, row, "data_request.started",
@@ -248,7 +260,7 @@ async def connect(session: AsyncSession, actor: User, claims: PermissionClaims, 
                   data_source_id: Optional[str] = None, note: Optional[str] = None) -> DataRequestORM:
     """Mark a request connected — naming the data source it became, which must be a
     live one in the request's workspace."""
-    row = await _to_answer(session, claims, request_id)
+    row = await _to_answer(session, actor, claims, request_id, as_source=data_source_id or None)
     label: Optional[str] = None
     if data_source_id:
         ds = (await session.execute(
@@ -274,7 +286,7 @@ async def connect(session: AsyncSession, actor: User, claims: PermissionClaims, 
 
 async def decline(session: AsyncSession, actor: User, claims: PermissionClaims, request_id: str,
                   reason: Optional[str]) -> DataRequestORM:
-    row = await _to_answer(session, claims, request_id, platform_only=True)
+    row = await _to_answer(session, actor, claims, request_id, platform_only=True)
     reason = _clean(reason)
     await _move(session, row, "declined", "declined", actor_id=actor.id, note=reason)
     await _emit(session, "workspace.data_request.declined", row, actor.id, reason=reason)

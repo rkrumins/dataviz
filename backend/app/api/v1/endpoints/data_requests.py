@@ -13,8 +13,10 @@ Routes (mounted from ``api.py``):
   POST   /api/v1/admin/data-requests/{id}/connect           {dataSourceId?, note?}
   POST   /api/v1/admin/data-requests/{id}/decline           {reason?} (the platform team)
 
-Start and connect are the platform team's, and the workspace's own data people's
-(``workspace:datasource:manage`` there); each is checked per request.
+Start and connect are the platform team's and the workspace's admins'
+(``workspace:admin`` there); a source's named Owner or Stewards may also connect a
+request as that source. The requester never answers their own (403 ``own_request``).
+Each is checked per request.
 
 ``dataRequestsEnabled`` gates asking. Turned off, everything already asked stays
 readable, withdrawable and answerable.
@@ -107,7 +109,7 @@ async def withdraw_my_data_request(
     return await _one(session, await service.withdraw(session, user, request_id))
 
 
-# ── The platform team, and a workspace's data people ─────────────────
+# ── The platform team, a workspace's admins, a source's contacts ─────
 
 
 @admin_router.get("", response_model=list[DataRequestResponse], response_model_by_alias=True)

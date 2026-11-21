@@ -295,7 +295,7 @@ api_router.include_router(
     tags=["admin:workspace-requests"],
 )
 # Data requests — a workspace's readers ask for data to be connected to it; the
-# platform team (and the workspace's own data people) connect it. Three prefixes:
+# platform team (and the workspace's admins, or the source's named contacts) connect it. Three prefixes:
 # one workspace's, "my requests", and the platform team's queue.
 api_router.include_router(
     data_requests.ws_router,

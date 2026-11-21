@@ -1132,7 +1132,7 @@ class WorkspaceRequestORM(Base):
 
 class DataRequestORM(Base):
     """Someone in a workspace asking for data to be connected to it, for the
-    platform team (or the workspace's own data people) to connect.
+    platform team (or the workspace's admins, or the source's named contacts) to connect.
 
     ``pending`` → ``in_progress`` (someone took it: ``assignee_id``) →
     ``connected`` (optionally naming the ``data_source_id`` it became) or

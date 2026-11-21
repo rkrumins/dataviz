@@ -694,8 +694,8 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "help_url": None,
         "admin_hint": (
             "Org and Super Admins answer every workspace's requests under Workspaces → Requests. "
-            "People who manage a workspace's data may start and connect that workspace's requests "
-            "themselves."
+            "A workspace's admins may start and connect that workspace's requests, and a source's "
+            "named Owner or Stewards may connect a request as that source. Nobody answers their own."
         ),
         "sort_order": 10,
         "deprecated": False,
