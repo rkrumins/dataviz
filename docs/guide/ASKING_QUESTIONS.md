@@ -99,6 +99,11 @@ You can also ask from the Explorer: a view's preview shows **Who to ask** under 
 and a **Questions** button with the open count, and the **…** on a view's card offers **Ask a
 question**.
 
+Cards show the open count too. A view's card or row (in the Explorer, on a workspace's
+Overview, on a profile) and a data source's card under **Data → Sources** carry an amber
+**?** with how many questions are open, and a dot when one has something you haven't read.
+Click it to open them: a view's in the drawer, a source's on its **Questions** tab.
+
 ## Ask about the data
 
 Questions about the data itself — where it comes from, how fresh it is, what a field means —
