@@ -370,5 +370,6 @@ export function propertyJobLabel(op: PropertyJobOp): string {
       return `Merge ${n.toLocaleString()} value${n === 1 ? '' : 's'} of ${op.key}`
     }
     case 'convert': return `Convert ${op.key} to ${op.toKind ? VALUE_KIND_LABEL[op.toKind] : '…'}`
+    case 'undo': return `Undo: ${op.sourceLabel ?? 'a bulk change'}`
   }
 }

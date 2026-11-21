@@ -323,14 +323,36 @@ missing. Missing means no value: no property, or an empty one.
   **Fill if empty** for exactly the entities the publish refused, including
   ones new in this draft. One change fills up to 20,000. Past that it fills the
   first 20,000 and says so: publish again for the rest.
-- **In the drawer**, a required field that some of the entities lack, or one
-  you removed or emptied, offers **Fill missing on every Type…**. That reaches
-  every entity of the type in the View without a value for it, as Published
-  holds them.
+- **Comparing several entities**, a required field that some of them lack
+  offers **Fill missing on every Type…**. That reaches every entity of the type
+  in the View without a value for it, as Published holds them — so one new in
+  this draft, or emptied in it, is filled there in the drawer instead. (For one
+  entity, a required field you removed or emptied is said on its row; give it a
+  value there.)
 
 Give the value on **What**. A field with allowed values offers them; when it
 takes no other value, they are the only choice. Then review and apply it like
 any other change.
+
+### Undo a bulk change
+
+A bulk change that has ended — finished, stopped or failed part-way — can be
+undone while it is still only in your draft. Under **Changes on this draft**,
+choose **Undo** on its row: it says how many entities it puts back, then runs
+like any other change, a batch at a time, and is listed as **Undo: …** (a
+rename's undo, for instance, is **Undo: Rename owner → steward**).
+
+Each entity is put back to what it held just before the change — a property
+the change added is removed, one it removed comes back, and each value is
+stored as the kind it was. An entity changed again since, by hand or by
+another change, is left as it is: the undo counts it as **changed since** and
+lists it under **Which, and why**. One deleted in the draft since is left out
+too. When the undo has finished, the change's row says **Undone**.
+
+**Undo** isn't offered for a change the draft has published, in whole or in
+part (make a new change instead), one that changed nothing, one already
+undone, or an undo itself. While another change is running on the draft, wait
+for it to finish.
 
 ### Keep a change as a recipe
 

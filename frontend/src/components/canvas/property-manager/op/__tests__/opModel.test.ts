@@ -154,6 +154,8 @@ describe('a clean-up of the values a property holds', () => {
       .toBe('Normalize dept (trim, collapse spaces, lower case)')
     expect(propertyJobLabel({ kind: 'mapValues', key: 'dept', map: [...merge, ...merge, ...merge] })).toBe('Merge 3 values of dept')
     expect(propertyJobLabel({ kind: 'convert', key: 'tier', toKind: 'Float' })).toBe('Convert tier to Decimal')
+    expect(propertyJobLabel({ kind: 'undo', key: 'owner', sourceJobId: 'vjob_1', sourceLabel: 'Rename owner → steward' }))
+      .toBe('Undo: Rename owner → steward')
   })
 
   it('counts at most the entities holding what it finds, or the values it merges', () => {
