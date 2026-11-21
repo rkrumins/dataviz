@@ -23,6 +23,7 @@ from backend.app.providers.versioned_branch_provider import VersionedBranchProvi
 from backend.app.services.advanced_search_service import AdvancedSearchService
 from backend.app.services.deep_search import SearchRunContext
 from backend.app.services.graph_reads import published_data_version
+from backend.app.services.versioning import config as vconfig
 from backend.app.services.view_scope import EffectiveViewScope
 from backend.common.models.graph import GraphNode
 from backend.common.models.search import (
@@ -137,6 +138,8 @@ class Draft:
         self.edges = {e["id"]: dict(e) for e in MAIN_EDGES}
         self.seq = 0
         self.history: Dict[int, Dict[str, Optional[Dict[str, Any]]]] = {}
+        # The type of each edge row a commit wrote — None for a delete, whose row names none.
+        self.edge_rows: Dict[int, List[Optional[str]]] = {}
         self.loads: List[List[str]] = []
         self.windows: List[Any] = []
         self.as_of: List[Any] = []
@@ -147,6 +150,7 @@ class Draft:
         self.seq += 1
         self.history[self.seq] = {f"id-{u}": (dict(n, urn=u) if n else None)
                                   for u, n in nodes.items()}
+        self.edge_rows[self.seq] = [e["type"] for e in add_edges] + [None for _ in drop_edges]
         for u, n in nodes.items():
             if n is None:
                 self.nodes.pop(u, None)
@@ -205,14 +209,17 @@ class Draft:
         return {u: truth._ancestors(truth._by_urn[u]) for u in urns if u in truth._by_urn}
 
     async def draft_search_window(self, *, graph_id, branch_id, commit_id, since_seq=None,
-                                  limit=0):
+                                  limit=0, containment_types=None):
         seq = int(commit_id.split("-")[1]) if commit_id else None
         self.windows.append((since_seq, seq))
         if since_seq is None:
             return {"seq": seq, "nodes": None, "edges": False}
         nodes = sorted({eid for s, writes in self.history.items()
                         if since_seq < s <= seq for eid in writes})
-        return {"seq": seq, "nodes": nodes if len(nodes) <= limit else None, "edges": False}
+        moves = {t.upper() for t in containment_types or ()}
+        edges = any(t is None or containment_types is None or t.upper() in moves
+                    for s, rows in self.edge_rows.items() if since_seq < s <= seq for t in rows)
+        return {"seq": seq, "nodes": nodes if len(nodes) <= limit else None, "edges": edges}
 
     async def draft_nodes_as_of(self, *, graph_id, branch_id, entity_ids, seq):
         self.as_of.append((list(entity_ids), seq))
@@ -399,6 +406,91 @@ def _first_draft_on(draft: Draft) -> Draft:
     return draft
 
 
+async def test_a_draft_too_large_to_read_whole_counts_as_main_said_so(monkeypatch):
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 2)
+    draft = _first_draft()                                  # it changed three entities
+    items = [("gold", RULES["gold"]), ("orphan", DegreePredicate(direction="both", op="eq", value=0))]
+    counts, deltas = await _count(_overlay(draft), SCOPE, items)
+    note = draft_search.TOO_LARGE.format(n=2)
+    assert note == "Your draft changed more than 2 entities, so these counts show the published graph."
+    assert deltas == {"deltas": {}, "approximate": {"gold": note, "orphan": note},
+                      "status": "complete", "progress": {"scanned": 0, "total": 0}}
+    assert counts["gold"] == 2 and draft.loads == []        # main's (c1, c3): none of it read
+
+
+async def test_a_fold_stays_exact_however_large_the_draft(monkeypatch):
+    draft = _first_draft()
+    items = [("gold", RULES["gold"])]
+    await _count(_overlay(draft), SCOPE, items)             # read whole while it is small
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 2)
+    draft.commit({"c1": {**draft.nodes["c1"], "tier": "bronze"}})
+    counts, deltas = await _count(_overlay(draft), SCOPE, items)
+    assert deltas["approximate"] == {} and draft.as_of == [(["id-c1"], 1)]
+    assert counts == await _truth_counts(draft, SCOPE, items)
+
+
+async def test_a_commit_that_moves_nothing_is_folded_in():
+    """A relationship of a type that isn't containment moves no entity, so a commit that writes
+    one is folded in; one that moves an entity has the draft read whole again."""
+    draft = _first_draft()
+    items = list(RULES.items())
+    await _count(_overlay(draft), SCOPE, items)
+    draft.commit({"c1": {**draft.nodes["c1"], "tier": "bronze"}},
+                 add_edges=[_edge("c2", "c4", "FLOWS_TO")])
+    counts, _ = await _count(_overlay(draft), SCOPE, items)
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert draft.as_of == [(["id-c1"], 1)], "folded in"
+    draft.commit({"c2": {**draft.nodes["c2"], "tier": "silver"}},
+                 add_edges=[_edge("t1", "c4")], drop_edges=[_edge("t2", "c4")])
+    draft.as_of.clear()
+    counts, _ = await _count(_overlay(draft), SCOPE, items)
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert draft.as_of == [], "a move: read whole"
+
+
+def _pointed(store, prefix: str) -> str:
+    [sid] = [sid for name, (_at, sid) in store._pointers.items() if name.startswith(prefix)]
+    return sid
+
+
+async def test_a_correction_a_later_one_supersedes_is_deleted(memory_store, monkeypatch):
+    """Not left to its hour: the complete one a later version's is folded from, once that one
+    completes; one still running for an earlier version, once the later one starts."""
+    items = [("gold", RULES["gold"])]
+    draft = _first_draft()
+    await _count(_overlay(draft), SCOPE, items)
+    first = _pointed(memory_store, "draft-search:")
+    draft.commit({"c1": {**draft.nodes["c1"], "tier": "bronze"}})
+    await _count(_overlay(draft), SCOPE, items)
+    later = _pointed(memory_store, "draft-search:")
+    assert later != first and await memory_store.load(first) is None
+    assert (await memory_store.load(later)).status == COMPLETE
+
+    monkeypatch.setattr(draft_search, "BATCH", 1)
+    other = _first_draft()
+    await _overlay(other).deep_search_count_deltas(SCOPE, items, context=CONTEXT, wait_ms=0)
+    running = [sid for name, (_at, sid) in memory_store._pointers.items()
+               if name.startswith("draft-search-running:") and sid not in (first, later)]
+    assert len(running) == 1 and (await memory_store.load(running[0])).status == "running"
+    other.commit({"c1": {**other.nodes["c1"], "tier": "bronze"}})
+    await _overlay(other).deep_search_count_deltas(SCOPE, items, context=CONTEXT, wait_ms=0)
+    assert await memory_store.load(running[0]) is None
+
+
+async def test_a_correction_is_saved_every_few_steps_and_when_it_completes(memory_store, monkeypatch):
+    monkeypatch.setattr(draft_search, "BATCH", 1)
+    monkeypatch.setattr(draft_search, "SAVE_EVERY", 2)
+    saved, real = [], memory_store.save
+
+    async def save(session, token, ttl_s, **kw):
+        saved.append(session.scanned)
+        return await real(session, token, ttl_s, **kw)
+    monkeypatch.setattr(memory_store, "save", save)
+    deltas = await _overlay(_first_draft()).deep_search_count_deltas(
+        SCOPE, [("gold", RULES["gold"])], context=CONTEXT, wait_ms=5000)
+    assert deltas["status"] == "complete" and saved == [2, 3]
+
+
 # ---------------------------------------------------------------------------
 # Membership
 # ---------------------------------------------------------------------------
@@ -479,6 +571,48 @@ async def test_while_mains_catalog_is_read_it_is_served_as_it_grows():
                                                                     wait_ms=2000)
     assert out["status"] == "running"
     assert {p["key"] for p in out["properties"]} == {"owner", "rows", "tier"}
+
+
+async def test_a_catalog_read_a_step_at_a_time_reads_its_statistics_once(monkeypatch):
+    """Its statistics are read from the correction once a request, not once a step: the
+    change's, main's and the fold's copy of main's — however many steps it takes."""
+    monkeypatch.setattr(draft_search, "BATCH", 1)
+    parsed, real = [], CatalogStats.from_json
+    monkeypatch.setattr(CatalogStats, "from_json",
+                        classmethod(lambda cls, raw: parsed.append(raw) or real(raw)))
+    draft = _first_draft()
+    out = await _overlay(draft).deep_search_catalog(SCOPE, context=CONTEXT, wait_ms=2000)
+    want = await catalog_of(draft.truth(), SCOPE, CONTEXT)
+    assert out["status"] == "complete" and len(parsed) == 3
+    assert {p["key"]: (p["count"], p["values"]) for p in out["properties"]} == \
+        {p["key"]: (p["count"], p["values"]) for p in want["properties"]}
+
+
+async def test_a_catalog_of_a_draft_too_large_to_read_whole_is_mains_said_so(monkeypatch):
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 2)
+    out = await _overlay(_first_draft()).deep_search_catalog(SCOPE, context=CONTEXT, wait_ms=2000)
+    rows = {p["key"]: p for p in out["properties"]}["rows"]
+    assert (rows["min"], rows["max"]) == (5, 20)            # main's: the draft's c2 holds 50
+    assert out["notes"][-1] == draft_search.TOO_LARGE.format(n=2)
+
+
+def test_a_change_to_too_many_tags_stops_counting_them(monkeypatch):
+    from backend.app.providers.falkordb_search import catalog
+    monkeypatch.setattr(catalog, "TAG_SETS_MAX", 2)
+    change = CatalogStats()
+    for i in range(5):
+        change.add_entity("Table", {}, [f"t{i}"], frozenset())
+    assert change.tags_counted is False and change.tags == {}
+    merged, _wide = CatalogStats(tags={"pii": 3}, tagged=3).folded(change)
+    assert merged.tags_counted is False and merged.tags == {}
+    session = Session("s", "catalog", "1", None, 0, [], [], 1, status=COMPLETE)
+    answer = answer_of(merged, session, CONTEXT)
+    assert answer["tags"] == [] and answer["tagged"] is None
+    # Within the cap they are counted, and a tag the change takes out as it puts back is gone.
+    few = CatalogStats()
+    few.add_entity("Table", {}, ["a"], frozenset())
+    few.add_entity("Table", {}, ["a"], frozenset(), -1)
+    assert few.tags == {} and few.tags_counted
 
 
 async def test_a_catalog_whose_draft_cant_be_read_is_mains_said_so():

@@ -2022,3 +2022,51 @@ async def test_the_served_version_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── ix_ev_commit: a commit's edges (20261122_1100_gv_ev_commit_idx) ──
+_EV_COMMIT = _VERSIONS / "20261122_1100_gv_ev_commit_idx.py"
+
+
+def test_the_edge_commit_index_is_declared_and_migrated():
+    [index] = [i for i in models.EdgeVersionORM.__table__.indexes if i.name == "ix_ev_commit"]
+    assert [c.name for c in index.columns] == ["graph_id", "commit_id"]
+    migration = _migration(_EV_COMMIT)
+    assert migration.revision == _EV_COMMIT.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261121_1000_gv_property_jobs"
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_ix_ev_commit(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'DROP INDEX IF EXISTS "{models._SCHEMA}".ix_ev_commit'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "ix_ev_commit" in await _indexes(conn, "edge_versions")
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_edge_commit_index_migration_round_trips(store):
+    migration = _migration(_EV_COMMIT)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "ix_ev_commit" not in await _indexes(conn, "edge_versions")
+            await conn.run_sync(run("upgrade"))
+            assert "ix_ev_commit" in await _indexes(conn, "edge_versions")
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

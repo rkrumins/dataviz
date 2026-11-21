@@ -157,16 +157,24 @@ class CatalogStats:
             if len(k["values"]) > 2 * VALUES_MAX:
                 self._too_many(k, 0)
         held = _tags_of(tags)
-        if held:
+        if held and self.tags_counted:
             self.tagged += sign
             for tag in held:
-                self.tags[tag] = self.tags.get(tag, 0) + sign
+                n = self.tags.get(tag, 0) + sign
+                if n:
+                    self.tags[tag] = n
+                else:
+                    self.tags.pop(tag, None)
+            # A change to more distinct tags than a scan reads tag sets: its tags are not counted.
+            if len(self.tags) > 2 * TAG_SETS_MAX:
+                self.tags_counted = False
+                self.tags.clear()
 
     def folded(self, change: "CatalogStats") -> Tuple["CatalogStats", FrozenSet[str]]:
         """This catalog with ``change`` (signed, ``add_entity``) folded in — and the keys whose
         range may now be wider than it is: a value taken out reached one of its ends. What no
         entity holds any more is dropped; a key whose values are past ``VALUES_MAX`` stops
-        listing them."""
+        listing them, and the tags stop being counted when the change's weren't."""
         out = CatalogStats.from_json(self.to_json())
         for label, n in change.entities.items():
             _add_count(out.entities, label, n)
@@ -187,6 +195,8 @@ class CatalogStats:
                         out._too_many(k, len(k["values"]))
             if sum(k["labels"].values()) <= 0:
                 del out.keys[key]
+        if not change.tags_counted:
+            out.tags_counted, out.tags = False, {}
         if out.tags_counted:
             for tag, n in change.tags.items():
                 _add_count(out.tags, tag, n)

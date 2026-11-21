@@ -1036,6 +1036,7 @@ class EdgeVersionORM(VersioningBase):
         Index("ix_ev_source", "graph_id", "source_entity_id"),
         Index("ix_ev_target", "graph_id", "target_entity_id"),
         Index("ix_ev_branch_changeset", "graph_id", "branch_id", "commit_seq"),
+        Index("ix_ev_commit", "graph_id", "commit_id"),         # a commit's edges, as ix_nv_commit
         Index("ix_ev_seq_brin", "commit_seq", postgresql_using="brin"),
         CheckConstraint("op IN ('create','update','delete')", name="ck_ev_op"),
     )
@@ -1212,6 +1213,8 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: ensure_ps_fencing_columns(conn), required=True)
     # 20261017_1900_gv_commits_idem.
     _bounded_step(conn, "uq_commits_idem was not built", lambda: ensure_commits_idem_index(conn))
+    # 20261122_1100_gv_ev_commit_idx. Not required: without it a commit's edges are found by a scan.
+    _bounded_step(conn, "ix_ev_commit was not built", lambda: ensure_ev_commit_index(conn))
     # 20261017_1950_gv_ingest_active. Two imports still running on one draft leave the index for a
     # later start.
     _bounded_step(conn, "uq_jobs_ingest_active was not built",
@@ -1912,6 +1915,21 @@ def ensure_commits_idem_index(conn) -> None:
     conn.execute(text(
         f"CREATE UNIQUE INDEX IF NOT EXISTS uq_commits_idem ON {commits} "
         "(graph_id, branch_id, idempotency_key) WHERE idempotency_key IS NOT NULL"))
+
+
+def ensure_ev_commit_index(conn) -> None:
+    """Build ``ix_ev_commit``: a commit's edge versions by ``(graph_id, commit_id)``, as
+    ``ix_nv_commit`` finds its nodes (a retried save reads what its first attempt's commit wrote
+    by it, and a bulk job's audit narrows to its commits with it). A no-op without the table, and
+    once the index exists: on the partitioned ``edge_versions`` even ``CREATE INDEX IF NOT
+    EXISTS`` locks every partition, and every worker start runs this. ``conn`` is a synchronous
+    connection (alembic's bind, or ``run_sync``'s)."""
+    if not sa_inspect(conn).has_table("edge_versions", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if conn.execute(text("SELECT to_regclass(:i)"), {"i": f'"{_SCHEMA}".ix_ev_commit'}).scalar():
+        return
+    conn.execute(text(f'CREATE INDEX IF NOT EXISTS ix_ev_commit ON "{_SCHEMA}"."edge_versions" '
+                      "(graph_id, commit_id)"))
 
 
 def ensure_ingest_active_index(conn, *, strict: bool) -> None:

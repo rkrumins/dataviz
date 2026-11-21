@@ -6,7 +6,9 @@ it is for a field kept unique: a draft that gives an entity a value its field re
 required field without one, is refused, naming each entity, field and value. Only what the draft
 changes is judged: data that predates a rule stays publishable. The same on each squash a publish
 can take — the full merge, the narrow copy (rows judged from their identity columns, so the values
-are read in full for the types with field rules) and the paged one.
+are read in full for the types with field rules) and the paged one. A refusal names the first
+hundred values and counts them all, per entity type, field and rule — the paged publish judging the
+fields of every page after the first it refuses, so the count is the whole draft's.
 """
 import os
 
@@ -74,6 +76,9 @@ def test_a_publish_giving_values_their_fields_refuse_is_refused(path, monkeypatc
         assert found[1]["value"] == "bronze" and found[1]["name"] == "New" and found[1]["type"] == "Table"
         assert found[1]["reason"] == "Tier must be one of 'gold', 'silver' — 'bronze' isn't."
         assert exc.value.detail["total"] == 2
+        assert exc.value.detail["byField"] == [
+            {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 1},
+            {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 1}]
     _run(case)
 
 
@@ -105,10 +110,37 @@ def test_emptying_a_required_field_or_changing_a_value_badly_is_refused(path, mo
             await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go",
                               ontology_rules=RULES)
         found = [(v["entity_id"], v["rule"], v["field"]) for v in exc.value.detail["violations"]]
-        both = [("urn:Legacy", "field_type", "rows"), ("urn:Owned", "field_required", "owner")]
-        # A paged publish stops at the first page that breaks a rule (here a page is one entity).
-        assert found == (both[:1] if path == "paged" else both)
+        # A paged publish judges every page's fields (here a page is one entity), not only the first.
+        assert found == [("urn:Legacy", "field_type", "rows"), ("urn:Owned", "field_required", "owner")]
         # Without field rules the same draft publishes.
         assert await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go",
                                  ontology_rules=OntologyRules())
+    _run(case)
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_a_refusal_counts_every_value_to_change_by_field_page_after_page(path, monkeypatch):
+    """Judged a page of nodes at a time, it keeps the first values and counts the rest — for a
+    paged publish, past the first page that breaks a rule, nothing of it written."""
+    from backend.app.services.versioning import ontology
+    _take(path, monkeypatch)
+    monkeypatch.setattr(config, "FIELD_CHECK_PAGE", 2)
+    monkeypatch.setattr(ontology, "FIELD_EXAMPLES", 3)
+
+    async def case(svc):
+        gid = await _graph(svc)
+        draft = await _draft(svc, gid, [_table(f"urn:New{i}", tier="bronze", rows=1) for i in range(5)]
+                             + [_table("urn:Fine", owner="ana", tier="gold")])
+        main = await svc.main_branch_id(gid)
+        published = await svc.commit_log(graph_id=gid, branch_id=main)
+        with pytest.raises(FieldViolation) as exc:
+            await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go",
+                              ontology_rules=RULES)
+        detail = exc.value.detail
+        assert detail["total"] == 10 and len(detail["violations"]) == 3
+        assert detail["byField"] == [
+            {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 5},
+            {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 5}]
+        assert [v["entity_id"] for v in detail["violations"]] == ["urn:New0", "urn:New0", "urn:New1"]
+        assert await svc.commit_log(graph_id=gid, branch_id=main) == published      # nothing published
     _run(case)

@@ -7331,14 +7331,18 @@ async def _property_targets_from_job(job: dict):
     back from its file. The view is held to the job's own — still in its workspace and data source
     (a view gone or moved is not found, and the job fails) — and its scope is the search's own
     resolver's, which never widens a view to the data source. The export's download token is
-    signed with a key of this run's own (a worker holds no API key), and read back here."""
+    signed with a key of this run's own (a worker holds no API key), and read back here. Followed
+    a few seconds a request, so a search matching more than ``PROPERTY_JOB_MAX_TARGETS`` stops
+    the job (``too_many_targets``) once its export has written that many, not once it is whole."""
     import secrets
     from backend.app.api.v1.endpoints import graph as graph_ep
     from backend.app.db.engine import get_async_session
     from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
     from backend.app.services.deep_search import SearchRunContext
     from backend.app.services.search_downloads import read_download_token
-    from backend.app.services.versioning.import_export.property_job import PropertyJobStopped
+    from backend.app.services.versioning.import_export.property_job import (
+        PropertyJobStopped, too_many_targets,
+    )
     from backend.app.services.view_transfer.sources import engine_for
     from backend.common.models.search import SearchExportRequest
 
@@ -7356,7 +7360,8 @@ async def _property_targets_from_job(job: dict):
                                        branch_id=bid, can_read_view=can_read)
         request = SearchExportRequest.model_validate({
             "scope": {"viewId": view_id, "scopeMode": target["scopeMode"]},
-            "predicate": target["predicate"], "format": "ndjson", "waitMs": 60000})
+            "predicate": target["predicate"], "format": "ndjson", "waitMs": 5000})
+        cap = vconfig.PROPERTY_JOB_MAX_TARGETS
         try:
             while True:
                 result = await search.export(request, principal=actor, signing_key=signing_key,
@@ -7364,6 +7369,8 @@ async def _property_targets_from_job(job: dict):
                                                  data_version=await graph_ep._search_data_version(engine),
                                                  admit=graph_ep._statement_admission(engine)))
                 await session.commit()                  # no transaction held between requests
+                if result.rows > cap:
+                    raise too_many_targets(cap)
                 if result.status == "complete":
                     break
                 request = request.model_copy(update={"session_id": result.session_id})

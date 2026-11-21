@@ -9,7 +9,10 @@ checkpoint — and never on main.
 * A rename skips an entity that holds the new key, unless it overwrites; what a job could not write
   — not in the draft, deleted there, a conflict, refused by the write gate — is counted and listed.
 * A search target is resolved by the job itself (a stub here: the search engine needs FalkorDB),
-  and one that matches too much is refused; a draft closed under a job stops it, saying why.
+  and one that matches too much is refused as soon as it has matched more than a job edits; each
+  match is checked again on the draft's values, and one the draft changed out of the search is
+  left alone (``no_longer_matches``) — unless the search can't be checked that way, which the
+  summary says. A draft closed under a job stops it, saying why.
 * The routes: preview, create, follow, cancel, the refused rows as CSV.
 * Relationships (an edge job): named by id — ``edge:<id>`` re-keyed ones by the id the graph calls
   them — or as a Connections search names one without (``source|TYPE|target``); deleted in the
@@ -247,6 +250,81 @@ async def _search_target(monkeypatch) -> None:
     await db.dispose_engine()
 
 
+async def _too_big_search_ends_early(monkeypatch) -> None:
+    """A search matching more than a job edits stops the job once it has matched one more —
+    never reading the rest, and writing nothing."""
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 2)
+    monkeypatch.setattr(config, "PROPERTY_JOB_MAX_TARGETS", 3)
+    pulled = []
+
+    async def targets(job):
+        for i in range(1000):
+            pulled.append(i)
+            yield f"urn:n{i % 4}"
+
+    svc, ds, gid, draft = await _draft(n=4)
+    ie = ImportExportService(versioning=svc, property_targets=targets)
+    search = {"viewId": "v1", "predicate": {"kind": "all"}, "scopeMode": "view"}
+    seeded = await _messages(gid, draft)
+    job_id = await _create(ie, ds, gid, draft, {"kind": "remove", "key": "owner", "onConflict": "skip"}, search)
+    await ie.run_property_safe(job_id, await lease_job(job_id))
+    job = await ie.get_property_job(job_id)
+    assert job["status"] == "failed" and job["error"]["code"] == "too_many_targets", job
+    assert "more than 3 entities" in job["error"]["message"]
+    assert len(pulled) == 4 and await _messages(gid, draft) == seeded
+    await db.dispose_engine()
+
+
+def test_a_search_matching_too_much_stops_as_soon_as_it_has(monkeypatch):
+    asyncio.run(_too_big_search_ends_early(monkeypatch))
+
+
+async def _search_rechecked(monkeypatch) -> None:
+    """The search runs on the published graph; each window checks its matches again on the
+    draft's values and leaves alone what the draft changed out of it, as the Review step's
+    draft-aware counts do. A search its values can't answer edits what it matched, and says so."""
+    from backend.app.services.versioning.import_export import property_job
+
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 2)
+
+    async def targets(job):
+        for urn in ("urn:n0", "urn:n1", "urn:n2"):        # gold on the published graph
+            yield urn
+
+    svc, ds, gid, draft = await _draft(nodes=[_node(i, tier="gold") for i in range(3)])
+    await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="n1 is silver now",
+                        ops=[{"op": "update", "entity_kind": "node", "entity_id": "N1",
+                              "payload": {"properties": {"tier": "silver"}}}])
+    ie = ImportExportService(versioning=svc, property_targets=targets)
+    set_flag = {"kind": "set", "key": "flag", "value": "x", "onConflict": "skip"}
+    gold = {"viewId": "v1", "scopeMode": "view",
+            "predicate": {"kind": "property", "key": "tier", "op": "eq", "value": "gold"}}
+    job_id = await _create(ie, ds, gid, draft, set_flag, gold)
+    await TransferRunner(lambda: ie).run_job(await lease_job(job_id))
+    job = await ie.get_property_job(job_id)
+    summary = job["summary"]
+    assert (summary["changed"], summary["noLongerMatches"]) == (2, 1), summary
+    assert summary["refused"]["byReason"] == {"no_longer_matches": 1}
+    assert summary["recheck"] == {"exact": True, "note": None}
+    assert await _props(svc, gid, draft, "N1") == {"tier": "silver"}               # left alone
+    assert (await _props(svc, gid, draft, "N2"))["flag"] == "x"
+    assert await _csv(ie, job_id) == ["urn,entityId,reason,detail", "urn:n1,N1,no_longer_matches,"
+                                      "In this draft it no longer matches the search."]
+
+    # Under a container: where an entity sits isn't its own value, so every match is edited.
+    under = {**gold, "predicate": {"kind": "descendantOf", "urns": ["urn:n0"]}}
+    job_id = await _create(ie, ds, gid, draft, {**set_flag, "value": "y"}, under, key="key-recheck-002")
+    await TransferRunner(lambda: ie).run_job(await lease_job(job_id))
+    summary = (await ie.get_property_job(job_id))["summary"]
+    assert (summary["changed"], summary["noLongerMatches"]) == (3, 0), summary
+    assert summary["recheck"] == {"exact": False, "note": property_job.RECHECK_APPROXIMATE}
+    await db.dispose_engine()
+
+
+def test_a_search_target_is_checked_again_on_the_drafts_values(monkeypatch):
+    asyncio.run(_search_rechecked(monkeypatch))
+
+
 def test_a_search_target_is_resolved_by_the_job_and_one_matching_too_much_is_refused(monkeypatch):
     asyncio.run(_search_target(monkeypatch))
 
@@ -387,10 +465,18 @@ async def _partial_merge() -> None:
                              containment_edge_types=cont)
     await svc.decide_changes(pr_id=pr, actor="bo", verdict="rejected", entity_ids=["N1", "N3"],
                              reason="Later", containment_edge_types=cont)
+    # What a job wrote, and how much of it lands, is counted in SQL on the draft's changeset.
+    async with db.graphver_session() as s:
+        row = await s.get(models.JobORM, rename)
+        assert await svc._property_job_entities(s, gid, draft, row, {"N0", "N2"}) == (2, 1)
+        assert await svc._property_job_entities(s, gid, draft, row, set()) == (2, 0)
     part = await svc.merge_mr(mr_id=pr, actor="cy", message="Some", containment_edge_types=cont, mode="accepted")
     listed = (await _stats(gid, part))["propertyJobs"]
     assert [(j["jobId"], j.get("partial", False)) for j in listed["jobs"]] == [(rename, True), (tier, False)]
     assert (await ie.get_property_job(rename))["summary"].get("publishedCommitId") is None
+    # Part of it is on main: said so, for what reads the job (an undo refuses it).
+    assert (await ie.get_property_job(rename))["summary"]["landedCommitIds"] == [part]
+    assert "landedCommitIds" not in (await ie.get_property_job(tier))["summary"]
     assert (await ie.get_property_job(tier))["summary"]["publishedCommitId"] == part
     assert (await ie.get_property_job(gone))["summary"].get("publishedCommitId") is None
 

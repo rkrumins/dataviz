@@ -511,16 +511,19 @@ class UniqueViolation(_HttpMapped, RuntimeError):
 class FieldViolation(_HttpMapped, RuntimeError):
     """A publish would give entities property values their type's fields refuse — not of the
     field's type, not one of its allowed values — or leave a required field without one: refused,
-    naming each entity, field and value (the first 100, and how many)."""
+    naming each entity, field and value (the first 100), how many in all (``total``), and how many
+    per entity type, field and rule (``byField``). ``found``: the publish's
+    :class:`~.ontology.FieldFindings`."""
 
-    def __init__(self, violations):
-        self.violations = list(violations)
+    def __init__(self, found):
+        self.violations = list(found.examples)
         first = self.violations[0] if self.violations else {}
-        n = len(self.violations)
+        n = found.total
         super().__init__(
             f"{n} {'value breaks' if n == 1 else 'values break'} the fields their entity types define — "
             f"{first.get('name') or first.get('entity_id')}: {first.get('reason')}",
-            {"type": "field_violation", "violations": self.violations[:100], "total": n})
+            {"type": "field_violation", "violations": self.violations[:100], "total": n,
+             "byField": found.by_field()})
 
 
 class EdgeEndsMissing(_HttpMapped, ValueError):

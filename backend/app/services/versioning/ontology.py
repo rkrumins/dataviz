@@ -24,7 +24,8 @@ Two validation tiers live here:
 * :class:`FieldRule` / :func:`field_violations` — the publish gate on property
   values: a field's type, its allowed values, and whether it is required. Like
   ``unique_fields`` it is judged at publish, never while a draft is written, and
-  only on the values the publish changes.
+  only on the values the publish changes; :class:`FieldFindings` keeps what it
+  refuses, page after page.
 """
 from __future__ import annotations
 
@@ -460,3 +461,35 @@ def field_violations(entities: Iterable[Tuple[str, Optional[Mapping], Optional[M
                             "rule": found[0], "field": key, "fieldName": f.name or key,
                             "value": _shown(value), "reason": found[1]})
     return out
+
+
+#: The field violations a refused publish names; past them it counts.
+FIELD_EXAMPLES = 100
+
+
+class FieldFindings:
+    """What a publish's field checks found, page after page (:func:`field_violations`): the first
+    ``FIELD_EXAMPLES`` violations, how many there are in all, and how many per entity type, field
+    and rule — so a publish of a million entities holds a hundred of them, never all."""
+
+    def __init__(self) -> None:
+        self.examples: List[dict] = []
+        self.total = 0
+        self._by: Dict[Tuple[str, str, str], List[Any]] = {}     # (type, field, rule) -> [name, n]
+
+    def add(self, found: Sequence[dict]) -> None:
+        self.examples += found[:max(0, FIELD_EXAMPLES - len(self.examples))]
+        self.total += len(found)
+        for v in found:
+            held = self._by.setdefault((v["type"], v["field"], v["rule"]),
+                                       [v.get("fieldName") or v["field"], 0])
+            held[1] += 1
+
+    def __bool__(self) -> bool:
+        return self.total > 0
+
+    def by_field(self) -> List[dict]:
+        """``[{entityType, field, fieldName, rule, count}]``, the most refused first."""
+        return sorted(({"entityType": t, "field": f, "fieldName": name, "rule": r, "count": n}
+                       for (t, f, r), (name, n) in self._by.items()),
+                      key=lambda e: (-e["count"], e["entityType"], e["field"], e["rule"]))

@@ -1,7 +1,8 @@
 /**
  * PublishForm — a publish refused because values break the fields their entity types define says
  * so, entity by entity: its name, its type, what is wrong — and the way to it: an entity on the
- * canvas opens in the drawer, one that isn't offers its id to find it by. Nothing was published.
+ * canvas opens in the drawer, one that isn't offers its id to find it by. Past the values it lists,
+ * it counts them all, field by field. Nothing was published.
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -43,7 +44,10 @@ const violations: FieldViolation[] = [
 
 beforeEach(() => {
   publishMutate.mockReset()
-  publishMutate.mockImplementation((_vars, { onError }) => onError(new FieldViolationError(violations, 14)))
+  publishMutate.mockImplementation((_vars, { onError }) => onError(new FieldViolationError(violations, 1214, [
+    { entityType: 'Table', field: 'owner', fieldName: 'Owner', rule: 'field_required', count: 1204 },
+    { entityType: 'Table', field: 'tier', fieldName: 'Tier', rule: 'field_not_allowed', count: 10 },
+  ])))
   useCanvasStore.setState({
     nodes: [{ id: 'urn:orders', type: 'generic', position: { x: 0, y: 0 }, data: { urn: 'urn:orders', label: 'Orders', type: 'Table' } }],
     edges: [], drawerNodeId: null, drawerNodeIds: null, drawerEdge: null,
@@ -61,11 +65,13 @@ describe('PublishForm — a publish refused by field rules', () => {
     )
     await user.click(screen.getByRole('button', { name: /publish now/i }))
 
-    expect(screen.getByText(/Nothing was published — 14 values break the fields their entity types define/)).toBeInTheDocument()
+    expect(screen.getByText(/Nothing was published — 1,214 values break the fields their entity types define/)).toBeInTheDocument()
+    const counts = within(screen.getByRole('list', { name: 'Values to change by field' })).getAllByRole('listitem')
+    expect(counts.map((c) => c.textContent)).toEqual(['Table · Owner: 1,204 missing', 'Table · Tier: 10 not allowed'])
     const list = screen.getByRole('list', { name: 'Values to change' })
     const [orders, returns] = within(list).getAllByRole('listitem')
     expect(orders).toHaveTextContent("Orders · Table · Tier must be one of 'gold', 'silver' — 'bronze' isn't.")
-    expect(screen.getByText('…and 12 more.')).toBeInTheDocument()
+    expect(screen.getByText('…and 1,212 more.')).toBeInTheDocument()
     expect(within(returns).getByRole('button', { name: 'Copy the id of Returns' })).toBeInTheDocument()
 
     await user.click(within(orders).getByRole('button', { name: 'Open Orders' }))

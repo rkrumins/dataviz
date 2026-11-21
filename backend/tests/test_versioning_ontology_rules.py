@@ -275,3 +275,22 @@ def test_only_what_a_publish_changes_is_judged():
     assert field_violations([("t", node(), {"entityType": "View", "properties": {}})], rules)
     assert field_violations([("t", None, legacy), ("v", {"entityType": "View"}, None)], rules) == []
     assert field_violations([("t", node(), None)], None) == []
+
+
+def test_a_refusal_keeps_a_hundred_values_and_counts_them_all_by_field():
+    from backend.app.services.versioning.errors import FieldViolation
+    from backend.app.services.versioning.ontology import FieldFindings, field_violations
+    rules = OntologyRules(entity_types={"Table": EntityRule(fields=_fields_rules())})
+    found = FieldFindings()
+    assert not found
+    for page in range(3):                                   # page after page, as a publish judges
+        found.add(field_violations([(f"t{page}-{i}", {"entityType": "Table", "properties": {"tier": "x"}}, None)
+                                    for i in range(50)], rules))
+    assert found.total == 300 and len(found.examples) == 100 and found.examples[0]["entity_id"] == "t0-0"
+    assert found.by_field() == [
+        {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 150},
+        {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 150}]
+    refusal = FieldViolation(found)
+    assert refusal.detail["total"] == 300 and len(refusal.detail["violations"]) == 100
+    assert refusal.detail["byField"] == found.by_field()
+    assert str(refusal).startswith("300 values break the fields their entity types define")
