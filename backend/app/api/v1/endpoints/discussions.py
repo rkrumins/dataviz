@@ -4,6 +4,7 @@ Routes (mounted from ``api.py`` at ``/discussions``):
 
   GET    /subjects/{type}/{id}                 threads about a subject (keyset: ?cursor=)
   GET    /subjects/{type}/{id}/summary         counts, unread, watching, latest, byEntity (ETag)
+  GET    /summaries?type=&ids=                 open, answered, total, unread for up to 100 cards (ETag)
   GET    /subjects/{type}/{id}/people          who to ask: view owners, data contacts, fallback
   GET    /subjects/{type}/{id}/mentionable     people who can open it, for @mentions
   POST   /subjects/{type}/{id}                 ask (201; 200 replaying a clientKey)
@@ -33,9 +34,10 @@ answers 404 ``not_found`` for what the caller can't see. Rules:
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
+from pydantic import StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.feature_gate import require_feature
@@ -56,6 +58,7 @@ from backend.common.models.discussions import (
     MessageResponse,
     ReadResponse,
     ReplyBody,
+    SubjectCounts,
     SubjectSummary,
     ThreadDetail,
     ThreadList,
@@ -71,6 +74,8 @@ router = APIRouter()
 me_router = APIRouter()
 
 SubjectPath = Literal["view", "data_source"]
+#: Subjects one ``/summaries`` call counts, at most: a page of cards.
+SUMMARIES_MAX = 100
 #: It ships off, so a definition not seeded yet means off too.
 _writing = [Depends(require_feature(service.FLAG, default=False))]
 _SUBJECT = "/subjects/{subject_type}/{subject_id}"
@@ -124,6 +129,27 @@ async def subject_summary(
     response.headers["ETag"] = etag
     response.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
     return summary
+
+
+@router.get("/summaries", response_model=SubjectCounts, response_model_by_alias=True)
+async def subject_summaries(
+    request: Request,
+    response: Response,
+    subject_type: SubjectPath = Query(..., alias="type"),
+    ids: list[Annotated[str, StringConstraints(min_length=1, max_length=128)]] = Query(
+        ..., min_length=1, max_length=SUMMARIES_MAX),
+    caller: access.Caller = Depends(_caller),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A page of cards' numbers, polled: a 304 when nothing changed for this caller."""
+    counts = await service.subject_counts(session, caller, subject_type, ids)
+    etag = make_etag("discussion-summaries", caller.id, subject_type, *sorted(set(ids)), counts.model_dump_json())
+    not_modified = maybe_not_modified(request, etag)
+    if not_modified is not None:
+        return not_modified
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
+    return counts
 
 
 @router.get(_SUBJECT + "/people", response_model=WhoToAskResponse, response_model_by_alias=True)

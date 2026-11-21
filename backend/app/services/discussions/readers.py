@@ -34,7 +34,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
     DataRequestORM,
+    DataSourceContactORM,
     GroupMemberORM,
+    ResourceGrantORM,
     RoleBindingORM,
     UserORM,
     ViewORM,
@@ -45,7 +47,6 @@ from backend.app.db.models import (
 from backend.app.db.repositories import (
     binding_repo,
     data_request_repo,
-    data_source_contact_repo,
     grant_repo,
     permission_repo,
 )
@@ -328,28 +329,73 @@ class Maintainers:
 async def derived_contacts(session: AsyncSession, ds: Subject) -> tuple[Optional[str], list[str]]:
     """A source naming nobody: ``(who created it, [the people who know it])`` — the
     contacts on the data requests connected as this source."""
-    known: list[str] = []
-    for raw in (await session.execute(
-        select(DataRequestORM.contact_ids).where(
-            DataRequestORM.data_source_id == ds.id, DataRequestORM.status == "connected",
-        ).order_by(DataRequestORM.created_at)
-    )).scalars().all():
-        known.extend(data_request_repo.ids_of(raw))
-    owner = ds.created_by if ds.created_by and not is_service_account(ds.created_by) else None
-    return owner, [u for u in dict.fromkeys(known) if u != owner and not is_service_account(u)]
+    return (await derived_contacts_of(session, [ds]))[ds.id]
+
+
+async def derived_contacts_of(
+    session: AsyncSession, sources: list[Subject],
+) -> dict[str, tuple[Optional[str], list[str]]]:
+    """:func:`derived_contacts` for many sources, keyed by id, in one read."""
+    known: dict[str, list[str]] = {ds.id: [] for ds in sources}
+    if known:
+        for ds_id, raw in (await session.execute(
+            select(DataRequestORM.data_source_id, DataRequestORM.contact_ids).where(
+                DataRequestORM.data_source_id.in_(sorted(known)), DataRequestORM.status == "connected",
+            ).order_by(DataRequestORM.created_at)
+        )).all():
+            known[ds_id].extend(data_request_repo.ids_of(raw))
+    out: dict[str, tuple[Optional[str], list[str]]] = {}
+    for ds in sources:
+        owner = ds.created_by if ds.created_by and not is_service_account(ds.created_by) else None
+        out[ds.id] = owner, [u for u in dict.fromkeys(known[ds.id]) if u != owner and not is_service_account(u)]
+    return out
 
 
 async def maintainers_of(session: AsyncSession, subject: Subject) -> Maintainers:
-    if subject.type == "view":
-        named = await grantees(session, subject.id, role="editor")
-        users = {sid for kind, sid in named if kind == "user"} | ({subject.created_by} if subject.created_by else set())
-        return Maintainers(frozenset(users), frozenset(sid for kind, sid in named if kind == "group"))
-    rows = await data_source_contact_repo.list_for_source(session, subject.id)
-    if rows:
-        return Maintainers(frozenset(r.subject_id for r in rows if r.subject_type == "user"),
-                           frozenset(r.subject_id for r in rows if r.subject_type == "group"))
-    owner, known = await derived_contacts(session, subject)
-    return Maintainers(frozenset(([owner] if owner else []) + known), frozenset())
+    return (await maintainers_of_many(session, [subject]))[(subject.type, subject.id)]
+
+
+async def maintainers_of_many(
+    session: AsyncSession, subjects: Iterable[Subject],
+) -> dict[tuple[str, str], Maintainers]:
+    """Each subject's :class:`Maintainers`, keyed by ``(type, id)``: one read for the
+    views' editor grants, one for the sources' named contacts and one for the derived
+    contacts of those naming nobody, however many subjects there are."""
+    subjects = list(subjects)
+    out: dict[tuple[str, str], Maintainers] = {}
+    views = [s for s in subjects if s.type == "view"]
+    if views:
+        editors: dict[str, list[tuple[str, str]]] = {s.id: [] for s in views}
+        for rid, kind, sid in (await session.execute(
+            select(ResourceGrantORM.resource_id, ResourceGrantORM.subject_type, ResourceGrantORM.subject_id).where(
+                ResourceGrantORM.resource_type == "view", ResourceGrantORM.resource_id.in_(sorted(editors)),
+                ResourceGrantORM.role_name == "editor",
+            )
+        )).all():
+            editors[rid].append((kind, sid))
+        for s in views:
+            named = editors[s.id]
+            users = {sid for kind, sid in named if kind == "user"} | ({s.created_by} if s.created_by else set())
+            out[("view", s.id)] = Maintainers(frozenset(users),
+                                              frozenset(sid for kind, sid in named if kind == "group"))
+    sources = [s for s in subjects if s.type == "data_source"]
+    if sources:
+        named_rows: dict[str, list[DataSourceContactORM]] = {s.id: [] for s in sources}
+        for r in (await session.execute(
+            select(DataSourceContactORM).where(DataSourceContactORM.data_source_id.in_(sorted(named_rows)))
+        )).scalars().all():
+            named_rows[r.data_source_id].append(r)
+        derived = await derived_contacts_of(session, [s for s in sources if not named_rows[s.id]])
+        for s in sources:
+            rows = named_rows[s.id]
+            if rows:
+                out[("data_source", s.id)] = Maintainers(
+                    frozenset(r.subject_id for r in rows if r.subject_type == "user"),
+                    frozenset(r.subject_id for r in rows if r.subject_type == "group"))
+            else:
+                owner, known = derived[s.id]
+                out[("data_source", s.id)] = Maintainers(frozenset(([owner] if owner else []) + known), frozenset())
+    return out
 
 
 async def expand(session: AsyncSession, maint: Maintainers) -> set[str]:

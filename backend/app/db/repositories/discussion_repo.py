@@ -147,6 +147,36 @@ async def count_unread(session: AsyncSession, user_id: str, *where) -> int:
     )).scalar() or 0)
 
 
+def _on(subject_type: str, subject_ids: Iterable[str]) -> list:
+    return [DiscussionORM.subject_type == subject_type, DiscussionORM.subject_id.in_(sorted(set(subject_ids)))]
+
+
+async def counts_by_subject(
+    session: AsyncSession, subject_type: str, subject_ids: Iterable[str], seen,
+) -> dict[str, dict[str, tuple[int, int]]]:
+    """``{subject_id: {status: (live threads, those matching seen)}}`` in one GROUP BY —
+    ``seen`` being what someone sees short of every private thread."""
+    out: dict[str, dict[str, tuple[int, int]]] = {}
+    for sid, status, n, n_seen in (await session.execute(
+        select(DiscussionORM.subject_id, DiscussionORM.status, func.count(), func.sum(case((seen, 1), else_=0)))
+        .where(live(), *_on(subject_type, subject_ids))
+        .group_by(DiscussionORM.subject_id, DiscussionORM.status)
+    )).all():
+        out.setdefault(sid, {})[status] = (int(n), int(n_seen or 0))
+    return out
+
+
+async def unread_by_subject(
+    session: AsyncSession, user_id: str, subject_type: str, subject_ids: Iterable[str],
+) -> dict[str, int]:
+    """:func:`count_unread` per subject, in one GROUP BY."""
+    return {sid: int(n) for sid, n in (await session.execute(
+        select(DiscussionORM.subject_id, func.count()).select_from(DiscussionORM).join(
+            DiscussionParticipantORM, DiscussionParticipantORM.discussion_id == DiscussionORM.id,
+        ).where(live(), unread_for(user_id), *_on(subject_type, subject_ids)).group_by(DiscussionORM.subject_id)
+    )).all()}
+
+
 async def bump_for_reply(session: AsyncSession, discussion_id: str, *, author_id: str, now: str) -> bool:
     """One reply's counters, in one conditional UPDATE: only while the thread is live,
     not closed and not full. ``first_response_at`` is the first reply by anyone but

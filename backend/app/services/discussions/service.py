@@ -69,6 +69,8 @@ from backend.common.models.discussions import (
     MySummary,
     NotReached,
     ReplyBody,
+    SubjectCount,
+    SubjectCounts,
     SubjectRef,
     SubjectSummary,
     ThreadAccess,
@@ -816,6 +818,31 @@ async def subject_summary(session: AsyncSession, caller: Caller, subject_type: s
     )
 
 
+async def subject_counts(session: AsyncSession, caller: Caller, subject_type: str,
+                         subject_ids: Iterable[str]) -> SubjectCounts:
+    """:func:`subject_summary`'s counts for many subjects of one type — a page of cards —
+    in a fixed number of reads: the counts in one GROUP BY, which of them the caller can
+    open in one id-correlated pass, the unread in one more, and — only where a private
+    thread is in question — who sees every one in one more. Unreadable subjects, and those
+    with nothing the caller can see, are left out."""
+    rows = await repo.counts_by_subject(session, subject_type, subject_ids, access.private_clause(caller.id))
+    readable = sorted(i for _t, i in await access.readable_subject_ids(session, caller, {(subject_type, i) for i in rows}))
+    if not readable:
+        return SubjectCounts()
+    hidden = {(subject_type, i) for i in readable if any(n > seen for n, seen in rows[i].values())}
+    sees_all = await access.sees_every_private_thread_on(
+        session, caller, (await rd.load_subjects(session, hidden)).values()) if hidden else set()
+    # An unread thread is one the caller is in, so it is one they see either way.
+    unread = await repo.unread_by_subject(session, caller.id, subject_type, readable)
+    out: dict[str, SubjectCount] = {}
+    for i in readable:
+        n = {status: every if (subject_type, i) in sees_all else seen for status, (every, seen) in rows[i].items()}
+        if sum(n.values()):
+            out[i] = SubjectCount(open=n.get("open", 0), answered=n.get("answered", 0), total=sum(n.values()),
+                                  unread=unread.get(i, 0))
+    return SubjectCounts(summaries=out)
+
+
 async def mentionable(session: AsyncSession, caller: Caller, subject_type: str, subject_id: str, *,
                       q: str, limit: int) -> MentionableResponse:
     """Up to ``limit`` people who can open the subject, matching ``q`` — or, with no
@@ -945,7 +972,8 @@ async def _unread_watched(session: AsyncSession, user_id: str) -> int:
 
 __all__ = [
     "ask", "reply", "edit", "delete_message", "answer", "unanswer", "close", "reopen", "delete_thread",
-    "set_mine", "mark_read", "list_for_subject", "subject_summary", "mentionable", "open_thread", "detail",
+    "set_mine", "mark_read", "list_for_subject", "subject_summary", "subject_counts", "mentionable", "open_thread",
+    "detail",
     "summaries", "subject_refs", "thread_link", "subject_link", "switch_on", "FLAG", "set_watch",
     "list_watches", "my_threads", "my_summary",
 ]

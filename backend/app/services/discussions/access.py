@@ -38,6 +38,7 @@ from backend.app.services.discussions.readers import (  # noqa: F401 — re-expo
     Subject,
     load_subject,
     maintainers_of,
+    maintainers_of_many,
     readers_of,
     source_subject,
     view_subject,
@@ -116,6 +117,20 @@ async def sees_every_private_thread(session: AsyncSession, caller: Caller, subje
         return True
     maint = maint or await maintainers_of(session, subject)
     return maint.includes(caller.id, await caller.group_ids(session))
+
+
+async def sees_every_private_thread_on(
+    session: AsyncSession, caller: Caller, subjects: Iterable[Subject],
+) -> set[tuple[str, str]]:
+    """:func:`sees_every_private_thread` for many subjects at once, as the ``(type, id)``
+    it holds for — in a fixed number of reads however many there are."""
+    subjects = list(subjects)
+    out = {(s.type, s.id) for s in subjects if caller.is_admin_of(s)}
+    rest = [s for s in subjects if (s.type, s.id) not in out]
+    if rest:
+        groups = await caller.group_ids(session)
+        out |= {k for k, m in (await maintainers_of_many(session, rest)).items() if m.includes(caller.id, groups)}
+    return out
 
 
 def private_clause(user_id: str):

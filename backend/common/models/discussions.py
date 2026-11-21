@@ -207,6 +207,20 @@ class SubjectSummary(_Wire):
     by_entity: dict[str, EntityCount] = Field(default_factory=dict)
 
 
+class SubjectCount(_Wire):
+    """One card's numbers: what :class:`SubjectSummary` counts, without the rest."""
+    open: int = 0
+    answered: int = 0
+    total: int = 0
+    unread: int = 0
+
+
+class SubjectCounts(_Wire):
+    """``GET /discussions/summaries``: by id, only the subjects the caller can open that
+    have a question they can see."""
+    summaries: dict[str, SubjectCount] = Field(default_factory=dict)
+
+
 class MentionCandidate(Person):
     hint: Optional[str] = None
 
