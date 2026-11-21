@@ -230,12 +230,15 @@ async def message_by_key(session: AsyncSession, author_id: str, client_key: str)
     )).scalar_one_or_none()
 
 
-async def question(session: AsyncSession, discussion_id: str) -> Optional[DiscussionMessageORM]:
-    return (await session.execute(
-        select(DiscussionMessageORM).where(
-            DiscussionMessageORM.discussion_id == discussion_id, DiscussionMessageORM.kind == "question",
-        )
-    )).scalar_one_or_none()
+async def soft_delete_messages(session: AsyncSession, discussion_id: str, *, actor_id: str, now: str) -> None:
+    """Delete a thread's question and replies in one UPDATE (one deleted before keeps its
+    own stamp), so retention blanks them all."""
+    await session.execute(
+        update(DiscussionMessageORM).where(
+            DiscussionMessageORM.discussion_id == discussion_id, DiscussionMessageORM.deleted_at.is_(None),
+        ).values(deleted_at=now, deleted_by=actor_id, version=DiscussionMessageORM.version + 1)
+        .execution_options(synchronize_session=False)
+    )
 
 
 async def messages(

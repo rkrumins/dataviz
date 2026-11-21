@@ -10,7 +10,8 @@
   was off — is marked done without a word.
 * **Reminders.** A question three days old that nobody but its asker has answered
   reminds the people asked (``discussion.reminder``); at seven days the workspace's
-  admins hear, else the Org Admins (``discussion.escalated``). Once each.
+  admins hear, else the Org Admins (``discussion.escalated``). Once each. A question
+  whose subject is soft-deleted waits, and is reminded once the subject is restored.
 * **Retention.** A message deleted more than 30 days ago loses its body and mentions.
 * **Archiving.** A thread whose subject no longer exists at all is archived — checked
   with id-correlated reads per batch of subjects, never a JOIN. (A soft-deleted subject
@@ -121,22 +122,43 @@ async def remind(session: AsyncSession, *, now: Optional[datetime] = None) -> tu
     """Remind the people asked about questions nobody but the asker has answered after
     :data:`REMIND_AFTER`; escalate after :data:`ESCALATE_AFTER`. Returns ``(reminded, escalated)``."""
     now = now or _now()
-    rows = (await session.execute(
-        select(DiscussionORM).where(
-            DiscussionORM.status == "open", DiscussionORM.first_response_at.is_(None),
-            DiscussionORM.created_at <= (now - REMIND_AFTER).isoformat(),
-            DiscussionORM.deleted_at.is_(None), DiscussionORM.archived_at.is_(None),
-            or_(DiscussionORM.reminded_at.is_(None),
-                and_(DiscussionORM.escalated_at.is_(None),
-                     DiscussionORM.created_at <= (now - ESCALATE_AFTER).isoformat())),
-        ).order_by(DiscussionORM.created_at).limit(_BATCH)
-    )).scalars().all()
+    due = select(DiscussionORM).where(
+        DiscussionORM.status == "open", DiscussionORM.first_response_at.is_(None),
+        DiscussionORM.created_at <= (now - REMIND_AFTER).isoformat(),
+        DiscussionORM.deleted_at.is_(None), DiscussionORM.archived_at.is_(None),
+        or_(DiscussionORM.reminded_at.is_(None),
+            and_(DiscussionORM.escalated_at.is_(None),
+                 DiscussionORM.created_at <= (now - ESCALATE_AFTER).isoformat())),
+    ).order_by(DiscussionORM.created_at, DiscussionORM.id).limit(_BATCH)
     reminded = escalated = 0
     stamp = now.isoformat()
+    after = None
+    while True:
+        stmt = due if after is None else due.where(or_(
+            DiscussionORM.created_at > after[0],
+            and_(DiscussionORM.created_at == after[0], DiscussionORM.id > after[1])))
+        rows = (await session.execute(stmt)).scalars().all()
+        r, e = await _remind_batch(session, rows, now=now, stamp=stamp)
+        reminded, escalated = reminded + r, escalated + e
+        if len(rows) < _BATCH:
+            break
+        # Past the batch: threads skipped below are left as they are, and must not hold up the rest.
+        after = (rows[-1].created_at, rows[-1].id)
+    await session.flush()
+    if reminded:
+        metrics.increment("discussions_reminders_total", value=float(reminded))
+    if escalated:
+        metrics.increment("discussions_escalated_total", value=float(escalated))
+    return reminded, escalated
+
+
+async def _remind_batch(session: AsyncSession, rows, *, now: datetime, stamp: str) -> tuple[int, int]:
+    reminded = escalated = 0
+    subjects = await rd.load_subjects(session, [(t.subject_type, t.subject_id) for t in rows])
     for thread in rows:
-        subject = await rd.load_subject(session, thread.subject_type, thread.subject_id)
+        subject = subjects.get((thread.subject_type, thread.subject_id))
         if subject is None:
-            thread.reminded_at, thread.escalated_at = thread.reminded_at or stamp, thread.escalated_at or stamp
+            # Soft-deleted (its question is reminded once it is restored) or gone (archived).
             continue
         readers = await rd.readers_of(session, subject)
         waited = (now - datetime.fromisoformat(thread.created_at)).days
@@ -164,7 +186,6 @@ async def remind(session: AsyncSession, *, now: Optional[datetime] = None) -> tu
                 resource_type="discussion", resource_id=thread.id, dedupe_unread=True,
             )
             escalated += 1
-    await session.flush()
     return reminded, escalated
 
 
@@ -185,6 +206,7 @@ async def retain(session: AsyncSession, *, now: Optional[datetime] = None) -> in
             update(DiscussionMessageORM).where(DiscussionMessageORM.id.in_(list(ids)))
             .values(body="", mentions=json.dumps([])).execution_options(synchronize_session=False)
         )
+        metrics.increment("discussions_blanked_total", value=float(len(ids)))
     return len(ids)
 
 
@@ -204,6 +226,8 @@ async def archive(session: AsyncSession, *, now: Optional[datetime] = None) -> i
             stmt.order_by(DiscussionORM.subject_type, DiscussionORM.subject_id).limit(_BATCH)
         )).all()]
         if not refs:
+            if archived:
+                metrics.increment("discussions_archived_total", value=float(archived))
             return archived
         views = {i for t, i in refs if t == "view"}
         sources = {i for t, i in refs if t == "data_source"}

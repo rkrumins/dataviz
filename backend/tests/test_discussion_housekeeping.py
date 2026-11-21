@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 
 from backend.app.db.models import (
     DiscussionMessageORM, DiscussionORM, DiscussionParticipantORM, NotificationORM, ViewORM, WatchORM,
+    WorkspaceDataSourceORM,
 )
 from backend.app.db.repositories import notification_repo
 from backend.app.services.discussions import housekeeping as hk
@@ -235,3 +236,91 @@ async def test_a_thread_whose_subject_is_gone_is_archived(world, db_session, fac
         await db_session.commit()
         assert (await test_client.get("/api/v1/discussions/dis_soft")).status_code == 200
         assert (await test_client.get("/api/v1/discussions/dis_live")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_thread_deletes_its_replies_so_retention_blanks_them(world, db_session, factory, test_client):
+    from backend.app.services.discussions import service
+
+    class _Open:
+        async def consume(self, *a, **k):
+            return True
+
+    base = "/api/v1/discussions"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(service, "get_account_limiter", lambda: _Open())
+        with w.acting(w.ADA, await w.claims_for(db_session, w.ADA)):
+            tid = (await test_client.post(f"{base}/subjects/view/{w.V_WS}",
+                                          json={"body": "Anyone?", "clientKey": "q"})).json()["thread"]["id"]
+        with w.acting(w.BEN, await w.claims_for(db_session, w.BEN)):
+            await test_client.post(f"{base}/{tid}/messages",
+                                   json={"body": "Secret", "clientKey": "a", "mentions": [w.ADA]})
+            early = (await test_client.post(f"{base}/{tid}/messages",
+                                            json={"body": "Oops", "clientKey": "b"})).json()["message"]["id"]
+            assert (await test_client.delete(f"{base}/{tid}/messages/{early}")).status_code == 200
+        with w.acting(w.ADA, await w.claims_for(db_session, w.ADA)):
+            assert (await test_client.delete(f"{base}/{tid}")).status_code == 204
+    await db_session.commit()
+
+    async def messages():
+        return {m.kind + (":early" if m.id == early else ""): m for m in (await db_session.execute(
+            select(DiscussionMessageORM).where(DiscussionMessageORM.discussion_id == tid)
+            .execution_options(populate_existing=True))).scalars().all()}
+
+    rows = await messages()
+    assert set(rows) == {"question", "reply", "reply:early"}
+    assert all(m.deleted_at for m in rows.values())
+    assert (rows["question"].deleted_by, rows["reply"].deleted_by, rows["reply:early"].deleted_by) == (
+        w.ADA, w.ADA, w.BEN)                                       # an earlier delete keeps its own
+    assert await hk.retain(db_session, now=datetime.now(timezone.utc) + timedelta(days=31)) == 3
+    rows = await messages()
+    assert {(m.body, m.mentions) for m in rows.values()} == {("", "[]")}
+
+
+@pytest.mark.asyncio
+async def test_a_question_on_a_soft_deleted_subject_is_reminded_once_it_is_back(world, db_session, factory,
+                                                                               monkeypatch):
+    monkeypatch.setattr(hk, "_BATCH", 2)
+    for i in range(3):        # older than the live one, more than a batch: they never hold it up
+        _thread(db_session, f"dis_hidden{i}", subject=("view", w.V_WS), at=NOW - timedelta(days=9, minutes=i))
+    _thread(db_session, "dis_ops_hidden", asked_by=w.EVE, subject=("data_source", w.DS_OPS),
+            at=NOW - timedelta(days=9), asked=())
+    _thread(db_session, "dis_live", subject=("view", w.V_ENT), at=NOW - timedelta(days=4))
+    (await db_session.get(ViewORM, w.V_WS)).deleted_at = NOW.isoformat()
+    (await db_session.get(WorkspaceDataSourceORM, w.DS_OPS)).deleted_at = NOW.isoformat()
+    await db_session.commit()
+
+    assert await hk.remind(db_session, now=NOW) == (1, 0)
+    assert [n.resource_id for n in await w.notifications(db_session, w.BEN, "discussion.reminder")] == ["dis_live"]
+    hidden = (await db_session.execute(
+        select(DiscussionORM).where(DiscussionORM.id != "dis_live").execution_options(populate_existing=True)
+    )).scalars().all()
+    assert len(hidden) == 4 and all(t.reminded_at is None and t.escalated_at is None for t in hidden)
+
+    (await db_session.get(ViewORM, w.V_WS)).deleted_at = None
+    (await db_session.get(WorkspaceDataSourceORM, w.DS_OPS)).deleted_at = None
+    await db_session.commit()
+    assert await hk.remind(db_session, now=NOW) == (4, 4)
+    assert (await _told(db_session, "discussion.reminder"))[w.BEN] == 4
+    assert await hk.remind(db_session, now=NOW) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_housekeeping_counts_what_it_sends_and_tidies(world, db_session, factory, monkeypatch):
+    from backend.app.jobs import metrics
+
+    counted = w.Counted()
+    monkeypatch.setattr(metrics, "_backend", counted)
+    _thread(db_session, "dis_quiet", subject=("view", w.V_WS), at=NOW - timedelta(days=8))
+    _thread(db_session, "dis_gone", subject=("view", "view_purged"))
+    await db_session.flush()
+    db_session.add(DiscussionMessageORM(id="dmsg_old", discussion_id="dis_quiet", kind="reply", author_id=w.BEN,
+                                        body="Secret", mentions="[]", created_at=NOW.isoformat(),
+                                        deleted_at=(NOW - timedelta(days=31)).isoformat()))
+    await db_session.commit()
+    out = await hk.run_pass(factory, now=NOW)
+    assert (out["reminded"], out["escalated"], out["blanked"], out["archived"]) == (1, 1, 1, 1)
+    assert counted.counts == {
+        "discussions_reminders_total": 1, "discussions_escalated_total": 1,
+        "discussions_blanked_total": 1, "discussions_archived_total": 1,
+    }

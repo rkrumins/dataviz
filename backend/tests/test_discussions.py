@@ -563,3 +563,86 @@ async def test_a_box_reads_past_subjects_you_can_no_longer_open(world, db_sessio
     assert not set(gone) & {t["id"] for t in page["threads"]}
     summary = (await call(test_client, db_session, w.GIL, "GET", "/api/v1/me/discussions/summary")).json()
     assert summary["mine"]["open"] == 2
+
+
+# ── Private threads on data sources and in your boxes ───────────────
+
+
+@pytest.mark.asyncio
+async def test_a_private_question_about_a_data_source_shows_through_nothing(world, db_session, test_client):
+    subject = f"data_source/{w.DS}"
+    private = (await ask(test_client, db_session, subject=subject, visibility="private", clientKey="p",
+                         entityId="urn:x"))["thread"]
+    await ask(test_client, db_session, uid=w.GIL, subject=subject, clientKey="o", entityId="urn:x")
+
+    async def seen_by(uid):
+        listed = (await call(test_client, db_session, uid, "GET", f"{BASE}/subjects/{subject}")).json()
+        summary = (await call(test_client, db_session, uid, "GET", f"{BASE}/subjects/{subject}/summary")).json()
+        one = await call(test_client, db_session, uid, "GET", f"{BASE}/{private['id']}")
+        return len(listed["threads"]), summary["total"], summary["byEntity"]["urn:x"]["total"], one.status_code
+
+    assert await seen_by(w.GIL) == (1, 1, 1, 404)            # a reader who isn't in it
+    assert await seen_by(w.ADA) == (2, 2, 2, 200)            # the asker
+    assert await seen_by(w.BEN) == (2, 2, 2, 200)            # the source's derived owner, asked
+    assert await seen_by(w.WALT) == (2, 2, 2, 200)           # the workspace's admin
+
+
+@pytest.mark.asyncio
+async def test_a_private_question_never_shows_in_what_you_watch(world, db_session, test_client):
+    from backend.app.services.discussions import housekeeping as hk
+
+    await call(test_client, db_session, w.GIL, "PUT", f"{BASE}/subjects/view/{w.V_WS}/watch")
+    await ask(test_client, db_session, visibility="private", clientKey="p")
+    shared = (await ask(test_client, db_session, clientKey="o"))["thread"]["id"]
+    while await hk.fan_out_one(db_session):
+        pass
+    await db_session.commit()
+    r = await call(test_client, db_session, w.GIL, "GET", "/api/v1/me/discussions", params={"box": "watching"})
+    assert r.status_code == 200 and [t["id"] for t in r.json()["threads"]] == [shared]
+    summary = (await call(test_client, db_session, w.GIL, "GET", "/api/v1/me/discussions/summary")).json()
+    assert summary == {"toMe": {"unread": 0, "waiting": 0}, "mine": {"unread": 0, "open": 0},
+                       "mentions": {"unread": 0}, "watching": {"unread": 1}, "totalUnread": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_data_source_in_the_trash_hides_its_threads_and_restoring_it_shows_them(world, db_session,
+                                                                                      test_client):
+    from backend.app.db.repositories import data_source_repo
+
+    subject = f"data_source/{w.DS}"
+    tid = (await ask(test_client, db_session, subject=subject))["thread"]["id"]
+
+    async def seen():
+        one = await call(test_client, db_session, w.ADA, "GET", f"{BASE}/{tid}")
+        listed = await call(test_client, db_session, w.ADA, "GET", f"{BASE}/subjects/{subject}")
+        mine = await call(test_client, db_session, w.ADA, "GET", "/api/v1/me/discussions", params={"box": "mine"})
+        summary = await call(test_client, db_session, w.ADA, "GET", "/api/v1/me/discussions/summary")
+        return (one.status_code, listed.status_code, [t["id"] for t in mine.json()["threads"]],
+                summary.json()["mine"]["open"])
+
+    assert await seen() == (200, 200, [tid], 1)
+    assert await data_source_repo.soft_delete_data_source(db_session, w.DS, actor=w.WALT)
+    await db_session.commit()
+    assert await seen() == (404, 404, [], 0)
+    assert await data_source_repo.restore_data_source(db_session, w.DS) is not None
+    await db_session.commit()
+    assert await seen() == (200, 200, [tid], 1)
+
+
+@pytest.mark.asyncio
+async def test_answering_closing_and_reopening_are_counted(world, db_session, test_client, monkeypatch):
+    from backend.app.jobs import metrics
+
+    counted = w.Counted()
+    monkeypatch.setattr(metrics, "_backend", counted)
+    tid = (await ask(test_client, db_session))["thread"]["id"]
+    m = (await reply(test_client, db_session, w.BEN, tid))["message"]
+    for path, body in (("answer", {"messageId": m["id"], "expectedVersion": 1}),
+                       ("answer", {"messageId": m["id"], "expectedVersion": 2}),     # already: not again
+                       ("close", {"expectedVersion": 2}), ("reopen", {"expectedVersion": 3})):
+        r = await call(test_client, db_session, w.ADA, "POST", f"{BASE}/{tid}/{path}", json=body)
+        assert r.status_code == 200, r.text
+    assert {k: v for k, v in counted.counts.items() if k.startswith("discussions_")} == {
+        "discussions_asked_total": 1, "discussions_replies_total": 1, "discussions_answered_total": 1,
+        "discussions_closed_total": 1, "discussions_reopened_total": 1,
+    }

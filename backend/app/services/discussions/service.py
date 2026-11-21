@@ -660,6 +660,7 @@ async def answer(session: AsyncSession, caller: Caller, discussion_id: str, mess
                     body=op.thread.excerpt, link=thread_link(op.subject, op.thread.id, message_id),
                     actor_id=caller.id, thread_id=op.thread.id)
         await _emit(session, "collaboration.discussion.answered", op.thread, caller.id, message_id=message_id)
+        metrics.increment("discussions_answered_total", subject_type=op.subject.type)
     return await _thread_response(session, op)
 
 
@@ -694,6 +695,7 @@ async def close(session: AsyncSession, caller: Caller, discussion_id: str, expec
                     body=op.thread.excerpt, link=thread_link(op.subject, op.thread.id), actor_id=caller.id,
                     thread_id=op.thread.id)
         await _emit(session, "collaboration.discussion.closed", op.thread, caller.id)
+        metrics.increment("discussions_closed_total", subject_type=op.subject.type)
     return await _thread_response(session, op)
 
 
@@ -708,21 +710,20 @@ async def reopen(session: AsyncSession, caller: Caller, discussion_id: str, expe
                         status="answered" if op.thread.answer_message_id else "open",
                         resolved_at=None, resolved_by=None, updated_at=now):
         await _emit(session, "collaboration.discussion.reopened", op.thread, caller.id)
+        metrics.increment("discussions_reopened_total", subject_type=op.subject.type)
     return await _thread_response(session, op)
 
 
 async def delete_thread(session: AsyncSession, caller: Caller, discussion_id: str) -> None:
-    """The asker or a workspace admin deletes the question, and with it the thread."""
+    """The asker or a workspace admin deletes the question, and with it the thread and its
+    replies."""
     require_person(caller.user)
     op = await open_thread(session, caller, discussion_id)
     if not (op.asker or op.admin):
         raise refuse(403, "not_allowed", "Only the asker or a workspace admin can delete a question.")
     now = repo.now_iso()
     await repo.soft_delete(session, op.thread.id, actor_id=caller.id, now=now)
-    q = await repo.question(session, op.thread.id)
-    if q is not None and q.deleted_at is None:
-        q.deleted_at, q.deleted_by = now, caller.id
-    await session.flush()
+    await repo.soft_delete_messages(session, op.thread.id, actor_id=caller.id, now=now)
     await _emit(session, "collaboration.discussion.deleted", op.thread, caller.id)
     metrics.increment("discussions_deleted_total")
 

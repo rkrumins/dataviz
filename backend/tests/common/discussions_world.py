@@ -159,3 +159,25 @@ async def events(session: AsyncSession, prefix: str) -> list[OutboxEventORM]:
     return list((await session.execute(
         select(OutboxEventORM).where(OutboxEventORM.event_type.like(f"{prefix}%")).order_by(OutboxEventORM.id)
     )).scalars().all())
+
+
+class Counted:
+    """A metrics backend keeping how far each counter was bumped, whatever its labels."""
+
+    def __init__(self):
+        self.counts: dict[str, float] = {}
+
+    def increment(self, name, labels, value=1.0):
+        self.counts[name] = self.counts.get(name, 0) + value
+
+    def observe(self, name, labels, value):
+        pass
+
+    def gauge_set(self, name, labels, value):
+        pass
+
+    def gauge_inc(self, name, labels, value=1.0):
+        pass
+
+    def gauge_dec(self, name, labels, value=1.0):
+        pass
