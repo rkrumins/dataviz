@@ -75,7 +75,7 @@
 import { useId, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, Tag, X } from 'lucide-react'
+import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, FlaskConical, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, Tag, X } from 'lucide-react'
 import { ViewUsageBadge } from './ViewUsageBadge'
 import { SyncStatusChip } from '@/features/sync-status/SyncStatusChip'
 import { cn } from '@/lib/utils'
@@ -111,6 +111,8 @@ import {
 import { workspaceColor } from '@/lib/workspaceColor'
 import { getView, updateView, type View } from '@/services/viewApiService'
 import { useBrand } from '@/store/branding'
+import { useAuthStore } from '@/store/auth'
+import { usePlayground } from '@/hooks/usePlayground'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
 import { useSchemaStore } from '@/store/schema'
@@ -243,6 +245,9 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     // plain text instead of a link into a page that would refuse them.
     const myWorkspaces = useWorkspacesStore(s => s.workspaces)
     const navigate = useNavigate()
+    // The Playground's workspace: a view there is an experiment, and its bar says so.
+    const playgroundId = usePlayground().data?.workspaceId
+    const me = useAuthStore(s => s.user?.id)
 
     // The canvas store holds a ViewConfiguration — the canvas's own shape, missing
     // visibility/tags/config that the edit form needs. So take the authoritative
@@ -421,6 +426,18 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             >
                                 {view.name}
                             </h1>
+                        )}
+                        {playgroundId && view.workspaceId === playgroundId && (
+                            <HoverTip
+                                className="inline-flex shrink-0"
+                                label={`${view.createdBy === me ? 'Your experiment' : 'An experiment'} — nothing here is production data`}
+                                detail="It lives in the Playground, apart from every team’s workspace"
+                            >
+                                <span className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-gradient-to-r from-violet-500/10 to-fuchsia-500/10 px-2 py-0.5 text-[10px] font-semibold text-violet-600 dark:text-violet-300 shrink-0">
+                                    <FlaskConical className="w-3 h-3" aria-hidden />
+                                    Playground
+                                </span>
+                            </HoverTip>
                         )}
                         {view.draftBranchId && (
                             /* An import waiting in its draft: not in any list, and private,
