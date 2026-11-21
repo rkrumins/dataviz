@@ -10,13 +10,16 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkspaceRequest } from '@/services/workspaceRequestsService'
 
-const api = vi.hoisted(() => ({ listToAnswer: vi.fn(), get: vi.fn(), approve: vi.fn(), sendBack: vi.fn(), decline: vi.fn() }))
+const api = vi.hoisted(() => ({ listToAnswer: vi.fn(), get: vi.fn(), approve: vi.fn(), sendBack: vi.fn(), decline: vi.fn(), linkIdpGroup: vi.fn() }))
+vi.mock('@/services/ssoAdminService', () => ({
+    ssoAdminService: { listProviders: vi.fn().mockResolvedValue([{ id: 'idp_entra', displayName: 'Entra ID' }]) },
+}))
 vi.mock('@/services/workspaceRequestsService', async (orig) => {
     const real = await orig<typeof import('@/services/workspaceRequestsService')>()
     return { ...real, workspaceRequestsService: { ...real.workspaceRequestsService, ...api } }
 })
 
-import { WorkspaceRequestsPanel } from '../WorkspaceRequestsPanel'
+import { IdpLinksToConfirm, WorkspaceRequestsPanel } from '../WorkspaceRequestsPanel'
 import { useAuthStore } from '@/store/auth'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 
@@ -103,5 +106,68 @@ describe('WorkspaceRequestsPanel', () => {
         await user.click(within(drawer).getByRole('button', { name: /Decline/ }))
         await user.click(within(drawer).getAllByRole('button', { name: /Decline/ }).at(-1)!)
         expect(api.decline).toHaveBeenCalledWith('wsr_1', undefined)
+    })
+})
+
+describe('Groups asked for with the workspace', () => {
+    const WITH_GROUPS = {
+        ...REQUEST,
+        groups: [{ key: 'g1', name: 'Engineers', role: 'workspace_publisher', memberIds: ['usr_ben'],
+            members: [{ id: 'usr_ben', displayName: 'Ben Hall' }], idpGroup: 'ML-Engineers' }],
+    } as unknown as WorkspaceRequest
+
+    it('lets a platform administrator rename them and link them to the identity provider', async () => {
+        useAuthStore.setState({ permissions: { global: ['system:admin', 'system:workspaces:create'], ws: {} } } as never)
+        api.get.mockResolvedValue(WITH_GROUPS)
+        api.approve.mockResolvedValue({ ...WITH_GROUPS, status: 'approved', workspaceId: 'ws_new',
+            outcome: { workspaceId: 'ws_new', movedSources: [], failedSources: [], membersAdded: [],
+                groupsCreated: [{ key: 'g1', groupId: 'grp_1', name: 'ML Engineers' }], idpLinksCreated: [{ groupId: 'grp_1', idpGroup: 'ML-Engineers' }] } })
+        const { user, drawer } = await openReview()
+        expect(await within(drawer).findByText('ML lineage · Engineers')).toBeInTheDocument()
+        expect(within(drawer).getByText('ML-Engineers')).toBeInTheDocument()
+        await user.click(within(drawer).getByRole('button', { name: /Approve…/ }))
+        expect(within(drawer).getByText('Link 1 group to the identity provider')).toBeInTheDocument()
+        await user.selectOptions(await within(drawer).findByRole('combobox', { name: 'Identity-provider connection' }), 'idp_entra')
+        const groupName = within(drawer).getByRole('textbox', { name: 'Name for Engineers' })
+        await user.clear(groupName)
+        await user.type(groupName, 'ML Engineers')
+        await user.click(within(drawer).getByRole('button', { name: /Approve and create/ }))
+        expect(api.approve).toHaveBeenCalledWith('wsr_1', expect.objectContaining({
+            groupNames: { g1: 'ML Engineers' }, idpProviderId: 'idp_entra',
+        }))
+        expect(await within(drawer).findByText(/1 group linked to the identity provider/)).toBeInTheDocument()
+    })
+
+    it('tells an Org Admin the links will wait for a platform administrator', async () => {
+        api.get.mockResolvedValue(WITH_GROUPS)
+        const { user, drawer } = await openReview()
+        await user.click(within(drawer).getByRole('button', { name: /Approve…/ }))
+        expect(within(drawer).getByText(/1 link will wait for one to confirm/)).toBeInTheDocument()
+        expect(within(drawer).queryByRole('combobox', { name: 'Identity-provider connection' })).not.toBeInTheDocument()
+    })
+
+    it('lists the links waiting for a platform administrator, and links one', async () => {
+        useAuthStore.setState({ permissions: { global: ['system:admin', 'system:workspaces:create'], ws: {} } } as never)
+        api.listToAnswer.mockImplementation((status: string) => Promise.resolve(status === 'approved' ? [{
+            ...REQUEST, status: 'approved', workspaceId: 'ws_new',
+            outcome: { workspaceId: 'ws_new', movedSources: [], failedSources: [], membersAdded: [],
+                idpLinksPending: [{ groupId: 'grp_1', groupName: 'ML lineage · Engineers', idpGroup: 'ML-Engineers' }] },
+        }] : []))
+        api.linkIdpGroup.mockResolvedValue({ ...REQUEST, status: 'approved' })
+        const user = userEvent.setup()
+        const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        render(<QueryClientProvider client={qc}><MemoryRouter><IdpLinksToConfirm /></MemoryRouter></QueryClientProvider>)
+        const row = (await screen.findByText('ML lineage · Engineers')).closest('li')!
+        await user.click(within(row).getByRole('button', { name: /Link/ }))
+        expect(api.linkIdpGroup).toHaveBeenCalledWith('wsr_1', 'grp_1', null)
+    })
+
+    it('shows no links to confirm to an Org Admin', async () => {
+        api.listToAnswer.mockResolvedValue([{ ...REQUEST, status: 'approved',
+            outcome: { movedSources: [], failedSources: [], membersAdded: [], idpLinksPending: [{ groupId: 'g', groupName: 'X', idpGroup: 'Y' }] } }])
+        const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        render(<QueryClientProvider client={qc}><MemoryRouter><IdpLinksToConfirm /></MemoryRouter></QueryClientProvider>)
+        await new Promise(r => setTimeout(r, 20))
+        expect(screen.queryByText('Identity-provider links to confirm')).not.toBeInTheDocument()
     })
 })

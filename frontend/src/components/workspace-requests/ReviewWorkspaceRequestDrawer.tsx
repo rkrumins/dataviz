@@ -9,16 +9,20 @@ import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import {
-    ArrowRight, Check, Clock, Database, FlaskConical, Loader2, MessageCircleQuestion, Rocket, Shield, User, Users, X, XCircle,
+    ArrowRight, Check, Clock, Database, FlaskConical, KeyRound, Link2, Loader2, MessageCircleQuestion, Rocket, Shield, User, Users,
+    UsersRound, X, XCircle,
 } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { nameTakenSuggestion, type WorkspaceRequest } from '@/services/workspaceRequestsService'
+import { groupFullName, nameTakenSuggestion, type WorkspaceRequest } from '@/services/workspaceRequestsService'
+import { ssoAdminService } from '@/services/ssoAdminService'
+import { useAuthStore } from '@/store/auth'
 import { useWorkspaceRequest, useWorkspaceRequestActions } from '@/hooks/useWorkspaceRequests'
-import { PURPOSES, purposeLabel } from './RequestSteps'
+import { PURPOSES, groupRoleLabel, purposeLabel } from './RequestSteps'
 
 type Mode = 'read' | 'approve' | 'send-back' | 'decline'
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
@@ -45,8 +49,27 @@ export function ReviewWorkspaceRequestDrawer({ request: listed, onClose }: { req
     const open = request.status === 'pending'
     const busy = actions.approve.isPending || actions.sendBack.isPending || actions.decline.isPending
 
+    // Proposed groups: their full names follow the workspace's unless the approver changed one.
+    const groups = request.groups ?? []
+    const [groupNames, setGroupNames] = useState<Record<string, string>>({})
+    const fullName = (key: string, short: string) => groupNames[key] ?? groupFullName(name.trim() || request.name, short)
+    const toLink = groups.filter(g => g.idpGroup?.trim())
+    // Linking a group to the identity provider is a platform administrator's (the SSO rules' own bar).
+    const canLink = useAuthStore(s => s.can('system:admin'))
+    const providers = useQuery({
+        queryKey: ['sso', 'providers'],
+        queryFn: () => ssoAdminService.listProviders(),
+        enabled: canLink && toLink.length > 0 && mode === 'approve',
+        staleTime: 60_000,
+    }).data ?? []
+    const [providerId, setProviderId] = useState('')
+
     const approve = () => actions.approve.mutate(
-        { id: request.id, name: name.trim(), description: description.trim() },
+        {
+            id: request.id, name: name.trim(), description: description.trim(),
+            groupNames: Object.keys(groupNames).length ? groupNames : undefined,
+            idpProviderId: canLink && toLink.length ? providerId || null : undefined,
+        },
         {
             onSuccess: (r) => setApproved(r),
             onError: (e) => {
@@ -134,6 +157,30 @@ export function ReviewWorkspaceRequestDrawer({ request: listed, onClose }: { req
                                 {request.teamName && <p className="mt-2 text-xs text-ink-muted">Team: {request.teamName}</p>}
                             </Section>
 
+                            {groups.length > 0 && (
+                                <Section icon={UsersRound} title="Groups">
+                                    <ul className="space-y-2">
+                                        {groups.map(g => (
+                                            <li key={g.key} className="rounded-xl border border-glass-border px-3 py-2.5">
+                                                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                    <span className="text-sm font-semibold text-ink">{fullName(g.key, g.name)}</span>
+                                                    <span className="rounded-full bg-black/[0.04] dark:bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium text-ink-secondary">{groupRoleLabel(g.role)}</span>
+                                                    {g.idpGroup?.trim() && (
+                                                        <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 px-2 py-0.5 text-[10px] font-semibold text-violet-700 dark:text-violet-300">
+                                                            <Link2 className="h-3 w-3" aria-hidden /> {g.idpGroup}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <p className="mt-0.5 text-xs text-ink-muted">
+                                                    {(g.members ?? []).length ? (g.members ?? []).map(m => m.displayName).join(', ')
+                                                        : g.memberIds.length ? plural(g.memberIds.length, 'person', 'people') : 'Nobody invited yet'}
+                                                </p>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </Section>
+                            )}
+
                             <Section icon={FlaskConical} title="From the Playground">
                                 {sources.length === 0 ? <p className="text-sm text-ink-muted">Nothing — it starts empty.</p> : (
                                     <>
@@ -178,12 +225,43 @@ export function ReviewWorkspaceRequestDrawer({ request: listed, onClose }: { req
                                         <span className="text-xs font-semibold text-ink-secondary">Description</span>
                                         <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} maxLength={2000} className="input mt-1 w-full resize-none" />
                                     </label>
+                                    {groups.length > 0 && (
+                                        <fieldset className="space-y-2">
+                                            <legend className="text-xs font-semibold text-ink-secondary">Group names</legend>
+                                            {groups.map(g => (
+                                                <input key={g.key} aria-label={`Name for ${g.name}`} value={fullName(g.key, g.name)} maxLength={200}
+                                                    onChange={e => setGroupNames(n => ({ ...n, [g.key]: e.target.value }))}
+                                                    className="input w-full text-sm" />
+                                            ))}
+                                        </fieldset>
+                                    )}
+                                    {toLink.length > 0 && (canLink ? (
+                                        <label className="block">
+                                            <span className="flex items-center gap-1.5 text-xs font-semibold text-ink-secondary">
+                                                <KeyRound className="h-3.5 w-3.5 text-violet-500" aria-hidden /> Identity-provider connection for the links
+                                            </span>
+                                            <select aria-label="Identity-provider connection" value={providerId} onChange={e => setProviderId(e.target.value)} className="input mt-1 w-full text-sm">
+                                                <option value="">Any connection</option>
+                                                {providers.map(p => <option key={p.id} value={p.id}>{p.displayName}</option>)}
+                                            </select>
+                                        </label>
+                                    ) : (
+                                        <p className="rounded-xl bg-violet-500/[0.06] px-3 py-2 text-xs text-ink-secondary">
+                                            Linking groups to the identity provider is a platform administrator’s: {plural(toLink.length, 'link')} will wait for one to confirm.
+                                        </p>
+                                    ))}
                                     <div>
                                         <p className="mb-1.5 text-xs font-semibold text-ink-secondary">Approving will</p>
                                         <ul className="space-y-1 text-sm text-ink">
                                             <Will>Create “{name.trim() || request.name}”</Will>
                                             <Will>Make {requester} its admin</Will>
                                             {teammates.length > 0 && <Will>Add {plural(teammates.length, 'teammate')} as {teammates.length === 1 ? 'a member' : 'members'}</Will>}
+                                            {groups.length > 0 && (
+                                                <Will>Create {plural(groups.length, 'group')} with {plural(groups.reduce((n, g) => n + g.memberIds.length, 0), 'person', 'people')} invited</Will>
+                                            )}
+                                            {toLink.length > 0 && (canLink
+                                                ? <Will>Link {plural(toLink.length, 'group')} to the identity provider</Will>
+                                                : <Will>Keep {plural(toLink.length, 'identity-provider link')} for a platform administrator</Will>)}
                                             {sources.length > 0 && <Will>Move {plural(sources.length, 'graph')} ({plural(views, 'view')}) from the Playground</Will>}
                                         </ul>
                                     </div>
@@ -252,6 +330,11 @@ function Approved({ request, onOpen }: { request: WorkspaceRequest; onOpen: () =
                 <li>Its admin has been told.</li>
                 {!!o?.membersAdded.length && <li>{plural(o.membersAdded.length, 'teammate')} added.</li>}
                 {!!o?.movedSources.length && <li>{plural(o.movedSources.length, 'graph')} moved from the Playground.</li>}
+                {!!o?.groupsCreated?.length && <li>{plural(o.groupsCreated.length, 'group')} created: {o.groupsCreated.map(g => g.name).join(', ')}.</li>}
+                {!!o?.idpLinksCreated?.length && <li>{plural(o.idpLinksCreated.length, 'group')} linked to the identity provider.</li>}
+                {!!o?.idpLinksPending?.length && (
+                    <li className="text-violet-700 dark:text-violet-300">{plural(o.idpLinksPending.length, 'identity-provider link')} waiting for a platform administrator.</li>
+                )}
                 {!!o?.failedSources.length && (
                     <li className="text-amber-700 dark:text-amber-300">
                         {plural(o.failedSources.length, 'graph')} couldn’t be moved: {o.failedSources.map(f => f.reason).join('; ')}

@@ -61,13 +61,20 @@ export function useWorkspaceRequestActions() {
         }),
         withdraw: useMutation({ mutationFn: (id: string) => workspaceRequestsService.withdraw(id), onSuccess: done }),
         approve: useMutation({
-            mutationFn: ({ id, name, description }: { id: string; name?: string; description?: string }) =>
-                workspaceRequestsService.approve(id, { name, description }),
+            mutationFn: ({ id, ...overrides }: {
+                id: string; name?: string; description?: string
+                groupNames?: Record<string, string>; idpProviderId?: string | null
+            }) => workspaceRequestsService.approve(id, overrides),
             onSuccess: async () => {
                 await done()
                 // The approver can open the new workspace straight away.
                 await useWorkspacesStore.getState().loadWorkspaces()
             },
+        }),
+        linkIdpGroup: useMutation({
+            mutationFn: ({ id, groupId, idpProviderId }: { id: string; groupId: string; idpProviderId?: string | null }) =>
+                workspaceRequestsService.linkIdpGroup(id, groupId, idpProviderId),
+            onSuccess: done,
         }),
         sendBack: useMutation({
             mutationFn: ({ id, question }: { id: string; question: string }) => workspaceRequestsService.sendBack(id, question),

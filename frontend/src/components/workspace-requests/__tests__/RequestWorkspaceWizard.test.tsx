@@ -70,7 +70,7 @@ beforeEach(() => {
 })
 
 describe('RequestWorkspaceWizard', () => {
-    it('walks the four steps and sends what was chosen', async () => {
+    it('walks the steps and sends what was chosen', async () => {
         const user = userEvent.setup()
         renderWizard()
         expect(screen.getByRole('button', { name: /^Next/ })).toBeDisabled()   // a name first
@@ -82,6 +82,9 @@ describe('RequestWorkspaceWizard', () => {
         await user.click(screen.getByRole('button', { name: 'pick Ada' }))
         expect(screen.getByText('Ada Okafor')).toBeInTheDocument()
         await next()
+
+        expect(screen.getByRole('heading', { name: 'Organise people into groups' })).toBeInTheDocument()
+        await next()                                                    // groups are optional
 
         const mine = await screen.findByRole('checkbox', { name: /Supply chain sketch/ })
         expect(screen.queryByText('Not mine')).toBeNull()             // only the reader's own graphs
@@ -105,7 +108,7 @@ describe('RequestWorkspaceWizard', () => {
         }))
         renderWizard()
         await user.type(screen.getByRole('textbox', { name: 'Name' }), 'Finance')
-        await next(); await next(); await next()
+        await next(); await next(); await next(); await next()
         await user.click(screen.getByRole('button', { name: /Send request/ }))
         expect(await screen.findByRole('alert')).toHaveTextContent('A workspace already has that name.')
         await user.click(screen.getByRole('button', { name: 'Use “Finance 2”' }))
@@ -120,7 +123,7 @@ describe('RequestWorkspaceWizard', () => {
         } as unknown as WorkspaceRequest
         renderWizard({ editing })
         expect(screen.getByText('Who owns it after the project?')).toBeInTheDocument()
-        await next(); await next(); await next()
+        await next(); await next(); await next(); await next()
         const resend = screen.getByRole('button', { name: /Send it back/ })
         expect(resend).toBeDisabled()
         await user.type(screen.getByRole('textbox', { name: 'Reply to the platform team' }), 'The data team')
@@ -135,5 +138,31 @@ describe('RequestWorkspaceWizard', () => {
         unmount()
         renderWizard()
         expect(screen.getByDisplayValue('Half-written')).toBeInTheDocument()
+    })
+
+    it('proposes groups with a role, colleagues to invite and an identity-provider group', async () => {
+        const user = userEvent.setup()
+        renderWizard()
+        await user.type(screen.getByRole('textbox', { name: 'Name' }), 'ML lineage')
+        await next(); await next()
+        await user.click(screen.getByRole('button', { name: /Editors/ }))
+        const group = screen.getByRole('region', { name: 'Group Editors' })
+        expect(within(group).getByText('Created as “ML lineage · Editors”')).toBeInTheDocument()
+        await user.click(within(group).getByRole('radio', { name: /Can publish/ }))
+        await user.click(within(group).getByRole('button', { name: 'pick Ada' }))
+        expect(within(group).getByText('Ada Okafor')).toBeInTheDocument()
+        await user.type(within(group).getByRole('textbox', { name: 'Identity-provider group' }), 'ML-Engineers')
+        // Two groups can't share a name.
+        await user.click(screen.getByRole('button', { name: /Add another group/ }))
+        expect(screen.getByRole('button', { name: /^Next/ })).toBeDisabled()
+        await user.type(screen.getAllByRole('textbox', { name: 'Group name' })[1], 'editors')
+        expect(screen.getByText('Two groups can’t share a name.')).toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: 'Remove editors' }))
+        await next(); await next()
+        expect(screen.getByText('ML-Engineers')).toBeInTheDocument()       // in the summary
+        await user.click(screen.getByRole('button', { name: /Send request/ }))
+        expect(api.submit).toHaveBeenCalledWith(expect.objectContaining({
+            groups: [expect.objectContaining({ name: 'Editors', role: 'workspace_publisher', memberIds: ['usr_ada'], idpGroup: 'ML-Engineers' })],
+        }))
     })
 })

@@ -1094,8 +1094,12 @@ over; admins get `access_review.overdue`.
 * the requester gets `workspace_request.approved` (linking to
   `/workspaces/{id}?welcome=1`), and `workspace_request.sent_back` and
   `workspace_request.declined` (linking to `/my/access?tab=workspaces`);
-* teammates the approval adds get `workspace.member_added`, linking to
-  `/workspaces/{id}`.
+* teammates the approval adds, and the people it puts in the groups the request
+  asked for, get `workspace.member_added`, linking to `/workspaces/{id}`;
+* platform administrators (`system:admin`) get
+  `workspace_request.idp_links_pending` when an Org Admin's approval made groups
+  that name identity-provider groups: linking a group to the identity provider is
+  theirs (`POST /admin/workspace-requests/{id}/idp-links`), as every SSO rule is.
 
 ## Invites
 

@@ -23,11 +23,36 @@ export interface WorkspaceRequestSource {
     viewCount: number
 }
 
+/** What a proposed group may do in the workspace. */
+export type ProposedGroupRole = 'workspace_viewer' | 'workspace_member' | 'workspace_publisher'
+
+/** A group the requester proposes for the workspace: made on approval, bound to the workspace with
+ *  `role`, with `memberIds` in it — and, when `idpGroup` names a group in the identity provider
+ *  (an Active Directory group, say), linked to it so its membership follows the directory. */
+export interface ProposedGroup {
+    /** The requester's own id for it, so an approver's rename can name it. */
+    key: string
+    /** Short — created as "<workspace> · <name>". */
+    name: string
+    description?: string
+    role: ProposedGroupRole
+    memberIds: string[]
+    /** On a read: the members by name. */
+    members?: WorkspaceRequestPerson[]
+    idpGroup?: string | null
+}
+
 export interface WorkspaceRequestOutcome {
     workspaceId?: string | null
     movedSources: string[]
     failedSources: { id: string; reason: string }[]
     membersAdded: string[]
+    /** The groups made: the proposal's key, the group, its full name. */
+    groupsCreated?: { key: string; groupId: string; name: string }[]
+    /** Groups linked to the identity provider on approval. */
+    idpLinksCreated?: { groupId: string; idpGroup: string }[]
+    /** Links waiting for a platform administrator to confirm. */
+    idpLinksPending?: { groupId: string; groupName: string; idpGroup: string }[]
 }
 
 export interface WorkspaceRequest {
@@ -42,6 +67,7 @@ export interface WorkspaceRequest {
     teammates?: WorkspaceRequestPerson[]
     playgroundSourceIds: string[]
     playgroundSources?: WorkspaceRequestSource[]
+    groups?: ProposedGroup[]
     dataNeeds?: string | null
     note?: string | null
     status: WorkspaceRequestStatus
@@ -67,9 +93,14 @@ export interface WorkspaceRequestDraft {
     teamName?: string
     teammateIds: string[]
     playgroundSourceIds: string[]
+    groups?: ProposedGroup[]
     dataNeeds?: string
     note?: string
 }
+
+/** The name a proposed group is created with. */
+export const groupFullName = (workspaceName: string, groupName: string) =>
+    `${workspaceName.trim()} · ${groupName.trim()}`
 
 /** The refusal a taken name comes back with, carrying a free one to use instead. */
 export function nameTakenSuggestion(error: unknown): string | null {
@@ -94,8 +125,17 @@ export const workspaceRequestsService = {
 
     listToAnswer: (status = 'open') => authFetch<WorkspaceRequest[]>(`${ADMIN}?status=${encodeURIComponent(status)}`),
     get: (id: string) => authFetch<WorkspaceRequest>(`${ADMIN}/${encodeURIComponent(id)}`),
-    approve: (id: string, overrides: { name?: string; description?: string } = {}) =>
+    approve: (id: string, overrides: {
+        name?: string; description?: string
+        /** Full names for the proposed groups, by key, where the approver changed them. */
+        groupNames?: Record<string, string>
+        /** The identity-provider connection the links are for; none means any connection. */
+        idpProviderId?: string | null
+    } = {}) =>
         authFetch<WorkspaceRequest>(`${ADMIN}/${encodeURIComponent(id)}/approve`, json(overrides)),
+    /** A platform administrator links a group from an approved request to its identity-provider group. */
+    linkIdpGroup: (id: string, groupId: string, idpProviderId?: string | null) =>
+        authFetch<WorkspaceRequest>(`${ADMIN}/${encodeURIComponent(id)}/idp-links`, json({ groupId, idpProviderId: idpProviderId || undefined })),
     sendBack: (id: string, question: string) =>
         authFetch<WorkspaceRequest>(`${ADMIN}/${encodeURIComponent(id)}/send-back`, json({ question })),
     decline: (id: string, reason?: string) =>

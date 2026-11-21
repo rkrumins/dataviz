@@ -821,6 +821,25 @@ class WorkspaceDirectoryResponse(BaseModel):
 
 # ── Workspace requests ───────────────────────────────────────────────
 
+#: What a proposed group may do in the workspace it is made for.
+ProposedGroupRole = Literal["workspace_viewer", "workspace_member", "workspace_publisher"]
+
+
+class ProposedGroup(BaseModel):
+    """A group asked for with a workspace: made when the request is approved, as
+    ``"<workspace> · <name>"``, bound to the workspace with ``role``, with ``memberIds``
+    in it. ``idpGroup`` names a group in the identity provider (an Active Directory
+    group, say) to link it to, so its membership follows the directory; a platform
+    administrator makes that link. ``key`` is the requester's own id for it."""
+    model_config = ConfigDict(populate_by_name=True)
+    key: str = Field(min_length=1, max_length=40)
+    name: str = Field(max_length=80)
+    description: Optional[str] = Field(default=None, max_length=500)
+    role: ProposedGroupRole
+    member_ids: list[str] = Field(default_factory=list, alias="memberIds", max_length=100)
+    idp_group: Optional[str] = Field(default=None, alias="idpGroup", max_length=200)
+
+
 class WorkspaceRequestCreate(BaseModel):
     """Body for ``POST /api/v1/workspace-requests`` and, resubmitting one sent
     back, ``PUT /api/v1/me/workspace-requests/{id}``. ``purpose`` is one of
@@ -834,16 +853,29 @@ class WorkspaceRequestCreate(BaseModel):
     playground_source_ids: list[str] = Field(
         default_factory=list, alias="playgroundSourceIds", max_length=100,
     )
+    groups: list[ProposedGroup] = Field(default_factory=list, max_length=10)
     data_needs: Optional[str] = Field(default=None, alias="dataNeeds", max_length=2000)
     note: Optional[str] = Field(default=None, max_length=2000)
 
 
 class WorkspaceRequestApprove(BaseModel):
     """Body for approving: the name and description to create the workspace
-    with, when the approver changes what was asked for."""
+    with, when the approver changes what was asked for; full names for proposed
+    groups the approver renamed (by key); and the identity-provider connection
+    the groups' links are for (none: any connection)."""
     model_config = ConfigDict(populate_by_name=True)
     name: Optional[str] = Field(default=None, max_length=200)
     description: Optional[str] = Field(default=None, max_length=2000)
+    group_names: Optional[dict[str, str]] = Field(default=None, alias="groupNames")
+    idp_provider_id: Optional[str] = Field(default=None, alias="idpProviderId", max_length=200)
+
+
+class WorkspaceRequestIdpLink(BaseModel):
+    """Body for linking a group made by an approved request to its identity-provider
+    group: the group, and the connection (none: any connection)."""
+    model_config = ConfigDict(populate_by_name=True)
+    group_id: str = Field(alias="groupId", max_length=200)
+    idp_provider_id: Optional[str] = Field(default=None, alias="idpProviderId", max_length=200)
 
 
 class WorkspaceRequestSendBack(BaseModel):
@@ -862,6 +894,11 @@ class WorkspaceRequestPerson(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     id: str
     display_name: Optional[str] = Field(default=None, alias="displayName")
+
+
+class ProposedGroupResponse(ProposedGroup):
+    """A proposed group as read back: its invited people by name."""
+    members: list[WorkspaceRequestPerson] = Field(default_factory=list)
 
 
 class WorkspaceRequestSource(BaseModel):
@@ -890,6 +927,7 @@ class WorkspaceRequestResponse(BaseModel):
     teammates: list[WorkspaceRequestPerson] = Field(default_factory=list)
     playground_source_ids: list[str] = Field(default_factory=list, alias="playgroundSourceIds")
     playground_sources: list[WorkspaceRequestSource] = Field(default_factory=list, alias="playgroundSources")
+    groups: list[ProposedGroupResponse] = Field(default_factory=list)
     data_needs: Optional[str] = Field(default=None, alias="dataNeeds")
     note: Optional[str] = None
     status: str

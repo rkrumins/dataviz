@@ -1062,7 +1062,10 @@ class WorkspaceRequestORM(Base):
     (JSON): the Playground graphs moved into it, those that could not be, and the
     teammates added. One open request per person (``uq_workspace_requests_one_open``).
 
-    ``teammate_ids`` and ``playground_source_ids`` are JSON lists of ids. No foreign
+    ``teammate_ids`` and ``playground_source_ids`` are JSON lists of ids;
+    ``proposed_groups`` a JSON list of the groups to make with it (``ProposedGroup``):
+    each with its role, the people to put in it, and the identity-provider group to
+    link it to. No foreign
     keys, like ``data_source_transfers``: people, workspaces and sources are named by
     id, and the record outlives them.
     """
@@ -1076,6 +1079,7 @@ class WorkspaceRequestORM(Base):
     team_name = Column(Text, nullable=True)
     teammate_ids = Column(Text, nullable=False, default="[]")            # JSON
     playground_source_ids = Column(Text, nullable=False, default="[]")   # JSON
+    proposed_groups = Column(Text, nullable=False, default="[]")         # JSON
     data_needs = Column(Text, nullable=True)
     note = Column(Text, nullable=True)
     status = Column(Text, nullable=False, default="pending")

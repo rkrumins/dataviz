@@ -33,17 +33,24 @@ Click **Request a workspace**. You'll find it:
 * at the top of **Workspaces**;
 * on **My access**, under **Your workspace requests**.
 
-The wizard asks four things:
+The wizard asks five things:
 
 1. **What it's for.** Pick the closest: a team's home, a project, a proof of concept,
    reporting, or something else. Give it a name and, if you like, a line on who
    should use it and for what.
 2. **Who it's for.** You'll be its admin. Name your teammates and they join as
    members the moment it's approved. You can invite more people yourself later.
-3. **What it will work with.** Tick the graphs you built in the Playground to bring
+3. **Groups** (optional). Organise people into groups, so access stays easy to
+   govern — for example *Editors* who **Can edit** and *Stakeholders* who **Can
+   view**. For each group, choose what it can do, invite colleagues who already
+   have an account, and — if your organisation keeps the same team in its identity
+   provider — name that group (an Active Directory, Entra or Okta group's name or
+   ID). Groups are named after the workspace, such as *ML platform lineage ·
+   Editors*, because group names are shared across {brand}.
+4. **What it will work with.** Tick the graphs you built in the Playground to bring
    them along — each moves with its views. Then say which data the platform team
    should connect for you.
-4. **Review.** Check what the platform team will see, add a note if there's anything
+5. **Review.** Check what the platform team will see, add a note if there's anything
    else they should know, and **Send request**.
 
 The wizard keeps your draft on this browser as you write, so closing it loses
@@ -64,6 +71,14 @@ can **Withdraw** it while it's waiting.
 If a graph couldn't be moved when the workspace was made, the welcome says so; it is
 still in the Playground, and you can bring it over yourself later.
 
+### Groups linked to your identity provider
+
+When a group you asked for names a group in your identity provider, a platform
+administrator links the two. From then on, people in the directory group join the
+{brand} group when they sign in through single sign-on — and leave it when the
+directory says so — so you don't have to keep two lists. Until the link is made,
+the people you invited are in the group, and you can add more from the workspace.
+
 ## For platform and org admins: answer requests
 
 *Needs `system:workspaces:create` — Org Admins and Super Admins hold it.*
@@ -77,6 +92,12 @@ it's for, who's in it, what comes over from the Playground and what data they ne
   description first. If the name is taken, you're offered a free one. Moving a graph
   takes its views with it: people in the Playground who aren't in the new workspace
   stop seeing them.
+* Any **groups** asked for are made with the workspace, given their roles and filled
+  with the people invited to them. You can rename them before approving.
+* A group that names an identity-provider group is linked to it at once if you're a
+  platform administrator — choose the connection, or leave **Any connection**. If
+  you're an Org Admin, the link waits under **Identity-provider links to confirm**
+  on the same tab for a platform administrator, who is told in their Inbox.
 * **Send back** asks the requester a question. The request waits on them until they
   answer and resend it.
 * **Decline** says no, with a reason they'll see.

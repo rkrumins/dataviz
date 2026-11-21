@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, Check, Database, Loader2, MessageCircleQuestion, Send, Sparkles, Users } from 'lucide-react'
+import { ArrowRight, Check, Database, Loader2, MessageCircleQuestion, Send, Sparkles, Users, UsersRound } from 'lucide-react'
 import { WizardShell, type WizardStepDef } from '@/components/wizard/WizardShell'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { listViews } from '@/services/viewApiService'
@@ -24,25 +24,28 @@ import { useRequestWorkspaceWizard, useWorkspaceRequestActions } from '@/hooks/u
 import { usePlayground } from '@/hooks/usePlayground'
 import { useAuthStore } from '@/store/auth'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { DataStep, PurposeStep, ReviewStep, TeamStep, type GraphOption, type PersonChip } from './RequestSteps'
+import { DataStep, GroupsStep, PurposeStep, ReviewStep, TeamStep, type GraphOption, type PersonChip } from './RequestSteps'
 import { NextSteps } from './NextSteps'
 
-type StepId = 'purpose' | 'team' | 'data' | 'review'
-const STEPS: StepId[] = ['purpose', 'team', 'data', 'review']
+type StepId = 'purpose' | 'team' | 'groups' | 'data' | 'review'
+const STEPS: StepId[] = ['purpose', 'team', 'groups', 'data', 'review']
 const STEP_DEFS: Record<StepId, WizardStepDef> = {
     purpose: { id: 'purpose', label: 'Purpose', icon: <Sparkles className="w-4 h-4" /> },
     team: { id: 'team', label: 'People', icon: <Users className="w-4 h-4" /> },
+    groups: { id: 'groups', label: 'Groups', icon: <UsersRound className="w-4 h-4" /> },
     data: { id: 'data', label: 'Data', icon: <Database className="w-4 h-4" /> },
     review: { id: 'review', label: 'Review', icon: <Send className="w-4 h-4" /> },
 }
 
 const EMPTY: WorkspaceRequestDraft = {
-    name: '', description: '', purpose: 'team', teamName: '', teammateIds: [], playgroundSourceIds: [], dataNeeds: '', note: '',
+    name: '', description: '', purpose: 'team', teamName: '', teammateIds: [], playgroundSourceIds: [], groups: [], dataNeeds: '', note: '',
 }
 const draftKey = (userId: string) => `nx-workspace-request-draft:${userId}`
 
-/** A draft kept on this browser: `{ draft, teammates }`, or nothing when storage can't be read. */
-function readDraft(userId: string | undefined): { draft: WorkspaceRequestDraft; teammates: PersonChip[] } | null {
+interface Start { draft: WorkspaceRequestDraft; teammates: PersonChip[]; people?: Record<string, string> }
+
+/** A draft kept on this browser: `{ draft, teammates, people }`, or nothing when storage can't be read. */
+function readDraft(userId: string | undefined): Start | null {
     if (!userId) return null
     try {
         const raw = window.localStorage.getItem(draftKey(userId))
@@ -52,14 +55,17 @@ function readDraft(userId: string | undefined): { draft: WorkspaceRequestDraft; 
     }
 }
 
-function fromRequest(r: WorkspaceRequest): { draft: WorkspaceRequestDraft; teammates: PersonChip[] } {
+function fromRequest(r: WorkspaceRequest): Start {
+    const groups = r.groups ?? []
     return {
         draft: {
             name: r.name, description: r.description ?? '', purpose: r.purpose, teamName: r.teamName ?? '',
             teammateIds: r.teammateIds ?? [], playgroundSourceIds: r.playgroundSourceIds ?? [],
+            groups: groups.map(({ members: _members, ...g }) => ({ ...g, idpGroup: g.idpGroup ?? '' })),
             dataNeeds: r.dataNeeds ?? '', note: '',
         },
         teammates: (r.teammates ?? r.teammateIds.map(id => ({ id, displayName: id }))).map(t => ({ id: t.id, name: t.displayName })),
+        people: Object.fromEntries(groups.flatMap(g => (g.members ?? []).map(m => [m.id, m.displayName]))),
     }
 }
 
@@ -88,8 +94,10 @@ export function RequestWorkspaceWizard({ editing, preselectedSourceIds = [], onC
         const ids = Array.from(new Set([...start.draft.playgroundSourceIds, ...preselectedSourceIds]))
         return { ...start, draft: { ...start.draft, playgroundSourceIds: ids } }
     })
-    const [draft, setDraft] = useState<WorkspaceRequestDraft>(initial.draft)
+    const [draft, setDraft] = useState<WorkspaceRequestDraft>({ ...EMPTY, ...initial.draft })
     const [teammates, setTeammates] = useState<PersonChip[]>(initial.teammates)
+    // Names of the people invited to groups, for showing them.
+    const [people, setPeople] = useState<Record<string, string>>(initial.people ?? {})
     const [step, setStep] = useState<StepId>('purpose')
     const [phase, setPhase] = useState<'steps' | 'sending' | 'sent'>('steps')
     const [nameError, setNameError] = useState<{ message: string; suggestion: string | null } | null>(null)
@@ -102,8 +110,8 @@ export function RequestWorkspaceWizard({ editing, preselectedSourceIds = [], onC
     // Kept as it is written (a new request only): closing the wizard loses nothing.
     useEffect(() => {
         if (editing || !me?.id || phase !== 'steps') return
-        try { window.localStorage.setItem(draftKey(me.id), JSON.stringify({ draft, teammates })) } catch { /* this visit only */ }
-    }, [draft, teammates, editing, me?.id, phase])
+        try { window.localStorage.setItem(draftKey(me.id), JSON.stringify({ draft, teammates, people })) } catch { /* this visit only */ }
+    }, [draft, teammates, people, editing, me?.id, phase])
 
     // The person's own graphs in the Playground, with how many views each holds.
     const playground = usePlayground().data
@@ -126,7 +134,12 @@ export function RequestWorkspaceWizard({ editing, preselectedSourceIds = [], onC
 
     const index = STEPS.indexOf(step)
     const nameOk = draft.name.trim().length > 0 && draft.name.trim().length <= 120
-    const canProceed = step === 'purpose' ? nameOk : step === 'review' && editing?.question ? !!draft.note?.trim() : true
+    // Every proposed group needs a name of its own.
+    const groupNames = (draft.groups ?? []).map(g => g.name.trim().toLowerCase())
+    const groupsOk = groupNames.every((n, i) => n && groupNames.indexOf(n) === i)
+    const canProceed = step === 'purpose' ? nameOk
+        : step === 'groups' ? groupsOk
+            : step === 'review' && editing?.question ? !!draft.note?.trim() : true
 
     const send = async () => {
         const body: WorkspaceRequestDraft = {
@@ -134,6 +147,10 @@ export function RequestWorkspaceWizard({ editing, preselectedSourceIds = [], onC
             name: draft.name.trim(),
             teammateIds: teammates.map(t => t.id),
             playgroundSourceIds: draft.playgroundSourceIds.filter(id => graphs.some(g => g.id === id)),
+            groups: (draft.groups ?? []).map(g => ({
+                key: g.key, name: g.name.trim(), description: g.description?.trim() || undefined, role: g.role,
+                memberIds: g.memberIds, idpGroup: g.idpGroup?.trim() || undefined,
+            })),
         }
         setPhase('sending')
         try {
@@ -221,9 +238,14 @@ export function RequestWorkspaceWizard({ editing, preselectedSourceIds = [], onC
                             onAddTeammate={p => setTeammates(t => t.some(x => x.id === p.id) ? t : [...t, p])}
                             onRemoveTeammate={id => setTeammates(t => t.filter(x => x.id !== id))} />
                     )}
+                    {step === 'groups' && (
+                        <GroupsStep workspaceName={draft.name} groups={draft.groups ?? []} people={people}
+                            onChange={groups => patch({ groups })}
+                            onRemember={p => setPeople(m => ({ ...m, [p.id]: p.name }))} />
+                    )}
                     {step === 'data' && <DataStep draft={draft} onChange={patch} graphs={graphs} playgroundOn={!!playground?.enabled && !!pgWorkspace} />}
                     {step === 'review' && (
-                        <ReviewStep draft={draft} onChange={patch} teammates={teammates} graphs={graphs} meName={meName} question={editing?.question} />
+                        <ReviewStep draft={draft} onChange={patch} teammates={teammates} graphs={graphs} meName={meName} question={editing?.question} people={people} />
                     )}
                 </>
             )}

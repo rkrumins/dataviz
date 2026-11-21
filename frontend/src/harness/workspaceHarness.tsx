@@ -73,6 +73,10 @@ const WS_REQUEST = {
     description: 'Where every feature in the ML platform comes from, for the model review board.',
     teamName: 'ML Engineering', teammateIds: ['usr_ben'], teammates: [{ id: 'usr_ben', displayName: 'Ben Hall' }],
     playgroundSourceIds: ['ds_pg_ml'], playgroundSources: [{ id: 'ds_pg_ml', label: 'ML feature pipeline', viewCount: 2 }],
+    groups: [
+        { key: 'g1', name: 'Engineers', role: 'workspace_publisher', memberIds: ['usr_ben'], members: [{ id: 'usr_ben', displayName: 'Ben Hall' }], idpGroup: 'SG-ML-Engineers' },
+        { key: 'g2', name: 'Stakeholders', role: 'workspace_viewer', memberIds: [], members: [], idpGroup: null },
+    ],
     dataNeeds: 'Snowflake ML marts and the dbt project “features”.', note: 'We’d like it before the January model review.',
     status: 'pending', createdAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
 }

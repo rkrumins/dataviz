@@ -20,8 +20,9 @@ from sqlalchemy import select
 
 from backend.app.auth.dependencies import get_current_user, get_optional_user, get_permission_claims
 from backend.app.db.models import (
-    NotificationORM, OutboxEventORM, ProviderORM, RoleBindingORM, RoleORM, RolePermissionORM, UserORM, ViewORM,
-    WorkspaceDataSourceORM, WorkspaceORM, WorkspaceRequestORM,
+    GroupMemberORM, GroupORM, IdpGroupRoleMappingORM, NotificationORM, OutboxEventORM, ProviderORM,
+    RoleBindingORM, RoleORM, RolePermissionORM, UserORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM,
+    WorkspaceRequestORM,
 )
 from backend.app.services import playground_policy
 from backend.app.services.feature_flags import feature_flags
@@ -461,3 +462,113 @@ async def test_declining_closes_it_with_the_reason(test_client: AsyncClient, est
         withdraw = await test_client.post(f"/api/v1/me/workspace-requests/{req['id']}/withdraw")
     assert withdraw.status_code == 409
     assert (await db_session.execute(select(WorkspaceORM).where(WorkspaceORM.name == "Ada's Lab"))).first() is None
+
+
+# ── Groups asked for with the workspace ─────────────────────────────────
+
+ROOT = _user("usr_root")
+PLATFORM = PermissionClaims(sid="s_r", global_perms=("system:admin", "system:workspaces:create"), ws_perms={})
+GROUPS = [
+    {"key": "g1", "name": "Engineers", "role": "workspace_publisher", "memberIds": [BEN.id, DEE.id],
+     "idpGroup": " ML-Engineers "},
+    {"key": "g2", "name": "Readers", "role": "workspace_viewer", "memberIds": []},
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("groups", [
+    [{"key": "a", "name": "Team", "role": "workspace_member"}, {"key": "b", "name": " team ", "role": "workspace_member"}],
+    [{"key": "a", "name": "  ", "role": "workspace_member"}],
+    [{"key": "a", "name": "Team", "role": "workspace_member", "memberIds": [CAL.id]}],
+    [{"key": "a", "name": "Team", "role": "workspace_admin"}],
+])
+async def test_the_groups_asked_for_are_checked(test_client: AsyncClient, estate, flag_on, groups):
+    with _as(ADA, PLAYER):
+        r = await test_client.post("/api/v1/workspace-requests", json=_ask(groups=groups))
+    assert r.status_code == 422, r.text
+
+
+@pytest.mark.asyncio
+async def test_a_platform_admins_approval_makes_binds_fills_and_links_the_groups(
+    test_client: AsyncClient, estate, db_session, flag_on,
+):
+    req = await _submit(test_client, groups=GROUPS, playgroundSourceIds=[])
+    assert [(g["name"], [m["displayName"] for m in g["members"]], g["idpGroup"]) for g in req["groups"]] == [
+        ("Engineers", ["Ben T", "Dee T"], "ML-Engineers"), ("Readers", [], None)]
+    with _as(ROOT, PLATFORM):
+        r = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/approve",
+                                   json={"name": "Lineage Lab", "groupNames": {"g2": "Lab readers"}})
+    assert r.status_code == 200, r.text
+    out = r.json()["outcome"]
+    ws_id = out["workspaceId"]
+    made = {g["key"]: g for g in out["groupsCreated"]}
+    assert made["g1"]["name"] == "Lineage Lab · Engineers" and made["g2"]["name"] == "Lab readers"
+    eng = made["g1"]["groupId"]
+    assert out["idpLinksCreated"] == [{"groupId": eng, "idpGroup": "ML-Engineers"}] and out["idpLinksPending"] == []
+
+    bound = dict((await db_session.execute(
+        select(RoleBindingORM.subject_id, RoleBindingORM.role_name)
+        .where(RoleBindingORM.scope_id == ws_id, RoleBindingORM.subject_type == "group")
+    )).all())
+    assert bound == {eng: "workspace_publisher", made["g2"]["groupId"]: "workspace_viewer"}
+    members = (await db_session.execute(
+        select(GroupMemberORM.user_id).where(GroupMemberORM.group_id == eng)
+    )).scalars().all()
+    assert sorted(members) == [BEN.id, DEE.id]
+    mapping = (await db_session.execute(
+        select(IdpGroupRoleMappingORM).where(IdpGroupRoleMappingORM.target_group_id == eng)
+    )).scalar_one()
+    assert (mapping.idp_group, mapping.target_type, mapping.provider_id) == ("ML-Engineers", "group_membership", None)
+    assert (await _kinds(db_session, DEE.id))["workspace.member_added"] == f"/workspaces/{ws_id}"
+    assert [p["via"] for _, p in await _events(db_session, "rbac.group.member_added")] == ["workspace_request"] * 2
+
+
+@pytest.mark.asyncio
+async def test_an_org_admins_approval_leaves_the_links_for_a_platform_admin_to_confirm(
+    test_client: AsyncClient, estate, db_session, flag_on,
+):
+    db_session.add(UserORM(id=ROOT.id, email=ROOT.email, password_hash="x", first_name="Root", last_name="T",
+                           status="active", created_at=T0, updated_at=T0))
+    db_session.add(RoleBindingORM(subject_type="user", subject_id=ROOT.id, role_name="super_admin", scope_type="global"))
+    await db_session.commit()
+    req = await _submit(test_client, groups=GROUPS, playgroundSourceIds=[])
+    with _as(OLGA, APPROVER):
+        r = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/approve")
+    assert r.status_code == 200, r.text
+    out = r.json()["outcome"]
+    eng = next(g["groupId"] for g in out["groupsCreated"] if g["key"] == "g1")
+    assert out["idpLinksCreated"] == []
+    assert out["idpLinksPending"] == [{"groupId": eng, "groupName": "Ada's Lab · Engineers", "idpGroup": "ML-Engineers"}]
+    assert (await db_session.execute(select(IdpGroupRoleMappingORM))).scalars().all() == []
+    assert (await _kinds(db_session, ROOT.id))["workspace_request.idp_links_pending"] == "/workspaces?tab=requests"
+
+    with _as(OLGA, APPROVER):
+        refused = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/idp-links", json={"groupId": eng})
+    assert refused.status_code == 403
+    with _as(ROOT, PLATFORM):
+        done = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/idp-links", json={"groupId": eng})
+        twice = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/idp-links", json={"groupId": eng})
+    assert done.status_code == 200, done.text
+    assert done.json()["outcome"]["idpLinksPending"] == []
+    assert done.json()["outcome"]["idpLinksCreated"] == [{"groupId": eng, "idpGroup": "ML-Engineers"}]
+    assert twice.status_code == 409 and twice.json()["detail"]["type"] == "no_pending_link"
+    mapping = (await db_session.execute(
+        select(IdpGroupRoleMappingORM).execution_options(populate_existing=True)
+    )).scalar_one()
+    assert (mapping.idp_group, mapping.target_group_id) == ("ML-Engineers", eng)
+
+
+@pytest.mark.asyncio
+async def test_a_taken_group_name_stops_the_approval_before_anything_is_made(
+    test_client: AsyncClient, estate, db_session, flag_on,
+):
+    db_session.add(GroupORM(name="Ada's Lab · Readers", deleted_at=T0))   # a deleted group still holds its name
+    await db_session.commit()
+    req = await _submit(test_client, groups=GROUPS, playgroundSourceIds=[])
+    with _as(ROOT, PLATFORM):
+        r = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/approve")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] | {"message": None} == {
+        "type": "group_name_taken", "message": None, "groupKey": "g2", "suggestion": "Ada's Lab · Readers 2"}
+    made = (await db_session.execute(select(WorkspaceORM).where(WorkspaceORM.name == "Ada's Lab"))).scalars().all()
+    assert made == []

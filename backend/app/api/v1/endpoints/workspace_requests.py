@@ -12,6 +12,7 @@ Routes (mounted from ``api.py``):
   GET    /api/v1/admin/workspace-requests?status=open     system:workspaces:create
   GET    /api/v1/admin/workspace-requests/{id}            … with the requester's Playground activity
   POST   /api/v1/admin/workspace-requests/{id}/approve
+  POST   /api/v1/admin/workspace-requests/{id}/idp-links   (system:admin)
   POST   /api/v1/admin/workspace-requests/{id}/send-back
   POST   /api/v1/admin/workspace-requests/{id}/decline
 
@@ -33,6 +34,7 @@ from backend.app.services import workspace_requests as service
 from backend.app.services.permission_service import PermissionClaims
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
+    WorkspaceRequestIdpLink,
     WorkspaceRequestApprove,
     WorkspaceRequestCreate,
     WorkspaceRequestDecline,
@@ -158,8 +160,24 @@ async def approve_workspace_request(
     Playground graphs in. ``outcome`` says which graphs moved and which couldn't."""
     body = body or WorkspaceRequestApprove()
     row = await service.approve(session, approver, claims, request_id,
-                                name=body.name, description=body.description)
+                                name=body.name, description=body.description,
+                                group_names=body.group_names, idp_provider_id=body.idp_provider_id)
     return await _one(session, row)
+
+
+@admin_router.post("/{request_id}/idp-links", response_model=WorkspaceRequestResponse,
+                   response_model_by_alias=True)
+async def link_workspace_request_group(
+    body: WorkspaceRequestIdpLink,
+    request_id: str = Path(...),
+    admin: User = Depends(requires(service.IDP_LINK_PERMISSION)),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Link a group the approved request made to the identity-provider group it named
+    (platform administrators — the SSO rules' own bar). For the links an Org Admin's
+    approval left waiting."""
+    return await _one(session, await service.link_idp_group(
+        session, admin, request_id, body.group_id, body.idp_provider_id))
 
 
 @admin_router.post("/{request_id}/send-back", response_model=WorkspaceRequestResponse,

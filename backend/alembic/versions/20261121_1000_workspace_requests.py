@@ -55,6 +55,7 @@ def upgrade() -> None:
             sa.Column("team_name", sa.Text(), nullable=True),
             sa.Column("teammate_ids", sa.Text(), nullable=False),
             sa.Column("playground_source_ids", sa.Text(), nullable=False),
+            sa.Column("proposed_groups", sa.Text(), nullable=False),
             sa.Column("data_needs", sa.Text(), nullable=True),
             sa.Column("note", sa.Text(), nullable=True),
             sa.Column("status", sa.Text(), nullable=False),

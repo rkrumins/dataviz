@@ -66,6 +66,7 @@ async def create(
     playground_source_ids: list[str],
     data_needs: Optional[str],
     note: Optional[str],
+    proposed_groups: Optional[list[dict]] = None,
 ) -> tuple[WorkspaceRequestORM, bool]:
     """Open a request, or return the person's open one.
 
@@ -80,7 +81,8 @@ async def create(
     row = WorkspaceRequestORM(
         requester_id=requester_id, name=name, description=description, purpose=purpose,
         team_name=team_name, teammate_ids=json.dumps(teammate_ids),
-        playground_source_ids=json.dumps(playground_source_ids), data_needs=data_needs,
+        playground_source_ids=json.dumps(playground_source_ids),
+        proposed_groups=json.dumps(proposed_groups or []), data_needs=data_needs,
         note=note, status="pending", created_at=now, updated_at=now,
     )
     try:
