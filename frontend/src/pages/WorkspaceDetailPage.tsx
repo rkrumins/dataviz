@@ -45,6 +45,10 @@ import { AddDataSourceWizard } from '@/components/admin/workspace/AddDataSourceW
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
 import { DataSourceGridCard } from '@/components/admin/workspace/DataSourceGridCard'
+import { DataSourceFilterBar } from '@/components/admin/workspace/DataSourceFilterBar'
+import { NO_FILTER, filterDataSources, wantsFilterBar, type DataSourceFilter } from '@/lib/dataSourceFilter'
+import { rankTags } from '@/lib/tags'
+import { DATA_SOURCE_METADATA_FEATURE } from '@/services/dataSourceMetadataService'
 import { WorkspaceCardSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { DataSourceDetailPanel } from '@/components/admin/workspace/DataSourceDetailPanel'
 import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSection'
@@ -59,7 +63,7 @@ import { useMyWorkspaceRequests } from '@/hooks/useWorkspaceRequests'
 import { WorkspaceWelcomeBanner } from '@/components/workspace-requests/WorkspaceWelcomeBanner'
 import { AskForDataButton } from '@/components/data-requests/AskForData'
 import { WorkspaceDataRequestsPanel } from '@/components/data-requests/WorkspaceDataRequestsPanel'
-import { useAskForData } from '@/hooks/useDataRequests'
+import { DATA_REQUESTS_FEATURE, useAskForData } from '@/hooks/useDataRequests'
 import { ActivityExplorer } from '@/components/activity/ActivityExplorer'
 import { workspaceActivityScope } from '@/components/activity/activityMeta'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
@@ -262,6 +266,26 @@ export function WorkspaceDetailPage() {
         if (primaryDs?.ontologyId) return ontologyNameMap[primaryDs.ontologyId]
         return undefined
     }, [workspace, ontologyNameMap])
+
+    // ── Data source details: the Sources filter, and the tags offered when tagging one ──
+    const sourceDetails = useFeature(DATA_SOURCE_METADATA_FEATURE)
+    const dataRequestsOn = useFeature(DATA_REQUESTS_FEATURE)
+    const [dsFilter, setDsFilter] = useState<DataSourceFilter>(NO_FILTER)
+    const showDsFilter = sourceDetails && wantsFilterBar(workspace?.dataSources ?? [])
+    const shownSources = useMemo(() => {
+        const all = workspace?.dataSources ?? []
+        return showDsFilter ? filterDataSources(all, dsFilter, ds => dsProviderMap[ds.id]?.catalogItemName) : all
+    }, [workspace, showDsFilter, dsFilter, dsProviderMap])
+    const filterByTag = useCallback((tag: string) => setDsFilter(f => ({ ...f, tag })), [])
+    const tagSuggestions = useMemo(() => sourceDetails
+        ? rankTags([...(workspace?.dataSources ?? []).map(ds => ds.tags), ...allWorkspaceViews.map(v => v.tags)])
+        : [], [sourceDetails, workspace, allWorkspaceViews])
+    // The data request a source came from is listed under Data → Sources.
+    const showDataRequests = useCallback(() => {
+        setSelectedDsId(null)
+        goTo('data', 'sources')
+        window.setTimeout(() => document.getElementById('ws-data-requests-title')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 200)
+    }, [goTo])
 
     // ── Handlers ───────────────────────────────────────────
     const handleSaveHeader = async () => {
@@ -722,9 +746,19 @@ export function WorkspaceDetailPage() {
                                             : askForData ? { label: 'Ask for data', onClick: askForData, icon: Plus } : undefined}
                                     />
                                 </div>
-                            ) : (
+                            ) : (<>
+                                {showDsFilter && (
+                                    <DataSourceFilterBar sources={workspace.dataSources} filter={dsFilter} onChange={setDsFilter} shown={shownSources.length} />
+                                )}
+                                {shownSources.length === 0 && (
+                                    <div className="rounded-3xl border-2 border-dashed border-glass-border">
+                                        <EmptyState icon={Database} title="No sources match"
+                                            description="Nothing here has those words, that tag, that sensitivity or that status."
+                                            action={{ label: 'Clear the filter', onClick: () => setDsFilter(NO_FILTER) }} />
+                                    </div>
+                                )}
                                 <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-                                    {workspace.dataSources.map(ds => {
+                                    {shownSources.map(ds => {
                                         const onto = ds.ontologyId ? ontologyMap[ds.ontologyId] : undefined
                                         return (
                                             <DataSourceGridCard
@@ -740,11 +774,12 @@ export function WorkspaceDetailPage() {
                                                 isSelected={selectedDsId === ds.id}
                                                 onSelect={() => setSelectedDsId(prev => prev === ds.id ? null : ds.id)}
                                                 onSetPrimary={canManageDataSources ? () => handleSetPrimary(ds.id) : undefined}
+                                                onTagClick={showDsFilter ? filterByTag : undefined}
                                             />
                                         )
                                     })}
                                 </div>
-                            )}
+                            </>)}
 
                             {/* What has been asked for here, and where each request stands. */}
                             {wsId && <WorkspaceDataRequestsPanel workspaceId={wsId} />}
@@ -894,6 +929,8 @@ export function WorkspaceDetailPage() {
             {/* Data source detail drawer (renders via portal — no scroll impact).
                 Editing is inline in the drawer now (no separate modal). */}
             <DataSourceDetailPanel
+                tagSuggestions={tagSuggestions}
+                onShowDataRequests={dataRequestsOn ? showDataRequests : undefined}
                 ds={selectedDs}
                 isOpen={!!selectedDsId && !!selectedDs}
                 wsId={wsId!}

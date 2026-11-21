@@ -9,6 +9,12 @@ import { NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import type { DataSourceReadinessResponse } from '@/services/aggregationService'
 import { usePersonaMode } from '@/store/persona'
+import { useFeature } from '@/store/features'
+import { DATA_SOURCE_METADATA_FEATURE } from '@/services/dataSourceMetadataService'
+import { TrustBadges } from '@/components/dataSource/TrustBadges'
+
+/** Tags shown on a card; the rest are counted. */
+const TAGS_SHOWN = 3
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -58,6 +64,8 @@ interface DataSourceGridCardProps {
     isSelected: boolean
     onSelect: () => void
     onSetPrimary?: () => void
+    /** Narrow the grid to the sources with this tag. */
+    onTagClick?: (tag: string) => void
 }
 
 const PROVIDER_NAMES: Record<string, string> = { neo4j: 'Neo4j', falkordb: 'FalkorDB', datahub: 'DataHub' }
@@ -85,9 +93,13 @@ function DataSourceGridCardBase({
     isSelected,
     onSelect,
     onSetPrimary,
+    onTagClick,
 }: DataSourceGridCardProps) {
     const ProviderLogo = providerInfo ? getProviderLogo(providerInfo.providerType) : null
     const technical = usePersonaMode() === 'technical'
+    const details = useFeature(DATA_SOURCE_METADATA_FEATURE)
+    const description = details ? (ds.description || ds.catalogDescription) : null
+    const tags = details ? (ds.tags ?? []) : []
     const name = ds.label || providerInfo?.catalogItemName || 'Unnamed source'
     const state = sourceStatus(ds, readiness)
     const statCell = (value: React.ReactNode, label: string, title?: string) => (
@@ -176,19 +188,46 @@ function DataSourceGridCardBase({
                     </div>
                 </div>
 
-                {/* Can I use it? */}
-                <div className="flex items-center justify-between gap-2 mb-3">
+                {/* What it is, in its own words (else the catalog's). */}
+                {description && (
+                    <p title={description} className="-mt-1 mb-3 line-clamp-2 text-xs leading-relaxed text-ink-secondary">{description}</p>
+                )}
+
+                {/* Can I use it — and may I rely on it? */}
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                     <span title={state.title} className={cn('flex items-center gap-1.5 text-[11px] font-semibold', state.text)}>
                         <span className={cn('w-2 h-2 rounded-full', state.dot)} />
                         {state.label}
                     </span>
-                    {technical && (
-                        <div className="flex items-center gap-1.5">
-                            <SourceModeChip mode={resolveSourceMode(ds)} />
-                            <NodeIdentityBadge value={ds.identityProperty} />
+                    {(technical || (details && (ds.trustStatus || ds.classification))) && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                            {details && <TrustBadges trustStatus={ds.trustStatus} classification={ds.classification} tip={false} />}
+                            {technical && <SourceModeChip mode={resolveSourceMode(ds)} />}
+                            {technical && <NodeIdentityBadge value={ds.identityProperty} />}
                         </div>
                     )}
                 </div>
+
+                {tags.length > 0 && (
+                    <ul aria-label="Tags" className="mb-3 flex flex-wrap items-center gap-1.5">
+                        {tags.slice(0, TAGS_SHOWN).map(t => (
+                            <li key={t}>
+                                {onTagClick ? (
+                                    <button type="button" onClick={e => { e.stopPropagation(); onTagClick(t) }}
+                                        aria-label={`Show the sources tagged ${t}`}
+                                        className="pointer-events-auto rounded-full border border-accent-lineage/20 bg-accent-lineage/10 px-2 py-0.5 text-[10px] font-semibold text-accent-lineage transition-colors hover:bg-accent-lineage/20">
+                                        {t}
+                                    </button>
+                                ) : (
+                                    <span className="rounded-full border border-accent-lineage/20 bg-accent-lineage/10 px-2 py-0.5 text-[10px] font-semibold text-accent-lineage">{t}</span>
+                                )}
+                            </li>
+                        ))}
+                        {tags.length > TAGS_SHOWN && (
+                            <li title={tags.slice(TAGS_SHOWN).join(', ')} className="text-[10px] font-semibold text-ink-muted">+{tags.length - TAGS_SHOWN}</li>
+                        )}
+                    </ul>
+                )}
 
                 {/* What's in it, and what's built on it */}
                 <div className="grid grid-cols-3 gap-2 mb-3">
