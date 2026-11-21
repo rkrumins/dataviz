@@ -790,7 +790,7 @@
       "options": null,
       "helpUrl": null,
       "adminHint": "Turning this on sends people's questions, and the names, descriptions and property values the answers need, to the AI connection set under Administration \u2192 AI. What may be sent is set there. The assistant only ever reads, as the person asking; who may use it is the 'ai:assistant:use' permission.",
-      "impactWhenOff": "The assistant, Ask AI in the search panel and the knowledge MCP endpoint disappear, and the server refuses every AI request, including delegations already in flight. Searching, tracing and the rule-based Ask in plain words are unaffected.",
+      "impactWhenOff": "The assistant, Ask AI in the search panel and the MCP endpoints disappear, and the server refuses every AI request, including delegations already in flight. Searching, tracing and the rule-based Ask in plain words are unaffected.",
       "impactWhenOn": null,
       "sortOrder": 2,
       "deprecated": false,
@@ -799,7 +799,7 @@
       "enforcedServerSide": true,
       "posture": "security",
       "serverGates": [
-        "Every /api/v1/ai route \u2014 chat, query drafting, conversations, AI administration and the knowledge MCP endpoint",
+        "Every /api/v1/ai route \u2014 chat, query drafting, conversations, AI administration and the MCP endpoints (knowledge and data)",
         "Read-only delegations to the AI service (api_key_auth), so tokens in flight stop too"
       ],
       "uiSurfaces": [

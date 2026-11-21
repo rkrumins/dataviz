@@ -427,7 +427,8 @@ someone. A pending publication request is put to the destination's publishers.
 
 `workspace:ai:use` lets a person ask the AI assistant about a workspace's views,
 lineage and data, have Advanced Search write searches and Cypher for them, and use
-the knowledge MCP endpoint (`POST /api/v1/ai/mcp/knowledge`). It changes nothing
+the MCP endpoints (`POST /api/v1/ai/mcp/knowledge` and `POST /api/v1/ai/mcp/data`). A data
+tool call is checked as a question about the view or workspace it names. It changes nothing
 about what they can read — the assistant reads as them:
 
 * **Who has it.** Every built-in role that reads data sources stores it, and
@@ -440,6 +441,9 @@ about what they can read — the assistant reads as them:
   it names none — the Help persona answers from the product docs, which are public.
   **Administration → AI** (`/api/v1/ai/admin/*`) needs `system:admin` instead.
   A request about a view checks the view's own workspace, whatever workspace it names.
+* **With an API key** (the MCP endpoints only), the permission checked is the key
+  owner's: a key carries view and data permissions, never this one. What the tools
+  read stays narrowed to the key's own scope and level.
 * **Views shared with you.** Someone who reads a view through a share or
   organisation-wide visibility, without a role in its workspace, may ask about it when
   they hold `workspace:ai:use` in any workspace. Their delegation is narrowed to that

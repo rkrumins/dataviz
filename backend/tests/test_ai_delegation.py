@@ -259,11 +259,98 @@ async def test_the_assistant_never_calls_itself(client, db_session):
     assert response.status_code in (401, 403)
 
 
-async def test_an_api_key_reaches_only_the_knowledge_mcp(client, db_session):
+async def test_an_api_key_reaches_only_the_mcp_endpoints(client, db_session):
     key = await mint(db_session, views="read", data="read")
     chat = await client.post("/api/v1/ai/chat/stream", headers=key.headers, json={"message": "hi"})
     assert chat.status_code == 403
     assert error(chat) == "api_key_not_allowed"
+    # Past the key surface to the route's own gate (this world's roles carry no workspace:ai:use).
+    for route in ("/api/v1/ai/mcp/knowledge", "/api/v1/ai/mcp/data"):
+        answered = await client.post(route, headers=key.headers, json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        assert answered.status_code != 403 or error(answered) != "api_key_not_allowed", route
+
+
+async def test_an_api_key_is_held_to_its_owners_ai_permission_and_reads_as_the_key(client, db_session):
+    # The test catalogue predates the permission; members hold it, as the seed says.
+    from backend.app.db.models import PermissionORM, RolePermissionORM
+
+    db_session.add(PermissionORM(id="workspace:ai:use", description="", category="workspace"))
+    await db_session.flush()
+    db_session.add(RolePermissionORM(role_name="workspace_member", permission_id="workspace:ai:use"))
+    await db_session.commit()
+    key = await mint(db_session, views="read", data="none")
+    upstream = Upstream()
+    ai_endpoints.set_client_for_tests(httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream), base_url="http://ai-service"))
+    try:
+        knowledge = await client.post("/api/v1/ai/mcp/knowledge", headers=key.headers,
+                                      json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        data = await client.post("/api/v1/ai/mcp/data", headers=key.headers,
+                                 json=tool_call("describe_view", {"viewId": "v_a_ws"}))
+        elsewhere = await client.post("/api/v1/ai/mcp/data", headers=key.headers,
+                                      json=tool_call("describe_view", {"workspaceId": "ws_b"}))
+    finally:
+        ai_endpoints.set_client_for_tests(None)
+    assert knowledge.status_code == 200, knowledge.text
+    assert data.status_code == 200, data.text
+    grant = delegation.verify(upstream.requests[-1].headers[DELEGATION_HEADER])
+    assert grant.parent_key_id == key.id and grant.scope.workspaces == {"ws_a"}
+    assert (grant.scope.views, grant.scope.data) == ("read", "none")     # no more than the key
+    assert elsewhere.status_code == 403                                  # only a viewer in ws_b
+    assert len(upstream.requests) == 2
+
+
+# ── The data MCP endpoint ───────────────────────────────────────────────
+
+
+def tool_call(name: str, arguments: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+
+
+async def test_a_data_tool_call_is_gated_and_narrowed_by_where_it_looks(edge):
+    shared = await edge.client.post("/api/v1/ai/mcp/data", headers=CSRF,
+                                    json=tool_call("describe_view", {"viewId": "v_b_granted"}))
+    assert shared.status_code == 200, shared.text
+    sent = edge.upstream.requests[-1]
+    assert sent.url.path == "/mcp/data" and sent.headers[REACH_HEADER] == "view"
+    assert delegation.verify(sent.headers[DELEGATION_HEADER]).scope.view_ids == {"v_b_granted"}
+
+    member = await edge.client.post("/api/v1/ai/mcp/data", headers=CSRF, json=tool_call(
+        "search_entities", {"workspaceId": "ws_b", "viewId": "v_a_ws", "predicate": {"kind": "all"}}))
+    assert member.status_code == 200, member.text
+    sent = edge.upstream.requests[-1]
+    assert delegation.verify(sent.headers[DELEGATION_HEADER]).scope.workspaces == {"ws_a"}   # the view's
+    assert REACH_HEADER not in sent.headers
+
+    listed = await edge.client.post("/api/v1/ai/mcp/data", headers=CSRF,
+                                    json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    assert listed.status_code == 200
+    asked = len(edge.upstream.requests)
+    # As for a question: refused without saying whether the view exists.
+    for arguments in ({"workspaceId": "ws_b", "viewId": "v_b_other"},
+                      {"workspaceId": "ws_b", "viewId": "v_nowhere"}, {"workspaceId": "ws_b"}):
+        refused = await edge.client.post("/api/v1/ai/mcp/data", headers=CSRF,
+                                         json=tool_call("describe_view", arguments))
+        assert refused.status_code == 403 and error(refused) == "missing_permission", arguments
+    assert len(edge.upstream.requests) == asked
+
+
+async def test_data_tool_calls_have_their_own_rate_limit(edge, monkeypatch):
+    from backend.auth_service.ratelimit import get_account_limiter
+
+    monkeypatch.setattr(ai_endpoints, "_MCP_RATE", "2/minute")
+    await get_account_limiter().reset(ai_endpoints._MCP_RATE_SCOPE, OWNER, "2/minute")
+    call = tool_call("find_views", {"query": "orders"})
+    for _ in range(2):
+        assert (await edge.client.post("/api/v1/ai/mcp/data", headers=CSRF, json=call)).status_code == 200
+    listed = await edge.client.post("/api/v1/ai/mcp/data", headers=CSRF,
+                                    json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    assert listed.status_code == 200                                     # only tool calls count
+    limited = await edge.client.post("/api/v1/ai/mcp/data", headers=CSRF, json=call)
+    assert limited.status_code == 429 and limited.headers.get("Retry-After")
+    chat = await edge.client.post("/api/v1/ai/chat/stream", headers=CSRF, json={"message": "hi"})
+    assert chat.status_code == 200                                       # questions are counted apart
+    await get_account_limiter().reset(ai_endpoints._MCP_RATE_SCOPE, OWNER, "2/minute")
 
 
 # ── Infrastructure status ───────────────────────────────────────────────

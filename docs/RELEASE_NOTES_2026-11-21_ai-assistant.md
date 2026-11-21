@@ -38,6 +38,8 @@ Companions:
 - **Administration → AI** — connections, data sharing, limits, retention, knowledge, vocabulary,
   usage.
 - **Knowledge MCP** — `POST /api/v1/ai/mcp/knowledge` for other teams' agents.
+- **Data MCP** — `POST /api/v1/ai/mcp/data`: find, describe, search, count, trace and impact for
+  other teams' agents, read as the caller, with no model in the loop.
 - **Everywhere, already in context** — a copilot bubble on every page and ⌘J, the guide included.
   The panel knows the view or page you're on; **What I know** shows its details, layers, types and
   how they nest, every kind of connection, what its entities carry and what limits answers there.

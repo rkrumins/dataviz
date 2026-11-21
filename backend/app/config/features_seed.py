@@ -831,7 +831,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "connects under Administration → AI."
         ),
         "impact_when_off": (
-            "The assistant, Ask AI in the search panel and the knowledge MCP endpoint disappear, "
+            "The assistant, Ask AI in the search panel and the MCP endpoints disappear, "
             "and the server refuses every AI request, including delegations already in flight. "
             "Searching, tracing and the rule-based Ask in plain words are unaffected."
         ),

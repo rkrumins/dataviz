@@ -35,6 +35,12 @@ is meant rather than guessing. Off until an administrator turns it on and connec
   retention; knowledge collections; external MCP knowledge sources; business vocabulary; usage
   and feedback.
 - **Knowledge MCP endpoint** `POST /api/v1/ai/mcp/knowledge` for other teams' agents, with API keys.
+- **Data MCP endpoint** `POST /api/v1/ai/mcp/data`: the assistant's own tools for other teams'
+  agents, without a model: find views, describe one, look up entities, search, count, trace
+  lineage and analyse impact, as the person or key calling. Choices (which entity, how to read a
+  term) are answered on the next call; tool calls are limited per person (`AI_MCP_RATE_LIMIT`).
+- **Fixed:** API keys were refused on the MCP endpoints, because a key never carries
+  `workspace:ai:use`. The key owner's permission is now checked; reads stay narrowed to the key.
 - **Semantic matching** for views and docs on a pgvector store, with versioned collections that
   re-embed only what changed; lexical when no embedding model is set.
 - Permission `workspace:ai:use`; new services `ai-service` and `vectordb`.

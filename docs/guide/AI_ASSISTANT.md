@@ -189,9 +189,11 @@ Requests and tokens by day, and the answers people marked 👎 with their commen
 
 ---
 
-## For other teams' agents: the knowledge MCP endpoint
+## For other teams' agents: the MCP endpoints
 
-Agents can search {brand}'s documentation and the views their key can read over the Model Context Protocol:
+Agents can use {brand} over the Model Context Protocol, with an [API key](/guide/api-keys) that has read access, or a service account's. Point an MCP client at the URL with the key as a bearer token. There are two endpoints.
+
+**Knowledge** (`/api/v1/ai/mcp/knowledge`): search the documentation and the views the key can read.
 
 ```bash
 curl -s https://your-host/api/v1/ai/mcp/knowledge \
@@ -201,7 +203,23 @@ curl -s https://your-host/api/v1/ai/mcp/knowledge \
        "params":{"name":"search_knowledge","arguments":{"query":"share a view","collection":"docs"}}}'
 ```
 
-Tools: `list_collections`, `search_knowledge` and `get_document`. Use an [API key](/guide/api-keys) with read access, or a service account's. Point an MCP client at the URL with the key as a bearer token.
+Tools: `list_collections`, `search_knowledge` and `get_document`.
+
+**Data** (`/api/v1/ai/mcp/data`): the assistant's own tools, without the assistant. An agent finds a view, learns what it holds, then searches, traces or analyses impact inside it, and gets back what your cards would show: counts, items, paths, owners, schedules. No model is called.
+
+```bash
+curl -s https://your-host/api/v1/ai/mcp/data \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+       "params":{"name":"analyze_impact","arguments":{"viewId":"VIEW_ID","name":"customers/first_name"}}}'
+```
+
+Tools: `find_views`, `describe_view`, `find_entities`, `get_entity`, `search_entities`, `count_entities`, `trace_lineage` and `analyze_impact`. Each data tool takes the `viewId` it works in.
+
+- **When it needs a choice** (a name that matches several entities, or a business term such as PII), it answers `needs_choice` with the options and says how to answer: call again with the chosen `urn`, or with `choices`. Nothing is remembered between calls.
+- **What it reads** is what the key may read. A view shared with you can be used too, and nothing past its edge.
+- **Limits.** Tool calls are limited to 60 a minute per person, apart from your questions to the assistant.
 
 ---
 
@@ -224,4 +242,4 @@ Tools: `list_collections`, `search_knowledge` and `get_document`. Use an [API ke
 - [Advanced Search](/guide/advanced-search) — the search the assistant writes, and how to keep it
 - [Reading Lineage](/guide/reading-lineage) — what the trace shows
 - [Feature Switches](/guide/feature-switches) — the **AI assistant** switch
-- [API Keys](/guide/api-keys) — for the knowledge MCP endpoint
+- [API Keys](/guide/api-keys) — for the MCP endpoints

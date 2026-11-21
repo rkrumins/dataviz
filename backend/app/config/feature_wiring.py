@@ -337,7 +337,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         stage="experimental",
         server_gates=(
             "Every /api/v1/ai route — chat, query drafting, conversations, AI administration and "
-            "the knowledge MCP endpoint",
+            "the MCP endpoints (knowledge and data)",
             "Read-only delegations to the AI service (api_key_auth), so tokens in flight stop too",
         ),
         ui_surfaces=(

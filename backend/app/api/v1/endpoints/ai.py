@@ -2,7 +2,7 @@
 
 The web tier is the only edge (ADR-031), as it is for the aggregation control
 plane (ADR-019). Every request here is authenticated as usual — a browser
-session, or an API key on the knowledge MCP route — then:
+session, or an API key on the MCP routes — then:
 
 1. the **switch** is on (``aiAssistantEnabled``, fail closed);
 2. the person holds **``workspace:ai:use``** — in the workspace the request
@@ -10,7 +10,8 @@ session, or an API key on the knowledge MCP route — then:
    person reads through a share (not as a member of its workspace) needs it
    in any workspace and read access to that view, and its delegation reaches
    that view alone; the administration routes need ``system:admin`` instead;
-3. a per-person **rate limit** holds, for the routes that call a model;
+3. a per-person **rate limit** holds, for the routes that call a model and for
+   data tool calls on the MCP endpoint;
 4. a **read-only delegation** is minted for this request (``auth.delegation``):
    narrowed to the request's workspace when it names one, and to the API
    key's own scope when it came with a key;
@@ -62,6 +63,7 @@ from backend.app.services.permission_service import (
     PermissionClaims,
     has_permission,
     has_permission_any_workspace,
+    resolve,
 )
 from backend.auth_service.cookies import read_access_cookie
 from backend.auth_service.interface import User
@@ -80,6 +82,10 @@ _DELEGATION_TTL = int(os.getenv("AI_DELEGATION_TTL_SECONDS", "240"))
 #: and settings are not counted.
 _RATE = os.getenv("AI_RATE_LIMIT", "30/minute")
 _RATE_SCOPE = "ai-turn"
+#: Data tool calls on the MCP endpoint per person: no model, but each is a
+#: search, a lineage walk or an impact report on the platform.
+_MCP_RATE = os.getenv("AI_MCP_RATE_LIMIT", "60/minute")
+_MCP_RATE_SCOPE = "ai-mcp-call"
 
 router = APIRouter(dependencies=[Depends(require_feature(FEATURE))])
 
@@ -133,6 +139,17 @@ def _require_use(claims: PermissionClaims, workspace_id: Optional[str]) -> None:
         )
 
 
+async def _users_claims(request: Request, db, user: User, claims: PermissionClaims) -> PermissionClaims:
+    """Whose ``workspace:ai:use`` an MCP request is held to. With an API key,
+    the key owner's: a key carries view and data permissions only
+    (``KEY_GRANTABLE_PERMISSIONS``), never this one, and what the tools read
+    with it stays narrowed to the key (``_scope_for``)."""
+    context = getattr(request.state, "api_key", None)
+    if isinstance(context, api_key_auth.ApiKeyContext) and context.claims is not None:
+        return await resolve(db, user.id, sid="")
+    return claims
+
+
 async def _reach(db, user: User, claims: PermissionClaims, *, workspace_id: Optional[str],
                  view_id: Optional[str]) -> tuple[Optional[str], Optional[delegation.DelegationScope]]:
     """The workspace a request acts in, and — for a view read through a share
@@ -154,11 +171,11 @@ async def _reach(db, user: User, claims: PermissionClaims, *, workspace_id: Opti
     return workspace_id, None
 
 
-async def _rate_limit(user: User) -> None:
+async def _rate_limit(user: User, *, scope: str = _RATE_SCOPE, rate: str = _RATE) -> None:
     limiter = get_account_limiter()
-    if await limiter.consume(_RATE_SCOPE, user.id, _RATE):
+    if await limiter.consume(scope, user.id, rate):
         return
-    retry = await limiter.retry_after_seconds(_RATE_SCOPE, user.id, _RATE, consumed=True)
+    retry = await limiter.retry_after_seconds(scope, user.id, rate, consumed=True)
     raise HTTPException(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         detail={"error": "rate_limited",
@@ -220,6 +237,25 @@ def _view_from(parsed: dict) -> Optional[str]:
     context = parsed.get("context") if isinstance(parsed.get("context"), dict) else {}
     view = context.get("viewId")
     return str(view) if isinstance(view, str) and view else None
+
+
+def _tool_call_place(body: bytes) -> tuple[bool, Optional[str], Optional[str]]:
+    """Whether an MCP message calls a tool, and the workspace and view its
+    arguments name — what the call is gated and its delegation narrowed by."""
+    try:
+        message = json.loads(body or b"{}")
+    except (TypeError, ValueError):
+        return False, None, None
+    if not isinstance(message, dict) or message.get("method") != "tools/call":
+        return False, None, None
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+
+    def named(key: str) -> Optional[str]:
+        value = arguments.get(key)
+        return value if isinstance(value, str) and value else None
+
+    return True, named("workspaceId"), named("viewId")
 
 
 def _ws_from_body(body: bytes) -> tuple[Optional[str], dict]:
@@ -388,16 +424,40 @@ async def mcp_knowledge(
     request: Request,
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
+    db=Depends(get_db_session),
 ):
     """The knowledge MCP endpoint, for people's own agents and other teams' —
     with an API key, or a session. Stateless streamable HTTP: every call is
     one POST, answered in full, so there is no session to hold open (GET and
     DELETE answer 405, as the protocol allows)."""
     _refuse_delegated(request)
-    _require_use(claims, None)
+    _require_use(await _users_claims(request, db, user, claims), None)
     body = await request.body()
     headers = _forward_headers(request, user, workspace_id=None)
     return await _forward(request, "/mcp/knowledge", headers, body=body)
+
+
+@router.post("/mcp/data")
+async def mcp_data(
+    request: Request,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    db=Depends(get_db_session),
+):
+    """The data MCP endpoint — find, describe, search, trace and impact, for
+    people's own agents and other teams', with an API key or a session. Each
+    tool call is gated as a question about the view or workspace its
+    arguments name, and its delegation narrowed to it; a view read through a
+    share is reached alone. Stateless, like the knowledge endpoint."""
+    _refuse_delegated(request)
+    body = await request.body()
+    calls, workspace_id, view_id = _tool_call_place(body)
+    workspace_id, override = await _reach(db, user, await _users_claims(request, db, user, claims),
+                                          workspace_id=workspace_id, view_id=view_id)
+    if calls:
+        await _rate_limit(user, scope=_MCP_RATE_SCOPE, rate=_MCP_RATE)
+    headers = _forward_headers(request, user, workspace_id=workspace_id, override=override)
+    return await _forward(request, "/mcp/data", headers, body=body)
 
 
 @router.api_route(

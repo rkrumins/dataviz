@@ -479,6 +479,80 @@ async def test_knowledge_mcp_speaks_the_protocol(world):
         assert (await client.get("/mcp/knowledge", headers=HEADERS)).status_code == 405
 
 
+async def data_tool(app, name: str, arguments: dict, headers: dict | None = None) -> dict:
+    """One data MCP tool call: its result (``structuredContent`` and ``isError``)."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://ai") as client:
+        response = await client.post("/mcp/data", headers={**HEADERS, **(headers or {})}, json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}})
+    assert response.status_code == 200, response.text
+    return response.json()["result"]
+
+
+async def test_the_data_mcp_answers_as_the_person_without_a_model(world):
+    model = world.script([])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=world.app), base_url="http://ai") as client:
+        listed = await client.post("/mcp/data", headers=HEADERS,
+                                   json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        tools = {t["name"]: t for t in listed.json()["result"]["tools"]}
+        assert (await client.get("/mcp/data", headers=HEADERS)).status_code == 405
+    assert set(tools) == {"find_views", "describe_view", "find_entities", "get_entity", "search_entities",
+                          "count_entities", "trace_lineage", "analyze_impact"}
+    assert all(t["annotations"]["readOnlyHint"] for t in tools.values())
+    grammar = tools["search_entities"]["description"]
+    assert '"kind":"related"' in grammar and "resultSet" not in grammar   # no conversation here
+
+    views = (await data_tool(world.app, "find_views", {"query": "supplier delays"}))["structuredContent"]
+    assert [v["name"] for v in views["views"]] == ["Supplier delays"]
+
+    card = (await data_tool(world.app, "describe_view", {"viewId": VIEW}))["structuredContent"]
+    assert (card["kind"], card["about"]["name"]) == ("view", "Customer lineage")
+    assert [layer["name"] for layer in card["layers"]] == ["Sources", "Marts"]
+
+    found = (await data_tool(world.app, "search_entities", {
+        "viewId": VIEW, "predicate": {"kind": "tag", "op": "has", "values": ["pii"]}}))["structuredContent"]
+    assert found["total"] == 214 and found["byContainer"][0]["count"] == 31
+    assert found["items"][0]["path"] == ["customers"]
+    assert found["query"]["predicate"] == {"kind": "tag", "op": "has", "values": ["pii"]}
+    assert "resultRef" not in found                                      # means nothing without a conversation
+
+    report = (await data_tool(world.app, "analyze_impact", {
+        "viewId": VIEW, "name": "customers/first_name", "change": "drop"}))["structuredContent"]
+    assert [c["name"] for c in report["consumers"]] == ["Customer 360"] and report["severity"] == "high"
+    assert report["timing"]["schedules"][0]["human"] == "daily at 04:00 UTC"
+    upstream = (await data_tool(world.app, "trace_lineage", {
+        "viewId": VIEW, "urn": COL, "direction": "upstream"}))["structuredContent"]
+    assert upstream["trace"]["direction"] == "upstream"
+    assert model.requests == []
+
+
+async def test_a_data_mcp_choice_is_answered_on_the_next_call(world):
+    pii = {"viewId": VIEW, "predicate": {"kind": "group", "op": "and", "children": [
+        {"kind": "entityType", "op": "in", "values": ["schemaField"]}, {"kind": "concept", "name": "PII"}]}}
+    asked = (await data_tool(world.app, "search_entities", pii))["structuredContent"]
+    assert asked["status"] == "needs_choice"
+    tag = next(o for o in asked["options"] if o["label"] == "Tag “pii”")
+    assert tag["count"] == 312 and asked["clarificationId"] in asked["howToAnswer"]
+    assert not any(c[1].endswith("/search/advanced") for c in world.platform.calls)
+
+    again = (await data_tool(world.app, "search_entities", pii))["structuredContent"]
+    assert again["clarificationId"] == asked["clarificationId"]          # the same question, the same id
+    found = (await data_tool(world.app, "search_entities",
+                             {**pii, "choices": {asked["clarificationId"]: tag["id"]}}))["structuredContent"]
+    assert found["total"] == 214
+    sent = next(c for c in world.platform.calls if c[1].endswith("/search/advanced"))[2]
+    assert {"kind": "tag", "op": "has", "values": ["pii"]} in sent["predicate"]["children"]
+    async with ai_db.session_scope() as session:
+        from sqlalchemy import select
+        assert (await session.execute(select(AiConceptMappingORM))).first() is None   # nothing remembered
+
+
+async def test_a_data_mcp_call_names_where_to_look(world):
+    nowhere = await data_tool(world.app, "search_entities", {"predicate": {"kind": "all"}})
+    assert nowhere["isError"] is True and "viewId" in nowhere["content"][0]["text"]
+    unreadable = await data_tool(world.app, "describe_view", {"viewId": "view_gone"})
+    assert unreadable["isError"] is True
+
+
 async def test_conversations_are_the_callers_own(world):
     world.script(["Hello."])
     events = await chat(world.app, {"message": "hi", "persona": "data", "context": {}})
@@ -756,3 +830,17 @@ async def test_impact_on_a_generic_schema_finds_sinks_owners_and_schedules(world
     assert report["timing"]["schedules"][0]["human"] == "daily at 04:00 UTC"
     assert "Show only the dashboards" in of(events, "followups")[0]
 
+
+
+async def test_a_generic_schema_is_read_through_its_kind_over_the_data_mcp(world):
+    use_generic(world)
+    tables = {"viewId": VIEW, "predicate": TABLES}
+    asked = (await data_tool(world.app, "search_entities", tables))["structuredContent"]
+    assert asked["status"] == "needs_choice" and "Which property says what kind" in asked["question"]
+    kind = asked["options"][0]
+    assert kind["label"] == "The property “kind”"
+    found = (await data_tool(world.app, "search_entities",
+                             {**tables, "choices": {asked["clarificationId"]: kind["id"]}}))["structuredContent"]
+    assert "total" in found
+    sent = next(c for c in world.platform.calls if c[1].endswith("/search/advanced"))[2]
+    assert reads_through_kind(sent["predicate"])

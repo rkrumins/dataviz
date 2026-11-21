@@ -621,6 +621,7 @@ The AI service: where it listens, the platform API it reads through, the network
 | `AI_INDEXER_ENABLED` | `true` | run the docs and views embedding syncs in this process | `backend/ai_service/config.py` |
 | `AI_INTERNAL_TOKEN` | — (secret, set your own) | shared secret between the web tier and the AI service; required with ENV=production | `backend/ai_service/internal_auth.py` |
 | `AI_LLM_TIMEOUT_SECONDS` | `60` | one call to a model or an MCP server (5-300) | `backend/ai_service/config.py` |
+| `AI_MCP_RATE_LIMIT` | `60/minute` | data tool calls on the MCP endpoint per person (searches, traces, impact reports) | `backend/app/api/v1/endpoints/ai.py` |
 | `AI_OUTBOUND_TLS_CA_CERTS` | (empty) | a PEM bundle trusted for model, token and MCP endpoints, in addition to the public roots | `backend/ai_service/llm/egress.py` |
 | `AI_PLATFORM_API_URL` | `http://viz-service:8000` | the platform API every read goes back through, as the person asking | `backend/ai_service/config.py` |
 | `AI_PLATFORM_TIMEOUT_SECONDS` | `60` | one platform read (5-150) | `backend/ai_service/config.py` |

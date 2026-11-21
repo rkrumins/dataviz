@@ -63,7 +63,7 @@ flowchart LR
     AI -->|"egress-guarded"| LLM["Model endpoints, external MCP servers"]
 ```
 
-1. **The edge** (`backend/app/api/v1/endpoints/ai.py`) authenticates the request as any other — a session, or an API key on the knowledge MCP route — checks the **AI assistant** switch and `workspace:ai:use`, limits turns per person (`AI_RATE_LIMIT`), records the question in the activity log (`workspace.ai.question_asked`, never the text), mints a delegation and forwards, passing streams through as they arrive.
+1. **The edge** (`backend/app/api/v1/endpoints/ai.py`) authenticates the request as any other — a session, or an API key on the MCP routes — checks the **AI assistant** switch and `workspace:ai:use`, limits turns per person (`AI_RATE_LIMIT`) and data tool calls per person (`AI_MCP_RATE_LIMIT`), records the question in the activity log (`workspace.ai.question_asked`, never the text), mints a delegation and forwards, passing streams through as they arrive.
 2. **The AI service** (`backend/ai_service`) runs the turn: grounding, the model, the tools. Every tool reads the platform API with the delegation, so RBAC, view scoping, admission control, caches and circuit breakers all apply exactly as they do for the person.
 3. **What it owns**: its `ai_*` tables in the management database and the vector store. Nothing else.
 
@@ -79,7 +79,7 @@ flowchart LR
 ## Identity and access
 
 - **The switch.** **AI assistant** (`aiAssistantEnabled`) ships off and fails closed. Off, the edge refuses every AI route and every delegation stops working at once.
-- **The permission.** `workspace:ai:use`, held by every built-in role that reads data sources — in the workspace a request names, or any workspace when it names none. A view names its own workspace, whatever the request sent. Administration needs `system:admin`. See [RBAC](/docs/rbac#the-ai-assistant).
+- **The permission.** `workspace:ai:use`, held by every built-in role that reads data sources — in the workspace a request names, or any workspace when it names none. A view names its own workspace, whatever the request sent. Administration needs `system:admin`. With an API key (the MCP routes), it is the key owner's permission that is checked, since a key carries view and data permissions only; what is read stays narrowed to the key. See [RBAC](/docs/rbac#the-ai-assistant).
 - **Shared views.** Someone who reads a view through a share or organisation-wide visibility, not as a member of its workspace, may ask about it when they hold `workspace:ai:use` in any workspace. Their delegation reaches **that view alone**, every read names it (`?viewId=`), and the edge tells the service so (`X-AI-Reach: view`): searches stay inside the view, and lineage-following conditions, which the platform refuses past a view's edge, are not attempted. Traces still work.
 - **The delegation** (ADR-032). A `nxdlg_` token per request, read only, one turn long, narrowed to the request's workspace (or, for a shared view, to the view) and to the API key it came with, if any. It is accepted on the API-key path: the deny-by-default endpoint surface, the resource fence, claims from the person's live access. It is refused on writes, on native queries, after the session ends and when the switch is off.
 - **Internal token.** `AI_INTERNAL_TOKEN` between the edge and the service; the service will not start in production without it.
@@ -156,6 +156,7 @@ All under `/api/v1/ai/`, through the edge.
 | GET, DELETE | `/concepts`, `/concepts/{id}` | The person's remembered readings |
 | * | `/admin/*` | Connections and their test, settings, knowledge and re-index, external sources, business vocabulary, usage (`system:admin`) |
 | POST | `/mcp/knowledge` | The knowledge MCP server |
+| POST | `/mcp/data` | The data MCP server: find, describe, search, trace, impact |
 
 Cards (`block` events) are typed: `results`, `impact`, `query`, `views`, `citations`, `entity`, `context`, `notice`, and `clarify` for a choice. Each carries what the person needs to act — the predicate to open in Advanced Search, the trace to open on the canvas, the view to open.
 
@@ -171,9 +172,32 @@ Cards (`block` events) are typed: `results`, `impact`, `query`, `views`, `citati
 
 Authenticate with an API key (`Authorization: Bearer nxpat_…` or a service account's `nxsat_…`); the key's own scope narrows what views appear. The route is on the API key surface as a read.
 
+## The data MCP server
+
+`POST /api/v1/ai/mcp/data` serves the assistant's own data tools to other teams' agents, over the same protocol and with the same authentication. No model is called: each tool runs the playbook the assistant would, as the person or key calling, and returns the data of the card the person would see.
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `find_views` | `query`, `synonyms` | Views about a topic across every workspace the caller can read, ranked, with why each matched |
+| `describe_view` | a place | The context brief: details, layers, types with counts, hierarchy, connections, properties and tags, caveats |
+| `find_entities` | a place, `names`, `entityType`, `scope` | For each name or path, how many entities match, their urns and paths |
+| `get_entity` | a place, `urn` | Type, description, properties, tags and ancestor path |
+| `search_entities` | a place, `predicate`, `scope`, `limit` | The total (exact or a lower bound), counts by type and container, the first items, and the predicate that ran |
+| `count_entities` | a place, `rules` (up to 32 `{label, predicate}`) | Exact counts |
+| `trace_lineage` | a place, `urn` or `name`, `direction`, `depth` | The lineage report: totals, the ends, owners, paths, schedules, the grain walked |
+| `analyze_impact` | a place, `urn` or `name`, `change`, `depth` | The impact report, with its severity and reasons |
+
+**A place** is a `viewId` (from `find_views`), or a `workspaceId` (and `dataSourceId`), whose data source's most used view is read. The edge gates each tool call as a question about that place: `workspace:ai:use` in the view's workspace (or in any workspace, for a view read through a share, whose delegation then reaches that view alone), and narrows the delegation to it. `search_entities` describes the predicate grammar in its own description.
+
+**Stateless choices.** A tool that needs a choice answers `{"status": "needs_choice", "clarificationId", "question", "options", "howToAnswer"}`. Which of several entities a name means: call again with the option's `urn`. How to read a business term (`{"kind": "concept", "name": "PII"}` in a predicate) or which property says what kind of thing each entity is on a generic schema: call again with `choices: {clarificationId: optionId}`. A term's clarification id is the same on every call, so no session is needed, and nothing is remembered. Earlier results are not kept: compose with the `query.predicate` a search returned.
+
+**What comes back** is what the caller may read, as the platform API would give it to the same key. The data-sharing policy governs what this deployment sends to its own model connection; it does not apply here, since no model is called.
+
+Tool calls are limited per person (`AI_MCP_RATE_LIMIT`, 60 a minute), apart from questions; `initialize` and `tools/list` are not counted. Unlike questions, calls are not recorded in the activity log.
+
 ## Configuration
 
-Operator settings are environment variables (see [Configuration](/docs/configuration), section *AI assistant*): `AI_SERVICE_URL` and `AI_INTERNAL_TOKEN` on both sides; `AI_PLATFORM_API_URL`, `AI_EGRESS_ALLOWED_HOSTS`, `AI_OUTBOUND_TLS_CA_CERTS`, `AI_VECTOR_DB_URL`, `AI_INDEXER_API_KEY` and the timeouts on the AI service; `AI_DELEGATION_SIGNING_KEY`, `AI_DELEGATION_TTL_SECONDS` and `AI_RATE_LIMIT` on the web tier. What an administrator decides — connections, personas, data sharing, limits, retention, vocabulary, external sources — is under **Administration → AI**.
+Operator settings are environment variables (see [Configuration](/docs/configuration), section *AI assistant*): `AI_SERVICE_URL` and `AI_INTERNAL_TOKEN` on both sides; `AI_PLATFORM_API_URL`, `AI_EGRESS_ALLOWED_HOSTS`, `AI_OUTBOUND_TLS_CA_CERTS`, `AI_VECTOR_DB_URL`, `AI_INDEXER_API_KEY` and the timeouts on the AI service; `AI_DELEGATION_SIGNING_KEY`, `AI_DELEGATION_TTL_SECONDS`, `AI_RATE_LIMIT` and `AI_MCP_RATE_LIMIT` on the web tier. What an administrator decides — connections, personas, data sharing, limits, retention, vocabulary, external sources — is under **Administration → AI**.
 
 ## Operations
 

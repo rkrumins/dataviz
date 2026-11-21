@@ -149,6 +149,7 @@ POST /api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job_id}/cancel resourc
 POST /api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job_id}/resume resource
 POST /api/v1/admin/data-sources/{ds_id}/refresh resource
 POST /api/v1/admin/data-sources/{ds_id}/source-changed resource
+POST /api/v1/ai/mcp/data filtered reads-only
 POST /api/v1/ai/mcp/knowledge filtered reads-only
 POST /api/v1/views/ workspace
 POST /api/v1/views/from-members workspace
