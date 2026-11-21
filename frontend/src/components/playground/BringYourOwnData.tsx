@@ -64,7 +64,9 @@ const nameFromFile = (fileName: string) => fileName.replace(/\.[^.]+$/, '').repl
 function refusal(e: unknown): string {
     const { status, detail } = (e ?? {}) as { status?: number; detail?: { type?: string; message?: string } }
     switch (detail?.type) {
+        case 'playground_quota':
         case 'quota_reached': return 'You’ve used all your graphs — delete one you’re done with, then try again.'
+        case 'import_load_failed': return 'The graph couldn’t be loaded just now, and nothing was kept. Try again in a moment.'
         case 'feature_disabled': return 'Bringing your own data is turned off right now. An administrator turns it on with the Playground, Version control and Build lineage from scratch switches.'
         case 'playground_not_member': return 'Join the Playground first — open it from the sidebar — then try again.'
         case 'too_large': return `That’s more than the Playground takes: up to ${n(OWN_DATA_LIMITS.things)} things and ${n(OWN_DATA_LIMITS.connections)} connections.`

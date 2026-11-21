@@ -543,6 +543,11 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Playground — in the sidebar, and on the Dashboard and Workspaces, opening it for anyone",
             "Setting the Playground up, on Workspaces, for platform administrators",
             "Start from a sample, under Your experiments in the Playground",
+            "Bring your own data and Start a blank graph, under Your experiments (with Version control and "
+            "Build lineage from scratch)",
+            "Your first steps — the Playground's builder checklist",
+            "The Playground chip on a view's header",
+            "The blank-graph wizard's way back to a sample or your own data, in the Playground",
         ),
         still_allowed=(
             "People already in the Playground keep their graphs and views; nothing is deleted",

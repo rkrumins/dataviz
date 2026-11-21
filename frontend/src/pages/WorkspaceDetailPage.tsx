@@ -701,7 +701,7 @@ export function WorkspaceDetailPage() {
             {activeTab === 'views' && (
                 <>
                     <TabIntro>
-                        Saved ways of looking at this workspace’s data — maps, hierarchies and tables. Open one to explore it.
+                        Saved ways of looking at this workspace’s data — graphs, hierarchies and context views. Open one to explore it.
                     </TabIntro>
                     <WorkspaceViewsSection
                         wsId={wsId!}

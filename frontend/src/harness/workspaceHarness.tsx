@@ -161,7 +161,7 @@ const PLAYGROUND_SAMPLES = [
     { id: 'ml-features', title: 'ML feature pipeline', icon: 'BrainCircuit', color: 'emerald', nodeCount: 26, edgeCount: 33,
         description: 'Raw events becoming features, the models they train, and where predictions go.',
         entityTypes: ['Data source', 'Dataset', 'Feature set', 'Model', 'Application'] },
-].map(s => ({ ...s, viewType: 'graph' }))
+].map(s => ({ ...s, viewType: 'reference' }))
 // A workspace request: Ada's proof of concept, with a teammate and a Playground graph.
 const WS_REQUEST = {
     id: 'wsr_1', requesterId: 'usr_ada', requesterName: 'Ada Okafor', name: 'ML platform lineage', purpose: 'poc',

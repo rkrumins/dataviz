@@ -164,7 +164,8 @@ describe('Bring your own data', () => {
     })
 
     it.each([
-        [403, 'quota_reached', /used all your graphs/],
+        [409, 'playground_quota', /used all your graphs/],
+        [502, 'import_load_failed', /nothing was kept/],
         [403, 'feature_disabled', /turned off/],
         [403, 'playground_not_member', /Join the Playground/],
         [413, 'too_large', /more than the Playground takes/],

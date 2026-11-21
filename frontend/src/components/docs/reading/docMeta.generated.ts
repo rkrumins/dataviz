@@ -23,7 +23,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-11-18",
+    "updated": "2026-11-21",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -333,7 +333,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/KEY_CONCEPTS.md"
   },
   "quick-start": {
-    "updated": "2026-11-20",
+    "updated": "2026-11-21",
     "path": "docs/guide/QUICK_START.md"
   },
   "browsing-views": {
@@ -368,10 +368,6 @@ export const guideMeta: Record<string, DocMeta> = {
     "updated": "2026-11-20",
     "path": "docs/guide/REQUESTING_ACCESS.md"
   },
-  "playground": {
-    "updated": "2026-11-21",
-    "path": "docs/guide/PLAYGROUND.md"
-  },
   "requesting-a-workspace": {
     "updated": "2026-11-21",
     "path": "docs/guide/REQUESTING_A_WORKSPACE.md"
@@ -383,6 +379,10 @@ export const guideMeta: Record<string, DocMeta> = {
   "asking-questions": {
     "updated": "2026-11-21",
     "path": "docs/guide/ASKING_QUESTIONS.md"
+  },
+  "playground": {
+    "updated": "2026-11-21",
+    "path": "docs/guide/PLAYGROUND.md"
   },
   "creating-views": {
     "updated": "2026-11-03",
@@ -405,7 +405,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/API_KEYS.md"
   },
   "versioning-change-control": {
-    "updated": "2026-11-17",
+    "updated": "2026-11-21",
     "path": "docs/guide/VERSIONING_CHANGE_CONTROL.md"
   },
   "editing-in-a-draft": {

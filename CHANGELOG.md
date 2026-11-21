@@ -20,10 +20,19 @@ Every new capability ships behind its own switch, off by default.
 
 ### Added
 
-- **Playground** (`playgroundEnabled`): one shared sandbox workspace anyone who can sign in may join,
-  on its own sandbox provider, with a per-person graph quota. Start from a sample (a retail
-  pipeline, a customer 360, an ML feature pipeline) with a ready-made view, or from blank; move an
-  experiment into a workspace you run, or ask to.
+- **Playground** (`playgroundEnabled`): your own workspace at its first stage — one shared sandbox
+  anyone who can sign in may join, on its own sandbox provider, with a per-person graph quota.
+  - **Three ways to start:** a sample (a retail pipeline, a customer 360, an ML feature pipeline),
+    your own data (CSV or JSON of things and connections, checked in the browser, up to 5,000
+    things and 20,000 connections, with downloadable templates), or a blank graph.
+  - **Samples that teach:** a Context View, a Graph view and a Hierarchy; saved searches and a
+    display rule; a described data source; and an example change waiting for review.
+  - **Makers finish their own work:** they publish their drafts and merge their reviews on graphs
+    they made; others' graphs are read-only to them, and drafts there start private.
+  - **Guidance:** a "Your first steps" checklist ticked from what you did, a Playground chip on
+    its views, a tour, and a guide with a learning path.
+  - **Graduate:** move an experiment into a workspace you run, or bring it in a workspace request —
+    views, saved searches, drafts, reviews, details and contacts go with it.
 - **Workspace requests** (`workspaceRequestsEnabled`): a wizard to ask for a workspace — its purpose,
   teammates, groups linked to the identity provider, the Playground graphs to bring, the data it
   needs — that Org and Super Admins approve, send back or decline; reminders after 3 days,
@@ -69,8 +78,10 @@ Every new capability ships behind its own switch, off by default.
 ### Known limitations
 
 - There is no email or chat delivery: notices are in the Inbox only.
-- A Playground graph's view canvas and an engineer's own-data import are covered by tests against
-  stand-ins for the graph store, not a live FalkorDB.
+- Starting a sample or importing your own data is covered by tests against stand-ins for the graph
+  store, not a live FalkorDB.
+- In the Playground, reverting, restoring and fork publishing still need the publish permission
+  (a Playground admin); publishing a draft and merging a review are the maker's own.
 - Analytics charts overflow their cards at phone width (as the Content tab already did).
 
 ---
