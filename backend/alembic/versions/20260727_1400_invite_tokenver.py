@@ -31,16 +31,21 @@ branch_labels = None
 depends_on = None
 
 
+def _has_token_version() -> bool:
+    # Guarded with the inspector, not ``IF [NOT] EXISTS`` DDL, which SQLite does not speak.
+    return "token_version" in {c["name"] for c in sa.inspect(op.get_bind()).get_columns("invites")}
+
+
 def upgrade() -> None:
-    op.add_column(
-        "invites",
-        sa.Column(
-            "token_version", sa.Integer(), nullable=False, server_default="1",
-        ),
-        if_not_exists=True,
-    )
+    if not _has_token_version():
+        op.add_column(
+            "invites",
+            sa.Column(
+                "token_version", sa.Integer(), nullable=False, server_default="1",
+            ),
+        )
 
 
 def downgrade() -> None:
-    # ``op.drop_column`` has no ``if_exists`` (alembic 1.18); raw DDL instead.
-    op.execute("ALTER TABLE invites DROP COLUMN IF EXISTS token_version")
+    if _has_token_version():
+        op.drop_column("invites", "token_version")

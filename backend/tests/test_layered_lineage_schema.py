@@ -245,6 +245,7 @@ def test_derived_ontology_admits_its_own_rows(preset):
         relationship_type_definitions=parse_relationship_definitions(req.relationship_type_definitions),
         containment_edge_types=req.containment_edge_types,
         lineage_edge_types=req.lineage_edge_types,
+        root_entity_types=req.root_entity_types,
     ))
 
     endpoint_types = {r["id"]: r["entityType"] for r in rows if r["kind"] == "node"}
@@ -283,6 +284,7 @@ def test_canonicalize_rows_restores_declared_casing():
         relationship_type_definitions=parse_relationship_definitions(req.relationship_type_definitions),
         containment_edge_types=req.containment_edge_types,
         lineage_edge_types=req.lineage_edge_types,
+        root_entity_types=req.root_entity_types,
     ))
     changed = canonicalize_rows(rows, rules)
     assert changed > 0

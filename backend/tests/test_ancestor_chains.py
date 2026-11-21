@@ -96,13 +96,37 @@ async def test_the_batch_is_bounded(test_client: AsyncClient, urns):
 
 
 async def test_a_reader_with_no_containment_walk_says_so(test_client: AsyncClient):
-    """A draft on a stale projection has no ancestors at all: an honest 501,
-    as for its other unsupported reads, never an AttributeError 500."""
+    """A reader with no containment walk at all: an honest 501, as for its
+    other unsupported reads, never an AttributeError 500."""
+    resp = await _post(test_client, ContextEngine(provider=_BaseWithoutClosure()), {"urns": [LEAF]})
+    assert resp.status_code == 501
+
+
+class _ChainService:
+    """The versioning service's containment walk over a branch's own state."""
+
+    def __init__(self):
+        self.asked: List[dict] = []
+
+    async def ancestor_chains(self, **kw):
+        self.asked.append(kw)
+        return {LEAF: [PARENT, ROOT]}
+
+
+async def test_a_draft_walks_its_own_state_whatever_its_base_reads(test_client: AsyncClient):
+    """A draft — even over a base with no walk of its own, as on a stale
+    projection — answers from the draft's composed state (its moves included)
+    through the branch reader, never from main."""
     from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
 
-    overlay = DraftOverlayProvider(_BaseWithoutClosure(), svc=None, graph_id="g1", branch_id="draft1")
+    svc = _ChainService()
+    overlay = DraftOverlayProvider(_BaseWithoutClosure(), svc=svc, graph_id="g1", branch_id="draft1")
+    overlay.set_containment_edge_types(["CONTAINS"])
     resp = await _post(test_client, ContextEngine(provider=overlay), {"urns": [LEAF]})
-    assert resp.status_code == 501
+    assert resp.status_code == 200
+    assert resp.json() == {"chains": {LEAF: [PARENT, ROOT]}}
+    assert svc.asked == [{"graph_id": "g1", "branch_id": "draft1", "urns": [LEAF],
+                          "containment_edge_types": ["CONTAINS"], "as_of_seq": None}]
 
 
 async def test_the_route_answers_every_reader(test_client: AsyncClient):

@@ -19,9 +19,11 @@ import time
 import pytest
 from httpx import AsyncClient
 
+from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
 from backend.app.services.feature_flags import feature_flags
 
 WS = "ws_gate_test"
+DS = "ds_x"
 
 
 def _prime(**values):
@@ -47,11 +49,29 @@ def _dispose_graphver_engine():
     asyncio.run(gvdb.dispose_engine())
 
 
+@pytest.fixture(autouse=True)
+async def _source(db_session):
+    """A real data source in the workspace. The graph router's tenant check refuses a source it
+    can't find (404) before any route's own gate runs, so without one no gate is reached."""
+    db_session.add_all([
+        WorkspaceORM(id=WS, name="Gates"),
+        ProviderORM(id="prov_gate", name="Gate graph", provider_type="falkordb"),
+        WorkspaceDataSourceORM(id=DS, workspace_id=WS, provider_id="prov_gate", graph_name="g_gate",
+                               label="Gate source", is_primary=True),
+    ])
+    await db_session.commit()
+
+
 def _blocked(resp, feature: str) -> bool:
     if resp.status_code != 403:
         return False
     d = resp.json().get("detail")
     return isinstance(d, dict) and d.get("type") == "feature_disabled" and d.get("feature") == feature
+
+
+def _reached_the_route(resp) -> bool:
+    """Past the router's tenant check: not its 404 for the data source."""
+    return not (resp.status_code == 404 and f"'{DS}'" in str(resp.json().get("detail")))
 
 
 # ── traceEnabled ─────────────────────────────────────────────────────────────
@@ -62,15 +82,15 @@ TRACE_ROUTES = ("/trace", "/trace/v2", "/trace/expand", "/trace/expand-batch")
 @pytest.mark.parametrize("route", TRACE_ROUTES)
 async def test_trace_is_refused_when_disabled(test_client: AsyncClient, route):
     _prime(traceEnabled=False)
-    resp = await test_client.post(f"/api/v1/{WS}/graph{route}?dataSourceId=ds_x", json={})
+    resp = await test_client.post(f"/api/v1/{WS}/graph{route}?dataSourceId={DS}", json={})
     assert _blocked(resp, "traceEnabled"), f"{route} must be refused, got {resp.status_code}"
 
 
 @pytest.mark.parametrize("route", TRACE_ROUTES)
 async def test_trace_passes_when_enabled(test_client: AsyncClient, route):
     _prime(traceEnabled=True)
-    resp = await test_client.post(f"/api/v1/{WS}/graph{route}?dataSourceId=ds_x", json={})
-    assert not _blocked(resp, "traceEnabled")
+    resp = await test_client.post(f"/api/v1/{WS}/graph{route}?dataSourceId={DS}", json={})
+    assert _reached_the_route(resp) and not _blocked(resp, "traceEnabled"), resp.text
 
 
 # ── editModeEnabled ──────────────────────────────────────────────────────────
@@ -87,15 +107,15 @@ EDIT_ROUTES = [
 @pytest.mark.parametrize("method, route", EDIT_ROUTES)
 async def test_graph_writes_refused_when_edit_mode_disabled(test_client: AsyncClient, method, route):
     _prime(editModeEnabled=False)
-    resp = await test_client.request(method, f"/api/v1/{WS}/graph{route}?dataSourceId=ds_x", json={})
+    resp = await test_client.request(method, f"/api/v1/{WS}/graph{route}?dataSourceId={DS}", json={})
     assert _blocked(resp, "editModeEnabled"), f"{method} {route} must be refused, got {resp.status_code}"
 
 
 @pytest.mark.parametrize("method, route", EDIT_ROUTES)
 async def test_graph_writes_pass_when_edit_mode_enabled(test_client: AsyncClient, method, route):
     _prime(editModeEnabled=True)
-    resp = await test_client.request(method, f"/api/v1/{WS}/graph{route}?dataSourceId=ds_x", json={})
-    assert not _blocked(resp, "editModeEnabled")
+    resp = await test_client.request(method, f"/api/v1/{WS}/graph{route}?dataSourceId={DS}", json={})
+    assert _reached_the_route(resp) and not _blocked(resp, "editModeEnabled"), resp.text
 
 
 # ── turning a feature OFF must not make the product BLANK ────────────────────
@@ -106,7 +126,8 @@ async def test_reads_are_never_feature_blocked(test_client: AsyncClient, route):
     product, not an empty screen — the canvas must still render, exports must still run, and an
     admin must still be able to look. Gating these would have blanked the app."""
     _prime(editModeEnabled=False, traceEnabled=False, versioningEnabled=False)
-    resp = await test_client.post(f"/api/v1/{WS}/graph{route}?dataSourceId=ds_x", json={})
+    resp = await test_client.post(f"/api/v1/{WS}/graph{route}?dataSourceId={DS}", json={})
+    assert _reached_the_route(resp), resp.text
     assert not _blocked(resp, "editModeEnabled")
     assert not _blocked(resp, "traceEnabled")
 
@@ -149,7 +170,7 @@ async def test_signup_fails_CLOSED_when_the_flag_cannot_be_read(test_client: Asy
 async def test_capability_flags_fail_OPEN_when_absent(test_client: AsyncClient):
     """...and the mirror image: a missing capability flag must not lock users out of the app."""
     _prime()  # key absent
-    resp = await test_client.post(f"/api/v1/{WS}/graph/trace/v2?dataSourceId=ds_x", json={})
-    assert not _blocked(resp, "traceEnabled")
-    resp = await test_client.post(f"/api/v1/{WS}/graph/changes?dataSourceId=ds_x", json={})
-    assert not _blocked(resp, "editModeEnabled")
+    resp = await test_client.post(f"/api/v1/{WS}/graph/trace/v2?dataSourceId={DS}", json={})
+    assert _reached_the_route(resp) and not _blocked(resp, "traceEnabled"), resp.text
+    resp = await test_client.post(f"/api/v1/{WS}/graph/changes?dataSourceId={DS}", json={})
+    assert _reached_the_route(resp) and not _blocked(resp, "editModeEnabled"), resp.text
