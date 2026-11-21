@@ -128,17 +128,19 @@ def starter_of(body: PlaygroundImport, ontology_id: str) -> Starter:
         raise _too_large("connections", CONNECTIONS_MAX, "connections", len(body.connections))
     errors: List[dict] = []
     things: Dict[str, Thing] = {}
+    urns: set = set()
     for i, raw in enumerate(body.things):
         try:
             thing = Thing.model_validate(raw)
         except ValidationError as exc:
             errors += _row_errors("things", i, exc)
             continue
-        if thing.key in things:
+        if thing.key in things or urn_of(thing.key) in urns:      # ``a`` and ``urn:playground:a`` are one
             errors.append({"section": "things", "index": i, "field": "key", "code": "duplicate_key",
                            "message": f"Another thing already has the key “{thing.key}”."})
         else:
             things[thing.key] = thing
+            urns.add(urn_of(thing.key))
     connections: Dict[tuple, Connection] = {}
     for i, raw in enumerate(body.connections):
         try:

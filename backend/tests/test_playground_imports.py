@@ -289,6 +289,7 @@ async def test_rows_that_are_wrong_are_named_and_nothing_is_made(
         {"key": "orders", "type": "Dashboard", "name": "Same key"},
         {"key": "x", "type": "T" * 61, "name": "x", "properties": {"bad": [1, 2]}},
         "not a row",
+        {"key": "urn:playground:shop", "type": "Dashboard", "name": "The shop, by its urn"},
     ], "connections": FILE["connections"] + [{"from": "shop", "type": "Feeds", "to": "nowhere"}, {"from": "shop"}]}
     r = await _post(test_client, body)
     assert r.status_code == 422, r.text
@@ -297,7 +298,7 @@ async def test_rows_that_are_wrong_are_named_and_nothing_is_made(
     assert {(e["section"], e["index"], e["field"], e["code"]) for e in detail["errors"]} == {
         ("things", 4, "key", "invalid"), ("things", 5, "key", "duplicate_key"),
         ("things", 6, "type", "invalid"), ("things", 6, "properties", "invalid"),
-        ("things", 7, "row", "invalid"),
+        ("things", 7, "row", "invalid"), ("things", 8, "key", "duplicate_key"),
         ("connections", 4, "to", "unknown_key"),
         ("connections", 5, "type", "invalid"), ("connections", 5, "to", "invalid"),
     }
