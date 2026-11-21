@@ -62,7 +62,7 @@ export function SampleGallery({ workspaceId, className, ref }: {
     })
 
     return (
-        <section ref={ref} aria-labelledby="samples-title" data-tour="playground-samples" className={cn('scroll-mt-24', className)}>
+        <section ref={ref} aria-labelledby="samples-title" className={cn('scroll-mt-24', className)}>
             <h3 id="samples-title" tabIndex={-1} className="flex items-center gap-1.5 text-sm font-semibold text-ink outline-none">
                 <WandSparkles className="w-4 h-4 text-violet-500" aria-hidden /> Start from a sample
             </h3>

@@ -470,9 +470,9 @@ TOURS.push(
   {
     id: 'playground',
     title: 'Find your way around the Playground',
-    description: 'Your experiments, how many more you can start, what everyone else made — and the way to a workspace of your own.',
+    description: 'Three ways to start a graph, your first steps, what everyone else made — and the way to a workspace of your own.',
     icon: FlaskConical,
-    estimate: '1 min',
+    estimate: '2 min',
     // The Playground is a workspace page (/workspaces/<its id>): its ribbon tells it
     // apart from every other workspace. Offered from its own header, and from Help there.
     contextual: true,
@@ -481,7 +481,7 @@ TOURS.push(
     steps: [
       {
         title: 'Welcome to the Playground',
-        body: 'A common area for trying ideas: build graphs of your own, explore them in views, and see what others made. Leave any time with **Esc**.',
+        body: 'Your workspace at its very first stage: build graphs of your own, explore them in views, change them in drafts — and take them to a workspace when they’re ready. Leave any time with **Esc**.',
       },
       {
         target: '[data-tour="playground-ribbon"]',
@@ -497,10 +497,28 @@ TOURS.push(
         body: 'The graphs you started and the views you built. The meter counts your graphs against your **quota** — delete one you’re done with to start another. Experiments don’t expire.',
       },
       {
+        target: '[data-tour="playground-start-sample"]',
+        placement: 'bottom',
+        title: 'Start from a sample',
+        body: 'A ready-made graph of your own — a **Context View**, a Graph view and a Hierarchy, saved searches, and an **example change waiting for review**. The quickest way to see what a graph is for.',
+      },
+      {
+        target: '[data-tour="playground-import"]',
+        placement: 'bottom',
+        title: 'Bring your own data',
+        body: 'Drop **CSV or JSON** files of your things and how they connect — templates included. You see what will be made, and any row to fix, before anything is sent.',
+      },
+      {
         target: '[data-tour="playground-new-graph"]',
-        placement: 'left',
-        title: 'Start a new graph',
-        body: 'Pick a **starter data model** and you have a blank graph of your own — draw on the canvas, or bring things in from a file.',
+        placement: 'bottom',
+        title: 'Or start blank',
+        body: 'Pick a **starter data model** and draw on the canvas — or bring things in from a file later.',
+      },
+      {
+        target: '[data-tour="playground-checklist"]',
+        placement: 'top',
+        title: 'Your first steps',
+        body: 'From a first graph to a change of your own, **published**. Each step ticks as you do it, and **How** shows the way. Hide it any time.',
       },
       {
         target: '[data-tour="playground-everyone"]',

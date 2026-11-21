@@ -41,7 +41,8 @@ describe('tour anchors', () => {
 
   it('references the self-service landmarks: the Playground, asking for a workspace, answering', () => {
     for (const n of [
-      'playground-ribbon', 'playground-experiments', 'playground-new-graph', 'playground-everyone', 'overview-layout',
+      'playground-ribbon', 'playground-experiments', 'playground-start-sample', 'playground-import', 'playground-new-graph',
+      'playground-checklist', 'playground-everyone', 'overview-layout',
       'workspace-request', 'workspaces-request', 'playground-card', 'workspace-requests-queue', 'workspace-request-review',
     ]) {
       expect(targetNames).toContain(n)
