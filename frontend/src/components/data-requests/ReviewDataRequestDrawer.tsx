@@ -1,10 +1,11 @@
 /**
- * Reviewing a data request — for the platform team, and a workspace's own data people
- * for its requests: everything the requester said (what, from where, why, by when, who
- * knows it) and where it stands, and the answers. **Start** takes it on as yours;
- * **Connect…** names the data source it became — one of the workspace's, or one added
- * there and then through Add source — or marks it connected another way; **Decline**
- * (the platform team's) says why.
+ * Reviewing a data request — for the platform team, and a workspace's admins for its
+ * requests: everything the requester said (what, from where, why, by when, who knows it)
+ * and where it stands, and the answers. **Start** takes it on as yours; **Connect…** names
+ * the data source it became — one of the workspace's, or one added there and then through
+ * Add source — or marks it connected another way; **Decline** (the platform team's) says
+ * why. A source's named Owner or Steward may connect it too, to a source they look after
+ * and nothing else. Nobody answers their own request.
  */
 import { useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -23,9 +24,9 @@ import { catalogService } from '@/services/catalogService'
 import { providerService } from '@/services/providerService'
 import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
 import type { DataRequest } from '@/services/dataRequestsService'
-import { usePermission } from '@/store/auth'
+import { useAuthStore, usePermission } from '@/store/auth'
 import { AddDataSourceWizard } from '@/components/admin/workspace/AddDataSourceWizard'
-import { useDataRequestActions, useIsPlatformTeam } from '@/hooks/useDataRequests'
+import { dataRequestRefusal, useDataRequestActions, useFulfilRights, useIsPlatformTeam } from '@/hooks/useDataRequests'
 import { DataRequestProgress } from './DataRequestProgress'
 import { STATUS_LABEL, STATUS_PILL, URGENCY_BADGE, systemOf, urgencyOf } from './systems'
 import { SystemTile } from './SystemTile'
@@ -49,20 +50,25 @@ export function ReviewDataRequestDrawer({ request: listed, onClose }: { request:
     const [connected, setConnected] = useState(false)
 
     const wsId = request.workspaceId
-    const canAddSource = usePermission('workspace:datasource:manage', wsId)
+    const rights = useFulfilRights(wsId)
+    const meId = useAuthStore(s => s.user?.id)
+    const mine = request.requestedBy === meId
+    // An Owner or Steward who is not an admin connects it to a source of theirs, or not at all.
+    const contactOnly = !rights.full
+    const canAddSource = usePermission('workspace:datasource:manage', wsId) && !contactOnly
     const workspace = useQuery({
         queryKey: ['workspace', wsId],
         queryFn: () => workspaceService.get(wsId),
         enabled: mode === 'connect',
     })
-    const sources = workspace.data?.dataSources ?? []
+    const sources = (workspace.data?.dataSources ?? []).filter(ds => !contactOnly || rights.contactSourceIds.includes(ds.id))
 
     const system = systemOf(request.system)
     const urgency = urgencyOf(request.urgency)
     const requester = request.requesterName || 'The requester'
     const open = request.status === 'pending' || request.status === 'in_progress'
     const busy = actions.start.isPending || actions.connect.isPending || actions.decline.isPending
-    const failed = (e: unknown) => notify('error', e instanceof Error ? e.message : 'Couldn’t save your answer.')
+    const failed = (e: unknown) => notify('error', dataRequestRefusal(e))
 
     const start = () => actions.start.mutate(request.id, {
         onSuccess: r => { setRequest(r); notify('success', `You’ve taken on “${r.title}”. ${requester} has been told.`) },
@@ -158,8 +164,12 @@ export function ReviewDataRequestDrawer({ request: listed, onClose }: { request:
                                             <Choice key={ds.id} on={chosen === ds.id} onPick={() => setChosen(ds.id)}
                                                 title={ds.label || ds.graphName || ds.id} detail={ds.graphName && ds.label ? ds.graphName : undefined} />
                                         ))}
-                                        <Choice on={chosen === ELSEWHERE} onPick={() => setChosen(ELSEWHERE)}
-                                            title="Connected another way" detail="Not one of this workspace’s sources — or you’ll add it later." />
+                                        {contactOnly ? (
+                                            <p className="text-[11px] text-ink-muted">You can connect it to a source you look after as its Owner or a Steward.</p>
+                                        ) : (
+                                            <Choice on={chosen === ELSEWHERE} onPick={() => setChosen(ELSEWHERE)}
+                                                title="Connected another way" detail="Not one of this workspace’s sources — or you’ll add it later." />
+                                        )}
                                     </div>
                                     {canAddSource && (
                                         <button type="button" onClick={() => setAdding(true)}
@@ -188,7 +198,12 @@ export function ReviewDataRequestDrawer({ request: listed, onClose }: { request:
                 </div>
 
                 {/* Footer */}
-                {!connected && open && (
+                {!connected && open && mine && (
+                    <p className="border-t border-glass-border p-4 text-center text-xs text-ink-muted">
+                        You asked for this, so someone else takes it on and connects it.
+                    </p>
+                )}
+                {!connected && open && !mine && (
                     <div className="flex flex-wrap items-center justify-end gap-2 border-t border-glass-border p-4">
                         {mode === 'read' ? (
                             <>
@@ -197,7 +212,7 @@ export function ReviewDataRequestDrawer({ request: listed, onClose }: { request:
                                         <XCircle className="h-4 w-4" aria-hidden /> Decline
                                     </button>
                                 )}
-                                {request.status === 'pending' && (
+                                {request.status === 'pending' && rights.full && (
                                     <button type="button" onClick={start} disabled={busy} className={GHOST}>
                                         {actions.start.isPending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Hand className="h-4 w-4" aria-hidden />}
                                         Start — assign me

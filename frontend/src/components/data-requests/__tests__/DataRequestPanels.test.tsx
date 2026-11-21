@@ -2,9 +2,11 @@
  * Following and answering data requests. A workspace's list shows where each stands — Asked, In
  * progress, Connected, Declined — and lets the person who asked withdraw one nobody has taken;
  * the platform team's queue opens one to start (assign me), connect (a source of that workspace's,
- * one added there and then, or none) or decline with a reason. With the switch off, nothing shows.
+ * one added there and then, or none) or decline with a reason. The workspace's admins review its
+ * requests too, and a source's named Owner or Steward connects one to a source of theirs and
+ * nothing else; nobody answers their own. With the switch off, nothing shows.
  */
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
@@ -15,6 +17,8 @@ const api = vi.hoisted(() => ({
     listForWorkspace: vi.fn(), listToAnswer: vi.fn(), withdraw: vi.fn(), start: vi.fn(), connect: vi.fn(), decline: vi.fn(),
 }))
 const ws = vi.hoisted(() => ({ get: vi.fn() }))
+const people = vi.hoisted(() => ({ profile: vi.fn() }))
+vi.mock('@/services/peopleService', () => ({ peopleService: people }))
 vi.mock('@/services/dataRequestsService', async (orig) => {
     const real = await orig<typeof import('@/services/dataRequestsService')>()
     return { ...real, dataRequestsService: { ...real.dataRequestsService, ...api } }
@@ -36,6 +40,7 @@ import { WorkspaceDataRequestsPanel } from '../WorkspaceDataRequestsPanel'
 import { DataRequestsPanel } from '../DataRequestsPanel'
 import { AskForDataButton, AskForDataPrompt } from '../AskForData'
 import { useAuthStore } from '@/store/auth'
+import { useNotificationStore } from '@/components/ui/notifications'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 
 const T = new Date(Date.now() - 3 * 86_400_000).toISOString()
@@ -56,15 +61,22 @@ function wrap(ui: React.ReactNode) {
     return render(<QueryClientProvider client={qc}><MemoryRouter>{ui}</MemoryRouter></QueryClientProvider>)
 }
 
-function as(global: string[], wsPerms: string[]) {
+function as(global: string[], wsPerms: string[], id = 'usr_me') {
     useAuthStore.setState({
-        user: { id: 'usr_me', firstName: 'Sam', lastName: 'Reader', email: 'sam@example.com' },
+        user: { id, firstName: 'Sam', lastName: 'Reader', email: 'sam@example.com' },
         permissions: { global, ws: { ws_fin: wsPerms } },
     } as never)
 }
 
+/** The data this reader is a named Owner or Steward of. */
+const looksAfter = (...ids: string[]) => people.profile.mockResolvedValue({
+    person: { id: 'usr_me' }, isMe: true, workspacesTheyRun: [],
+    dataContacts: ids.map(id => ({ dataSourceId: id, dataSourceName: id, workspaceId: 'ws_fin', workspaceName: 'Finance', role: 'steward', via: 'direct' })),
+})
+
 beforeEach(() => {
-    for (const fn of [...Object.values(api), ...Object.values(ws)]) fn.mockReset()
+    for (const fn of [...Object.values(api), ...Object.values(ws), ...Object.values(people)]) fn.mockReset()
+    looksAfter()
     api.listForWorkspace.mockResolvedValue([MARTS, DBT, FILE, CRM])
     api.listToAnswer.mockResolvedValue([MARTS, DBT])
     api.withdraw.mockResolvedValue({ ...MARTS, status: 'withdrawn' })
@@ -103,18 +115,49 @@ describe('WorkspaceDataRequestsPanel', () => {
         expect(api.withdraw).toHaveBeenCalledWith('dr_marts')
     })
 
-    it('offers Review to the workspace’s data people', async () => {
+    it('offers Review to the workspace’s admins on the open ones — never on their own', async () => {
+        as([], ['workspace:datasource:read', 'workspace:admin'])
+        wrap(<WorkspaceDataRequestsPanel workspaceId="ws_fin" />)
+        await screen.findByText('Finance marts')
+        expect(screen.getAllByRole('button', { name: /^Review/ }).map(b => b.getAttribute('aria-label'))).toEqual(['Review dbt core'])
+        expect(people.profile).not.toHaveBeenCalled()
+    })
+
+    it('no longer offers it for managing the sources alone', async () => {
         as([], ['workspace:datasource:read', 'workspace:datasource:manage'])
         wrap(<WorkspaceDataRequestsPanel workspaceId="ws_fin" />)
         await screen.findByText('Finance marts')
-        expect(screen.getAllByRole('button', { name: /^Review/ })).toHaveLength(2)     // the open ones
+        await waitFor(() => expect(people.profile).toHaveBeenCalledWith('usr_me'))
+        expect(screen.queryByRole('button', { name: /^Review/ })).toBeNull()
+    })
+
+    it('lets a source’s named Steward connect a request to a source of theirs, and nothing else', async () => {
+        const user = userEvent.setup()
+        as([], ['workspace:datasource:read', 'workspace:datasource:manage'])
+        looksAfter('ds_gl')
+        ws.get.mockResolvedValue({ id: 'ws_fin', name: 'Finance', dataSources: [
+            { id: 'ds_gl', label: 'General ledger', graphName: 'gl' }, { id: 'ds_crm', label: 'CRM', graphName: 'crm' },
+        ] })
+        wrap(<WorkspaceDataRequestsPanel workspaceId="ws_fin" />)
+        await user.click(await screen.findByRole('button', { name: 'Review dbt core' }))
+        const drawer = screen.getByRole('dialog', { name: 'dbt core' })
+        expect(within(drawer).queryByRole('button', { name: /Start — assign me/ })).toBeNull()
+        expect(within(drawer).queryByRole('button', { name: /Decline/ })).toBeNull()
+        await user.click(within(drawer).getByRole('button', { name: /Connect…/ }))
+        expect(await within(drawer).findByRole('radio', { name: /General ledger/ })).toBeInTheDocument()
+        expect(within(drawer).queryByRole('radio', { name: /CRM/ })).toBeNull()
+        expect(within(drawer).queryByRole('radio', { name: /Connected another way/ })).toBeNull()
+        expect(within(drawer).queryByRole('button', { name: /Add source/ })).toBeNull()
+        await user.click(within(drawer).getByRole('radio', { name: /General ledger/ }))
+        await user.click(within(drawer).getByRole('button', { name: /Mark connected/ }))
+        expect(api.connect).toHaveBeenCalledWith('dr_dbt', { dataSourceId: 'ds_gl', note: undefined })
     })
 })
 
 describe('DataRequestsPanel — the platform team', () => {
-    async function openReview(title = 'Finance marts') {
+    async function openReview(title = 'Finance marts', reviewer = 'usr_olga') {
         const user = userEvent.setup()
-        as(['system:workspaces:create', 'system:org-admin'], [])
+        as(['system:workspaces:create', 'system:org-admin'], [], reviewer)
         wrap(<DataRequestsPanel />)
         await user.click(await screen.findByRole('button', { name: `Review ${title}` }))
         return { user, drawer: screen.getByRole('dialog', { name: title }) }
@@ -168,6 +211,21 @@ describe('DataRequestsPanel — the platform team', () => {
         await user.click(within(drawer).getByRole('radio', { name: /Connected another way/ }))
         await user.click(within(drawer).getByRole('button', { name: /Mark connected/ }))
         expect(api.connect).toHaveBeenCalledWith('dr_marts', { dataSourceId: null, note: undefined })
+    })
+
+    it('answers nothing on their own request', async () => {
+        const { drawer } = await openReview('Finance marts', 'usr_me')
+        expect(within(drawer).getByText(/You asked for this, so someone else takes it on/)).toBeInTheDocument()
+        for (const name of [/Connect…/, /Start — assign me/, /Decline/]) expect(within(drawer).queryByRole('button', { name })).toBeNull()
+    })
+
+    it('says plainly when the server refuses because they asked for it', async () => {
+        useNotificationStore.setState({ notifications: [] })
+        api.start.mockRejectedValue(Object.assign(new Error('Forbidden'), { status: 403, detail: { type: 'own_request', message: 'x' } }))
+        const { user, drawer } = await openReview()
+        await user.click(within(drawer).getByRole('button', { name: /Start — assign me/ }))
+        await waitFor(() => expect(useNotificationStore.getState().notifications.map(n => n.message))
+            .toContain('You asked for this data, so someone else has to take it on — a workspace admin, the platform team, or an Owner or Steward of the source it becomes.'))
     })
 
     it('declines one with a reason', async () => {

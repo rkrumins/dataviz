@@ -2,8 +2,9 @@
  * A workspace's data requests, on Data → Sources: what has been asked for, by whom and
  * how long ago, and where each stands — Asked → In progress → Connected, or declined
  * with the reason. The person who asked may withdraw a request nobody has taken yet;
- * the platform team and the workspace's own data people open one to take it on or
- * connect it. Renders nothing while requests are off, or when nothing has been asked.
+ * the platform team, the workspace's admins and its sources' named Owners and Stewards
+ * open one to take it on or connect it — never their own. Renders nothing while requests
+ * are off, or when nothing has been asked.
  */
 import { useState } from 'react'
 import { Database, Loader2, Undo2 } from 'lucide-react'
@@ -86,7 +87,7 @@ function RequestList({ workspaceId, rows }: { workspaceId: string; rows: DataReq
                                         Withdraw
                                     </button>
                                 )}
-                                {canFulfil && (r.status === 'pending' || r.status === 'in_progress') && (
+                                {canFulfil && !mine && (r.status === 'pending' || r.status === 'in_progress') && (
                                     <button type="button" onClick={() => setReviewing(r)} aria-label={`Review ${r.title}`}
                                         className="shrink-0 rounded-xl border border-glass-border px-3 py-1.5 text-xs font-semibold text-ink hover:border-indigo-500/40 hover:bg-indigo-500/[0.05]">
                                         Review
