@@ -91,6 +91,9 @@ export interface CanvasContextMenuProps {
     /** Open the Lineage Lens on this node — its immediate connections,
      *  grouped and searchable. */
     onFocusConnections?: (id: string) => void
+    /** Ask the view's owners about this node — opens the questions drawer with the
+     *  question about it. Absent where questions are off or there is no saved view. */
+    onAskAboutNode?: (nodeId: string) => void
     /** Export… — this node (or the selection it is part of) with everything inside it, to edit
      *  offline and import back. */
     onExportNode?: (id: string) => void
@@ -138,6 +141,7 @@ export function CanvasContextMenu({
     onCreateChild,
     onTraceNode,
     onFocusConnections,
+    onAskAboutNode,
     onExportNode,
     onCopyUrn,
     onConnect,
@@ -246,6 +250,15 @@ export function CanvasContextMenu({
                     icon: 'Focus',
                     shortcut: 'F',
                     onClick: () => { onFocusConnections(target.id); onClose() }
+                })
+            }
+
+            if (onAskAboutNode) {
+                result.push({
+                    id: 'ask-about',
+                    label: 'Ask about this',
+                    icon: 'MessageCircleQuestion',
+                    onClick: () => { onAskAboutNode(target.id); onClose() }
                 })
             }
 
@@ -513,7 +526,7 @@ export function CanvasContextMenu({
         result.push(...customActions)
 
         return result
-    }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections, onExportNode,
+    }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections, onAskAboutNode, onExportNode,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical])
 

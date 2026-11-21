@@ -28,6 +28,7 @@ import { portView, type NodePorts } from './lineagePorts'
 import { LineagePortGlyph } from './LineagePortGlyph'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { NarrowRowMark } from '@/features/narrow/NarrowRowMark'
+import { QuestionRowMark } from '@/features/discussions/QuestionRowMark'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
@@ -980,6 +981,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       <div className={cn("flex items-center gap-1.5 flex-shrink-0 relative z-[5]", minimal && "h-5")}>
         {/* On a narrowed canvas: why this row is there (nothing otherwise). */}
         {!isTracing && <NarrowRowMark urn={urnOrId} collapsed={!isExpanded && hasChildren} />}
+        {/* Questions asked about this row (nothing otherwise). */}
+        <QuestionRowMark urn={urnOrId} label={displayName} />
         {(descendantCount > 0 || traceApprox > 0) && (
           <span className={cn(
             "text-[11px] px-2 py-1 rounded-lg flex-shrink-0",

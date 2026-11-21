@@ -28,6 +28,8 @@ import { useLoadingNotification } from '@/components/ui/notifications'
 
 // UX-first interaction components (shared across canvases)
 import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
+import { useAskAboutNode } from '@/features/discussions/useAskAboutNode'
+import { QuestionRowMark } from '@/features/discussions/QuestionRowMark'
 import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
 import { useCreateLinkStore } from './edge-create/createLinkStore'
 import { InlineNodeEditor } from './InlineNodeEditor'
@@ -139,6 +141,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const { parentMap, childMap, rootNodes: hierarchyRoots, nodeMap } = useContainmentHierarchy({
     nodes, edges, isContainmentEdge,
   })
+
+  // "Ask about this" on a node — nothing while questions are off.
+  const askAboutNode = useAskAboutNode()
 
   // Unified Trace System (shared hook handles merge + auto-expand)
   const trace = useCanvasTrace({
@@ -641,6 +646,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           })
         } : undefined}
         onTraceNode={(id) => trace.startTrace(id)}
+        onAskAboutNode={askAboutNode}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={editModeEnabled ? interactions.deleteEdge : undefined}
@@ -915,6 +921,8 @@ function HierarchyContainer({
           {/* Display-rule tags — shared premium chip cluster (same as the
               other canvases). */}
           <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" />
+          {/* Questions asked about this row (nothing otherwise). */}
+          <QuestionRowMark urn={node.urn ?? node.id} label={node.name} />
 
           {/* Details on demand — hover-visible, and kept on the selected row. */}
           {offerDetails && (

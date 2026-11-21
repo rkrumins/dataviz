@@ -74,8 +74,20 @@ export const useDiscussionsDrawer = create<DrawerState>((set) => ({
     setCompose: (compose) => set((s) => (s.target ? { target: { ...s.target, compose, recipients: compose ? s.target.recipients : [] } } : s)),
 }))
 
-/** Close the drawer and select the node on the canvas, which brings it into view. */
+/**
+ * Close the drawer and show the node on the canvas: selected (never toggled off, as a second
+ * click on a selected node would), pulsed where it is drawn, and a drawn row of the Context or
+ * Hierarchy view scrolled to the middle. Selecting alone does not scroll, and a row the
+ * virtualizer has not drawn has no element to scroll to — it is still selected, with its details.
+ */
 export function showNodeOnCanvas(urn: string) {
     useDiscussionsDrawer.getState().close()
-    requestAnimationFrame(() => useCanvasStore.getState().selectNode(urn))
+    requestAnimationFrame(() => {
+        const canvas = useCanvasStore.getState()
+        const id = canvas.nodes.find((n) => n.id === urn || n.data?.urn === urn)?.id ?? urn
+        if (!(canvas.selectedNodeIds.length === 1 && canvas.selectedNodeIds[0] === id)) canvas.selectNode(id)
+        canvas.pulseNode(id)
+        const row = document.getElementById(`layer-node-${id}`) ?? document.getElementById(`hierarchy-node-${id}`)
+        row?.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'smooth' })
+    })
 }

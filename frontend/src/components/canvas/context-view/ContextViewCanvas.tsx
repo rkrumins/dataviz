@@ -44,6 +44,7 @@ import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { useFeature } from '@/store/features'
 import { NarrowChip } from '@/features/narrow/NarrowChip'
 import { NarrowComposer } from '@/features/narrow/NarrowComposer'
+import { useAskAboutNode } from '@/features/discussions/useAskAboutNode'
 import { PRESETS as NARROW_PRESETS, seedsLabel as narrowSeedsLabel, specFor, specKey, type PresetId } from '@/features/narrow/model'
 import { canShareNarrow, decodeNarrowShare, narrowLink } from '@/features/narrow/narrowShareCodec'
 import { useNarrowStore, type NarrowDraft } from '@/features/narrow/narrowStore'
@@ -8525,6 +8526,7 @@ export function ContextViewCanvas({
         } : undefined}
         onTraceNode={(id) => startCanvasTrace(id)}
         onFocusConnections={openLens}
+        onAskAboutNode={useAskAboutNode()}
         onExportNode={exportWithChildren ? (id) => {
           // The selection it is part of, or the entity right-clicked alone.
           const selection = selectedNodeIds.filter(isSelectableNode)

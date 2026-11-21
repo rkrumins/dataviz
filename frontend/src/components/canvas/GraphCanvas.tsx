@@ -62,6 +62,7 @@ import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPa
 
 // UX components
 import { CanvasContextMenu } from './CanvasContextMenu'
+import { useAskAboutNode } from '@/features/discussions/useAskAboutNode'
 import { InlineNodeEditor } from './InlineNodeEditor'
 import { CommandPalette } from './CommandPalette'
 import { EditorToolbar } from './EditorToolbar'
@@ -324,6 +325,9 @@ export function GraphCanvas({ className }: { className?: string }) {
   // Reveal a search hit on this canvas — same flow as ContextViewCanvas
   // (walk ancestor chain, expand each step, then select + scroll).
   const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
+
+  // "Ask about this" on a node — nothing while questions are off.
+  const askAboutNode = useAskAboutNode()
 
   // 8. Trace system (shared hook)
   const trace = useCanvasTrace({
@@ -1732,6 +1736,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           })
         } : undefined}
         onTraceNode={(id) => trace.startTrace(id)}
+        onAskAboutNode={askAboutNode}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={editModeEnabled ? interactions.deleteEdge : undefined}

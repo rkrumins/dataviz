@@ -26,9 +26,12 @@ sequenceDiagram
 
 Open the view and click **Questions** in its header — the number beside it counts the
 questions still open. The drawer that opens lists who looks after the view, every question
-asked about it so far, and **Ask a question…** at the top. You can also start from **About**
-(or **Details → About**) in the view's header, where **Who to ask** names each owner and why
-they are one, with **Ask a question** under them.
+asked about it so far, and **Ask a question…** at the top. You can also start from:
+
+* **About** (or **Details → About**) in the view's header, where **Who to ask** names each
+  owner and why they are one, with **Ask a question** under them;
+* a node on the canvas: right-click it and choose **Ask about this**, and the question is
+  about that one thing.
 
 Write your question and press **⌘↵** (Ctrl+Enter on Windows and Linux), or click **Ask**.
 Type `@` to mention someone who can open the view — their name joins the question, and they
@@ -84,6 +87,13 @@ and after a week with the workspace's admins.
 
 If someone else changed a question while you were looking — answered or closed it — the
 drawer says **This changed** with **Reload**, rather than overwriting what they did.
+
+## Questions on the canvas
+
+A question asked about one thing on the canvas puts an amber **?** beside it, with how many
+are still open — a grey one once they're all answered or closed. Click the **?** to see the
+questions about that thing alone, and ask another. In a question about a node, **Show on
+canvas** closes the drawer and selects the node, bringing it into view.
 
 ## Where to next
 
