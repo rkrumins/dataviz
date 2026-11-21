@@ -445,7 +445,8 @@ async def _find_entities(ctx: ToolContext, args: dict) -> Any:
             path = [p.strip() for p in str(name).replace(" / ", "/").split("/") if p.strip()]
             if len(path) == 1:
                 path = ["**", path[0]]
-        ref: dict[str, Any] = {"path": path[:12], "caseSensitive": False}
+        # The platform compares names exactly under "**"; a full path may ignore case.
+        ref: dict[str, Any] = {"path": path[:12], "caseSensitive": "**" in path}
         if args.get("entityType"):
             ref["entityType"] = str(args["entityType"])
         refs.append(ref)

@@ -127,7 +127,15 @@ def caveats(g) -> list[dict]:
         out.append({"code": "few_types", "action": "confirm_type",
                     "text": f"Everything here is a ‘{c['on']}’ ({total:,}). What kind of thing each one "
                             f"is looks like it's recorded in “{c['key']}”: {kinds}."})
-    if g.schema is not None and (g.schema.get("entityTypes") or g.schema.get("relationshipTypes")):
+    no_layer = g.semantic_layer is not None and not g.semantic_layer.get("id")
+    if no_layer:
+        # Without a semantic layer nothing is classified, so this one sentence
+        # says what "no hierarchy", "no lineage" and "unclassified" would.
+        out.append({"code": "no_semantic_layer",
+                    "text": "No semantic layer is assigned to this data source, so no connection is "
+                            "classified as hierarchy or lineage, and traces and impact questions can't "
+                            "follow them. An administrator can assign one under Semantic layers."})
+    elif g.schema is not None and (g.schema.get("entityTypes") or g.schema.get("relationshipTypes")):
         if not g.containment_edge_types:
             out.append({"code": "no_containment",
                         "text": "Nothing here is recorded as containing anything else, so there is no "
@@ -142,11 +150,6 @@ def caveats(g) -> list[dict]:
             out.append({"code": "unclassified_edges",
                         "text": f"{len(other)} kind{'s' if len(other) != 1 else ''} of connection ({names}) "
                                 "are neither hierarchy nor lineage, so traces don't follow them."})
-    if g.semantic_layer is not None and not g.semantic_layer.get("id"):
-        out.append({"code": "lineage_by_default",
-                    "text": "No semantic layer is assigned to this data source, so every connection is "
-                            "read as lineage and nothing as hierarchy. An administrator can assign one "
-                            "under Semantic layers."})
     if g.target.view_only:
         out.append({"code": "view_only",
                     "text": "You're reading this view through a share, so searches stay inside it and "
@@ -154,20 +157,40 @@ def caveats(g) -> list[dict]:
     return out
 
 
-def hierarchy_chains(schema: Optional[dict], limit: int = 3) -> list[list[str]]:
-    """Up to *limit* of the longest top-to-bottom paths through the types'
-    containment, e.g. ``["platform", "schema", "table", "column"]``."""
+def hierarchy_chains(schema: Optional[dict], limit: int = 3,
+                     present: Optional[dict[str, int]] = None) -> list[list[str]]:
+    """Up to *limit* top-to-bottom paths through the types' containment, e.g.
+    ``["platform", "schema", "table", "column"]`` — through types that hold
+    entities (*present*: type → count, when known), only ever down the
+    declared levels, the most populated first, each ending differently.
+
+    A semantic layer's "can contain" lists are permissive (a platform "can
+    contain" a system), so a chain follows them only where the levels agree."""
     if not schema:
         return []
+    level = {str(et["id"]): et.get("level") for et in schema.get("entityTypes") or []
+             if isinstance(et.get("level"), (int, float))}
+    live = {t for t, n in (present or {}).items() if n}
+
+    def usable(t: str) -> bool:
+        return not live or t in live
+
+    def downward(parent: str, child: str) -> bool:
+        if parent == child or not (usable(parent) and usable(child)):
+            return False
+        return parent not in level or child not in level or level[parent] < level[child]
+
     children: dict[str, set[str]] = {}
     for et in schema.get("entityTypes") or []:
         for child in et.get("canContain") or []:
-            children.setdefault(str(et["id"]), set()).add(str(child))
+            if downward(str(et["id"]), str(child)):
+                children.setdefault(str(et["id"]), set()).add(str(child))
     for rel in schema.get("relationshipTypes") or []:
-        if rel.get("class") == "containment":
+        if rel.get("class") == "containment" and len(rel.get("from") or []) * len(rel.get("to") or []) <= 4:
+            # A pair or two is a statement about nesting; a cross product of many is not.
             for parent in rel.get("from") or []:
                 for child in rel.get("to") or []:
-                    if parent != child:
+                    if downward(str(parent), str(child)):
                         children.setdefault(str(parent), set()).add(str(child))
     if not children:
         return []
@@ -177,20 +200,22 @@ def hierarchy_chains(schema: Optional[dict], limit: int = 3) -> list[list[str]]:
 
     def walk(path: list[str]) -> None:
         kids = sorted(children.get(path[-1], set()) - set(path))
-        if not kids or len(path) >= 8:
+        if not kids or len(path) >= 8 or len(chains) > 400:
             chains.append(path)
             return
-        for kid in kids[:6]:
+        for kid in kids[:8]:
             walk(path + [kid])
 
-    for root in sorted(roots)[:6]:
+    for root in sorted(roots)[:8]:
         walk([root])
+    weight = present or {}
     chains = [c for c in chains if len(c) >= 2]
-    chains.sort(key=lambda c: (-len(c), c))
+    chains.sort(key=lambda c: (-len(c), -sum(weight.get(t, 0) for t in c), c))
     picked: list[list[str]] = []
     for chain in chains:
-        if not any(chain == p[:len(chain)] for p in picked):
-            picked.append(chain)
+        if any(chain[-2:] == p[-2:] or chain == p[:len(chain)] for p in picked):
+            continue
+        picked.append(chain)
         if len(picked) >= limit:
             break
     return picked
@@ -225,17 +250,23 @@ def _types(g, schema: Optional[dict]) -> list[dict]:
 
 
 def _connections(g, schema: Optional[dict]) -> list[dict]:
-    counts = g.edge_counts()
-    rows = {str(r.get("id")): {"id": str(r.get("id")), "name": r.get("name") or r.get("id"),
-                               "class": r.get("class") or "other", "category": r.get("category"),
-                               "description": r.get("description"), "from": list(r.get("from") or []),
-                               "to": list(r.get("to") or []), "count": counts.get(str(r.get("id")))}
-            for r in (schema or {}).get("relationshipTypes") or []}
-    lineage, containment = set(g.lineage_edge_types), set(g.containment_edge_types)
-    for edge_id, count in counts.items():
-        rows.setdefault(edge_id, {"id": edge_id, "name": edge_id,
-                                  "class": "containment" if edge_id in containment
-                                  else "lineage" if edge_id in lineage else "other",
+    # Counts and the schema can spell one edge type differently ("RELATED" and
+    # "related"): they are matched without regard to case, the count's spelling
+    # being the graph's own.
+    counts = {k.lower(): (k, v) for k, v in g.edge_counts().items()}
+    rows = {}
+    for r in (schema or {}).get("relationshipTypes") or []:
+        spelled, count = counts.get(str(r.get("id")).lower(), (str(r.get("id")), None))
+        rows[spelled.lower()] = {"id": spelled, "name": r.get("name") or spelled,
+                                 "class": r.get("class") or "other", "category": r.get("category"),
+                                 "description": r.get("description"), "from": list(r.get("from") or []),
+                                 "to": list(r.get("to") or []), "count": count}
+    lineage = {e.lower() for e in g.lineage_edge_types}
+    containment = {e.lower() for e in g.containment_edge_types}
+    for edge_id, count in (v for v in counts.values()):
+        rows.setdefault(edge_id.lower(), {"id": edge_id, "name": edge_id,
+                                  "class": "containment" if edge_id.lower() in containment
+                                  else "lineage" if edge_id.lower() in lineage else "other",
                                   "category": None, "description": None, "from": [], "to": [],
                                   "count": count})
     order = {"containment": 0, "lineage": 1, "other": 2}
@@ -294,7 +325,8 @@ def _scope(view: Optional[dict]) -> Optional[dict]:
 
 
 def _structure(g, schema: Optional[dict]) -> dict:
-    chains = hierarchy_chains(schema)
+    present = {**g.source_counts(), **{t: n for t, n in g.type_counts().items() if n}}
+    chains = hierarchy_chains(schema, present=present or None)
     return {
         "types": _types(g, schema),
         "hierarchy": {"chains": chains} if chains else None,

@@ -95,9 +95,11 @@ async def _resolve_target(ctx: ToolContext, args: dict) -> Optional[dict]:
             raise ToolFailed("Name the entity (urn, or a name or path such as customers/first_name).")
         else:
             path = [p.strip() for p in re.split(r"\s*/\s*|\s*\.\s*(?=\S)", name) if p.strip()]
-            refs = [{"path": (["**"] + path) if len(path) == 1 else path, "caseSensitive": False}]
+            # The platform compares names exactly under "**"; a full path may ignore case.
+            refs = [{"path": ["**"] + path, "caseSensitive": True} if len(path) == 1
+                    else {"path": path, "caseSensitive": False}]
             if len(path) > 1:
-                refs.append({"path": ["**"] + path, "caseSensitive": False})
+                refs.append({"path": ["**"] + path, "caseSensitive": True})
             try:
                 body = await ctx.client.resolve(target.workspace_id, target.data_source_id,
                                                 target.scope("data_source"), refs)
@@ -251,6 +253,15 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
         n["entityType"] = g.display_type(n)
     edges = fine.get("edges") or []
     parents = {e.get("targetUrn"): e.get("sourceUrn") for e in fine.get("containmentEdges") or []}
+
+    def ent(u: str, hop: Optional[int] = None) -> dict:
+        """An entity named with its container when the walk knows it —
+        "raw_customers.first_name", since many columns share a name."""
+        out = _entity(nodes[u], hop)
+        parent = nodes.get(parents.get(u) or "")
+        if parent is not None:
+            out["name"] = f"{_name(parent)}.{out['name']}"
+        return out
     reached_key = "downstreamUrns" if direction == "downstream" else "upstreamUrns"
     reached = set(fine.get(reached_key) or [])
     inside = {u for u in nodes if _is_inside(u, urn, parents)} | {urn}
@@ -331,7 +342,7 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
                              hops.get(u, 99)))
     if terminal:
         ends = [u for u in ends if nodes[u].get("entityType") in terminal] or ends
-    consumers = [_entity(nodes[u], hops.get(u)) for u in ends[:12]]
+    consumers = [ent(u, hops.get(u)) for u in ends[:12]]
 
     owner_ref = ctx.state.confirmed("owner", target.data_source_id)
     owner_key = None
@@ -343,7 +354,7 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
         if u in nodes:
             found = _owner_of(nodes[u], parents, nodes, owner_keys)
             if found:
-                owners_map[found].append(_entity(nodes[u]))
+                owners_map[found].append(ent(u))
     owners = [
         {"owner": owner, "property": key, "count": len(assets), "assets": assets[:3]}
         for (owner, key), assets in sorted(owners_map.items(), key=lambda kv: -len(kv[1]))[:8]
@@ -369,7 +380,7 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
         if direction == "upstream":
             chain_nodes.reverse()
             chain_edges.reverse()
-        return {"nodes": [_entity(nodes[n]) if n in nodes else {"urn": n, "name": n} for n in chain_nodes],
+        return {"nodes": [ent(n) if n in nodes else {"urn": n, "name": n} for n in chain_nodes],
                 "edges": chain_edges}
 
     paths = [p for p in (path_to(c["urn"]) for c in consumers[:5]) if p]
@@ -386,7 +397,7 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
                 scheduled.append((u, str(value)))
                 break
     scheduled.sort(key=lambda uv: (humanize_cron(uv[1]) is None, hops.get(uv[0], 99)))
-    schedules = [{"job": _entity(nodes[u], hops.get(u)), "schedule": value[:80], "human": humanize_cron(value)}
+    schedules = [{"job": ent(u, hops.get(u)), "schedule": value[:80], "human": humanize_cron(value)}
                  for u, value in scheduled[:6]]
     timing = None
     if schedules:

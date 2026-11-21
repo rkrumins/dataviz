@@ -265,7 +265,7 @@ export const GENERIC_BRIEF: ContextBrief = {
         { code: 'few_types', action: 'confirm_type',
             text: 'Everything here is a ‘Node’ (500). What kind each one is looks like it’s in kind: table 300 · column 150 · dashboard 30 · job 20.' },
         { code: 'no_containment', text: 'Nothing here sits inside anything else, so there is no hierarchy to browse or roll up.' },
-        { code: 'lineage_by_default', text: 'No semantic layer is assigned, so every connection is read as lineage. An administrator can assign one under Semantic layers.' },
+        { code: 'no_semantic_layer', text: 'No semantic layer is assigned to this data source, so no connection is classified as hierarchy or lineage, and traces and impact questions can’t follow them. An administrator can assign one under Semantic layers.' },
     ],
     notes: [],
 }

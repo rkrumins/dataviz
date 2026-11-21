@@ -259,6 +259,23 @@ def test_hierarchy_chains_read_top_to_bottom():
     assert chains[0] == ["platform", "schema", "table", "column"] and ["platform", "dashboard"] in chains
 
 
+def test_hierarchy_chains_follow_levels_and_what_holds_entities():
+    # A semantic layer's "can contain" lists are permissive; its levels and the data are not.
+    schema = {"entityTypes": [
+        {"id": "domain", "level": 0, "canContain": ["platform", "table"]},
+        {"id": "platform", "level": 1, "canContain": ["schema", "platform", "system"]},
+        {"id": "system", "level": 1, "canContain": ["schema", "platform"]},
+        {"id": "schema", "level": 2, "canContain": ["table", "platform"]},
+        {"id": "table", "level": 3, "canContain": ["column", "field"]},
+        {"id": "column", "level": 4}, {"id": "field", "level": 4}],
+        "relationshipTypes": [{"class": "containment", "from": ["domain", "platform", "system", "schema"],
+                               "to": ["platform", "system", "schema", "table", "column"]}]}
+    present = {"platform": 7, "system": 2, "schema": 30, "table": 300, "column": 4000}
+    chains = B.hierarchy_chains(schema, present=present)
+    assert chains[0] == ["platform", "schema", "table", "column"]      # domain and field hold nothing
+    assert all(c[:2] != ["platform", "system"] for c in chains)        # never sideways across a level
+
+
 def test_kinds_of_thing_are_read_through_the_type_property():
     out = P.rewrite_types({"kind": "group", "op": "and", "children": [
         {"kind": "entityType", "op": "in", "values": ["table", "Node"]},
@@ -290,3 +307,11 @@ def test_terminal_types_and_owner_keys_come_from_the_data():
     g.type_property, g.value_sets = {"on": "Node", "key": "kind"}, {"kind": [{"value": "table", "count": 3}]}
     assert g.display_type({"entityType": "Node", "properties": {"kind": "table"}}) == "table"
     assert g.display_type({"entityType": "Other", "properties": {"kind": "table"}}) == "Other"
+
+
+def test_one_edge_type_spelled_two_ways_is_one_connection():
+    g = Grounding(target=Target(), schema={"relationshipTypes": [{"id": "related", "class": "other"}],
+                                          "containmentEdgeTypes": [], "lineageEdgeTypes": []},
+                  introspection={"edgeTypeStats": [{"id": "RELATED", "count": 887}]})
+    assert [(c["id"], c["count"]) for c in B._connections(g, g.schema)] == [("RELATED", 887)]
+

@@ -93,7 +93,8 @@ class FakePlatform:
                 "totalNodes": 9000, "totalEdges": 20000,
                 "entityTypeStats": [{"id": "schemaField", "name": "schemaField", "count": 7000,
                                      "sampleNames": ["secret_outside_the_view"]},
-                                    {"id": "dataset", "name": "dataset", "count": 900}],
+                                    {"id": "dataset", "name": "dataset", "count": 900},
+                                    {"id": "container", "name": "container", "count": 40}],
                 "edgeTypeStats": [{"id": "CONTAINS", "name": "CONTAINS", "count": 8000},
                                   {"id": "TRANSFORMS", "name": "TRANSFORMS", "count": 5000},
                                   {"id": "AGGREGATED", "name": "AGGREGATED", "count": 300}],
@@ -157,6 +158,9 @@ class FakePlatform:
         if path == f"/api/v1/{WS}/graph/search/resolve":
             results = []
             for ref in body["refs"]:
+                if "**" in ref.get("path", []) and not ref.get("caseSensitive"):
+                    # As the platform answers: '**' compares names exactly.
+                    return httpx.Response(422, json={"detail": "a path with '**' compares names exactly"})
                 names = [p for p in ref.get("path", []) if p != "**"]
                 if names and names[-1] == "first_name":
                     results.append({"count": 1, "matches": [{"urn": COL, "displayName": "first_name",
@@ -332,6 +336,9 @@ async def test_impact_turn_reports_who_why_and_when(world):
     owners = {o["owner"] for o in report["owners"]}
     assert {"bi-team", "analytics-team"} <= owners
     assert report["paths"][0]["edges"][1]["detail"] == "concat(first_name, ' ', last_name)"
+    # Columns are named with their table: many columns share a name.
+    assert [n["name"] for n in report["paths"][0]["nodes"]][:3] == [
+        "customers.first_name", "dbt_dim_customer", "dim_customer.full_name"]
     assert report["timing"]["schedules"][0]["human"] == "daily at 04:00 UTC"
     assert report["resultRef"] == "r1"
     assert "".join(d["delta"] for d in of(events, "text")).startswith("Dropping")
@@ -668,7 +675,8 @@ async def test_a_generic_schema_is_diagnosed(world):
         "suggested", "kind", "Node")
     assert [v["value"] for v in brief["typeProperty"]["values"]] == ["table", "column", "dashboard", "job"]
     codes = {c["code"] for c in brief["caveats"]}
-    assert {"few_types", "no_containment", "lineage_by_default"} <= codes
+    assert {"few_types", "no_semantic_layer"} <= codes
+    assert "no_lineage" not in codes          # said once, by the semantic layer's absence
     assert next(c for c in brief["caveats"] if c["code"] == "few_types")["action"] == "confirm_type"
 
 

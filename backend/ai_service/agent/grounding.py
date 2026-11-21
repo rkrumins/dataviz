@@ -380,7 +380,7 @@ async def _ground_page(client: PlatformClient, grounding: Grounding, *, user_id:
     about, and — where a data source is in play — the grounding of one of its
     views, so searches work as they do on a view."""
     kind, page_id = page.get("kind"), str(page.get("id") or "")
-    sources = await _sources(client, user_id)
+    sources = await _sources(client, user_id, grounding.target.workspace_id)
     grounding.sources = sources
     info: dict[str, Any] = {"kind": kind, "id": page_id, "title": page.get("title")}
     through_ws = through_ds = None
@@ -444,7 +444,7 @@ async def _semantic_layer(client: PlatformClient, user_id: str, ws: Optional[str
                           ds: Optional[str]) -> Optional[dict]:
     """The data source's ontology — its id, and its name where the person
     may read it. ``{"id": None}`` when none is assigned; None when unknown."""
-    for entry in await _sources(client, user_id):
+    for entry in await _sources(client, user_id, ws):
         if entry.get("workspaceId") != ws:
             continue
         for source in entry.get("dataSources") or []:
@@ -457,8 +457,12 @@ async def _semantic_layer(client: PlatformClient, user_id: str, ws: Optional[str
     return None
 
 
-async def _sources(client: PlatformClient, user_id: str) -> list[dict]:
-    key = ("sources", user_id)
+async def _sources(client: PlatformClient, user_id: str, narrowed_to: Optional[str] = None) -> list[dict]:
+    """The workspaces and data sources the request may see. The edge narrows a
+    request's delegation to the workspace it names, so the list is cached per
+    person *and* that narrowing — a list read for one workspace is not the
+    person's whole estate."""
+    key = ("sources", user_id, narrowed_to or "")
     cached = _cached(key)
     if cached is not None:
         return cached

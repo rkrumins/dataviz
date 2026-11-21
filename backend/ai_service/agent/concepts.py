@@ -339,7 +339,7 @@ async def entity_candidates(client, target, name: str, type_ids: list[str]) -> l
     linked to one (a ``TAGGED_WITH`` edge rather than a tag on the node)."""
     if not type_ids or not target.searchable:
         return []
-    refs = [{"path": ["**", name], "entityType": t, "caseSensitive": False} for t in type_ids[:4]]
+    refs = [{"path": ["**", name], "entityType": t, "caseSensitive": True} for t in type_ids[:4]]
     try:
         body = await client.resolve(target.workspace_id, target.data_source_id,
                                     target.scope("data_source"), refs)
