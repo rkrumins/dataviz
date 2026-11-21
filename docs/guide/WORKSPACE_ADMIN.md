@@ -154,10 +154,11 @@ exception**.
 Custom roles your team has created also appear in the list, when they can be
 bound in this workspace and you hold everything they grant.
 
-> **Note:** Binding a group needs the platform's group list
-> (`system:groups:manage`) — Org Admins and Super Admins have it. A workspace
-> admin without it can still add people one by one, or ask an Org Admin to bind
-> the group.
+> **Note:** Binding a group needs only this workspace's admin role, not the
+> platform's group list: **Group** searches every group, and a bound group's
+> row opens to show the people it lets in here. Creating groups and changing
+> who is in them stays with `system:groups:manage` — Org Admins and Super
+> Admins have it.
 
 ### Seeing who can actually get in
 

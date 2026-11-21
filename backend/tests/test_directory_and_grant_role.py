@@ -84,6 +84,19 @@ async def test_directory_matches_groups(test_client: AsyncClient, db_session):
 
 
 @pytest.mark.asyncio
+async def test_directory_leaves_out_deleted_groups(test_client: AsyncClient, db_session):
+    """A deleted group can't be shared with or bound — the picker mustn't offer it."""
+    live_id = await _seed_people(db_session)
+    gone = await group_repo.create_group(db_session, name="Analytics Alumni")
+    await db_session.commit()
+    assert await group_repo.soft_delete_group(db_session, gone.id)
+    await db_session.commit()
+    with _auth(user=CALLER, claims=EMPTY_CLAIMS):
+        r = await test_client.get("/api/v1/directory", params={"q": "analytics", "types": "group"})
+    assert [g["id"] for g in r.json()["groups"]] == [live_id]
+
+
+@pytest.mark.asyncio
 async def test_directory_types_filter_and_limit(
     test_client: AsyncClient, db_session,
 ):

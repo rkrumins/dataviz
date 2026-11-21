@@ -20,7 +20,9 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import ContextModelORM, WorkspaceORM, WorkspaceDataSourceORM, ViewORM
+from backend.app.db.models import (
+    CatalogItemORM, ContextModelORM, ProviderORM, WorkspaceORM, WorkspaceDataSourceORM, ViewORM,
+)
 
 from backend.app.api.v1.capability_gate import require_ds_read_or_view_dspath
 from backend.app.api.v1.endpoints.versioning import get_versioning_service
@@ -156,6 +158,22 @@ def _ensure_can_read_workspace(claims: PermissionClaims, ws_id: str) -> None:
             status_code=404,
             detail=f"Workspace '{ws_id}' not found",
         )
+
+
+async def _assert_permitted(session: AsyncSession, ws_id: Optional[str], ws_name: str,
+                            ds: DataSourceCreateRequest) -> None:
+    """A source's catalog entry and its provider must each admit the workspace in their
+    ``permitted_workspaces`` — the rule a move keeps too (``data_source_transfer``). ``ws_id``
+    None is a workspace not yet created, which only "*" admits. 403 ``not_permitted``."""
+    cat = await session.get(CatalogItemORM, ds.catalog_item_id) if ds.catalog_item_id else None
+    provider_id = cat.provider_id if cat is not None else ds.provider_id
+    prov = await session.get(ProviderORM, provider_id) if provider_id else None
+    for row, what in ((cat, "catalog entry"), (prov, "provider")):
+        if row is not None and not data_source_transfer._permits(row.permitted_workspaces, ws_id):
+            raise HTTPException(status_code=403, detail={
+                "type": "not_permitted",
+                "message": f"The {what} '{row.name}' isn't permitted in {ws_name}.",
+            })
 
 
 # ================================================================== #
@@ -376,6 +394,7 @@ async def create_workspace(
             raise HTTPException(status_code=422, detail="Each data source requires either catalogItemId or providerId")
         if ds.ontology_id and not await ontology_definition_repo.get_ontology(session, ds.ontology_id):
             raise HTTPException(status_code=404, detail=f"Ontology '{ds.ontology_id}' not found")
+        await _assert_permitted(session, None, req.name, ds)
 
     try:
         ws = await workspace_repo.create_workspace(session, req)
@@ -772,6 +791,7 @@ async def add_data_source(
         raise HTTPException(status_code=422, detail="Either catalogItemId or providerId is required")
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
+    await _assert_permitted(session, workspace_id, ws.name, req)
     try:
         created = await data_source_repo.create_data_source(
             session, workspace_id, req, created_by=_user.id,
