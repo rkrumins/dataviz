@@ -65,7 +65,8 @@ Every new capability ships behind its own switch, off by default.
 ### Upgrading
 
 - **Migrations** `20261120_1000_playground` through `20261126_1000_disc_analytics`, joined with
-  main's line by `20261127_1000_merge_bulk_recipes` (nothing to run). They add the Playground role
+  main's line by `20261127_1000_merge_bulk_recipes` and `20261128_1000_merge_reusable` (nothing to
+  run). They add the Playground role
   (`workspace_playground_member`), the requests, groups, contacts and conversations tables, and
   nullable columns on existing tables.
 - **`20261124_1100_aal_ds_type` builds an index on the activity ledger** (`auth_audit_log`), with a

@@ -1,9 +1,9 @@
-"""A view's library: its display rules, its saved queries and its bulk
-recipes — and the pack the rules and queries travel in between views.
+"""A view's library: its display rules, its saved queries and its reusable
+changes — and the pack the rules and queries travel in between views.
 
 A rule tags on-screen entities that match its predicate; a saved query is a
-search kept under a name; a bulk recipe is a bulk property change kept under
-a name, to run again. All belong to the view (a rule to the branch it was
+search kept under a name; a reusable change is a bulk property change kept
+under a name, to run again. All belong to the view (a rule to the branch it was
 written on, as the view's layout does). Rules and queries are exported and
 imported together as a ``LibraryPack``.
 
@@ -21,11 +21,11 @@ from backend.common.models.property_job import PropertyJobOp
 
 LIBRARY_RULES_MAX = 200
 LIBRARY_QUERIES_MAX = 500
-LIBRARY_RECIPES_MAX = 200
+LIBRARY_REUSABLE_CHANGES_MAX = 200
 #: The most queries listed from a workspace's other views at once.
 OTHER_VIEW_QUERIES_MAX = 500
-#: The most recipes listed from a workspace's other views at once.
-OTHER_VIEW_RECIPES_MAX = 500
+#: The most reusable changes listed from a workspace's other views at once.
+OTHER_VIEW_REUSABLE_CHANGES_MAX = 500
 
 PACK_FORMAT = "synodic.view-library"
 PACK_VERSION = 1
@@ -89,16 +89,16 @@ class OtherViewQuery(_Base):
 
 
 #: Where-step choices that name entities by id. Ids belong to one graph at one
-#: time, so a recipe never keeps them.
+#: time, so a reusable change never keeps them.
 _BY_ID = ("selection", "relationships", "children", "inside")
 
 
-class RecipeTarget(_Base):
-    """Which entities a recipe reaches, as the bulk dialog's Where step names
-    them: the whole view, every entity holding ``key``, a layer by its name,
-    or a predicate (a search's, criteria built in the dialog, a Connections
-    search's). Never ids: a recipe is run again, on other entities, perhaps
-    in another view. ``scopeMode`` is ``view`` for a layer, which is
+class ReusableChangeTarget(_Base):
+    """Which entities a reusable change reaches, as the bulk dialog's Where
+    step names them: the whole view, every entity holding ``key``, a layer by
+    its name, or a predicate (a search's, criteria built in the dialog, a
+    Connections search's). Never ids: a reusable change is run again, on other
+    entities, perhaps in another view. ``scopeMode`` is ``view`` for a layer, which is
     searched where the view places it."""
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -112,9 +112,9 @@ class RecipeTarget(_Base):
     @classmethod
     def _never_ids(cls, data: Any) -> Any:
         if isinstance(data, dict) and (data.get("kind") in _BY_ID or "ids" in data or "edgeIds" in data):
-            raise ValueError("A recipe can't keep entities picked by id: the next time it runs they "
-                             "may not be the ones it should reach. Save it for the whole view, a key, "
-                             "a layer or criteria.")
+            raise ValueError("A reusable change can't keep entities picked by id: the next time it "
+                             "runs they may not be the ones it should reach. Save it for the whole "
+                             "view, a key, a layer or criteria.")
         return data
 
     @model_validator(mode="after")
@@ -129,15 +129,15 @@ class RecipeTarget(_Base):
         return self
 
 
-class BulkRecipeInput(_Base):
+class ReusableChangeInput(_Base):
     """What a client writes: a bulk property change and where it reaches."""
     name: str = Field(min_length=1, max_length=120)
     description: Optional[str] = Field(None, max_length=500)
     op: PropertyJobOp
-    target: RecipeTarget
+    target: ReusableChangeTarget
 
 
-class BulkRecipe(_Base):
+class ReusableChange(_Base):
     """A bulk property change kept under a name, for everyone who can open
     the view — to run again from the Property Manager. ``op`` is as a job
     keeps it (``PropertyJobOp.wire``)."""
@@ -152,20 +152,20 @@ class BulkRecipe(_Base):
     updated_by: Optional[str] = Field(None, alias="updatedBy")
 
 
-class OtherViewRecipe(_Base):
-    """A recipe saved on another view of the workspace the caller may open —
-    to run in this one."""
+class OtherViewReusableChange(_Base):
+    """A reusable change saved on another view of the workspace the caller
+    may open — to run in this one."""
     view_id: str = Field(alias="viewId")
     view_name: str = Field(alias="viewName")
     same_source: bool = Field(
         alias="sameSource",
-        description="The other view reads this one's data source, so the recipe's keys, "
+        description="The other view reads this one's data source, so the change's keys, "
                     "types and layers mean what they meant there.")
-    recipe: BulkRecipe
+    change: ReusableChange
 
 
 class LibraryOrder(_Base):
-    """A new order for a view's rules, queries or recipes: their ids, first to last."""
+    """A new order for a view's rules, queries or reusable changes: their ids, first to last."""
     ids: List[str] = Field(max_length=LIBRARY_QUERIES_MAX)
 
 
@@ -174,7 +174,7 @@ class ViewLibrary(_Base):
     branch_id: Optional[str] = Field(None, alias="branchId")
     display_rules: List[Dict[str, Any]] = Field(default_factory=list, alias="displayRules")
     saved_queries: List[SavedQuery] = Field(default_factory=list, alias="savedQueries")
-    bulk_recipes: List[BulkRecipe] = Field(default_factory=list, alias="bulkRecipes")
+    reusable_changes: List[ReusableChange] = Field(default_factory=list, alias="reusableChanges")
     can_edit: bool = Field(False, alias="canEdit")
 
 

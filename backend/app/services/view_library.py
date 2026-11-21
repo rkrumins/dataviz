@@ -1,5 +1,5 @@
-"""A view's library: its display rules, its saved queries and its bulk
-recipes, and the pack the rules and queries are exported and imported in.
+"""A view's library: its display rules, its saved queries and its reusable
+changes, and the pack the rules and queries are exported and imported in.
 
 Display rules stay where they have always lived — in the view's
 ``referenceLayout``, and in a draft's layout overlay — so a draft keeps its
@@ -9,7 +9,7 @@ written back under a row lock. Two people editing different rules both keep
 their edits, and a layout save no longer carries the rules at all.
 
 Saved queries belong to the view, not to a branch, in ``view_saved_queries``;
-bulk recipes too, in ``view_bulk_recipes``.
+reusable changes too, in ``view_reusable_changes``.
 
 No write here touches the view's ``updated_at``. It keys the view's resolved
 scope (``view_scope``), and neither a rule nor a saved query is part of that:
@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
 from backend.app.db.models import (
-    ViewBulkRecipeORM, ViewLayoutOverlayORM, ViewORM, ViewSavedQueryORM, view_is_live,
+    ViewLayoutOverlayORM, ViewORM, ViewReusableChangeORM, ViewSavedQueryORM, view_is_live,
 )
 from backend.app.db.repositories import view_repo
 from backend.app.services.advanced_search_service import (
@@ -43,12 +43,10 @@ from backend.app.services.view_scope import _collect_content_scope, _collect_ref
 from backend.common.models.search import EdgesPredicate, Predicate, unwrap_edges
 from backend.common.models.view_library import (
     LIBRARY_QUERIES_MAX,
-    LIBRARY_RECIPES_MAX,
+    LIBRARY_REUSABLE_CHANGES_MAX,
     LIBRARY_RULES_MAX,
     OTHER_VIEW_QUERIES_MAX,
-    OTHER_VIEW_RECIPES_MAX,
-    BulkRecipe,
-    BulkRecipeInput,
+    OTHER_VIEW_REUSABLE_CHANGES_MAX,
     DisplayRule,
     ImportStrategy,
     LibraryImportItem,
@@ -56,7 +54,9 @@ from backend.common.models.view_library import (
     LibraryPack,
     LibraryPackSource,
     OtherViewQuery,
-    OtherViewRecipe,
+    OtherViewReusableChange,
+    ReusableChange,
+    ReusableChangeInput,
     SavedQuery,
     SavedQueryInput,
     ViewLibrary,
@@ -326,7 +326,7 @@ async def _rows_elsewhere(
     session: AsyncSession, view: ViewORM, readable: Optional[ColumnElement[bool]],
     orm: Any, limit: int,
 ) -> List[Tuple[Any, str, bool]]:
-    """The ``orm`` rows (saved queries, or recipes) of the workspace's other
+    """The ``orm`` rows (saved queries, or reusable changes) of the workspace's other
     live views that ``readable`` lets the caller open — every one with no
     clause (RBAC off) — those over this view's data source first, then by
     view name, each view's in its own order: each with its view's name and
@@ -412,12 +412,12 @@ async def order_queries(session: AsyncSession, view_id: str, ids: List[str]) -> 
 
 
 # ---------------------------------------------------------------------------
-# Bulk recipes: the view's own, whatever the branch
+# Reusable changes: the view's own, whatever the branch
 # ---------------------------------------------------------------------------
 
-def _recipe_of(row: ViewBulkRecipeORM) -> BulkRecipe:
-    stored = json.loads(row.recipe or "{}")
-    return BulkRecipe(
+def _reusable_change_of(row: ViewReusableChangeORM) -> ReusableChange:
+    stored = json.loads(row.change or "{}")
+    return ReusableChange(
         id=row.id, name=row.name, description=row.description,
         op=stored.get("op") or {}, target=stored.get("target") or {},
         created_at=row.created_at, created_by=row.created_by,
@@ -425,30 +425,31 @@ def _recipe_of(row: ViewBulkRecipeORM) -> BulkRecipe:
     )
 
 
-async def _recipe_rows(session: AsyncSession, view_id: str) -> List[ViewBulkRecipeORM]:
+async def _reusable_change_rows(session: AsyncSession, view_id: str) -> List[ViewReusableChangeORM]:
     return list((await session.execute(
-        select(ViewBulkRecipeORM).where(ViewBulkRecipeORM.view_id == view_id)
-        .order_by(ViewBulkRecipeORM.position, ViewBulkRecipeORM.created_at)
+        select(ViewReusableChangeORM).where(ViewReusableChangeORM.view_id == view_id)
+        .order_by(ViewReusableChangeORM.position, ViewReusableChangeORM.created_at)
     )).scalars())
 
 
-async def read_recipes(session: AsyncSession, view_id: str) -> List[BulkRecipe]:
-    return [_recipe_of(row) for row in await _recipe_rows(session, view_id)]
+async def read_reusable_changes(session: AsyncSession, view_id: str) -> List[ReusableChange]:
+    return [_reusable_change_of(row) for row in await _reusable_change_rows(session, view_id)]
 
 
-async def read_recipes_elsewhere(
+async def read_reusable_changes_elsewhere(
     session: AsyncSession, view: ViewORM, readable: Optional[ColumnElement[bool]],
-    *, limit: int = OTHER_VIEW_RECIPES_MAX,
-) -> List[OtherViewRecipe]:
-    """The recipes saved on the workspace's other views the caller may open
-    (``_rows_elsewhere``)."""
+    *, limit: int = OTHER_VIEW_REUSABLE_CHANGES_MAX,
+) -> List[OtherViewReusableChange]:
+    """The reusable changes saved on the workspace's other views the caller
+    may open (``_rows_elsewhere``)."""
     return [
-        OtherViewRecipe(view_id=row.view_id, view_name=name, same_source=same, recipe=_recipe_of(row))
-        for row, name, same in await _rows_elsewhere(session, view, readable, ViewBulkRecipeORM, limit)
+        OtherViewReusableChange(view_id=row.view_id, view_name=name, same_source=same,
+                                change=_reusable_change_of(row))
+        for row, name, same in await _rows_elsewhere(session, view, readable, ViewReusableChangeORM, limit)
     ]
 
 
-def _check_recipe_target(body: BulkRecipeInput) -> None:
+def _check_reusable_change_target(body: ReusableChangeInput) -> None:
     """A predicate target's predicate, checked as a saved query's is — and
     a Connections search's only under ``connections``, which changes
     relationships, not entities."""
@@ -464,50 +465,50 @@ def _check_recipe_target(body: BulkRecipeInput) -> None:
                                 "relationships, not entities.")
 
 
-async def put_recipe(session: AsyncSession, view_id: str, recipe_id: str,
-                     body: BulkRecipeInput, *, actor: Optional[str]) -> BulkRecipe:
-    """Save a recipe under ``recipe_id``: a new one, or a new name,
-    description, change or target for one this view already has."""
-    _check_recipe_target(body)
+async def put_reusable_change(session: AsyncSession, view_id: str, change_id: str,
+                              body: ReusableChangeInput, *, actor: Optional[str]) -> ReusableChange:
+    """Save a reusable change under ``change_id``: a new one, or a new name,
+    description, operation or target for one this view already has."""
+    _check_reusable_change_target(body)
     await _view(session, view_id)
-    rows = await _recipe_rows(session, view_id)
-    if any(r.id != recipe_id and r.name.strip().lower() == body.name.strip().lower() for r in rows):
-        raise LibraryError(409, f"A recipe named '{body.name}' is already saved in this view.")
+    rows = await _reusable_change_rows(session, view_id)
+    if any(r.id != change_id and r.name.strip().lower() == body.name.strip().lower() for r in rows):
+        raise LibraryError(409, f"A reusable change named '{body.name}' is already saved in this view.")
     stored = json.dumps({"op": body.op.wire(),
                          "target": body.target.model_dump(by_alias=True, exclude_none=True)})
-    row = next((r for r in rows if r.id == recipe_id), None)
+    row = next((r for r in rows if r.id == change_id), None)
     if row is None:
         taken = (await session.execute(
-            select(ViewBulkRecipeORM.view_id).where(ViewBulkRecipeORM.id == recipe_id)
+            select(ViewReusableChangeORM.view_id).where(ViewReusableChangeORM.id == change_id)
         )).scalar_one_or_none()
         if taken is not None:
-            raise LibraryError(409, f"Recipe id '{recipe_id}' is taken.")
-        if len(rows) >= LIBRARY_RECIPES_MAX:
-            raise LibraryError(422, f"A view holds at most {LIBRARY_RECIPES_MAX} recipes.")
+            raise LibraryError(409, f"Reusable change id '{change_id}' is taken.")
+        if len(rows) >= LIBRARY_REUSABLE_CHANGES_MAX:
+            raise LibraryError(422, f"A view holds at most {LIBRARY_REUSABLE_CHANGES_MAX} reusable changes.")
         now = _now()
-        row = ViewBulkRecipeORM(
-            id=recipe_id, view_id=view_id,
+        row = ViewReusableChangeORM(
+            id=change_id, view_id=view_id,
             position=max((r.position for r in rows), default=-1) + 1,
-            name=body.name, description=body.description, recipe=stored,
+            name=body.name, description=body.description, change=stored,
             created_by=actor, created_at=now, updated_by=actor, updated_at=now,
         )
         session.add(row)
     else:
-        row.name, row.description, row.recipe = body.name, body.description, stored
+        row.name, row.description, row.change = body.name, body.description, stored
         row.updated_by, row.updated_at = actor, _now()
     await session.flush()
-    return _recipe_of(row)
+    return _reusable_change_of(row)
 
 
-async def delete_recipe(session: AsyncSession, view_id: str, recipe_id: str) -> bool:
-    result = await session.execute(delete(ViewBulkRecipeORM).where(
-        ViewBulkRecipeORM.view_id == view_id, ViewBulkRecipeORM.id == recipe_id))
+async def delete_reusable_change(session: AsyncSession, view_id: str, change_id: str) -> bool:
+    result = await session.execute(delete(ViewReusableChangeORM).where(
+        ViewReusableChangeORM.view_id == view_id, ViewReusableChangeORM.id == change_id))
     await session.flush()
     return bool(result.rowcount)
 
 
-async def order_recipes(session: AsyncSession, view_id: str, ids: List[str]) -> None:
-    rows = await _recipe_rows(session, view_id)
+async def order_reusable_changes(session: AsyncSession, view_id: str, ids: List[str]) -> None:
+    rows = await _reusable_change_rows(session, view_id)
     for position, row in enumerate(_reordered(rows, ids, lambda r: r.id)):
         row.position = position
     await session.flush()
@@ -523,7 +524,7 @@ async def read_library(session: AsyncSession, view: ViewORM, branch_id: Optional
         view_id=view.id, branch_id=branch_id or None,
         display_rules=_flag_invalid(await read_rules(session, view, branch_id)),
         saved_queries=await read_queries(session, view.id),
-        bulk_recipes=await read_recipes(session, view.id),
+        reusable_changes=await read_reusable_changes(session, view.id),
         can_edit=can_edit,
     )
 

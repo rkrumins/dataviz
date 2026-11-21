@@ -11,8 +11,9 @@ vi.mock('../apiClient', () => ({ authFetch }))
 import type { DisplayRuleConfig } from '@/types/schema'
 
 import {
-    LIBRARY_PACK_FORMAT, deleteViewQuery, deleteViewRecipe, getViewLibrary, importViewLibrary, listRecipesFromOtherViews,
-    orderViewRules, putViewRecipe, putViewRule, type BulkRecipeInput, type LibraryPack,
+    LIBRARY_PACK_FORMAT, deleteReusableChange, deleteViewQuery, getViewLibrary, importViewLibrary,
+    listReusableChangesFromOtherViews, orderViewRules, putReusableChange, putViewRule, type LibraryPack,
+    type ReusableChangeInput,
 } from '../viewLibraryService'
 
 
@@ -51,19 +52,19 @@ describe('viewLibraryService', () => {
         ])
     })
 
-    it('keeps a bulk recipe under its own (encoded) id, removes it, and lists other views\'', async () => {
-        const recipe: BulkRecipeInput = {
+    it('keeps a reusable change under its own (encoded) id, removes it, and lists other views\'', async () => {
+        const change: ReusableChangeInput = {
             name: 'Own them', op: { kind: 'set', key: 'owner', value: 'data-team' },
             target: { kind: 'layer', layerName: 'Gold', scopeMode: 'view' },
         }
         const signal = new AbortController().signal
-        await putViewRecipe('v1', 'recipe/1', recipe)
-        await deleteViewRecipe('v1', 'recipe/1')
-        await listRecipesFromOtherViews('v1', signal)
+        await putReusableChange('v1', 'change/1', change)
+        await deleteReusableChange('v1', 'change/1')
+        await listReusableChangesFromOtherViews('v1', signal)
         expect(authFetch.mock.calls).toEqual([
-            ['/api/v1/views/v1/library/recipes/recipe%2F1', { method: 'PUT', body: JSON.stringify(recipe) }],
-            ['/api/v1/views/v1/library/recipes/recipe%2F1', { method: 'DELETE' }],
-            ['/api/v1/views/v1/library/recipes/from-other-views', { signal }],
+            ['/api/v1/views/v1/library/reusable-changes/change%2F1', { method: 'PUT', body: JSON.stringify(change) }],
+            ['/api/v1/views/v1/library/reusable-changes/change%2F1', { method: 'DELETE' }],
+            ['/api/v1/views/v1/library/reusable-changes/from-other-views', { signal }],
         ])
     })
 

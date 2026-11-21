@@ -60,15 +60,15 @@ from backend.app.services.versioning.models import BranchORM
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.auth_service.interface import User
 from backend.common.models.view_library import (
-    BulkRecipe,
-    BulkRecipeInput,
     DisplayRule,
     ImportStrategy,
     LibraryImportResult,
     LibraryOrder,
     LibraryPack,
     OtherViewQuery,
-    OtherViewRecipe,
+    OtherViewReusableChange,
+    ReusableChange,
+    ReusableChangeInput,
     SavedQuery,
     SavedQueryInput,
     ViewLibrary,
@@ -1838,7 +1838,7 @@ async def record_visit(
 
 
 # ---------------------------------------------------------------------------
-# The view's library: display rules, saved queries and bulk recipes, and the pack
+# The view's library: display rules, saved queries and reusable changes, and the pack
 # ---------------------------------------------------------------------------
 
 async def _library_view(
@@ -2016,69 +2016,69 @@ async def order_view_queries(
     return await view_library.read_queries(session, view_id)
 
 
-@router.get("/{view_id}/library/recipes/from-other-views", response_model=List[OtherViewRecipe])
-async def list_recipes_from_other_views(
+@router.get("/{view_id}/library/reusable-changes/from-other-views", response_model=List[OtherViewReusableChange])
+async def list_reusable_changes_from_other_views(
     view_id: str = Path(...),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """The bulk recipes saved on the workspace's other views the caller may
-    open — those over this view's data source first — to run in this view.
-    Not open to API keys: it reaches past the one view a key names."""
+    """The reusable changes saved on the workspace's other views the caller
+    may open — those over this view's data source first — to run in this
+    view. Not open to API keys: it reaches past the one view a key names."""
     view_orm, _ = await _library_view(session, view_id, user, claims, edit=False)
     clause, _scope = await _readable_clause(session, user, claims)
-    return await view_library.read_recipes_elsewhere(session, view_orm, clause)
+    return await view_library.read_reusable_changes_elsewhere(session, view_orm, clause)
 
 
-@router.put("/{view_id}/library/recipes/{recipe_id}", response_model=BulkRecipe)
-async def put_view_recipe(
+@router.put("/{view_id}/library/reusable-changes/{change_id}", response_model=ReusableChange)
+async def put_view_reusable_change(
     view_id: str = Path(...),
-    recipe_id: str = Path(..., min_length=1, max_length=128),
-    body: BulkRecipeInput = Body(...),
+    change_id: str = Path(..., min_length=1, max_length=128),
+    body: ReusableChangeInput = Body(...),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Save a bulk recipe in the view's library under this id — a new one, or
-    a new name, description, change or target for one it has. Its target is
-    the whole view, a key, a layer by name or a predicate, never ids.
-    Recipes belong to the view, whichever branch is open."""
+    """Save a reusable change in the view's library under this id — a new
+    one, or a new name, description, operation or target for one it has. Its
+    target is the whole view, a key, a layer by name or a predicate, never
+    ids. Reusable changes belong to the view, whichever branch is open."""
     await _library_view(session, view_id, user, claims, edit=True)
     try:
-        return await view_library.put_recipe(
-            session, view_id, recipe_id, body, actor=_user_id(user),
+        return await view_library.put_reusable_change(
+            session, view_id, change_id, body, actor=_user_id(user),
         )
     except view_library.LibraryError as exc:
         raise _library_refusal(exc)
 
 
-@router.delete("/{view_id}/library/recipes/{recipe_id}", status_code=204)
-async def delete_view_recipe(
+@router.delete("/{view_id}/library/reusable-changes/{change_id}", status_code=204)
+async def delete_view_reusable_change(
     view_id: str = Path(...),
-    recipe_id: str = Path(...),
+    change_id: str = Path(...),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Remove a bulk recipe (no error when it is already gone)."""
+    """Remove a reusable change (no error when it is already gone)."""
     await _library_view(session, view_id, user, claims, edit=True)
-    await view_library.delete_recipe(session, view_id, recipe_id)
+    await view_library.delete_reusable_change(session, view_id, change_id)
 
 
-@router.put("/{view_id}/library/recipes", response_model=List[BulkRecipe])
-async def order_view_recipes(
+@router.put("/{view_id}/library/reusable-changes", response_model=List[ReusableChange])
+async def order_view_reusable_changes(
     view_id: str = Path(...),
     order: LibraryOrder = Body(...),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Put the view's bulk recipes in the order ``ids`` names them; any it
-    leaves out follow. Returns the view's recipes."""
+    """Put the view's reusable changes in the order ``ids`` names them; any
+    it leaves out follow. Returns the view's reusable changes."""
     await _library_view(session, view_id, user, claims, edit=True)
-    await view_library.order_recipes(session, view_id, order.ids)
-    return await view_library.read_recipes(session, view_id)
+    await view_library.order_reusable_changes(session, view_id, order.ids)
+    return await view_library.read_reusable_changes(session, view_id)
 
 
 @router.get("/{view_id}/library/export")
