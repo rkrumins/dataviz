@@ -7,11 +7,13 @@
  * then the question itself, with `@` to mention and ⌘↵ to ask.
  *
  * Someone who can't open the subject can't be asked: they are named before it is sent, and
- * again after if the server found more. Nobody named to look after it? It goes to the
- * workspace's admins, and the composer says so.
+ * again after if the server found more — with **Share** beside them, for whoever can change who
+ * sees the view, and a fresh look at who can be reached once the dialog closes. Nobody named to
+ * look after it? It goes to the workspace's admins, and the composer says so.
  */
-import { useId, useMemo, useState } from 'react'
-import { AlertTriangle, Check, Globe, Lock, MapPin, Plus, Search, Users, X } from 'lucide-react'
+import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { AlertTriangle, Check, Globe, Lock, MapPin, Plus, Search, Share2, Users, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { AvatarStack } from '@/components/ui/AvatarStack'
 import { UserAvatar } from '@/components/ui/UserAvatar'
@@ -19,6 +21,8 @@ import { Segmented } from '@/components/ui/Segmented'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { CommentComposer } from '@/features/reviews/comments/CommentComposer'
+import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { useViewAccess } from '@/hooks/useViewMetadata'
 import type { MentionCandidate } from '@/features/reviews/comments/mentions'
 import { useAuthStore } from '@/store/auth'
 import type { AskResult, PeopleMap, PersonRole, SubjectKey, Visibility } from '@/services/discussionsService'
@@ -142,6 +146,20 @@ export function AskComposer({ subject, entity, onClearEntity, initialRecipients,
     const [recipients, setRecipients] = useState<MentionCandidate[]>(
         () => (initialRecipients ?? []).map((id) => ({ id, name: id })),
     )
+    // Who may bring someone in: whoever can share the view or change who sees it.
+    const theView = useViewAccess(isView ? subject.id : null)
+    const canShare = !!theView.access && (theView.access.canManageGrants || theView.access.canChangeVisibility)
+    const [sharing, setSharing] = useState(false)
+    const { refetch: refetchPeople } = peopleQ
+    // Shared, or not: ask again who can open it.
+    const doneSharing = useCallback(() => { setSharing(false); void refetchPeople() }, [refetchPeople])
+    useEffect(() => {
+        if (!sharing) return
+        // Esc closes the dialog, not the drawer behind it (whose own Esc would drop the question).
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); doneSharing() } }
+        window.addEventListener('keydown', onKey, true)
+        return () => window.removeEventListener('keydown', onKey, true)
+    }, [sharing, doneSharing])
 
     const data = peopleQ.data
     const loading = peopleQ.isLoading
@@ -218,11 +236,26 @@ export function AskComposer({ subject, entity, onClearEntity, initialRecipients,
                 {cantRead.length > 0 && (
                     <p className="flex items-start gap-1.5 rounded-lg bg-amber-500/[0.08] px-2.5 py-1.5 text-[11.5px] text-amber-800 dark:text-amber-200">
                         <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />
-                        <span>
+                        <span className="min-w-0 flex-1">
                             {listNames(cantRead.map((r) => nameOf(r.personId, people)), 3)} can’t open {noun}, so won’t be asked.
                             {' '}Share {noun} with them first to bring them in.
                         </span>
+                        {canShare && (
+                            <button type="button" onClick={() => setSharing(true)} aria-label={`Share ${noun}`}
+                                className="-my-0.5 inline-flex shrink-0 items-center gap-1 rounded-lg border border-amber-500/30 bg-canvas/70 px-2 py-0.5 text-[11.5px] font-semibold text-amber-800 dark:text-amber-200 hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40">
+                                <Share2 className="w-3 h-3" aria-hidden />Share
+                            </button>
+                        )}
                     </p>
+                )}
+                {sharing && theView.view && createPortal(
+                    // In the body, not the drawer: the drawer slides in on a transform, which would
+                    // pin a fixed dialog inside it.
+                    <ShareViewDialog viewId={theView.view.id} viewName={theView.view.name}
+                        currentVisibility={theView.view.visibility} workspaceId={theView.view.workspaceId}
+                        access={theView.access} publishRequest={theView.view.publishRequest} isOpen
+                        onClose={doneSharing} />,
+                    document.body,
                 )}
                 {reachesNobody && (
                     <p className="flex items-center gap-2 text-[11.5px] text-ink-muted">
