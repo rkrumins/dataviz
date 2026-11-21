@@ -535,7 +535,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "GET /playground — says the Playground is off, and offers nothing",
         ),
         ui_surfaces=(
-            "Try the Playground — on the Dashboard for someone with no workspace, and on Workspaces",
+            "Playground — in the sidebar, and on the Dashboard and Workspaces, opening it for anyone",
             "Setting the Playground up, on Workspaces, for platform administrators",
         ),
         still_allowed=(

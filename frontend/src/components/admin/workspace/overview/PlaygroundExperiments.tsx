@@ -68,7 +68,7 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                         <div className="min-w-0">
                             <h2 id="experiments-title" className="font-display text-lg font-bold text-ink">Your experiments</h2>
                             <p className="text-sm text-ink-secondary">
-                                What you build here is yours — only you see it until you share it with the Playground.
+                                Shared with everyone in the Playground — make one private any time. Only you can change what you made.
                             </p>
                         </div>
                     </div>
@@ -150,7 +150,7 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                                     <Sparkles className="w-3.5 h-3.5 text-fuchsia-500" aria-hidden /> Your views
                                 </p>
                                 <OverviewViewGrid wsId={workspace.id} views={mine.slice(0, 4)} layout={layout}
-                                    meta={v => v.visibility === 'private' ? 'Only you' : 'Shared in the Playground'} />
+                                    meta={v => v.visibility === 'private' ? 'Only you' : 'Shared with everyone here'} />
                             </div>
                         )}
                     </div>

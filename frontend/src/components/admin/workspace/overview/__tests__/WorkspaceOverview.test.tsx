@@ -280,3 +280,20 @@ describe('The reader chooses how views are laid out', () => {
         expect(names()).toEqual(['Alpha map', 'Zeta flows'])
     })
 })
+
+describe('Everyone’s experiments, in the Playground', () => {
+    it('shows other people’s newest work, never the reader’s own', async () => {
+        useAuthStore.setState({ user: { id: 'usr_me' } as never })
+        const mk = (id: string, name: string, by: string) => ({
+            id, name, viewType: 'graph', workspaceId: 'ws_play', dataSourceId: 'ds1', visibility: 'workspace',
+            isFavourited: false, favouriteCount: 0, tags: [], config: {}, createdAt: '2026-11-01T00:00:00Z',
+            updatedAt: '2026-11-19T00:00:00Z', createdBy: by, createdByName: by === 'usr_me' ? 'Me' : 'Ada',
+        }) as unknown as View
+        listViews.mockResolvedValue({ items: [mk('v1', 'Mine', 'usr_me'), mk('v2', 'Ada’s sketch', 'usr_ada')] })
+        renderOverview({ workspace: ws({ id: 'ws_play', kind: 'playground', dataSources: [] }), views: [mk('v1', 'Mine', 'usr_me')] })
+        const shelf = screen.getByRole('region', { name: 'Everyone’s experiments' })
+        expect(await within(shelf).findByRole('button', { name: /Ada’s sketch/ })).toBeInTheDocument()
+        expect(within(shelf).queryByText('Mine')).toBeNull()
+        expect(listViews).toHaveBeenCalledWith(expect.objectContaining({ sort: 'recently-modified' }))
+    })
+})

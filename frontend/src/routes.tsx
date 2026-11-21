@@ -69,6 +69,7 @@ const WorkspacesPage = lazyWithRetry(() => import('@/pages/WorkspacesPage').then
 const TemplatesPage = lazyWithRetry(() => import('@/pages/TemplatesPage').then(m => ({ default: m.TemplatesPage })))
 const WorkspaceDetailPage = lazyWithRetry(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const WorkspaceReviewsPage = lazyWithRetry(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
+const PlaygroundPage = lazyWithRetry(() => import('@/pages/PlaygroundPage').then(m => ({ default: m.PlaygroundPage })))
 const ReviewCenterPage = lazyWithRetry(() => import('@/pages/ReviewCenterPage').then(m => ({ default: m.ReviewCenterPage })))
 const WorkspaceReviewPage = lazyWithRetry(() => import('@/pages/WorkspaceReviewPage').then(m => ({ default: m.WorkspaceReviewPage })))
 const OntologySchemaPage = lazyWithRetry(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
@@ -221,6 +222,8 @@ export const router = createBrowserRouter([
       { path: 'workspaces/:wsId', element: <Lazy><WorkspaceDetailPage /></Lazy> },
       // Reviews are a versioning surface — the whole route disappears (redirects
       // to the workspace) when the admin turns version control off.
+      // The way into the Playground: opens it, joining on the way when needed.
+      { path: 'playground', element: <RequireFeature feature="playgroundEnabled" explain title="The Playground is turned off" message="The Playground is a common area where anyone can build graphs and try ideas out, apart from production. An administrator hasn't turned it on for this deployment." guideSlug="playground"><Lazy><PlaygroundPage /></Lazy></RequireFeature> },
       // The Review Center: every workspace the reader can review in, or one (?workspace=).
       { path: 'reviews', element: <RequireFeature feature="versioningEnabled" explain title="Reviews are turned off" message="Reviews are part of version control, which an administrator hasn't enabled for this deployment. With it on, changes are drafted, reviewed, and merged like a pull request." guideSlug="versioning-change-control"><Lazy><ReviewCenterPage /></Lazy></RequireFeature> },
       { path: 'workspaces/:wsId/reviews', element: <RequireFeature feature="versioningEnabled" explain title="Reviews are turned off" message="Reviews are part of version control, which an administrator hasn't enabled for this deployment. With it on, changes are drafted, reviewed, and merged like a pull request." guideSlug="versioning-change-control"><Lazy><WorkspaceReviewsPage /></Lazy></RequireFeature> },

@@ -22,7 +22,7 @@ import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
     Activity, AlertTriangle, ArrowRightLeft, Clock, Database, Eye, Flame, Gauge, GitPullRequestArrow, History,
-    LayoutGrid, List, Network, Plus, Rows3, Shapes, UserPlus, UserX,
+    LayoutGrid, List, Network, Plus, Rows3, Shapes, UserPlus, Users, UserX,
 } from 'lucide-react'
 import type { ComponentType } from 'react'
 import { cn } from '@/lib/utils'
@@ -192,13 +192,18 @@ export function WorkspaceOverview({
 
     const popularQ = useQuery({
         queryKey: ['workspace-overview', 'popular', wsId],
-        queryFn: () => listViews({ workspaceIds: [wsId], sort: 'most-opened', limit: isPlayground ? 8 : 4 }),
+        // In the Playground it is everyone's newest work; elsewhere, what is opened most.
+        queryFn: () => listViews(isPlayground
+            ? { workspaceIds: [wsId], sort: 'recently-modified', limit: 12 }
+            : { workspaceIds: [wsId], sort: 'most-opened', limit: 4 }),
         enabled: views.length > 0,
         staleTime: 60_000,
     })
     // In the Playground the reader's own work has its panel: this shelf is everyone else's.
     const me = useAuthStore(s => s.user?.id)
-    const popular = (popularQ.data?.items ?? []).filter(v => !isPlayground || v.createdBy !== me).slice(0, 4)
+    const popular = isPlayground
+        ? (popularQ.data?.items ?? []).filter(v => v.createdBy !== me).slice(0, 6)
+        : (popularQ.data?.items ?? []).slice(0, 4)
 
     // ── At a glance ─────────────────────────────────────────────────────
     const lastRefreshed = sources
@@ -245,13 +250,29 @@ export function WorkspaceOverview({
                             )}
                         </Shelf>
 
-                        <Shelf
-                            title={isPlayground ? 'Shared by others' : 'Popular here'}
-                            subtitle={isPlayground ? 'What people in the Playground open most — open one for ideas' : 'What people in this workspace open most'}
-                            onSeeAll={() => onGoTo('views')} icon={Flame} tone="text-amber-500 bg-amber-500/10"
-                        >
-                            <OverviewViewGrid wsId={wsId} views={popular} layout={layout} />
-                        </Shelf>
+                        {isPlayground ? (
+                            <Shelf
+                                title="Everyone’s experiments"
+                                subtitle="The latest from people in the Playground — open one for ideas"
+                                onSeeAll={() => onGoTo('views')} icon={Users} tone="text-fuchsia-500 bg-fuchsia-500/10"
+                            >
+                                {popular.length === 0 ? (
+                                    <p className="rounded-2xl border border-dashed border-glass-border px-4 py-6 text-center text-sm text-ink-muted">
+                                        Nobody else has shared anything here yet. What you make is shared with everyone — be the first.
+                                    </p>
+                                ) : (
+                                    <OverviewViewGrid wsId={wsId} views={popular} layout={layout}
+                                        meta={v => v.createdByName ? `By ${v.createdByName}` : undefined} />
+                                )}
+                            </Shelf>
+                        ) : (
+                            <Shelf
+                                title="Popular here" subtitle="What people in this workspace open most"
+                                onSeeAll={() => onGoTo('views')} icon={Flame} tone="text-amber-500 bg-amber-500/10"
+                            >
+                                <OverviewViewGrid wsId={wsId} views={popular} layout={layout} />
+                            </Shelf>
+                        )}
                     </>
                 )}
             </div>

@@ -10,13 +10,11 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PlaygroundInfo } from '@/services/playgroundService'
 
-const { state, join } = vi.hoisted(() => ({
+const { state } = vi.hoisted(() => ({
     state: { info: undefined as PlaygroundInfo | undefined },
-    join: vi.fn(),
 }))
 vi.mock('@/hooks/usePlayground', () => ({
     usePlayground: () => ({ data: state.info }),
-    useJoinPlayground: () => ({ mutate: join, isPending: false }),
 }))
 vi.mock('../PlaygroundSetupDialog', () => ({
     PlaygroundSetupDialog: () => <div role="dialog" aria-label="Set up the Playground" />,
@@ -34,7 +32,7 @@ function renderCard() {
         <MemoryRouter initialEntries={['/dashboard']}>
             <Routes>
                 <Route path="/dashboard" element={<PlaygroundCard />} />
-                <Route path="/workspaces/:wsId" element={<p>playground page</p>} />
+                <Route path="/playground" element={<p>playground page</p>} />
             </Routes>
         </MemoryRouter>,
     )
@@ -59,15 +57,14 @@ describe('PlaygroundCard', () => {
         expect(screen.queryByRole('button')).not.toBeInTheDocument()
     })
 
-    it('offers to join, and opens the Playground once joined', async () => {
+    it('opens the Playground for someone not in it yet — no joining step, and what it promises', async () => {
         const user = userEvent.setup()
         state.info = INFO
-        join.mockImplementation((_: unknown, opts: { onSuccess: (i: PlaygroundInfo) => void }) =>
-            opts.onSuccess({ ...INFO, joined: true }))
         renderCard()
         expect(screen.getByText(/up to 5 graphs each/)).toBeInTheDocument()
-        await user.click(screen.getByRole('button', { name: /Try the Playground/ }))
-        expect(join).toHaveBeenCalledTimes(1)
+        expect(screen.getByText('Shared with everyone')).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Try|Join/ })).not.toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: /Open the Playground/ }))
         expect(await screen.findByText('playground page')).toBeInTheDocument()
     })
 
@@ -76,7 +73,6 @@ describe('PlaygroundCard', () => {
         state.info = { ...INFO, joined: true, graphsUsed: 2 }
         renderCard()
         expect(screen.getByText(/2 of 5 graphs used/)).toBeInTheDocument()
-        expect(screen.queryByRole('button', { name: /Try the Playground/ })).not.toBeInTheDocument()
         await user.click(screen.getByRole('button', { name: /Open the Playground/ }))
         expect(await screen.findByText('playground page')).toBeInTheDocument()
     })

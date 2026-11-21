@@ -45,6 +45,12 @@ const LABEL: Record<ViewVisibility, string> = {
  */
 export const KNOWN_VISIBILITIES: readonly ViewVisibility[] = ['private', 'workspace', 'enterprise']
 
+/** Who a new view is for to begin with: its maker alone — except in the Playground, a common area
+ *  where what people make is shared with everyone there unless they keep it to themselves. */
+export function defaultVisibilityFor(workspaceKind?: string | null): ViewVisibility {
+    return workspaceKind === 'playground' ? 'workspace' : 'private'
+}
+
 export function isKnownVisibility(v: string | null | undefined): v is ViewVisibility {
     return v != null && (KNOWN_VISIBILITIES as readonly string[]).includes(v)
 }

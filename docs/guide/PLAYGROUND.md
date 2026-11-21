@@ -1,39 +1,39 @@
 # The Playground
 
 *For anyone who wants to try {brand} out — and for the platform administrators who set it up.*
-The Playground is one shared sandbox. Anyone who can sign in may join it in one
-click and build graphs of their own from blank, then explore them in views —
-without access to any team's workspace or its data. This page explains what you
-can do there, what keeps it apart from production, and how an administrator sets
-it up.
+The Playground is a common area. Anyone who can sign in opens it and builds
+graphs, proofs of concept and experiments of their own from blank, explores them
+in views and sees what everyone else made — without access to any team's
+workspace or its data. This page explains what you can do there, what keeps it
+apart from production, and how an administrator sets it up.
 
 > **Before you start:** The Playground is off until a platform administrator turns
 > on **Playground** in [Feature Switches](/guide/feature-switches) and sets it up.
-> If you don't see it on your Dashboard or on **Workspaces**, it isn't on yet.
+> If you don't see **Playground** in the sidebar, it isn't on yet.
 
 ```mermaid
 flowchart LR
-  You([You]) -->|Try the Playground| Join[Join: Playground member]
-  Join --> Graph[Start a blank graph<br/>from a starter data model]
+  You([You]) -->|Open the Playground| Graph[Start a blank graph<br/>from a starter data model]
   Graph --> View[Build views on it]
-  View -->|Share within the Playground| Others([Other members])
+  View -->|Shared with everyone there| Others([Everyone in the Playground])
   Prod[(Production data)] -. nothing attaches or moves in .-x Graph
 ```
 
 ---
 
-## Join the Playground
+## Open the Playground
 
-You'll find the Playground card in two places:
+Click **Playground** in the sidebar. You'll also find it:
 
 * on your **Dashboard**, if you aren't in a team workspace yet;
-* at the top of **Workspaces → Your workspaces**, for everyone.
+* at the top of **Workspaces → Your workspaces**;
+* behind any link someone shares to it.
 
-Click **Try the Playground**. You join at once as a **Playground member** — no
-request, no wait — and the Playground opens. Next time, the card says **Open the
-Playground** instead.
+There is nothing to ask for. The first time you open it you become a **Playground
+member** — recorded like any other access, so administrators can see it — and the
+Playground opens.
 
-Joining the Playground gives you nothing anywhere else: you still ask to join a
+Being in the Playground gives you nothing anywhere else: you still ask to join a
 team's workspace the usual way (see [Requesting Access](/guide/requesting-access)).
 
 ## Start a graph of your own
@@ -62,10 +62,13 @@ trash as usual, and stops counting at once.
 
 ## Share what you made
 
-Everything you make starts **private** — only you see it. You can share a view
-with the Playground (**Workspace** visibility) or with named people, so others
-can open it and get ideas. **Shared by others** on the Overview lists what
-Playground members open most.
+The Playground is a common area, so a view you make there starts **shared with
+everyone in the Playground** (**Workspace** visibility). To keep one to yourself,
+choose **Only me** when you create it, or later from **Share**. You can also share
+a view with named people.
+
+**Everyone's experiments** on the Overview shows the newest work of everyone else
+there — open one for ideas. Your own work is under **Your experiments**.
 
 What you can't do there:
 
@@ -111,7 +114,7 @@ The server enforces each of these, whatever the screen shows:
 * A member changes or deletes only the graphs and views they made. Workspace admins
   of the Playground and platform administrators can change anything there.
 * Nothing in the Playground is published to everyone, and its publishing and
-  joining settings can't be changed: people join it themselves, and publishing is
+  joining settings can't be changed: anyone opens it themselves, and publishing is
   closed.
 
 ### Turning it off

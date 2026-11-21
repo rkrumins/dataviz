@@ -28,9 +28,10 @@ export function useJoinPlayground() {
     return useMutation({
         mutationFn: () => playgroundService.join(),
         onSuccess: async (info) => {
-            queryClient.setQueryData(KEY, info)
+            // Permissions and workspaces first: whoever reads "joined" next may open it at once.
             await useAuthStore.getState().refreshPermissions()
             await useWorkspacesStore.getState().loadWorkspaces()
+            queryClient.setQueryData(KEY, info)
         },
     })
 }

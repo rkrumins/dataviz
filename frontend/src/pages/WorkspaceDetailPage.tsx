@@ -10,7 +10,7 @@
  * (see `workspaceTabs`).
  */
 import { useState, useEffect, useMemo, useRef, useCallback, useContext } from 'react'
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { Navigate, useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
     ChevronLeft, Plus, Database, Settings2, GitBranch, Eye, RefreshCw, Sparkles, Shapes, Activity,
@@ -54,6 +54,7 @@ import { WorkspaceMembers } from '@/components/workspaces/WorkspaceMembers'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { ProfilingBoard } from '@/components/ingestion/profiling/ProfilingBoard'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
+import { usePlayground } from '@/hooks/usePlayground'
 import { ActivityExplorer } from '@/components/activity/ActivityExplorer'
 import { workspaceActivityScope } from '@/components/activity/activityMeta'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
@@ -153,6 +154,8 @@ export function WorkspaceDetailPage() {
     // Creating a view here starts on this workspace. The editor lives in the app
     // shell; outside it (a test, a harness) there is simply no New view.
     const viewEditor = useContext(ViewEditorContext)
+    // The Playground is open to all: someone not in it yet who follows a link to it is let in.
+    const playground = usePlayground().data
     const canCreateView = usePermission('workspace:view:create', wsId ?? null)
     const canEditSchema = usePermission('workspace:ontology:manage', wsId ?? null)
     const openNewView = viewEditor && canCreateView && wsId
@@ -476,6 +479,9 @@ export function WorkspaceDetailPage() {
     }
 
     if (!workspace) {
+        if (wsId && playground?.workspaceId === wsId && !playground.joined) {
+            return <Navigate to="/playground" replace />
+        }
         // Detect "had access but lost it" vs. "never existed".
         // ``hadAccessRef`` is set once when the workspace first loads
         // successfully. If it's now gone AND the current claims no
@@ -584,6 +590,7 @@ export function WorkspaceDetailPage() {
                 onSave={handleSaveHeader}
                 onCancel={() => { setEditingHeader(false); setEditName(workspace.name); setEditDesc(workspace.description || '') }}
             />
+
 
             {/* Tabs — only the ones this reader can use. They stay in reach while a
                 long tab scrolls, on an opaque strip of the page's own colour (a blur

@@ -49,6 +49,9 @@ export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpe
     explore:    { kind: 'always' },
     templates:  { kind: 'always' },
     workspaces: { kind: 'always' },
+    // The Playground: a common area anyone may open. The sidebar also wants the Playground switched
+    // on and set up (a flag is not a permission).
+    playground: { kind: 'always' },
     // The open workspace's review inbox — the `/review-inbox` gate. The sidebar
     // also wants the `versioningEnabled` flag on and a workspace open (a flag is
     // not a permission).

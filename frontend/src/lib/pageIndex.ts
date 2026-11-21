@@ -105,6 +105,16 @@ export const PAGE_INDEX: PageEntry[] = [
         gate: { kind: 'sidebar', key: 'workspaces' },
     },
     {
+        id: 'playground',
+        category: 'Page',
+        title: 'Playground',
+        description: 'A common area to build graphs and try ideas, apart from production',
+        keywords: ['sandbox', 'experiment', 'try', 'proof of concept', 'poc', 'practice', 'blank graph'],
+        path: '/playground',
+        gate: { kind: 'sidebar', key: 'playground' },
+        feature: 'playgroundEnabled',
+    },
+    {
         id: 'find-a-workspace',
         category: 'Page',
         title: 'Find a workspace',

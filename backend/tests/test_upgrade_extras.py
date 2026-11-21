@@ -27,6 +27,12 @@ def _script():
     return ScriptDirectory.from_config(_alembic_config())
 
 
+def _behind(script) -> list[str]:
+    """The revision(s) just before head: a merge's parents, or a linear head's one parent."""
+    down = script.get_revision(script.get_current_head()).down_revision
+    return list(down) if isinstance(down, (tuple, list)) else [down]
+
+
 def _plan(stamped, **kw):
     inputs = {"virgin": False, "own": {}, "lines": schema_plan.other_lines(_alembic_config().get_main_option(
         "script_location")), "open_placement": None, "changed": [], "built": ("main at abc", True)}
@@ -40,7 +46,7 @@ def test_the_plan_says_what_an_upgrade_would_do():
     assert _plan([head])["verdict"] == "up_to_date"
     assert _plan([], virgin=True)["verdict"] == "fresh_install"
 
-    behind = _plan(list(script.get_revision(head).down_revision))
+    behind = _plan(_behind(script))
     assert behind["verdict"] == "upgrade" and behind["wouldRun"] == [head]
 
     # #670's stamp: placed exactly, then everything the heads need that it doesn't have.
@@ -57,7 +63,7 @@ def test_the_plan_says_what_an_upgrade_would_do():
 
 def test_the_plan_holds_a_shared_database_to_main():
     script = _script()
-    behind = list(script.get_revision(script.get_current_head()).down_revision)
+    behind = _behind(script)
     branch = ("claude/x at abc", False)
     assert _plan(behind, shared=True, built=branch)["verdict"] == "refused"
     assert _plan([script.get_current_head()], shared=True, built=branch)["verdict"] == "up_to_date"

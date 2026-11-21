@@ -70,6 +70,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { defaultVisibilityFor } from '@/lib/viewVisibility'
 import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import { usePreferencesStore } from '@/store/preferences'
 import { useFeature, useFeatureList } from '@/store/features'
@@ -1192,13 +1193,16 @@ function ViewWizardBody({
 
     // Create-mode initial form: layers start empty for both existing and blank
     // scopes — blank models choose their starting layers via a template on Layout.
+    // In the Playground a new view is shared with everyone there to begin with.
+    const workspaceKind = useWorkspacesStore(s => s.workspaces.find(w => w.id === resolvedWorkspaceId)?.kind)
     const makeCreateFormData = useCallback((): WizardFormData => {
         const base = getInitialFormData(schema)
         return {
             ...base,
+            visibility: defaultVisibilityFor(workspaceKind),
             dataSourceId: resolvedDataSourceId ?? undefined,
         }
-    }, [schema, resolvedDataSourceId])
+    }, [schema, resolvedDataSourceId, workspaceKind])
 
     // When editing a draft, hydrate the wizard from the BRANCH-EFFECTIVE view
     // (base ⊕ overlay) — same branch the submit writes to (branchIdForScope
