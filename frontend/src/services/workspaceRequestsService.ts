@@ -53,6 +53,8 @@ export interface WorkspaceRequestOutcome {
     idpLinksCreated?: { groupId: string; idpGroup: string }[]
     /** Links waiting for a platform administrator to confirm. */
     idpLinksPending?: { groupId: string; groupName: string; idpGroup: string }[]
+    /** Links a platform administrator declined, and why. */
+    idpLinksDeclined?: { groupId: string; idpGroup: string; reason?: string | null }[]
 }
 
 export interface WorkspaceRequest {

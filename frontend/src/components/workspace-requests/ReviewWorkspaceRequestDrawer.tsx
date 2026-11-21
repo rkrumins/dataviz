@@ -354,6 +354,7 @@ function Approved({ request, onOpen }: { request: WorkspaceRequest; onOpen: () =
                 {!!o?.idpLinksPending?.length && (
                     <li className="text-violet-700 dark:text-violet-300">{plural(o.idpLinksPending.length, 'identity-provider link')} waiting for a platform administrator.</li>
                 )}
+                {!!o?.idpLinksDeclined?.length && <li>{plural(o.idpLinksDeclined.length, 'identity-provider link')} declined.</li>}
                 {!!o?.failedSources.length && (
                     <li className="text-amber-700 dark:text-amber-300">
                         {plural(o.failedSources.length, 'graph')} couldn’t be moved: {o.failedSources.map(f => f.reason).join('; ')}

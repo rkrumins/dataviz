@@ -205,25 +205,39 @@ manager.
 ### Your workspace's groups
 
 A workspace can have groups of its own — the ones an approved [workspace
-request](/guide/requesting-a-workspace) made, and any its admins make. The
-workspace's admins manage them here, without the platform's group list: make
-one with a name, a role (**Workspace viewer**, **Workspace member** or
-**Publisher**) and the people in it; rename it, change its role, add and remove
-people, or delete it. Its name always starts with the workspace's — "Lab ·
-Engineers" — because group names are unique across {brand}. Stewards see the
-groups and who is in them; only admins change them.
+request](/guide/requesting-a-workspace) made, and any its admins make. They're
+listed under **Groups** on the People tab. Each card says what the group can do
+here, who is in it, and whether it follows a group in your identity provider.
 
-Groups bound here that the workspace doesn't own are listed too, but they're
-managed on the platform's Groups page. So is a group of yours that has also been
-given access somewhere you can't grant, or that manages a service account: who is
-in it decides more than this workspace.
+The workspace's admins manage these groups there, without the platform's group
+list:
+
+1. Click **New group**, or one of the starters (**Editors**, **Viewers**,
+   **Publishers**) when there are none yet.
+2. Give it a name, choose what its people can do here (**Can view**, **Can
+   edit** or **Can publish**), and invite people. Its name always starts with
+   the workspace's — "Lab · Engineers" — because group names are unique across
+   {brand}.
+3. Optionally, name the identity-provider group it should follow.
+
+Click a group's card to rename it, change its role, add or remove people, link
+it to the identity provider, or delete it. Stewards see the groups and who is in
+them; only admins change them.
+
+Groups bound here that the workspace doesn't own are listed too, marked
+**Platform group**, and managed on the platform's Groups page. So is a group of
+yours that has also been given access somewhere you can't grant, or that manages
+a service account: who is in it decides more than this workspace.
 
 A group can be **linked to a group in your identity provider** (an Active
-Directory group, say), so its members follow the directory at each sign-in.
-Linking is a Super Admin's call: when you ask for a link, a Super Admin is told
-and links or declines it, and you hear which. People the identity provider put in
-a group leave it there, not here. Only the identity-provider groups you yourself
-had at your last sign-in are suggested as you type — nobody sees anyone else's.
+Directory group, say), so its members follow the directory at each sign-in. As
+you type, the identity-provider groups you yourself had at your last sign-in are
+suggested — nobody sees anyone else's. Linking is a Super Admin's call: when you
+click **Ask to link**, the group's card shows the link waiting, Super Admins
+find it under **Workspaces → Requests** (with how many people have that group,
+and the connection to link it from), and you hear in your Inbox whether it was
+linked or declined. People the identity provider put in a group are marked
+**From the directory**; they leave it there, not here.
 
 ### Answering access requests
 
