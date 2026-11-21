@@ -1,7 +1,7 @@
 """One bulk property operation — what a property job does to each entity it reaches — as the API
 takes it. The jobs route (``api/v1/endpoints/versioning.py``) takes a job's in it, and a view's
-library keeps one in each saved bulk recipe (``models/view_library.py``), so a recipe only ever
-holds an operation a job would take.
+library keeps one in each reusable change (``models/view_library.py``), so a reusable change
+only ever holds an operation a job would take.
 """
 from __future__ import annotations
 

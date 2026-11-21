@@ -85,9 +85,9 @@ export function PropertyOpDialog({
   // what is still to give. And the target it was opened with, said on What when it has a name.
   const keySeeded = !!(seed.op?.key ?? seed.key)
   const seededFor = seed.target && 'label' in seed.target && seed.target.label ? targetLabel(preset) : null
-  // A recipe run as it was kept has nothing new to keep as one.
+  // A reusable change run as it was kept has nothing new to keep.
   const [openedAs] = useState(() => JSON.stringify([jobOp(op), preset, scopeMode]))
-  const unchangedRecipe = !!seed.recipe && JSON.stringify([jobOp(op), preset, scopeMode]) === openedAs
+  const unchangedReusable = !!seed.reusable && JSON.stringify([jobOp(op), preset, scopeMode]) === openedAs
 
   // ── Where ──
   // A preset that named the old property follows a new one.
@@ -247,8 +247,8 @@ export function PropertyOpDialog({
               <p className="mt-0.5 text-[11.5px] text-ink-muted">
                 {cleanup ? 'Tidy the values it holds' : 'On'} every {edges ? 'relationship' : 'entity'} it should reach — applied to your draft by the server.
               </p>
-              {seed.recipe && (
-                <p className="mt-1 break-words text-[11.5px] text-ink-secondary">From recipe: <span className="font-semibold">{seed.recipe.name}</span></p>
+              {seed.reusable && (
+                <p className="mt-1 break-words text-[11.5px] text-ink-secondary">From reusable change: <span className="font-semibold">{seed.reusable.name}</span></p>
               )}
               {step === 0 && seededFor && (
                 <p className="mt-1 break-words text-[11.5px] text-ink-secondary">For: <span className="font-semibold">{seededFor}</span></p>
@@ -296,7 +296,7 @@ export function PropertyOpDialog({
                     preview={preview.data} previewLoading={preview.loading} previewError={preview.error} onRetry={retry}
                     sample={sample.data} sampleLoading={sample.loading}
                     stagedCount={stagedCount} draftChanges={draftChanges} reason={reason} onReason={setReason} edges={edges}
-                    onFollow={(jobId) => void follow(jobId)} onChangeTarget={() => setStep(1)} offerSave={!unchangedRecipe}
+                    onFollow={(jobId) => void follow(jobId)} onChangeTarget={() => setStep(1)} offerSave={!unchangedReusable}
                   />
                 )}
               </motion.div>

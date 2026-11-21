@@ -1,5 +1,5 @@
 /**
- * ReviewStep — Save as recipe: the change under review kept in the view's library, named inline, for
+ * ReviewStep — Save for reuse: the change under review kept in the view's library, named inline, for
  * people who can edit the library. A change aimed at entities picked by id can't be kept, and the
  * button says why.
  */
@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const api = vi.hoisted(() => ({ put: vi.fn() }))
 vi.mock('@/services/viewLibraryService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/viewLibraryService')>()),
-  putViewRecipe: api.put,
+  putReusableChange: api.put,
 }))
 
 import { useViewLibraryStore } from '@/store/viewLibraryStore'
@@ -25,40 +25,40 @@ function review(preset: TargetPreset, scopeMode: ScopeMode = 'view') {
       preview={null} previewLoading={false} sample={null} sampleLoading={false} stagedCount={0} />,
   )
 }
-const saveButton = () => screen.getByRole('button', { name: /Save as recipe/ })
+const saveButton = () => screen.getByRole('button', { name: /Save for reuse/ })
 
 beforeEach(() => {
   api.put.mockReset().mockImplementation(async (_view: string, id: string, body: object) => ({ id, ...body }))
-  useViewLibraryStore.setState({ viewId: 'v1', branchId: null, status: 'ready', canEdit: true, bulkRecipes: [] })
+  useViewLibraryStore.setState({ viewId: 'v1', branchId: null, status: 'ready', canEdit: true, reusableChanges: [] })
 })
 
-describe('Save as recipe', () => {
+describe('Save for reuse', () => {
   it('keeps the change and where it reaches, named inline', async () => {
     const user = userEvent.setup()
     review({ kind: 'hasKey', key: 'owner' }, 'data_source')
     await user.click(saveButton())
-    const name = screen.getByRole('textbox', { name: 'Recipe name' })
+    const name = screen.getByRole('textbox', { name: 'Name' })
     // Named after the change until it is named otherwise.
     expect(name).toHaveValue('Set owner')
     await user.clear(name)
     await user.type(name, 'Own every entity')
     await user.type(screen.getByRole('textbox', { name: /Description/ }), 'After each import')
-    await user.click(screen.getByRole('button', { name: 'Save recipe' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
 
-    expect(api.put).toHaveBeenCalledWith('v1', expect.stringMatching(/^recipe/), {
+    expect(api.put).toHaveBeenCalledWith('v1', expect.stringMatching(/^change/), {
       name: 'Own every entity', description: 'After each import',
       op: { kind: 'set', key: 'owner', value: 'data-team' },
       target: { kind: 'hasKey', key: 'owner', scopeMode: 'data_source' },
     })
-    expect(await screen.findByRole('status')).toHaveTextContent('Saved as “Own every entity”')
-    expect(useViewLibraryStore.getState().bulkRecipes.map((r) => r.name)).toEqual(['Own every entity'])
+    expect(await screen.findByRole('status')).toHaveTextContent('Kept for reuse as “Own every entity”')
+    expect(useViewLibraryStore.getState().reusableChanges.map((r) => r.name)).toEqual(['Own every entity'])
   })
 
   it('keeps a layer by its name', async () => {
     const user = userEvent.setup()
     review({ kind: 'layer', layerId: 'L2', name: 'Silver' })
     await user.click(saveButton())
-    await user.click(screen.getByRole('button', { name: 'Save recipe' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(api.put.mock.calls[0][2].target).toEqual({ kind: 'layer', layerName: 'Silver', scopeMode: 'view' })
   })
 
@@ -68,7 +68,7 @@ describe('Save as recipe', () => {
     expect(saveButton()).toBeDisabled()
     await user.hover(saveButton().parentElement!)
     const tip = await screen.findByRole('tooltip')
-    expect(tip).toHaveTextContent('Can’t keep this as a recipe')
+    expect(tip).toHaveTextContent('Can’t keep this for reuse')
     expect(tip).toHaveTextContent(/A selection is the entities picked now/)
   })
 
@@ -82,17 +82,17 @@ describe('Save as recipe', () => {
 
   it('says what went wrong, and keeps the form to change the name', async () => {
     const user = userEvent.setup()
-    api.put.mockRejectedValueOnce(new Error("A recipe named 'Set owner' is already saved in this view."))
+    api.put.mockRejectedValueOnce(new Error("A reusable change named 'Set owner' is already saved in this view."))
     review({ kind: 'view' })
     await user.click(saveButton())
     await user.keyboard('{Enter}')
     expect(await screen.findByRole('alert')).toHaveTextContent(/already saved in this view — change the name, or try again/)
-    expect(screen.getByRole('textbox', { name: 'Recipe name' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Name' })).toBeInTheDocument()
   })
 
   it('is not offered to someone who can’t edit the view’s library', () => {
     useViewLibraryStore.setState({ canEdit: false })
     review({ kind: 'view' })
-    expect(screen.queryByRole('button', { name: /Save as recipe/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Save for reuse/ })).not.toBeInTheDocument()
   })
 })

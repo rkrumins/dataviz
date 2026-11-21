@@ -744,12 +744,12 @@ remapped on import — while saved queries stay behind.
 ## View library endpoints
 
 All under `/api/v1/views/{view_id}` (the View's id, not a workspace path).
-`branchId` addresses a draft's rules; saved queries and bulk recipes belong to
-the View whatever the branch.
+`branchId` addresses a draft's rules; saved queries and reusable changes belong
+to the View whatever the branch.
 
 | Method · path | Body → answer | Needs |
 | --- | --- | --- |
-| `GET /library[?branchId]` | → `{viewId, branchId, displayRules, savedQueries, bulkRecipes, canEdit}` | Read |
+| `GET /library[?branchId]` | → `{viewId, branchId, displayRules, savedQueries, reusableChanges, canEdit}` | Read |
 | `GET /library/from-other-views` | → `[{viewId, viewName, sameSource, query}]`: the saved queries of the workspace's other Views the caller can read — those over this View's data source first (`sameSource`), then by View name — at most 500. Not for API keys: a script reads each View's `GET /library` | Read |
 | `PUT /library/rules/{ruleId}[?branchId]` | a rule → the View's rules | Edit |
 | `DELETE /library/rules/{ruleId}[?branchId]` | → the View's rules (no error when already gone) | Edit |
@@ -757,10 +757,10 @@ the View whatever the branch.
 | `PUT /library/queries/{queryId}` | `{name, description?, predicate}` → the saved query | Edit |
 | `DELETE /library/queries/{queryId}` | → `204` (no error when already gone) | Edit |
 | `PUT /library/queries` | `{"ids": [...]}` → the saved queries, in that order | Edit |
-| `PUT /library/recipes/{recipeId}` | `{name, description?, op, target}` → the bulk recipe | Edit |
-| `DELETE /library/recipes/{recipeId}` | → `204` (no error when already gone) | Edit |
-| `PUT /library/recipes` | `{"ids": [...]}` → the bulk recipes, in that order | Edit |
-| `GET /library/recipes/from-other-views` | → `[{viewId, viewName, sameSource, recipe}]`, as `from-other-views` for queries — at most 500. Not for API keys | Read |
+| `PUT /library/reusable-changes/{changeId}` | `{name, description?, op, target}` → the reusable change | Edit |
+| `DELETE /library/reusable-changes/{changeId}` | → `204` (no error when already gone) | Edit |
+| `PUT /library/reusable-changes` | `{"ids": [...]}` → the reusable changes, in that order | Edit |
+| `GET /library/reusable-changes/from-other-views` | → `[{viewId, viewName, sameSource, change}]`, as `from-other-views` for queries — at most 500. Not for API keys | Read |
 | `GET /library/export[?branchId]` | → a library pack, `Content-Disposition: attachment; filename="<view name>.library.json"` | Read |
 | `POST /library/import?strategy=&dryRun=[&branchId]` | a library pack → an import result ([below](#importing-a-pack)) | Edit — **even for a dry run** |
 
@@ -769,19 +769,19 @@ updatedAt, updatedBy}`. `name` is 1–120 characters and unique in the View;
 `description` up to 500. Saved-query ids are unique across **all** Views, so a
 script generates its own (`query_<uuid>`) rather than reusing one.
 
-A bulk recipe — a bulk property change kept to run again — answers `{id, name,
-description, op, target, createdAt, createdBy, updatedAt, updatedBy}`, with the
-same bounds on `name` and `description`, ids unique across all Views, and at
-most 200 in a View. `op` is a property job's operation (`POST …/property-jobs`),
-kept as the job keeps it. `target` says where it reaches, never by id:
+A reusable change — a bulk property change kept to run again — answers `{id,
+name, description, op, target, createdAt, createdBy, updatedAt, updatedBy}`,
+with the same bounds on `name` and `description`, ids unique across all Views,
+and at most 200 in a View. `op` is a property job's operation
+(`POST …/property-jobs`), kept as the job keeps it. `target` says where it reaches, never by id:
 `{kind: "view"}`, `{kind: "hasKey", key}`, `{kind: "layer", layerName}`, or
 `{kind: "search" | "custom" | "connections", predicate}` — each with `scopeMode`
 `view` (the default) or `data_source`, except a layer, which is searched in the
 View. A predicate is checked as a saved query's is, and a Connections search is
 only a `connections` target. A target naming ids (`ids`, `edgeIds`, or a kind
-such as `selection`) is refused with `422`. Recipes aren't part of a library
-pack, and their routes refuse API keys (`403 api_key_not_allowed`): they
-aren't on the reviewed API-key surface.
+such as `selection`) is refused with `422`. Reusable changes aren't part of a
+library pack, and their routes refuse API keys (`403 api_key_not_allowed`):
+they aren't on the reviewed API-key surface.
 
 **Permissions.** *Read* is whoever can open the View (its visibility and
 grants); anyone else gets `404`, as if it weren't there. *Edit* is `system:admin`,

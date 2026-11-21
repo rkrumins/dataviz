@@ -1,17 +1,18 @@
 /**
- * recipes — a bulk change kept to run again (a bulk recipe, in the view's library), and back.
+ * reusableChanges — a bulk change kept to run again (a reusable change, in the view's library), and
+ * back.
  *
- * A recipe keeps the change whole and where it reaches as the Where step names it: the whole view,
+ * It keeps the operation whole and where it reaches as the Where step names it: the whole view,
  * every entity with a key, a layer by its name, or criteria — never by id, since the entities picked
  * now may not be the ones it should reach next time. Run, it opens the dialog with all of it, and the
  * dialog checks it again (its counts, the server's preview) against the view it runs in.
  */
-import type { BulkRecipe, RecipeTarget } from '@/services/viewLibraryService'
+import type { ReusableChange, ReusableChangeTarget } from '@/services/viewLibraryService'
 import type { OpRequest } from '@/store/propertyJobsStore'
 import { searchPreset, type ScopeMode, type TargetPreset } from './opModel'
 
-/** The target a recipe keeps for `preset`, searched in `scopeMode` — or why it can't keep one. */
-export function recipeTargetOf(preset: TargetPreset, scopeMode: ScopeMode): { target: RecipeTarget } | { reason: string } {
+/** The target a reusable change keeps for `preset`, searched in `scopeMode` — or why it can't keep one. */
+export function reusableChangeTargetOf(preset: TargetPreset, scopeMode: ScopeMode): { target: ReusableChangeTarget } | { reason: string } {
   switch (preset.kind) {
     case 'view': return { target: { kind: 'view', scopeMode } }
     case 'hasKey': return { target: { kind: 'hasKey', key: preset.key, scopeMode } }
@@ -21,16 +22,16 @@ export function recipeTargetOf(preset: TargetPreset, scopeMode: ScopeMode): { ta
     case 'custom': return preset.predicate
       ? { target: { kind: 'custom', predicate: preset.predicate, scopeMode } }
       : { reason: 'Add a condition first' }
-    case 'selection': return { reason: 'A selection is the entities picked now, and next time others may be meant. Choose the whole view, a key, a layer or criteria to keep it as a recipe.' }
-    case 'relationships': return { reason: 'Picked relationships are the ones chosen now, and next time others may be meant. Use a Connections search to keep it as a recipe.' }
+    case 'selection': return { reason: 'A selection is the entities picked now, and next time others may be meant. Choose the whole view, a key, a layer or criteria to keep it for reuse.' }
+    case 'relationships': return { reason: 'Picked relationships are the ones chosen now, and next time others may be meant. Use a Connections search to keep it for reuse.' }
     case 'children':
-    case 'inside': return { reason: 'A container is named by the one picked now. Choose criteria or a layer to keep it as a recipe.' }
+    case 'inside': return { reason: 'A container is named by the one picked now. Choose criteria or a layer to keep it for reuse.' }
   }
 }
 
-/** Where a recipe reaches, in a few words ("every entity with owner") — and whether across the whole
+/** Where a reusable change reaches, in a few words ("every entity with owner") — and whether across the whole
  *  data source, unless that is said apart (`withScope` false). */
-export function recipeTargetLabel(target: RecipeTarget, withScope = true): string {
+export function reusableChangeTargetLabel(target: ReusableChangeTarget, withScope = true): string {
   const across = withScope && target.scopeMode === 'data_source' ? ', across the whole data source' : ''
   switch (target.kind) {
     case 'view': return `every entity in the view${across}`
@@ -42,14 +43,14 @@ export function recipeTargetLabel(target: RecipeTarget, withScope = true): strin
   }
 }
 
-/** The dialog's seed for running `recipe` here: its change whole, its target as the Where step
+/** The dialog's seed for running `change` here: its change whole, its target as the Where step
  *  names it, its scope, and its name. A layer is found by its name among `layers`; when none has it,
  *  `missingLayer` names it and the dialog is left to ask where. */
-export function recipeRequest(recipe: BulkRecipe, layers: readonly { id: string; name: string }[]): { request: OpRequest; missingLayer?: string } {
-  const op = recipe.op
-  const target = recipe.target
+export function reusableChangeRequest(change: ReusableChange, layers: readonly { id: string; name: string }[]): { request: OpRequest; missingLayer?: string } {
+  const op = change.op
+  const target = change.target
   const scopeMode: ScopeMode = target.scopeMode ?? 'view'
-  const named = { recipe: { name: recipe.name } }
+  const named = { reusable: { name: change.name } }
   switch (target.kind) {
     case 'view': return { request: { op, target: { kind: 'view' }, scopeMode, ...named } }
     case 'hasKey': return { request: { op, target: { kind: 'hasKey', key: target.key }, scopeMode, ...named } }

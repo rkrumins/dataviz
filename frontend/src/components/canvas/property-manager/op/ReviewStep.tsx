@@ -18,7 +18,7 @@ import {
   DRAFT_LARGE, OP_LABEL, isCleanup, jobOp, needsTo, needsValue, propertyJobLabel, targetLabel, type Impact, type OpDraft, type ScopeMode,
   type TargetPreset,
 } from './opModel'
-import { SaveRecipe } from './SaveRecipe'
+import { SaveForReuse } from './SaveForReuse'
 import { FIELD, LABEL } from './styles'
 import type { ReviewCounts } from './useReviewCounts'
 
@@ -68,7 +68,7 @@ export function ReviewStep({
   onFollow?: (jobId: string) => void
   /** Go back and choose another target. */
   onChangeTarget?: () => void
-  /** Offer to keep it as a recipe (not for a recipe run as it was kept). */
+  /** Offer to keep it for reuse (not for a reusable change run as it was kept). */
   offerSave?: boolean
 }) {
   const budget = preview?.nameBudget
@@ -250,7 +250,7 @@ export function ReviewStep({
         )}
       </div>
 
-      {offerSave && <SaveRecipe op={op} preset={preset} scopeMode={scopeMode} />}
+      {offerSave && <SaveForReuse op={op} preset={preset} scopeMode={scopeMode} />}
     </div>
   )
 }

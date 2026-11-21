@@ -50,8 +50,8 @@ export interface TrackedJob {
 }
 
 /** What a surface knows when it asks for a change: any of it seeds the dialog — a merge, the values
- *  it merges (`map`); a convert, the kind to convert to; a recipe, the whole change (`op`) and where
- *  it is searched (`scopeMode`). */
+ *  it merges (`map`); a convert, the kind to convert to; a reusable change, all of the operation (`op`)
+ *  and where it is searched (`scopeMode`). */
 export interface OpRequest {
   kind?: PropertyOpKind
   key?: string
@@ -60,8 +60,8 @@ export interface OpRequest {
   toKind?: ValueKind
   op?: Partial<OpDraft>
   scopeMode?: ScopeMode
-  /** The recipe it runs, named in the dialog. */
-  recipe?: { name: string }
+  /** The reusable change it runs, named in the dialog. */
+  reusable?: { name: string }
 }
 
 const ENDED = new Set(['completed', 'failed', 'cancelled'])

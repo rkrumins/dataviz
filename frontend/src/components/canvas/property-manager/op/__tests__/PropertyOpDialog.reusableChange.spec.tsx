@@ -1,6 +1,6 @@
 /**
- * PropertyOpDialog, opened with a whole change (a recipe's): every part of the operation as it was
- * kept, and where it reaches, searched where it was — then checked again here before it is applied.
+ * PropertyOpDialog, opened with a reusable change: every part of the operation as it was kept, and
+ * where it reaches, searched where it was — then checked again here before it is applied.
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -60,17 +60,17 @@ describe('PropertyOpDialog seeded with a whole change', () => {
     expect(screen.getByRole('textbox', { name: 'Value' })).toHaveValue('gold')
   })
 
-  it('names the recipe it runs, and offers to keep it as one only once it is changed', async () => {
+  it('names the reusable change it runs, and offers to keep it for reuse only once it is changed', async () => {
     const user = userEvent.setup()
-    useViewLibraryStore.setState({ viewId: 'v1', branchId: null, status: 'ready', canEdit: true, bulkRecipes: [] })
-    open({ op: { kind: 'set', key: 'tier', value: 'gold', onConflict: 'skip' }, target: { kind: 'view' }, scopeMode: 'view', recipe: { name: 'Gold tier' } })
-    expect(screen.getByText(/^From recipe:/)).toHaveTextContent('From recipe: Gold tier')
+    useViewLibraryStore.setState({ viewId: 'v1', branchId: null, status: 'ready', canEdit: true, reusableChanges: [] })
+    open({ op: { kind: 'set', key: 'tier', value: 'gold', onConflict: 'skip' }, target: { kind: 'view' }, scopeMode: 'view', reusable: { name: 'Gold tier' } })
+    expect(screen.getByText(/^From reusable change:/)).toHaveTextContent('From reusable change: Gold tier')
     await user.click(next())
-    expect(screen.queryByRole('button', { name: /Save as recipe/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Save for reuse/ })).toBeNull()
     await user.click(screen.getByRole('button', { name: /Where/ }))
     await user.click(screen.getByRole('radio', { name: /Every entity with tier/ }))
     await user.click(next())
-    expect(screen.getByRole('button', { name: /Save as recipe/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Save for reuse/ })).toBeInTheDocument()
   })
 
   it('opens a clean-up on What with every part of it as it was kept', () => {
