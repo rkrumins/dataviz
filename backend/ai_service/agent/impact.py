@@ -42,8 +42,6 @@ from .tools import ToolContext, ToolFailed, ensure_searchable
 logger = logging.getLogger(__name__)
 
 _NODE_BUDGET = 2000
-_CONSUMER_TYPES = re.compile(r"dashboard|chart|report|model|notebook|application|\bapp\b|metric|kpi|api|feature|workbook|tile", re.I)
-_JOB_TYPES = re.compile(r"job|pipeline|flow|task|dag|process|workflow", re.I)
 _SCHEDULE_KEYS = re.compile(r"schedule|cron|interval|frequency|trigger", re.I)
 _TRANSFORM_KEYS = re.compile(r"transform|expression|logic|sql|mapping|formula|rule|derivation", re.I)
 _OWNER_KEYS = ("owner", "owners", "data_owner", "dataOwner", "steward", "data_steward",
@@ -160,16 +158,32 @@ async def _closure(ctx: ToolContext, urn: str, direction: str, depth: int, grain
                                           view_id=target.view_id)
 
 
+def _type_rules(ctx: ToolContext, seen: Counter) -> list[tuple[str, str, dict]]:
+    """(type, label, predicate) for counting what is affected by type: the
+    kinds of thing a confirmed type property names, else the types in scope,
+    most numerous first — whatever this data source calls them."""
+    g = ctx.grounding
+    tp = g.type_property
+    if tp and g.display_types():
+        return [(str(v["value"]), str(v["value"]),
+                 P.all_of(P.of_types([tp["on"]]), {"kind": "property", "key": tp["key"], "op": "eq",
+                                                   "value": v["value"]}))
+                for v in g.display_types()[:20]]
+    ranked = sorted(g.type_counts().items(), key=lambda kv: -kv[1])
+    ids = [t for t, _ in ranked] or [t["id"] for t in g.entity_types] or [t for t, _ in seen.most_common()]
+    return [(t, g.type_label(t), P.of_types([t])) for t in ids[:20] if t]
+
+
 async def _exact_counts(ctx: ToolContext, urn: str, direction: str, depth: int,
-                        type_ids: list[str]) -> Optional[dict]:
+                        type_rules: list[tuple[str, str, dict]]) -> Optional[dict]:
     target = ctx.target
     far_end = P.any_of(P.is_urns([urn]), {"kind": "descendantOf", "urns": [urn]})
     hops = max(1, min(10, depth))
     axis = "upstream" if direction == "downstream" else "downstream"
     reached = {"kind": "related", "axis": axis, "where": far_end, "maxHops": hops}
     items = [{"id": "all", "predicate": reached}]
-    for i, t in enumerate(type_ids[:20]):
-        items.append({"id": f"t{i}", "predicate": P.all_of(reached, P.of_types([t]))})
+    for i, (_t, _label, rule) in enumerate(type_rules[:20]):
+        items.append({"id": f"t{i}", "predicate": P.all_of(reached, rule)})
     try:
         body = await ctx.client.counts(target.workspace_id, target.data_source_id,
                                        target.scope("data_source"), items, budget_seconds=25)
@@ -178,10 +192,10 @@ async def _exact_counts(ctx: ToolContext, urn: str, direction: str, depth: int,
         return None
     counts = body.get("counts") or {}
     by_type = []
-    for i, t in enumerate(type_ids[:20]):
+    for i, (t, label, _rule) in enumerate(type_rules[:20]):
         row = counts.get(f"t{i}") or {}
         if row.get("count"):
-            by_type.append({"type": t, "label": ctx.grounding.type_label(t), "count": int(row["count"])})
+            by_type.append({"type": t, "label": label, "count": int(row["count"])})
     total_row = counts.get("all") or {}
     return {
         "total": total_row.get("count"),
@@ -200,12 +214,11 @@ def _transform_detail(edge: dict) -> Optional[str]:
 
 
 def _owner_of(node: dict, parents: dict[str, str], nodes: dict[str, dict],
-              owner_key: Optional[str]) -> Optional[tuple[str, str]]:
+              keys: list[str]) -> Optional[tuple[str, str]]:
     seen = 0
     current: Optional[dict] = node
     while current is not None and seen < 6:
         props = current.get("properties") or {}
-        keys = (owner_key,) if owner_key else _OWNER_KEYS
         for key in keys:
             value = props.get(key) if key else None
             if value not in (None, "", []):
@@ -233,6 +246,9 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
         raise ToolFailed(exc.for_model())
 
     nodes = {n["urn"]: n for n in fine.get("nodes") or [] if n.get("urn")}
+    g = ctx.grounding
+    for n in [*nodes.values(), target_node]:
+        n["entityType"] = g.display_type(n)
     edges = fine.get("edges") or []
     parents = {e.get("targetUrn"): e.get("sourceUrn") for e in fine.get("containmentEdges") or []}
     reached_key = "downstreamUrns" if direction == "downstream" else "upstreamUrns"
@@ -272,13 +288,14 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
     grain = "fine"
     if truncated:
         step = ctx.turn.step("Counting everything affected exactly")
-        type_ids = [t["id"] for t in ctx.grounding.entity_types][:20] or list(type_counts)
-        exact = await _exact_counts(ctx, urn, direction, depth, type_ids)
+        exact = await _exact_counts(ctx, urn, direction, depth, _type_rules(ctx, type_counts))
         if exact and exact.get("total") is not None:
             totals = {"entities": exact["total"], "exact": exact["exact"],
                       "byType": exact["byType"] or totals["byType"]}
             if depth > 10:
                 notes.append("Exact counts reach 10 hops; the walk went further.")
+            if target.view_only:
+                notes.append("Counts stop at the edge of this view, which is shared with you.")
             ctx.turn.finish_step(step, detail=f"{exact['total']:,} in total")
         else:
             ctx.turn.finish_step(step, status="error", detail="Counted what the walk reached only")
@@ -307,20 +324,24 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
     has_next = {s for s, outs in forward.items() if outs}
     frontier_urns = {f.get("urn") for f in frontier}
     ends = [u for u in reached if u in nodes and u not in has_next and u not in frontier_urns]
-    ends.sort(key=lambda u: (not _CONSUMER_TYPES.search(str(nodes[u].get("entityType") or "")),
+    # The ends of lineage are the consumers (or, upstream, the sources). The
+    # semantic layer may say which types lineage ends at; those come first.
+    terminal = g.terminal_types() if direction == "downstream" else None
+    ends.sort(key=lambda u: (bool(terminal) and nodes[u].get("entityType") not in terminal,
                              hops.get(u, 99)))
-    if direction == "downstream":
-        ends = [u for u in ends if _CONSUMER_TYPES.search(str(nodes[u].get("entityType") or ""))] or ends
+    if terminal:
+        ends = [u for u in ends if nodes[u].get("entityType") in terminal] or ends
     consumers = [_entity(nodes[u], hops.get(u)) for u in ends[:12]]
 
     owner_ref = ctx.state.confirmed("owner", target.data_source_id)
     owner_key = None
     if owner_ref and owner_ref.get("predicate", {}).get("kind") == "hasProperty":
         owner_key = owner_ref["predicate"].get("key")
+    owner_keys = g.owner_keys(owner_key) or list(_OWNER_KEYS)
     owners_map: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for u in reached:
         if u in nodes:
-            found = _owner_of(nodes[u], parents, nodes, owner_key)
+            found = _owner_of(nodes[u], parents, nodes, owner_keys)
             if found:
                 owners_map[found].append(_entity(nodes[u]))
     owners = [
@@ -355,17 +376,18 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
 
     # When: schedules of the jobs on those paths, or among what is affected.
     on_paths = {n["urn"] for p in paths for n in p["nodes"]}
-    jobs = [u for u in (on_paths | reached) if u in nodes
-            and _JOB_TYPES.search(str(nodes[u].get("entityType") or ""))]
-    schedules = []
-    for u in sorted(jobs, key=lambda u: hops.get(u, 99)):
+    # Whatever records a schedule is a job here, whatever its type is called.
+    scheduled = []
+    for u in on_paths | reached:
+        if u not in nodes:
+            continue
         for key, value in (nodes[u].get("properties") or {}).items():
             if _SCHEDULE_KEYS.search(str(key)) and value not in (None, ""):
-                schedules.append({"job": _entity(nodes[u], hops.get(u)), "schedule": str(value)[:80],
-                                  "human": humanize_cron(str(value))})
+                scheduled.append((u, str(value)))
                 break
-        if len(schedules) >= 6:
-            break
+    scheduled.sort(key=lambda uv: (humanize_cron(uv[1]) is None, hops.get(uv[0], 99)))
+    schedules = [{"job": _entity(nodes[u], hops.get(u)), "schedule": value[:80], "human": humanize_cron(value)}
+                 for u, value in scheduled[:6]]
     timing = None
     if schedules:
         first = schedules[0]
@@ -379,10 +401,13 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
 
     # Severity — a heuristic, and labelled as one.
     reasons: list[str] = []
-    bi = [c for c in consumers if _CONSUMER_TYPES.search(str(c.get("type") or ""))]
+    bi = [c for c in consumers if terminal and c.get("type") in terminal]
     if bi:
         reasons.append(f"Reaches {len(bi)} consumer{'s' if len(bi) != 1 else ''} such as "
                        f"{bi[0]['name']}")
+    elif consumers and direction == "downstream":
+        reasons.append(f"Ends at {len(consumers)} asset{'s' if len(consumers) != 1 else ''} such as "
+                       f"{consumers[0]['name']}")
     total = int(totals.get("entities") or 0)
     if total:
         reasons.append(f"{total:,} entities {'downstream' if direction == 'downstream' else 'upstream'}")
@@ -395,7 +420,7 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
     direct = [u for u in reached if hops.get(u) == 1]
     if direct and direction == "downstream":
         reasons.append(f"{len(direct)} directly downstream")
-    severity = "high" if (bi or critical or total >= 50) else "medium" if total >= 5 else "low"
+    severity = "high" if (bi or critical or total >= 50) else "medium" if (total >= 5 or consumers) else "low"
 
     target_entity = {"urn": urn, "name": _name(target_node), "type": target_node.get("entityType"),
                      "path": target_node.get("_path")}
@@ -405,7 +430,8 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
         summary = (f"{verb + ' ' if verb else ''}{target_entity['name']} "
                    f"{'affects' if verb else 'feeds'} {total:,} "
                    f"{'entity' if total == 1 else 'entities'}"
-                   + (f", including {len(bi)} consumer{'s' if len(bi) != 1 else ''}" if bi else "")
+                   + (f", including {len(bi)} consumer{'s' if len(bi) != 1 else ''}" if bi
+                      else f", ending in {len(consumers)} {_kind_words(g, consumers)}" if consumers else "")
                    + ".")
     else:
         summary = (f"{target_entity['name']} is fed by {total:,} upstream "
@@ -448,14 +474,13 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
                         "payload": {"viewId": target.view_id, "predicate": result_predicate}})
     ctx.turn.add_actions(actions)
     if direction == "downstream":
-        ctx.turn.add_followups([
+        ctx.turn.add_followups([q for q in (
             "Who owns the affected assets?" if owners else "Which teams should I tell?",
-            "Show only the dashboards and reports",
+            f"Show only the {_kind_words(g, consumers)}" if consumers else None,
             f"Where does {target_entity['name']} come from?",
-        ])
+        ) if q])
     else:
-        ctx.turn.add_followups([f"What does {target_entity['name']} feed?",
-                                "Which of these sources are ingested tables?"])
+        ctx.turn.add_followups([f"What does {target_entity['name']} feed?", "Who owns these sources?"])
 
     def path_text(p: dict) -> str:
         parts = [p["nodes"][0]["name"]]
@@ -473,6 +498,15 @@ async def _report(ctx: ToolContext, args: dict, *, direction: str, change: Optio
         "grain": grain, "notes": notes,
         "shownToPerson": "an impact report card with all of this; summarise, do not repeat it",
     }
+
+
+def _kind_words(g, entities: list[dict]) -> str:
+    """"dashboards" for a list that is mostly dashboards; "assets" otherwise."""
+    kinds = Counter(e.get("type") for e in entities if e.get("type"))
+    if not kinds:
+        return "assets"
+    top, n = kinds.most_common(1)[0]
+    return g.plural(str(top)).lower() if n == len(entities) or len(kinds) == 1 else "assets"
 
 
 def _is_inside(urn: str, container: str, parents: dict[str, str]) -> bool:

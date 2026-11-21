@@ -557,6 +557,22 @@ async def _locate(kind: str, ids: list[str]) -> dict[str, _Place]:
     return found
 
 
+async def _primary_of(workspace_id: str) -> Optional[str]:
+    """The data source a view that names none renders: its workspace's
+    primary — the capability gate's reading too (``capability_gate``)."""
+    from backend.app.db.repositories import data_source_repo
+
+    now = time.monotonic()
+    hit = _locations.get(("primary", workspace_id))
+    if hit is not None and hit[0] > now:
+        return hit[1].data_source_id
+    async with db_engine.get_async_session() as session:
+        primary = await data_source_repo.get_primary_data_source(session, workspace_id)
+    _locations[("primary", workspace_id)] = (now + _LOCATION_TTL_SECONDS,
+                                             _Place(workspace_id, primary.id if primary else None))
+    return primary.id if primary else None
+
+
 def _not_in_workspace(kind: str, resource_id: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -604,13 +620,12 @@ async def _fence(request: Request, rule, scope, *, reads: bool) -> None:
     # path is a route about that source itself — its jobs, its pull
     # requests — which a view of it does not open. Not a whole-source export
     # either: that is more than a view's reach.
-    through_view = (
-        view_at.get(query_view, _NOWHERE).data_source_id
-        if reads and rule.level == api_key_surface.RESOURCE
-        and query_view and query_view in view_ids
-        and scope.allows("workspace:view:read")
-        else None
-    )
+    through_view = None
+    if (reads and rule.level == api_key_surface.RESOURCE and query_view and query_view in view_ids
+            and scope.allows("workspace:view:read")):
+        place = view_at.get(query_view, _NOWHERE)
+        through_view = place.data_source_id or (
+            await _primary_of(place.workspace_id) if place.workspace_id else None)
     for ds_id in ds_ids:
         where = ds_at.get(ds_id, _NOWHERE).workspace_id
         if workspace_id and where and where != workspace_id:

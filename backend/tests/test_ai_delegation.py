@@ -15,7 +15,7 @@ import time
 import httpx
 import pytest
 
-from backend.ai_service.internal_auth import ADMIN_HEADER, DELEGATION_HEADER, USER_ID_HEADER
+from backend.ai_service.internal_auth import ADMIN_HEADER, DELEGATION_HEADER, REACH_HEADER, USER_ID_HEADER
 from backend.app.api.v1.endpoints import ai as ai_endpoints
 from backend.app.auth import delegation
 from backend.app.auth.dependencies import get_current_user, get_permission_claims
@@ -192,6 +192,64 @@ async def test_administration_needs_system_admin(edge):
     allowed = await edge.client.get("/api/v1/ai/admin/connections")
     assert allowed.status_code == 200, allowed.text
     assert edge.upstream.requests[-1].headers[ADMIN_HEADER] == "1"
+
+
+async def test_a_view_shared_from_another_workspace_is_answered_inside_that_view(edge):
+    # The person holds workspace:ai:use in ws_a only; v_b_granted lives in ws_b,
+    # readable to them through a grant on the view.
+    response = await edge.client.post("/api/v1/ai/chat/stream", headers=CSRF, json={
+        "message": "what is this?", "context": {"workspaceId": "ws_a", "viewId": "v_b_granted"}})
+    assert response.status_code == 200, response.text
+    sent = edge.upstream.requests[-1]
+    grant = delegation.verify(sent.headers[DELEGATION_HEADER])
+    assert grant.scope.view_ids == {"v_b_granted"}
+    assert not grant.scope.workspaces and not grant.scope.data_source_ids and not grant.scope.all_resources
+    assert sent.headers[REACH_HEADER] == "view"
+
+
+async def test_a_member_keeps_the_workspace_delegation_for_its_views(edge):
+    response = await edge.client.post("/api/v1/ai/chat/stream", headers=CSRF, json={
+        "message": "hi", "context": {"workspaceId": "ws_b", "viewId": "v_a_ws"}})
+    assert response.status_code == 200, response.text
+    sent = edge.upstream.requests[-1]
+    grant = delegation.verify(sent.headers[DELEGATION_HEADER])
+    assert grant.scope.workspaces == {"ws_a"} and REACH_HEADER not in sent.headers   # the view's workspace wins
+
+
+async def test_a_view_the_person_cannot_read_is_refused_without_saying_it_exists(edge):
+    for view in ("v_b_other", "v_nowhere"):
+        response = await edge.client.post("/api/v1/ai/chat/stream", headers=CSRF, json={
+            "message": "hi", "context": {"workspaceId": "ws_b", "viewId": view}})
+        assert response.status_code == 403
+        assert response.json()["detail"]["error"] == "missing_permission"
+    assert edge.upstream.requests == []
+
+
+async def test_without_the_permission_anywhere_a_shared_view_is_refused(edge):
+    edge.state["claims"] = PermissionClaims(sid="", global_perms=(), ws_perms={"ws_a": ("workspace:view:read",)})
+    response = await edge.client.post("/api/v1/ai/chat/stream", headers=CSRF, json={
+        "message": "hi", "context": {"viewId": "v_b_granted"}})
+    assert response.status_code == 403 and edge.upstream.requests == []
+
+
+async def test_the_context_card_is_gated_as_a_question_is(edge):
+    allowed = await edge.client.get("/api/v1/ai/context", params={"viewId": "v_b_granted"})
+    assert allowed.status_code == 200, allowed.text
+    sent = edge.upstream.requests[-1]
+    assert sent.url.path == "/context" and sent.headers[REACH_HEADER] == "view"
+    refused = await edge.client.get("/api/v1/ai/context", params={"viewId": "v_b_other", "workspaceId": "ws_b"})
+    assert refused.status_code == 403
+
+
+async def test_a_view_narrowed_delegation_reads_only_through_the_view(client):
+    token = delegation.mint(user_id=OWNER, scope=delegation.DelegationScope(
+        all_resources=False, view_ids=frozenset({"v_b_granted"})))
+    through = await client.get("/api/v1/ws_b/graph/metadata/schema",
+                               params={"dataSourceId": "ds_b", "viewId": "v_b_granted"}, headers=bearer(token))
+    assert through.status_code != 403, through.text
+    around = await client.get("/api/v1/ws_b/graph/metadata/schema", params={"dataSourceId": "ds_b"},
+                              headers=bearer(token))
+    assert around.status_code == 403
 
 
 async def test_the_assistant_never_calls_itself(client, db_session):

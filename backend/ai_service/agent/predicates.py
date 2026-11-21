@@ -189,5 +189,50 @@ def upstream_of(urns: list[str], *, max_hops: int = 10) -> dict:
             "maxHops": max(1, min(search_models.RELATION_ANCHORED_HOPS_MAX, max_hops))}
 
 
+def entity_type_values(node: Any) -> set[str]:
+    """Every value an ``entityType`` rule anywhere in *node* names."""
+    found: set[str] = set()
+    if isinstance(node, dict):
+        if node.get("kind") == "entityType":
+            found |= {str(v) for v in node.get("values") or []}
+        for value in node.values():
+            found |= entity_type_values(value)
+    elif isinstance(node, list):
+        for item in node:
+            found |= entity_type_values(item)
+    return found
+
+
+def map_types(node: Any, fn) -> Any:
+    """*node* with every ``entityType`` rule replaced by ``fn(rule)``."""
+    if isinstance(node, dict):
+        if node.get("kind") == "entityType":
+            return fn(node)
+        return {k: map_types(v, fn) for k, v in node.items()}
+    if isinstance(node, list):
+        return [map_types(v, fn) for v in node]
+    return node
+
+
+def rewrite_types(node: Any, *, on: str, key: str, kinds: set[str]) -> Any:
+    """Read kinds of thing through a type property: ``entityType in
+    [table]`` becomes ``entityType in [Node] AND kind in [table]`` when
+    everything is a ``Node`` and its ``kind`` says what it is."""
+    def rule(r: dict) -> dict:
+        values = [str(v) for v in r.get("values") or []]
+        through = [v for v in values if v in kinds]
+        if not through:
+            return r
+        rest = [v for v in values if v not in kinds]
+        positive = all_of(of_types([on]), {"kind": "property", "key": key, "op": "in", "value": through})
+        if rest:
+            positive = any_of(positive, of_types(rest))
+        if r.get("op") == "notIn":
+            return {"kind": "group", "op": "not", "children": [positive]}
+        return positive
+
+    return map_types(node, rule)
+
+
 def kinds() -> list[str]:
     return sorted(_MODELS)

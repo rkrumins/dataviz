@@ -80,9 +80,9 @@ class ToolFailed(Exception):
 # ── Shared helpers ──────────────────────────────────────────────────────
 
 
-def entity(node: dict, *, path: Optional[list] = None) -> dict:
+def entity(node: dict, *, path: Optional[list] = None, g: Optional[Grounding] = None) -> dict:
     out = {"urn": node.get("urn"), "name": node.get("displayName") or node.get("name") or node.get("urn"),
-           "type": node.get("entityType") or node.get("type")}
+           "type": (g.display_type(node) if g else None) or node.get("entityType") or node.get("type")}
     if path:
         out["path"] = [p.get("displayName") or p.get("name") for p in path if isinstance(p, dict)]
     return out
@@ -97,10 +97,16 @@ async def ensure_searchable(ctx: ToolContext) -> Target:
     if target.workspace_id:
         view = await default_view(ctx.client, target.workspace_id, target.data_source_id)
         if view:
-            target.view_id = view.get("id")
-            target.view_name = view.get("name")
-            target.data_source_id = target.data_source_id or view.get("dataSourceId")
-            return target
+            from . import grounding as G
+
+            fresh = await G.build(ctx.client, user_id=ctx.user_id, view_only=target.view_only,
+                                  include_values=ctx.policy.send_sample_values,
+                                  context={"viewId": view.get("id"), "workspaceId": target.workspace_id,
+                                           "dataSourceId": target.data_source_id or view.get("dataSourceId")})
+            ctx.grounding.adopt(fresh)
+            await load_type_property(ctx)
+            ctx.turn.notice(f"Searched through **{view.get('name')}**, this data source's most used view.")
+            return ctx.target
     raise ToolFailed(
         "No data source is in context. Ask the person which data source or view they mean, "
         "or use find_views to find one, then call set_context.",
@@ -136,18 +142,83 @@ async def prepare_predicate(ctx: ToolContext, raw: Any, *, applies_to: Optional[
         return None
     except P.PredicateInvalid as exc:
         raise ToolFailed(str(exc))
+    expanded = await _read_types(ctx, expanded)
+    if expanded is None:
+        return None
     try:
         return P.validate(expanded)
     except P.PredicateInvalid as exc:
         raise ToolFailed(str(exc))
 
 
+async def _read_types(ctx: ToolContext, predicate: Any) -> Optional[Any]:
+    """Entity types the data source doesn't have: a spelling to correct, a
+    kind of thing read through the confirmed type property, a question to
+    the person (once) about which property says what kind each entity is —
+    or an error naming the types it does have."""
+    g = ctx.grounding
+    real = g.real_type_ids()
+    named = P.entity_type_values(predicate)
+    if not real or named <= real:
+        return predicate
+    by_lower = {t.lower(): t for t in real}
+    predicate = P.map_types(predicate, lambda r: {**r, "values": [
+        by_lower.get(str(v).lower(), v) for v in r.get("values") or []]})
+    unknown = P.entity_type_values(predicate) - real
+    if not unknown:
+        return predicate
+    if not g.type_property:
+        offered = {str(v["value"]).lower() for c in g.type_candidates for v in c["values"]}
+        if not any(_forms(u) & offered for u in unknown):
+            raise ToolFailed(f"Unknown entity type(s): {', '.join(sorted(unknown))}. This data source's "
+                             f"types are: {', '.join(sorted(real)[:30])}.")
+        resolution = await resolve_concept_flow(ctx, C.TYPE_CONCEPT)
+        if resolution.status not in ("mapped", "auto"):
+            return None
+    tp = g.type_property
+    if not tp:
+        return None
+    known = {str(v["value"]) for v in g.display_types()}
+    by_kind = {k.lower(): k for k in known}
+
+    def kind_of(v: Any) -> Any:
+        if v in real:
+            return v
+        return next((by_kind[f] for f in _forms(v) if f in by_kind), v)
+
+    predicate = P.map_types(predicate, lambda r: {**r, "values": [kind_of(v) for v in r.get("values") or []]})
+    kinds = (P.entity_type_values(predicate) - real) if not known else known
+    return P.rewrite_types(predicate, on=tp["on"], key=tp["key"], kinds=kinds)
+
+
+def _forms(word: Any) -> set[str]:
+    """A kind as it may be asked for: "tables" for "table", "processes" for "process"."""
+    w = str(word).lower()
+    out = {w}
+    if w.endswith("ies"):
+        out.add(w[:-3] + "y")
+    if w.endswith("es"):
+        out.add(w[:-2])
+    if w.endswith("s"):
+        out.add(w[:-1])
+    return out
+
+
+async def load_type_property(ctx: ToolContext) -> None:
+    async with ctx.session_scope() as session:
+        ctx.grounding.type_property = await C.load_type_property(
+            session, ctx.state, data_source_id=ctx.target.data_source_id, user_id=ctx.user_id)
+
+
 async def resolve_concept_flow(ctx: ToolContext, name: str, *, applies_to: Optional[str] = None,
                                want: str = "predicate", synonyms: Optional[list[str]] = None,
                                scope_mode: str = "view") -> C.Resolution:
     target = await ensure_searchable(ctx)
+    is_type = C.is_type_concept(name)
     confirmed = ctx.state.confirmed(name, target.data_source_id)
     if confirmed:
+        if is_type:
+            ctx.grounding.type_property = C.type_property_from(confirmed["predicate"])
         return C.Resolution("mapped", name, confirmed["label"], confirmed["predicate"],
                             property_key=confirmed.get("propertyKey"), source="conversation")
     if target.data_source_id:
@@ -159,11 +230,16 @@ async def resolve_concept_flow(ctx: ToolContext, name: str, *, applies_to: Optio
                 predicate = json.loads(row.predicate)
                 ctx.state.confirm_concept(name, target.data_source_id, label=row.label,
                                           predicate=predicate)
+                if is_type:
+                    ctx.grounding.type_property = C.type_property_from(predicate)
                 return C.Resolution("mapped", name, row.label, predicate, source=row.scope)
+    if is_type:
+        return _ask_type_property(ctx, target, name)
     candidates = C.candidates_from(ctx.grounding, name, synonyms=synonyms, want=want)
     if want == "predicate":
+        glossary = ("tag", "glossaryterm", "term", "classification")
         entity_types = [t["id"] for t in ctx.grounding.entity_types
-                        if C.norm(t.get("id")) in ("tag", "glossaryterm", "term", "classification")]
+                        if C.norm(t.get("id")) in glossary or C.norm(t.get("name")) in glossary]
         candidates += await C.entity_candidates(ctx.client, target, name, entity_types)
     await C.count(ctx.client, target, candidates, scope_mode=scope_mode, applies_to=applies_to)
     live = [c for c in candidates if c.count]
@@ -209,6 +285,34 @@ async def resolve_concept_flow(ctx: ToolContext, name: str, *, applies_to: Optio
     return C.Resolution("ask", name, candidates=live, clarification=payload)
 
 
+def _ask_type_property(ctx: ToolContext, target: Target, name: str) -> C.Resolution:
+    """Which property says what kind of thing each entity is — asked once,
+    with what each candidate holds; never assumed."""
+    live = C.type_candidates(ctx.grounding)
+    if not live:
+        return C.Resolution("missing", name)
+    picked = ctx.choices.get(C.clarification_id(name, target.data_source_id))
+    chosen = next((c for c in live if c.id == picked), None)
+    if chosen is not None:
+        ctx.state.confirm_concept(name, target.data_source_id, label=chosen.label, predicate=chosen.predicate)
+        ctx.grounding.type_property = C.type_property_from(chosen.predicate)
+        return C.Resolution("mapped", name, chosen.label, chosen.predicate, source="choice", candidates=live)
+    on = ctx.grounding.type_candidates[0]["on"]
+    payload = C.clarification(
+        name, live, applies_label=on, data_source_id=target.data_source_id, allow_any=False,
+        question=f"Everything here is a ‘{on}’. Which property says what kind of thing each one is?")
+    ctx.state.pending = {
+        "id": payload["id"], "kind": "concept", "concept": name,
+        "workspaceId": target.workspace_id, "dataSourceId": target.data_source_id,
+        "question": ctx.question,
+        "options": {c.id: {"label": c.label, "predicate": c.predicate, "propertyKey": c.property_key}
+                    for c in live},
+    }
+    ctx.turn.clarify(payload)
+    ctx.stopped = True
+    return C.Resolution("ask", name, candidates=live, clarification=payload)
+
+
 def _aggregate_rows(page: dict, index: int) -> list[dict]:
     aggs = page.get("aggregates") or []
     if index >= len(aggs) or not isinstance(aggs[index], list):
@@ -226,7 +330,9 @@ async def run_search(ctx: ToolContext, predicate: dict, *, title: str, scope_mod
             "results": "both", "pageSize": max(1, min(limit, 50)), "includeAncestorPath": True,
             "softDeadlineMs": 45000,
             "aggregations": [
-                {"by": "entityType", "maxBuckets": 12, "sampleHitsPerBucket": 0},
+                ({"by": "property", "propertyKey": ctx.grounding.type_property["key"], "maxBuckets": 12,
+                  "sampleHitsPerBucket": 0} if ctx.grounding.type_property
+                 else {"by": "entityType", "maxBuckets": 12, "sampleHitsPerBucket": 0}),
                 {"by": "parent", "maxBuckets": 10, "sampleHitsPerBucket": 0},
             ],
         },
@@ -250,7 +356,7 @@ async def run_search(ctx: ToolContext, predicate: dict, *, title: str, scope_mod
                     "type": b.get("ancestorEntityType")}, "count": b.get("matchCount")}
         for b in _aggregate_rows(page, 1)
     ]
-    items = [entity(h.get("node") or {}, path=h.get("ancestorPath")) for h in hits[:limit]]
+    items = [entity(h.get("node") or {}, path=h.get("ancestorPath"), g=ctx.grounding) for h in hits[:limit]]
     if total is None:
         total = sum(int(b.get("count") or 0) for b in by_type) or len(items)
     notes = list((page.get("scopeDiagnostics") or {}).get("notes") or [])
@@ -500,17 +606,31 @@ async def _set_context(ctx: ToolContext, args: dict) -> Any:
         raise ToolFailed(exc.for_model())
     from . import grounding as G
 
-    fresh = await G.build(ctx.client, user_id=ctx.user_id,
+    fresh = await G.build(ctx.client, user_id=ctx.user_id, view_only=ctx.target.view_only,
                           context={"workspaceId": view.get("workspaceId"),
                                    "dataSourceId": view.get("dataSourceId"), "viewId": view_id},
                           include_values=ctx.policy.send_sample_values)
-    ctx.grounding.target = fresh.target
-    ctx.grounding.view, ctx.grounding.schema = fresh.view, fresh.schema
-    ctx.grounding.catalog, ctx.grounding.catalog_complete = fresh.catalog, fresh.catalog_complete
+    ctx.grounding.adopt(fresh)
+    await load_type_property(ctx)
+    from .brief import fit
     from .prompts import grounding_text
 
     return {"now": f"Working in the view {view.get('name')!r} ({view.get('dataSourceName')})",
-            "grounding": json.loads(ctx.policy.to_model_text(grounding_text(ctx.grounding), limit=8000))}
+            "grounding": json.loads(fit(grounding_text(ctx.grounding), ctx.policy, limit=8000))}
+
+
+async def _describe_context(ctx: ToolContext, args: dict) -> Any:
+    from . import brief
+
+    card = brief.for_ui(ctx.grounding)
+    ctx.turn.block("context", card)
+    out: dict[str, Any] = {"shown": "a card with what is known about "
+                                    f"{(card.get('about') or {}).get('name')}: its details, layers, types, "
+                                    "hierarchy, connections, contents and caveats"}
+    page = brief.section(card, str(args.get("section") or "") or None, int(args.get("offset") or 0))
+    if page is not None:
+        out["section"] = page
+    return out
 
 
 async def _suggest_followups(ctx: ToolContext, args: dict) -> Any:
@@ -612,6 +732,16 @@ def _tools() -> dict[str, Tool]:
                   "Work inside a view found with find_views: loads its schema and catalogue.",
                   _schema({"viewId": {"type": "string"}}, ("viewId",))),
              _set_context, "Opening a view"),
+        Tool(spec("describe_context",
+                  "Show the person what you know about where they are — the view's details, layers, "
+                  "types and hierarchy, every kind of connection, what its entities carry, and what "
+                  "limits answers here — as a card. Use for 'what do you know / what's in the "
+                  "context / what does this view show / explain the hierarchy'. Optionally page "
+                  "through one section.",
+                  _schema({"section": {"type": "string", "enum": ["about", "layers", "types", "hierarchy",
+                                                                  "connections", "contents", "caveats"]},
+                           "offset": {"type": "integer", "minimum": 0}})),
+             _describe_context, "Reading what I know"),
         Tool(spec("show_query",
                   "Show the person a search as a query card they can open in Advanced Search, "
                   "with its count. Use when they ask you to write or build a search.",

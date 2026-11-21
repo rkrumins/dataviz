@@ -6,8 +6,10 @@ session, or an API key on the knowledge MCP route — then:
 
 1. the **switch** is on (``aiAssistantEnabled``, fail closed);
 2. the person holds **``workspace:ai:use``** — in the workspace the request
-   names, or in any workspace when it names none; the administration routes
-   need ``system:admin`` instead;
+   names, or in any workspace when it names none; a request about a view the
+   person reads through a share (not as a member of its workspace) needs it
+   in any workspace and read access to that view, and its delegation reaches
+   that view alone; the administration routes need ``system:admin`` instead;
 3. a per-person **rate limit** holds, for the routes that call a model;
 4. a **read-only delegation** is minted for this request (``auth.delegation``):
    narrowed to the request's workspace when it names one, and to the API
@@ -29,6 +31,7 @@ from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
 from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
@@ -36,6 +39,7 @@ from backend.ai_service.internal_auth import (
     ADMIN_HEADER,
     DELEGATION_HEADER,
     ORIGIN_HEADER,
+    REACH_HEADER,
     USER_EMAIL_HEADER,
     USER_ID_HEADER,
     USER_NAME_HEADER,
@@ -51,6 +55,8 @@ from backend.app.auth.dependencies import (
 )
 from backend.app.common import activity_context
 from backend.app.db.engine import get_db_session
+from backend.app.db.models import ViewORM, view_is_live
+from backend.app.services import view_access
 from backend.app.services.activity.recorder import record_for_request
 from backend.app.services.permission_service import (
     PermissionClaims,
@@ -127,6 +133,27 @@ def _require_use(claims: PermissionClaims, workspace_id: Optional[str]) -> None:
         )
 
 
+async def _reach(db, user: User, claims: PermissionClaims, *, workspace_id: Optional[str],
+                 view_id: Optional[str]) -> tuple[Optional[str], Optional[delegation.DelegationScope]]:
+    """The workspace a request acts in, and — for a view read through a share
+    — the narrower delegation it gets. A named view decides the workspace:
+    the request may carry the person's active one from elsewhere."""
+    if view_id:
+        view = (await db.execute(
+            select(ViewORM).where(ViewORM.id == view_id, view_is_live()))).scalar_one_or_none()
+        if view is not None:
+            if has_permission(claims, PERMISSION, workspace_id=view.workspace_id):
+                return view.workspace_id, None
+            if has_permission_any_workspace(claims, PERMISSION):
+                viewer = await view_access.ViewerContext.build(db, user=user, claims=claims)
+                if await view_access.can_read_view(db, viewer, view):
+                    return view.workspace_id, delegation.DelegationScope(
+                        all_resources=False, view_ids=frozenset({view.id}))
+    # Never says whether the view exists: the usual refusal, as if none was named.
+    _require_use(claims, workspace_id)
+    return workspace_id, None
+
+
 async def _rate_limit(user: User) -> None:
     limiter = get_account_limiter()
     if await limiter.consume(_RATE_SCOPE, user.id, _RATE):
@@ -140,8 +167,10 @@ async def _rate_limit(user: User) -> None:
     )
 
 
-def _scope_for(request: Request, workspace_id: Optional[str]) -> tuple[delegation.DelegationScope, Optional[str]]:
-    scope = (
+def _scope_for(request: Request, workspace_id: Optional[str],
+               override: Optional[delegation.DelegationScope] = None,
+               ) -> tuple[delegation.DelegationScope, Optional[str]]:
+    scope = override or (
         delegation.DelegationScope(all_resources=False, workspaces=frozenset({workspace_id}))
         if workspace_id else delegation.DelegationScope()
     )
@@ -156,8 +185,9 @@ def _scope_for(request: Request, workspace_id: Optional[str]) -> tuple[delegatio
 def _forward_headers(
     request: Request, user: User, *, workspace_id: Optional[str],
     conversation_id: str = "", admin: bool = False,
+    override: Optional[delegation.DelegationScope] = None,
 ) -> dict[str, str]:
-    scope, parent_key = _scope_for(request, workspace_id)
+    scope, parent_key = _scope_for(request, workspace_id, override)
     session_id = "" if parent_key else str(_payload(read_access_cookie(request)).get("sid") or "")
     try:
         token = delegation.mint(
@@ -181,7 +211,15 @@ def _forward_headers(
     }
     if admin:
         headers[ADMIN_HEADER] = "1"
+    if override is not None:
+        headers[REACH_HEADER] = "view"
     return headers
+
+
+def _view_from(parsed: dict) -> Optional[str]:
+    context = parsed.get("context") if isinstance(parsed.get("context"), dict) else {}
+    view = context.get("viewId")
+    return str(view) if isinstance(view, str) and view else None
 
 
 def _ws_from_body(body: bytes) -> tuple[Optional[str], dict]:
@@ -261,12 +299,12 @@ async def _forward(
     )
 
 
-async def _record_question(db, persona: str, parsed: dict) -> None:
+async def _record_question(db, persona: str, parsed: dict, workspace_id: Optional[str]) -> None:
     context = parsed.get("context") if isinstance(parsed.get("context"), dict) else {}
     try:
         await record_for_request(
             db, "workspace.ai.question_asked",
-            workspace_id=context.get("workspaceId") or None,
+            workspace_id=workspace_id or context.get("workspaceId") or None,
             data_source_id=context.get("dataSourceId") or None,
             target_type="view" if context.get("viewId") else None,
             target_id=context.get("viewId") or None,
@@ -298,12 +336,13 @@ async def chat_stream(
     _refuse_delegated(request)
     body = await request.body()
     workspace_id, parsed = _ws_from_body(body)
-    _require_use(claims, workspace_id)
+    workspace_id, override = await _reach(db, user, claims, workspace_id=workspace_id,
+                                          view_id=_view_from(parsed))
     await _rate_limit(user)
     persona = str(parsed.get("persona") or "data")[:16]
-    await _record_question(db, persona, parsed)
+    await _record_question(db, persona, parsed, workspace_id)
     headers = _forward_headers(
-        request, user, workspace_id=workspace_id,
+        request, user, workspace_id=workspace_id, override=override,
         conversation_id=str(parsed.get("conversationId") or ""),
     )
     return await _forward(request, "/chat/stream", headers, body=body, stream=True)
@@ -314,15 +353,34 @@ async def query_draft(
     request: Request,
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
+    db=Depends(get_db_session),
 ):
     """Write a search (or Cypher) for a question, for the person to review."""
     _refuse_delegated(request)
     body = await request.body()
-    workspace_id, _ = _ws_from_body(body)
-    _require_use(claims, workspace_id)
+    workspace_id, parsed = _ws_from_body(body)
+    workspace_id, override = await _reach(db, user, claims, workspace_id=workspace_id,
+                                          view_id=_view_from(parsed))
     await _rate_limit(user)
-    headers = _forward_headers(request, user, workspace_id=workspace_id)
+    headers = _forward_headers(request, user, workspace_id=workspace_id, override=override)
     return await _forward(request, "/query/draft", headers, body=body)
+
+
+@router.get("/context")
+async def context_preview(
+    request: Request,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    db=Depends(get_db_session),
+):
+    """What the assistant knows about the page the person is on — gated as a
+    question about it would be. A read: no rate limit, no activity record."""
+    _refuse_delegated(request)
+    workspace_id, override = await _reach(
+        db, user, claims, workspace_id=request.query_params.get("workspaceId") or None,
+        view_id=request.query_params.get("viewId") or None)
+    headers = _forward_headers(request, user, workspace_id=workspace_id, override=override)
+    return await _forward(request, "/context", headers)
 
 
 @router.post("/mcp/knowledge")
@@ -375,15 +433,17 @@ async def proxy(
     request: Request,
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
+    db=Depends(get_db_session),
 ):
     """Everything else: the person's status, conversations, feedback and
     concept mappings — ``workspace:ai:use`` in the workspace named by
     ``?workspaceId=``, or in any workspace."""
     _refuse_delegated(request)
-    workspace_id = request.query_params.get("workspaceId") or None
-    _require_use(claims, workspace_id)
+    workspace_id, override = await _reach(
+        db, user, claims, workspace_id=request.query_params.get("workspaceId") or None,
+        view_id=request.query_params.get("viewId") or None)
     body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
-    headers = _forward_headers(request, user, workspace_id=workspace_id)
+    headers = _forward_headers(request, user, workspace_id=workspace_id, override=override)
     return await _forward(request, f"/{path}", headers, body=body)
 
 

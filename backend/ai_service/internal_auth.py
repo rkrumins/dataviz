@@ -41,6 +41,9 @@ USER_NAME_HEADER = "X-AI-User-Name"
 USER_EMAIL_HEADER = "X-AI-User-Email"
 ADMIN_HEADER = "X-AI-Admin"
 ORIGIN_HEADER = "X-AI-Origin"  # browser | api_key
+#: ``view`` when the person reaches the view only through a share, not its
+#: workspace: the platform keeps every read inside that view.
+REACH_HEADER = "X-AI-Reach"
 
 _EXEMPT_PATHS = frozenset({"/health", "/metrics"})
 
@@ -81,6 +84,7 @@ class Caller:
     delegation: str
     is_admin: bool = False
     origin: str = "browser"
+    view_only: bool = False
 
 
 def _header(request: Request, name: str, limit: int = 320) -> str:
@@ -128,6 +132,7 @@ def caller(request: Request) -> Caller:
         delegation=delegation,
         is_admin=(request.headers.get(ADMIN_HEADER) == "1"),
         origin=(request.headers.get(ORIGIN_HEADER) or "browser")[:16],
+        view_only=(request.headers.get(REACH_HEADER) == "view"),
     )
 
 

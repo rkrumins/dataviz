@@ -11,6 +11,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, select
 
 from .. import connections, settings_store
+from ..agent import brief
+from ..agent import concepts as C
 from ..agent import grounding as G
 from ..agent import loop
 from ..agent.events import KEEPALIVE
@@ -103,7 +105,10 @@ async def query_draft(request: Request, who: Caller = Depends(caller)):
                             transport=getattr(request.app.state, "platform_transport", None))
     try:
         grounding = await G.build(client, user_id=who.user_id, context=context,
-                                  include_values=policy.send_sample_values)
+                                  include_values=policy.send_sample_values, view_only=who.view_only)
+        async with session_scope() as session:
+            grounding.type_property = await C.load_type_property(
+                session, None, data_source_id=grounding.target.data_source_id, user_id=who.user_id)
         return await query_drafting.draft(
             provider=provider, client=client, grounding=grounding, policy=policy,
             question=question, mode=mode,
@@ -113,6 +118,43 @@ async def query_draft(request: Request, who: Caller = Depends(caller)):
         )
     except LlmError as exc:
         raise HTTPException(status_code=502, detail={"code": "llm_error", "message": loop._llm_message(exc)})
+    except PlatformError as exc:
+        raise HTTPException(status_code=exc.status if 400 <= exc.status < 600 else 502,
+                            detail={"code": exc.code, "message": exc.message})
+    finally:
+        await client.aclose()
+
+
+@router.get("/context")
+async def context_preview(request: Request, viewId: str = "", workspaceId: str = "", dataSourceId: str = "",
+                          pageKind: str = "", pageId: str = "", pageTitle: str = "",
+                          who: Caller = Depends(caller)):
+    """What the assistant knows about where the person is — the card the
+    panel shows before anything is asked. No model is called, and nothing is
+    cut by the data-sharing policy: the person could read all of it."""
+    context: dict = {k: v for k, v in {"viewId": viewId, "workspaceId": workspaceId,
+                                       "dataSourceId": dataSourceId}.items() if v}
+    if pageKind:
+        context["page"] = {"kind": pageKind[:32], "id": pageId[:512] or None, "title": pageTitle[:200] or None}
+    config = get_config()
+    client = PlatformClient(config.platform_api_url, who.delegation,
+                            timeout=config.platform_timeout_seconds,
+                            transport=getattr(request.app.state, "platform_transport", None))
+    try:
+        grounding = await G.build(client, user_id=who.user_id, context=context, include_values=True,
+                                  view_only=who.view_only)
+        if viewId and not grounding.view and not grounding.schema:
+            raise HTTPException(status_code=404, detail={"code": "not_found",
+                                                         "message": "That view could not be read."})
+        async with session_scope() as session:
+            grounding.type_property = await C.load_type_property(
+                session, None, data_source_id=grounding.target.data_source_id, user_id=who.user_id)
+        if pageKind == "doc":
+            knowledge = getattr(request.app.state, "knowledge", None)
+            found = await knowledge.page(pageId) if knowledge is not None else None
+            grounding.page = {"kind": "doc", "id": pageId, "title": pageTitle or (found or {}).get("title"),
+                              "headings": (found or {}).get("headings") or []}
+        return brief.for_ui(grounding)
     except PlatformError as exc:
         raise HTTPException(status_code=exc.status if 400 <= exc.status < 600 else 502,
                             detail={"code": exc.code, "message": exc.message})
@@ -138,7 +180,8 @@ async def status(request: Request, who: Caller = Depends(caller), session=Depend
         "connectionName": row.name if row else None,
         "personas": dict(settings.personas),
         "knowledge": summary,
-        "dataPolicy": {k: settings.data_policy[k] for k in ("sendDescriptions", "sendPropertyValues")},
+        "dataPolicy": {k: bool(settings.data_policy.get(k, True))
+                       for k in ("sendDescriptions", "sendPropertyValues", "sendSampleValues")},
         "limits": {"maxStepsPerTurn": settings.limits["maxStepsPerTurn"]},
     }
 

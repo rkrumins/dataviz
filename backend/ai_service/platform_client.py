@@ -60,6 +60,18 @@ def _message(response: httpx.Response) -> tuple[str, str]:
     return "error", str(detail)[:400]
 
 
+def _with_meta(body: Any) -> dict:
+    if not isinstance(body, dict):
+        return {}
+    if "data" not in body and "meta" not in body:
+        return body
+    data = body.get("data")
+    out = dict(data) if isinstance(data, dict) else {}
+    if isinstance(body.get("meta"), dict):
+        out["_meta"] = body["meta"]
+    return out
+
+
 class PlatformClient:
     """One person's view of the platform, for one turn."""
 
@@ -137,10 +149,25 @@ class PlatformClient:
     def _graph(ws: str, rest: str) -> str:
         return f"/api/v1/{quote(ws, safe='')}/graph{rest}"
 
-    async def schema(self, ws: str, ds: Optional[str]) -> dict:
+    async def schema(self, ws: str, ds: Optional[str], *, view_id: Optional[str] = None) -> dict:
+        """The data source's resolved schema, with the cache's ``meta`` kept
+        as ``_meta`` — ``status`` says when it is still being computed or
+        stands in from the ontology alone."""
         body = await self._call("GET", self._graph(ws, "/metadata/schema"),
-                                params={"dataSourceId": ds})
-        return body.get("data", body) if isinstance(body, dict) else {}
+                                params={"dataSourceId": ds, "viewId": view_id})
+        return _with_meta(body)
+
+    async def introspection(self, ws: str, ds: Optional[str], *, view_id: Optional[str] = None) -> dict:
+        """How many entities and edges of each type the whole data source holds."""
+        body = await self._call("GET", self._graph(ws, "/introspection"),
+                                params={"dataSourceId": ds, "viewId": view_id})
+        return _with_meta(body)
+
+    async def get_ontology(self, ontology_id: str) -> dict:
+        return await self._call("GET", f"/api/v1/admin/ontologies/{quote(ontology_id, safe='')}")
+
+    async def get_catalog_item(self, item_id: str) -> dict:
+        return await self._call("GET", f"/api/v1/admin/catalog/{quote(item_id, safe='')}")
 
     async def get_node(self, ws: str, ds: Optional[str], urn: str, *, view_id: Optional[str] = None) -> dict:
         return await self._call("GET", self._graph(ws, f"/nodes/{quote(urn, safe='')}"),

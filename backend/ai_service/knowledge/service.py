@@ -133,6 +133,16 @@ class KnowledgeService:
 
     # ── searching ──────────────────────────────────────────────────
 
+    async def page(self, route: str) -> Optional[dict]:
+        """The guide or docs page at *route* (``/guide/ai-assistant``): its title
+        and section headings, for "this page" in the Help persona."""
+        route = (route or "").split("#", 1)[0].rstrip("/")
+        found = [c for c in self.docs if c.url.split("#", 1)[0].rstrip("/") == route] if route else []
+        if not found:
+            return None
+        headings = list(dict.fromkeys(c.heading for c in found if c.heading))[:15]
+        return {"title": found[0].title, "headings": headings}
+
     async def search_docs_local(self, query: str, limit: int = 6) -> list[Hit]:
         lexical = [Hit(c.id, c.source_id, c.title, c.heading, c.url, c.text, s, metadata=c.metadata)
                    for c, s in self.bm25.search(query, limit * 3)]

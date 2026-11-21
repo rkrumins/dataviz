@@ -24,6 +24,7 @@ from backend.common.interfaces.native_query import NativeQueryRefused
 
 from .agent import predicates as P
 from .agent import tools as T
+from .agent.brief import fit
 from .agent.events import Turn
 from .agent.grounding import Grounding
 from .agent.policy import DataPolicy
@@ -87,12 +88,24 @@ the graph's labels and relationship types from CONTEXT. Facts about the graph:
 Reply with ONLY a JSON object: {{"cypher": "<query>", "explanation": "<one plain sentence>"}}"""
 
 
+def _graph_facts(g: Grounding) -> str:
+    """Facts about this graph that the generic Cypher rules get wrong."""
+    facts = []
+    if g.type_property:
+        kinds = ", ".join(f"'{v['value']}'" for v in g.display_types()[:12])
+        facts.append(f"every entity is labelled :{g.type_property['on']}; what kind of thing it is is "
+                     f"n.{g.type_property['key']}" + (f" (values {kinds})" if kinds else ""))
+    if g.schema is not None and g.schema.get("entityTypes") and not g.containment_edge_types:
+        facts.append("no relationship type is containment: there is no hierarchy to walk")
+    return ("\nGRAPH FACTS: " + "; ".join(facts) + ".") if facts else ""
+
+
 async def draft(*, provider, client: PlatformClient, grounding: Grounding, policy: DataPolicy,
                 question: str, mode: str, current_predicate: Optional[dict], choices: dict,
                 session_scope, user_id: str) -> dict:
-    card = policy.to_model_text(grounding_text(grounding), limit=14000)
+    card = fit(grounding_text(grounding), policy, limit=14000)
     if mode == "cypher":
-        return await _draft_cypher(provider, card, question)
+        return await _draft_cypher(provider, card + _graph_facts(grounding), question)
     return await _draft_search(provider, client, grounding, policy, card, question,
                                current_predicate, choices, session_scope, user_id)
 

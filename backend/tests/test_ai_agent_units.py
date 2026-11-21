@@ -209,3 +209,84 @@ def test_the_service_holds_none_of_the_web_tier():
                          cwd=__import__("pathlib").Path(__file__).resolve().parents[2])
     assert out.returncode == 0, out.stderr[-2000:]
     assert out.stdout.strip().splitlines()[-1] == "[]"
+
+
+# ── The shape of a data source ──────────────────────────────────────────
+
+from backend.ai_service.agent import brief as B
+from backend.ai_service.agent.grounding import Grounding, Target
+
+
+def _prop(key, values, *, on="Node", total=500, kind="String", distinct=None):
+    count = sum(n for _, n in values) if values else total
+    return {"key": key, "count": count, "kinds": {kind: count}, "byEntityType": {on: count},
+            "distinct": distinct if distinct is not None else len(values), "distinctExact": True,
+            "values": [{"value": v, "count": n} for v, n in values]}
+
+
+KIND = _prop("kind", [("table", 300), ("column", 150), ("dashboard", 30), ("job", 20)])
+
+
+def _catalog(*props, types=(("Node", 500),)):
+    return {"entities": sum(n for _, n in types), "entityTypes": [{"type": t, "count": n} for t, n in types],
+            "properties": list(props)}
+
+
+def test_the_detector_finds_what_kind_each_entity_is():
+    found = B.detect_type_property(_catalog(KIND, _prop("name", [], distinct=480)), None, None)
+    assert [c["key"] for c in found] == ["kind"] and found[0]["on"] == "Node" and found[0]["coverage"] == 1.0
+
+
+def test_the_detector_leaves_real_schemas_alone():
+    # Three populated types with real names: nothing to detect.
+    three = _catalog(_prop("kind", [("a", 10), ("b", 10)], on="table"),
+                     types=(("table", 300), ("column", 150), ("dashboard", 50)))
+    assert B.detect_type_property(three, None, None) == []
+    # A column-heavy view of a two-type source: a column's data type is not a kind of thing.
+    data_type = _prop("dataType", [("varchar", 200), ("int", 100), ("date", 50)], on="column")
+    assert B.detect_type_property(_catalog(data_type, types=(("column", 350), ("table", 20))), None, None) == []
+    # Identities, near-constant keys and sentences don't qualify.
+    constant = _prop("source", [("prod", 499), ("dev", 1)])
+    prose = _prop("note", [("this is a long free text note about it", 250), ("another long note here ok", 250)])
+    assert B.detect_type_property(_catalog(constant, prose), None, None) == []
+
+
+def test_hierarchy_chains_read_top_to_bottom():
+    schema = {"entityTypes": [{"id": "platform", "canContain": ["schema"]}, {"id": "schema", "canContain": ["table"]},
+                              {"id": "table", "canContain": ["table", "column"]}, {"id": "column"}],
+              "relationshipTypes": [{"class": "containment", "from": ["platform"], "to": ["dashboard"]}]}
+    chains = B.hierarchy_chains(schema)
+    assert chains[0] == ["platform", "schema", "table", "column"] and ["platform", "dashboard"] in chains
+
+
+def test_kinds_of_thing_are_read_through_the_type_property():
+    out = P.rewrite_types({"kind": "group", "op": "and", "children": [
+        {"kind": "entityType", "op": "in", "values": ["table", "Node"]},
+        {"kind": "entityType", "op": "notIn", "values": ["job"]}]}, on="Node", key="kind", kinds={"table", "job"})
+    keep, drop = out["children"]
+    assert keep["op"] == "or" and {"kind": "entityType", "op": "in", "values": ["Node"]} in keep["children"]
+    assert drop["op"] == "not" and drop["children"][0]["children"][1]["value"] == ["job"]
+    assert P.validate(out)
+
+
+def test_the_card_fits_its_budget_by_shedding_detail():
+    card = {"entityTypes": [{"id": f"t{i}", "description": "x" * 150} for i in range(40)],
+            "relationships": [{"id": f"R{i}", "description": "y" * 150} for i in range(40)],
+            "properties": [{"key": f"p{i}", "values": [{"value": "v" * 40, "count": 1}] * 6} for i in range(60)],
+            "tags": [{"tag": f"tag{i}", "count": i} for i in range(40)]}
+    policy = DataPolicy(max_result_rows=200)
+    text = B.fit(card, policy, limit=8000)
+    assert len(text) <= 8000 and "(truncated)" not in text and json.loads(text)["entityTypes"][0]["id"] == "t0"
+
+
+def test_terminal_types_and_owner_keys_come_from_the_data():
+    g = Grounding(target=Target(), schema={"relationshipTypes": [
+        {"class": "lineage", "from": ["table"], "to": ["table", "dashboard"]},
+        {"class": "containment", "from": ["db"], "to": ["table"]}]},
+        catalog={"properties": [{"key": "owning_team", "count": 9}, {"key": "data_steward", "count": 30},
+                                {"key": "rowCount", "count": 99}]})
+    assert g.terminal_types() == {"dashboard"}
+    assert g.owner_keys("owner") == ["owner", "data_steward", "owning_team"]
+    g.type_property, g.value_sets = {"on": "Node", "key": "kind"}, {"kind": [{"value": "table", "count": 3}]}
+    assert g.display_type({"entityType": "Node", "properties": {"kind": "table"}}) == "table"
+    assert g.display_type({"entityType": "Other", "properties": {"kind": "table"}}) == "Other"

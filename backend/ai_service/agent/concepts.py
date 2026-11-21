@@ -54,6 +54,66 @@ LEXICON: dict[str, tuple[str, ...]] = {
 
 _MAX_CANDIDATES = 8
 
+#: The reading of "what kind of thing each entity is" in a data source that
+#: keeps everything under one generic type (``brief.detect_type_property``).
+TYPE_CONCEPT = "entity type"
+
+
+def is_type_concept(name: Any) -> bool:
+    return norm(name) == norm(TYPE_CONCEPT)
+
+
+def type_property_predicate(on: str, key: str) -> dict:
+    return {"kind": "group", "op": "and", "children": [
+        {"kind": "entityType", "op": "in", "values": [on]}, {"kind": "hasProperty", "key": key}]}
+
+
+def type_property_from(predicate: Any) -> Optional[dict]:
+    """``{"on": "Node", "key": "kind"}`` from a confirmed reading, or None."""
+    if not isinstance(predicate, dict) or predicate.get("op") != "and":
+        return None
+    on = key = None
+    for child in predicate.get("children") or []:
+        if not isinstance(child, dict):
+            continue
+        if child.get("kind") == "entityType" and len(child.get("values") or []) == 1:
+            on = str(child["values"][0])
+        elif child.get("kind") == "hasProperty" and child.get("key"):
+            key = str(child["key"])
+    return {"on": on, "key": key} if on and key else None
+
+
+def type_candidates(grounding) -> list["Candidate"]:
+    """The detected type properties as readings to choose from, counted
+    already: how many of the generic type carry each."""
+    out = []
+    for c in grounding.type_candidates:
+        kinds = " · ".join(f"{v['value']} {v['count']:,}" for v in c["values"][:4])
+        more = len(c["values"]) - 4
+        on_count = grounding.type_counts().get(c["on"]) or 0
+        cand = Candidate(
+            id="", label=f"The property “{c['key']}”",
+            description=kinds + (f" · {more} more" if more > 0 else ""),
+            predicate=type_property_predicate(c["on"], c["key"]), kind="property",
+            property_key=c["key"], count=int(round(c["coverage"] * on_count)) or None, exact=False,
+        )
+        cand.id = option_id(cand.predicate)
+        out.append(cand)
+    return out
+
+
+async def load_type_property(session, state, *, data_source_id: Optional[str],
+                             user_id: str) -> Optional[dict]:
+    """The confirmed type property: this conversation's, else the person's
+    remembered one, else the workspace's."""
+    if not data_source_id:
+        return None
+    confirmed = state.confirmed(TYPE_CONCEPT, data_source_id) if state is not None else None
+    if confirmed:
+        return type_property_from(confirmed.get("predicate"))
+    row = await stored(session, data_source_id=data_source_id, user_id=user_id, concept=TYPE_CONCEPT)
+    return type_property_from(json.loads(row.predicate)) if row is not None else None
+
 
 def option_id(predicate: dict) -> str:
     """Stable for the same reading, so a choice made on one request can be
@@ -322,16 +382,17 @@ async def count(client, target, candidates: list[Candidate], *, scope_mode: str,
 
 
 def clarification(concept: str, candidates: list[Candidate], *, applies_label: str,
-                  data_source_id: Optional[str] = None) -> dict:
+                  data_source_id: Optional[str] = None, question: Optional[str] = None,
+                  allow_any: bool = True) -> dict:
     options = [c.option() for c in candidates]
     live = [c for c in candidates if c.count]
-    if len(live) >= 2:
+    if allow_any and len(live) >= 2:
         options.append({
             "id": "opt_any", "label": "Any of these",
             "description": f"{applies_label} matching any reading above", "count": None,
         })
     no_exact = not any(c.exact for c in candidates)
-    question = (
+    question = question or (
         f"There's nothing called “{concept}” in this data source. Which of these means {concept} here?"
         if no_exact else f"“{concept}” could mean more than one thing here. Which do you mean?"
     )

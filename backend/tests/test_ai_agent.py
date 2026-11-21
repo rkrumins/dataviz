@@ -61,19 +61,43 @@ class FakePlatform:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, Any]] = []
+        self.params: list[tuple[str, dict]] = []
         self.counts = {"tag:pii": 312, "property:personal_data": 290}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         body = json.loads(request.content) if request.content else None
         self.calls.append((request.method, path, body))
+        self.params.append((path, dict(request.url.params)))
         assert request.headers.get("authorization", "").startswith("Bearer nxdlg_") or path in (
             "/api/v1/features/values", "/api/v1/branding",
         )
         if path == f"/api/v1/views/{VIEW}":
-            return httpx.Response(200, json={"id": VIEW, "name": "Customer lineage", "workspaceId": WS,
-                                             "dataSourceId": DS, "dataSourceName": "CRM lake",
-                                             "workspaceName": "Data", "description": "CRM to BI"})
+            return httpx.Response(200, json={
+                "id": VIEW, "name": "Customer lineage", "workspaceId": WS, "dataSourceId": DS,
+                "dataSourceName": "CRM lake", "workspaceName": "Data", "description": "CRM to BI",
+                "layoutType": "reference", "createdByName": "Grace", "tags": ["crm"],
+                "config": {"layout": {"type": "reference", "referenceLayout": {"layers": [
+                    {"id": "l2", "name": "Marts", "order": 1, "entityTypes": ["dataset"],
+                     "description": "Modelled tables"},
+                    {"id": "l1", "name": "Sources", "order": 0, "entityTypes": ["container"]},
+                ]}}}})
+        if path == "/api/v1/admin/workspaces":
+            return httpx.Response(200, json=[{"id": WS, "name": "Data", "description": "Analytics",
+                                              "dataSources": [{"id": DS, "label": "CRM lake",
+                                                               "ontologyId": "onto_1", "catalogItemId": "cat_1"}]}])
+        if path == "/api/v1/admin/ontologies/onto_1":
+            return httpx.Response(200, json={"id": "onto_1", "name": "Lineage core"})
+        if path == f"/api/v1/{WS}/graph/introspection":
+            return httpx.Response(200, json={"data": {
+                "totalNodes": 9000, "totalEdges": 20000,
+                "entityTypeStats": [{"id": "schemaField", "name": "schemaField", "count": 7000,
+                                     "sampleNames": ["secret_outside_the_view"]},
+                                    {"id": "dataset", "name": "dataset", "count": 900}],
+                "edgeTypeStats": [{"id": "CONTAINS", "name": "CONTAINS", "count": 8000},
+                                  {"id": "TRANSFORMS", "name": "TRANSFORMS", "count": 5000},
+                                  {"id": "AGGREGATED", "name": "AGGREGATED", "count": 300}],
+            }, "meta": {"status": "fresh"}})
         if path == "/api/v1/views/":
             q = request.url.params.get("search", "")
             if "supplier" in q or "supply" in q:
@@ -93,8 +117,14 @@ class FakePlatform:
                 "entityTypes": [{"id": t, "name": t.title(), "pluralName": t + "s",
                                  "hierarchy": {"level": i}} for i, t in
                                 enumerate(["container", "dataset", "schemaField", "dataJob", "dashboard"])],
-                "relationshipTypes": [{"id": "CONTAINS", "name": "Contains", "isContainment": True},
-                                      {"id": "TRANSFORMS", "name": "Transforms", "isLineage": True}],
+                "relationshipTypes": [{"id": "CONTAINS", "name": "Contains", "isContainment": True,
+                                       "sourceTypes": ["container", "dataset"],
+                                       "targetTypes": ["dataset", "schemaField"],
+                                       "description": "Relationship type: CONTAINS"},
+                                      {"id": "TRANSFORMS", "name": "Transforms", "isLineage": True,
+                                       "category": "flow", "description": "One column computed from another"},
+                                      {"id": "CONSUMES", "name": "Consumes", "isLineage": True,
+                                       "sourceTypes": ["schemaField"], "targetTypes": ["dashboard"]}],
                 "containmentEdgeTypes": ["CONTAINS"], "lineageEdgeTypes": ["TRANSFORMS", "PRODUCES"],
             }})
         if path == f"/api/v1/{WS}/graph/search/catalog":
@@ -262,9 +292,10 @@ HEADERS = {"X-AI-User-Id": "user_1", "X-AI-User-Name": "Ada", "X-AI-User-Email":
            "X-AI-Delegation": "nxdlg_test"}
 
 
-async def chat(app, body: dict) -> list[tuple[str, Any]]:
+async def chat(app, body: dict, headers: dict | None = None) -> list[tuple[str, Any]]:
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://ai") as client:
-        response = await client.post("/chat/stream", json=body, headers=HEADERS, timeout=30)
+        response = await client.post("/chat/stream", json=body, headers={**HEADERS, **(headers or {})},
+                                     timeout=30)
         assert response.status_code == 200, response.text
         events = []
         for frame in response.text.split("\n\n"):
@@ -461,3 +492,256 @@ async def test_requests_without_a_caller_are_refused(world):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=world.app), base_url="http://ai") as client:
         response = await client.post("/chat/stream", json={"message": "hi"})
     assert response.status_code == 401
+
+
+# ── What the assistant knows about where the person is ──────────────────
+
+
+async def context_card(app, headers: dict | None = None, **params) -> httpx.Response:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://ai") as client:
+        return await client.get("/context", params=params, headers={**HEADERS, **(headers or {})})
+
+
+def model_context(model: "ScriptedModel") -> str:
+    return next(m["content"] for m in model.requests[0]["messages"]
+                if m["role"] == "system" and m["content"].startswith("CONTEXT"))
+
+
+async def test_the_context_card_holds_layers_types_hierarchy_and_connections(world):
+    response = await context_card(world.app, viewId=VIEW)
+    assert response.status_code == 200, response.text
+    brief = response.json()
+    assert brief["kind"] == "view"
+    about = brief["about"]
+    assert (about["name"], about["semanticLayer"], about["owner"], about["layout"]) == (
+        "Customer lineage", "Lineage core", "Grace", "reference")
+    assert [layer["name"] for layer in brief["layers"]] == ["Sources", "Marts"]
+    assert brief["hierarchy"]["chains"][0] == ["container", "dataset", "schemaField"]
+    connections = {c["id"]: c for c in brief["connections"]}
+    assert connections["CONTAINS"]["class"] == "containment" and connections["CONTAINS"]["count"] == 8000
+    assert connections["CONTAINS"]["description"] is None          # the platform's placeholder is dropped
+    assert connections["CONSUMES"]["to"] == ["dashboard"]
+    assert "AGGREGATED" not in connections
+    types = {t["id"]: t for t in brief["types"]}
+    assert (types["schemaField"]["inView"], types["schemaField"]["inSource"]) == (3200, 7000)
+    assert brief["contents"]["entities"] == 4000
+    assert "secret_outside_the_view" not in response.text        # introspection's sample names never leave
+
+
+async def test_the_model_sees_the_brief_within_its_budget(world):
+    model = world.script(["Fine."])
+    await chat(world.app, {"message": "What is this view about?", "context": CONTEXT})
+    text = model_context(model)
+    assert "Sources" in text and "container › dataset › schemaField" in text and "Lineage core" in text
+    assert "(truncated)" not in text and len(text) < 16_100
+
+
+async def test_describe_context_shows_the_card(world):
+    world.script([[("describe_context", {})], "Here is what I know about it."])
+    events = await chat(world.app, {"message": "What do you know about this view?", "context": CONTEXT})
+    card = next(b["data"] for b in of(events, "block") if b["type"] == "context")
+    assert card["about"]["name"] == "Customer lineage" and card["layers"]
+
+
+async def test_descriptions_stay_with_the_person_when_the_policy_withholds_them(world):
+    async with ai_db.session_scope() as session:
+        await settings_store.save(session, {"dataPolicy": {"sendDescriptions": False}}, user_id="admin")
+    model = world.script(["Fine."])
+    await chat(world.app, {"message": "What is this?", "context": CONTEXT})
+    text = model_context(model)
+    assert "CRM to BI" not in text and "One column computed" not in text
+    assert "CRM to BI" in (await context_card(world.app, viewId=VIEW)).text
+
+
+async def test_graph_reads_name_the_view(world):
+    world.script(["Fine."])
+    await chat(world.app, {"message": "What is this?", "context": {**CONTEXT, "workspaceId": "ws_elsewhere"}})
+    graph_reads = [(path, params) for path, params in world.platform.params if "/graph/" in path]
+    assert graph_reads and all(params.get("viewId") == VIEW for _, params in graph_reads)
+    assert all(path.startswith(f"/api/v1/{WS}/") for path, _ in graph_reads)   # the view's workspace wins
+
+
+async def test_a_shared_view_keeps_searches_inside_it(world):
+    world.script([[("search_entities", {"title": "All", "scope": "data_source",
+                                        "predicate": {"kind": "tag", "op": "has", "values": ["pii"]}})],
+                  "Done."])
+    await chat(world.app, {"message": "everything tagged pii", "context": CONTEXT}, headers={"X-AI-Reach": "view"})
+    sent = next(c for c in world.platform.calls if c[1].endswith("/search/advanced"))[2]
+    assert sent["scope"]["scopeMode"] == "view"
+    brief = (await context_card(world.app, headers={"X-AI-Reach": "view"}, viewId=VIEW)).json()
+    assert "view_only" in {c["code"] for c in brief["caveats"]}
+
+
+async def test_help_on_a_docs_page_knows_the_page(world):
+    model = world.script(["It explains sharing [1]."])
+    await chat(world.app, {"message": "Summarise this page", "persona": "help", "context": {
+        "page": {"kind": "doc", "id": "/guide/managing-views", "title": "Managing & Sharing Views"}}})
+    assert "Share with people" in model_context(model)
+    brief = (await context_card(world.app, pageKind="doc", pageId="/guide/managing-views")).json()
+    assert brief["kind"] == "doc" and brief["headings"] == ["Share with people"]
+
+
+# ── A data source with a generic schema ─────────────────────────────────
+
+G_TABLE, G_COL, G_JOB, G_DASH = "urn:g:orders", "urn:g:orders.total", "urn:g:load_orders", "urn:g:revenue"
+G_NODES = {
+    G_TABLE: node(G_TABLE, "orders", "Node", kind="table", owner_team="sales-eng"),
+    G_COL: node(G_COL, "total", "Node", kind="column"),
+    G_JOB: node(G_JOB, "load_orders", "Node", kind="job", cron="0 4 * * *"),
+    G_DASH: node(G_DASH, "Revenue board", "Node", kind="dashboard", owner_team="bi"),
+}
+
+
+class GenericPlatform(FakePlatform):
+    """Everything is a ``Node``; its ``kind`` says what it is; one edge type;
+    no semantic layer, so no hierarchy."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = json.loads(request.content) if request.content else None
+        if path == f"/api/v1/views/{VIEW}":
+            self.calls.append((request.method, path, body))
+            return httpx.Response(200, json={"id": VIEW, "name": "Everything", "workspaceId": WS,
+                                             "dataSourceId": DS, "dataSourceName": "Graph"})
+        if path == "/api/v1/admin/workspaces":
+            return httpx.Response(200, json=[{"id": WS, "name": "Data", "dataSources": [
+                {"id": DS, "label": "Graph", "ontologyId": None}]}])
+        if path == f"/api/v1/{WS}/graph/metadata/schema":
+            return httpx.Response(200, json={"data": {
+                "entityTypes": [{"id": "Node", "name": "Node", "description": "Entity type: Node"}],
+                "relationshipTypes": [{"id": "RELATED", "name": "RELATED", "isLineage": True,
+                                       "sourceTypes": ["Node"], "targetTypes": ["Node"]}],
+                "containmentEdgeTypes": [], "lineageEdgeTypes": ["RELATED"],
+            }, "meta": {"status": "fresh"}})
+        if path == f"/api/v1/{WS}/graph/introspection":
+            return httpx.Response(200, json={"data": {
+                "totalNodes": 500, "totalEdges": 900,
+                "entityTypeStats": [{"id": "Node", "name": "Node", "count": 500}],
+                "edgeTypeStats": [{"id": "RELATED", "name": "RELATED", "count": 900}]}})
+        if path == f"/api/v1/{WS}/graph/search/catalog":
+            return httpx.Response(200, json={
+                "sessionId": "g1", "status": "complete", "entities": 500,
+                "entityTypes": [{"type": "Node", "count": 500}],
+                "properties": [
+                    {"key": "kind", "count": 500, "kinds": {"String": 500}, "byEntityType": {"Node": 500},
+                     "distinct": 4, "distinctExact": True,
+                     "values": [{"value": v, "kind": "String", "count": n}
+                                for v, n in (("table", 300), ("column", 150), ("dashboard", 30), ("job", 20))]},
+                    {"key": "name", "count": 500, "kinds": {"String": 500}, "byEntityType": {"Node": 500},
+                     "distinct": 480, "distinctExact": True, "values": []},
+                    {"key": "owner_team", "count": 400, "kinds": {"String": 400}, "byEntityType": {"Node": 400},
+                     "distinct": 3, "distinctExact": True,
+                     "values": [{"value": "sales-eng", "kind": "String", "count": 300}]},
+                    {"key": "cron", "count": 20, "kinds": {"String": 20}, "byEntityType": {"Node": 20},
+                     "distinct": 2, "distinctExact": True, "values": []},
+                ],
+                "tags": [],
+            })
+        if path.startswith(f"/api/v1/{WS}/graph/nodes/") and path.endswith("/ancestors"):
+            self.calls.append((request.method, path, body))
+            return httpx.Response(200, json=[])
+        if path.startswith(f"/api/v1/{WS}/graph/nodes/"):
+            from urllib.parse import unquote
+            return httpx.Response(200, json=G_NODES[unquote(path.split("/nodes/", 1)[1])])
+        if path == f"/api/v1/{WS}/graph/trace/closure":
+            return httpx.Response(200, json={
+                "nodes": list(G_NODES.values()),
+                "edges": [{"id": "e1", "sourceUrn": G_COL, "targetUrn": G_JOB, "edgeType": "RELATED"},
+                          {"id": "e2", "sourceUrn": G_JOB, "targetUrn": G_DASH, "edgeType": "RELATED"}],
+                "containmentEdges": [], "downstreamUrns": [G_JOB, G_DASH], "upstreamUrns": [],
+                "focus": {"urn": G_COL}, "truncated": False, "frontierDown": [], "frontierUp": [],
+            })
+        return super().__call__(request)
+
+
+def use_generic(world) -> GenericPlatform:
+    platform = GenericPlatform()
+    world.app.state.platform_transport = httpx.MockTransport(platform)
+    world.platform = platform
+    return platform
+
+
+async def test_a_generic_schema_is_diagnosed(world):
+    use_generic(world)
+    brief = (await context_card(world.app, viewId=VIEW)).json()
+    assert (brief["typeProperty"]["status"], brief["typeProperty"]["key"], brief["typeProperty"]["on"]) == (
+        "suggested", "kind", "Node")
+    assert [v["value"] for v in brief["typeProperty"]["values"]] == ["table", "column", "dashboard", "job"]
+    codes = {c["code"] for c in brief["caveats"]}
+    assert {"few_types", "no_containment", "lineage_by_default"} <= codes
+    assert next(c for c in brief["caveats"] if c["code"] == "few_types")["action"] == "confirm_type"
+
+
+TABLES = {"kind": "entityType", "op": "in", "values": ["tables"]}
+
+
+def reads_through_kind(predicate: dict) -> bool:
+    """``Node`` whose ``kind`` is ``table`` — the validated rule may add defaults."""
+    on, prop = predicate["children"]
+    return (predicate["op"] == "and" and on == {"kind": "entityType", "op": "in", "values": ["Node"]}
+            and {k: prop[k] for k in ("kind", "key", "op", "value")} ==
+            {"kind": "property", "key": "kind", "op": "in", "value": ["table"]})
+
+
+async def test_the_type_property_is_asked_once_then_used(world):
+    use_generic(world)
+    world.script([[("search_entities", {"title": "Tables", "predicate": TABLES})]])
+    events = await chat(world.app, {"message": "How many tables are there?", "context": CONTEXT})
+    clarify = of(events, "clarify")[0]
+    assert events[-1] == ("done", {"status": "clarify"})
+    assert "Which property says what kind of thing" in clarify["question"]
+    option = clarify["options"][0]
+    assert option["label"] == "The property “kind”" and "table 300" in option["description"]
+    assert not any(o["id"] == "opt_any" for o in clarify["options"])
+    assert not any(c[1].endswith("/search/advanced") for c in world.platform.calls)
+
+    world.script([[("search_entities", {"title": "Tables", "predicate": TABLES})], "There are 300 tables."])
+    await chat(world.app, {"conversationId": events[0][1]["conversationId"], "message": "",
+                           "clarification": {"id": clarify["id"], "optionId": option["id"], "remember": True},
+                           "context": CONTEXT})
+    sent = next(c for c in world.platform.calls if c[1].endswith("/search/advanced"))[2]
+    assert reads_through_kind(sent["predicate"])
+    assert sent["options"]["aggregations"][0] == {"by": "property", "propertyKey": "kind", "maxBuckets": 12,
+                                                  "sampleHitsPerBucket": 0}
+    async with ai_db.session_scope() as session:
+        from sqlalchemy import select
+        mapping = (await session.execute(select(AiConceptMappingORM))).scalar_one()
+    assert (mapping.concept, mapping.scope) == ("entitytype", "personal")
+
+    world.platform.calls.clear()
+    world.script([[("search_entities", {"title": "Tables", "predicate": TABLES})], "300."])
+    events = await chat(world.app, {"message": "And tables again?", "context": CONTEXT})
+    assert not of(events, "clarify")
+    sent = next(c for c in world.platform.calls if c[1].endswith("/search/advanced"))[2]
+    assert reads_through_kind(sent["predicate"])
+    brief = (await context_card(world.app, viewId=VIEW)).json()
+    assert brief["typeProperty"]["status"] == "confirmed"
+    assert "few_types" not in {c["code"] for c in brief["caveats"]}
+
+
+async def test_an_unknown_type_goes_back_to_the_model(world):
+    model = world.script([[("search_entities", {"title": "x", "predicate": {
+        "kind": "entityType", "op": "in", "values": ["spaceship"]}})], "Sorry."])
+    await chat(world.app, {"message": "spaceships?", "context": CONTEXT})
+    tool_message = next(m for m in model.requests[1]["messages"] if m["role"] == "tool")
+    assert "Unknown entity type(s): spaceship" in tool_message["content"] and "schemaField" in tool_message["content"]
+
+
+async def test_impact_on_a_generic_schema_finds_sinks_owners_and_schedules(world):
+    use_generic(world)
+    async with ai_db.session_scope() as session:
+        session.add(AiConceptMappingORM(
+            workspace_id=WS, data_source_id=DS, scope="workspace", concept="entitytype",
+            label="The property “kind” on Node", created_at="x", updated_at="x",
+            predicate=json.dumps({"kind": "group", "op": "and", "children": [
+                {"kind": "entityType", "op": "in", "values": ["Node"]}, {"kind": "hasProperty", "key": "kind"}]})))
+    world.script([[("analyze_impact", {"urn": G_COL, "change": "drop"})], "It breaks the Revenue board."])
+    events = await chat(world.app, {"message": "What breaks if total is dropped?", "context": CONTEXT})
+    report = next(b["data"] for b in of(events, "block") if b["type"] == "impact")
+    assert [(c["name"], c["type"]) for c in report["consumers"]] == [("Revenue board", "dashboard")]
+    assert report["target"]["type"] == "column"
+    assert "bi" in {o["owner"] for o in report["owners"]}
+    assert report["timing"]["schedules"][0]["job"]["name"] == "load_orders"
+    assert report["timing"]["schedules"][0]["human"] == "daily at 04:00 UTC"
+    assert "Show only the dashboards" in of(events, "followups")[0]
+
