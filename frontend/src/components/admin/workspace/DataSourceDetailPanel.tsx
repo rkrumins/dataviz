@@ -40,6 +40,7 @@ import { DataSourceActionMenu } from './DataSourceActionMenu'
 import { DataSourceLifecycle, MovedFromChip } from '@/features/data-source-transfer/DataSourceLifecycle'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
+import { DataContactsCard } from './DataContactsCard'
 
 // ─────────────────────────────────────────────────────────────────────
 // Props
@@ -458,8 +459,9 @@ export function DataSourceDetailPanel({
                             </div>
                             ) : (<>
                             {/* ─── Insights Tab ─────────────────────────── */}
-                            {activeTab === 'insights' && (
-                                ds.catalogItemId ? (
+                            {activeTab === 'insights' && (<div className="space-y-5">
+                                <DataContactsCard wsId={wsId} dsId={ds.id} />
+                                {ds.catalogItemId ? (
                                     <DataSourceProfile
                                         catalogId={ds.catalogItemId}
                                         context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName, identityProperty: ds.identityProperty, nameProperty: ds.nameProperty } satisfies DataSourceProfileContext}
@@ -468,8 +470,8 @@ export function DataSourceDetailPanel({
                                     />
                                 ) : (
                                     <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>
-                                )
-                            )}
+                                )}
+                            </div>)}
 
                             {/* ─── Profiling Tab ────────────────────────── */}
                             {activeTab === 'profiling' && (

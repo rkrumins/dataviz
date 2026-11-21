@@ -167,7 +167,7 @@ export function OverviewViewGrid({ wsId, views, layout = 'cards', meta }: {
                     viewId={sharing.id}
                     viewName={sharing.name}
                     currentVisibility={sharing.visibility}
-                    workspaceId={wsId}
+                    workspaceId={sharing.workspaceId || wsId}
                     isOpen
                     onClose={() => { setSharing(null); refresh() }}
                 />
