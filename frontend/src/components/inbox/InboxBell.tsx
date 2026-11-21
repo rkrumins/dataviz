@@ -135,6 +135,33 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         icon: 'text-emerald-500',
         tile: 'bg-emerald-500/10',
     },
+    // Asking for a workspace of one's own: the ask (and an answer to a question) reaches the
+    // platform team; approval, a question or a no reaches the person who asked.
+    'workspace_request.submitted': {
+        Icon: Building2,
+        icon: 'text-violet-500',
+        tile: 'bg-violet-500/10',
+    },
+    'workspace_request.resubmitted': {
+        Icon: Building2,
+        icon: 'text-violet-500',
+        tile: 'bg-violet-500/10',
+    },
+    'workspace_request.approved': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'workspace_request.sent_back': {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'workspace_request.declined': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
     // A request nobody has answered, brought up again — then to the Org Admins.
     'access_request.reminder': {
         Icon: Clock,

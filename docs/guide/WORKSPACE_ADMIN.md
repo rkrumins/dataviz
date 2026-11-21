@@ -335,6 +335,16 @@ straight in.
 
 ---
 
+### Workspaces people ask for
+
+People who can't create workspaces may ask for one (while **Workspace requests** is on
+in [Feature Switches](/guide/feature-switches)). As someone who creates workspaces, you
+answer them on **Workspaces → Requests**, under **Requests for new workspaces**:
+approve one (tidying its name first if you like), send it back with a question, or
+decline it. Approving creates the workspace with the requester as its admin, adds the
+teammates they named and moves the Playground graphs they chose. See
+[Requesting a Workspace](/guide/requesting-a-workspace#for-platform-and-org-admins-answer-requests).
+
 ## Adding a data source
 
 A workspace isn't usable until it has at least one **data source** — a catalog

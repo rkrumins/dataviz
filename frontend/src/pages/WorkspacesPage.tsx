@@ -16,6 +16,9 @@ import { WorkspaceCard, type WsDataSourceProviderInfo, type WorkspaceSchemaSumma
 import { useWorkspaceUsage } from '@/hooks/useContentInsights'
 import { WorkspaceFilterToolbar, type WorkspaceSortKey, type HealthFilter } from '@/components/admin/workspace/WorkspaceFilterToolbar'
 import { PlaygroundCard } from '@/components/playground/PlaygroundCard'
+import { WorkspaceRequestPrompt } from '@/components/workspace-requests/WorkspaceRequestCard'
+import { WORKSPACE_REQUESTS_FEATURE, useRequestWorkspaceWizard, useWorkspaceRequestsToAnswer } from '@/hooks/useWorkspaceRequests'
+import { WorkspaceRequestsPanel } from '@/components/workspace-requests/WorkspaceRequestsPanel'
 import { WorkspaceListRow, WORKSPACE_LIST_GRID } from '@/components/admin/workspace/WorkspaceListRow'
 import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHealthBadge'
@@ -76,6 +79,9 @@ export function WorkspacesPage() {
     // system:workspaces:create (workspaces.py:100). Hiding the CTA for
     // users who can't create avoids a wizard-open → submit → 403 dance.
     const canCreateWorkspace = useAuthStore(s => s.can('system:workspaces:create'))
+    // Someone who can't create one may ask the platform team for a workspace of their own.
+    const requestsOn = useFeature(WORKSPACE_REQUESTS_FEATURE)
+    const openRequestWizard = useRequestWorkspaceWizard(s => s.openWizard)
 
     useDocumentTitle('Workspaces')
 
@@ -437,7 +443,10 @@ export function WorkspacesPage() {
     const { requests: waiting } = useRequestsToAnswer('open', { enabled: canAnswer })
     // Data sources waiting to move into a workspace the reader runs wait here too.
     const { transfers: incoming } = useIncomingTransfers('open', { enabled: canAnswer })
-    const waitingCount = waiting || incoming ? (waiting?.length ?? 0) + (incoming?.length ?? 0) : null
+    // And requests for new workspaces, for the people who create them.
+    const newWorkspaces = useWorkspaceRequestsToAnswer('open').data?.filter(r => r.status === 'pending')
+    const waitingCount = waiting || incoming || newWorkspaces
+        ? (waiting?.length ?? 0) + (incoming?.length ?? 0) + (newWorkspaces?.length ?? 0) : null
     const tabParam = searchParams.get('tab')
     const tab: 'mine' | 'discover' | 'requests' =
         canAnswer && tabParam === 'requests'
@@ -500,6 +509,11 @@ export function WorkspacesPage() {
                 </div>
                 <div className="flex items-center gap-2">
                     <TourLaunchButton tourId="workspaces" />
+                    {!canCreateWorkspace && requestsOn && (
+                        <button type="button" onClick={() => openRequestWizard()} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-sm font-semibold shadow-lg shadow-violet-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
+                            <Plus className="w-4 h-4" /> Request a workspace
+                        </button>
+                    )}
                     {canCreateWorkspace && (
                         <button data-tour="workspaces-create" onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
                             <Plus className="w-4 h-4" /> Create Workspace
@@ -551,6 +565,7 @@ export function WorkspacesPage() {
 
             {tab === 'requests' && (
                 <div className="space-y-4">
+                    <WorkspaceRequestsPanel hideWhenEmpty />
                     <TransferRequestsPanel />
                     <ReviewRequestsPanel />
                 </div>
@@ -558,8 +573,10 @@ export function WorkspacesPage() {
 
             {tab === 'mine' && (
                 <>
-                    {/* The shared sandbox, pinned first: join it, open it, or set it up. */}
+                    {/* The shared sandbox, pinned first: open it, or set it up. Then, for someone who can't
+                        create workspaces, where their request for one stands — or how to ask. */}
                     <PlaygroundCard compact className="mb-5" />
+                    <WorkspaceRequestPrompt className="mb-5" />
 
                     {/* A failed refresh used to erase the provider/ontology detail silently.
                         Now it keeps it and admits it might be stale. */}

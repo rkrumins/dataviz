@@ -45,6 +45,7 @@ import { useOverviewLayout, type OverviewLayout } from './overviewLayout'
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { SectionTitle } from './SectionTitle'
 import { PlaygroundExperiments } from './PlaygroundExperiments'
+import { WorkspaceRequestPrompt } from '@/components/workspace-requests/WorkspaceRequestCard'
 import type { DataSection, WorkspaceTab } from '../workspaceTabs'
 
 interface WorkspaceOverviewProps {
@@ -220,7 +221,13 @@ export function WorkspaceOverview({
                 {attention.length > 0 && <AttentionCard items={attention} />}
                 {/* The Playground has nothing to set up: it leads with the reader's own experiments. */}
                 {isPlayground
-                    ? <PlaygroundExperiments workspace={workspace} views={views} layout={layout} onNewGraph={onNewGraph} onOpenGraph={onOpenGraph ?? (() => onGoTo('data', 'sources'))} />
+                    ? (
+                        <>
+                            <PlaygroundExperiments workspace={workspace} views={views} layout={layout} onNewGraph={onNewGraph} onOpenGraph={onOpenGraph ?? (() => onGoTo('data', 'sources'))} />
+                            {/* Found their feet? The way to a workspace of their own, bringing their graphs. */}
+                            <WorkspaceRequestPrompt preselectedSourceIds={sources.filter(ds => !!me && ds.createdBy === me).map(ds => ds.id)} />
+                        </>
+                    )
                     : isManager && <SetupChecklist wsId={wsId} steps={steps} />}
 
                 {views.length === 0 ? (isPlayground ? null : (

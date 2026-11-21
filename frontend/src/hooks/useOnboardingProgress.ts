@@ -23,7 +23,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { LucideIcon } from 'lucide-react'
 import {
   DatabaseZap, Boxes, Layers, Compass, GitBranch, PlusCircle,
-  Users, ShieldCheck, GitPullRequest, DoorOpen,
+  Users, ShieldCheck, GitPullRequest, DoorOpen, FlaskConical, Rocket,
 } from 'lucide-react'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
@@ -32,6 +32,8 @@ import { listViews } from '@/services/viewApiService'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
+import { usePlayground } from '@/hooks/usePlayground'
+import { useMyWorkspaceRequests, WORKSPACE_REQUESTS_FEATURE } from '@/hooks/useWorkspaceRequests'
 
 /** The product tour the hub offers (as a persistent action, not a step). */
 export const GETTING_STARTED_TOUR = 'getting-started'
@@ -133,6 +135,12 @@ export function useOnboardingProgress(): OnboardingProgressResult {
   const canCreateWorkspace = usePermission('system:workspaces:create')
   const versioningEnabled = useFeature('versioningEnabled')
   const directoryEnabled = useFeature('workspaceDirectoryEnabled')
+  // The way in for someone who can't make a workspace: try the Playground, then ask for one.
+  const playground = usePlayground().data
+  const playgroundOpen = !!playground?.enabled && !!playground.exists
+  const playgroundJoined = !!playground?.joined
+  const requestsEnabled = useFeature(WORKSPACE_REQUESTS_FEATURE)
+  const asked = (useMyWorkspaceRequests().data?.length ?? 0) > 0
 
   // Who sees what. Setup is for people who can actually connect data; the
   // governance steps are admin/flag scoped. Explore is for everyone.
@@ -163,7 +171,14 @@ export function useOnboardingProgress(): OnboardingProgressResult {
           ? 'Find the workspace your team works in and ask to join — or join one open to everyone.'
           : 'Ask an administrator to add you, or open a link to a workspace and ask there.',
         DoorOpen, counts.workspaceCount > 0,
-        { href: directoryEnabled ? '/workspaces?tab=discover' : '/my/access', guideSlug: 'requesting-access' })]
+        { href: directoryEnabled ? '/workspaces?tab=discover' : '/my/access', guideSlug: 'requesting-access' }),
+        ...(playgroundOpen ? [makeStep('try-playground', 'Try the Playground',
+          'Build a graph of your own and try views out in the common area, apart from production.',
+          FlaskConical, playgroundJoined, { href: '/playground', guideSlug: 'playground' })] : []),
+        ...(requestsEnabled ? [makeStep('request-workspace', 'Ask for your own workspace',
+          'Ready for more? Ask the platform team for a workspace of your own — bring what you built in the Playground.',
+          Rocket, asked, { href: '/my/access?tab=workspaces', guideSlug: 'requesting-a-workspace' })] : []),
+      ]
       : []
     out.push(makeTrack('explore', 'Explore your data', 'See how everything connects', 'explore', Compass, [
       ...join,
@@ -184,7 +199,8 @@ export function useOnboardingProgress(): OnboardingProgressResult {
     }
 
     return out.filter((t): t is OnboardingTrack => t !== null)
-  }, [counts, manual, canSetup, canCreateWorkspace, directoryEnabled, isAdmin, versioningEnabled])
+  }, [counts, manual, canSetup, canCreateWorkspace, directoryEnabled, isAdmin, versioningEnabled,
+    playgroundOpen, playgroundJoined, requestsEnabled, asked])
 
   const allSteps = tracks.flatMap((t) => t.steps)
   const completedCount = allSteps.filter((s) => s.done).length

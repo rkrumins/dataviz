@@ -271,6 +271,14 @@ export const guideEntries: GuideEntry[] = [
     description: 'A sandbox anyone may join to build graphs of their own and try views out, apart from production',
     importFn: () => import('@docs/guide/PLAYGROUND.md?raw'),
   },
+  {
+    slug: 'requesting-a-workspace',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'Requesting a Workspace',
+    description: 'Ask the platform team for a workspace of your own, follow the request, and answer one',
+    importFn: () => import('@docs/guide/REQUESTING_A_WORKSPACE.md?raw'),
+  },
 
   // For Builders
   {

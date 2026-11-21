@@ -52,6 +52,7 @@ import {
 import { useFeature } from '@/store/features'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { MyWorkspaceRequestsPanel } from '@/components/workspace-requests/MyWorkspaceRequestsPanel'
 
 
 export function MyAccessPage() {
@@ -145,6 +146,7 @@ export function MyAccessPage() {
                 ) : access ? (
                     <>
                         <PlainEnglishSummary access={access} permissions={permissions ?? []} />
+                        <MyWorkspaceRequestsPanel />
                         {requests && requests.length > 0 && (
                             <MyRequestsPanel requests={requests} />
                         )}

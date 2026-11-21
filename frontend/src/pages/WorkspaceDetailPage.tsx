@@ -55,6 +55,8 @@ import { PageContainer } from '@/components/layout/PageContainer'
 import { ProfilingBoard } from '@/components/ingestion/profiling/ProfilingBoard'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import { usePlayground } from '@/hooks/usePlayground'
+import { useMyWorkspaceRequests } from '@/hooks/useWorkspaceRequests'
+import { WorkspaceWelcomeBanner } from '@/components/workspace-requests/WorkspaceWelcomeBanner'
 import { ActivityExplorer } from '@/components/activity/ActivityExplorer'
 import { workspaceActivityScope } from '@/components/activity/activityMeta'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
@@ -156,6 +158,8 @@ export function WorkspaceDetailPage() {
     const viewEditor = useContext(ViewEditorContext)
     // The Playground is open to all: someone not in it yet who follows a link to it is let in.
     const playground = usePlayground().data
+    // The reader's own workspace requests: the one this workspace came from says what was done for them.
+    const myRequests = useMyWorkspaceRequests().data
     const canCreateView = usePermission('workspace:view:create', wsId ?? null)
     const canEditSchema = usePermission('workspace:ontology:manage', wsId ?? null)
     const openNewView = viewEditor && canCreateView && wsId
@@ -591,6 +595,16 @@ export function WorkspaceDetailPage() {
                 onCancel={() => { setEditingHeader(false); setEditName(workspace.name); setEditDesc(workspace.description || '') }}
             />
 
+            {/* Landing here from an approved request: what was done, and what to do next. */}
+            {searchParams.get('welcome') === '1' && (
+                <WorkspaceWelcomeBanner
+                    name={workspace.name}
+                    request={myRequests?.find(r => r.workspaceId === workspace.id) ?? null}
+                    onNewView={openNewView}
+                    onInvite={canAddMembers ? () => goTo('members') : undefined}
+                    onDismiss={() => setSearchParams(prev => { const next = new URLSearchParams(prev); next.delete('welcome'); return next }, { replace: true })}
+                />
+            )}
 
             {/* Tabs — only the ones this reader can use. They stay in reach while a
                 long tab scrolls, on an opaque strip of the page's own colour (a blur

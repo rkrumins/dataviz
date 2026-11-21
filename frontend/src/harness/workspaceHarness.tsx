@@ -13,8 +13,11 @@
  *   mode     business | technical               (default business)
  *   theme    light | dark
  *   tab / section / ds — passed to the page's own address
- *   page     workspace | reviews | playground-card  (reviews: the Review Center at /reviews;
- *            playground-card: the Playground card, &joined=0 before joining)
+ *   page     workspace | reviews | playground-card | request-wizard | workspace-requests
+ *            (reviews: the Review Center at /reviews; playground-card: the Playground card,
+ *            &joined=0 before joining; request-wizard: asking for a workspace; workspace-requests:
+ *            the platform team's queue, and &status=pending|changes_requested|approved|declined on
+ *            page=workspace the reader's own request card)
  *
  * `npm run harness:workspace` drives Chromium over the main combinations and
  * writes PNGs to .harness/.
@@ -32,6 +35,9 @@ import { ViewEditorContext } from '../components/layout/viewEditorContext'
 import { WorkspaceDetailPage } from '../pages/WorkspaceDetailPage'
 import { ReviewCenterPage } from '../pages/ReviewCenterPage'
 import { PlaygroundCard } from '../components/playground/PlaygroundCard'
+import { RequestWorkspaceWizard } from '../components/workspace-requests/RequestWorkspaceWizard'
+import { WorkspaceRequestsPanel } from '../components/workspace-requests/WorkspaceRequestsPanel'
+import { WorkspaceRequestPrompt } from '../components/workspace-requests/WorkspaceRequestCard'
 import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { useWorkspacesStore } from '../store/workspaces'
 import {
@@ -61,6 +67,15 @@ const REVIEWS = [
     reviewRow(3, 'Retire legacy GL mappings', REVIEW_WS[0], 7, 'Priya Nair'),
     reviewRow(4, 'Campaign attribution owners', REVIEW_WS[2], 20, 'Tom Weiss'),
 ]
+// A workspace request: Ada's proof of concept, with a teammate and a Playground graph.
+const WS_REQUEST = {
+    id: 'wsr_1', requesterId: 'usr_ada', requesterName: 'Ada Okafor', name: 'ML platform lineage', purpose: 'poc',
+    description: 'Where every feature in the ML platform comes from, for the model review board.',
+    teamName: 'ML Engineering', teammateIds: ['usr_ben'], teammates: [{ id: 'usr_ben', displayName: 'Ben Hall' }],
+    playgroundSourceIds: ['ds_pg_ml'], playgroundSources: [{ id: 'ds_pg_ml', label: 'ML feature pipeline', viewCount: 2 }],
+    dataNeeds: 'Snowflake ML marts and the dbt project “features”.', note: 'We’d like it before the January model review.',
+    status: 'pending', createdAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+}
 const centerCounts = (rows: unknown[]) => ({ counts: { needs_review: rows.length, waiting: 1, sent_back: 1, ready: 0, open: rows.length + 2, done: 9 }, unread: { needs_review: 2 }, capped: false })
 
 const PERMS: Record<typeof as, string[]> = {
@@ -83,6 +98,18 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const ws = workspaceOf(fixture)
     const views = viewsOf(fixture)
     let m: RegExpMatchArray | null
+    if (p === '/api/v1/me/workspace-requests') {
+        const status = params.get('status')
+        return json(status ? [{ ...WS_REQUEST, requesterId: 'usr_me', status,
+            question: status === 'changes_requested' ? 'Which team will own it once the project ends?' : null,
+            resolutionNote: status === 'declined' ? 'Finance Data already covers this — ask to join it.' : null,
+            resolvedAt: status === 'approved' || status === 'declined' ? new Date().toISOString() : null,
+            workspaceId: status === 'approved' ? 'ws_new' : null }] : [])
+    }
+    if (p === '/api/v1/admin/workspace-requests') return json([WS_REQUEST, { ...WS_REQUEST, id: 'wsr_2', name: 'Quarter-end reporting', purpose: 'reporting',
+        requesterName: 'Liam Chen', teammateIds: [], playgroundSourceIds: [], status: 'changes_requested', createdAt: new Date(Date.now() - 8 * 86_400_000).toISOString() }])
+    if (p.startsWith('/api/v1/admin/workspace-requests/')) return json(WS_REQUEST)
+    if (p === '/api/v1/directory') return json({ users: [{ id: 'usr_ada', displayName: 'Ada Okafor', email: 'ada@example.com' }, { id: 'usr_ben', displayName: 'Ben Hall', email: 'ben@example.com' }], groups: [] })
     if (p === '/api/v1/playground') {
         return json({
             enabled: true, exists: true, workspaceId: 'ws_fin', name: 'Playground', joined: params.get('joined') !== '0',
@@ -165,10 +192,11 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 useAuthStore.setState({
     status: 'authenticated', isAuthenticated: true, permissionsStatus: 'ready',
     user: { id: 'usr_me', firstName: 'Sam', lastName: 'Reader', email: 'sam@example.com' },
-    permissions: { sid: 'harness', global: [], ws: { ws_fin: PERMS[as] } },
+    permissions: { sid: 'harness', global: page === 'workspace-requests' ? ['system:workspaces:create'] : [], ws: { ws_fin: PERMS[as] } },
 } as never)
 usePersonaStore.setState({ mode })
-useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true } })
+useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, workspaceRequestsEnabled: true } })
+if (page === 'request-wizard') useWorkspacesStore.setState({ workspaces: [workspaceOf('playground')] } as never)
 if (page === 'reviews') useWorkspacesStore.setState({ workspaces: REVIEW_WS.map(w => ({ ...w, dataSources: [] })) } as never)
 
 function Harness() {
@@ -182,7 +210,7 @@ function Harness() {
 
     const address = new URLSearchParams()
     for (const k of ['tab', 'section', 'ds', 'dstab']) { const v = params.get(k); if (v) address.set(k, v) }
-    const at = page === 'playground-card' ? '/playground-card' : page === 'reviews'
+    const at = ['playground-card', 'request-wizard', 'workspace-requests', 'request-card'].includes(page) ? `/${page}` : page === 'reviews'
         ? `/reviews${params.get('workspace') ? `?workspace=${params.get('workspace')}` : ''}`
         : `/workspaces/ws_fin${address.toString() ? `?${address}` : ''}`
 
@@ -194,6 +222,13 @@ function Harness() {
                         <Routes>
                             <Route path="/workspaces/:wsId" element={<WorkspaceDetailPage />} />
                             <Route path="/reviews" element={<ReviewCenterPage />} />
+                            <Route path="/request-wizard" element={<RequestWorkspaceWizard onClose={() => {}} />} />
+                            <Route path="/workspace-requests" element={
+                                <div className="mx-auto max-w-5xl space-y-6 p-8">
+                                    <WorkspaceRequestsPanel />
+                                </div>
+                            } />
+                            <Route path="/request-card" element={<div className="mx-auto max-w-5xl p-8"><WorkspaceRequestPrompt /></div>} />
                             <Route path="/playground-card" element={
                                 <div className="mx-auto max-w-5xl space-y-6 p-8">
                                     <PlaygroundCard />
