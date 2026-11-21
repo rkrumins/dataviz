@@ -3,14 +3,18 @@
  *
  * A blank canvas asks someone to know already what a graph is for. A sample shows them: one
  * click makes a realistic graph of their own — a retail data pipeline, a customer 360 — with a
- * view on it, and opens that view. It is one of their graphs, so the quota holds it as it holds
- * a blank one, and it is theirs to change (backend `endpoints/playground.py`).
+ * Context View, a Graph view and a Hierarchy view on it, saved searches, and an example change
+ * waiting for review; it opens the Context View, offering the canvas tour and that review. It is
+ * one of their graphs, so the quota holds it as it holds a blank one, and it is theirs to change
+ * (backend `endpoints/playground.py`).
  */
+import type { Ref } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowRight, CircleAlert, Loader2, WandSparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DynamicIcon, viewTypeIconComponent, viewTypeMeta } from '@/lib/viewUtils'
-import { useAppNotifications } from '@/components/ui/notifications'
+import { useAppNotifications, type NotificationAction } from '@/components/ui/notifications'
+import { useFeature } from '@/store/features'
 import { usePlaygroundSamples, useStartSample } from '@/hooks/usePlayground'
 import type { PlaygroundSample } from '@/services/playgroundService'
 
@@ -23,9 +27,15 @@ const TILES: Record<string, string> = {
 const DEFAULT_TILE = 'from-violet-500 to-fuchsia-500 shadow-violet-500/25'
 const FULL = 'You’ve used all your graphs — delete one you’re done with to start a sample.'
 
-export function SampleGallery({ workspaceId, className }: { workspaceId: string; className?: string }) {
+export function SampleGallery({ workspaceId, className, ref }: {
+    workspaceId: string
+    className?: string
+    /** The gallery, for "Start from a sample" to scroll to. */
+    ref?: Ref<HTMLElement>
+}) {
     const navigate = useNavigate()
     const { notify } = useAppNotifications()
+    const toursOn = useFeature('toursEnabled')
     const catalogue = usePlaygroundSamples().data
     const start = useStartSample(workspaceId)
 
@@ -34,7 +44,16 @@ export function SampleGallery({ workspaceId, className }: { workspaceId: string;
 
     const begin = (sample: PlaygroundSample) => start.mutate(sample.id, {
         onSuccess: (made) => {
-            notify('success', `“${sample.title}” is ready — explore it, then make it your own.`)
+            // The ways on from here: the canvas tour, and the change waiting for review on its
+            // Graph view — the review itself, else its draft (an older server offers neither).
+            const next: NotificationAction[] = []
+            if (toursOn) next.push({ label: 'Take the tour', onClick: () => navigate(`/views/${made.viewId}?tour=canvas-lineage`) })
+            const example = made.reviewId
+                ? `/workspaces/${workspaceId}/reviews/${made.reviewId}`
+                : made.draftId && made.viewIds?.graph ? `/views/${made.viewIds.graph}?branch=${made.draftId}` : null
+            if (example) next.push({ label: 'See the example review', onClick: () => navigate(example) })
+            notify('success', `“${sample.title}” is ready — explore it, then make it your own.`,
+                next.length ? next : undefined, next.length ? 12_000 : undefined)
             navigate(`/views/${made.viewId}`)
         },
         onError: (err) => notify('error', err instanceof Error && err.message
@@ -43,12 +62,12 @@ export function SampleGallery({ workspaceId, className }: { workspaceId: string;
     })
 
     return (
-        <section aria-labelledby="samples-title" className={className}>
-            <h3 id="samples-title" className="flex items-center gap-1.5 text-sm font-semibold text-ink">
+        <section ref={ref} aria-labelledby="samples-title" data-tour="playground-samples" className={cn('scroll-mt-24', className)}>
+            <h3 id="samples-title" tabIndex={-1} className="flex items-center gap-1.5 text-sm font-semibold text-ink outline-none">
                 <WandSparkles className="w-4 h-4 text-violet-500" aria-hidden /> Start from a sample
             </h3>
             <p className="mt-0.5 text-xs text-ink-muted">
-                A ready-made graph with a view on it, yours to explore and change. Each one counts as one of your graphs.
+                A ready-made graph to explore and change: a Context View, a Graph view and a Hierarchy, saved searches, and an example change waiting for review. Each one counts as one of your graphs.
             </p>
             {full && (
                 <p className="mt-2 inline-flex items-start gap-1.5 rounded-lg bg-amber-500/10 px-2.5 py-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">

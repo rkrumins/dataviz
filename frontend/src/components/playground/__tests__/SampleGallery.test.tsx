@@ -1,13 +1,14 @@
 /**
  * Start from a sample: each sample is a card saying what it is, how big and how it opens;
- * one click makes it — the card says so while it does — and opens the new view; once the
- * reader has used all their graphs, the cards say what to do instead; and nothing is offered
- * while blank graphs are off.
+ * one click makes it — the card says so while it does — and opens its Context View, with a
+ * way into the canvas tour (while tours are on) and to the example change waiting for review;
+ * once the reader has used all their graphs, the cards say what to do instead; and nothing is
+ * offered while blank graphs are off.
  */
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PlaygroundSamples } from '@/services/playgroundService'
 
@@ -41,8 +42,14 @@ const CATALOGUE: PlaygroundSamples = {
 }
 
 function ViewPage() {
-    return <p>view {useParams().viewId}</p>
+    return <p>view {useParams().viewId}{useLocation().search}</p>
 }
+function ReviewPage() {
+    const { wsId, prId } = useParams()
+    return <p>review {prId} in {wsId}</p>
+}
+/** The actions the success notification offered. */
+const offered = () => (notify.mock.calls.find(c => c[0] === 'success')?.[2] ?? []) as { label: string; onClick: () => void }[]
 
 function renderGallery() {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
@@ -52,6 +59,7 @@ function renderGallery() {
                 <Routes>
                     <Route path="/workspaces/:wsId" element={<SampleGallery workspaceId="ws_play" />} />
                     <Route path="/views/:viewId" element={<ViewPage />} />
+                    <Route path="/workspaces/:wsId/reviews/:prId" element={<ReviewPage />} />
                 </Routes>
             </MemoryRouter>
         </QueryClientProvider>,
@@ -93,8 +101,39 @@ describe('Start from a sample', () => {
 
         finish({ dataSourceId: 'ds_new', viewId: 'v_new' })
         expect(await screen.findByText('view v_new')).toBeInTheDocument()
+        // An older server's answer: one view, nothing more to offer.
+        expect(offered()).toEqual([])
         expect(loadWorkspaces).toHaveBeenCalled()       // the view's page reads its new data source
-        expect(notify).toHaveBeenCalledWith('success', expect.stringContaining('Retail data pipeline'))
+        expect(notify).toHaveBeenCalledWith('success', expect.stringContaining('Retail data pipeline'), undefined, undefined)
+    })
+
+    it('opens the Context View, and offers the canvas tour and the example review', async () => {
+        useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, toursEnabled: true } })
+        startSample.mockResolvedValue({
+            dataSourceId: 'ds_new', viewId: 'v_ctx', viewIds: { context: 'v_ctx', graph: 'v_graph', hierarchy: 'v_tree' },
+            draftId: 'br_example', reviewId: 'pr_example',
+        })
+        renderGallery()
+        await userEvent.click(await screen.findByRole('button', { name: 'Start Retail data pipeline' }))
+        expect(await screen.findByText('view v_ctx')).toBeInTheDocument()
+        expect(offered().map(a => a.label)).toEqual(['Take the tour', 'See the example review'])
+
+        act(() => offered()[0].onClick())
+        expect(await screen.findByText('view v_ctx?tour=canvas-lineage')).toBeInTheDocument()
+        act(() => offered()[1].onClick())
+        expect(await screen.findByText('review pr_example in ws_play')).toBeInTheDocument()
+    })
+
+    it('without tours, offers only the example — on its draft when there is no review', async () => {
+        startSample.mockResolvedValue({
+            dataSourceId: 'ds_new', viewId: 'v_ctx', viewIds: { context: 'v_ctx', graph: 'v_graph' }, draftId: 'br_example', reviewId: null,
+        })
+        renderGallery()
+        await userEvent.click(await screen.findByRole('button', { name: 'Start Retail data pipeline' }))
+        await screen.findByText('view v_ctx')
+        expect(offered().map(a => a.label)).toEqual(['See the example review'])
+        act(() => offered()[0].onClick())
+        expect(await screen.findByText('view v_graph?branch=br_example')).toBeInTheDocument()
     })
 
     it('says why, and stays put, when the sample can’t be made', async () => {

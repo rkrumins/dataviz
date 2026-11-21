@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { NotificationStack, useLoadingNotification, useNotificationStore } from '../notifications'
+import { NotificationStack, useAppNotifications, useLoadingNotification, useNotificationStore } from '../notifications'
 
 afterEach(() => {
   cleanup()
@@ -198,5 +198,26 @@ describe('a notification is said out loud', () => {
     useNotificationStore.getState().add({ type: 'success', message: 'Lineage trace — turned off' })
     render(<NotificationStack />)
     expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument()
+  })
+})
+
+describe('a notification may offer two ways on', () => {
+  // A sample just made: take the tour of its view, or see the example review waiting on it.
+  it('offers both, and either one closes it', () => {
+    const tour = vi.fn()
+    const review = vi.fn()
+    const { result } = renderHook(() => useAppNotifications())
+    act(() => {
+      result.current.notify('success', 'Retail is ready', [
+        { label: 'Take the tour', onClick: tour },
+        { label: 'See the example review', onClick: review },
+      ])
+    })
+    render(<NotificationStack />)
+    expect(screen.getByRole('button', { name: 'Take the tour' })).toBeInTheDocument()
+    act(() => { screen.getByRole('button', { name: 'See the example review' }).click() })
+    expect(review).toHaveBeenCalled()
+    expect(tour).not.toHaveBeenCalled()
+    expect(useNotificationStore.getState().notifications).toEqual([])
   })
 })
