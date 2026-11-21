@@ -15,17 +15,24 @@
  * nothing offers the fixes that would. Enter applies it — replacing the
  * query, or adding to it when the question starts with "and". ↑ / ↓ bring
  * back earlier questions; Esc clears.
+ *
+ * When the assistant is set up, Ask AI (⌘↵) hands the question to the AI service instead —
+ * offered most where the rule-based reading leaves words unplaced or notes what it left out.
+ * Its draft reads back the same way, marked AI-drafted, with what it assumed; a choice it
+ * needs first is offered as chips. Applying it is the same as applying a reading.
  */
 import * as Popover from '@radix-ui/react-popover'
-import { CheckCircle2, ChevronDown, CornerDownLeft, Loader2, Sparkles, X } from 'lucide-react'
+import { Bot, CheckCircle2, ChevronDown, CornerDownLeft, Loader2, Sparkles, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { HoverTip } from '@/components/ui/HoverTip'
 import { Skeleton } from '@/components/ui/Skeleton'
+import { formatShortcut, hasPrimaryModifier } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { usePersonaMode } from '@/store/persona'
-import { useSearchStore } from '@/store/searchStore'
+import { useSearchStore, type DraftSource } from '@/store/searchStore'
 import type { NodeRef, Predicate } from '@/types/search'
 
 import { useClauseCounts } from '../counts/useClauseCounts'
@@ -40,6 +47,7 @@ import { readHistory, remember } from './askHistory'
 import type { AskVocabulary } from './askVocabulary'
 import type { AskPicks } from './interpretQuestion'
 import { ReadsAs } from './ReadsAs'
+import { useAiQueryDraft, type AiDraftState } from './useAiQueryDraft'
 import { useAskPreview, type NameLookup, type NameMatch } from './useAskPreview'
 
 
@@ -49,8 +57,8 @@ export interface AskBarProps {
     /** The query a question starting with "and" adds to — unless it is a
      *  connection, which is the whole query: a question takes its place. */
     draft: Predicate | null
-    /** Apply the query a question leaves. */
-    onAsk: (result: Predicate) => void
+    /** Apply the query a question leaves — read by the rules (`ask`), or drafted by the AI (`ai`). */
+    onAsk: (result: Predicate, source?: DraftSource) => void
     /** The types this view holds, most common first — for the examples. */
     presentTypes: readonly string[]
     /** ``hero``: the empty card's front door, examples beneath. */
@@ -86,19 +94,34 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
     const examples = useMemo(() => askExamples(presentTypes, vocabulary.tags, typeName, persona),
         [presentTypes, vocabulary.tags, typeName, persona])
 
+    // The AI's draft of this question, if one was asked for (and the question hasn't changed since).
+    const ai = useAiQueryDraft(viewId)
+    const aiDraft = ai.state?.question === question.trim() ? ai.state : null
+    const aiResult = aiDraft?.status === 'done' && !aiDraft.result.clarification ? aiDraft.result.predicate : null
+    // Where the rules came up short: words they could only search for by name, things left out.
+    const aiNeeded = asking && (!result || interpretation.unrecognized.length > 0 || interpretation.notes.length > 0)
+    const askAi = (choices?: Record<string, string>) => {
+        if (!ai.available || disabled) return
+        void ai.draft(question, { currentPredicate: addTo, choices })
+    }
+
+    const { reset: resetAi } = ai
     const clear = useCallback(() => {
         setQuestion('')
         setPicks({})
         setRecall(null)
-    }, [])
+        resetAi()
+    }, [resetAi])
     const apply = useCallback(() => {
-        if (!result || disabled) return
+        if (disabled || !(aiDraft ? aiResult : result)) return
         remember(question.trim())
-        onAsk(result)
+        if (aiDraft) onAsk(aiResult!, 'ai')
+        else onAsk(result!)
         clear()
-    }, [result, disabled, question, onAsk, clear])
+    }, [aiDraft, aiResult, result, disabled, question, onAsk, clear])
 
     const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Enter' && hasPrimaryModifier(e) && ai.available) { e.preventDefault(); askAi(); return }
         if (e.key === 'Enter') { e.preventDefault(); apply(); return }
         if (e.key === 'Escape' && asking) { e.preventDefault(); e.stopPropagation(); clear(); return }
         if ((e.key === 'ArrowUp' && (!asking || recall !== null)) || (e.key === 'ArrowDown' && recall !== null)) {
@@ -152,20 +175,42 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                                 className="rounded-md p-0.5 text-ink-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
                             <X className="h-3.5 w-3.5" />
                         </button>
-                        <button type="button" onClick={apply} disabled={!result || disabled}
+                        {ai.available && (
+                            <HoverTip label="Have the AI read the question" detail="You see what it drafts before anything changes"
+                                      shortcut={formatShortcut('mod+enter')} className="inline-flex shrink-0">
+                                <button type="button" onClick={() => askAi()} disabled={disabled || aiDraft?.status === 'drafting'}
+                                        aria-label="Ask AI"
+                                        className={cn(
+                                            'inline-flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-40',
+                                            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                                            aiNeeded && !aiDraft
+                                                ? 'border-violet-500/40 bg-violet-500/10 text-violet-700 hover:bg-violet-500/15 dark:text-violet-300'
+                                                : 'border-glass-border text-ink-muted hover:text-ink',
+                                        )}>
+                                    {aiDraft?.status === 'drafting'
+                                        ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                                        : <Bot className="h-3 w-3" aria-hidden />}
+                                    Ask AI
+                                </button>
+                            </HoverTip>
+                        )}
+                        <button type="button" onClick={apply} disabled={!(aiDraft ? aiResult : result) || disabled}
                                 className={cn(
                                     'inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium transition-colors',
                                     'bg-accent-lineage text-white hover:bg-accent-lineage/90 disabled:opacity-40',
                                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                                 )}>
-                            {adding ? 'Add' : 'Apply'}
+                            {adding && !aiDraft ? 'Add' : 'Apply'}
                             <CornerDownLeft className="h-3 w-3" aria-hidden />
                         </button>
                     </>
                 )}
             </div>
 
-            {asking ? (
+            {asking && aiDraft ? (
+                <AiDraftPreview state={aiDraft} onChoose={(id, option) => askAi({ ...(aiDraft.status === 'done' ? aiDraft.choices : {}), [id]: option })}
+                                onDismiss={resetAi} />
+            ) : asking ? (
                 <div className="flex flex-col gap-2 rounded-xl border border-glass-border bg-canvas-elevated/60 p-3">
                     <div className="flex items-start gap-3">
                         <div className="min-w-0 flex-1">
@@ -227,6 +272,17 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                     {interpretation.notes.map((note) => (
                         <p key={note} className="text-xs text-amber-700 dark:text-amber-300">{note}</p>
                     ))}
+                    {aiNeeded && ai.available && (
+                        <p className="flex flex-wrap items-center gap-1 text-xs text-ink-muted">
+                            <Bot className="h-3 w-3 text-violet-500" aria-hidden />
+                            Not all of it was placed.
+                            <button type="button" onClick={() => askAi()} disabled={disabled}
+                                    className="font-medium text-violet-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:text-violet-300">
+                                Ask AI to read it
+                            </button>
+                            <span className="text-ink-muted/80">({formatShortcut('mod+enter')})</span>
+                        </p>
+                    )}
                 </div>
             ) : showExamples && (
                 <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -265,6 +321,75 @@ function AskRescue({ viewId, query, onApply }: { viewId: string; query: Predicat
                 Nothing matches{rescue.line ? <> past “{rescue.line}”</> : null} — try
             </span>
             <FixChips fixes={rescue.fixes} onApply={onApply} line={rescue.line} counting={rescue.status === 'counting'} />
+        </div>
+    )
+}
+
+
+/** The AI's draft of the question, in the same place a reading is: being drafted, a choice it
+ *  needs first, or the query it reads as — with how many it finds and what it assumed. */
+function AiDraftPreview({ state, onChoose, onDismiss }: {
+    state: AiDraftState
+    onChoose: (clarificationId: string, optionId: string) => void
+    onDismiss: () => void
+}) {
+    const r = state.status === 'done' ? state.result : null
+    const clarification = r?.clarification ?? null
+    const predicate = r && !clarification ? r.predicate : null
+    return (
+        <div aria-busy={state.status === 'drafting'}
+             className="flex flex-col gap-2 rounded-xl border border-violet-500/25 bg-canvas-elevated/60 p-3">
+            <div className="flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-2xs font-semibold uppercase tracking-wider text-ink-muted">Reads as</span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 px-1.5 py-px text-2xs font-semibold text-violet-700 dark:text-violet-300">
+                            <Bot className="h-3 w-3" aria-hidden /> AI-drafted
+                        </span>
+                    </div>
+                    <div className="text-sm">
+                        {state.status === 'drafting' && (
+                            <div className="mt-1.5 flex flex-col gap-1.5" role="status" aria-label="Reading your question">
+                                <Skeleton className="nx-skeleton h-3 w-4/5" />
+                                <Skeleton className="nx-skeleton h-3 w-3/5" />
+                            </div>
+                        )}
+                        {state.status === 'error' && <span className="text-rose-600 dark:text-rose-400">{state.message}</span>}
+                        {clarification && <span className="text-ink">{clarification.question}</span>}
+                        {predicate && <ReadsAs predicate={predicate} />}
+                        {r && !clarification && !predicate && (
+                            <span className="text-ink-muted">It couldn’t turn that into a search{r.explanation ? ` — ${r.explanation}` : '.'}</span>
+                        )}
+                    </div>
+                </div>
+                {predicate && (
+                    <CountBadge count={typeof r?.count === 'number' ? { count: r.count, complete: r.countExact !== false } : null}
+                                status="done" shown />
+                )}
+            </div>
+            {clarification && (
+                <div className="flex flex-wrap items-center gap-1.5 text-xs" role="group" aria-label={clarification.question}>
+                    {clarification.options.map((o) => (
+                        <button key={o.id} type="button" onClick={() => onChoose(clarification.id, o.id)}
+                                className="rounded-full border border-black/10 px-2 py-0.5 text-ink transition-colors hover:border-violet-500/40 hover:text-violet-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:border-white/15 dark:hover:text-violet-300">
+                            {o.label}
+                            {typeof o.count === 'number' && <span className="ml-1 tabular-nums text-ink-muted">{o.count.toLocaleString()}</span>}
+                        </button>
+                    ))}
+                </div>
+            )}
+            {predicate && r?.explanation && <p className="text-xs text-ink-secondary">{r.explanation}</p>}
+            {predicate && (r?.assumptions ?? []).length > 0 && (
+                <ul className="flex flex-col gap-0.5 text-xs text-ink-muted">
+                    {r!.assumptions.map((a) => <li key={a}>Assumed {a}</li>)}
+                </ul>
+            )}
+            {state.status !== 'drafting' && (
+                <button type="button" onClick={onDismiss}
+                        className="self-start text-xs text-ink-muted hover:text-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+                    Use the rule-based reading instead
+                </button>
+            )}
         </div>
     )
 }

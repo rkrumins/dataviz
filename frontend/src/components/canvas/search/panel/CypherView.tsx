@@ -13,7 +13,9 @@
  * FalkorDB does) says so, instead of a spinner that never stops.
  *
  * Below it, for whoever may query the view's data source: Edit and run,
- * starting from that same statement (``NativeConsole``).
+ * starting from that same statement (``NativeConsole``) — and, while the
+ * assistant is set up, Draft with AI (``AiCypherDraft``), which writes the
+ * Cypher into that console for the person to read and run.
  */
 import { AlertCircle, AlertTriangle, CheckCircle2, ChevronRight, Copy, Info, Loader2 } from 'lucide-react'
 import { type FC, type ReactNode, useCallback, useState } from 'react'
@@ -25,6 +27,7 @@ import { useDraftPredicate } from '@/store/searchStore'
 
 import { CypherEditor } from '../editor/CypherEditor'
 
+import { AiCypherDraft } from './native/AiCypherDraft'
 import { NativeConsole } from './native/NativeConsole'
 import { useCompiledQuery } from './native/useCompiledQuery'
 import { useNativeQueryEngine } from './native/useNativeQueryEngine'
@@ -115,6 +118,7 @@ export const CypherView: FC<CypherViewProps> = ({ viewId }) => {
         <div className="flex flex-col gap-3">
             <QuerySentence draftPredicate={draft} />
             {body}
+            {nativeEngine && !onDraft && <AiCypherDraft viewId={viewId} />}
             {nativeEngine && (
                 <NativeConsole
                     viewId={viewId}

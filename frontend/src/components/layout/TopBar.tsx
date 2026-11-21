@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2, KeySquare, SlidersHorizontal } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2, KeySquare, SlidersHorizontal, Bot } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { PersonaIntroTip } from '@/components/persona/PersonaIntroTip'
@@ -23,6 +23,10 @@ import {
   type SystemRole,
 } from '@/store/auth'
 import { useHelpPanelStore } from '@/store/helpPanel'
+import { useFeature } from '@/store/features'
+import { useAssistantStore } from '@/features/ai-assistant/store/assistantStore'
+import { ASSISTANT_SHORTCUT } from '@/features/ai-assistant/lib/useAssistantShortcut'
+import { formatShortcut } from '@/lib/platform'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
 
@@ -113,6 +117,10 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   // see at least part of /admin (org_admin gets workspaces/SSO but not
   // users/groups; the section guards inside /admin enforce that).
   const showAdminCog = isSystemAdmin || isOrgAdmin
+
+  // The AI assistant's launcher, beside Help — only while the assistant is switched on.
+  const aiAssistantEnabled = useFeature('aiAssistantEnabled')
+  const assistantOpen = useAssistantStore((s) => s.open)
 
   // Through the shared helper, seeded by whatever name actually exists:
   // a full-name-only identity has blank halves and a displayName, and
@@ -223,6 +231,18 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
 
           {/* Group 3: System / Account */}
           <ThemeSwitcher theme={theme} onChange={setTheme} />
+
+          {aiAssistantEnabled && (
+            <button
+              className="btn btn-ghost p-2 rounded-lg"
+              onClick={() => useAssistantStore.getState().toggleAssistant()}
+              title={`Assistant (${formatShortcut(ASSISTANT_SHORTCUT)})`}
+              aria-label="Assistant"
+              aria-pressed={assistantOpen}
+            >
+              <Bot className={cn('w-5 h-5', assistantOpen ? 'text-accent-lineage' : 'text-ink-secondary')} />
+            </button>
+          )}
 
           <button
             data-tour="help"

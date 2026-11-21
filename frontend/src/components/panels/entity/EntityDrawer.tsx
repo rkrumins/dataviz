@@ -24,6 +24,7 @@ import { stagedIndexOf } from '@/store/stagedIndex'
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { useFeature } from '@/store/features'
+import { useAssistantStore } from '@/features/ai-assistant/store/assistantStore'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
 import { useEntityBaseline } from '@/features/versioning/hooks/useEntityBaseline'
@@ -98,6 +99,7 @@ function OpenEntityDrawer({
   const colors = useEntityColorSet(typeId)
   const personaMode = usePersonaStore((s) => s.mode)
   const versioningEnabled = useFeature('versioningEnabled')
+  const assistantEnabled = useFeature('aiAssistantEnabled')
 
   // ── What is stored: the summary for the line being read (a draft sees main at its branch
   // point plus its own edits) — its last change, and its current value and token. ──
@@ -235,6 +237,9 @@ function OpenEntityDrawer({
             onFocusNode={onFocusNode}
             customizing={customizing}
             onCustomize={toggleCustomize}
+            onAskAbout={assistantEnabled && !unsavedCreate
+              ? () => useAssistantStore.getState().openAssistant({ persona: 'data', context: { focusUrn: urn, focusName: title } })
+              : undefined}
           />
 
           <DrawerBody>

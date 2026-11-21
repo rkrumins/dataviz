@@ -72,6 +72,22 @@ export const NativeConsole: FC<NativeConsoleProps> = ({ viewId, engine, seed, un
     // Leaving stops a run in flight; the server cancels it on the engine.
     useEffect(() => () => inFlight.current?.abort(), [])
 
+    // Cypher drafted for this console (by the AI) opens in it, to read through and Run — it is
+    // never run for the person. Taken once it shows; not while the console can't run here.
+    const pendingNative = useSearchStore((s) => s.pendingNativeQuery)
+    useEffect(() => {
+        if (pendingNative === null || unavailable) return
+        const t = setTimeout(() => {
+            const cypher = useSearchStore.getState().consumeNativeQuery()
+            if (cypher === null) return
+            inFlight.current?.abort()
+            setText(cypher)
+            setOpen(true)
+            setState({ status: 'idle', note: 'Drafted with AI — read it through, then press Run.' })
+        }, 0)
+        return () => clearTimeout(t)
+    }, [pendingNative, unavailable])
+
     const start = useCallback(() => {
         setText(seed ?? STARTER_QUERY)
         setOpen(true)

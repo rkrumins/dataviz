@@ -19,6 +19,7 @@ import {
   BookOpen,
   Loader2,
   Upload,
+  Bot,
 } from 'lucide-react'
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
@@ -36,6 +37,9 @@ import { wsGradient } from '@/lib/viewUtils'
 import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
 import { formatShortcut } from '@/lib/platform'
+import { useFeature } from '@/store/features'
+import { useAssistantStore } from '@/features/ai-assistant/store/assistantStore'
+import { ASSISTANT_SHORTCUT } from '@/features/ai-assistant/lib/useAssistantShortcut'
 
 interface CommandPaletteProps {
   open: boolean
@@ -112,6 +116,7 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
   const { toggleMode, mode } = usePersonaStore()
   const { setTheme, theme, toggleSidebar } = usePreferencesStore()
   const templatesOn = useLayoutTemplatesEnabled()
+  const assistantOn = useFeature('aiAssistantEnabled')
 
   // Workspaces (for the zero-search "Switch Workspace" group)
   const workspaces = useWorkspacesStore((s) => s.workspaces)
@@ -392,6 +397,18 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
 
               {/* Quick Actions — always shown */}
               <Command.Group heading="Quick Actions">
+                {assistantOn && (
+                  <CommandItem
+                    icon={Bot}
+                    label={isZeroSearch ? 'Ask the assistant' : `Ask the assistant “${search.trim()}”`}
+                    description="Questions about your data or how to use the product, answered with their evidence"
+                    shortcut={ASSISTANT_SHORTCUT}
+                    onSelect={() => {
+                      useAssistantStore.getState().openAssistant(isZeroSearch ? undefined : { context: { prompt: search.trim() } })
+                      onClose()
+                    }}
+                  />
+                )}
                 <CommandItem
                   icon={mode === 'business' ? Zap : Layers}
                   label={`Switch to ${mode === 'business' ? 'Technical' : 'Business'} View`}

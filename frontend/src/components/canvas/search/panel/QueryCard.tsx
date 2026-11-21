@@ -49,6 +49,7 @@ import {
     useCanUndo,
     useDraftPredicate,
     useSearchStore,
+    type DraftSource,
     type RecentQueryEntry,
 } from '@/store/searchStore'
 import type { EdgesPredicate, Predicate, SearchQuery } from '@/types/search'
@@ -174,6 +175,10 @@ export const QueryCard: FC<QueryCardProps> = ({
         discovery.keysByEdgeType, edgeTypeOptions, discovery.suggestValues, remote, viewId])
 
     const [mode, setMode] = useEditorMode()
+    // Cypher sent here to edit (the assistant's "Open in Cypher tab") opens the Cypher tab,
+    // whose console takes it.
+    const nativePending = useSearchStore((s) => s.pendingNativeQuery !== null)
+    useEffect(() => { if (nativePending) setMode('cypher') }, [nativePending, setMode])
 
     // Entities or Connections: the draft's own kind. Switching rewrites the
     // draft as one undo step, and says what it left out.
@@ -226,9 +231,10 @@ export const QueryCard: FC<QueryCardProps> = ({
     }, [runnable, onRun])
 
     // A question applied is a change of shape, and runs at once: Auto runs
-    // the committed draft itself, Manual is told to.
-    const handleAsk = useCallback((result: Predicate) => {
-        commitDraft(result, 'ask')
+    // the committed draft itself, Manual is told to. One the AI drafted says so
+    // (its source is `ai`).
+    const handleAsk = useCallback((result: Predicate, source: DraftSource = 'ask') => {
+        commitDraft(result, source)
         if (runMode !== 'manual') return
         const next = buildRunnablePredicate(result)
         if (next) onRun(next.predicate, SEARCH_OPTIONS)

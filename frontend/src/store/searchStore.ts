@@ -54,11 +54,12 @@ export const DEFAULT_DRAFT_OPTIONS: DraftOptions = {
 /**
  * What put the draft in its shape when it wasn't the editor it is built in:
  * a question asked, a recipe, the library, a change made from the results,
- * the canvas's right-click or Property Manager, the header box. A search
- * reports it as where it came from (``graph.search``'s ``source``).
+ * the canvas's right-click or Property Manager, the header box, or the AI
+ * assistant (a query it drafted). A search reports it as where it came from
+ * (``graph.search``'s ``source``).
  */
 export type DraftSource =
-    | 'ask' | 'recipe' | 'library' | 'results' | 'right-click' | 'property-manager' | 'header'
+    | 'ask' | 'recipe' | 'library' | 'results' | 'right-click' | 'property-manager' | 'header' | 'ai'
 
 
 /**
@@ -329,6 +330,10 @@ interface SearchStoreState {
     /** "Ask about this view" was chosen from outside the panel: the Ask bar
      *  takes focus once it shows. */
     pendingAskFocus: boolean
+
+    /** Cypher to put in the Cypher tab's console (an AI draft): the console
+     *  opens with it once it shows. Never run — the person presses Run. */
+    pendingNativeQuery: string | null
 }
 
 
@@ -457,6 +462,9 @@ interface SearchStoreActions {
     requestAskFocus: () => void
     /** Atomic read-and-clear of the request to focus the Ask bar. */
     consumeAskFocus: () => boolean
+    requestNativeQuery: (cypher: string) => void
+    /** Atomic read-and-clear of the Cypher waiting for the console. */
+    consumeNativeQuery: () => string | null
     /** Atomic read-and-clear of the pending run predicate (panel-side). */
     consumePendingRun: () => Predicate | null
     /** Persist the scope mode chosen by the user in the panel header.
@@ -722,6 +730,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     studioOpen: false,
     pendingOpenBlank: false,
     pendingAskFocus: false,
+    pendingNativeQuery: null,
 
     setResult: ({ viewId, matchUrns, edgeKeys, matchedEdges, matchedEdgesComplete, ancestorPaths, ancestorCounts, queryHash }) => {
         const next = new Set<string>()
@@ -977,6 +986,16 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     consumeAskFocus: () => {
         const pending = get().pendingAskFocus
         if (pending) set({ pendingAskFocus: false })
+        return pending
+    },
+
+    requestNativeQuery: (cypher) => {
+        set({ pendingNativeQuery: cypher })
+    },
+
+    consumeNativeQuery: () => {
+        const pending = get().pendingNativeQuery
+        if (pending !== null) set({ pendingNativeQuery: null })
         return pending
     },
 

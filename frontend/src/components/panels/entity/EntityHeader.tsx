@@ -6,7 +6,7 @@
  */
 import type { ComponentType } from 'react'
 import {
-  ArrowDownRight, ArrowUpLeft, Check, Code, Copy, ExternalLink, Eye, Focus, GitBranch, GitBranchPlus,
+  ArrowDownRight, ArrowUpLeft, Bot, Check, Code, Copy, ExternalLink, Eye, Focus, GitBranch, GitBranchPlus,
   Pencil, RotateCcw, SlidersHorizontal, Trash2,
 } from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
@@ -32,7 +32,7 @@ interface TraceAction {
 export function EntityHeader({
   nodeId, titleId, typeName, colors, confidence, title, technicalLine, isGhost, onRestore,
   onTraceUp, onTraceDown, onFullTrace, onFocusConnections, copiedUrn, onCopyUrn, externalUrl,
-  editable, editBlocked, dirty, onStartEditing, onClose, onFocusNode, customizing = false, onCustomize,
+  editable, editBlocked, dirty, onStartEditing, onClose, onFocusNode, customizing = false, onCustomize, onAskAbout,
 }: {
   nodeId: string
   titleId: string
@@ -64,6 +64,8 @@ export function EntityHeader({
   customizing?: boolean
   /** Opens or closes it; absent, not offered. */
   onCustomize?: () => void
+  /** Opens the AI assistant about this entity; absent (the assistant off), not offered. */
+  onAskAbout?: () => void
 }) {
   const technical = usePersonaMode() === 'technical'
   // Upstream and downstream wear the product's lineage direction pair (lib/lineageDirectionColors.ts)
@@ -156,6 +158,9 @@ export function EntityHeader({
         )}
         {externalUrl && (
           <Button size="sm" variant="subtle" leftIcon={ExternalLink} onClick={() => window.open(externalUrl, '_blank', 'noopener')}>Open</Button>
+        )}
+        {onAskAbout && !isGhost && (
+          <Button size="sm" variant="subtle" leftIcon={Bot} onClick={onAskAbout}>Ask about this</Button>
         )}
         {onCustomize && (
           <Button size="sm" variant={customizing ? 'secondary' : 'ghost'} leftIcon={SlidersHorizontal}

@@ -37,6 +37,8 @@ import { TourOverlay } from '@/features/tour/TourOverlay'
 import { TourLauncher } from '@/features/tour/TourLauncher'
 import { useTourDeepLink } from '@/features/tour/useTourDeepLink'
 import { useInviteWelcome } from '@/hooks/useInviteWelcome'
+import { AssistantRail } from '@/features/ai-assistant/components/AssistantRail'
+import { useAssistantShortcut } from '@/features/ai-assistant/lib/useAssistantShortcut'
 
 export { useViewEditorModal }
 
@@ -50,6 +52,7 @@ export function AppLayout() {
   // unrelated preference write (sidebar collapse, pinned views, …).
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
   const toursEnabled = useFeature('toursEnabled')
+  const aiAssistantEnabled = useFeature('aiAssistantEnabled')
 
   // Launch a tour from ?tour=<id> (deep-links from docs / announcements).
   useTourDeepLink()
@@ -140,6 +143,9 @@ export function AppLayout() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
+  // Global ⌘J (Ctrl-J elsewhere) opens and closes the AI assistant, while it is switched on.
+  useAssistantShortcut(aiAssistantEnabled)
+
   // Global ⌘/ (Ctrl-/ elsewhere) switches Business / Technical names: the shortcut the command
   // palette and the top bar's toggle advertise. Not from inside a field either, where a code
   // editor's ⌘/ is its own "comment line". A held key switches once, not back and forth.
@@ -206,6 +212,9 @@ export function AppLayout() {
               <Outlet />
             </ErrorBoundary>
           </main>
+
+          {/* The AI assistant: a rail in the row, so it pushes the page rather than covering it. */}
+          {aiAssistantEnabled && <AssistantRail />}
         </div>
 
         <CommandPalette

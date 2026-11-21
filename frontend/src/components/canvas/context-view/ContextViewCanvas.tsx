@@ -31,6 +31,11 @@ import {
 import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
+import { registerCanvasActions } from '@/store/canvasActionsBridge'
+import { useAssistantStore } from '@/features/ai-assistant/store/assistantStore'
+import { useSearchSchema } from '@/hooks/useSearchSchema'
+import { decodePredicate } from '@/utils/predicateCodec'
+import { decodeSearchParam } from '@/lib/viewShareLink'
 import { useSaveProblemsStore } from '@/store/saveProblemsStore'
 import { BranchClosedError, DraftRoleRequiredError, IntegrityError, MergeConflictError, NotDraftOwnerError, OntologyViolationError, type Branch } from '@/services/versioningApiService'
 import { markConflicts } from '@/features/versioning/model/mapConflicts'
@@ -507,6 +512,41 @@ function takeRail(open: () => void) {
     useCanvasStore.getState().closeNodeDrawer()
     open()
   })
+}
+
+/** Take a link's one-time parameter out of the address, so a refresh or a copied URL stays clean. */
+function dropViewParam(name: string) {
+  const params = new URLSearchParams(window.location.search)
+  if (!params.has(name)) return
+  params.delete(name)
+  const qs = params.toString()
+  window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
+}
+
+/**
+ * A `?search=` link's query, handed on once the search schema has validated it — or null, when
+ * it is not JSON, not a query, or there is no schema to check it against. Rendered only while
+ * there is such a link, so a view opened without one asks for no schema.
+ */
+function SearchLinkOpener({ json, onOpen }: { json: string | null; onOpen: (predicate: Predicate | null) => void }) {
+  const { schema, isReady, error, versionMismatch } = useSearchSchema()
+  const done = useRef(false)
+  useEffect(() => {
+    if (done.current) return
+    if (json === null || error || versionMismatch) {
+      done.current = true
+      onOpen(null)
+      return
+    }
+    if (!isReady) return
+    done.current = true
+    try {
+      onOpen(decodePredicate(json, schema))
+    } catch {
+      onOpen(null)
+    }
+  }, [json, schema, isReady, error, versionMismatch, onOpen])
+  return null
 }
 
 export function ContextViewCanvas({
@@ -2143,7 +2183,21 @@ export function ContextViewCanvas({
   // panel opened out into Search Studio.
   const { closeCommandPalette } = interactions
   const { openPanel: openSearchPanel } = search
+  const assistantEnabled = useFeature('aiAssistantEnabled')
   const searchCommands = useMemo<CommandItem[]>(() => [
+    // The AI assistant, about this view — only while it is switched on.
+    ...(assistantEnabled ? [{
+      id: 'ai:chat',
+      label: 'Chat about this view',
+      description: 'Ask the assistant about what this view holds — answers show their evidence',
+      icon: 'Bot' as const,
+      category: 'action' as const,
+      keywords: ['ai', 'assistant', 'chat', 'ask', 'question', 'impact', 'lineage'],
+      onSelect: () => {
+        closeCommandPalette()
+        useAssistantStore.getState().openAssistant({ persona: 'data' })
+      },
+    }] : []),
     {
       id: 'search:ask',
       label: 'Ask about this view',
@@ -2170,7 +2224,7 @@ export function ContextViewCanvas({
         useSearchStore.getState().setStudioOpen(true)
       },
     },
-  ], [closeCommandPalette, openSearchPanel])
+  ], [closeCommandPalette, openSearchPanel, assistantEnabled])
   // Side panels (EntityDrawer, EdgeDetailPanel, Advanced Search, the
   // hierarchy builder/build rails) are OVERLAYS that reserve canvas space
   // via padding — a change that does NOT resize the observed node cards,
@@ -2738,6 +2792,8 @@ export function ContextViewCanvas({
   const startCanvasTrace = useCallback((
     nodeId: string | readonly string[],
     direction: 'up' | 'down' | 'both' = 'both',
+    // Hops to show the way(s) traced; the reader's default when not given (the assistant's ask).
+    depth?: number,
   ) => {
     // A trace takes the canvas over and closes the drawer: a drawer move, held — whole — while
     // the drawer has edits not staged yet.
@@ -2759,11 +2815,12 @@ export function ContextViewCanvas({
       }
       const urns = nodeIds.map(id => displayMap.get(id)?.urn ?? id)
       const urn = urns[0]!
+      const hops = depth === undefined ? null : Math.max(0, Math.min(FULL_WALK_INITIAL_DEPTH, Math.round(depth)))
       const view = {
         showUpstream: direction !== 'down',
         showDownstream: direction !== 'up',
-        depthUp: openingTraceDepth().up,
-        depthDown: openingTraceDepth().down,
+        depthUp: hops !== null && direction !== 'down' ? hops : openingTraceDepth().up,
+        depthDown: hops !== null && direction !== 'up' ? hops : openingTraceDepth().down,
         // Re-pressing Trace on the focal already on screen does NOT re-seed the
         // overlay, so recording an empty picture here would leave the entry
         // describing a trace nobody is looking at. A genuinely new focal has no
@@ -5068,6 +5125,88 @@ export function ContextViewCanvas({
       })
       .catch((err) => notify('error', narrowErrorText(err)))
   }, [initialEditSubset, searchViewsOn, narrowViewId, search, notify])
+
+  // ─── THE AI ASSISTANT'S WAY IN (store/canvasActionsBridge) ──────────────────
+  // What the assistant may ask of this canvas — reveal, locate, trace, search, the Cypher console —
+  // and what the canvas is looking at. The handlers read the latest of everything through a ref,
+  // so the registration itself only changes with the view.
+  const assistantBridge = useRef({
+    revealOnCanvas, locateManyOnCanvas, startCanvasTrace, search, activeView, bulkSelection, drawerNodeId,
+    selectedNodeId, displayMap, urnToIdMap, scopeWsId, dataSourceId,
+  })
+  useEffect(() => {
+    assistantBridge.current = {
+      revealOnCanvas, locateManyOnCanvas, startCanvasTrace, search, activeView, bulkSelection, drawerNodeId,
+      selectedNodeId, displayMap, urnToIdMap, scopeWsId, dataSourceId,
+    }
+  })
+  const bridgeViewId = activeView?.id ?? null
+  useEffect(() => {
+    if (!bridgeViewId) return
+    const live = () => assistantBridge.current
+    const idOf = (urn: string) => live().urnToIdMap.get(urn) ?? urn
+    return registerCanvasActions({
+      viewId: bridgeViewId,
+      reveal: (urn) => live().revealOnCanvas(idOf(urn)),
+      locateMany: (urns) => live().locateManyOnCanvas(urns.map(idOf)),
+      startTrace: (urns, opts) => live().startCanvasTrace(
+        urns.map(idOf),
+        opts?.direction === 'upstream' ? 'up' : opts?.direction === 'downstream' ? 'down' : 'both',
+        opts?.depth,
+      ),
+      runSearch: (predicate) => {
+        useSearchStore.getState().requestSearchRun(predicate, 'ai')
+        live().search.openPanel()
+      },
+      openCypher: (cypher) => {
+        useSearchStore.getState().requestNativeQuery(cypher)
+        live().search.refine()
+      },
+      getContext: () => {
+        const c = live()
+        const urnOf = (id: string) => c.displayMap.get(id)?.urn ?? id
+        const focusId = c.drawerNodeId ?? c.selectedNodeId
+        return {
+          viewId: bridgeViewId,
+          viewName: c.activeView?.name,
+          workspaceId: c.scopeWsId ?? undefined,
+          dataSourceId: c.dataSourceId,
+          selectedUrns: c.bulkSelection.map(urnOf),
+          focusUrn: focusId ? urnOf(focusId) : null,
+          focusName: focusId ? c.displayMap.get(focusId)?.name : undefined,
+        }
+      },
+    })
+  }, [bridgeViewId])
+
+  // `?focus=<urn>` — a link that opens on an entity (the assistant's, when this canvas wasn't
+  // the one open). Read on the first render, as `?trace=` is; revealed once the canvas has drawn,
+  // then stripped. One the view doesn't hold is simply not revealed.
+  const [initialFocus] = useState(() => new URLSearchParams(window.location.search).get('focus'))
+  const focusLinkUsed = useRef(false)
+  useEffect(() => {
+    if (!initialFocus || focusLinkUsed.current || isHydratingInitial) return
+    focusLinkUsed.current = true
+    dropViewParam('focus')
+    void revealOnCanvas(urnToIdMap.get(initialFocus) ?? initialFocus)
+  }, [initialFocus, isHydratingInitial, revealOnCanvas, urnToIdMap])
+
+  // `?search=<base64url JSON>` — a link that opens Advanced Search with a query in it. Never
+  // trusted: it runs only once the search schema has validated it (SearchLinkOpener, below).
+  const [searchLink, setSearchLink] = useState(() => {
+    const raw = new URLSearchParams(window.location.search).get('search')
+    return raw === null ? undefined : decodeSearchParam(raw)
+  })
+  const openSearchLink = useCallback((predicate: Predicate | null) => {
+    dropViewParam('search')
+    setSearchLink(undefined)
+    if (!predicate) {
+      notify('warning', 'The search in that link couldn’t be read, so the view opened without it.')
+      return
+    }
+    useSearchStore.getState().requestSearchRun(predicate, 'ai')
+    search.openPanel()
+  }, [notify, search])
   const onSaveMatchesAsView = useCallback((query: SearchQuery) => {
     if (editingSubset) setUpdateSubsetQuery(query)
     else setSaveSearch({ query })
@@ -8468,6 +8607,10 @@ export function ContextViewCanvas({
           />
         )}
       </AnimatePresence>
+      {/* A `?search=` link opens Advanced Search with its query, once the canvas has drawn. */}
+      {searchLink !== undefined && !isHydratingInitial && (
+        <SearchLinkOpener json={searchLink} onOpen={openSearchLink} />
+      )}
       {/* Property Manager — independent right-rail panel. Unlike the
           selection-driven panels above it isn't mutually exclusive: it
           sits to the right of whichever inspector is open so the user

@@ -19,6 +19,7 @@
     "harness:shot": "node scripts/harness-shot.mjs",
     "harness:analytics": "node scripts/analytics-shot.mjs",
     "harness:search": "node scripts/search-shot.mjs",
+    "harness:ai": "node scripts/ai-shot.mjs",
     "harness:revision": "node scripts/revision-shot.mjs",
     "harness:provenance": "node scripts/provenance-shot.mjs",
     "harness:scale": "node scripts/scale-shot.mjs",

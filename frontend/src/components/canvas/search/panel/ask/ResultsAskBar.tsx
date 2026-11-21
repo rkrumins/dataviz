@@ -7,7 +7,7 @@
 import { useCallback, useMemo } from 'react'
 
 import { useSchemaStore } from '@/store/schema'
-import { useDraftPredicate, useSearchStore } from '@/store/searchStore'
+import { useDraftPredicate, useSearchStore, type DraftSource } from '@/store/searchStore'
 import type { Predicate, SearchQuery } from '@/types/search'
 
 import { useDiscovery } from '../../builder/useDiscovery'
@@ -33,8 +33,8 @@ export function ResultsAskBar({ viewId, onRun }: {
     )
     const draft = useDraftPredicate()
     const commitDraft = useSearchStore((s) => s.commitDraft)
-    const onAsk = useCallback((result: Predicate) => {
-        commitDraft(result, 'ask')
+    const onAsk = useCallback((result: Predicate, source: DraftSource = 'ask') => {
+        commitDraft(result, source)
         const next = buildRunnablePredicate(result)
         if (next) onRun(next.predicate, SEARCH_OPTIONS)
     }, [commitDraft, onRun])
