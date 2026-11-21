@@ -3,7 +3,7 @@
 *For Administrators.* Turn whole capabilities on or off for everyone in your
 deployment — editing, tracing, exports, sign-up, Analytics and more — and know
 who will notice before you do. This page shows you how to change a switch
-safely, then describes all 38 switches on **Administration → Features**.
+safely, then describes all 47 switches on **Administration → Features**.
 
 > **Before you start:** You need the **Super admin** role (the `system:admin`
 > permission). Nobody else sees **Features** under **Administration**, and the
@@ -236,6 +236,7 @@ will ask for.
 | **View versions, import and export** (`viewPortabilityEnabled`) | Off (preview) | A view's design history people can compare and restore, and moving views between environments as files. **Export views** and **Import views** decide which directions are allowed. | Everyone. Versions, Export and Import disappear from views, the Explorer and the View wizard, and the server refuses them. Versions keep being recorded, so turning this on later shows each view's whole history. | [Import & Export](/guide/import-export) |
 | **Export views** (`viewExportEnabled`) | On | Downloads a view's design — layers, assignments and settings — as a file. Does nothing while **View versions, import and export** is off. | People exporting views. Export actions disappear and the server refuses to build the file. Files already downloaded aren't recalled. | [Import & Export](/guide/import-export) |
 | **Import views** (`viewImportEnabled`) | On | Brings a view in from another environment's file, checks it against a data source here, and creates or updates a view. Does nothing while **View versions, import and export** is off. | People importing views. The import journey disappears from the View wizard, the Explorer and the workspace Views manager, and the server refuses uploads. | [Import & Export](/guide/import-export) |
+| **Data source details** (`dataSourceMetadataEnabled`) | Off (preview) | Lets people describe each data source — a description, links to read more, and tags — and say whether to trust it: its sensitivity (**Public**, **Internal**, **Confidential** or **Restricted**) and its status (**Certified**, **In review** or **Deprecated**). Anyone who manages a source edits its description, links and tags; only the workspace's admins and the source's named **Owner** and **Stewards** set its sensitivity and status. Each source also shows how it was connected and an **Activity** tab. Sensitivity is not the admin-only *Restricted* publishing setting. Also lets people name a source's data contacts. | People describing or choosing data. Off, the About card, trust badges, tag filter and Activity tab disappear and the server refuses changes. Everything already written is kept. | — |
 
 ### Display & UI
 
@@ -248,7 +249,7 @@ will ask for.
 | Switch (key) | Default | What it does | When it's off, who notices | Read more |
 | --- | --- | --- | --- | --- |
 | **Announcements** (`announcementsEnabled`) | On | Shows announcement banners to everyone. | Everyone. Banners stop appearing because the server serves none. Your announcements are hidden, not deactivated, and return when you turn this back on. | [The Admin Console](/guide/governance-ops) |
-| **Questions and conversations** (`conversationsEnabled`) | Off (preview) | Lets anyone who can open a view or a data source ask the people behind it about it — the view's owners and the source's data contacts — openly or privately, mention colleagues who can open it too, answer and accept answers, and watch a view or a source for new questions. A question reaches only people who can open what it is about. Workspace admins name each source's **Owner** and **Stewards** on its Overview; whoever manages the source changes the Stewards, and only workspace admins or the current Owner change the Owner. | Everyone asking or answering. Off, conversations become read-only: nobody can ask, reply, edit, watch or change data contacts, and reminders and watcher notices stop. Everything already said can still be read, marked read, muted, closed or deleted. | — |
+| **Questions and conversations** (`conversationsEnabled`) | Off (preview) | Lets anyone who can open a view or a data source ask the people behind it about it — the view's owners and the source's data contacts — openly or privately, mention colleagues who can open it too, answer and accept answers, and watch a view or a source for new questions. A question reaches only people who can open what it is about. Workspace admins name each source's **Owner** and **Stewards** on its Overview; whoever manages the source changes the Stewards, and only workspace admins or the current Owner change the Owner. A source's named Owner and Stewards can also mark a data request connected as their source. | Everyone asking or answering. Off, conversations become read-only: nobody can ask, reply, edit, watch or change data contacts (unless **Data source details** is on), and reminders and watcher notices stop. Everything already said can still be read, marked read, muted, closed or deleted. | — |
 
 ### Analytics
 

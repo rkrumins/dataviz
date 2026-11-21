@@ -962,6 +962,13 @@ class DataSourceResponse(BaseModel):
     last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")
     aggregation_edge_count: int = Field(0, alias="aggregationEdgeCount")
     aggregation_schedule: Optional[str] = Field(None, alias="aggregationSchedule")
+    #: Its details (``data_source_repo.metadata_fields``). ``catalog_description`` is the catalog
+    #: item's, when the read loaded it — shown when the source has no description of its own.
+    description: Optional[str] = None
+    catalog_description: Optional[str] = Field(None, alias="catalogDescription")
+    tags: List[str] = Field(default_factory=list)
+    classification: Optional[str] = None   # public | internal | confidential | restricted
+    trust_status: Optional[str] = Field(None, alias="trustStatus")   # certified | in_review | deprecated
     #: Who made it — in the Playground, the person whose experiment it is.
     created_by: Optional[str] = Field(None, alias="createdBy")
     created_at: str = Field(alias="createdAt")

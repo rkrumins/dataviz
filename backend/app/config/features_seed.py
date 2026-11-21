@@ -105,6 +105,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "conversationsEnabled":
         "Questions and conversations are turned off for this deployment, so they are read-only. "
         "An administrator can enable them under Admin → Features.",
+    "dataSourceMetadataEnabled":
+        "Data source details are turned off for this deployment, so they can't be changed. "
+        "An administrator can enable them under Admin → Features.",
     "allowedViewModes":
         "That view type is not available in this deployment. "
         "An administrator chooses the available types under Admin → Features.",
@@ -1040,6 +1043,34 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "rather than arrive as a file from somewhere else."
         ),
         "sort_order": 4,
+        "deprecated": False,
+    },
+    {
+        "key": "dataSourceMetadataEnabled",
+        "name": "Data source details",
+        "description": (
+            "Let people describe each data source — what it is, links to read more, and tags — and "
+            "say whether to trust it: how sensitive it is (Public, Internal, Confidential or "
+            "Restricted) and whether it is Certified, In review or Deprecated. Each source also "
+            "shows how it was connected and its history."
+        ),
+        "impact_when_off": (
+            "Details can no longer be changed, and the About card, the trust badges, the tags "
+            "filter and a source's Activity tab disappear. Everything already written is kept and "
+            "comes back when it is turned on again. Nothing is deleted."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A preview. Anyone who manages a source edits its description, links and tags; its "
+            "sensitivity and status are set by the workspace's admins and the source's named Owner "
+            "and Stewards. Turning this on also lets people name a source's data contacts, as "
+            "Questions and conversations does."
+        ),
+        "sort_order": 5,
         "deprecated": False,
     },
     # ── Display & UI ──────────────────────────────────────────────────────────

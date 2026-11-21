@@ -397,7 +397,7 @@ async def create_workspace(
         await _assert_permitted(session, None, req.name, ds)
 
     try:
-        ws = await workspace_repo.create_workspace(session, req)
+        ws = await workspace_repo.create_workspace(session, req, created_by=user.id)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 

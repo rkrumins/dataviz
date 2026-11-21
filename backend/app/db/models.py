@@ -891,6 +891,22 @@ class WorkspaceDataSourceORM(Base):
     aggregation_edge_count = Column(Integer, nullable=False, default=0)  # count of AGGREGATED edges created
     graph_fingerprint = Column(Text, nullable=True)  # JSON hash of node/edge counts by type (change detection)
     aggregation_schedule = Column(Text, nullable=True)  # Cron expression (e.g., "0 */6 * * *") for periodic checks
+    # ── Details (``backend.app.services.data_source_metadata``) ──
+    # What it is and where to read more — anyone who manages the source edits these.
+    description = Column(Text, nullable=True)             # ≤4000
+    links = Column(Text, nullable=True)                   # JSON [{label, url}], ≤10, http(s) only
+    tags = Column(Text, nullable=True)                    # JSON [str], ≤20 × 40 chars
+    # Whether to trust it — the workspace's admins and the source's named contacts set these.
+    # ``classification`` is how sensitive the data is; it is NOT ``is_restricted`` (the publish gate).
+    classification = Column(Text, nullable=True)          # public | internal | confidential | restricted
+    trust_status = Column(Text, nullable=True)            # certified | in_review | deprecated
+    trust_note = Column(Text, nullable=True)              # ≤500, e.g. "Use Finance v2 instead"
+    trust_status_by = Column(Text, nullable=True)         # who set the CURRENT status, and when
+    trust_status_at = Column(Text, nullable=True)
+    # The last change to any detail — and the lock token a save sends back. Not ``updated_at``,
+    # which aggregation writes.
+    metadata_updated_by = Column(Text, nullable=True)
+    metadata_updated_at = Column(Text, nullable=True)
     # Audit-only attribution; does not grant any permission.
     created_by = Column(Text, nullable=True, default=None)
     created_at = Column(Text, nullable=False, default=_now)
@@ -971,6 +987,22 @@ class WorkspaceDataSourceORM(Base):
         CheckConstraint(
             "source_mode IS NULL OR source_mode IN ('managed', 'federated')",
             name="ck_ds_source_mode",
+        ),
+        CheckConstraint(
+            "description IS NULL OR length(description) <= 4000",
+            name="ck_ds_description_len",
+        ),
+        CheckConstraint(
+            "classification IS NULL OR classification IN ('public', 'internal', 'confidential', 'restricted')",
+            name="ck_ds_classification",
+        ),
+        CheckConstraint(
+            "trust_status IS NULL OR trust_status IN ('certified', 'in_review', 'deprecated')",
+            name="ck_ds_trust_status",
+        ),
+        CheckConstraint(
+            "trust_note IS NULL OR length(trust_note) <= 500",
+            name="ck_ds_trust_note_len",
         ),
     )
 
@@ -1168,6 +1200,9 @@ class DataRequestORM(Base):
         Index("idx_data_requests_workspace_created", "workspace_id", "created_at"),
         Index("idx_data_requests_status_created", "status", "created_at"),
         Index("idx_data_requests_requester", "requested_by", "created_at"),
+        Index("idx_data_requests_source", "data_source_id",
+              postgresql_where=text("data_source_id IS NOT NULL"),
+              sqlite_where=text("data_source_id IS NOT NULL")),
         CheckConstraint(
             "system IN ('snowflake', 'databricks', 'bigquery', 'postgres', 'dbt', 'datahub', "
             "'neo4j', 'file', 'other')",
@@ -4651,6 +4686,11 @@ class AuthAuditLogORM(Base):
               postgresql_where=text("category = 'operations' AND data_source_id IS NOT NULL"),
               sqlite_where=text("category = 'operations' AND data_source_id IS NOT NULL")),
         Index("idx_aal_ds_occurred", "data_source_id", "occurred_at"),
+        # A source's history (``GET …/data-sources/{ds}/activity/events``): its events of the
+        # allowed types, newest first. Alembic 20261124_1100_aal_ds_type.
+        Index("idx_aal_ds_type_occurred", "data_source_id", "event_type", "occurred_at",
+              postgresql_where=text("data_source_id IS NOT NULL"),
+              sqlite_where=text("data_source_id IS NOT NULL")),
         Index("idx_aal_target_occurred", "target_type", "target_id", "occurred_at"),
         Index("idx_aal_type_occurred", "event_type", "occurred_at"),
         Index("idx_aal_correlation", "correlation_id"),

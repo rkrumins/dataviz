@@ -4,7 +4,7 @@
 to know which endpoint a switch turns off.*
 
 This page is the reference for the feature-switch API behind **Administration → Features**:
-every route with its request and answer, how a change is saved safely, and all 38 switches
+every route with its request and answer, how a change is saved safely, and all 47 switches
 with their defaults and the server routes each one controls.
 
 - **Administrators:** what each switch does on screen, and how to change one, is in
@@ -173,7 +173,7 @@ required. `type` is `boolean` or `string[]`; a `string[]` switch also needs
 > **Warning:** `options`, `helpUrl`, `adminHint`, `impactWhenOff` and `impactWhenOn` are cleared
 > when you leave them out. Send their current values with every change.
 
-> **Note:** For the 38 built-in switches, the API service rewrites `name`, `description`,
+> **Note:** For the 47 built-in switches, the API service rewrites `name`, `description`,
 > `adminHint`, `impactWhenOff`, `impactWhenOn`, `helpUrl`, `category`, `type`, `options` and
 > `sortOrder` from the code every time it starts, so a change to those lasts only until the next
 > restart. Change the text in `backend/app/config/features_seed.py` instead.
@@ -192,7 +192,7 @@ An unknown key answers `404`.
 
 ## Feature flags (authoritative set)
 
-All 38 switches, grouped as **Administration → Features** groups them. **Switch** is the name
+All 47 switches, grouped as **Administration → Features** groups them. **Switch** is the name
 an administrator sees. **When it is off** names the routes the server refuses — `403` with
 `{"detail": {"type": "feature_disabled", "feature": "<key>", "message": "…"}}` unless the row
 says otherwise — or what it does instead. Paths are relative to `/api/v1`. Every switch whose
@@ -258,6 +258,7 @@ feature open to anyone who knows the URL.
 | View versions, import and export | `viewPortabilityEnabled` | Off | Every `/views/transfer/*` and `/views/{view_id}/versions/*` route | Experimental preview. Versions keep being recorded while it is off |
 | Export views | `viewExportEnabled` | On | `POST /views/transfer/export`, `/views/transfer/export/preview`, `/views/transfer/packages` | Needs View versions, import and export |
 | Import views | `viewImportEnabled` | On | `POST /views/transfer/inspect`, `/reconcile`, `/import`, `/packages/inspect`, `/packages/{upload_id}/data`, `/packages/uploads` (and its parts, status and `complete`), `GET /packages/{upload_id}`, `/packages/{upload_id}/new-source` | Needs View versions, import and export |
+| Data source details | `dataSourceMetadataEnabled` | Off | `PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata` (description, links, tags), `PUT …/metadata/trust` (classification, status, note) and `GET /admin/workspaces/{ws_id}/data-sources/{ds_id}/activity/events` (a source's history). `GET …/metadata` still answers, with `canEdit` and `canEditTrust` false; stored details stay on every data source and view read | Experimental preview. On, it also opens `PUT …/contacts`, as `conversationsEnabled` does. Trust needs `workspace:admin` or being a named Owner or Steward; never in the Playground |
 
 ### Display & UI
 
@@ -281,7 +282,7 @@ feature open to anyone who knows the URL.
 | Switch | Key | Default | When it is off | Notes |
 |---|---|---|---|---|
 | Announcements | `announcementsEnabled` | On | Not refused: `GET /announcements` answers an empty list | Announcements are hidden, not deactivated |
-| Questions and conversations | `conversationsEnabled` | `false` | `POST /discussions/subjects/{type}/{id}` (ask), `POST /discussions/{id}/messages` (reply), `PATCH /discussions/{id}/messages/{mid}` (edit), `PUT /discussions/subjects/{type}/{id}/watch`, `PUT /discussions/{id}/me` with `following: true`, and `PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts` are refused `403 feature_disabled`; watcher notices and reminders pause. Reading, `POST /discussions/{id}/read`, muting, unfollowing, unwatching, closing, reopening, accepting answers and deleting still work | Preview. Unreadable means off |
+| Questions and conversations | `conversationsEnabled` | `false` | `POST /discussions/subjects/{type}/{id}` (ask), `POST /discussions/{id}/messages` (reply), `PATCH /discussions/{id}/messages/{mid}` (edit), `PUT /discussions/subjects/{type}/{id}/watch`, `PUT /discussions/{id}/me` with `following: true`, and `PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts` (unless `dataSourceMetadataEnabled` is on) are refused `403 feature_disabled`; watcher notices and reminders pause. Reading, `POST /discussions/{id}/read`, muting, unfollowing, unwatching, closing, reopening, accepting answers and deleting still work | Preview. Unreadable means off |
 
 ### Experimental
 

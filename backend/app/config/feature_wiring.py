@@ -602,7 +602,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /discussions/subjects/{type}/{id} — asking is refused while off",
             "POST /discussions/{id}/messages, PATCH /discussions/{id}/messages/{mid} — replying and editing",
             "PUT /discussions/subjects/{type}/{id}/watch, PUT /discussions/{id}/me (following) — watching",
-            "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts — naming data contacts",
+            "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts — naming data contacts "
+            "(open while this or dataSourceMetadataEnabled is on)",
             "Watcher notices and reminders pause",
         ),
         ui_surfaces=(
@@ -699,6 +700,29 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ),
         still_allowed=("Building views in the wizard", "Exporting views"),
         depends_on=("viewPortabilityEnabled",),
+    ),
+    # Preview, like conversations: it ships OFF and every gate passes default=False.
+    "dataSourceMetadataEnabled": FeatureWiring(
+        key="dataSourceMetadataEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata — description, links and tags",
+            "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata/trust — sensitivity and status",
+            "GET /admin/workspaces/{ws_id}/data-sources/{ds_id}/activity/events — a source's history",
+            "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts — naming data contacts "
+            "(open while this or conversationsEnabled is on)",
+        ),
+        ui_surfaces=(
+            "About this data source — a data source's Overview, with its edit and status forms",
+            "Trust badges — the data source drawer, the Sources grid and a view's Built on",
+            "Tags and the filter bar — the Sources grid; description and tags in the search palette",
+            "Activity — a data source's history tab",
+        ),
+        still_allowed=(
+            "Reading a source's details (GET …/metadata), with nothing editable",
+            "Details already written stay on every data source and view read; nothing is deleted",
+        ),
     ),
     "blankModelsEnabled": FeatureWiring(
         key="blankModelsEnabled",

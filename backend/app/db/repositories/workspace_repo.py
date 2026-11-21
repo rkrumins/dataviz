@@ -24,7 +24,7 @@ from backend.common.models.management import (
     WorkspaceResponse,
     DataSourceResponse,
 )
-from .data_source_repo import fork_of
+from .data_source_repo import fork_of, metadata_fields
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,7 @@ def _ds_to_response(row: WorkspaceDataSourceORM, identity=None) -> DataSourceRes
         # Ready / Syncing / Needs-attention options could never match anything.
         aggregationStatus=row.aggregation_status or "none",
         forkOf=fork_of(row),
+        **metadata_fields(row),
         createdBy=row.created_by,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
@@ -156,7 +157,7 @@ def _ws_query():
             WorkspaceORM.data_sources.and_(
                 WorkspaceDataSourceORM.deleted_at.is_(None)
             )
-        )
+        ).selectinload(WorkspaceDataSourceORM.catalog_item)
     )
 
 
@@ -292,7 +293,9 @@ async def create_workspace(
     session: AsyncSession,
     req: WorkspaceCreateRequest,
     make_default: bool = False,
+    created_by: Optional[str] = None,
 ) -> WorkspaceResponse:
+    """``created_by`` is who made it: each of its data sources records them."""
     ws = WorkspaceORM(
         name=req.name,
         description=req.description,
@@ -330,6 +333,7 @@ async def create_workspace(
             label=label,
             is_primary=(i == 0),  # first data source is primary by default
             is_active=True,
+            created_by=created_by,
         )
         session.add(ds)
 

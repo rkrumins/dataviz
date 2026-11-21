@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
+import sqlalchemy as sa
 from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -82,10 +83,35 @@ def _to_response(row: WorkspaceDataSourceORM, identity=None) -> DataSourceRespon
         sourceMode=row.source_mode,
         writeBackEnabled=bool(row.write_back_enabled),
         forkOf=fork_of(row),
+        **metadata_fields(row),
         createdBy=row.created_by,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
+
+
+def json_list(text: Optional[str]) -> list:
+    """A JSON-array column as a list: ``[]`` when unset or unreadable."""
+    try:
+        value = json.loads(text) if text else []
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def metadata_fields(row: WorkspaceDataSourceORM) -> dict:
+    """A source's details as every serializer carries them (``DataSourceResponse``'s aliases).
+
+    ``catalogDescription`` only when the read already loaded the catalog item — never a lazy
+    load from inside a serializer, which an async session can't do."""
+    catalog = row.catalog_item if "catalog_item" not in sa.inspect(row).unloaded else None
+    return {
+        "description": row.description,
+        "catalogDescription": catalog.description if catalog is not None else None,
+        "tags": json_list(row.tags),
+        "classification": row.classification,
+        "trustStatus": row.trust_status,
+    }
 
 
 def fork_of(row) -> Optional[dict]:
@@ -134,6 +160,7 @@ async def list_data_sources(
         query = query.where(WorkspaceDataSourceORM.provider_id == provider_id)
     if not include_forks:
         query = query.where(not_a_fork())
+    query = query.options(selectinload(WorkspaceDataSourceORM.catalog_item))
     result = await session.execute(query.order_by(WorkspaceDataSourceORM.created_at))
     rows = list(result.scalars().all())
     # Resolve each row's mapping so the list reports what is actually in force.

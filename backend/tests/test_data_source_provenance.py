@@ -113,6 +113,51 @@ async def test_is_restricted_survives_both_serializers(db_session):
     assert listed[0].is_restricted is True
 
 
+_METADATA = ("description", "catalogDescription", "tags", "classification", "trustStatus")
+
+
+def _metadata(ds) -> dict:
+    dumped = ds.model_dump(by_alias=True)
+    return {k: dumped[k] for k in _METADATA}
+
+
+async def test_both_serializers_emit_the_same_details(db_session):
+    """Every list and card shows a source's description, tags and trust badges from
+    whichever serializer served it — the workspace read or the flat list — so the two
+    must agree, the catalog item's description included."""
+    from backend.app.db.models import CatalogItemORM
+
+    ws = await _seed_workspace_with_ds(db_session, name="meta-ws", provider_id="prov_meta")
+    db_session.add(CatalogItemORM(id="cat_meta", provider_id="prov_meta", source_identifier="meta-ws-g1",
+                                  name="Ledger", description="The general ledger, nightly."))
+    await db_session.flush()
+    row = await _ds_row(db_session, ws.id)
+    row.catalog_item_id = "cat_meta"
+    row.description = "Month-end figures."
+    row.tags = '["finance", "gl"]'
+    row.classification = "confidential"
+    row.trust_status = "certified"
+    await db_session.flush()
+    db_session.expunge_all()
+
+    nested = _metadata((await workspace_repo.get_workspace(db_session, ws.id)).data_sources[0])
+    db_session.expunge_all()
+    listed = _metadata((await data_source_repo.list_data_sources(db_session, ws.id))[0])
+    assert nested == listed == {
+        "description": "Month-end figures.", "catalogDescription": "The general ledger, nightly.",
+        "tags": ["finance", "gl"], "classification": "confidential", "trustStatus": "certified",
+    }
+
+
+async def test_a_source_with_no_details_reads_as_empty_in_both(db_session):
+    ws = await _seed_workspace_with_ds(db_session, name="meta-ws-2", provider_id="prov_meta2")
+    nested = _metadata((await workspace_repo.get_workspace(db_session, ws.id)).data_sources[0])
+    listed = _metadata((await data_source_repo.list_data_sources(db_session, ws.id))[0])
+    assert nested == listed == {
+        "description": None, "catalogDescription": None, "tags": [], "classification": None, "trustStatus": None,
+    }
+
+
 async def test_sources_are_unrestricted_until_someone_says_otherwise(db_session):
     ws = await _seed_workspace_with_ds(db_session, name="restr-ws-2", provider_id="prov_restr2")
     nested = (await workspace_repo.get_workspace(db_session, ws.id)).data_sources[0]
