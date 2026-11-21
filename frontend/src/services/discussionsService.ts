@@ -139,6 +139,14 @@ export interface SubjectSummary {
     byEntity: Record<string, { open: number; total: number }>
 }
 
+/** A card's numbers: what a subject's summary counts, without the rest. */
+export interface SubjectCount {
+    open: number
+    answered: number
+    total: number
+    unread: number
+}
+
 export interface PersonRole {
     personId: string
     via: PersonVia
@@ -257,6 +265,14 @@ export function listSubjectThreads(
 
 export function getSubjectSummary(subject: SubjectKey): Promise<SubjectSummary> {
     return authFetch<SubjectSummary>(`${subjectBase(subject)}/summary`)
+}
+
+/** The counts on up to 100 subjects of one type at once — a page of cards. Only those the caller
+ *  can open, with a question they can see, come back. */
+export function getSubjectSummaries(type: SubjectType, ids: string[]): Promise<{ summaries: Record<string, SubjectCount> }> {
+    const q = new URLSearchParams({ type })
+    for (const id of ids) q.append('ids', id)
+    return authFetch(`${BASE}/summaries?${q}`)
 }
 
 export function getSubjectPeople(subject: SubjectKey): Promise<SubjectPeople> {

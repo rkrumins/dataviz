@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useMemo } from 'react'
 import {
-    useInfiniteQuery, useMutation, useQuery, useQueryClient,
+    keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient,
     type InfiniteData, type QueryClient,
 } from '@tanstack/react-query'
 import { POLLING_INTERVALS, withJitter } from '@/config/polling'
@@ -22,12 +22,12 @@ import type { MentionSource } from '@/features/reviews/comments/CommentComposer'
 import type { MentionCandidate } from '@/features/reviews/comments/mentions'
 import {
     acceptAnswer, askQuestion, closeThread, deleteMessage, deleteThread, editMessage,
-    getMyDiscussionSummary, getSubjectPeople, getSubjectSummary, getThread, listMentionable,
+    getMyDiscussionSummary, getSubjectPeople, getSubjectSummaries, getSubjectSummary, getThread, listMentionable,
     listMyDiscussions, listMyWatches, listSubjectThreads, markThreadRead, postReply, reopenThread,
     setThreadMe, unacceptAnswer, unwatchSubject, watchSubject,
     type AskInput, type DiscussionStatus, type MentionablePerson, type MessageResult, type MyBox,
-    type SubjectKey, type SubjectSummary, type ThreadDetail, type ThreadFilter, type ThreadList,
-    type ThreadChange, type ThreadSummary,
+    type SubjectCount, type SubjectKey, type SubjectSummary, type SubjectType, type ThreadDetail,
+    type ThreadFilter, type ThreadList, type ThreadChange, type ThreadSummary,
 } from '@/services/discussionsService'
 import { useAnchorStore } from './anchorStore'
 
@@ -45,6 +45,9 @@ export const DISCUSSION_KEYS = {
     subject: subjectKey,
     threads: (s: SubjectKey, filter: Required<ThreadFilter>) => [...subjectKey(s), 'threads', filter] as const,
     summary: (s: SubjectKey) => [...subjectKey(s), 'summary'] as const,
+    /** Every list's card counts; one list's, by its sorted ids. */
+    summaries: ['discussions', 'summaries'] as const,
+    counts: (type: SubjectType, sortedIds: string[]) => ['discussions', 'summaries', type, sortedIds.join(',')] as const,
     people: (s: SubjectKey) => [...subjectKey(s), 'people'] as const,
     mentionable: (s: SubjectKey) => [...subjectKey(s), 'mentionable'] as const,
     thread: (id: string) => ['discussions', 'thread', id] as const,
@@ -108,6 +111,37 @@ export function useSubjectSummary(subject: SubjectKey | null | undefined, { live
         }
     }, [qc, type, id, latest])
     return q
+}
+
+/** Ids one card-counts request carries, at most (the server's cap). */
+export const COUNTS_CHUNK = 100
+const NO_COUNTS: Record<string, SubjectCount> = {}
+
+/**
+ * The question counts on a list of cards — views or data sources — by id: one request per hundred
+ * for the whole list, never one per card; polled at the badge pace, ETag'd. A subject the reader
+ * can't open, or with no question they can see, is absent. Empty while the switch is off.
+ */
+export function useSubjectCounts(type: SubjectType, ids: readonly string[]): Record<string, SubjectCount> {
+    const on = useConversationsEnabled()
+    const sorted = useMemo(() => [...new Set(ids)].sort(), [ids])
+    const q = useQuery({
+        queryKey: DISCUSSION_KEYS.counts(type, sorted),
+        queryFn: async () => {
+            const chunks: string[][] = []
+            for (let i = 0; i < sorted.length; i += COUNTS_CHUNK) chunks.push(sorted.slice(i, i + COUNTS_CHUNK))
+            const pages = await Promise.all(chunks.map((c) => getSubjectSummaries(type, c)))
+            return Object.assign({}, ...pages.map((p) => p.summaries)) as Record<string, SubjectCount>
+        },
+        enabled: on && sorted.length > 0,
+        refetchInterval: pollEvery(POLLING_INTERVALS.discussionSummary),
+        refetchOnWindowFocus: true,
+        // A new page of cards keeps the numbers already shown until its own arrive.
+        placeholderData: keepPreviousData,
+        staleTime: 15_000,
+        retry: 1,
+    })
+    return (on && q.data) || NO_COUNTS
 }
 
 /** Keeps the canvas's question marks counting the questions on `viewId`, while it is open. */
@@ -289,6 +323,7 @@ function refreshAround(qc: QueryClient, subject: SubjectKey | null | undefined) 
         void qc.invalidateQueries({ queryKey: [...subjectKey(subject), 'threads'] })
         void qc.invalidateQueries({ queryKey: DISCUSSION_KEYS.summary(subject) })
     }
+    void qc.invalidateQueries({ queryKey: DISCUSSION_KEYS.summaries })
     void qc.invalidateQueries({ queryKey: DISCUSSION_KEYS.me })
 }
 
@@ -373,6 +408,8 @@ export function useDiscussionActions() {
             patchRows(qc, threadId, { unread: false })
             const subject = threadOf(threadId)?.subject
             if (subject) void qc.invalidateQueries({ queryKey: DISCUSSION_KEYS.summary(subject) })
+            // The card's unread dot goes too.
+            void qc.invalidateQueries({ queryKey: DISCUSSION_KEYS.summaries })
             void qc.invalidateQueries({ queryKey: DISCUSSION_KEYS.mySummary })
             // Reading the thread marks its Inbox messages read too.
             void qc.invalidateQueries({ queryKey: INBOX_QUERY_KEY })
