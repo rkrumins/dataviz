@@ -465,31 +465,42 @@ def field_violations(entities: Iterable[Tuple[str, Optional[Mapping], Optional[M
 
 #: The field violations a refused publish names; past them it counts.
 FIELD_EXAMPLES = 100
+#: The refused entities each per-field count names by id: as many as one bulk property job names
+#: (``config.PROPERTY_JOB_MAX_IDS``), so one job can fix them all.
+FIELD_IDS_MAX = 20_000
 
 
 class FieldFindings:
     """What a publish's field checks found, page after page (:func:`field_violations`): the first
-    ``FIELD_EXAMPLES`` violations, how many there are in all, and how many per entity type, field
-    and rule — so a publish of a million entities holds a hundred of them, never all."""
+    ``FIELD_EXAMPLES`` violations, how many there are in all, and per entity type, field and rule
+    how many and which (the first ``FIELD_IDS_MAX``) — so a publish of a million entities holds a
+    hundred of them, and a bounded list of ids per field, never all."""
 
     def __init__(self) -> None:
         self.examples: List[dict] = []
         self.total = 0
-        self._by: Dict[Tuple[str, str, str], List[Any]] = {}     # (type, field, rule) -> [name, n]
+        # (type, field, rule) -> [name, n, ids]
+        self._by: Dict[Tuple[str, str, str], List[Any]] = {}
 
     def add(self, found: Sequence[dict]) -> None:
         self.examples += found[:max(0, FIELD_EXAMPLES - len(self.examples))]
         self.total += len(found)
         for v in found:
             held = self._by.setdefault((v["type"], v["field"], v["rule"]),
-                                       [v.get("fieldName") or v["field"], 0])
+                                       [v.get("fieldName") or v["field"], 0, []])
             held[1] += 1
+            if len(held[2]) < FIELD_IDS_MAX:
+                held[2].append(f"gv:{v['entity_id']}")
 
     def __bool__(self) -> bool:
         return self.total > 0
 
     def by_field(self) -> List[dict]:
-        """``[{entityType, field, fieldName, rule, count}]``, the most refused first."""
-        return sorted(({"entityType": t, "field": f, "fieldName": name, "rule": r, "count": n}
-                       for (t, f, r), (name, n) in self._by.items()),
+        """``[{entityType, field, fieldName, rule, count, ids, idsComplete}]``, the most refused
+        first. ``ids``: the refused entities as a bulk property job names them (``gv:<entity
+        id>``, which reaches one new in the draft too), at most ``FIELD_IDS_MAX``; ``idsComplete``:
+        they are all of them."""
+        return sorted(({"entityType": t, "field": f, "fieldName": name, "rule": r, "count": n,
+                        "ids": list(ids), "idsComplete": len(ids) == n}
+                       for (t, f, r), (name, n, ids) in self._by.items()),
                       key=lambda e: (-e["count"], e["entityType"], e["field"], e["rule"]))
