@@ -8,7 +8,7 @@ import { render, screen } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { describe, expect, it } from 'vitest'
 
-import { ActivityDetails, splitChanges } from '../ActivityDetails'
+import { ActivityDetails, splitBulkEdits, splitChanges } from '../ActivityDetails'
 
 function wrap(ui: ReactNode) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -84,5 +84,41 @@ describe('ActivityDetails', () => {
     it('draws nothing for an empty record', () => {
         const { container } = wrap(<ActivityDetails details={{}} />)
         expect(container).toBeEmptyDOMElement()
+    })
+})
+
+describe('a publish that took bulk property edits to Published', () => {
+    const published = {
+        commitId: 'cmt_9',
+        changes: { create: 0, update: 27_110, delete: 0 },
+        propertyJobs: {
+            total: 3,
+            jobs: [
+                { jobId: 'vjob_1', label: 'Rename owner → steward', changed: 27_000, refused: 4, actor: 'usr_ana',
+                  message: 'Steward is the new name', status: 'completed' },
+                { jobId: 'vjob_2', op: { kind: 'convert', key: 'tier', toKind: 'Integer' }, changed: 1, refused: 0, partial: true },
+            ],
+        },
+    }
+
+    it('takes them out of the rest of the record', () => {
+        const { edits, total, rest } = splitBulkEdits(published)
+        expect(total).toBe(3)
+        expect(edits.map((e) => [e.label, e.changed, e.partial])).toEqual([
+            ['Rename owner → steward', 27_000, false], ['Convert tier to Integer', 1, true]])
+        expect(rest).toEqual({ commitId: 'cmt_9', changes: published.changes })
+        expect(splitBulkEdits({ propertyJobs: { jobs: 'x' } }).edits).toEqual([])
+    })
+
+    it('lists each: what it did, to how many, who ran it and why', () => {
+        wrap(<ActivityDetails details={published} names={{ usr_ana: 'Ana Ruiz' }} />)
+        expect(screen.getByText('Bulk property edits · 3')).toBeInTheDocument()
+        expect(screen.getByText('Rename owner → steward')).toBeInTheDocument()
+        // Who ran it is drawn as the person (their chip).
+        expect(screen.getByText('Rename owner → steward').closest('li')).toHaveTextContent(
+            /27,000 entities changed in the draft · 4 not changed· by/)
+        expect(screen.getByText('“Steward is the new name”')).toBeInTheDocument()
+        expect(screen.getByText('in part')).toBeInTheDocument()
+        expect(screen.getByText('and 1 more')).toBeInTheDocument()
     })
 })

@@ -1,8 +1,9 @@
 /**
  * PropertyOpDialog — one bulk property change, guided: **What** (the operation, the property, its
- * value or new name) → **Where** (which entities) → **Review** (counted exactly, with anything that
- * would stop it), then applied to the draft by a job on the server: every entity the target reaches,
- * however many — not only the ones loaded on the canvas.
+ * value or new name — or how a clean-up tidies its values, with a before → after) → **Where**
+ * (which entities) → **Review** (counted exactly, with anything that would stop it, and an optional
+ * reason kept with it), then applied to the draft by a job on the server: every entity the target
+ * reaches, however many — not only the ones loaded on the canvas.
  *
  * A removal, a rename or an overwrite of many entities (or across the whole data source) asks for
  * the property's name to be typed first. The request carries a key made from what it applies, so
@@ -25,7 +26,7 @@ import { createPropertyJob, previewPropertyJob, type PropertyJobPreview } from '
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
 import {
-  impactOf, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel, reviewCounts, scopeFixedToView, targetLabel, targetOf,
+  impactOf, isCleanup, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel, reviewCounts, scopeFixedToView, targetLabel, targetOf,
   type OpDraft, type ScopeMode, type TargetPreset,
 } from './opModel'
 import { useReviewCounts } from './useReviewCounts'
@@ -54,12 +55,16 @@ export function PropertyOpDialog({
 
   const [op, setOp] = useState<OpDraft>(() => ({
     kind: seed.kind ?? 'set', key: seed.key ?? '', to: '', value: '', onConflict: 'skip',
+    ...(seed.map ? { map: seed.map } : {}), ...(seed.toKind ? { toKind: seed.toKind } : {}),
   }))
   const [preset, setPreset] = useState<TargetPreset>(() => seed.target ?? (seed.key ? { kind: 'hasKey', key: seed.key } : { kind: 'view' }))
   const [scopeMode, setScopeMode] = useState<ScopeMode>(() => (seed.target?.kind === 'search' ? seed.target.scopeMode : 'view'))
   const [sourceConfirmed, setSourceConfirmed] = useState(false)
-  // A change whose What is already whole (Remove from a row) opens on Where.
-  const [step, setStep] = useState(() => (opProblem({ kind: seed.kind ?? 'set', key: seed.key ?? '', to: '', value: '', onConflict: 'skip' }) ? 0 : 1))
+  // A change whose What is already whole (Remove from a row) opens on Where; a clean-up opens on
+  // What, where its before → after is shown.
+  const [step, setStep] = useState(() => (isCleanup(op.kind) || opProblem(op) ? 0 : 1))
+  const [reason, setReason] = useState('')
+  const cleanup = isCleanup(op.kind)
 
   // ── Where ──
   // A preset that named the old property follows a new one.
@@ -92,11 +97,17 @@ export function PropertyOpDialog({
 
   const ids = preset.kind === 'selection'
   const tally = ids
-    ? preview.data?.counts ? { target: preview.data.counts.matched, haveKey: preview.data.counts.haveKey, haveTo: preview.data.counts.haveTo ?? 0 } : null
+    ? preview.data?.counts ? {
+      target: preview.data.counts.matched, haveKey: preview.data.counts.haveKey, haveTo: preview.data.counts.haveTo ?? 0,
+      wouldChange: preview.data.counts.wouldChange,
+    } : null
     : counts.counts.size > 0 ? {
       target: counts.counts.get('target')?.count, haveKey: counts.counts.get('haveKey')?.count, haveTo: counts.counts.get('haveTo')?.count,
+      match: counts.counts.get('match')?.count,
     } : null
-  const impact = tally && tally.target !== undefined ? impactOf(op, tally) : null
+  // A convert's bound, from how the view's entities store the property (the target is in the view).
+  const kinds = effectiveScope === 'view' ? properties.find((p) => p.key === op.key.trim())?.kinds : null
+  const impact = tally && tally.target !== undefined ? impactOf(op, tally, kinds) : null
   const exact = ids ? !!preview.data?.counts : counts.complete
   const stagedCount = useStagedChangesStore((s) => s.changes.length)
   const blocked = !!preview.data?.refusal || !!preview.data?.activeJobId || preview.data?.nameBudget?.verdict === 'refused'
@@ -114,8 +125,10 @@ export function PropertyOpDialog({
     setSubmitting(true)
     setError(null)
     try {
+      // The reason, when one is given, is the change's message: in the draft's history, and in the
+      // audit of the publish that takes it to Published.
       const job = await createPropertyJob(graphWrite.wsId, graphWrite.graphId, graphWrite.branchId, jobOp(op), target, idempotencyKey,
-        `Bulk property: ${propertyJobLabel(jobOp(op))} on ${targetLabel(preset)}`)
+        reason.trim() || `Bulk property: ${propertyJobLabel(jobOp(op))} on ${targetLabel(preset)}`)
       usePropertyJobsStore.getState().track({
         jobId: job.jobId, ...graphWrite, viewId, op: jobOp(op), targetLabel: targetLabel(preset),
         startedAt: new Date().toISOString(), job,
@@ -165,8 +178,10 @@ export function PropertyOpDialog({
               <Database className="h-5 w-5" aria-hidden />
             </span>
             <div className="min-w-0 flex-1">
-              <h3 id="property-op-title" className="text-[15px] font-semibold leading-tight text-ink">Change a property</h3>
-              <p className="mt-0.5 text-[11.5px] text-ink-muted">On every entity it should reach — applied to your draft by the server.</p>
+              <h3 id="property-op-title" className="text-[15px] font-semibold leading-tight text-ink">{cleanup ? 'Clean up a property' : 'Change a property'}</h3>
+              <p className="mt-0.5 text-[11.5px] text-ink-muted">
+                {cleanup ? 'Tidy the values it holds' : 'On'} every entity it should reach — applied to your draft by the server.
+              </p>
               <ol className="mt-3 flex items-center gap-1" aria-label="Steps">
                 {STEPS.map((label, i) => {
                   const done = i < step
@@ -192,7 +207,7 @@ export function PropertyOpDialog({
 
           <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-5 py-4">
             <motion.div key={step} initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} transition={MOTION.stepSwap}>
-              {step === 0 && <WhatStep op={op} onChange={setOp} properties={properties} />}
+              {step === 0 && <WhatStep op={op} onChange={setOp} properties={properties} viewId={viewId} />}
               {step === 1 && (
                 <WhereStep
                   viewId={viewId} preset={preset} onPreset={setPreset} scopeMode={scopeMode} onScope={setScopeMode}
@@ -204,7 +219,7 @@ export function PropertyOpDialog({
                 <ReviewStep
                   op={op} preset={preset} scopeMode={effectiveScope} counts={ids ? null : counts} impact={impact} exact={exact}
                   preview={preview.data} previewLoading={preview.loading} sample={sample.data} sampleLoading={sample.loading}
-                  stagedCount={stagedCount}
+                  stagedCount={stagedCount} reason={reason} onReason={setReason}
                 />
               )}
             </motion.div>
@@ -217,7 +232,8 @@ export function PropertyOpDialog({
             {step > 0 && <Button size="sm" variant="ghost" leftIcon={ArrowLeft} onClick={() => setStep(step - 1)}>Back</Button>}
             <Button size="sm" variant={step === 2 && (op.kind === 'remove') ? 'danger' : 'primary'} rightIcon={step < 2 ? ArrowRight : undefined}
               disabled={!canNext} loading={submitting} onClick={next}>
-              {step < 2 ? 'Next' : error ? 'Try again' : `Apply${impact ? ` to ${impact.changes.toLocaleString()}${exact ? '' : '+'}` : ''}`}
+              {step < 2 ? 'Next' : error ? 'Try again'
+                : `Apply${impact ? ` to ${impact.upTo ? 'up to ' : ''}${impact.changes.toLocaleString()}${exact ? '' : '+'}` : ''}`}
             </Button>
           </div>
         </motion.div>
@@ -230,8 +246,10 @@ export function PropertyOpDialog({
           confirmPhrase={op.key.trim()}
           confirmLabel="Apply"
           sections={[{
-            label: 'Entities', count: impact.changes, tone: op.kind === 'remove' ? 'destructive' : 'warning',
-            consequence: op.kind === 'remove' ? `Lose ${op.key.trim()}` : op.kind === 'rename' ? `${op.key.trim()} becomes ${op.to.trim()}` : `${op.key.trim()} is replaced`,
+            label: 'Entities', count: impact.changes, tone: op.kind === 'remove' || (op.kind === 'convert' && op.onFail === 'remove') ? 'destructive' : 'warning',
+            consequence: op.kind === 'remove' ? `Lose ${op.key.trim()}` : op.kind === 'rename' ? `${op.key.trim()} becomes ${op.to.trim()}`
+              : cleanup ? `${op.key.trim()} is rewritten${op.kind === 'convert' && op.onFail === 'remove' ? ', or removed where it won’t convert' : ''}`
+                : `${op.key.trim()} is replaced`,
           }]}
           impactHeading="This will change"
           irreversibleNote={null}

@@ -429,8 +429,10 @@ class DraftSearch:
                 "progress": {"scanned": state["cursor"], "total": state["total"]}}
 
     # ---- catalog ------------------------------------------------------ #
-    async def catalog(self, scope, main_answer: Dict[str, Any], wait_ms: int) -> Dict[str, Any]:
-        """Main's catalog ``main_answer`` with the draft's changes folded in."""
+    async def catalog(self, scope, main_answer: Dict[str, Any], wait_ms: int,
+                      values_for: Optional[str] = None) -> Dict[str, Any]:
+        """Main's catalog ``main_answer`` with the draft's changes folded in — ``values_for``: a key
+        whose every kept value is listed (as main's own catalog lists it)."""
         skip = _skipped_keys()
 
         def fold(read: _Read, states: List[_State], held_json: str) -> str:
@@ -467,7 +469,7 @@ class DraftSearch:
             raise LookupError("main's catalog is not kept where its session is")
         merged, wide = CatalogStats.from_json(raw).folded(
             CatalogStats.from_json(state["acc"]["stats"]))
-        answer = answer_of(merged, main_session, self.main_ctx, wide)
+        answer = answer_of(merged, main_session, self.main_ctx, wide, values_for=values_for)
         answer.update({
             "status": state["status"],
             "entities": sum(merged.entities.values()),

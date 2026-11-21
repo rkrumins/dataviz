@@ -109,3 +109,38 @@ def test_a_composed_patch_lands_like_the_two_edits_in_order():
         {"displayName": "Renamed"})
     out = GraphVersioningService._patch_payload(stored, composed)
     assert out == {"urn": "u", "displayName": "Renamed", "properties": {"sourceId": BIG}}
+
+
+# ── the one bypass: a bulk property job writes the kind it asks for ──────────
+def test_an_exact_write_stores_each_value_as_sent_kind_and_all():
+    """A bulk property job computes its values on the server and means their kind (a convert of
+    "42" to 42, a set of 1 over 1.0): written ``exact``, the stored value doesn't win."""
+    stored = {"urn": "u", "properties": {"n": "42", "r": 1.0, "ok": True, "id": BIG, "keep": "x"}}
+    patch = {"properties": {"n": 42, "r": 1, "ok": "true", "id": float(BIG)}}
+    out = GraphVersioningService._patch_payload(stored, patch, exact=True)
+    assert out["properties"] == {"n": 42, "r": 1, "ok": "true", "id": float(BIG), "keep": "x"}
+    assert isinstance(out["properties"]["r"], int) and isinstance(out["properties"]["n"], int)
+    # Without it — as every save is — the stored value wins over the same value retyped.
+    assert GraphVersioningService._patch_payload(stored, patch)["properties"] == stored["properties"]
+
+
+def test_an_exact_write_still_stores_a_date_one_way_and_still_removes():
+    stored = {"urn": "u", "properties": {"at": "2026-01-05T10:00:00Z", "gone": 1}}
+    out = GraphVersioningService._patch_payload(
+        stored, {"properties": {"at": "2026-01-05 12:00+02:00", "gone": "__nx_prop_delete__",
+                                "on": "2026-01-06T00:00"}}, exact=True)
+    assert out["properties"] == {"at": "2026-01-05T10:00:00Z", "on": "2026-01-06T00:00:00Z"}
+
+
+def test_exact_patches_compose_and_fold_as_sent():
+    from backend.app.services.versioning.changeset import fold_batch_ops
+    from backend.common.property_patch import compose_patches
+    assert compose_patches({"properties": {"n": "1"}}, {"properties": {"n": 1}}, exact=True) == {
+        "properties": {"n": 1}}
+    assert compose_patches({"properties": {"n": "1"}}, {"properties": {"n": 1}}) == {"properties": {"n": "1"}}
+    ops = [{"op": "update", "entity_id": "A", "payload": {"properties": {"n": "1"}}},
+           {"op": "update", "entity_id": "A", "payload": {"properties": {"n": 1}}}]
+    fold = fold_batch_ops(ops, is_edge_payload=lambda p: False, sanitize_node=lambda v: v, exact=True)
+    assert fold.new_vals["A"] == {"properties": {"n": 1}}
+    fold = fold_batch_ops(ops, is_edge_payload=lambda p: False, sanitize_node=lambda v: v)
+    assert fold.new_vals["A"] == {"properties": {"n": "1"}}

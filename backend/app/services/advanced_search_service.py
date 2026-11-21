@@ -1227,7 +1227,8 @@ class AdvancedSearchService:
         op = self._provider_op("deep_search_catalog")
         context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
         out = await op(scope, context=context, wait_ms=request.wait_ms,
-                       session_id=request.session_id, refresh=request.refresh)
+                       session_id=request.session_id, refresh=request.refresh,
+                       **({"values_for": request.values_for} if request.values_for else {}))
         return SearchCatalogResult.model_validate(out)
 
     async def export(

@@ -1981,6 +1981,7 @@ class GraphVersioningService:
         draft.updated_at = graph.updated_at = _now()
         if squash is None:
             return ""
+        await self._note_property_jobs(s, graph.id, draft.id, squash, only=only)
         ps = await s.get(ProjectionStateORM, graph.id)
         if ps is not None:
             ps.target_commit_seq = squash.commit_seq
@@ -1999,11 +2000,71 @@ class GraphVersioningService:
         # unmergeable (`_require_open` rejects it) yet still rendered as actionable, with an empty
         # diff. Resolve them all here, in the shared body, so no squash path can skip it.
         await self._resolve_live_prs(s, draft.id, squash.id, actor, merged_via)
+        await self._note_property_jobs(s, graph.id, draft.id, squash)
 
         ps = await s.get(ProjectionStateORM, graph.id)
         if ps is not None:
             ps.target_commit_seq = new_seq
         return squash.id
+
+    async def _note_property_jobs(self, s, graph_id: str, draft_id: str, squash, *, only=None) -> None:
+        """The bulk property jobs a squash of ``draft_id`` takes to ``main``, listed in its commit —
+        ``stats.propertyJobs = {total, jobs: [...]}``, the first ``AUDIT_LISTED`` of them oldest first
+        (``property_job.audit_entry``), which its activity event carries — and each stamped with it
+        (``summary.publishedCommitId``), so no later squash lists it again. A job is one that ended
+        having written to the draft (``commits``) and no squash has stamped yet; none can be running
+        (``_require_no_import``, under the draft's lock, as this is).
+
+        ``only``: a review merged in part (:meth:`_landed_in_part`) — the entities that landed. A job
+        none of whose changes landed is not listed; one some of whose did is listed ``partial`` and
+        not stamped, so the squash that lands the rest lists it again; one all of whose did is listed
+        and stamped. What a job changed is what its window commits wrote (found by their messages)."""
+        from .import_export import property_job
+        rows = (await s.execute(select(JobORM).where(
+            JobORM.graph_id == graph_id, JobORM.status.in_(("completed", "failed", "cancelled")),
+            JobORM.branch_id == draft_id, JobORM.job_type == "property",
+        ).order_by(JobORM.created_at, JobORM.id))).scalars().all()
+        entries: List[dict] = []
+        for row in rows:
+            summary = row.summary if isinstance(row.summary, dict) else {}
+            if int(summary.get("commits") or 0) <= 0 or summary.get("publishedCommitId"):
+                continue
+            partial = False
+            if only is not None:
+                wrote = await self._property_job_entities(s, graph_id, draft_id, row)
+                landed = wrote & only
+                if not landed:
+                    continue
+                partial = len(landed) < len(wrote)
+            entries.append(property_job.audit_entry(row, partial=partial))
+            if not partial:
+                row.summary = {**summary, "publishedCommitId": squash.id}
+        if entries:
+            squash.stats = {**dict(squash.stats or {}), "propertyJobs": {
+                "total": len(entries), "jobs": entries[:property_job.AUDIT_LISTED]}}
+
+    @staticmethod
+    async def _property_job_entities(s, graph_id: str, draft_id: str, job) -> set:
+        """The entities a bulk property job's window commits wrote on its draft."""
+        from .import_export import property_job
+        fields = job.field_scope if isinstance(job.field_scope, dict) else {}
+        summary = job.summary if isinstance(job.summary, dict) else {}
+        ends = [summary.get("firstCommitId"), summary.get("lastCommitId")]
+        seqs = dict((await s.execute(select(CommitORM.id, CommitORM.commit_seq).where(
+            CommitORM.graph_id == graph_id, CommitORM.id.in_([e for e in ends if e])))).all())
+        if not all(e in seqs for e in ends) or not isinstance(fields.get("op"), dict):
+            return set()
+        commits = select(CommitORM.id).where(
+            CommitORM.graph_id == graph_id, CommitORM.branch_id == draft_id,
+            CommitORM.commit_seq.between(seqs[ends[0]], seqs[ends[1]]),
+            CommitORM.actor == fields.get("actor"),
+            CommitORM.message.in_(property_job.window_messages(
+                fields["op"], fields.get("message"), int(summary.get("chunks") or 0))))
+        out: set = set()
+        for table in (NodeVersionORM, EdgeVersionORM):
+            out.update((await s.execute(select(table.entity_id).where(
+                table.graph_id == graph_id, table.commit_id.in_(commits)))).scalars())
+        return out
 
     @staticmethod
     def _narrow_squash(graph, draft, resolutions) -> bool:
@@ -11768,6 +11829,7 @@ class GraphVersioningService:
         allow_main: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
         from_client: bool = False,
+        exact_types: bool = False,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -11807,12 +11869,16 @@ class GraphVersioningService:
         restore); a urn several live nodes carry is refused (:class:`AmbiguousUrn`). A create
         never replaces a live entity (:class:`EntityExists`), and an edge create needs both ends
         (:class:`EdgeEndsMissing`). An import and the system's own writes leave it off.
+
+        ``exact_types``: each property an update sends is written as sent, kind and all, where a
+        save keeps a stored value sent back in a lossier form (``property_patch``) — a bulk
+        property job's writes, which the server computed and whose kind is the one asked for.
         """
         result = await self.apply_ops_detailed(
             graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
             containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
             on_commit=on_commit, allow_main=allow_main, node_identity=node_identity,
-            from_client=from_client)
+            from_client=from_client, exact_types=exact_types)
         return result.commit_id
 
     async def apply_ops_detailed(
@@ -11826,6 +11892,7 @@ class GraphVersioningService:
         aim_edges: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
         from_client: bool = False,
+        exact_types: bool = False,
     ) -> ApplyResult:
         """:meth:`apply_ops`, answering with every addressed entity's value after the batch.
 
@@ -11844,7 +11911,7 @@ class GraphVersioningService:
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
                 ontology_rules=ontology_rules, on_commit=on_commit, allow_main=allow_main,
                 idempotency_key=idempotency_key, aim_edges=aim_edges,
-                node_identity=node_identity, from_client=from_client),
+                node_identity=node_identity, from_client=from_client, exact_types=exact_types),
         )
 
     async def _apply_ops_once(
@@ -11858,6 +11925,7 @@ class GraphVersioningService:
         aim_edges: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
         from_client: bool = False,
+        exact_types: bool = False,
     ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
@@ -11937,7 +12005,8 @@ class GraphVersioningService:
             # second dropped the first's removal). Replacing instead stored a renamed new node
             # as {displayName} alone — no type, no urn — which then failed every read of the draft.
             fold = fold_batch_ops(
-                ops, is_edge_payload=_is_edge_payload, sanitize_node=_sanitize_node_properties)
+                ops, is_edge_payload=_is_edge_payload, sanitize_node=_sanitize_node_properties,
+                exact=exact_types)
             new_vals: Dict[str, Optional[dict]] = fold.new_vals
             kind_by_entity: Dict[str, str] = fold.kind_by_entity
             update_ids: set = fold.update_ids
@@ -11975,7 +12044,8 @@ class GraphVersioningService:
                 cur = cur_vals.get(eid)
                 base = base_payloads.get(eid)
                 if base is not None and cur is not None:
-                    out = three_way_merge(base, self._patch_payload(base, patch), cur, occ_set_fields)
+                    out = three_way_merge(base, self._patch_payload(base, patch, exact=exact_types),
+                                          cur, occ_set_fields)
                     new_vals[eid] = out.merged
                     for cf in out.conflicts:
                         occ_conflicts.append({
@@ -11983,7 +12053,7 @@ class GraphVersioningService:
                             "path": list(cf.path), "base": cf.base,
                             "ours": cf.ours, "theirs": cf.theirs, "kind": cf.kind})
                 else:
-                    new_vals[eid] = self._patch_payload(cur, patch)
+                    new_vals[eid] = self._patch_payload(cur, patch, exact=exact_types)
             if occ_conflicts:
                 # Each conflicting entity's CURRENT value rides along, so the client can rebase the
                 # user's edit onto it without another read.
@@ -12182,11 +12252,12 @@ class GraphVersioningService:
             ))
 
     @staticmethod
-    def _patch_payload(base: Optional[dict], patch: dict) -> dict:
+    def _patch_payload(base: Optional[dict], patch: dict, *, exact: bool = False) -> dict:
         """Apply a partial update `patch` onto `base` (see ``backend.common.property_patch``):
         top-level fields override, ``properties`` is merged key by key, and a property marked
-        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed."""
-        return apply_patch(base, patch)
+        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed.
+        ``exact``: each value is written as sent (``apply_ops``' ``exact_types``)."""
+        return apply_patch(base, patch, exact=exact)
 
     @staticmethod
     def _compose_patches(first: dict, second: dict) -> dict:

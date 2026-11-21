@@ -346,8 +346,21 @@ through which API key and in which request (read from the commit), its kind and 
 | `workspace.versioning.restored` | A restore |
 
 Details: `{graphId, commitId, commitSeq, kind, message, changes{create, update, delete},
-actorKind, automation, sourceBranchId}`. The event is written once the commit has landed, and never
-fails it ([19](19-change-streams.md) §3.6).
+actorKind, automation, sourceBranchId, propertyJobs?}`. The event is written once the commit has
+landed, and never fails it ([19](19-change-streams.md) §3.6).
+
+`propertyJobs` — on a publish (or a review's merge) of a draft that bulk property jobs edited — is
+`{total, jobs: [...]}`, the same record the commit keeps in `stats.propertyJobs`: the first 20 jobs,
+oldest first, each `{jobId, op, label, changed, refused, status, actor, message, createdAt,
+firstCommitId, lastCommitId, partial?}`. `label` names what the job did ("Rename owner →
+steward"); `changed` is how many entities it changed **in the draft** (a later edit there may have
+changed some again); `message` is the reason it was started with. An `op` lists a `value` up to 1 KiB
+and a merge's first 50 values (`mapSize` says how many it has). Each job listed is stamped with the
+commit (`summary.publishedCommitId`, which `GET …/property-jobs/{jobId}` returns), so no later publish
+lists it again. A review merged in part lists a job only when some of what it changed landed: all of
+it, and the job is stamped; some of it, and it is listed `partial: true`, unstamped, and listed again
+by the merge that lands the rest. The event's summary names the first: "Published 27,110 changes to
+Sales, including Rename owner → steward and 2 more bulk edits".
 
 ### 2.8 Versioned graph read (canvas neighbors)
 

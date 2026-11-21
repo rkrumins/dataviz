@@ -12,7 +12,7 @@ import { useMemo } from 'react'
 import { create } from 'zustand'
 
 import { remember, remembered } from '@/services/importExportApiService'
-import type { PropertyJob, PropertyJobOp, PropertyOpKind } from '@/services/versioningApiService'
+import type { PropertyJob, PropertyJobOp, PropertyOpKind, ValueKind, ValueMapping } from '@/services/versioningApiService'
 import type { TargetPreset } from '@/components/canvas/property-manager/op/opModel'
 
 const STORAGE_KEY = 'property-jobs:v1'
@@ -33,11 +33,14 @@ export interface TrackedJob {
   job: PropertyJob | null
 }
 
-/** What a surface knows when it asks for a change: any of it seeds the dialog. */
+/** What a surface knows when it asks for a change: any of it seeds the dialog — a merge, the values
+ *  it merges (`map`); a convert, the kind to convert to. */
 export interface OpRequest {
   kind?: PropertyOpKind
   key?: string
   target?: TargetPreset
+  map?: ValueMapping[]
+  toKind?: ValueKind
 }
 
 const ENDED = new Set(['completed', 'failed', 'cancelled'])

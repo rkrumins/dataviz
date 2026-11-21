@@ -67,7 +67,9 @@ from backend.common.models.search import MatchAllPredicate, SearchQuery, SearchS
 #: key is high-cardinality.
 VALUES_MAX = 1000
 
-#: Values listed per key in an answer, fullest first.
+#: Values listed per key in an answer, fullest first — all that are kept for
+#: the one key a request names (``valuesFor``: a merge of near-duplicates
+#: reads every value).
 VALUES_SHOWN = 20
 
 #: Distinct tag sets read per unit; past it the tags are not counted.
@@ -295,14 +297,15 @@ class CatalogStats:
         k["distinct"] = max(k["distinct"], seen, len(k["values"] or {}))
         k["values"] = None
 
-    def describe(self, key: str, complete: bool, range_exact: bool = True) -> Dict[str, Any]:
+    def describe(self, key: str, complete: bool, range_exact: bool = True,
+                 shown: int = VALUES_SHOWN) -> Dict[str, Any]:
         k = self.keys[key]
         least, greatest = _ends(k["range"])
         values = k["values"]
         listed = []
         if values is not None:
             ranked = sorted(values.items(), key=lambda kv: (-kv[1], kv[0]))
-            for slot, n in ranked[:VALUES_SHOWN]:
+            for slot, n in ranked[:shown]:
                 kind, value = json.loads(slot)
                 listed.append({"value": value, "kind": kind, "count": n})
         return {
@@ -518,10 +521,13 @@ class _CatalogWork:
 
 async def execute_catalog_session(provider, scope: SearchScope, *, context: SearchRunContext,
                                   wait_ms: int, session_id: Optional[str] = None,
-                                  refresh: bool = False) -> Dict[str, Any]:
+                                  refresh: bool = False,
+                                  values_for: Optional[str] = None) -> Dict[str, Any]:
     """The catalog of ``scope`` (resolved by the caller): this request's
     share of the scan, answered with everything read so far. A client
-    follows it with the returned ``sessionId`` until it is complete."""
+    follows it with the returned ``sessionId`` until it is complete.
+    ``values_for``: a key whose every kept value is listed, not only the
+    ``VALUES_SHOWN`` most held."""
     from backend.app.providers.falkordb_search.engine import (
         _GRACE_S,
         _advance,
@@ -549,7 +555,7 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
                 and latest.scope_hash == context.scope_hash
                 and (latest.data_version == context.data_version
                      or time.time() - latest.created < settings.catalog_reuse_seconds)):
-            return await _answer(store, latest, context)
+            return await _answer(store, latest, context, values_for)
 
     admit = context.admit
 
@@ -590,7 +596,7 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
         raise SearchFailed(f"catalog failed: {session.error}")
     if session.status == COMPLETE:
         await store.point(name, session.sid, settings.catalog_ttl_seconds)
-    return await _answer(store, session, context)
+    return await _answer(store, session, context, values_for)
 
 
 def _skipped_keys() -> FrozenSet[str]:
@@ -599,18 +605,21 @@ def _skipped_keys() -> FrozenSet[str]:
     return frozenset(_RESERVED_NODE_KEYS) | frozenset(platform_property_names())
 
 
-async def _answer(store: SessionStore, session: Session, context: SearchRunContext
-                  ) -> Dict[str, Any]:
+async def _answer(store: SessionStore, session: Session, context: SearchRunContext,
+                  values_for: Optional[str] = None) -> Dict[str, Any]:
     return answer_of(CatalogStats.from_json(await store.load_accumulator(session.sid)),
-                     session, context)
+                     session, context, values_for=values_for)
 
 
 def answer_of(stats: CatalogStats, session: Session, context: SearchRunContext,
-              wide: FrozenSet[str] = frozenset()) -> Dict[str, Any]:
+              wide: FrozenSet[str] = frozenset(), values_for: Optional[str] = None) -> Dict[str, Any]:
     """The catalog answer of ``stats`` as read by ``session`` — ``wide``: the keys whose range
-    may be wider than it is (``CatalogStats.folded``)."""
+    may be wider than it is (``CatalogStats.folded``); ``values_for``: a key whose every kept
+    value is listed, not only the most held."""
     complete = session.status == COMPLETE
-    properties = sorted((stats.describe(key, complete, key not in wide) for key in stats.keys),
+    properties = sorted((stats.describe(key, complete, key not in wide,
+                                        VALUES_MAX if key == values_for else VALUES_SHOWN)
+                         for key in stats.keys),
                         key=lambda p: (-p["count"], p["key"]))
     return {
         "sessionId": session.sid,

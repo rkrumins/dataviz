@@ -179,6 +179,27 @@ def test_every_kind_that_moves_main_is_catalogued():
         "Changed the published data of Sales (1 change)"
 
 
+def test_a_publish_event_carries_the_bulk_property_jobs_its_commit_lists():
+    """What a publish's commit lists of the bulk property jobs it took to main is in its event, as
+    one ``propertyJobs`` record — never a top-level ``jobId``, which reads as an aggregation job."""
+    from types import SimpleNamespace
+    from backend.app.services.activity import catalogue
+
+    jobs = {"total": 1, "jobs": [{"jobId": "vjob_1", "label": "Rename owner → steward", "changed": 2,
+                                  "actor": "usr_ana", "message": "Steward is the new name"}]}
+    commit = SimpleNamespace(id="cmt_9", commit_seq=9, kind="squash_publish", message="Publish",
+                             actor="alice", actor_kind="human", api_key_id=None, source_branch_id="br_1",
+                             stats={"create": 0, "update": 2, "delete": 0, "propertyJobs": jobs})
+    details = main_activity.details_of("g1", commit)
+    assert details["propertyJobs"] == jobs and "jobId" not in details
+    assert details["changes"] == {"create": 0, "update": 2, "delete": 0}
+    _severity, summary = catalogue._EVENT_META["workspace.versioning.published"]
+    assert summary({"target_label": "Sales", "details": details}) == \
+        "Published 2 changes to Sales, including Rename owner → steward"
+    commit.stats = {"update": 1}
+    assert "propertyJobs" not in main_activity.details_of("g1", commit)
+
+
 @_live
 def test_turning_version_control_on_records_no_import_event():
     """Seeding a graph in the transaction that makes it is turning version control on, which records

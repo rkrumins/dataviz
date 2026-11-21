@@ -7,9 +7,12 @@
  * however many, a window at a time. Structural targets are plain searches the server walks from
  * an entity — a container's children, everything inside it, a layer — so they reach entities the
  * canvas has never loaded.
+ *
+ * Besides changing a property (set, fill, rename, copy, remove) it cleans up the values it holds:
+ * find & replace, normalize, merge near-duplicate values, convert every value to one kind.
  */
 import type { Predicate } from '@/types/search'
-import type { PropertyJobOp, PropertyJobTarget, PropertyOpKind } from '@/services/versioningApiService'
+import type { PropertyJobOp, PropertyJobTarget, PropertyOpKind, ValueKind, ValueMapping } from '@/services/versioningApiService'
 import { RESERVED_PROPERTY_KEYS } from '@/lib/nodeFields'
 
 export type ScopeMode = 'view' | 'data_source'
@@ -37,7 +40,20 @@ export const CONFIRM_ABOVE = 1_000
 
 export const OP_LABEL: Record<PropertyOpKind, string> = {
   set: 'Set value', fillEmpty: 'Fill if empty', rename: 'Rename', copy: 'Copy to new', remove: 'Remove',
+  replace: 'Find & replace', normalize: 'Normalize', mapValues: 'Merge values', convert: 'Convert kind',
 }
+
+/** The operations that clean up the values a property holds, where it is held. */
+export const CLEANUP_KINDS = ['replace', 'normalize', 'mapValues', 'convert'] as const satisfies readonly PropertyOpKind[]
+export type CleanupKind = typeof CLEANUP_KINDS[number]
+export const isCleanup = (kind: PropertyOpKind): kind is CleanupKind => (CLEANUP_KINDS as readonly PropertyOpKind[]).includes(kind)
+/** Find and replace take at most this many characters each. */
+export const FIND_MAX = 256
+/** A merge names at most this many values. */
+export const MAP_MAX = 1_000
+
+/** How each kind a value is stored as reads (the catalog's labels). */
+export const VALUE_KIND_LABEL: Record<ValueKind, string> = { Integer: 'Integer', Float: 'Decimal', String: 'Text', Boolean: 'Boolean' }
 
 const is = (urn: string): Predicate => ({ kind: 'is', refs: [{ urn }] } as Predicate)
 const anyOf = (children: Predicate[]): Predicate =>
@@ -92,6 +108,22 @@ export interface OpDraft {
   to: string
   value: unknown
   onConflict: 'skip' | 'overwrite'
+  /** Find & replace: in any case unless `matchCase`; only a value that is all of it with `wholeValue`. */
+  find?: string
+  replaceWith?: string
+  matchCase?: boolean
+  wholeValue?: boolean
+  /** Normalize (trim is on unless turned off). */
+  trim?: boolean
+  collapseSpaces?: boolean
+  case?: 'lower' | 'upper' | 'title' | null
+  /** Normalize and merge: in a list, each value once (a merge's is on unless turned off). */
+  dedupeList?: boolean
+  /** Merge values. */
+  map?: ValueMapping[]
+  /** Convert: to this kind; a value that won't convert is left (`skip`) or removed. */
+  toKind?: ValueKind
+  onFail?: 'skip' | 'remove'
 }
 
 export const needsValue = (kind: PropertyOpKind) => kind === 'set' || kind === 'fillEmpty'
@@ -116,6 +148,16 @@ export function opProblem(op: OpDraft): string | null {
     if (op.to.trim() === op.key.trim()) return 'The new name is the same as the old one'
   }
   if (needsValue(op.kind) && (op.value === undefined || op.value === '')) return 'Give it a value'
+  if (op.kind === 'replace') {
+    if (!op.find) return 'Say what to find'
+    if (op.find.length > FIND_MAX || (op.replaceWith ?? '').length > FIND_MAX) return `Find and replace take at most ${FIND_MAX} characters`
+  }
+  if (op.kind === 'normalize' && !((op.trim ?? true) || op.collapseSpaces || op.case || op.dedupeList)) return 'Choose what to tidy'
+  if (op.kind === 'mapValues') {
+    if (!op.map?.length) return 'Choose the values to merge'
+    if (op.map.length > MAP_MAX) return `At most ${MAP_MAX.toLocaleString()} values merge at once`
+  }
+  if (op.kind === 'convert' && !op.toKind) return 'Choose the kind to convert to'
   return null
 }
 
@@ -126,25 +168,77 @@ export function jobOp(op: OpDraft): PropertyJobOp {
     key: op.key.trim(),
     ...(needsTo(op.kind) ? { to: op.to.trim(), onConflict: op.onConflict } : {}),
     ...(needsValue(op.kind) ? { value: op.value } : {}),
+    ...(op.kind === 'replace' ? { find: op.find ?? '', replaceWith: op.replaceWith ?? '', matchCase: !!op.matchCase, wholeValue: !!op.wholeValue } : {}),
+    ...(op.kind === 'normalize'
+      ? { trim: op.trim ?? true, collapseSpaces: !!op.collapseSpaces, case: op.case ?? null, dedupeList: !!op.dedupeList } : {}),
+    ...(op.kind === 'mapValues' ? { map: op.map ?? [], dedupeList: op.dedupeList ?? true } : {}),
+    ...(op.kind === 'convert' ? { toKind: op.toKind, onFail: op.onFail ?? 'skip' } : {}),
   }
 }
 
 /** What Review counts, exactly, before the change is applied: the entities it targets, those of
  *  them holding the property (a set replaces their value; a fill leaves them alone), and — for a
- *  rename or a copy — those already holding the new name. */
-export function reviewCounts(op: OpDraft, target: Predicate): Array<{ id: 'target' | 'haveKey' | 'haveTo'; predicate: Predicate }> {
+ *  rename or a copy — those already holding the new name; for a find & replace or a merge, those
+ *  holding a value it could change (`match`: the text found, the values merged). */
+export function reviewCounts(op: OpDraft, target: Predicate): Array<{ id: 'target' | 'haveKey' | 'haveTo' | 'match'; predicate: Predicate }> {
   const and = (...children: Predicate[]) => ({ kind: 'group', op: 'and', children } as Predicate)
   const has = (key: string) => ({ kind: 'hasProperty', key, negate: false } as Predicate)
-  const items: Array<{ id: 'target' | 'haveKey' | 'haveTo'; predicate: Predicate }> = [{ id: 'target', predicate: target }]
+  const items: Array<{ id: 'target' | 'haveKey' | 'haveTo' | 'match'; predicate: Predicate }> = [{ id: 'target', predicate: target }]
   if (op.key.trim()) items.push({ id: 'haveKey', predicate: and(target, has(op.key.trim())) })
   if (needsTo(op.kind) && op.to.trim()) items.push({ id: 'haveTo', predicate: and(target, has(op.to.trim())) })
+  const match = op.key.trim() ? matchPredicate(op) : null
+  if (match) items.push({ id: 'match', predicate: and(target, match) })
   return items
 }
 
-/** What the change does to the entities counted: how many it changes, replaces, leaves alone. */
-export function impactOf(op: OpDraft, c: { target?: number; haveKey?: number; haveTo?: number }) {
+/** The entities a find & replace or a merge could change: text containing what it finds (or being
+ *  it), or one of the values merged — compared as text exactly, as numbers or as yes/no. A bound:
+ *  a number reads as text too, and 1 and 1.0 compare as one number. */
+function matchPredicate(op: OpDraft): Predicate | null {
+  const key = op.key.trim()
+  if (op.kind === 'replace' && op.find) {
+    return { kind: 'property', key, op: op.wholeValue ? 'eq' : 'contains', value: op.find, valueType: 'string', caseSensitive: !!op.matchCase } as Predicate
+  }
+  if (op.kind !== 'mapValues' || !op.map?.length) return null
+  const byType = new Map<string, unknown[]>()
+  for (const m of op.map) {
+    const type = typeof m.from === 'number' ? 'number' : typeof m.from === 'boolean' ? 'boolean' : 'string'
+    byType.set(type, [...(byType.get(type) ?? []), m.from])
+  }
+  const parts = [...byType].map(([valueType, values]) => (
+    { kind: 'property', key, op: 'in', value: values, valueType, ...(valueType === 'string' ? { caseSensitive: true } : {}) } as Predicate))
+  return parts.length === 1 ? parts[0]! : ({ kind: 'group', op: 'or', children: parts } as Predicate)
+}
+
+export interface Impact {
+  changes: number
+  replaced: number
+  untouched: number
+  /** `changes` is a bound — at most this many: what a clean-up finds is only known as it runs. */
+  upTo?: boolean
+}
+
+/** What the change does to the entities counted: how many it changes, replaces, leaves alone. A
+ *  clean-up's is exact from the draft for named entities (`wouldChange`); otherwise at most those
+ *  holding a value it could change — for a convert, those holding the property as another kind,
+ *  read from the catalog's `kinds` (for the view) when given. */
+export function impactOf(
+  op: OpDraft,
+  c: { target?: number; haveKey?: number; haveTo?: number; match?: number; wouldChange?: number },
+  kinds?: Readonly<Record<string, number>> | null,
+): Impact {
   const target = c.target ?? 0
   const haveKey = c.haveKey ?? 0
+  if (isCleanup(op.kind)) {
+    if (c.wouldChange !== undefined) return { changes: c.wouldChange, replaced: c.wouldChange, untouched: Math.max(0, target - c.wouldChange) }
+    let changes = haveKey
+    if ((op.kind === 'replace' || op.kind === 'mapValues') && c.match !== undefined) changes = Math.min(haveKey, c.match)
+    if (op.kind === 'convert' && op.toKind && kinds) {
+      const others = Object.entries(kinds).reduce((n, [kind, count]) => n + (kind === op.toKind ? 0 : count), 0)
+      changes = Math.min(haveKey, others)
+    }
+    return { changes, replaced: changes, untouched: Math.max(0, target - changes), upTo: true }
+  }
   switch (op.kind) {
     case 'set': return { changes: target, replaced: haveKey, untouched: 0 }
     case 'fillEmpty': return { changes: Math.max(0, target - haveKey), replaced: 0, untouched: haveKey }
@@ -161,15 +255,23 @@ export function impactOf(op: OpDraft, c: { target?: number; haveKey?: number; ha
   }
 }
 
-/** Whether applying it asks for the property's name to be typed first: a removal or a rename, or a
- *  set that replaces values — past `CONFIRM_ABOVE` entities, or anywhere across the data source. */
+/** Whether applying it asks for the property's name to be typed first: a removal, a rename or a
+ *  clean-up, or a set that replaces values — past `CONFIRM_ABOVE` entities, or anywhere across the
+ *  data source. */
 export function needsTypedConfirm(op: OpDraft, impact: { changes: number; replaced: number }, scopeMode: ScopeMode): boolean {
-  const affected = op.kind === 'set' ? impact.replaced : op.kind === 'remove' || op.kind === 'rename' ? impact.changes : 0
-  if (affected === 0 && !(scopeMode === 'data_source' && (op.kind === 'remove' || op.kind === 'rename'))) return false
+  const rewrites = op.kind === 'remove' || op.kind === 'rename' || isCleanup(op.kind)
+  const affected = op.kind === 'set' ? impact.replaced : rewrites ? impact.changes : 0
+  if (affected === 0 && !(scopeMode === 'data_source' && rewrites)) return false
   return affected >= CONFIRM_ABOVE || scopeMode === 'data_source'
 }
 
-/** A change in a few words: "Rename owner → steward". */
+const quoted = (text: string | undefined) => {
+  const t = text ?? ''
+  return `“${t.length <= 40 ? t : `${t.slice(0, 39)}…`}”`
+}
+
+/** A change in a few words: "Rename owner → steward" — a clean-up as its commits name it on the
+ *  server (`property_job.describe`). */
 export function propertyJobLabel(op: PropertyJobOp): string {
   switch (op.kind) {
     case 'set': return `Set ${op.key}`
@@ -177,5 +279,19 @@ export function propertyJobLabel(op: PropertyJobOp): string {
     case 'remove': return `Remove ${op.key}`
     case 'rename': return `Rename ${op.key} → ${op.to ?? ''}`
     case 'copy': return `Copy ${op.key} → ${op.to ?? ''}`
+    case 'replace': return `Replace ${quoted(op.find)} → ${quoted(op.replaceWith)} in ${op.key}`
+    case 'normalize': {
+      const parts = [
+        (op.trim ?? true) && 'trim', op.collapseSpaces && 'collapse spaces',
+        op.case === 'lower' && 'lower case', op.case === 'upper' && 'UPPER CASE', op.case === 'title' && 'Title Case',
+        op.dedupeList && 'each value once',
+      ].filter(Boolean)
+      return `Normalize ${op.key}${parts.length ? ` (${parts.join(', ')})` : ''}`
+    }
+    case 'mapValues': {
+      const n = op.map?.length ?? 0
+      return `Merge ${n.toLocaleString()} value${n === 1 ? '' : 's'} of ${op.key}`
+    }
+    case 'convert': return `Convert ${op.key} to ${op.toKind ? VALUE_KIND_LABEL[op.toKind] : '…'}`
   }
 }

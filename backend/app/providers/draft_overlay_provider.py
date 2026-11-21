@@ -1342,13 +1342,14 @@ class DraftOverlayProvider:
         return await search.membership(scope, items, urns, context.named or {})
 
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
-                                  refresh=False):
+                                  refresh=False, values_for=None):
         """The property catalog: main's — its own session, read once per version of main — with
         what the draft changed folded in (``draft_search``)."""
         self._now_only("Search")
+        extra = {"values_for": values_for} if values_for else {}
         if not self._searches_draft():
             return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
-                                                        session_id=session_id, refresh=refresh)
+                                                        session_id=session_id, refresh=refresh, **extra)
         from .draft_search import CATALOG_NOT_DRAFT_AWARE
         started = time.monotonic()
         search, failed = None, False
@@ -1362,11 +1363,11 @@ class DraftOverlayProvider:
         answer = await self._base.deep_search_catalog(
             scope, context=self._main_context(context),
             wait_ms=wait_ms // 2 if search is not None else wait_ms,
-            session_id=session_id, refresh=refresh)
+            session_id=session_id, refresh=refresh, **extra)
         if search is not None:
             try:
                 left = max(0, wait_ms - int((time.monotonic() - started) * 1000))
-                return await search.catalog(scope, answer, left)
+                return await search.catalog(scope, answer, left, values_for=values_for)
             except Exception:
                 logger.warning("draft catalog: read as main", exc_info=True)
                 failed = True

@@ -2,15 +2,17 @@
  * Step 1 — What: the operation, the property it changes (named from every property the view's
  * entities carry, with how many carry it), and its value or new name. A value is typed as what it
  * is — text, a number, yes/no, a date, a link — and the values the property already holds are a
- * click away.
+ * click away. A clean-up of the values it holds (find & replace, normalize, merge, convert) is
+ * set up with a live before → after (`CleanupFields`).
  */
-import { useMemo, useState } from 'react'
-import { CopyPlus, Eraser, PencilLine, TextCursorInput, Trash2 } from 'lucide-react'
+import { useMemo, useRef, useState, type ComponentType, type KeyboardEvent } from 'react'
+import { ArrowRightLeft, CaseSensitive, Combine, CopyPlus, Eraser, PencilLine, Replace, TextCursorInput, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Segmented } from '@/components/ui/Segmented'
 import type { SearchCatalogProperty } from '@/types/search'
-import type { PropertyOpKind } from '@/services/versioningApiService'
-import { OP_LABEL, nameProblem, needsTo, needsValue, type OpDraft } from './opModel'
+import type { PropertyOpKind, ValueKind } from '@/services/versioningApiService'
+import { CleanupFields } from './CleanupFields'
+import { OP_LABEL, isCleanup, nameProblem, needsTo, needsValue, type OpDraft } from './opModel'
 import { FIELD, LABEL } from './styles'
 
 type ValueType = 'text' | 'number' | 'boolean' | 'date' | 'url'
@@ -26,6 +28,28 @@ const KIND_HINT: Record<PropertyOpKind, string> = {
   rename: 'Move the property to a new name, keeping each value.',
   copy: 'Copy each value to a new property, keeping the original.',
   remove: 'Remove the property from every entity that holds it.',
+  replace: 'Find text in its values and put something else in its place.',
+  normalize: 'Tidy its text: spaces at either end, runs of spaces, one case — and in lists, each value once.',
+  mapValues: 'Merge values that mean the same into one — “Finance”, “finance ” and “FINANCE” become “Finance”.',
+  convert: 'Store every value as one kind — the ones that don’t convert are left as they are, or removed.',
+}
+
+const OPS: Array<{ group: string; kinds: Array<{ value: PropertyOpKind; icon: ComponentType<{ className?: string }> }> }> = [
+  { group: 'Change', kinds: [
+    { value: 'set', icon: PencilLine }, { value: 'fillEmpty', icon: Eraser }, { value: 'rename', icon: TextCursorInput },
+    { value: 'copy', icon: CopyPlus }, { value: 'remove', icon: Trash2 },
+  ] },
+  { group: 'Clean up values', kinds: [
+    { value: 'replace', icon: Replace }, { value: 'normalize', icon: CaseSensitive }, { value: 'mapValues', icon: Combine },
+    { value: 'convert', icon: ArrowRightLeft },
+  ] },
+]
+
+/** The kind most of a property's entities store it as — what a convert offers first. */
+function dominantKind(known: SearchCatalogProperty | null): ValueKind {
+  const kinds = Object.entries(known?.kinds ?? {}).filter(([k]) => ['Integer', 'Float', 'String', 'Boolean'].includes(k))
+  kinds.sort((a, b) => b[1] - a[1])
+  return (kinds[0]?.[0] as ValueKind | undefined) ?? 'String'
 }
 
 function typeOfValue(v: unknown): ValueType {
@@ -36,35 +60,27 @@ function typeOfValue(v: unknown): ValueType {
   return 'text'
 }
 
-export function WhatStep({ op, onChange, properties }: {
+export function WhatStep({ op, onChange, properties, viewId }: {
   op: OpDraft
   onChange: (op: OpDraft) => void
   /** Every property the view's entities carry, most carried first. */
   properties: readonly SearchCatalogProperty[]
+  /** The view whose values a clean-up previews. */
+  viewId: string
 }) {
   const set = (patch: Partial<OpDraft>) => onChange({ ...op, ...patch })
   const known = useMemo(() => properties.find((p) => p.key === op.key.trim()) ?? null, [properties, op.key])
   const keyError = op.key ? nameProblem(op.key) : null
   const toError = needsTo(op.kind) && op.to ? (op.to.trim() === op.key.trim() ? 'The new name is the same as the old one' : nameProblem(op.to)) : null
   const toHeldBy = needsTo(op.kind) ? properties.find((p) => p.key === op.to.trim()) : undefined
+  // A convert starts from the kind most of its entities hold it as.
+  const pick = (kind: PropertyOpKind) => set(kind === 'convert' && !op.toKind ? { kind, toKind: dominantKind(known) } : { kind })
 
   return (
     <div className="space-y-5">
       <div>
-        <span className={LABEL}>Operation</span>
-        <Segmented<PropertyOpKind>
-          label="Operation"
-          size="md"
-          value={op.kind}
-          onChange={(kind) => set({ kind })}
-          options={[
-            { value: 'set', label: OP_LABEL.set, icon: PencilLine },
-            { value: 'fillEmpty', label: OP_LABEL.fillEmpty, icon: Eraser },
-            { value: 'rename', label: OP_LABEL.rename, icon: TextCursorInput },
-            { value: 'copy', label: OP_LABEL.copy, icon: CopyPlus },
-            { value: 'remove', label: OP_LABEL.remove, icon: Trash2 },
-          ]}
-        />
+        <span className={LABEL} id="op-kind-label">Operation</span>
+        <OpPicker value={op.kind} onChange={pick} />
         <p className="mt-1.5 text-[11.5px] text-ink-muted">{KIND_HINT[op.kind]}</p>
       </div>
 
@@ -105,6 +121,50 @@ export function WhatStep({ op, onChange, properties }: {
       )}
 
       {needsValue(op.kind) && <ValueField value={op.value} onChange={(value) => set({ value })} known={known} />}
+      {isCleanup(op.kind) && op.key.trim() && !keyError && (
+        <CleanupFields op={op} onChange={set} known={known} viewId={viewId} />
+      )}
+    </div>
+  )
+}
+
+/** The operation: a change of the property, or a clean-up of its values — one choice, in two rows.
+ *  A radiogroup: one tab stop, arrow keys move the choice. */
+function OpPicker({ value, onChange }: { value: PropertyOpKind; onChange: (kind: PropertyOpKind) => void }) {
+  const all = OPS.flatMap((g) => g.kinds.map((k) => k.value))
+  const refs = useRef(new Map<PropertyOpKind, HTMLButtonElement | null>())
+  const move = (e: KeyboardEvent, from: PropertyOpKind) => {
+    const at = all.indexOf(from)
+    const to = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? all[(at + 1) % all.length]
+      : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? all[(at - 1 + all.length) % all.length]
+        : e.key === 'Home' ? all[0] : e.key === 'End' ? all[all.length - 1] : undefined
+    if (!to) return
+    e.preventDefault()
+    onChange(to)
+    refs.current.get(to)?.focus()
+  }
+  return (
+    <div role="radiogroup" aria-labelledby="op-kind-label" className="space-y-1.5">
+      {OPS.map((g) => (
+        <div key={g.group} className="flex flex-wrap items-center gap-1.5">
+          <span className="w-24 shrink-0 text-[10.5px] text-ink-muted">{g.group}</span>
+          <div className="inline-flex flex-wrap items-center gap-0.5 rounded-lg bg-black/[0.05] p-0.5 dark:bg-white/[0.05]">
+            {g.kinds.map(({ value: kind, icon: Icon }) => {
+              const on = kind === value
+              return (
+                <button key={kind} ref={(el) => { refs.current.set(kind, el) }} type="button" role="radio" aria-checked={on}
+                  tabIndex={on ? 0 : -1} onClick={() => onChange(kind)} onKeyDown={(e) => move(e, kind)}
+                  className={cn('inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-150',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    on ? 'bg-canvas-elevated text-ink shadow-sm' : 'text-ink-muted hover:text-ink')}>
+                  <Icon className="h-3.5 w-3.5" aria-hidden />
+                  {OP_LABEL[kind]}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

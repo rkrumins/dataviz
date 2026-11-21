@@ -257,6 +257,43 @@ describe('PropertyBrowser — a property is changed only in a draft', () => {
         expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_DRAFT)
     })
 
+    it('cleans up a property’s values from its row, its near-duplicates, its kinds and its value bars', async () => {
+        const user = userEvent.setup()
+        const DEPT = property({
+            key: 'dept', count: 300, kinds: { String: 300 }, distinct: 3, values: [
+                { value: 'Finance', kind: 'String', count: 200 }, { value: 'finance ', kind: 'String', count: 80 },
+                { value: 'Ops', kind: 'String', count: 20 },
+            ],
+        })
+        renderBrowser({ catalog: catalog({ properties: [OWNER, IS_PII, DEPT] }) })
+        const take = () => usePropertyJobsStore.getState().consumeRequest()
+
+        await user.click(within(card('owner')).getByRole('button', { name: 'Clean up…' }))
+        expect(take()).toEqual({ kind: 'normalize', key: 'owner' })
+
+        // Values that differ only in case or spaces: flagged, and merged in one go.
+        expect(within(card('owner')).queryByText('similar values')).not.toBeInTheDocument()
+        expect(within(card('dept')).getByText('similar values')).toBeInTheDocument()
+        await user.click(screen.getByTitle('dept'))
+        expect(screen.getByText(/differ only in case or spaces/)).toHaveTextContent('“Finance”, “finance ” differ only in case or spaces')
+        await user.click(screen.getByRole('button', { name: 'Merge similar values…' }))
+        expect(take()).toEqual({ kind: 'mapValues', key: 'dept' })
+
+        // Values picked from the bars: merged into the most held of them.
+        const dept = within(card('dept'))
+        await user.click(dept.getByRole('checkbox', { name: 'Pick Ops' }))
+        expect(dept.getByRole('button', { name: /Merge into/ })).toBeDisabled()
+        await user.click(dept.getByRole('checkbox', { name: 'Pick Finance' }))
+        expect(dept.getByText('2 values picked — they become one')).toBeInTheDocument()
+        await user.click(dept.getByRole('button', { name: /Merge into/ }))
+        expect(take()).toEqual({ kind: 'mapValues', key: 'dept', map: [{ from: 'Ops', fromKind: 'String', to: 'Finance', toKind: 'String' }] })
+
+        // Stored as two kinds: converted to the one most of its entities hold.
+        await user.click(screen.getByTitle('isPii'))
+        await user.click(screen.getByRole('button', { name: 'Convert all to Boolean…' }))
+        expect(take()).toEqual({ kind: 'convert', key: 'isPii', toKind: 'Boolean' })
+    })
+
     it('offers no change at all where editing is off', () => {
         editing = { offered: false, blocked: NO_DRAFT }
         renderBrowser()
@@ -264,6 +301,7 @@ describe('PropertyBrowser — a property is changed only in a draft', () => {
         const owner = within(card('owner'))
         expect(owner.queryByRole('button', { name: 'Change' })).not.toBeInTheDocument()
         expect(owner.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
+        expect(owner.queryByRole('button', { name: 'Clean up…' })).not.toBeInTheDocument()
         expect(owner.getByRole('button', { name: 'Create rule' })).toBeEnabled()
     })
 })
@@ -310,6 +348,22 @@ describe('PropertyBrowser — the draft\'s bulk changes', () => {
         expect(panel.getByRole('button', { name: 'Which, and why' })).toBeInTheDocument()
         panel.getByRole('button', { name: 'Dismiss' }).click()
         expect(usePropertyJobsStore.getState().jobs).toEqual([])
+    })
+
+    it('says what a convert left alone, and when what it changed has been published', () => {
+        usePropertyJobsStore.getState().track(tracked('j3', {
+            op: { kind: 'convert', key: 'isPii', toKind: 'Boolean', onFail: 'skip' },
+            job: { jobId: 'j3', status: 'completed', summary: {
+                changed: 200, unchanged: 600, unconvertible: 4, conflicts: 0, publishedCommitId: 'cmt_9',
+                refused: { count: 4, byReason: { unconvertible: 4 }, examples: [] },
+            } },
+        }))
+        renderBrowser()
+        const panel = within(screen.getByRole('region', { name: 'Changes on this draft' }))
+        expect(panel.getByText('Convert isPii to Boolean')).toBeInTheDocument()
+        expect(panel.getByText(/200/).closest('p')!.textContent).toMatch(/200 changed · 600 left as they were · 4 wouldn’t convert/)
+        expect(panel.getByText(/Published — listed in the publish’s audit/)).toBeInTheDocument()
+        expect(panel.getByRole('button', { name: 'Which, and why' })).toBeInTheDocument()
     })
 
     it('offers to compare several entities selected on the canvas', async () => {

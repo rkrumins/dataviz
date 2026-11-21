@@ -20,11 +20,16 @@
  *
  * "Make it a field…" promotes a property to a field of the entity types that carry it, in the
  * data source's semantic layer (``PromoteFieldDialog``) — offered to who may edit the layer.
+ *
+ * Its values are cleaned up the same way: **Clean up…** on a property, **Merge
+ * similar values…** where values differ only in case or spaces, **Convert all
+ * to …** where a property is stored as several kinds, and **Merge into…** for
+ * values picked from its value bars.
  */
 import { motion } from 'framer-motion'
 import {
-    AlertTriangle, ArrowDownWideNarrow, ChevronRight, CircleSlash, Copy, CopyPlus, Database, Layers, ListChecks, Loader2,
-    Pencil, Plus, ScanSearch, Search, Sparkles, Tag, Tags, Trash2,
+    AlertTriangle, ArrowDownWideNarrow, ArrowRightLeft, ChevronRight, CircleSlash, Combine, Copy, CopyPlus, Database, Layers, ListChecks, Loader2,
+    Pencil, Plus, ScanSearch, Search, Sparkles, Tag, Tags, Trash2, WandSparkles,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
@@ -40,10 +45,12 @@ import { useCanvasStore } from '@/store/canvas'
 import {
     useDraftPropertyJobs, usePropertyCatalogOverlay, usePropertyJobsStore, type CatalogOverlayEntry, type OpRequest,
 } from '@/store/propertyJobsStore'
+import type { ValueKind, ValueMapping } from '@/services/versioningApiService'
 import type { Predicate, SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
 
 import { fieldClass } from '../search/builder/editors/shared'
 
+import { similarGroups } from './op/cleanup'
 import { PropertyInsightsHeader } from './PropertyInsightsHeader'
 import { PropertyJobsPanel } from './PropertyJobsPanel'
 import { PromoteFieldDialog } from './PromoteFieldDialog'
@@ -270,6 +277,11 @@ export function PropertyBrowser({
                                 onUpdate={change({ kind: 'set', key: property.key })}
                                 onDuplicate={change({ kind: 'copy', key: property.key })}
                                 onRemove={change({ kind: 'remove', key: property.key })}
+                                onCleanUp={change({ kind: 'normalize', key: property.key })}
+                                onMerge={editing.offered ? (map) => usePropertyJobsStore.getState().requestOp(
+                                    { kind: 'mapValues', key: property.key, ...(map ? { map } : {}) }) : undefined}
+                                onConvert={editing.offered ? (toKind) => usePropertyJobsStore.getState().requestOp(
+                                    { kind: 'convert', key: property.key, toKind }) : undefined}
                                 blocked={editing.blocked}
                                 onCreateRule={() => onCreateRuleFromPredicate(
                                     { kind: 'hasProperty', key: property.key, negate: false }, property.key)}
@@ -431,8 +443,14 @@ function valuePredicate(key: string, v: SearchCatalogValue): Predicate {
     return { kind: 'property', key, op: 'eq', value: v.value, valueType } as Predicate
 }
 
+/** The kind most of a property's entities store it as (a list's elements aside). */
+function dominantKind(kinds: Readonly<Record<string, number>>): ValueKind {
+    const held = Object.entries(kinds).filter(([k]) => k in KIND_LABEL && k !== 'List').sort((a, b) => b[1] - a[1])
+    return (held[0]?.[0] as ValueKind | undefined) ?? 'String'
+}
+
 function PropertyRow({
-    property, entities, exact, overlay, onUpdate, onDuplicate, onRemove, blocked, onCreateRule, onCopy, onSearch, onPromote,
+    property, entities, exact, overlay, onUpdate, onDuplicate, onRemove, onCleanUp, onMerge, onConvert, blocked, onCreateRule, onCopy, onSearch, onPromote,
 }: {
     property: SearchCatalogProperty
     /** Entities in the view — what coverage is a share of. */
@@ -444,6 +462,12 @@ function PropertyRow({
     /** Copy its values to a new property. */
     onDuplicate?: () => void
     onRemove?: () => void
+    /** Tidy its values (find & replace, normalize, …). */
+    onCleanUp?: () => void
+    /** Merge values into one — these, or the near-duplicates it holds. */
+    onMerge?: (map?: ValueMapping[]) => void
+    /** Store every value as one kind. */
+    onConvert?: (toKind: ValueKind) => void
     blocked: string | null
     onCreateRule: () => void
     onCopy: () => void
@@ -454,6 +478,24 @@ function PropertyRow({
     const [expanded, setExpanded] = useState(false)
     const key = property.key
     const { type, mixed } = storedType(property.kinds)
+    // Values that differ only in case or in spaces around them: a merge waiting to be made.
+    const similar = useMemo(() => similarGroups(property.values), [property.values])
+    const dominant = dominantKind(property.kinds)
+    // Values picked from the bars, by index, to merge into one.
+    const [picked, setPicked] = useState<ReadonlySet<number>>(() => new Set())
+    const togglePicked = (i: number) => setPicked((s) => {
+        const next = new Set(s)
+        if (!next.delete(i)) next.add(i)
+        return next
+    })
+    const mergePicked = () => {
+        // Into the most held of them; the dialog offers to keep another.
+        const chosen = [...picked].sort((a, b) => a - b).map((i) => property.values[i]).filter((v): v is SearchCatalogValue => !!v)
+        const [into, ...rest] = chosen
+        if (!into || !onMerge) return
+        onMerge(rest.map((v) => ({ from: v.value, fromKind: v.kind as ValueKind, to: into.value, toKind: into.kind as ValueKind })))
+        setPicked(new Set())
+    }
     const byType = useMemo(
         () => Object.entries(property.byEntityType).sort((a, b) => b[1] - a[1]),
         [property.byEntityType],
@@ -497,6 +539,11 @@ function PropertyRow({
                                 <AlertTriangle className="w-2.5 h-2.5" /> mixed
                             </span>
                         )}
+                        {similar.length > 0 && (
+                            <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide border bg-sky-500/15 text-sky-600 dark:text-sky-300 border-sky-500/30">
+                                <Combine className="w-2.5 h-2.5" aria-hidden /> similar values
+                            </span>
+                        )}
                         {overlay && (
                             <PendingBadge
                                 label={`${pendingRemove ? 'removed' : overlay.kinds.has('rename') ? 'renamed' : overlay.kinds.has('copy') ? 'copied' : 'changed'}${overlay.running ? '…' : ''}`}
@@ -508,6 +555,7 @@ function PropertyRow({
                                 <RowAction icon={<Copy className="w-3 h-3" />} label="Copy the name" onClick={onCopy} />
                                 {onUpdate && <RowAction icon={<Pencil className="w-3 h-3" />} label="Change" onClick={onUpdate} blocked={blocked} />}
                                 {onDuplicate && <RowAction icon={<CopyPlus className="w-3 h-3" />} label="Duplicate as…" onClick={onDuplicate} blocked={blocked} />}
+                                {onCleanUp && <RowAction icon={<WandSparkles className="w-3 h-3" />} label="Clean up…" onClick={onCleanUp} blocked={blocked} />}
                                 {onRemove && <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger blocked={blocked} />}
                                 {onPromote && <RowAction icon={<ListChecks className="w-3 h-3" />} label="Make it a field…" onClick={onPromote} />}
                                 <RowAction icon={<Plus className="w-3 h-3" />} label="Create rule" onClick={onCreateRule} />
@@ -575,7 +623,27 @@ function PropertyRow({
                             tone="accent"
                             onClick={onCreateRule}
                         />
+                        {similar.length > 0 && onMerge && !blocked && (
+                            <QuickActionCard
+                                icon={<Combine className="w-3.5 h-3.5" />}
+                                label="Merge similar values…"
+                                onClick={() => onMerge()}
+                            />
+                        )}
                     </div>
+
+                    {similar.length > 0 && (
+                        <p className="text-[11px] text-ink-muted leading-snug">
+                            {similar.slice(0, 2).map((g, i) => (
+                                <span key={g.key}>
+                                    {i > 0 && '; '}
+                                    {g.members.map((m) => `“${String(m.value)}”`).join(', ')}
+                                </span>
+                            ))}
+                            {similar.length > 2 && ` and ${similar.length - 2} more`} differ only in case or spaces — a search
+                            or a rule tells them apart.
+                        </p>
+                    )}
 
                     <UsageGauge
                         total={property.count}
@@ -599,6 +667,15 @@ function PropertyRow({
                                     {' '}on {n.toLocaleString()}
                                 </span>
                             ))} entities. A search compares each kind as its own — pick the kind you mean.
+                            {onConvert && !blocked && (
+                                <button
+                                    type="button"
+                                    onClick={() => onConvert(dominant)}
+                                    className="mt-2 flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] font-semibold text-amber-100 hover:bg-amber-500/20 transition-colors"
+                                >
+                                    <ArrowRightLeft className="w-3 h-3" aria-hidden /> Convert all to {KIND_LABEL[dominant] ?? dominant}…
+                                </button>
+                            )}
                         </div>
                     )}
 
@@ -624,7 +701,24 @@ function PropertyRow({
                                 total={property.count}
                                 limit={values.length}
                                 onItemClick={searchLabel ? (it) => searchLabel(it.label) : undefined}
+                                selectable={onMerge && !blocked && values.length > 1 ? { selected: picked, onToggle: togglePicked } : undefined}
                             />
+                            {picked.size > 0 && onMerge && (
+                                <div className="flex items-center gap-2 rounded-lg border border-accent-lineage/30 bg-accent-lineage/[0.06] px-2.5 py-1.5 text-[11px] text-ink-secondary" aria-live="polite">
+                                    <span className="flex-1 min-w-0">
+                                        {picked.size === 1 ? 'Pick another value to merge it with' : `${picked.size} values picked — they become one`}
+                                    </span>
+                                    <button type="button" onClick={() => setPicked(new Set())} className="text-ink-muted hover:text-ink">Clear</button>
+                                    <button
+                                        type="button"
+                                        disabled={picked.size < 2}
+                                        onClick={mergePicked}
+                                        className="inline-flex items-center gap-1 rounded-md bg-accent-lineage px-2 py-1 font-semibold text-white hover:bg-accent-lineage/90 disabled:opacity-50 transition-colors"
+                                    >
+                                        <Combine className="w-3 h-3" aria-hidden /> Merge into…
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     ) : (
                         <p className="text-[11px] text-ink-muted leading-snug">

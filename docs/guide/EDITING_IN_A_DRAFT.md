@@ -210,7 +210,7 @@ the target includes, however many, even ones not loaded on the canvas.
 
 1. Start from where you are:
    - **Properties** in the View's header → **Properties** tab → **New**, or
-     **Change**, **Duplicate as…** or **Remove** on a property;
+     **Change**, **Duplicate as…**, **Clean up…** or **Remove** on a property;
    - right-click a layer's header → **Change properties in this layer…**;
    - right-click a container → **Change properties of its children…** or
      **…of everything inside…** (or **Change inside…** in its drawer);
@@ -219,7 +219,8 @@ the target includes, however many, even ones not loaded on the canvas.
    new** or **Remove**, the property (the View's properties are suggested, with
    how many entities hold each), and its value or new name. For a rename or
    copy onto a name some entities already hold, choose to leave those entities
-   as they are or replace their value.
+   as they are or replace their value. Or tidy the values it holds — see
+   [Clean up a property's values](#clean-up-a-propertys-values).
 3. **Where** — choose which entities: the one you started from is already
    chosen. You can also pick every entity in the View, every entity with the
    property, the entities selected on the canvas, a layer, a container's
@@ -231,8 +232,51 @@ the target includes, however many, even ones not loaded on the canvas.
    also says what would stop the change: a name the platform keeps, the graph's
    property-name budget, or another change still running on this draft. Save
    or discard any staged changes first.
-5. **Apply**. Removing, renaming or overwriting 1,000 entities or more — or
-   any across the whole data source — asks you to type the property's name.
+   Add a **Reason** if you like: it names the change in the draft's history,
+   and is kept in the audit when the draft is published.
+5. **Apply**. Removing, renaming, cleaning up or overwriting 1,000 entities or
+   more — or any across the whole data source — asks you to type the
+   property's name.
+
+### Clean up a property's values
+
+The same dialog tidies the values a property already holds, under **Clean up
+values**:
+
+- **Find & replace** — text in its values, in any case unless you choose
+  **Match case**; **Whole value only** replaces a value only when it is all of
+  what you typed. Only text changes (each text value of a list too), and the
+  values the View holds are shown before → after as you type.
+- **Normalize** — trim spaces at either end, one space for many, one case
+  (lower, UPPER or Title), and in lists each value once. It says which
+  different values would become one.
+- **Merge values** — values that mean the same thing written differently
+  ("Finance", "finance ", "FINANCE") become one. It reads every value the View
+  holds for the property, groups the ones that differ only in case or in the
+  spaces around them, and lets you keep or drop each group and pick the value
+  to keep. A merge matches each value exactly, as it is stored.
+- **Convert kind** — store every value as one kind (Integer, Decimal, Text or
+  Boolean). It shows how the values are stored now and which won't convert
+  ("n/a" isn't a number, "1e3" isn't read as one, 2.5 isn't an integer): leave
+  those as they are, or remove them. A convert writes the kind you chose —
+  42, not "42" — and keeps every digit.
+
+Start one from the **Properties** tab too:
+
+- **Clean up…** on a property;
+- **Merge similar values…** on a property marked **similar values**;
+- **Convert all to …** on a property marked **mixed** (stored as several kinds);
+- tick two or more of a property's values, then **Merge into…**.
+
+Review counts **up to** how many entities a clean-up changes, since what it
+changes is only known as each one is read; for entities selected on the canvas
+the count is exact. A value that ends up reading as a date is stored the way
+dates always are (YYYY-MM-DD, or a moment in UTC). A convert lists the values it
+left as they were under **Which, and why**.
+
+Merging values of a field that must be unique for its type (into one value on
+several entities) is refused; tidying one with Normalize or Find & replace is
+allowed, and publishing refuses a draft whose values then collide.
 
 The change is applied to your draft a batch at a time. The **Properties** tab
 lists it under **Changes on this draft** with how far it has got (**Stop**
@@ -258,6 +302,13 @@ A few things are still the published graph's, and say so:
   at either end: every value is still within the range shown, which may be
   wider than it is (**Numbers within …**);
 - Advanced Search's matches and exports.
+
+When the draft is published, the **Activity** log's entry for the publish lists
+the bulk changes it included — "Published 27,110 changes to Sales, including
+Rename owner → steward" — each with what it did, how many entities it changed in
+the draft, who ran it and the reason given. Its row under **Changes on this
+draft** then says **Published**. A review merged in part lists a change once
+what it changed has landed (**in part** when only some has).
 
 Entities are found as they are published: an entity new in this draft isn't
 matched — select it on the canvas instead.
