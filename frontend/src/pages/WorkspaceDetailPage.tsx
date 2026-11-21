@@ -45,6 +45,7 @@ import { AddDataSourceWizard } from '@/components/admin/workspace/AddDataSourceW
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
 import { DataSourceGridCard } from '@/components/admin/workspace/DataSourceGridCard'
+import { useSubjectCounts } from '@/features/discussions/useDiscussions'
 import { DataSourceFilterBar } from '@/components/admin/workspace/DataSourceFilterBar'
 import { NO_FILTER, filterDataSources, wantsFilterBar, type DataSourceFilter } from '@/lib/dataSourceFilter'
 import { rankTags } from '@/lib/tags'
@@ -280,6 +281,19 @@ export function WorkspaceDetailPage() {
         return showDsFilter ? filterDataSources(all, dsFilter, ds => dsProviderMap[ds.id]?.catalogItemName) : all
     }, [workspace, showDsFilter, dsFilter, dsProviderMap])
     const filterByTag = useCallback((tag: string) => setDsFilter(f => ({ ...f, tag })), [])
+    // The sources' questions, for their cards: one request for all of them, while the cards show.
+    const showingSources = requested.tab === 'data' && requested.section === 'sources'
+    const sourceQuestions = useSubjectCounts('data_source',
+        useMemo(() => (showingSources ? (workspace?.dataSources ?? []).map(ds => ds.id) : []), [showingSources, workspace]))
+    // A card's "?" opens its source on the Questions tab, on the list (as a link to it would).
+    const openSourceQuestions = useCallback((dsId: string) => setSearchParams(prev => {
+        const next = new URLSearchParams(prev)
+        next.set('ds', dsId)
+        next.set('dstab', 'questions')
+        next.delete('discussion')
+        next.delete('message')
+        return next
+    }, { replace: true }), [setSearchParams])
     const tagSuggestions = useMemo(() => sourceDetails
         ? rankTags([...(workspace?.dataSources ?? []).map(ds => ds.tags), ...allWorkspaceViews.map(v => v.tags)])
         : [], [sourceDetails, workspace, allWorkspaceViews])
@@ -778,6 +792,8 @@ export function WorkspaceDetailPage() {
                                                 onSelect={() => setSelectedDsId(prev => prev === ds.id ? null : ds.id)}
                                                 onSetPrimary={canManageDataSources ? () => handleSetPrimary(ds.id) : undefined}
                                                 onTagClick={showDsFilter ? filterByTag : undefined}
+                                                questions={sourceQuestions[ds.id]}
+                                                onOpenQuestions={() => openSourceQuestions(ds.id)}
                                             />
                                         )
                                     })}

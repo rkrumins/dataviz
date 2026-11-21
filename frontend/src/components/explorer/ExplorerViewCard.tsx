@@ -33,6 +33,9 @@ import { ContributorTrail } from '@/features/view-filters/components/Contributor
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { SourceKindBadge } from '@/features/view-filters/components/SourceKindBadge'
 import { layersOfViewConfig } from '@/components/templates/fromView'
+import type { SubjectCount } from '@/services/discussionsService'
+import { QuestionCountChip } from '@/features/discussions/QuestionCountChip'
+import { useDiscussionsDrawer } from '@/features/discussions/drawerStore'
 
 // View type theme (label + colours) comes from the SHARED resolver in
 // lib/viewUtils — see viewTypeMeta(). Do not reintroduce a local map: a
@@ -202,6 +205,8 @@ export interface ExplorerViewCardProps {
   onPickPerson?: (userId: string) => void
   /** New or changed since the reader's last visit (see SinceLastVisitBanner). */
   visitMark?: 'new' | 'updated' | null
+  /** Its questions, counted by the list (`useSubjectCounts`); none while the switch is off. */
+  questions?: SubjectCount
 }
 
 // ─── Component ───────────────────────────────────────────────────
@@ -228,6 +233,7 @@ export function ExplorerViewCard({
   hideWorkspaceInScope,
   onPickPerson,
   visitMark,
+  questions,
 }: ExplorerViewCardProps) {
   // Density-derived classes. Compact noticeably reduces vertical rhythm
   // (padding, section margins, suppressed mini preview) so a dense grid
@@ -665,6 +671,9 @@ export function ExplorerViewCard({
               opened it, and how many times. As a sentence on its own line this
               was the loudest text on a shelf of quiet views. */}
           <ViewUsageCounters usage={usage} />
+
+          <QuestionCountChip count={questions}
+            onOpen={() => useDiscussionsDrawer.getState().open({ subject: { type: 'view', id: view.id, name: view.name } })} />
 
           {/* Who shaped it — creator, last editor, last data publisher, each
               once. Hover says what they did and when; a click filters to them. */}

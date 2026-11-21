@@ -23,6 +23,7 @@ import { parseSort } from '@/components/explorer/sortOptions'
 import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
 import { useViewUsage } from '@/hooks/useContentInsights'
+import { useSubjectCounts } from '@/features/discussions/useDiscussions'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
 import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
@@ -373,6 +374,8 @@ export function ExplorerPage() {
     [loadedViews, popularViews],
   )
   const { data: usageMap } = useViewUsage(usageIds)
+  // Their questions the same way: one request for the page, not one per card.
+  const questionCounts = useSubjectCounts('view', usageIds)
   // Every sort, "Most opened" included, is the server's order.
   const views = loadedViews
   // What a bulk action acts on: the selected views that are on screen — never an
@@ -818,6 +821,7 @@ export function ExplorerPage() {
                     onTagClick={handleTagClick}
                     healthStatus={healthMap.get(v.id)?.status}
                     usage={usageMap?.[v.id]}
+                    questions={questionCounts[v.id]}
                     density={density}
                     providerInfo={resolveProvider(v.dataSourceId)}
                   />
@@ -974,6 +978,7 @@ export function ExplorerPage() {
                       onTagClick={handleTagClick}
                       healthStatus={healthMap.get(v.id)?.status}
                     usage={usageMap?.[v.id]}
+                    questions={questionCounts[v.id]}
                       isSelected={selectedIds.has(v.id)}
                       density={density}
                       providerInfo={resolveProvider(v.dataSourceId)}
@@ -1019,6 +1024,7 @@ export function ExplorerPage() {
                   onPermanentDelete={canHardDeleteView(v) ? () => handlePermanentDeleteRequest(v) : undefined}
                   healthStatus={healthMap.get(v.id)?.status}
                     usage={usageMap?.[v.id]}
+                    questions={questionCounts[v.id]}
                   isSelected={selectedIds.has(v.id)}
                   density={density}
                   providerInfo={resolveProvider(v.dataSourceId)}

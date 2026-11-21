@@ -14,7 +14,7 @@ import type { SubjectCount } from '@/services/discussionsService'
 const questions = (n: number, what = '') => `${n.toLocaleString()} ${what}${n === 1 ? 'question' : 'questions'}`
 
 /** "3 open questions, 1 unread"; once none is open, "2 questions, all answered or closed, 1 unread". */
-export function questionCountLabel(c: SubjectCount): string {
+function questionCountLabel(c: SubjectCount): string {
     const head = c.open > 0 ? questions(c.open, 'open ') : `${questions(c.total)}, all answered or closed`
     return c.unread > 0 ? `${head}, ${c.unread.toLocaleString()} unread` : head
 }

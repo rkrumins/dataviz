@@ -8,13 +8,14 @@
  *
  * Cards and rows answer the way they do in the Explorer: a click previews the view
  * in the Explorer's drawer, the heart favourites it, the link button copies its
- * address and Manage sharing opens the Share dialog.
+ * address, Manage sharing opens the Share dialog and the "?" chip opens its questions.
  */
 import { useContext, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { favouriteView, unfavouriteView, type View } from '@/services/viewApiService'
 import type { SortOption } from '@/hooks/useExplorerViews'
 import { useViewUsage } from '@/hooks/useContentInsights'
+import { useSubjectCounts } from '@/features/discussions/useDiscussions'
 import { useCopyViewLink } from '@/lib/viewShareLink'
 import { viewTypeLabel } from '@/lib/viewUtils'
 import { compact } from '@/lib/formatMetric'
@@ -80,6 +81,8 @@ export function OverviewViewGrid({ wsId, views, layout = 'cards', meta }: {
     const copyLink = useCopyViewLink()
     const viewEditor = useContext(ViewEditorContext)
     const usage = useViewUsage(views.map(v => v.id)).data
+    // Cards and rows carry their questions; a compact tile is one link, so it asks for none.
+    const questions = useSubjectCounts('view', layout === 'compact' ? [] : views.map(v => v.id))
 
     // A favourite shows at once; the lists catch up when they are read again.
     const [favourite, setFavourite] = useState<Record<string, boolean>>({})
@@ -114,6 +117,7 @@ export function OverviewViewGrid({ wsId, views, layout = 'cards', meta }: {
     const actions = (v: View) => ({
         view: v,
         usage: usage?.[v.id],
+        questions: questions[v.id],
         hideWorkspaceInScope: true,
         onToggleFavourite: () => void toggleFavourite(v),
         onShare: () => void copyLink(v.id),

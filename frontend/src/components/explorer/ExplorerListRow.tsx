@@ -27,6 +27,9 @@ import { ContributorTrail } from '@/features/view-filters/components/Contributor
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { SourceKindBadge } from '@/features/view-filters/components/SourceKindBadge'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
+import type { SubjectCount } from '@/services/discussionsService'
+import { QuestionCountChip } from '@/features/discussions/QuestionCountChip'
+import { useDiscussionsDrawer } from '@/features/discussions/drawerStore'
 
 /* ------------------------------------------------------------------ */
 /*  View type icon + themed color mapping                              */
@@ -72,6 +75,8 @@ export interface ExplorerListRowProps {
   onPickPerson?: (userId: string) => void
   /** New or changed since the reader's last visit. */
   visitMark?: 'new' | 'updated' | null
+  /** Its questions, counted by the list (`useSubjectCounts`); none while the switch is off. */
+  questions?: SubjectCount
 }
 
 /* ------------------------------------------------------------------ */
@@ -96,6 +101,7 @@ export function ExplorerListRow({
   hideWorkspaceInScope,
   onPickPerson,
   visitMark,
+  questions,
 }: ExplorerListRowProps) {
   const typeMeta = viewTypeMeta(view.viewType)
   // One source for the sentence, so the tip and the screen-reader text cannot
@@ -194,10 +200,13 @@ export function ExplorerListRow({
                 sentence per row would drown the names. Inside this cell, not
                 beside it: as cells of their own they pushed every column after
                 Scope out from under its header. */}
-            {usage && (
+            {(usage || questions) && (
               <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0">
-                <ViewUsageCounters usage={usage} className="hidden sm:inline-flex shrink-0" />
-                <ViewUsageNote usage={usage} className="hidden lg:inline-flex shrink-0" />
+                {/* Its open questions, here rather than beside the name: they never take its width. */}
+                <QuestionCountChip count={questions}
+                  onOpen={() => useDiscussionsDrawer.getState().open({ subject: { type: 'view', id: view.id, name: view.name } })} />
+                {usage && <ViewUsageCounters usage={usage} className="hidden sm:inline-flex shrink-0" />}
+                {usage && <ViewUsageNote usage={usage} className="hidden lg:inline-flex shrink-0" />}
               </span>
             )}
           </div>

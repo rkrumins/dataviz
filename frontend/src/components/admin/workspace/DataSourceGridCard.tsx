@@ -12,6 +12,8 @@ import { usePersonaMode } from '@/store/persona'
 import { useFeature } from '@/store/features'
 import { DATA_SOURCE_METADATA_FEATURE } from '@/services/dataSourceMetadataService'
 import { TrustBadges } from '@/components/dataSource/TrustBadges'
+import type { SubjectCount } from '@/services/discussionsService'
+import { QuestionCountChip } from '@/features/discussions/QuestionCountChip'
 
 /** Tags shown on a card; the rest are counted. */
 const TAGS_SHOWN = 3
@@ -66,6 +68,10 @@ interface DataSourceGridCardProps {
     onSetPrimary?: () => void
     /** Narrow the grid to the sources with this tag. */
     onTagClick?: (tag: string) => void
+    /** Its questions, counted by the page for all its sources; none while the switch is off. */
+    questions?: SubjectCount
+    /** Open the source on its Questions tab. */
+    onOpenQuestions?: () => void
 }
 
 const PROVIDER_NAMES: Record<string, string> = { neo4j: 'Neo4j', falkordb: 'FalkorDB', datahub: 'DataHub' }
@@ -94,6 +100,8 @@ function DataSourceGridCardBase({
     onSelect,
     onSetPrimary,
     onTagClick,
+    questions,
+    onOpenQuestions,
 }: DataSourceGridCardProps) {
     const ProviderLogo = providerInfo ? getProviderLogo(providerInfo.providerType) : null
     const technical = usePersonaMode() === 'technical'
@@ -253,8 +261,11 @@ function DataSourceGridCardBase({
                             <span>Updated {new Date(ds.updatedAt).toLocaleDateString()}</span>
                         )}
                     </span>
-                    <span className="flex items-center gap-0.5 text-indigo-500 font-medium opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                        Open <ChevronRight className="w-3 h-3" />
+                    <span className="flex items-center gap-2 shrink-0">
+                        <span className="flex items-center gap-0.5 text-indigo-500 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
+                            Open <ChevronRight className="w-3 h-3" />
+                        </span>
+                        {onOpenQuestions && <QuestionCountChip count={questions} onOpen={onOpenQuestions} className="pointer-events-auto" />}
                     </span>
                 </div>
             </div>
