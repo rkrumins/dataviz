@@ -38,6 +38,7 @@ import { searchDirectory, type DirectoryGroup } from '@/services/userDirectorySe
 import { ReviewRequestsPanel } from '@/components/access/ReviewRequestsPanel'
 import { WorkspaceReachNote } from '@/components/access/WorkspaceReachNote'
 import { WorkspaceAccessSettings } from './WorkspaceAccessSettings'
+import { WorkspaceGroupsPanel } from './WorkspaceGroupsPanel'
 import { AccessReviewPanel } from './AccessReviewPanel'
 import { useGrantOptions } from '@/hooks/useWorkspaceAccess'
 import { useAuthStore } from '@/store/auth'
@@ -938,6 +939,9 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
             )}
             </>
             )}
+
+            {/* The teams that get access together, and their links to the identity provider */}
+            <WorkspaceGroupsPanel workspaceId={workspaceId} canManage={canManage} onChanged={() => void fetchMembers()} />
 
             {/* How people get in — listed, who decides, how people ask, the note for people asking */}
             {canManage && <WorkspaceAccessSettings workspaceId={workspaceId} />}

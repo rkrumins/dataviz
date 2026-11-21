@@ -168,12 +168,22 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         icon: 'text-amber-500',
         tile: 'bg-amber-500/10',
     },
-    // Groups an approved request made, waiting for a platform administrator to link them
-    // to the identity provider.
-    'workspace_request.idp_links_pending': {
+    // A workspace group to link to the identity provider: asked of the platform
+    // administrators, then linked or declined.
+    'idp_link.requested': {
         Icon: KeyRound,
         icon: 'text-violet-500',
         tile: 'bg-violet-500/10',
+    },
+    'idp_link.linked': {
+        Icon: KeyRound,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'idp_link.declined': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
     },
     'workspace_request.declined': {
         Icon: XCircle,

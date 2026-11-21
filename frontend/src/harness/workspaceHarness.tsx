@@ -17,7 +17,8 @@
  *            (reviews: the Review Center at /reviews; playground-card: the Playground card,
  *            &joined=0 before joining; request-wizard: asking for a workspace; workspace-requests:
  *            the platform team's queue, and &status=pending|changes_requested|approved|declined on
- *            page=workspace the reader's own request card)
+ *            page=workspace the reader's own request card); groups: the People tab's Groups
+ *            panel (&platform=1 as a platform administrator, with the links waiting to confirm)
  *
  * `npm run harness:workspace` drives Chromium over the main combinations and
  * writes PNGs to .harness/.
@@ -38,6 +39,8 @@ import { PlaygroundCard } from '../components/playground/PlaygroundCard'
 import { RequestWorkspaceWizard } from '../components/workspace-requests/RequestWorkspaceWizard'
 import { WorkspaceRequestsPanel } from '../components/workspace-requests/WorkspaceRequestsPanel'
 import { WorkspaceRequestPrompt } from '../components/workspace-requests/WorkspaceRequestCard'
+import { WorkspaceGroupsPanel } from '../components/workspaces/WorkspaceGroupsPanel'
+import { IdpLinkRequestsPanel } from '../components/workspaces/IdpLinkRequestsPanel'
 import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { useWorkspacesStore } from '../store/workspaces'
 import {
@@ -50,6 +53,42 @@ const fixture = (params.get('fixture') ?? 'populated') as WorkspaceFixtureName
 const dark = params.get('theme') === 'dark'
 const mode = (params.get('mode') ?? 'business') as 'business' | 'technical'
 const page = params.get('page') ?? 'workspace'
+const platform = params.get('platform') === '1'
+
+// The People tab's groups: two of the workspace's own, one following the directory and one
+// whose link waits; and a platform-wide group bound here.
+const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
+const person = (id: string, displayName: string) => ({ id, displayName })
+const GROUPS = [
+    { id: 'grp_eng', name: 'Finance Risk · Engineers', shortName: 'Engineers', description: 'The people who build and fix the lineage',
+        owned: true, role: 'workspace_member', roleLabel: 'Member', memberCount: 7, source: 'local',
+        memberPreview: [person('usr_ada', 'Ada Okafor'), person('usr_ben', 'Ben Hall'), person('usr_cy', 'Cy Park'), person('usr_di', 'Dina Roy')],
+        idpLinks: [{ mappingId: 'map_1', idpGroup: 'AD-FinRisk-Engineers', providerName: 'Entra ID' }], pendingIdpLink: null, createdAt: ago(400) },
+    { id: 'grp_view', name: 'Finance Risk · Analysts', shortName: 'Analysts', description: null,
+        owned: true, role: 'workspace_viewer', roleLabel: 'Viewer', memberCount: 23, source: 'local',
+        memberPreview: [person('usr_li', 'Liam Chen'), person('usr_pr', 'Priya Nair'), person('usr_ow', 'Owen Diaz')],
+        idpLinks: [], pendingIdpLink: { requestId: 'ilr_1', idpGroup: 'AD-FinRisk-Analysts', requestedBy: 'usr_me', requestedByName: 'Sam Reader', requestedAt: ago(20) }, createdAt: ago(200) },
+    { id: 'grp_pub', name: 'Finance Risk · Publishers', shortName: 'Publishers', description: null,
+        owned: true, role: 'workspace_publisher', roleLabel: 'Publisher', memberCount: 2, source: 'local',
+        memberPreview: [person('usr_ada', 'Ada Okafor'), person('usr_me', 'Sam Reader')], idpLinks: [], pendingIdpLink: null, createdAt: ago(100) },
+    { id: 'grp_all', name: 'All risk analysts', shortName: 'All risk analysts', description: null,
+        owned: false, role: 'workspace_viewer', roleLabel: 'Viewer', memberCount: 140, source: 'sso',
+        memberPreview: [person('usr_x1', 'Mo Adams'), person('usr_x2', 'Kit Ng'), person('usr_x3', 'Rae Holm')], idpLinks: [], pendingIdpLink: null, createdAt: ago(900) },
+]
+const GROUP_MEMBERS = [
+    { id: 'usr_ada', displayName: 'Ada Okafor', email: 'ada@example.com', source: 'local', addedAt: ago(300) },
+    { id: 'usr_ben', displayName: 'Ben Hall', email: 'ben@example.com', source: 'sso', addedAt: ago(30) },
+    { id: 'usr_cy', displayName: 'Cy Park', email: 'cy@example.com', source: 'sso', addedAt: ago(30) },
+]
+const IDP_GROUPS = ['AD-FinRisk-Engineers', 'AD-FinRisk-Analysts', 'AD-Finance-All', 'AD-Risk-Managers']
+const LINK_REQUESTS = [
+    { id: 'ilr_1', groupId: 'grp_view', groupName: 'Finance Risk · Analysts', workspaceId: 'ws_fin', workspaceName: 'Finance Risk',
+        idpGroup: 'AD-FinRisk-Analysts', providerId: null, requestedBy: 'usr_me', requestedByName: 'Sam Reader', requestedAt: ago(20),
+        status: 'pending', source: 'workspace', seenCount: 18 },
+    { id: 'ilr_2', groupId: 'grp_ml', groupName: 'ML lineage · Engineers', workspaceId: 'ws_ml', workspaceName: 'ML lineage',
+        idpGroup: 'ML-Engineers', providerId: null, requestedBy: 'usr_ada', requestedByName: 'Ada Okafor', requestedAt: ago(52),
+        status: 'pending', source: 'workspace_request', seenCount: 0 },
+]
 
 // The Review Center's reviews, across three workspaces.
 const REVIEW_WS = [
@@ -113,6 +152,19 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (p === '/api/v1/admin/workspace-requests') return json([WS_REQUEST, { ...WS_REQUEST, id: 'wsr_2', name: 'Quarter-end reporting', purpose: 'reporting',
         requesterName: 'Liam Chen', teammateIds: [], playgroundSourceIds: [], status: 'changes_requested', createdAt: new Date(Date.now() - 8 * 86_400_000).toISOString() }])
     if (p.startsWith('/api/v1/admin/workspace-requests/')) return json(WS_REQUEST)
+    if (p === '/api/v1/admin/workspaces/ws_fin/groups') return json(GROUPS)
+    if (p.match(/^\/api\/v1\/admin\/workspaces\/ws_fin\/groups\/[^/]+\/members$/)) return json(GROUP_MEMBERS)
+    if (p === '/api/v1/idp-groups/suggestions') {
+        const q = (url.searchParams.get('q') ?? '').toLowerCase()
+        return json(IDP_GROUPS.filter(g => g.toLowerCase().includes(q)).map((g, i) => ({ idpGroup: g, ...(platform ? { seenCount: 30 - i * 7 } : {}) })))
+    }
+    if (p === '/api/v1/admin/idp-groups/preview') {
+        return json({ idpGroup: url.searchParams.get('idpGroup'), seenCount: 9,
+            people: [person('usr_ada', 'Ada Okafor'), person('usr_ben', 'Ben Hall'), person('usr_cy', 'Cy Park'), person('usr_li', 'Liam Chen')],
+            note: 'Who had this group at their last sign-in through your identity provider. Someone added to it since appears after their next one.' })
+    }
+    if (p === '/api/v1/admin/idp-link-requests') return json(LINK_REQUESTS)
+    if (p === '/api/v1/admin/idp-providers') return json([{ id: 'idp_entra', displayName: 'Entra ID' }, { id: 'idp_okta', displayName: 'Okta' }])
     if (p === '/api/v1/directory') return json({ users: [{ id: 'usr_ada', displayName: 'Ada Okafor', email: 'ada@example.com' }, { id: 'usr_ben', displayName: 'Ben Hall', email: 'ben@example.com' }], groups: [] })
     if (p === '/api/v1/playground') {
         return json({
@@ -196,11 +248,12 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 useAuthStore.setState({
     status: 'authenticated', isAuthenticated: true, permissionsStatus: 'ready',
     user: { id: 'usr_me', firstName: 'Sam', lastName: 'Reader', email: 'sam@example.com' },
-    permissions: { sid: 'harness', global: page === 'workspace-requests' ? ['system:workspaces:create'] : [], ws: { ws_fin: PERMS[as] } },
+    permissions: { sid: 'harness', global: platform ? ['system:admin'] : page === 'workspace-requests' ? ['system:workspaces:create'] : [], ws: { ws_fin: PERMS[as] } },
 } as never)
 usePersonaStore.setState({ mode })
 useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, workspaceRequestsEnabled: true } })
 if (page === 'request-wizard') useWorkspacesStore.setState({ workspaces: [workspaceOf('playground')] } as never)
+if (page === 'groups') useWorkspacesStore.setState({ workspaces: [{ id: 'ws_fin', name: 'Finance Risk' }] } as never)
 if (page === 'reviews') useWorkspacesStore.setState({ workspaces: REVIEW_WS.map(w => ({ ...w, dataSources: [] })) } as never)
 
 function Harness() {
@@ -214,7 +267,7 @@ function Harness() {
 
     const address = new URLSearchParams()
     for (const k of ['tab', 'section', 'ds', 'dstab']) { const v = params.get(k); if (v) address.set(k, v) }
-    const at = ['playground-card', 'request-wizard', 'workspace-requests', 'request-card'].includes(page) ? `/${page}` : page === 'reviews'
+    const at = ['playground-card', 'request-wizard', 'workspace-requests', 'request-card', 'groups'].includes(page) ? `/${page}` : page === 'reviews'
         ? `/reviews${params.get('workspace') ? `?workspace=${params.get('workspace')}` : ''}`
         : `/workspaces/ws_fin${address.toString() ? `?${address}` : ''}`
 
@@ -230,6 +283,12 @@ function Harness() {
                             <Route path="/workspace-requests" element={
                                 <div className="mx-auto max-w-5xl space-y-6 p-8">
                                     <WorkspaceRequestsPanel />
+                                </div>
+                            } />
+                            <Route path="/groups" element={
+                                <div className="mx-auto max-w-5xl space-y-6 p-8">
+                                    {platform && <IdpLinkRequestsPanel />}
+                                    <WorkspaceGroupsPanel workspaceId="ws_fin" canManage={as === 'admin'} />
                                 </div>
                             } />
                             <Route path="/request-card" element={<div className="mx-auto max-w-5xl p-8"><WorkspaceRequestPrompt /></div>} />

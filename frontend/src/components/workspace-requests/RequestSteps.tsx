@@ -14,6 +14,7 @@ import {
 } from '@/services/workspaceRequestsService'
 import { SubjectPicker, subjectKey } from '@/components/serviceAccounts/SubjectPicker'
 import { BigInput, BigTextarea, FieldLabel, Hint, StepBlock, StepColumn, StepHero } from '@/components/admin/InviteWizard/ui'
+import { IdpGroupInput } from '@/components/workspaces/IdpGroupInput'
 import { NextSteps } from './NextSteps'
 
 export const PURPOSES: { value: WorkspacePurpose; label: string; detail: string; icon: LucideIcon; example: string }[] = [
@@ -272,18 +273,13 @@ export function GroupsStep({ workspaceName, groups, people, onChange, onRemember
                             </div>
 
                             <div className="rounded-xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02] p-3">
-                                <label className="block">
-                                    <span className="flex items-center gap-1.5 text-xs font-semibold text-ink-secondary">
-                                        <KeyRound className="h-3.5 w-3.5 text-violet-500" aria-hidden /> Link to your identity provider
-                                        <span className="font-normal text-ink-muted">optional</span>
-                                    </span>
-                                    <input aria-label="Identity-provider group" value={g.idpGroup ?? ''} maxLength={200}
-                                        onChange={e => update(g.key, { idpGroup: e.target.value })}
-                                        placeholder="e.g. ML-Engineers, or the group’s object ID"
-                                        className="mt-1.5 w-full rounded-lg border border-black/[0.08] dark:border-white/[0.10] bg-canvas px-3 py-2 text-sm text-ink outline-none focus:border-indigo-500" />
-                                </label>
+                                <p className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-ink-secondary">
+                                    <KeyRound className="h-3.5 w-3.5 text-violet-500" aria-hidden /> Link to your identity provider
+                                    <span className="font-normal text-ink-muted">optional</span>
+                                </p>
+                                <IdpGroupInput value={g.idpGroup ?? ''} onChange={v => update(g.key, { idpGroup: v })} />
                                 <p className="mt-1.5 text-[11px] text-ink-muted">
-                                    The group’s name or ID in Active Directory, Entra, Okta… People in it then join this group when they sign in. A platform administrator confirms the link.
+                                    The group’s name or ID in Active Directory, Entra, Okta… — we suggest the ones your own sign-ins carry. People in it then join this group when they sign in. A platform administrator confirms the link.
                                 </p>
                             </div>
                         </section>

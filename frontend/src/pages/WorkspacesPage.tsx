@@ -19,6 +19,8 @@ import { PlaygroundCard } from '@/components/playground/PlaygroundCard'
 import { WorkspaceRequestPrompt } from '@/components/workspace-requests/WorkspaceRequestCard'
 import { WORKSPACE_REQUESTS_FEATURE, useRequestWorkspaceWizard, useWorkspaceRequestsToAnswer } from '@/hooks/useWorkspaceRequests'
 import { WorkspaceRequestsPanel } from '@/components/workspace-requests/WorkspaceRequestsPanel'
+import { IdpLinkRequestsPanel } from '@/components/workspaces/IdpLinkRequestsPanel'
+import { useIdpLinkRequests } from '@/hooks/useWorkspaceGroups'
 import { WorkspaceListRow, WORKSPACE_LIST_GRID } from '@/components/admin/workspace/WorkspaceListRow'
 import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHealthBadge'
@@ -445,8 +447,10 @@ export function WorkspacesPage() {
     const { transfers: incoming } = useIncomingTransfers('open', { enabled: canAnswer })
     // And requests for new workspaces, for the people who create them.
     const newWorkspaces = useWorkspaceRequestsToAnswer('open').data?.filter(r => r.status === 'pending')
-    const waitingCount = waiting || incoming || newWorkspaces
-        ? (waiting?.length ?? 0) + (incoming?.length ?? 0) + (newWorkspaces?.length ?? 0) : null
+    // And, for platform administrators, groups waiting to be linked to the identity provider.
+    const idpLinks = useIdpLinkRequests('pending').data
+    const waitingCount = waiting || incoming || newWorkspaces || idpLinks
+        ? (waiting?.length ?? 0) + (incoming?.length ?? 0) + (newWorkspaces?.length ?? 0) + (idpLinks?.length ?? 0) : null
     const tabParam = searchParams.get('tab')
     const tab: 'mine' | 'discover' | 'requests' =
         canAnswer && tabParam === 'requests'
@@ -566,6 +570,7 @@ export function WorkspacesPage() {
             {tab === 'requests' && (
                 <div className="space-y-4">
                     <WorkspaceRequestsPanel hideWhenEmpty />
+                    <IdpLinkRequestsPanel />
                     <TransferRequestsPanel />
                     <ReviewRequestsPanel />
                 </div>

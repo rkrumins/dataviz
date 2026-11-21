@@ -139,8 +139,6 @@ export const workspaceRequestsService = {
     } = {}) =>
         authFetch<WorkspaceRequest>(`${ADMIN}/${encodeURIComponent(id)}/approve`, json(overrides)),
     /** A platform administrator links a group from an approved request to its identity-provider group. */
-    linkIdpGroup: (id: string, groupId: string, idpProviderId?: string | null) =>
-        authFetch<WorkspaceRequest>(`${ADMIN}/${encodeURIComponent(id)}/idp-links`, json({ groupId, idpProviderId: idpProviderId || undefined })),
     sendBack: (id: string, question: string) =>
         authFetch<WorkspaceRequest>(`${ADMIN}/${encodeURIComponent(id)}/send-back`, json({ question })),
     decline: (id: string, reason?: string) =>

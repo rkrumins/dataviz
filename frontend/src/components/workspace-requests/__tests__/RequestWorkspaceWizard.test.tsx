@@ -16,6 +16,9 @@ vi.mock('@/services/workspaceRequestsService', async (orig) => {
     const real = await orig<typeof import('@/services/workspaceRequestsService')>()
     return { ...real, workspaceRequestsService: { ...real.workspaceRequestsService, ...api } }
 })
+vi.mock('@/services/workspaceGroupsService', () => ({
+    idpGroupsService: { suggestions: vi.fn().mockResolvedValue([{ idpGroup: 'ML-Engineers' }]), preview: vi.fn() },
+}))
 vi.mock('@/services/viewApiService', () => ({
     listViews: vi.fn().mockResolvedValue({ items: [{ id: 'v1', dataSourceId: 'ds_mine' }, { id: 'v2', dataSourceId: 'ds_mine' }] }),
 }))
@@ -151,7 +154,7 @@ describe('RequestWorkspaceWizard', () => {
         await user.click(within(group).getByRole('radio', { name: /Can publish/ }))
         await user.click(within(group).getByRole('button', { name: 'pick Ada' }))
         expect(within(group).getByText('Ada Okafor')).toBeInTheDocument()
-        await user.type(within(group).getByRole('textbox', { name: 'Identity-provider group' }), 'ML-Engineers')
+        await user.type(within(group).getByRole('combobox', { name: 'Identity-provider group' }), 'ML-Engineers')
         // Two groups can't share a name.
         await user.click(screen.getByRole('button', { name: /Add another group/ }))
         expect(screen.getByRole('button', { name: /^Next/ })).toBeDisabled()

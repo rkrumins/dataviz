@@ -71,11 +71,6 @@ export function useWorkspaceRequestActions() {
                 await useWorkspacesStore.getState().loadWorkspaces()
             },
         }),
-        linkIdpGroup: useMutation({
-            mutationFn: ({ id, groupId, idpProviderId }: { id: string; groupId: string; idpProviderId?: string | null }) =>
-                workspaceRequestsService.linkIdpGroup(id, groupId, idpProviderId),
-            onSuccess: done,
-        }),
         sendBack: useMutation({
             mutationFn: ({ id, question }: { id: string; question: string }) => workspaceRequestsService.sendBack(id, question),
             onSuccess: done,
