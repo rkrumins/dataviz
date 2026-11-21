@@ -1072,7 +1072,7 @@ class AdvancedSearchService:
         op = self._provider_op("deep_search_membership")
         context = replace(run_context or SearchRunContext(),
                           members=self._members(request.scope, _eff))
-        items, unusable = await self._resolve_item_refs(
+        items, unusable, context = await self._resolve_item_refs(
             [item for item in request.items if item.id not in refused], scope, context)
         items, unplaced = _resolve_item_layers(items, _eff)
         refused = {**refused, **unusable, **unplaced}
@@ -1084,6 +1084,7 @@ class AdvancedSearchService:
             matches={**{item_id: [] for item_id in refused}, **out["matches"]},
             errors={**out["errors"], **refused},
             data_version=context.data_version or None, elapsed_ms=out["elapsedMs"],
+            notes=out.get("notes") or [],
         )
 
     def _refused_on_a_shared_link(self, items) -> dict:
@@ -1127,7 +1128,7 @@ class AdvancedSearchService:
         if context.members is not None:
             errors.update({item.id: CONNECTIONS_PAST_THE_CAP for item in request.items
                            if isinstance(item.predicate, EdgesPredicate)})
-        resolved, unusable = await self._resolve_item_refs(
+        resolved, unusable, context = await self._resolve_item_refs(
             [item for item in request.items if item.id not in errors], scope, context)
         resolved, unplaced = _resolve_item_layers(resolved, eff)
         errors.update(unusable)
@@ -1157,6 +1158,15 @@ class AdvancedSearchService:
         pending = sorted((i for i in request.items
                           if i.id in answers and answers[i.id]["status"] != "complete"),
                          key=done)
+        # On a draft, main's counts above are main's own; what the draft changed is counted
+        # apart, for every rule at once — half the wait while main's counts move too.
+        drafted = None
+        draft_op = getattr(self._engine.provider, "deep_search_count_deltas", None)
+        counted = [(item.id, predicates[item.id]) for item in request.items if item.id in answers]
+        if callable(draft_op) and counted:
+            share = 0.5 if pending else 1.0
+            drafted = await draft_op(scope, counted, context=context, wait_ms=max(
+                0, int((deadline - time.monotonic()) * 1000 * share)))
         for n, item in enumerate(pending):
             wait_ms = max(0, int((deadline - time.monotonic()) * 1000))
             if n and not wait_ms:
@@ -1180,12 +1190,24 @@ class AdvancedSearchService:
                                                   error=errors[item.id])
                 continue
             answer = answers[item.id]
+            count, status, progress = answer["count"], answer["status"], answer.get("progress")
+            note = None
+            if drafted is not None:
+                # Main's count, moved by what the draft changed: complete once both are.
+                note = drafted["approximate"].get(item.id)
+                count = max(0, count + drafted["deltas"].get(item.id, 0))
+                if drafted["status"] != "complete":
+                    status = "running"
+                if progress and drafted["progress"]["total"]:
+                    progress = {**progress,
+                                "scanned": progress["scanned"] + drafted["progress"]["scanned"],
+                                "total": progress["total"] + drafted["progress"]["total"]}
             counts[item.id] = SearchRuleCount(
-                count=answer["count"], status=answer["status"],
+                count=count, status=status,
                 session_id=answer["sessionId"],
-                progress=(SearchProgress(**answer["progress"])
-                          if answer.get("progress") else None),
+                progress=SearchProgress(**progress) if progress else None,
                 lower_bound=bool(answer.get("lowerBound")),
+                approximate=note is not None, note=note,
             )
         return SearchCountsResult(counts=counts, data_version=context.data_version or None,
                                   elapsed_ms=int((time.monotonic() - started) * 1000))
@@ -1341,21 +1363,25 @@ class AdvancedSearchService:
 
     async def _resolve_item_refs(self, items, scope: SearchScope, context: SearchRunContext):
         """Each rule with its name references resolved — in one round for
-        every rule — and the rules whose references can't be used, each with
-        why. One rule's unusable reference is its own error."""
+        every rule — the rules whose references can't be used, each with
+        why, and ``context`` naming the urns each rule's names resolved to
+        (``SearchRunContext.named``). One rule's unusable reference is its
+        own error."""
         found = [(item, ref) for i, item in enumerate(items)
                  for _, ref in _path_refs(item.predicate, f"$.items[{i}].predicate")]
         if not found:
-            return list(items), {}
+            return list(items), {}, context
         answers = await self._provider_op("deep_search_resolve_refs")(
             scope, [ref for _, ref in found], context=context, confined=self._confined)
-        named, errors = {}, {}
+        named, errors, by_item = {}, {}, {}
         for (item, ref), answer in zip(found, answers):
             if answer.get("error"):
                 errors[item.id] = answer["error"]
             named[id(ref)] = answer["urns"]
-        return [item.model_copy(update={"predicate": _with_resolved_refs(item.predicate, named)})
-                for item in items if item.id not in errors], errors
+            by_item[item.id] = by_item.get(item.id, frozenset()) | frozenset(answer["urns"])
+        return ([item.model_copy(update={"predicate": _with_resolved_refs(item.predicate, named)})
+                 for item in items if item.id not in errors], errors,
+                replace(context, named=by_item))
 
     async def _rule_scope(self, requested: SearchScope, *, members: bool = False):
         """The resolved scope a rule is evaluated in, or None when every root

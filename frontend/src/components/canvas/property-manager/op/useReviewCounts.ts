@@ -5,6 +5,7 @@
  * cancels the count under way and starts again, after a pause for typing.
  */
 import { useEffect, useState } from 'react'
+import { useDraftDataKey } from '@/features/versioning/hooks/useDraftDataKey'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { countRules, type RuleCount } from '@/services/ruleCounts'
@@ -34,8 +35,10 @@ export function useReviewCounts(
 ): ReviewCounts {
   const provider = useGraphProvider()
   const remote = provider instanceof RemoteGraphProvider
-  // Answers are kept with the request they answer: a newer request reads as counting afresh.
-  const key = items && items.length > 0 ? JSON.stringify(items) + scopeMode : ''
+  // Answers are kept with the request they answer: a newer request reads as counting afresh. The
+  // draft is counted as it stands, so its moving on (a save, a running change's next window) is one.
+  const draftKey = useDraftDataKey()
+  const key = items && items.length > 0 ? JSON.stringify(items) + scopeMode + draftKey : ''
   const [state, setState] = useState<{ key: string; value: ReviewCounts }>({ key: '', value: EMPTY })
   useEffect(() => {
     if (!key || !items || !(provider instanceof RemoteGraphProvider)) return

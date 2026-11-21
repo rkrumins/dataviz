@@ -163,6 +163,15 @@ describe('countRules', () => {
         expect(final.get('a')).toEqual({ count: 7, complete: true, percent: 100, lowerBound: true })
     })
 
+    it('says a draft count that is the published graph’s, and why', async () => {
+        const { provider } = providerAnswering(
+            { counts: { a: { count: 7, status: 'complete', approximate: true, note: 'It follows relationships.' } } },
+        )
+        const final = await countRules(provider, 'v', [{ id: 'a', predicate: group }])
+        expect(final.get('a')).toEqual({ count: 7, complete: true, percent: 100, approximate: true,
+                                         note: 'It follows relationships.' })
+    })
+
     it('rides out a graph that cannot answer just now', async () => {
         vi.useFakeTimers()
         try {

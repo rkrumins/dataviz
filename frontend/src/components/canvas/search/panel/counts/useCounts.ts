@@ -18,6 +18,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 
+import { useDraftDataKey } from '@/features/versioning/hooks/useDraftDataKey'
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { httpStatusOf } from '@/services/graphRequestFailure'
@@ -89,6 +90,8 @@ export function useCounts(
     // Counts belong to the scope the search runs in: a change of scope is
     // a change of every count.
     const scopeMode = useSearchStore((s) => s.scopeMode)
+    // So are a draft's: it is counted as it stands, and again as it changes.
+    const draftKey = useDraftDataKey()
     const [live] = useLiveCounts()
     const itemsKey = items.map((i) => i.id).join(',')
     const [state, setState] = useState<{ key: string; counts: Map<string, CountState>; status: CountsStatus }>(
@@ -98,7 +101,8 @@ export function useCounts(
 
     useEffect(() => {
         if (!live || !remote || !viewId || !enabled || unavailable || items.length === 0) return
-        const { key: scopeKey, urns } = scopeKeyOf(viewId)
+        const { key: viewKey, urns } = scopeKeyOf(viewId)
+        const scopeKey = `${viewKey}|${draftKey}`
         const runKey = `${scopeKey}|${itemsKey}`
         if (scopeMode === 'visible' && urns > VISIBLE_URNS_MAX) return
         const known = cacheFor(remote, scopeKey)
@@ -159,7 +163,7 @@ export function useCounts(
         }
     // ``items`` is read through ``itemsKey``: the same ids are the same counts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [remote, viewId, itemsKey, scopeMode, enabled, rough, debounceMs, unavailable, live])
+    }, [remote, viewId, itemsKey, scopeMode, draftKey, enabled, rough, debounceMs, unavailable, live])
 
     return useMemo(() => {
         if (unavailable) return { counts: new Map(), status: 'unavailable' as const }
