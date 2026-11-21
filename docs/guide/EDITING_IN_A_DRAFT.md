@@ -313,6 +313,27 @@ what it changed has landed (**in part** when only some has).
 Entities are found as they are published: an entity new in this draft isn't
 matched — select it on the canvas instead.
 
+### Keep a change as a recipe
+
+A change you make often — fill a missing owner, tidy a department's spelling —
+can be kept to run again. On **Review**, choose **Save as recipe**, name it and
+add a description if you like. It is saved in the View's library, for everyone
+who can open the View, and offered to people who can edit the View. A recipe
+keeps where the change reaches as **Where** named it — the whole View, every
+entity with a property, a layer (by its name), a search's matches or your own
+conditions, in the View or the whole data source. A change aimed at the
+entities selected on the canvas, picked relationships or a container can't be
+kept: next time other entities may be meant, and the button says so.
+
+The **Properties** tab lists the View's recipes under **Recipes**: **Run**
+opens the dialog with the whole change, ready to review; people who can edit
+the View can rename or delete one. **From other views** lists the recipes kept
+on the workspace's other views you can open, to run in this one. A run is
+counted and checked again in this View before anything changes: a layer is
+found by its name (if this View has none by that name, the dialog asks
+where), and **What** says when none of this View's entities holds the
+property.
+
 ## Change a relationship
 
 1. Click a line on the canvas. The relationship's drawer opens: what it means,
