@@ -287,6 +287,14 @@ export const guideEntries: GuideEntry[] = [
     description: 'Ask for data to be connected to a workspace, follow the request, and connect one',
     importFn: () => import('@docs/guide/REQUESTING_DATA.md?raw'),
   },
+  {
+    slug: 'asking-questions',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'Asking Questions',
+    description: 'Ask the people who look after a view about it, follow the conversation, and answer a question',
+    importFn: () => import('@docs/guide/ASKING_QUESTIONS.md?raw'),
+  },
 
   // For Builders
   {

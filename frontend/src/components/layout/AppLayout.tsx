@@ -17,6 +17,7 @@ import { CommandPalette } from './CommandPalette'
 import { HelpPanel } from '@/components/help/HelpPanel'
 import { RequestWorkspaceWizardHost } from '@/components/workspace-requests/RequestWorkspaceWizard'
 import { AskForDataWizardHost } from '@/components/data-requests/AskForDataWizard'
+import { DiscussionsDrawerHost } from '@/features/discussions/DiscussionsDrawer'
 import { useHelpPanelStore } from '@/store/helpPanel'
 import { usePersonaStore } from '@/store/persona'
 import { hasPrimaryModifier } from '@/lib/platform'
@@ -236,6 +237,8 @@ export function AppLayout() {
         <RequestWorkspaceWizardHost />
         {/* Asking for data to be connected to a workspace: from its Data → Sources and Overview. */}
         <AskForDataWizardHost />
+        {/* Questions about a view or a data source: its Questions button, the canvas, the Inbox. */}
+        <DiscussionsDrawerHost />
         {/* The exports the server prepares, followed and downloaded wherever the person goes. */}
         <ExportTray />
         <NotificationStack />

@@ -91,6 +91,9 @@ import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 import { EditDetailsPanel } from '@/components/views/EditDetailsPanel'
 import { ViewBuiltOn } from '@/components/views/ViewBuiltOn'
+import { QuestionsButton } from '@/features/discussions/QuestionsButton'
+import { WhoToAsk } from '@/features/discussions/WhoToAsk'
+import { useDiscussionsDrawer } from '@/features/discussions/drawerStore'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { ViewVersionsDrawer } from '@/features/view-versions/ViewVersionsDrawer'
@@ -266,6 +269,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     // rendered without one. So an unversioned view lands in the roomier layout
     // by construction rather than by a special case for it.
     const openVersioningPanel = useVersioningPanelStore((st) => st.openPanel)
+    const openQuestions = useDiscussionsDrawer((st) => st.open)
     const { data: prCounts } = useViewPrCounts(view?.workspaceId, view?.id)
     const hasOpenReviews = ((prCounts?.fromView ?? 0) + (prCounts?.onDataSource ?? 0)) > 0
     const actionButtonClass = hasOpenReviews ? ACTION_BUTTON : ACTION_BUTTON_ROOMY
@@ -723,6 +727,13 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         </button>
                     </HoverTip>
 
+                    {/* Asking the people who look after this view — nothing while the switch is off. */}
+                    <QuestionsButton
+                        subject={{ type: 'view', id: view.id, name: view.name }}
+                        className={actionButtonClass}
+                        labelClassName="hidden lg:inline"
+                    />
+
                     {/* The history of the view's DESIGN, which every view has; not the
                         graph's drafts and commits, which Reviews opens. The dot says the
                         design has changed since its latest version. */}
@@ -920,6 +931,13 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                         </div>
                                     )}
                                     <ViewBuiltOn view={view} />
+                                    <WhoToAsk
+                                        subject={{ type: 'view', id: view.id, name: view.name }}
+                                        onAsk={() => {
+                                            closeDetails()
+                                            openQuestions({ subject: { type: 'view', id: view.id, name: view.name }, compose: true })
+                                        }}
+                                    />
                                 </div>
                             ) : (
                                 <EditDetailsPanel

@@ -17,6 +17,8 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { ViewExecutionProvider } from '@/providers/ViewExecutionContext'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { useRefreshWhenGraphUpdated } from '@/features/sync-status/useSyncStatus'
+import { useDiscussionDeepLink } from '@/features/discussions/useDiscussionDeepLink'
+import { useViewQuestionAnchors } from '@/features/discussions/useDiscussions'
 
 export function ViewPage() {
   const { viewId } = useParams<{ viewId: string }>()
@@ -29,6 +31,11 @@ export function ViewPage() {
   // While the graph is updated, the view shows the version it last finished (the header's sync
   // chip says so); when the new one is in, the view refetches it.
   useRefreshWhenGraphUpdated(viewWorkspaceId, viewDataSourceId, view?.id)
+  // ?discussion=&message= opens the questions drawer on that thread; the canvas's question marks
+  // count this view's questions while it is open.
+  const readyViewId = status === 'ready' ? view?.id ?? null : null
+  useDiscussionDeepLink(readyViewId ? { type: 'view', id: readyViewId, name: view?.name } : null)
+  useViewQuestionAnchors(readyViewId)
 
   // Tab title: "{View} · {Workspace} · {Brand}". The API response names the
   // workspace even for non-members; the store lookup is only a fallback for

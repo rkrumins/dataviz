@@ -28,6 +28,7 @@ import {
     ClipboardCheck,
     Clock,
     Database,
+    Eye,
     GitMerge,
     GitPullRequestArrow,
     Globe,
@@ -37,7 +38,9 @@ import {
     LayoutTemplate,
     Lock,
     Megaphone,
+    MessageCircleQuestion,
     MessageSquare,
+    MessagesSquare,
     Share2,
     Reply,
     RotateCcw,
@@ -45,6 +48,7 @@ import {
     Sparkles,
     Trash2,
     Undo2,
+    UserCheck,
     UserMinus,
     UserPlus,
     XCircle,
@@ -56,6 +60,8 @@ import { useInbox } from '@/hooks/useInbox'
 import { formatUtc, timeAgo } from '@/lib/timeAgo'
 import type { InboxItem } from '@/services/inboxService'
 import { cn } from '@/lib/utils'
+import { UserAvatar } from '@/components/ui/UserAvatar'
+import { useFeature } from '@/store/features'
 
 interface KindVisual {
     Icon: LucideIcon
@@ -392,6 +398,55 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         icon: 'text-emerald-500',
         tile: 'bg-emerald-500/10',
     },
+    // Questions about a view or a data source: one asked of you, a mention,
+    // a reply, an answer accepted, a question closed by someone else, one
+    // still waiting (to the people asked, then to the admins), a new one on
+    // something you watch — and being named one of a source's data contacts.
+    'discussion.asked': {
+        Icon: MessageCircleQuestion,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'discussion.mentioned': {
+        Icon: AtSign,
+        icon: 'text-violet-500',
+        tile: 'bg-violet-500/10',
+    },
+    'discussion.replied': {
+        Icon: MessageSquare,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'discussion.answered': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'discussion.closed': {
+        Icon: XCircle,
+        icon: 'text-slate-500',
+        tile: 'bg-slate-500/10',
+    },
+    'discussion.reminder': {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'discussion.escalated': {
+        Icon: ShieldAlert,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'discussion.watched': {
+        Icon: Eye,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'data_source.contact_added': {
+        Icon: UserCheck,
+        icon: 'text-indigo-500',
+        tile: 'bg-indigo-500/10',
+    },
     'reconcile.suspended': {
         Icon: ShieldAlert,
         icon: 'text-amber-500',
@@ -497,6 +552,7 @@ export function InboxBell() {
     const [isOpen, setIsOpen] = useState(false)
     const navigate = useNavigate()
     const { items, unread, isLoading, markAllRead, markRead } = useInbox()
+    const conversations = useFeature('conversationsEnabled')
 
     const handleOpenItem = (item: InboxItem) => {
         // Only spend a request when there is something to change. Re-marking
@@ -583,6 +639,18 @@ export function InboxBell() {
                             </div>
                         )}
                     </div>
+
+                    {/* Questions and their replies live on as conversations: all of them, in one place. */}
+                    {conversations && (
+                        <button
+                            type="button"
+                            onClick={() => { setIsOpen(false); navigate('/conversations') }}
+                            className="w-full flex items-center justify-center gap-1.5 px-4 py-2.5 border-t border-glass-border text-xs font-semibold text-ink-secondary hover:text-accent-lineage hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
+                        >
+                            <MessagesSquare className="w-3.5 h-3.5" aria-hidden />
+                            All conversations
+                        </button>
+                    )}
                 </Popover.Content>
             </Popover.Portal>
         </Popover.Root>
@@ -600,6 +668,8 @@ function InboxRow({
 }) {
     const { Icon, icon, tile } = visualFor(item.kind)
     const isUnread = !item.readAt
+    // A conversation is a person talking to you: their face, with what they did as a badge.
+    const person = item.resourceType === 'discussion' && item.actorId
 
     return (
         <div
@@ -613,9 +683,20 @@ function InboxRow({
             tabIndex={0}
             onKeyDown={(e) => e.key === 'Enter' && onClick()}
         >
-            <div className={cn('w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5', tile)}>
-                <Icon className={cn('w-3.5 h-3.5', icon)} />
-            </div>
+            {person ? (
+                <span className="relative shrink-0 mt-0.5" data-testid="inbox-actor-avatar">
+                    <UserAvatar userId={item.actorId} name={item.actorName || 'Someone'} className="w-7 h-7 text-[10px] font-bold" />
+                    <span className="absolute -bottom-1 -right-1 rounded-full bg-canvas-elevated p-px">
+                        <span className={cn('w-3.5 h-3.5 rounded-full flex items-center justify-center', tile)}>
+                            <Icon className={cn('w-2.5 h-2.5', icon)} />
+                        </span>
+                    </span>
+                </span>
+            ) : (
+                <div className={cn('w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5', tile)}>
+                    <Icon className={cn('w-3.5 h-3.5', icon)} />
+                </div>
+            )}
 
             <div className="min-w-0 flex-1">
                 <p

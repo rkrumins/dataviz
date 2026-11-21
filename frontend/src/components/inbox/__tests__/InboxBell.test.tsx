@@ -8,7 +8,8 @@
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 
 const navigate = vi.fn()
 vi.mock('react-router-dom', async () => {
@@ -174,5 +175,83 @@ describe('what happened to a review you are part of', () => {
         fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
         fireEvent.click(await screen.findByText(/asked to review/))
         expect(navigate).toHaveBeenCalledWith('/workspaces/ws1/reviews/pr_1')
+    })
+})
+
+describe('review discussions, partial publishes and publishing to everyone', () => {
+    it.each([
+        ['review.mention', 'lucide-at-sign', 'review'],
+        ['review.reply', 'lucide-reply', 'review'],
+        ['review.comment', 'lucide-message-square', 'review'],
+        ['draft.returned', 'lucide-git-merge', 'branch'],
+        ['view.published', 'lucide-globe', 'view'],
+    ])('shows %s with its own icon', async (kind, icon, resourceType) => {
+        mockList.mockResolvedValue({ items: [message({ kind, title: 'Something happened', resourceType })], unread: 1 })
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        const row = (await screen.findByText('Something happened')).closest('[role="button"]')!
+        expect(row.querySelector(`.${icon}`)).not.toBeNull()
+        expect(row.querySelector('.lucide-bell')).toBeNull()
+    })
+})
+
+describe('questions and conversations', () => {
+    afterEach(() => useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } }))
+
+    it.each([
+        ['discussion.asked', 'lucide-message-circle-question'],
+        ['discussion.mentioned', 'lucide-at-sign'],
+        ['discussion.replied', 'lucide-message-square'],
+        ['discussion.answered', 'lucide-circle-check'],
+        ['discussion.closed', 'lucide-circle-x'],
+        ['discussion.reminder', 'lucide-clock'],
+        ['discussion.escalated', 'lucide-shield-alert'],
+        ['discussion.watched', 'lucide-eye'],
+    ])('shows %s as the person who did it, with its own badge', async (kind, icon) => {
+        mockList.mockResolvedValue({
+            items: [message({
+                kind, title: 'Ana Silva replied', resourceType: 'discussion', resourceId: 'dis_1',
+                link: '/views/v1?discussion=dis_1&message=dmsg_2', actorName: 'Ana Silva',
+            })],
+            unread: 1,
+        })
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        const row = (await screen.findByText('Ana Silva replied')).closest('[role="button"]')!
+        const face = row.querySelector('[data-testid="inbox-actor-avatar"]')
+        expect(face).not.toBeNull()
+        expect(face!.textContent).toContain('AS')
+        expect(face!.querySelector(`.${icon}`)).not.toBeNull()
+        expect(row.querySelector('.lucide-bell')).toBeNull()
+        // A click opens the exact thread and message.
+        fireEvent.click(row)
+        expect(navigate).toHaveBeenCalledWith('/views/v1?discussion=dis_1&message=dmsg_2')
+    })
+
+    it('names a new data contact with its own icon, not a face', async () => {
+        mockList.mockResolvedValue({
+            items: [message({ kind: 'data_source.contact_added', title: 'You’re a data steward', resourceType: 'data_source' })],
+            unread: 1,
+        })
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        const row = (await screen.findByText('You’re a data steward')).closest('[role="button"]')!
+        expect(row.querySelector('.lucide-user-check')).not.toBeNull()
+        expect(row.querySelector('[data-testid="inbox-actor-avatar"]')).toBeNull()
+    })
+
+    it('leads to all conversations while the switch is on', async () => {
+        useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, conversationsEnabled: true } })
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        fireEvent.click(await screen.findByRole('button', { name: 'All conversations' }))
+        expect(navigate).toHaveBeenCalledWith('/conversations')
+    })
+
+    it('has no conversations link while the switch is off', async () => {
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        await screen.findByText(/was shared with you/)
+        expect(screen.queryByRole('button', { name: 'All conversations' })).not.toBeInTheDocument()
     })
 })
