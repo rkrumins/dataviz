@@ -41,10 +41,49 @@ export interface PlaygroundSamples {
     quotaLeft: number
 }
 
-/** What starting a sample made: a graph of the person's, and a view on it. */
+/** What starting a sample made: a graph of the person's, its views — the Context View
+ *  (`viewId`) opens first — and an example change waiting for review on the Graph view. */
 export interface StartedSample {
     dataSourceId: string
     viewId: string
+    /** Absent from servers that made one view per sample. */
+    viewIds?: { context: string; graph: string; hierarchy?: string }
+    draftId?: string | null
+    reviewId?: string | null
+}
+
+export type PropertyValue = string | number | boolean | null
+
+/** One thing of the person's: `key` is how connections name it. */
+export interface OwnThing {
+    key: string
+    type: string
+    name: string
+    description?: string
+    properties?: Record<string, PropertyValue>
+    tags?: string[]
+}
+
+/** A connection between two things, by their keys. */
+export interface OwnConnection {
+    from: string
+    type: string
+    to: string
+}
+
+/** A graph made from the person's own files (`POST /playground/imports`): parsed in the browser. */
+export interface OwnDataImport {
+    name: string
+    description?: string
+    things: OwnThing[]
+    connections: OwnConnection[]
+}
+
+/** What an import made: a graph, its Context View (`viewId`, opened first) and a Graph view. */
+export interface ImportedGraph {
+    dataSourceId: string
+    viewId: string
+    viewIds: { context: string; graph: string }
 }
 
 export interface PlaygroundSetup {
@@ -68,4 +107,7 @@ export const playgroundService = {
     samples: () => authFetch<PlaygroundSamples>(`${BASE}/samples`, { silent403: true }),
     startSample: (sampleId: string) => authFetch<StartedSample>(
         `${BASE}/samples/${encodeURIComponent(sampleId)}`, { method: 'POST' }),
+    importOwnData: (body: OwnDataImport) => authFetch<ImportedGraph>(`${BASE}/imports`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }),
 }

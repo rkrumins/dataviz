@@ -4,7 +4,7 @@
  * workspaces are read again so the Playground opens straight away.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { playgroundService, type PlaygroundSetup } from '@/services/playgroundService'
+import { playgroundService, type OwnDataImport, type PlaygroundSetup } from '@/services/playgroundService'
 import { useFeature } from '@/store/features'
 import { useAuthStore } from '@/store/auth'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -51,18 +51,33 @@ export function usePlaygroundSamples() {
     })
 }
 
-/** Start a graph from a sample. After it, the workspace and the quota are read again — and the
- *  workspaces store, which the new view's page reads its data source from. */
-export function useStartSample(workspaceId: string) {
+/** A new graph of the reader's: the workspace and the quota are read again — and the workspaces
+ *  store, which the new view's page reads its data source from. */
+function useGraphMade(workspaceId: string) {
     const queryClient = useQueryClient()
+    return async () => {
+        void queryClient.invalidateQueries({ queryKey: ['workspace', workspaceId] })
+        void queryClient.invalidateQueries({ queryKey: ['workspace-detail-phase2', workspaceId] })
+        void queryClient.invalidateQueries({ queryKey: KEY })
+        await useWorkspacesStore.getState().loadWorkspaces().catch(() => {})
+    }
+}
+
+/** Start a graph from a sample. */
+export function useStartSample(workspaceId: string) {
+    const made = useGraphMade(workspaceId)
     return useMutation({
         mutationFn: (sampleId: string) => playgroundService.startSample(sampleId),
-        onSuccess: async () => {
-            void queryClient.invalidateQueries({ queryKey: ['workspace', workspaceId] })
-            void queryClient.invalidateQueries({ queryKey: ['workspace-detail-phase2', workspaceId] })
-            void queryClient.invalidateQueries({ queryKey: KEY })
-            await useWorkspacesStore.getState().loadWorkspaces().catch(() => {})
-        },
+        onSuccess: made,
+    })
+}
+
+/** Make a graph from the reader's own files, parsed in the browser. */
+export function useImportOwnData(workspaceId: string) {
+    const made = useGraphMade(workspaceId)
+    return useMutation({
+        mutationFn: (body: OwnDataImport) => playgroundService.importOwnData(body),
+        onSuccess: made,
     })
 }
 

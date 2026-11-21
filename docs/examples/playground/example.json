@@ -1,0 +1,139 @@
+{
+  "name": "Coffee shop sales",
+  "description": "Where the coffee shop’s sales figures come from: the tills and the web shop, through the warehouse, to the dashboard and the loyalty report.",
+  "things": [
+    {
+      "key": "pos",
+      "type": "System",
+      "name": "Point of sale",
+      "description": "The tills in every shop, one record per sale",
+      "properties": {
+        "owner": "Store operations"
+      }
+    },
+    {
+      "key": "web_shop",
+      "type": "System",
+      "name": "Web shop",
+      "description": "Orders placed on the website",
+      "properties": {
+        "owner": "Digital"
+      }
+    },
+    {
+      "key": "orders_raw",
+      "type": "Table",
+      "name": "Raw orders",
+      "description": "Every order as it lands, card numbers included",
+      "tags": [
+        "pii"
+      ],
+      "properties": {
+        "owner": "Data engineering",
+        "rows": 182000
+      }
+    },
+    {
+      "key": "customers",
+      "type": "Table",
+      "name": "Customers",
+      "description": "One row per customer: name, email, loyalty tier",
+      "tags": [
+        "pii"
+      ],
+      "properties": {
+        "owner": "Data engineering",
+        "rows": 9400
+      }
+    },
+    {
+      "key": "orders_clean",
+      "type": "Table",
+      "name": "Clean orders",
+      "description": "Orders without duplicates, card numbers removed",
+      "tags": [
+        "certified"
+      ],
+      "properties": {
+        "owner": "Analytics engineering",
+        "rows": 179500
+      }
+    },
+    {
+      "key": "daily_sales",
+      "type": "Table",
+      "name": "Daily sales",
+      "description": "Sales per shop per day — the \"official\" figures",
+      "tags": [
+        "certified"
+      ],
+      "properties": {
+        "owner": "Analytics engineering",
+        "rows": 2190
+      }
+    },
+    {
+      "key": "sales_dashboard",
+      "type": "Dashboard",
+      "name": "Sales dashboard",
+      "description": "What the business reads every morning",
+      "properties": {
+        "owner": "Finance"
+      }
+    },
+    {
+      "key": "loyalty_report",
+      "type": "Report",
+      "name": "Loyalty report, monthly",
+      "description": "Who comes back, and how often",
+      "tags": [
+        "pii"
+      ],
+      "properties": {
+        "owner": "Marketing"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": "pos",
+      "type": "FEEDS",
+      "to": "orders_raw"
+    },
+    {
+      "from": "web_shop",
+      "type": "FEEDS",
+      "to": "orders_raw"
+    },
+    {
+      "from": "web_shop",
+      "type": "FEEDS",
+      "to": "customers"
+    },
+    {
+      "from": "orders_raw",
+      "type": "FEEDS",
+      "to": "orders_clean"
+    },
+    {
+      "from": "orders_clean",
+      "type": "FEEDS",
+      "to": "daily_sales"
+    },
+    {
+      "from": "daily_sales",
+      "type": "FEEDS",
+      "to": "sales_dashboard"
+    },
+    {
+      "from": "orders_clean",
+      "type": "FEEDS",
+      "to": "loyalty_report"
+    },
+    {
+      "from": "customers",
+      "type": "FEEDS",
+      "to": "loyalty_report"
+    }
+  ]
+}

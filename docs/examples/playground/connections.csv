@@ -1,0 +1,9 @@
+from,type,to
+pos,FEEDS,orders_raw
+web_shop,FEEDS,orders_raw
+web_shop,FEEDS,customers
+orders_raw,FEEDS,orders_clean
+orders_clean,FEEDS,daily_sales
+daily_sales,FEEDS,sales_dashboard
+orders_clean,FEEDS,loyalty_report
+customers,FEEDS,loyalty_report
