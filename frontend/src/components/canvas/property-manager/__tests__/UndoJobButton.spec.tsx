@@ -36,7 +36,7 @@ const undoOf = (status: PropertyJob['status'], summary: Partial<PropertyJobSumma
 })
 
 const messages = () => useNotificationStore.getState().notifications.map((n) => n.message)
-const dialog = () => screen.getByText('Undo Rename owner → steward?').closest('div.pointer-events-auto') as HTMLElement
+const dialog = () => screen.getByText('Undo “Rename owner → steward”?').closest('div.pointer-events-auto') as HTMLElement
 
 beforeEach(() => {
   api.undo.mockReset()
@@ -70,7 +70,8 @@ describe('UndoJobButton', () => {
 
     usePropertyJobsStore.setState({ jobs: [undoOf('running')] })
     const running = render(<UndoJobButton tracked={tracked('completed')} />)
-    expect(running.container).toBeEmptyDOMElement()                 // being undone
+    expect(screen.getByRole('status')).toHaveTextContent('Being undone…')
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument()
     running.unmount()
     usePropertyJobsStore.setState({ jobs: [undoOf('completed')] })
     const done = render(<UndoJobButton tracked={tracked('completed')} />)
@@ -83,7 +84,9 @@ describe('UndoJobButton', () => {
     expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
     stopped.unmount()
     usePropertyJobsStore.setState({ jobs: [undoOf('cancelled'), { ...undoOf('running'), jobId: 'vjob_3' }] })
-    expect(render(<UndoJobButton tracked={tracked('completed')} />).container).toBeEmptyDOMElement()
+    render(<UndoJobButton tracked={tracked('completed')} />)
+    expect(screen.getByText('Being undone…')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument()
   })
 
   it('an undo is never undone itself, and says how many it left because they changed since', () => {
@@ -101,7 +104,10 @@ describe('UndoJobButton', () => {
     api.undo.mockResolvedValue(started)
     render(<UndoJobButton tracked={tracked('cancelled')} />)
     await user.click(screen.getByRole('button', { name: 'Undo' }))
-    expect(screen.getByText('Puts back what 5 entities held before — on your draft.')).toBeInTheDocument()
+    // Amber, not a deletion's red: an undo is a change on the draft like any other.
+    expect(within(dialog()).getByRole('heading', { level: 4 })).toHaveTextContent('This will put back')
+    expect(within(dialog()).getByText('entities').closest('button')).toHaveTextContent('5entities — to what they held before the change')
+    expect(within(dialog()).getByRole('heading', { level: 4 }).className).toMatch(/amber/)
     expect(screen.getByText(/Any changed since are left as they are, and listed/)).toBeInTheDocument()
     await user.click(within(dialog()).getByRole('button', { name: 'Undo' }))
 
@@ -109,8 +115,8 @@ describe('UndoJobButton', () => {
     const [undo] = usePropertyJobsStore.getState().jobs
     expect(undo).toMatchObject({ jobId: 'vjob_2', branchId: 'd1', viewId: 'v1', op: { kind: 'undo', sourceJobId: 'vjob_1' },
       targetLabel: 'every entity with owner', job: started })
-    expect(messages()).toEqual(['Undoing Rename owner → steward on your draft — follow it in Property Manager.'])
-    expect(screen.queryByText('Undo Rename owner → steward?')).not.toBeInTheDocument()
+    expect(messages()).toEqual(['Undoing “Rename owner → steward” on your draft — it’s listed under Changes on this draft.'])
+    expect(screen.queryByText('Undo “Rename owner → steward”?')).not.toBeInTheDocument()
   })
 
   it('says why it can’t start, with what to do — and a retry is the same undo', async () => {

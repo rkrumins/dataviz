@@ -40,7 +40,7 @@ export function AllowedValuePicker({ field, value, label, onPick, className }: {
         aria-label={`${what} of ${label}`}
         value={current && allowed.includes(current) ? current : ''}
         onChange={(e) => { if (e.target.value) onPick(storedAllowed(field, e.target.value)) }}
-        className={cn('max-w-full rounded-md border border-glass-border bg-canvas-elevated px-2 py-1 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-accent-lineage/30', className)}
+        className={cn('max-w-full rounded-md border border-black/[0.10] dark:border-white/[0.12] bg-canvas-elevated px-2 py-1 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-accent-lineage/30', className)}
       >
         <option value="" disabled>{field.allowOther ? 'Pick a suggested value…' : 'Pick one of the allowed values…'}</option>
         {allowed.map((a) => <option key={a} value={a}>{a}</option>)}
@@ -64,8 +64,9 @@ export function AllowedValuePicker({ field, value, label, onPick, className }: {
             onClick={() => pick(a)}
             className={cn(
               'max-w-[12rem] truncate rounded-md border px-1.5 py-px text-[11px] font-medium transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
               on ? 'border-accent-lineage/50 bg-accent-lineage/15 text-accent-lineage'
-                : 'border-glass-border text-ink-secondary hover:border-accent-lineage/40 hover:text-ink',
+                : 'border-black/[0.10] dark:border-white/[0.12] text-ink-secondary hover:border-accent-lineage/40 hover:text-ink',
             )}
           >
             {a}

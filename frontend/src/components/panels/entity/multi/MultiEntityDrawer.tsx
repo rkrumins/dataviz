@@ -73,7 +73,7 @@ export function MultiEntityDrawer({
   const byId = useMemo(() => new Map(held.map((n) => [n.id, n])), [held])
   const memberOf = useCallback((id: string) => {
     const n = byId.get(id)
-    return { id, name: n ? resolveEntityName(n.data, personaMode, id) : id }
+    return { id, name: n ? resolveEntityName(n.data, personaMode, id) : id, type: n ? String((n.data as Record<string, unknown>).type ?? '') : undefined }
   }, [byId, personaMode])
 
   // How many of each type — the selection in the reader's words — and what no two of a type may share.

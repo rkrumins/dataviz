@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/Button'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { Skeleton } from '@/components/ui/Skeleton'
 import type { AffectedSample } from '@/services/propertyInsights'
-import type { PropertyJobPreview } from '@/services/versioningApiService'
+import type { PropertyJobPreview, PropertyOpKind } from '@/services/versioningApiService'
 import {
   DRAFT_LARGE, OP_LABEL, isCleanup, jobOp, needsTo, needsValue, propertyJobLabel, targetLabel, type Impact, type OpDraft, type ScopeMode,
   type TargetPreset,
@@ -24,9 +24,22 @@ import type { ReviewCounts } from './useReviewCounts'
 
 export type { Impact } from './opModel'
 
+/** The reason's example, fitting the change: why someone would make it. */
+const REASON_EXAMPLE: Record<PropertyOpKind, string> = {
+  set: 'e.g. The data platform team owns these now',
+  fillEmpty: 'e.g. Left empty by the last import',
+  rename: 'e.g. One name for this property across every source',
+  copy: 'e.g. Kept under the old name while dashboards move',
+  remove: 'e.g. No longer used since the catalog moved',
+  replace: 'e.g. The Ops team is now called Platform',
+  normalize: 'e.g. Stray spaces and mixed case from the CSV import',
+  mapValues: 'e.g. One spelling of each department, per the data owners',
+  convert: 'e.g. Retention is a number of days, not text',
+}
+
 export function ReviewStep({
   op, preset, scopeMode, counts, impact, exact, preview, previewLoading, previewError = null, onRetry, sample, sampleLoading, stagedCount,
-  reason = '', onReason, edges = false, onFollow, onChangeTarget, draftChanges,
+  reason = '', onReason, edges = false, onFollow, onChangeTarget, draftChanges, offerSave = true,
 }: {
   op: OpDraft
   preset: TargetPreset
@@ -55,6 +68,8 @@ export function ReviewStep({
   onFollow?: (jobId: string) => void
   /** Go back and choose another target. */
   onChangeTarget?: () => void
+  /** Offer to keep it as a recipe (not for a recipe run as it was kept). */
+  offerSave?: boolean
 }) {
   const budget = preview?.nameBudget
   const noun = edges ? 'relationship' : 'entity'
@@ -64,6 +79,12 @@ export function ReviewStep({
   const approximate = counts ? [...counts.counts.values()].find((c) => c.approximate)?.note ?? null : null
   const cleanup = isCleanup(op.kind)
   const unconvertible = preview?.counts?.unconvertible
+  // Still counting (or stopped short): the numbers are what has been counted so far.
+  const soFar = !!counts && !counts.complete && !counts.unavailable
+  // The second count, as the operation has one: a fill never replaces, a removal removes.
+  const second = op.kind === 'fillEmpty' ? null
+    : op.kind === 'remove' ? { label: 'Values removed', value: impact?.changes }
+      : { label: cleanup ? 'Values rewritten' : 'Values replaced', value: impact?.replaced }
   return (
     <div className="space-y-4">
       <p className="text-[13px] leading-relaxed text-ink">
@@ -78,12 +99,20 @@ export function ReviewStep({
         {' '}on {targetLabel(preset)}{preset.kind !== 'selection' && preset.kind !== 'relationships' && scopeMode === 'data_source' ? ', across the whole data source' : ''}.
       </p>
 
-      <div className="grid grid-cols-3 gap-2" aria-live="polite">
-        <Tile label="Will change" value={impact?.changes} tone="accent" upTo={impact?.upTo} />
-        <Tile label={cleanup ? 'Values rewritten' : op.kind === 'set' || needsTo(op.kind) ? 'Values replaced' : 'Replaced'} value={impact?.replaced}
-          tone={impact?.replaced ? 'warning' : 'neutral'} upTo={impact?.upTo} />
-        <Tile label="Left as they are" value={impact?.untouched} tone="neutral" />
-      </div>
+      {counts?.unavailable ? (
+        <Notice tone="neutral" icon={Info}>
+          <span className="font-semibold text-ink">Can’t be counted here.</span> The job counts what it changes as it goes, and says
+          how many when it ends.
+        </Notice>
+      ) : (
+        <div className={cn('grid gap-2', second ? 'grid-cols-3' : 'grid-cols-2')} aria-live="polite">
+          <Tile label="Will change" value={impact?.changes} tone="accent" upTo={impact?.upTo} soFar={soFar} />
+          {second && (
+            <Tile label={second.label} value={second.value} tone={second.value ? 'warning' : 'neutral'} upTo={impact?.upTo} soFar={soFar} />
+          )}
+          <Tile label="Left as they are" value={impact?.untouched} tone="neutral" soFar={soFar} />
+        </div>
+      )}
       {impact?.upTo && (
         <p className="flex items-start gap-1.5 text-[11px] text-ink-muted">
           <Info className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden /> At most: what it changes is known as each entity is read — the job says exactly when it ends.
@@ -99,7 +128,7 @@ export function ReviewStep({
       )}
       {counts && !counts.complete && !counts.error && !counts.unavailable && (
         <div className="flex items-center gap-2 text-[11px] text-ink-muted">
-          <ProgressBar value={counts.percent} label="Counting the entities" className="w-32" />
+          <ProgressBar value={counts.percent} label="Counting the entities" className="w-32 shrink-0 bg-black/[0.08] dark:bg-white/[0.10]" />
           Counting every {noun}{scopeMode === 'data_source' ? ' in the data source' : ' in the view'}… {Math.round(counts.percent)}%
         </div>
       )}
@@ -195,7 +224,7 @@ export function ReviewStep({
         <div>
           <label className={LABEL} htmlFor="op-reason">Reason <span className="normal-case tracking-normal font-normal">(optional)</span></label>
           <input id="op-reason" value={reason} onChange={(e) => onReason(e.target.value)} maxLength={2000}
-            placeholder="e.g. One spelling of each department, per the data owners" className={FIELD} />
+            placeholder={REASON_EXAMPLE[op.kind]} className={FIELD} />
           <p className="mt-1 text-[11px] text-ink-muted">Kept with the change: in the draft’s history, and in the audit of the publish that takes it to Published.</p>
         </div>
       )}
@@ -207,6 +236,11 @@ export function ReviewStep({
             Applied to your draft by the server — every relationship it reaches, however many, a batch at a time — and
             published from there. Roll-ups are never changed: they follow the relationships they summarise.
           </span>
+        ) : preset.kind === 'selection' ? (
+          <span>
+            Applied to your draft by the server, a batch at a time, and published from there. These entities are found
+            by id on your draft — ones new in it too. Counts, rule tags and the catalog follow your draft, batch by batch.
+          </span>
         ) : (
           <span>
             Applied to your draft by the server — every matching entity, however many, a batch at a time — and
@@ -216,12 +250,16 @@ export function ReviewStep({
         )}
       </div>
 
-      <SaveRecipe op={op} preset={preset} scopeMode={scopeMode} />
+      {offerSave && <SaveRecipe op={op} preset={preset} scopeMode={scopeMode} />}
     </div>
   )
 }
 
-function Tile({ label, value, tone, upTo }: { label: string; value: number | undefined; tone: 'accent' | 'warning' | 'neutral'; upTo?: boolean }) {
+function Tile({ label, value, tone, upTo, soFar }: {
+  label: string; value: number | undefined; tone: 'accent' | 'warning' | 'neutral'; upTo?: boolean
+  /** Still being counted: the number so far. */
+  soFar?: boolean
+}) {
   return (
     <div className={cn('rounded-xl border px-3 py-2',
       tone === 'accent' ? 'border-accent-lineage/30 bg-accent-lineage/[0.05]'
@@ -232,6 +270,7 @@ function Tile({ label, value, tone, upTo }: { label: string; value: number | und
           tone === 'accent' ? 'text-accent-lineage' : tone === 'warning' ? 'text-amber-700 dark:text-amber-300' : 'text-ink')}>
           {upTo && <span className="mr-1 text-[11px] font-medium text-ink-muted">up to</span>}
           {value.toLocaleString()}
+          {soFar && <span className="ml-1 text-[11px] font-medium text-ink-muted">so far</span>}
         </div>
       )}
     </div>

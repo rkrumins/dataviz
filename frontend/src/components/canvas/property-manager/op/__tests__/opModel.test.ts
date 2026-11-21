@@ -10,7 +10,7 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
-  EDGE_RESERVED_KEYS, MAX_IDS, impactOf, isConnectionsPredicate, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
+  EDGE_RESERVED_KEYS, MAX_IDS, applyLabel, impactOf, isConnectionsPredicate, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
   reviewCounts, searchPreset, targetLabel, targetOf, tooManyIds, type OpDraft,
 } from '../opModel'
 import { cleanValue, convertValue, mergeMap, normalizeText, replaceText, similarGroups } from '../cleanup'
@@ -46,7 +46,11 @@ describe('targets', () => {
   it('a selection past the most one can change is refused whole — never cut short — and says what to use instead', () => {
     const ids = Array.from({ length: MAX_IDS + 1 }, (_, i) => `e${i}`)
     expect(targetOf({ kind: 'selection', ids }, 'v1', 'view')).toBeNull()
-    expect(tooManyIds({ kind: 'selection', ids })).toBe('20,000 is the most a selection can change — use Whole view, Has key or a layer instead.')
+    // The other ways in, named as the Where step titles them — only those it offers.
+    expect(tooManyIds({ kind: 'selection', ids }, ['Every entity in the view', 'Every entity with owner', 'Entities matching criteria']))
+      .toBe('20,000 is the most a selection can change — choose “Every entity in the view”, “Every entity with owner” or “Entities matching criteria” instead.')
+    expect(tooManyIds({ kind: 'selection', ids }, ['Every entity in the view'])).toBe('20,000 is the most a selection can change — choose “Every entity in the view” instead.')
+    expect(tooManyIds({ kind: 'selection', ids })).toBe('20,000 is the most a selection can change.')
     expect(targetOf({ kind: 'selection', ids: ids.slice(0, MAX_IDS) }, 'v1', 'view')).toEqual({ ids: ids.slice(0, MAX_IDS) })
     expect(tooManyIds({ kind: 'selection', ids: ids.slice(0, MAX_IDS) })).toBeNull()
     expect(tooManyIds({ kind: 'view' })).toBeNull()
@@ -93,6 +97,14 @@ describe('review', () => {
     expect(impactOf(op({ kind: 'remove' }), c)).toEqual({ changes: 40, replaced: 0, untouched: 60 })
     expect(impactOf(op({ kind: 'rename', to: 'x' }), c)).toEqual({ changes: 30, replaced: 0, untouched: 70 })
     expect(impactOf(op({ kind: 'rename', to: 'x', onConflict: 'overwrite' }), c)).toEqual({ changes: 40, replaced: 10, untouched: 60 })
+  })
+
+  it('Apply says how many: at most for a bound, about for a count not the draft’s own, + while counting', () => {
+    expect(applyLabel(null, true, true)).toBe('Apply')
+    expect(applyLabel({ changes: 1200, replaced: 0, untouched: 0 }, true, true)).toBe('Apply to 1,200')
+    expect(applyLabel({ changes: 16_333, replaced: 0, untouched: 0, upTo: true }, true, true)).toBe('Apply to at most 16,333')
+    expect(applyLabel({ changes: 30, replaced: 0, untouched: 0 }, true, false)).toBe('Apply to about 30')
+    expect(applyLabel({ changes: 21_695, replaced: 0, untouched: 0, upTo: true }, false, false)).toBe('Apply to 21,695+')
   })
 
   it('a fill counts the entities whose value is empty — none, null, "" or [] — not only those without the key', () => {

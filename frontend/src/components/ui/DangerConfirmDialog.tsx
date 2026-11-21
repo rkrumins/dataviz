@@ -51,6 +51,8 @@ export function DangerConfirmDialog({
      * The impact probe FAILED. Distinct from "the impact is empty" — see below.
      */
     impactUnknown,
+    /** What the unknown impact says — for an action where there is nothing to try again. */
+    unknownMessage = 'We couldn’t check what this will affect. It may destroy more than you expect — try again in a moment, or continue only if you are certain.',
     /** Shown when every section is empty — the honest "this is safe" case. */
     safeMessage = 'Nothing else will be affected.',
     /** Anything the deletion does NOT do, that a reasonable person would assume it does. */
@@ -74,6 +76,7 @@ export function DangerConfirmDialog({
     sections: ImpactSection[]
     loadingImpact?: boolean
     impactUnknown?: boolean
+    unknownMessage?: string
     safeMessage?: string
     caveat?: string
     impactHeading?: string
@@ -99,6 +102,9 @@ export function DangerConfirmDialog({
     }, [isOpen, confirmPhrase])
 
     const total = sections.reduce((n, s) => n + s.count, 0)
+    // Red for what destroys or can't be taken back; amber for a change that can still be (an
+    // undo, a bulk change on a draft): no irreversible note, and no section that destroys.
+    const caution = irreversibleNote === null && !sections.some(s => s.tone === 'destructive')
     const typedCorrectly = confirmText === confirmPhrase
     // Never let someone confirm before we know the scale of what they're destroying.
     const canConfirm = typedCorrectly && !loadingImpact && !busy
@@ -139,15 +145,18 @@ export function DangerConfirmDialog({
                     className="pointer-events-auto w-full max-w-lg max-h-[85vh] flex flex-col bg-canvas rounded-2xl shadow-2xl shadow-black/30 overflow-hidden border border-glass-border"
                 >
                     <div className="relative shrink-0">
-                        <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-red-500 to-rose-500" />
+                        <div className={cn('absolute inset-x-0 top-0 h-1 bg-gradient-to-r', caution ? 'from-amber-400 to-amber-500' : 'from-red-500 to-rose-500')} />
                         <div className="flex items-center gap-3.5 px-6 pt-6 pb-4">
-                            <div className="w-11 h-11 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 flex items-center justify-center shrink-0">
-                                <Icon className="w-5 h-5 text-red-500" />
+                            <div className={cn('w-11 h-11 rounded-xl border flex items-center justify-center shrink-0',
+                                caution
+                                    ? 'bg-amber-50 dark:bg-amber-500/10 border-amber-200 dark:border-amber-500/20'
+                                    : 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20')}>
+                                <Icon className={cn('w-5 h-5', caution ? 'text-amber-600 dark:text-amber-400' : 'text-red-500')} />
                             </div>
                             <div className="flex-1 min-w-0">
                                 <h3 className="text-lg font-bold text-ink">{title}</h3>
                                 {subtitle && (
-                                    <p className="text-sm text-ink-muted truncate">{subtitle}</p>
+                                    <p className="text-sm text-ink-muted line-clamp-2">{subtitle}</p>
                                 )}
                             </div>
                             <button
@@ -176,11 +185,7 @@ export function DangerConfirmDialog({
                         {!loadingImpact && impactUnknown && (
                             <div className="rounded-xl bg-amber-50 dark:bg-amber-500/[0.08] border border-amber-200 dark:border-amber-500/20 px-4 py-3.5 flex items-start gap-2.5">
                                 <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
-                                <p className="text-sm text-amber-800 dark:text-amber-300">
-                                    We couldn&rsquo;t check what this will affect. It may destroy more
-                                    than you expect &mdash; try again in a moment, or continue only if
-                                    you are certain.
-                                </p>
+                                <p className="text-sm text-amber-800 dark:text-amber-300">{unknownMessage}</p>
                             </div>
                         )}
 
@@ -192,10 +197,14 @@ export function DangerConfirmDialog({
                         )}
 
                         {!loadingImpact && !impactUnknown && total > 0 && (
-                            <div className="rounded-xl bg-red-50 dark:bg-red-500/[0.08] border border-red-200 dark:border-red-500/20 px-4 py-3.5">
+                            <div className={cn('rounded-xl border px-4 py-3.5',
+                                caution
+                                    ? 'bg-amber-50 dark:bg-amber-500/[0.08] border-amber-200 dark:border-amber-500/20'
+                                    : 'bg-red-50 dark:bg-red-500/[0.08] border-red-200 dark:border-red-500/20')}>
                                 <div className="flex items-center gap-2 mb-3">
-                                    <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
-                                    <h4 className="text-xs font-bold uppercase tracking-wider text-red-600 dark:text-red-400">
+                                    <AlertTriangle className={cn('w-4 h-4 shrink-0', caution ? 'text-amber-600 dark:text-amber-400' : 'text-red-500')} />
+                                    <h4 className={cn('text-xs font-bold uppercase tracking-wider',
+                                        caution ? 'text-amber-700 dark:text-amber-300' : 'text-red-600 dark:text-red-400')}>
                                         {impactHeading}
                                     </h4>
                                 </div>
@@ -212,11 +221,12 @@ export function DangerConfirmDialog({
                                                     onClick={() => setExpanded(p => ({ ...p, [section.label]: !p[section.label] }))}
                                                     className={cn(
                                                         'w-full flex items-center gap-2 text-left rounded-lg px-2 py-1.5 -mx-2',
-                                                        canExpand && 'hover:bg-red-500/10 transition-colors',
+                                                        canExpand && 'transition-colors',
+                                                        canExpand && (caution ? 'hover:bg-amber-500/10' : 'hover:bg-red-500/10'),
                                                     )}
                                                 >
                                                     <span className="text-sm font-bold text-ink tabular-nums shrink-0">
-                                                        {section.count}
+                                                        {section.count.toLocaleString()}
                                                     </span>
                                                     <span className="text-sm text-ink min-w-0 flex-1">
                                                         {section.label}
@@ -281,13 +291,13 @@ export function DangerConfirmDialog({
                                         'w-full px-3.5 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 border text-sm text-ink',
                                         'placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 transition-colors',
                                         typedCorrectly
-                                            ? 'border-red-500/50 focus:ring-red-500/40'
-                                            : 'border-glass-border focus:ring-red-500/20',
+                                            ? (caution ? 'border-amber-500/50 focus:ring-amber-500/40' : 'border-red-500/50 focus:ring-red-500/40')
+                                            : cn('border-glass-border', caution ? 'focus:ring-amber-500/20' : 'focus:ring-red-500/20'),
                                     )}
                                 />
                                 <div className="mt-1.5 h-0.5 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden">
                                     <div
-                                        className="h-full bg-gradient-to-r from-red-500 to-rose-500 transition-[width] duration-150"
+                                        className={cn('h-full bg-gradient-to-r transition-[width] duration-150', caution ? 'from-amber-400 to-amber-500' : 'from-red-500 to-rose-500')}
                                         style={{ width: `${progress * 100}%` }}
                                     />
                                 </div>
@@ -315,9 +325,11 @@ export function DangerConfirmDialog({
                             disabled={!canConfirm}
                             className={cn(
                                 'inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold text-white transition-all',
-                                canConfirm
-                                    ? 'bg-gradient-to-r from-red-500 to-rose-600 shadow-lg shadow-red-500/25 hover:shadow-xl hover:-translate-y-0.5'
-                                    : 'bg-slate-300 dark:bg-slate-700 cursor-not-allowed',
+                                !canConfirm
+                                    ? 'bg-slate-300 dark:bg-slate-700 cursor-not-allowed'
+                                    : caution
+                                    ? 'bg-gradient-to-r from-amber-600 to-orange-600 shadow-lg shadow-amber-500/25 hover:shadow-xl hover:-translate-y-0.5'
+                                    : 'bg-gradient-to-r from-red-500 to-rose-600 shadow-lg shadow-red-500/25 hover:shadow-xl hover:-translate-y-0.5',
                             )}
                         >
                             {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Icon className="w-4 h-4" />}

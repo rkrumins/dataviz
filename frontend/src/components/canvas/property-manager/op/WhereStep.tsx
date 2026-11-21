@@ -104,7 +104,8 @@ export function WhereStep({
   }, [seed, selectionIds, key, layers, preset])
 
   const fixed = scopeFixedToView(preset)
-  const tooMany = tooManyIds(preset)
+  // Too many to name by id: the other ways in, as they are titled here.
+  const tooMany = tooManyIds(preset, choices.filter((c) => c.id !== 'selection').map((c) => c.title))
   return (
     <div className="space-y-5">
       <div role="radiogroup" aria-label="Which entities" className="grid gap-1.5">

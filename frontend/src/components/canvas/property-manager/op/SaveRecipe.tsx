@@ -11,7 +11,7 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import { jobOp, propertyJobLabel, type OpDraft, type ScopeMode, type TargetPreset } from './opModel'
 import { recipeTargetOf } from './recipes'
-import { FIELD, LABEL } from './styles'
+import { FIELD, LABEL, SECONDARY_EDGE } from './styles'
 
 export function SaveRecipe({ op, preset, scopeMode }: { op: OpDraft; preset: TargetPreset; scopeMode: ScopeMode }) {
   const canEdit = useLibraryCanEdit()
@@ -83,7 +83,7 @@ export function SaveRecipe({ op, preset, scopeMode }: { op: OpDraft; preset: Tar
       {error && <p role="alert" className="text-[11.5px] text-rose-600 dark:text-rose-400">{error}</p>}
       <div className="flex items-center justify-end gap-2">
         <Button size="sm" variant="ghost" onClick={() => setNaming(false)}>Cancel</Button>
-        <Button size="sm" variant="secondary" leftIcon={BookmarkPlus} disabled={!name.trim()} loading={saving} onClick={() => void save()}>
+        <Button size="sm" variant="secondary" className={SECONDARY_EDGE} leftIcon={BookmarkPlus} disabled={!name.trim()} loading={saving} onClick={() => void save()}>
           Save recipe
         </Button>
       </div>

@@ -28,9 +28,10 @@ export function recipeTargetOf(preset: TargetPreset, scopeMode: ScopeMode): { ta
   }
 }
 
-/** Where a recipe reaches, in a few words ("every entity with owner"). */
-export function recipeTargetLabel(target: RecipeTarget): string {
-  const across = target.scopeMode === 'data_source' ? ', across the whole data source' : ''
+/** Where a recipe reaches, in a few words ("every entity with owner") — and whether across the whole
+ *  data source, unless that is said apart (`withScope` false). */
+export function recipeTargetLabel(target: RecipeTarget, withScope = true): string {
+  const across = withScope && target.scopeMode === 'data_source' ? ', across the whole data source' : ''
   switch (target.kind) {
     case 'view': return `every entity in the view${across}`
     case 'hasKey': return `every entity with ${target.key}${across}`
@@ -42,23 +43,24 @@ export function recipeTargetLabel(target: RecipeTarget): string {
 }
 
 /** The dialog's seed for running `recipe` here: its change whole, its target as the Where step
- *  names it, and its scope. A layer is found by its name among `layers`; when none has it,
+ *  names it, its scope, and its name. A layer is found by its name among `layers`; when none has it,
  *  `missingLayer` names it and the dialog is left to ask where. */
 export function recipeRequest(recipe: BulkRecipe, layers: readonly { id: string; name: string }[]): { request: OpRequest; missingLayer?: string } {
   const op = recipe.op
   const target = recipe.target
   const scopeMode: ScopeMode = target.scopeMode ?? 'view'
+  const named = { recipe: { name: recipe.name } }
   switch (target.kind) {
-    case 'view': return { request: { op, target: { kind: 'view' }, scopeMode } }
-    case 'hasKey': return { request: { op, target: { kind: 'hasKey', key: target.key }, scopeMode } }
+    case 'view': return { request: { op, target: { kind: 'view' }, scopeMode, ...named } }
+    case 'hasKey': return { request: { op, target: { kind: 'hasKey', key: target.key }, scopeMode, ...named } }
     case 'layer': {
       const layer = layers.find((l) => l.name === target.layerName)
       return layer
-        ? { request: { op, target: { kind: 'layer', layerId: layer.id, name: layer.name } } }
-        : { request: { op }, missingLayer: target.layerName }
+        ? { request: { op, target: { kind: 'layer', layerId: layer.id, name: layer.name }, ...named } }
+        : { request: { op, ...named }, missingLayer: target.layerName }
     }
     case 'search':
-    case 'connections': return { request: { op, target: searchPreset(target.predicate, scopeMode) } }
-    case 'custom': return { request: { op, target: { kind: 'custom', predicate: target.predicate }, scopeMode } }
+    case 'connections': return { request: { op, target: searchPreset(target.predicate, scopeMode), ...named } }
+    case 'custom': return { request: { op, target: { kind: 'custom', predicate: target.predicate }, scopeMode, ...named } }
   }
 }

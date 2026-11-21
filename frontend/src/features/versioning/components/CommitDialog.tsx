@@ -36,8 +36,9 @@ export function CommitDialog(props: CommitDialogProps) {
     <>
     <Backdrop open={true} onClick={busy ? undefined : onClose} zClassName="z-[100]" className="bg-black/40 backdrop-blur-sm" />
     <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
-      <div className="relative bg-canvas-elevated rounded-2xl shadow-glass-lg border border-glass-border w-full max-w-md mx-4 overflow-hidden animate-fade-in flex flex-col pointer-events-auto">
-        <div className="px-6 pt-6 pb-4 flex items-center gap-3">
+      {/* Held to the viewport: a long refusal scrolls between the header and the actions. */}
+      <div className="relative bg-canvas-elevated rounded-2xl shadow-glass-lg border border-glass-border w-full max-w-md max-h-[90vh] mx-4 overflow-hidden animate-fade-in flex flex-col pointer-events-auto">
+        <div className="shrink-0 px-6 pt-6 pb-4 flex items-center gap-3">
           <div className={cn(
             'w-10 h-10 rounded-xl flex items-center justify-center border',
             inReview
@@ -61,9 +62,11 @@ export function CommitDialog(props: CommitDialogProps) {
           </button>
         </div>
 
-        <PublishBody flow={flow} />
+        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+          <PublishBody flow={flow} />
+        </div>
 
-        <div className="px-6 py-4 border-t border-glass-border flex items-center justify-end gap-3 bg-canvas-overlay/40">
+        <div className="shrink-0 px-6 py-4 border-t border-black/[0.06] dark:border-white/[0.06] flex items-center justify-end gap-3 bg-canvas-overlay/40">
           <PublishActions flow={flow} />
         </div>
       </div>

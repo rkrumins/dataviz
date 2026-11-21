@@ -67,12 +67,14 @@ describe('PropertyOpDialog — filling a required field', () => {
   it('opens on What with the allowed values of the target type’s field, and its Where by name', async () => {
     const user = userEvent.setup()
     open(fillRequiredRequest({ entityType: 'table', entityTypeName: 'Table', field: 'tier', fieldName: 'Tier', scopeMode: 'view' }))
-    // The value is still to give: What, "Fill if empty" on tier.
+    // The value is still to give: What, "Fill if empty" on tier — and for whom it is said.
     expect(step()).toHaveTextContent('What')
+    expect(screen.getByText(/^For:/)).toHaveTextContent('For: every Table missing Tier')
     expect(screen.getByRole('radio', { name: /Fill if empty/ })).toHaveAttribute('aria-checked', 'true')
     expect(screen.getByRole('combobox', { name: 'Property' })).toHaveValue('tier')
-    // The Table's field, not the View's: only its values, no free text.
+    // The Table's field, not the View's: only its values, no free text — the focus on them.
     const picker = screen.getByRole('group', { name: 'Allowed values of Tier' })
+    expect(within(picker).getByRole('button', { name: 'gold' })).toHaveFocus()
     expect(within(picker).getAllByRole('button').map((b) => b.textContent)).toEqual(['gold', 'silver'])
     expect(screen.queryByRole('textbox', { name: 'Value' })).toBeNull()
     expect(screen.getByText('Tier takes only these values — publishing refuses any other.')).toBeInTheDocument()
@@ -95,6 +97,7 @@ describe('PropertyOpDialog — filling a required field', () => {
   it('offers suggested values above the free text, and a pick fills it in', async () => {
     const user = userEvent.setup()
     open(fillRequiredRequest({ entityType: 'table', field: 'dept', scopeMode: 'view' }))
+    expect(within(screen.getByRole('group', { name: 'Suggested values of Department' })).getByRole('button', { name: 'Finance' })).toHaveFocus()
     await user.click(within(screen.getByRole('group', { name: 'Suggested values of Department' })).getByRole('button', { name: 'Sales' }))
     expect(screen.getByRole('textbox', { name: 'Value' })).toHaveValue('Sales')
     expect(screen.queryByText(/takes only these values/)).toBeNull()
@@ -105,6 +108,7 @@ describe('PropertyOpDialog — filling a required field', () => {
     const user = userEvent.setup()
     api.preview.mockResolvedValue({ refusal: null, nameBudget: null, activeJobId: null, counts: { matched: 2, haveKey: 0, wouldChange: 2 } })
     open(fillRefusedRequest({ entityType: 'table', field: 'tier', fieldName: 'Tier', ids: ['gv:a', 'gv:b'], complete: true }), [])
+    expect(screen.getByText(/^For:/)).toHaveTextContent('For: every table the publish refused for missing Tier')
     // The refused entities' type's field, whatever the view shows.
     expect(screen.getByRole('group', { name: 'Allowed values of Tier' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'silver' }))
@@ -124,7 +128,7 @@ describe('PropertyOpDialog — filling a required field', () => {
     await user.click(screen.getByRole('button', { name: 'gold' }))
     await user.click(next())
     expect(screen.getByRole('radio', { name: /The first 20,001 the publish refused/ })).toHaveAttribute('aria-checked', 'true')
-    expect(screen.getAllByText(/20,000 is the most a selection can change/).length).toBeGreaterThan(0)
+    expect(screen.getByText(/20,000 is the most a selection can change/)).toBeInTheDocument()
     expect(next()).toBeDisabled()
   })
 })
