@@ -533,10 +533,12 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         server_gates=(
             "POST /playground/join — refused while off",
             "GET /playground — says the Playground is off, and offers nothing",
+            "GET /playground/samples, POST /playground/samples/{sample_id} — refused while off",
         ),
         ui_surfaces=(
             "Playground — in the sidebar, and on the Dashboard and Workspaces, opening it for anyone",
             "Setting the Playground up, on Workspaces, for platform administrators",
+            "Start from a sample, under Your experiments in the Playground",
         ),
         still_allowed=(
             "People already in the Playground keep their graphs and views; nothing is deleted",
@@ -728,10 +730,14 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
     "blankModelsEnabled": FeatureWiring(
         key="blankModelsEnabled",
         posture="capability",
-        server_gates=("POST /blank-graphs — provision a lineage model with no data source",),
+        server_gates=(
+            "POST /blank-graphs — provision a lineage model with no data source",
+            "GET /playground/samples, POST /playground/samples/{sample_id} — a sample is a blank model",
+        ),
         ui_surfaces=(
             "Blank-model option in the View wizard",
             "'Start from scratch' on the canvas empty state",
+            "Start from a sample, in the Playground",
         ),
         still_allowed=(
             "Every blank model already built keeps working and stays editable",
