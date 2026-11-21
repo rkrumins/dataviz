@@ -7,6 +7,10 @@
  * catalog until the new one is complete — a panel of exact numbers never
  * turns back into partial ones. The last complete catalog of each view is
  * kept for the session, so reopening the tab shows it at once.
+ *
+ * Every reader of one view's catalog — the Properties tab, the bulk dialog —
+ * shares one read of it (``joinRead``): followed once while any of them is
+ * mounted, each hearing every answer.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -48,6 +52,54 @@ function remember(provider: object, viewId: string, catalog: SearchCatalogResult
 }
 
 
+type CatalogEvent = { answer: SearchCatalogResult } | { error: unknown }
+
+/** One read of a view's catalog, and the readers following it. */
+interface SharedRead {
+    readers: Set<(event: CatalogEvent) => void>
+    controller: AbortController
+    /** What it last heard — told at once to a reader that joins late. */
+    last: CatalogEvent | null
+}
+
+/** The reads under way, per provider and key (the view, the draft and how far it has got, and a
+ *  refresh asked for). */
+const reads = new WeakMap<object, Map<string, SharedRead>>()
+
+/** Follow the catalog `key` names with `reader`, sharing a read already under way for it. Returns
+ *  how to leave it: the last reader to leave stops the read. */
+function joinRead(provider: RemoteGraphProvider, viewId: string, key: string, refresh: boolean,
+                  reader: (event: CatalogEvent) => void): () => void {
+    let byKey = reads.get(provider)
+    if (!byKey) reads.set(provider, (byKey = new Map()))
+    const under = byKey
+    let read = under.get(key)
+    if (!read) {
+        const started: SharedRead = { readers: new Set(), controller: new AbortController(), last: null }
+        const tell = (event: CatalogEvent) => {
+            if (started.controller.signal.aborted) return
+            started.last = event
+            for (const r of started.readers) r(event)
+        }
+        followCatalog(provider, viewId, {
+            signal: started.controller.signal,
+            refresh,
+            onUpdate: (answer) => tell({ answer }),
+        }).catch((error: unknown) => tell({ error }))
+        under.set(key, (read = started))
+    }
+    const joined = read
+    joined.readers.add(reader)
+    if (joined.last) reader(joined.last)
+    return () => {
+        joined.readers.delete(reader)
+        if (joined.readers.size > 0) return
+        joined.controller.abort()
+        if (under.get(key) === joined) under.delete(key)
+    }
+}
+
+
 interface ViewState {
     viewId: string
     complete: SearchCatalogResult | null
@@ -73,31 +125,28 @@ export function usePropertyCatalog(viewId: string): PropertyCatalogState {
 
     useEffect(() => {
         if (!viewId || !(provider instanceof RemoteGraphProvider)) return
-        const controller = new AbortController()
         const refresh = refreshOf !== refreshed.current && refreshOf.viewId === viewId && refreshOf.n > 0
         refreshed.current = refreshOf
         // Every update names its view: an answer for a view switched away
         // from never shows under the new one.
         const update = (next: (s: ViewState) => ViewState) => setHeld((s) => next(
             s && s.viewId === kept ? s : fresh(provider, kept)))
-        followCatalog(provider, viewId, {
-            signal: controller.signal,
-            refresh,
-            onUpdate: (answer) => {
-                if (controller.signal.aborted) return
+        // A refresh is a read of its own; any other is shared with every reader of this view.
+        const key = `${kept}|${draftKey}|${refresh ? `refresh:${refreshOf.n}` : ''}`
+        return joinRead(provider, viewId, key, refresh, (event) => {
+            if ('answer' in event) {
+                const { answer } = event
                 if (answer.status === 'complete') remember(provider, kept, answer)
                 update((s) => (answer.status === 'complete'
                     ? { ...s, complete: answer, running: null, error: null, refused: false }
                     : { ...s, running: answer, error: null }))
-            },
-        }).catch((e: unknown) => {
-            if (controller.signal.aborted) return
-            const status = httpStatusOf(e)
+                return
+            }
+            const status = httpStatusOf(event.error)
             const refused = status === 403 || status === 501
             update((s) => ({ ...s, running: null, refused,
-                             error: refused ? null : (e as Error).message }))
+                             error: refused ? null : (event.error as Error).message }))
         })
-        return () => controller.abort()
         // ``kept`` is the view and the branch; ``draftKey`` how far the draft has got.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [provider, kept, draftKey, refreshOf])

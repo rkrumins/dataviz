@@ -19,6 +19,8 @@ import { ArrowRight, Info } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Segmented } from '@/components/ui/Segmented'
 import { Skeleton } from '@/components/ui/Skeleton'
+import { DrawerScrollContext } from '@/components/panels/shell/drawerScroll'
+import { useDrawerList } from '@/components/panels/entity/multi/useDrawerList'
 import type { ValueKind } from '@/services/versioningApiService'
 import type { SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
 import { cleanValue, mergeMap, similarGroups, type SimilarGroup } from './cleanup'
@@ -28,6 +30,8 @@ import { useAllValues } from './useAllValues'
 
 /** Rows a preview shows of each list. */
 const SHOWN = 6
+/** A merge group's height before it is measured: a few values, one per line. */
+const GROUP_ESTIMATE = 96
 
 export function CleanupFields({ op, onChange, known, viewId }: {
   op: OpDraft
@@ -127,8 +131,10 @@ function MergeFields({ op, onChange, known, viewId }: {
 }) {
   const all = useAllValues(viewId, op.key.trim())
   const values = useMemo(() => all.values ?? known?.values ?? [], [all.values, known?.values])
+  // How many entities hold each value, by value: what the counts here look up.
+  const held = useMemo(() => new Map(values.map((v) => [key(v), v.count])), [values])
   // A merge asked for from the catalog (its value bars' "Merge into…") is the first group, kept.
-  const [asked] = useState(() => askedGroup(op.map ?? [], values))
+  const [asked] = useState(() => askedGroup(op.map ?? [], held))
   const groups = useMemo(() => {
     const suggested = similarGroups(values)
     if (!asked) return suggested
@@ -138,23 +144,31 @@ function MergeFields({ op, onChange, known, viewId }: {
   // Each group: the member kept (an index into it), or null when it is left out. Asked for: only
   // that group, to begin with; otherwise every suggestion.
   const [choice, setChoice] = useState<Record<string, number | null>>({})
-  const picked = (g: SimilarGroup) => (g.key in choice ? choice[g.key]! : asked && g !== asked ? null : g.canonical)
-  const map = useMemo(() => mergeMap(groups.flatMap((g) => {
-    const c = picked(g)
-    return c === null ? [] : [{ members: g.members, canonical: c }]
+  const pickedIn = (c: Record<string, number | null>, g: SimilarGroup) => (g.key in c ? c[g.key]! : asked && g !== asked ? null : g.canonical)
+  const mapOf = (c: Record<string, number | null>) => mergeMap(groups.flatMap((g) => {
+    const kept = pickedIn(c, g)
+    return kept === null ? [] : [{ members: g.members, canonical: kept }]
+  }))
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  })), [groups, choice])
+  const map = useMemo(() => mapOf(choice), [groups, choice])
+  // A choice is sent as it is made — one change per click.
+  const choose = (g: SimilarGroup, kept: number | null) => {
+    const next = { ...choice, [g.key]: kept }
+    setChoice(next)
+    onChange({ map: mapOf(next) })
+  }
+  // The groups themselves change as every value it holds arrives: the merge they make then is sent.
   useEffect(() => {
     if (JSON.stringify(map) !== JSON.stringify(op.map ?? [])) onChange({ map })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [map])
+  }, [groups])
 
   const tooMany = known && !known.distinctExact && known.values.length === 0
   if (tooMany) {
     return <Hint>It holds more than {known.distinct.toLocaleString()} distinct values — too many to list and merge here. Use Find &amp; replace with “Whole value only” instead.</Hint>
   }
   if (all.loading && values.length === 0) return <div className="space-y-1.5">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-8 w-full rounded-lg" />)}</div>
-  const entities = map.reduce((n, m) => n + (values.find((v) => key(v) === key({ value: m.from, kind: m.fromKind ?? '' }))?.count ?? 0), 0)
+  const entities = map.reduce((n, m) => n + (held.get(key({ value: m.from, kind: m.fromKind ?? '' })) ?? 0), 0)
   return (
     <div className="space-y-3">
       {groups.length === 0 ? (
@@ -168,15 +182,14 @@ function MergeFields({ op, onChange, known, viewId }: {
             {asked ? 'The values you chose, and others' : 'Values'} that read as one once case and spaces are set aside — pick the one to keep.
             {all.loading && ' Reading every value it holds…'}
           </p>
-          <ul className="max-h-72 space-y-1.5 overflow-y-auto custom-scrollbar pr-0.5" aria-label="Values to merge">
-            {groups.map((g) => {
-              const c = picked(g)
+          <GroupList groups={groups} group={(g) => {
+              const c = pickedIn(choice, g)
               const total = g.members.reduce((n, m) => n + m.count, 0)
               return (
-                <li key={g.key} className={cn('rounded-lg border p-2', c !== null ? 'border-accent-lineage/30 bg-accent-lineage/[0.04]' : 'border-black/[0.07] dark:border-white/[0.08]')}>
+                <div className={cn('rounded-lg border p-2', c !== null ? 'border-accent-lineage/30 bg-accent-lineage/[0.04]' : 'border-black/[0.07] dark:border-white/[0.08]')}>
                   <label className="flex items-center gap-2 text-[12px] text-ink">
                     <input type="checkbox" className="accent-indigo-500" checked={c !== null}
-                      onChange={(e) => setChoice((s) => ({ ...s, [g.key]: e.target.checked ? g.canonical : null }))} />
+                      onChange={(e) => choose(g, e.target.checked ? g.canonical : null)} />
                     <span className="flex-1 min-w-0 truncate">
                       {g.members.length} values → <span className="font-mono">{quote(g.members[c ?? g.canonical]!.value)}</span>
                     </span>
@@ -186,16 +199,15 @@ function MergeFields({ op, onChange, known, viewId }: {
                     {g.members.map((m, i) => (
                       <label key={key(m)} className="flex items-center gap-2 text-[11.5px] text-ink-secondary">
                         <input type="radio" name={`keep-${g.key}`} className="accent-indigo-500" checked={(c ?? g.canonical) === i}
-                          onChange={() => setChoice((s) => ({ ...s, [g.key]: i }))} aria-label={`Keep ${quote(m.value)}`} />
+                          onChange={() => choose(g, i)} aria-label={`Keep ${quote(m.value)}`} />
                         <span className="flex-1 min-w-0 truncate font-mono whitespace-pre">{quote(m.value)}</span>
                         <span className="shrink-0 text-[10.5px] tabular-nums text-ink-muted">{m.count.toLocaleString()}</span>
                       </label>
                     ))}
                   </div>
-                </li>
+                </div>
               )
-            })}
-          </ul>
+            }} />
           <p className="text-[11.5px] text-ink-secondary" aria-live="polite">
             {map.length === 0 ? 'Nothing chosen to merge.'
               : <>Merges <span className="font-semibold tabular-nums">{map.length.toLocaleString()}</span> value{map.length === 1 ? '' : 's'} into another — held by about <span className="tabular-nums">{entities.toLocaleString()}</span> entities in this view.</>}
@@ -210,10 +222,40 @@ function MergeFields({ op, onChange, known, viewId }: {
 
 const key = (v: { value: unknown; kind: string }) => JSON.stringify([v.kind, v.value])
 
+/** The merge's groups, in a list of its own height: past a hundred, only those in view are drawn. */
+function GroupList({ groups, group }: { groups: readonly SimilarGroup[]; group: (g: SimilarGroup) => ReactNode }) {
+  const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null)
+  return (
+    <div ref={setScrollEl} className="max-h-72 overflow-y-auto custom-scrollbar pr-0.5">
+      <DrawerScrollContext.Provider value={scrollEl}>
+        <GroupRows groups={groups} group={group} />
+      </DrawerScrollContext.Provider>
+    </div>
+  )
+}
+
+function GroupRows({ groups, group }: { groups: readonly SimilarGroup[]; group: (g: SimilarGroup) => ReactNode }) {
+  const { listRef, virtual, virtualizer } = useDrawerList(groups.length, GROUP_ESTIMATE, (i) => groups[i]?.key ?? String(i))
+  return (
+    <div ref={listRef} role="list" aria-label="Values to merge" className={cn(!virtual && 'space-y-1.5')}
+      style={virtual ? { height: virtualizer.getTotalSize(), position: 'relative' } : undefined}>
+      {virtual
+        ? virtualizer.getVirtualItems().map((item) => (
+          <div key={item.key} role="listitem" data-index={item.index} ref={virtualizer.measureElement}
+            className="absolute left-0 top-0 w-full pb-1.5"
+            style={{ transform: `translateY(${item.start - virtualizer.options.scrollMargin}px)` }}>
+            {group(groups[item.index]!)}
+          </div>
+        ))
+        : groups.map((g) => <div key={g.key} role="listitem">{group(g)}</div>)}
+    </div>
+  )
+}
+
 /** The group a merge asked for from the catalog names: what it merges, and what into. */
-function askedGroup(map: NonNullable<OpDraft['map']>, values: readonly SearchCatalogValue[]): SimilarGroup | null {
+function askedGroup(map: NonNullable<OpDraft['map']>, held: ReadonlyMap<string, number>): SimilarGroup | null {
   if (map.length === 0) return null
-  const count = (value: unknown, kind: string) => values.find((v) => key(v) === key({ value, kind }))?.count ?? 0
+  const count = (value: unknown, kind: string) => held.get(key({ value, kind })) ?? 0
   const into = { value: map[0]!.to, kind: map[0]!.toKind ?? 'String' }
   const members: SearchCatalogValue[] = [{ ...into, count: count(into.value, into.kind) }]
   for (const m of map) {
@@ -230,9 +272,15 @@ function ConvertFields({ op, onChange, known, viewId }: {
   op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null; viewId: string
 }) {
   const all = useAllValues(viewId, op.key.trim())
-  const values = all.values ?? known?.values ?? []
+  const values = useMemo(() => all.values ?? known?.values ?? [], [all.values, known?.values])
   const kinds = Object.entries(known?.kinds ?? {}).sort((a, b) => b[1] - a[1])
-  const fails = op.toKind ? values.filter((v) => cleanValue({ ...op, onFail: 'skip' }, v.value, v.kind).fails) : []
+  const fails = useMemo(
+    () => (op.toKind ? values.filter((v) => cleanValue({ ...op, onFail: 'skip' }, v.value, v.kind).fails) : []),
+    [values, op])
+  const converts = useMemo(() => {
+    const failing = new Set(fails)
+    return values.filter((v) => !failing.has(v))
+  }, [values, fails])
   return (
     <div className="space-y-3">
       {kinds.length > 0 && (
@@ -257,7 +305,7 @@ function ConvertFields({ op, onChange, known, viewId }: {
       </div>
       {op.toKind && (
         <>
-          <Preview op={{ ...op, onFail: 'skip' }} values={values.filter((v) => !fails.includes(v))} distinct={known?.distinct} title="Converts" />
+          <Preview op={{ ...op, onFail: 'skip' }} values={converts} distinct={known?.distinct} title="Converts" />
           {fails.length > 0 ? (
             <fieldset className="rounded-lg border border-amber-500/30 bg-amber-500/[0.06] p-2.5">
               <legend className="px-1 text-[11px] text-amber-700 dark:text-amber-300">

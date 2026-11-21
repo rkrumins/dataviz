@@ -47,6 +47,37 @@ describe('propertyJobsStore', () => {
     expect(usePropertyJobsStore.getState().jobs).toEqual([])
   })
 
+  it('moves a draft\'s written epoch when a job ends — and while it runs, at most every 30 s', async () => {
+    vi.useFakeTimers()
+    try {
+      const { usePropertyJobsStore } = await import('../propertyJobsStore')
+      usePropertyJobsStore.getState().track(tracked('j1'))
+      const epoch = () => usePropertyJobsStore.getState().writtenEpochs['g1|d1']?.epoch ?? 0
+      const tick = (commits: number, status: 'running' | 'completed' = 'running') =>
+        usePropertyJobsStore.getState().update('j1', { jobId: 'j1', status, summary: { commits } })
+      tick(0)
+      expect(epoch()).toBe(0)                  // nothing written yet
+      tick(1)
+      expect(epoch()).toBe(1)                  // its first window shows at once
+      vi.advanceTimersByTime(10_000)
+      tick(2)
+      vi.advanceTimersByTime(10_000)
+      tick(3)
+      expect(epoch()).toBe(1)                  // windows land faster than the reads are asked again
+      vi.advanceTimersByTime(10_000)
+      tick(3)
+      expect(epoch()).toBe(2)                  // 30 s on, it has written more than was last read
+      vi.advanceTimersByTime(60_000)
+      tick(3)
+      expect(epoch()).toBe(2)                  // nothing more written
+      tick(4, 'completed')
+      expect(epoch()).toBe(3)                  // it ended: read at once
+      expect(usePropertyJobsStore.getState().writtenEpochs['g1|d2']).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('hands a request to the dialog once', async () => {
     const { usePropertyJobsStore } = await import('../propertyJobsStore')
     usePropertyJobsStore.getState().requestOp({ kind: 'remove', key: 'owner' })
