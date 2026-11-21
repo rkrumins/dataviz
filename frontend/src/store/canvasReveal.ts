@@ -5,7 +5,7 @@
  * into view, the Hierarchy opens the node's path and scrolls to it — opening collapsed ancestors
  * (and loading them, where the canvas can) first.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 
 export type RevealNode = (nodeId: string) => unknown
 
@@ -24,9 +24,7 @@ export function revealNodeOnCanvas(nodeId: string): boolean {
     return true
 }
 
-/** For a canvas: `fn` is its reveal while it is mounted (always the latest `fn`). */
+/** For a canvas: `fn` is its reveal while it is mounted (re-registered when it changes). */
 export function useCanvasReveal(fn: RevealNode): void {
-    const latest = useRef(fn)
-    latest.current = fn
-    useEffect(() => registerCanvasReveal((id) => latest.current(id)), [])
+    useEffect(() => registerCanvasReveal(fn), [fn])
 }
