@@ -30,6 +30,42 @@ describe('DangerConfirmDialog — an action that isn’t a deletion', () => {
     await act(async () => { finish() })
   })
 
+  it('is amber for a change that can be taken back, red for one that destroys — and counts with separators', () => {
+    const { unmount } = render(
+      <DangerConfirmDialog isOpen title="Undo Set owner?" confirmPhrase="" confirmLabel="Undo" impactHeading="This will put back"
+        sections={[{ label: 'entities', count: 31877, tone: 'warning', consequence: 'to what they held before' }]} irreversibleNote={null}
+        onClose={() => {}} onConfirm={() => {}} />,
+    )
+    expect(screen.getByText('entities').closest('button')).toHaveTextContent('31,877entities')
+    expect(screen.getByRole('heading', { name: 'This will put back' }).className).toMatch(/amber/)
+    expect(screen.getByRole('button', { name: 'Undo' }).className).toMatch(/amber/)
+    unmount()
+    // A section that destroys keeps the red, though the action can be taken back.
+    const removing = render(
+      <DangerConfirmDialog isOpen title="Remove owner?" confirmPhrase="" confirmLabel="Apply" impactHeading="This will change"
+        sections={[{ label: 'entities', count: 3, tone: 'destructive', consequence: 'lose owner' }]} irreversibleNote={null}
+        onClose={() => {}} onConfirm={() => {}} />,
+    )
+    expect(screen.getByRole('heading', { name: 'This will change' }).className).toMatch(/red/)
+    removing.unmount()
+    // A deletion, as every delete dialog says it: red.
+    render(<DangerConfirmDialog isOpen title="Delete Sales?" confirmPhrase="" sections={[{ label: 'Views', count: 2, consequence: 'deleted' }]}
+      onClose={() => {}} onConfirm={() => {}} />)
+    expect(screen.getByRole('heading', { name: 'This will destroy' }).className).toMatch(/red/)
+    expect(screen.getByText('This cannot be undone')).toBeInTheDocument()
+  })
+
+  it('says an unknown impact in its own words, where there is nothing to try again', () => {
+    const { unmount } = render(<DangerConfirmDialog isOpen title="Delete Sales?" confirmPhrase="" sections={[]} impactUnknown
+      onClose={() => {}} onConfirm={() => {}} />)
+    expect(screen.getByText(/try again in a moment/)).toBeInTheDocument()
+    unmount()
+    render(<DangerConfirmDialog isOpen title="Remove owner?" confirmPhrase="" sections={[]} impactUnknown irreversibleNote={null}
+      unknownMessage="It can’t be counted here." onClose={() => {}} onConfirm={() => {}} />)
+    expect(screen.getByText('It can’t be counted here.')).toBeInTheDocument()
+    expect(screen.queryByText(/try again in a moment/)).toBeNull()
+  })
+
   it('reads as a deletion when nothing else is said', async () => {
     const { finish } = renderDialog({ confirmLabel: 'Delete' })
     expect(document.querySelector('.lucide-trash2, .lucide-trash-2')).not.toBeNull()
