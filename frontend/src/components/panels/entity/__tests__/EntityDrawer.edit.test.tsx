@@ -15,6 +15,7 @@ import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { stagedChangesToOps } from '@/features/versioning/model/stagedChangesToOps'
 
 vi.mock('../../useDrawerHistoryScope', () => ({
@@ -363,5 +364,20 @@ describe("EntityDrawer — what the type's fields ask of a value", () => {
     await user.click(within(rowOf('owner')).getByRole('button', { name: 'Delete owner' }))
     expect(screen.getByText(/Owner is required for Dataset/)).toBeInTheDocument()
     expect(ops()[0].unsetProperties).toEqual(['owner'])
+  })
+
+  it('a required one said to be left without a value offers to fill it on every Dataset missing it', async () => {
+    const user = userEvent.setup()
+    usePropertyJobsStore.setState({ request: null } as never)
+    render(<EntityDrawer canEdit />)
+    expect(screen.queryByRole('button', { name: /Fill missing/ })).toBeNull()
+    await user.click(within(rowOf('owner')).getByRole('button', { name: 'Delete owner' }))
+    await user.click(screen.getByRole('button', { name: 'Fill missing on every Dataset…' }))
+    expect(usePropertyJobsStore.getState().request).toMatchObject({
+      op: { kind: 'fillEmpty', key: 'owner' }, scopeMode: 'view',
+      target: { kind: 'search', scopeMode: 'view', label: 'every Dataset missing Owner' },
+    })
+    expect(usePropertyJobsStore.getState().request?.target).toMatchObject({ predicate: { children: [
+      { kind: 'entityType', op: 'in', values: ['dataset'] }, { kind: 'property', key: 'owner', op: 'isEmpty' }] } })
   })
 })

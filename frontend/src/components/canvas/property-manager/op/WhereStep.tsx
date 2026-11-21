@@ -6,7 +6,7 @@
  * the ones it was opened on: those picked, or a Connections search's.
  */
 import { useMemo, type ComponentType, type ReactNode } from 'react'
-import { AlertTriangle, Filter, FolderTree, Globe2, Layers, ListTree, MousePointerSquareDashed, ScanSearch, Tag, Waypoints } from 'lucide-react'
+import { AlertTriangle, Filter, FolderTree, Globe2, Layers, ListChecks, ListTree, MousePointerSquareDashed, ScanSearch, Tag, Waypoints } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Segmented } from '@/components/ui/Segmented'
 import type { Predicate } from '@/types/search'
@@ -61,7 +61,7 @@ export function WhereStep({
       out.push({
         id: seed.kind,
         icon: seed.kind === 'search' ? ScanSearch : seed.kind === 'children' ? ListTree : FolderTree,
-        title: seed.kind === 'search' ? 'The search’s matches' : seed.kind === 'children' ? `The children of ${seed.label}` : `Everything inside ${seed.label}`,
+        title: seed.kind === 'search' ? sentence(seed.label) : seed.kind === 'children' ? `The children of ${seed.label}` : `Everything inside ${seed.label}`,
         detail: seed.kind === 'search' ? `Every match${seed.count !== undefined ? ` — ${seed.count.toLocaleString()}` : ''}, on every page`
           : seed.kind === 'children' ? 'One level down — not their own children' : 'Every level down, however deep (up to 20)',
         preset: seed,
@@ -79,7 +79,11 @@ export function WhereStep({
         })
       }
     }
-    if (selectionIds.length > 0) {
+    // Ids it was opened with that aren't the canvas selection (a publish's refusals): those, by name.
+    if (seed?.kind === 'selection' && seed.label) {
+      out.push({ id: 'selection', icon: ListChecks, title: sentence(seed.label),
+        detail: `Exactly these ${seed.ids.length.toLocaleString()}, by id — new in the draft too`, preset: seed })
+    } else if (selectionIds.length > 0) {
       out.push({ id: 'selection', icon: MousePointerSquareDashed, title: `The ${selectionIds.length.toLocaleString()} selected`,
         detail: 'Exactly the entities selected on the canvas', preset: { kind: 'selection', ids: selectionIds } })
     }
@@ -175,6 +179,9 @@ export function WhereStep({
     </div>
   )
 }
+
+/** A target's words as a title: "every Table missing Owner" → "Every Table missing Owner". */
+const sentence = (label: string) => label.charAt(0).toUpperCase() + label.slice(1)
 
 function CustomCriteria({ viewId, predicate, onChange, knownEntityTypes, layers }: {
   viewId: string

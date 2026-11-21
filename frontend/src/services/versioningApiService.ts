@@ -785,13 +785,17 @@ export interface FieldViolation {
   reason: string
 }
 
-/** How many values a publish refused for one field of one entity type, by one rule. */
+/** How many values a publish refused for one field of one entity type, by one rule — and which:
+ *  `ids`, as a bulk property job's `ids` target names them (the first 20,000), all of them when
+ *  `idsComplete`. */
 export interface FieldViolationCount {
   entityType: string
   field: string
   fieldName?: string
   rule: FieldViolation['rule']
   count: number
+  ids?: string[]
+  idsComplete?: boolean
 }
 
 /** A publish refused because property values break the fields their entity types define. Nothing

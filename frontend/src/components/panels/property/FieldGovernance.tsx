@@ -1,7 +1,8 @@
 /**
  * A governed field's value, helped along while it is edited (`lib/fieldRules`): its allowed values
  * picked with one click — the one held marked — and a warning, said where the value is, of what
- * publishing would refuse. Neither blocks the edit.
+ * publishing would refuse. Neither blocks the edit. A required one left without a value offers the
+ * way to fill it on every entity of its type missing it (`FillMissingButton`).
  */
 import type { ReactNode } from 'react'
 import { AlertTriangle } from 'lucide-react'
@@ -72,6 +73,17 @@ export function AllowedValuePicker({ field, value, label, onPick, className }: {
         )
       })}
     </div>
+  )
+}
+
+/** From a required field left without a value to the bulk dialog: "Fill if empty" on every entity
+ *  of its type missing it. */
+export function FillMissingButton({ typeName, onClick, className }: { typeName: string; onClick: () => void; className?: string }) {
+  return (
+    <button type="button" onClick={onClick}
+      className={cn('shrink-0 rounded px-1 text-2xs font-semibold text-accent-lineage hover:bg-accent-lineage/10', className)}>
+      Fill missing on every {typeName}…
+    </button>
   )
 }
 
