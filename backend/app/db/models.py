@@ -1130,6 +1130,72 @@ class WorkspaceRequestORM(Base):
         )
 
 
+class DataRequestORM(Base):
+    """Someone in a workspace asking for data to be connected to it, for the
+    platform team (or the workspace's own data people) to connect.
+
+    ``pending`` → ``in_progress`` (someone took it: ``assignee_id``) →
+    ``connected`` (optionally naming the ``data_source_id`` it became) or
+    ``declined``; a ``pending`` one may also be connected or declined straight
+    away, or ``withdrawn`` by the person who asked. ``system`` is where the data
+    lives, ``details`` what of it, ``purpose`` why, ``urgency`` by when, and
+    ``contact_ids`` (JSON list) the people who know it.
+
+    No foreign keys, like ``workspace_requests``: the workspace, people and the
+    data source are named by id, and the record outlives them.
+    """
+    __tablename__ = "data_requests"
+
+    id = Column(Text, primary_key=True, default=lambda: f"dr_{uuid.uuid4().hex[:12]}")
+    workspace_id = Column(Text, nullable=False)
+    requested_by = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
+    system = Column(Text, nullable=False)
+    details = Column(Text, nullable=True)
+    purpose = Column(Text, nullable=True)
+    urgency = Column(Text, nullable=False, default="no_rush")
+    contact_ids = Column(Text, nullable=False, default="[]")             # JSON
+    status = Column(Text, nullable=False, default="pending")
+    assignee_id = Column(Text, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    data_source_id = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_data_requests_workspace_created", "workspace_id", "created_at"),
+        Index("idx_data_requests_status_created", "status", "created_at"),
+        Index("idx_data_requests_requester", "requested_by", "created_at"),
+        CheckConstraint(
+            "system IN ('snowflake', 'databricks', 'bigquery', 'postgres', 'dbt', 'datahub', "
+            "'neo4j', 'file', 'other')",
+            name="ck_data_requests_system",
+        ),
+        CheckConstraint(
+            "urgency IN ('no_rush', 'this_month', 'this_week')",
+            name="ck_data_requests_urgency",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'in_progress', 'connected', 'declined', 'withdrawn')",
+            name="ck_data_requests_status",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND resolved_at IS NULL) "
+            "OR (status = 'in_progress' AND resolved_at IS NULL AND assignee_id IS NOT NULL) "
+            "OR (status IN ('connected', 'declined', 'withdrawn') AND resolved_at IS NOT NULL)",
+            name="ck_data_requests_state_consistency",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataRequest id={self.id!r} workspace={self.workspace_id!r} "
+            f"title={self.title!r} status={self.status!r}>"
+        )
+
+
 # ------------------------------------------------------------------ #
 # context_models  (how to visualize/organize the graph)               #
 # ------------------------------------------------------------------ #

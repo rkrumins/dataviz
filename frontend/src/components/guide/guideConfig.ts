@@ -279,6 +279,14 @@ export const guideEntries: GuideEntry[] = [
     description: 'Ask the platform team for a workspace of your own, follow the request, and answer one',
     importFn: () => import('@docs/guide/REQUESTING_A_WORKSPACE.md?raw'),
   },
+  {
+    slug: 'requesting-data',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'Requesting Data',
+    description: 'Ask for data to be connected to a workspace, follow the request, and connect one',
+    importFn: () => import('@docs/guide/REQUESTING_DATA.md?raw'),
+  },
 
   // For Builders
   {

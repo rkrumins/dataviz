@@ -16,6 +16,7 @@ import { SidebarNav } from './SidebarNav'
 import { CommandPalette } from './CommandPalette'
 import { HelpPanel } from '@/components/help/HelpPanel'
 import { RequestWorkspaceWizardHost } from '@/components/workspace-requests/RequestWorkspaceWizard'
+import { AskForDataWizardHost } from '@/components/data-requests/AskForDataWizard'
 import { useHelpPanelStore } from '@/store/helpPanel'
 import { usePersonaStore } from '@/store/persona'
 import { hasPrimaryModifier } from '@/lib/platform'
@@ -233,6 +234,8 @@ export function AppLayout() {
         <HelpPanel />
         {/* Asking for a workspace of your own: opened from the Playground, the Dashboard, Workspaces. */}
         <RequestWorkspaceWizardHost />
+        {/* Asking for data to be connected to a workspace: from its Data → Sources and Overview. */}
+        <AskForDataWizardHost />
         {/* The exports the server prepares, followed and downloaded wherever the person goes. */}
         <ExportTray />
         <NotificationStack />

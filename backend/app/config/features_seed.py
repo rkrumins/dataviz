@@ -99,6 +99,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "workspaceRequestsEnabled":
         "Requesting a workspace is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "dataRequestsEnabled":
+        "Asking for data is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
     "allowedViewModes":
         "That view type is not available in this deployment. "
         "An administrator chooses the available types under Admin → Features.",
@@ -666,6 +669,32 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "views."
         ),
         "sort_order": 9,
+        "deprecated": False,
+    },
+    {
+        "key": "dataRequestsEnabled",
+        "name": "Data requests",
+        "description": (
+            "Let anyone who can read a workspace ask for data to be connected to it — where it "
+            "lives (Snowflake, Databricks, a dbt project, a file…), what of it, why, by when and "
+            "who knows it — for the platform team to take on, connect, or decline."
+        ),
+        "impact_when_off": (
+            "Ask for data disappears and the server refuses new requests. Requests already sent "
+            "can still be read, withdrawn and answered, and data sources connected for them are "
+            "kept. Nothing is deleted."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Org and Super Admins answer every workspace's requests under Workspaces → Requests. "
+            "People who manage a workspace's data may start and connect that workspace's requests "
+            "themselves."
+        ),
+        "sort_order": 10,
         "deprecated": False,
     },
     # ── Lineage ────────────────────────────────────────────────────────────────

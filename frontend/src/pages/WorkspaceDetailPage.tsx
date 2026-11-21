@@ -57,6 +57,9 @@ import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import { usePlayground } from '@/hooks/usePlayground'
 import { useMyWorkspaceRequests } from '@/hooks/useWorkspaceRequests'
 import { WorkspaceWelcomeBanner } from '@/components/workspace-requests/WorkspaceWelcomeBanner'
+import { AskForDataButton } from '@/components/data-requests/AskForData'
+import { WorkspaceDataRequestsPanel } from '@/components/data-requests/WorkspaceDataRequestsPanel'
+import { useAskForData } from '@/hooks/useDataRequests'
 import { ActivityExplorer } from '@/components/activity/ActivityExplorer'
 import { workspaceActivityScope } from '@/components/activity/activityMeta'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
@@ -152,6 +155,8 @@ export function WorkspaceDetailPage() {
     const canManageDataSources = usePermission(
         'workspace:datasource:manage', wsId ?? null,
     )
+    // Data the reader can't add themselves: asked for here (undefined where it can't be).
+    const askForData = useAskForData(workspace)
 
     // Creating a view here starts on this workspace. The editor lives in the app
     // shell; outside it (a test, a harness) there is simply no New view.
@@ -678,11 +683,19 @@ export function WorkspaceDetailPage() {
                             value={dataSection}
                             onChange={v => goTo('data', v)}
                         />
-                        {dataSection === 'sources' && canManageDataSources && workspace.dataSources.length > 0 && (
-                            <button onClick={() => setShowAddDs(true)}
-                                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-sm font-semibold hover:bg-indigo-500/20 transition-colors">
-                                <Plus className="w-4 h-4" /> Add source
-                            </button>
+                        {dataSection === 'sources' && (
+                            <div className="flex items-center gap-2">
+                                {/* With nothing connected, the empty state below asks instead. */}
+                                {(canManageDataSources || workspace.dataSources.length > 0) && (
+                                    <AskForDataButton workspace={workspace} primary={!canManageDataSources} />
+                                )}
+                                {canManageDataSources && workspace.dataSources.length > 0 && (
+                                    <button onClick={() => setShowAddDs(true)}
+                                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-sm font-semibold hover:bg-indigo-500/20 transition-colors">
+                                        <Plus className="w-4 h-4" /> Add source
+                                    </button>
+                                )}
+                            </div>
                         )}
                     </div>
 
@@ -702,8 +715,11 @@ export function WorkspaceDetailPage() {
                                         title="No data connected yet"
                                         description={canManageDataSources
                                             ? 'Connect the graph this workspace is about. Next you’ll choose its data model, build its connections and create the first view — the Overview walks you through it.'
-                                            : 'The people who look after this workspace haven’t connected any data yet.'}
-                                        action={canManageDataSources ? { label: 'Connect data', onClick: () => setShowAddDs(true), icon: Plus } : undefined}
+                                            : askForData
+                                                ? 'Nobody has connected any data here yet. Ask for the data you need — the platform team connects it.'
+                                                : 'The people who look after this workspace haven’t connected any data yet.'}
+                                        action={canManageDataSources ? { label: 'Connect data', onClick: () => setShowAddDs(true), icon: Plus }
+                                            : askForData ? { label: 'Ask for data', onClick: askForData, icon: Plus } : undefined}
                                     />
                                 </div>
                             ) : (
@@ -729,6 +745,9 @@ export function WorkspaceDetailPage() {
                                     })}
                                 </div>
                             )}
+
+                            {/* What has been asked for here, and where each request stands. */}
+                            {wsId && <WorkspaceDataRequestsPanel workspaceId={wsId} />}
 
                             {/* The trash. Renders nothing when it's empty — it appears only when there
                                 is actually something to undo, and vanishes again once there isn't. */}

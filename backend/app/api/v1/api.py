@@ -20,7 +20,7 @@ from .endpoints import (
     view_membership, search_views,
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
-    workspace_directory, data_source_transfers, workspace_requests, workspace_groups,
+    workspace_directory, data_source_transfers, workspace_requests, workspace_groups, data_requests,
     versioning,
     versioning_admin,
     review_center,
@@ -292,6 +292,24 @@ api_router.include_router(
     workspace_requests.admin_router,
     prefix="/admin/workspace-requests",
     tags=["admin:workspace-requests"],
+)
+# Data requests — a workspace's readers ask for data to be connected to it; the
+# platform team (and the workspace's own data people) connect it. Three prefixes:
+# one workspace's, "my requests", and the platform team's queue.
+api_router.include_router(
+    data_requests.ws_router,
+    prefix="/admin/workspaces/{ws_id}/data-requests",
+    tags=["admin:data-requests:workspace"],
+)
+api_router.include_router(
+    data_requests.me_router,
+    prefix="/me",
+    tags=["me:data-requests"],
+)
+api_router.include_router(
+    data_requests.admin_router,
+    prefix="/admin/data-requests",
+    tags=["admin:data-requests"],
 )
 # Access reviews — a workspace admin keeps or removes each grant.
 api_router.include_router(

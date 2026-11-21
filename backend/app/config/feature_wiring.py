@@ -563,6 +563,24 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Workspaces made from a request keep everything; nothing is deleted",
         ),
     ),
+    # Preview, like workspace requests: it ships OFF and the gate passes default=False.
+    "dataRequestsEnabled": FeatureWiring(
+        key="dataRequestsEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "POST /admin/workspaces/{ws_id}/data-requests — refused while off",
+        ),
+        ui_surfaces=(
+            "Ask for data — the wizard, from a workspace's Data → Sources and its Overview",
+            "Data requests — a workspace's Data → Sources, and Workspaces → Requests for platform and org admins",
+        ),
+        still_allowed=(
+            "Reading and withdrawing requests already sent",
+            "Answering requests already sent: starting, connecting and declining",
+            "Data sources connected for a request are kept; nothing is deleted",
+        ),
+    ),
     # ── Notifications ──────────────────────────────────────────────────────────
     "announcementsEnabled": FeatureWiring(
         key="announcementsEnabled",

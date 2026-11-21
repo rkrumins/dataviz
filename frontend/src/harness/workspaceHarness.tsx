@@ -13,13 +13,16 @@
  *   mode     business | technical               (default business)
  *   theme    light | dark
  *   tab / section / ds — passed to the page's own address
- *   page     workspace | reviews | playground-card | request-wizard | workspace-requests | groups | workspaces | dashboard
+ *   page     workspace | reviews | playground-card | request-wizard | workspace-requests | groups | workspaces
+ *            | dashboard | data-requests | data-request-wizard
  *            (reviews: the Review Center at /reviews; playground-card: the Playground card,
  *            &joined=0 before joining; request-wizard: asking for a workspace; workspace-requests:
  *            the platform team's queue, and &status=pending|changes_requested|approved|declined on
  *            page=workspace the reader's own request card); groups: the People tab's Groups
  *            panel (&platform=1 as a platform administrator, with the links waiting to confirm);
- *            workspaces: the Workspaces page, &tab=requests its queue; dashboard: the Dashboard, led by &mode
+ *            workspaces: the Workspaces page, &tab=requests its queue; dashboard: the Dashboard, led by &mode;
+ *            data-requests: the platform team's queue of requests for data; data-request-wizard: Ask
+ *            for data. On page=workspace, Data → Sources lists the workspace's data requests too
  *   creator  1 — the reader may create workspaces (and so answers requests for them)
  *   tour / step — start that tour at that step (0-based) once the page has loaded
  *
@@ -49,6 +52,8 @@ import { Dashboard } from '../components/dashboard/Dashboard'
 import { TourOverlay } from '../features/tour/TourOverlay'
 import { useTourStore } from '../features/tour/tourStore'
 import { useProviderStatusStore } from '../store/providerStatus'
+import { AskForDataWizard, AskForDataWizardHost } from '../components/data-requests/AskForDataWizard'
+import { DataRequestsPanel } from '../components/data-requests/DataRequestsPanel'
 import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { useWorkspacesStore } from '../store/workspaces'
 import {
@@ -129,6 +134,28 @@ const WS_REQUEST = {
     dataNeeds: 'Snowflake ML marts and the dbt project “features”.', note: 'We’d like it before the January model review.',
     status: 'pending', createdAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
 }
+// Data requests in Finance Risk: Snowflake marts waiting, dbt in progress, a file connected.
+const DATA_REQUESTS = [
+    {
+        id: 'dr_1', workspaceId: 'ws_fin', workspaceName: 'Finance Risk', requestedBy: 'usr_me', requesterName: 'Sam Reader',
+        title: 'Finance marts', system: 'snowflake', details: 'FIN_DB.MARTS — gl_balances, ap_invoices and the views on them',
+        purpose: 'Trace month-end figures back to the ledger for the March audit.', urgency: 'this_month',
+        contactIds: ['usr_ada'], contacts: [{ id: 'usr_ada', displayName: 'Ada Okafor' }], status: 'pending',
+        createdAt: new Date(Date.now() - 4 * 86_400_000).toISOString(),
+    },
+    {
+        id: 'dr_2', workspaceId: 'ws_fin', workspaceName: 'Finance Risk', requestedBy: 'usr_liam', requesterName: 'Liam Chen',
+        title: 'dbt project “core”', system: 'dbt', details: 'finance and marts models, and the sources they read', purpose: null,
+        urgency: 'this_week', contactIds: [], contacts: [], status: 'in_progress', assigneeId: 'usr_olga', assigneeName: 'Olga Ivanova',
+        createdAt: new Date(Date.now() - 2 * 86_400_000).toISOString(),
+    },
+    {
+        id: 'dr_3', workspaceId: 'ws_fin', workspaceName: 'Finance Risk', requestedBy: 'usr_priya', requesterName: 'Priya Nair',
+        title: 'System inventory spreadsheet', system: 'file', details: null, purpose: null, urgency: 'no_rush', contactIds: [],
+        contacts: [], status: 'connected', dataSourceId: 'ds_gl', dataSourceLabel: 'General ledger', resolutionNote: 'Loaded with the ledger.',
+        createdAt: new Date(Date.now() - 12 * 86_400_000).toISOString(), resolvedAt: new Date(Date.now() - 86_400_000).toISOString(),
+    },
+]
 const centerCounts = (rows: unknown[]) => ({ counts: { needs_review: rows.length, waiting: 1, sent_back: 1, ready: 0, open: rows.length + 2, done: 9 }, unread: { needs_review: 2 }, capped: false })
 
 const PERMS: Record<typeof as, string[]> = {
@@ -175,6 +202,14 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     }
     if (p === '/api/v1/admin/idp-link-requests') return json(LINK_REQUESTS)
     if (p === '/api/v1/admin/idp-providers') return json([{ id: 'idp_entra', displayName: 'Entra ID' }, { id: 'idp_okta', displayName: 'Okta' }])
+    if (p === '/api/v1/admin/workspaces/ws_fin/data-requests') {
+        return init?.method === 'POST' ? json({ ...DATA_REQUESTS[0], id: 'dr_new' }) : json(DATA_REQUESTS)
+    }
+    if (p === '/api/v1/admin/data-requests') return json(DATA_REQUESTS.filter(r => url.searchParams.get('status') === 'all' || ['pending', 'in_progress'].includes(r.status)))
+    if ((m = p.match(/^\/api\/v1\/(?:admin|me)\/data-requests\/([^/]+)\/(start|connect|decline|withdraw)$/))) {
+        const status = { start: 'in_progress', connect: 'connected', decline: 'declined', withdraw: 'withdrawn' }[m[2]]
+        return json({ ...(DATA_REQUESTS.find(r => r.id === m![1]) ?? DATA_REQUESTS[0]), status, assigneeName: 'Sam Reader' })
+    }
     if (p === '/api/v1/directory') return json({ users: [{ id: 'usr_ada', displayName: 'Ada Okafor', email: 'ada@example.com' }, { id: 'usr_ben', displayName: 'Ben Hall', email: 'ben@example.com' }], groups: [] })
     if (p === '/api/v1/playground') {
         return json({
@@ -272,10 +307,10 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 useAuthStore.setState({
     status: 'authenticated', isAuthenticated: true, permissionsStatus: 'ready',
     user: { id: 'usr_me', firstName: 'Sam', lastName: 'Reader', email: 'sam@example.com' },
-    permissions: { sid: 'harness', global: platform ? ['system:admin'] : page === 'workspace-requests' || params.get('creator') === '1' ? ['system:workspaces:create'] : [], ws: { ws_fin: PERMS[as] } },
+    permissions: { sid: 'harness', global: platform ? ['system:admin'] : page === 'workspace-requests' || page === 'data-requests' || params.get('creator') === '1' ? ['system:workspaces:create'] : [], ws: { ws_fin: PERMS[as] } },
 } as never)
 usePersonaStore.setState({ mode })
-useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, workspaceRequestsEnabled: true, toursEnabled: !!tour } })
+useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, workspaceRequestsEnabled: true, dataRequestsEnabled: true, toursEnabled: !!tour } })
 if (page === 'dashboard') {
     useProviderStatusStore.setState({ statuses: {
         prov_fdb: { id: 'prov_fdb', name: 'FalkorDB · finance', status: 'ready', lastCheckedAt: null },
@@ -309,7 +344,7 @@ function Harness() {
     for (const k of ['tab', 'section', 'ds', 'dstab']) { const v = params.get(k); if (v) address.set(k, v) }
     const at = page === 'workspaces' ? `/workspaces${params.get('tab') ? `?tab=${params.get('tab')}` : ''}`
         : page === 'dashboard' ? '/dashboard'
-        : ['playground-card', 'request-wizard', 'workspace-requests', 'request-card', 'groups'].includes(page) ? `/${page}` : page === 'reviews'
+        : ['playground-card', 'request-wizard', 'workspace-requests', 'request-card', 'groups', 'data-requests', 'data-request-wizard'].includes(page) ? `/${page}` : page === 'reviews'
         ? `/reviews${params.get('workspace') ? `?workspace=${params.get('workspace')}` : ''}`
         : `/workspaces/ws_fin${address.toString() ? `?${address}` : ''}`
 
@@ -335,6 +370,12 @@ function Harness() {
                                     <WorkspaceGroupsPanel workspaceId="ws_fin" canManage={as === 'admin'} />
                                 </div>
                             } />
+                            <Route path="/data-requests" element={
+                                <div className="mx-auto max-w-5xl space-y-6 p-8">
+                                    <DataRequestsPanel />
+                                </div>
+                            } />
+                            <Route path="/data-request-wizard" element={<AskForDataWizard workspace={{ id: 'ws_fin', name: 'Finance Risk' }} onClose={() => {}} />} />
                             <Route path="/request-card" element={<div className="mx-auto max-w-5xl p-8"><WorkspaceRequestPrompt /></div>} />
                             <Route path="/playground-card" element={
                                 <div className="mx-auto max-w-5xl space-y-6 p-8">
@@ -343,6 +384,8 @@ function Harness() {
                                 </div>
                             } />
                         </Routes>
+                        {/* Ask for data, from the workspace page (the app shell mounts it). */}
+                        <AskForDataWizardHost />
                         {tour && <TourOverlay />}
                     </div>
                 </MemoryRouter>

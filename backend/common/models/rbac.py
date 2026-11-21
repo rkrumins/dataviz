@@ -1108,6 +1108,71 @@ class IdpGroupPreview(BaseModel):
     note: str
 
 
+# ── Data requests ────────────────────────────────────────────────────
+
+#: Where the data asked for lives.
+DataRequestSystem = Literal[
+    "snowflake", "databricks", "bigquery", "postgres", "dbt", "datahub", "neo4j", "file", "other",
+]
+#: By when it is needed.
+DataRequestUrgency = Literal["no_rush", "this_month", "this_week"]
+
+
+class DataRequestCreate(BaseModel):
+    """Body for ``POST /api/v1/admin/workspaces/{ws_id}/data-requests``: what data,
+    from where, why, by when, and who knows it."""
+    model_config = ConfigDict(populate_by_name=True)
+    title: str = Field(max_length=200)
+    system: DataRequestSystem
+    details: Optional[str] = Field(default=None, max_length=2000)
+    purpose: Optional[str] = Field(default=None, max_length=2000)
+    urgency: DataRequestUrgency = "no_rush"
+    contact_ids: list[str] = Field(default_factory=list, alias="contactIds", max_length=20)
+
+
+class DataRequestConnect(BaseModel):
+    """Body for marking a request connected: the data source it became, when there is
+    one in the workspace, and a note for the requester."""
+    model_config = ConfigDict(populate_by_name=True)
+    data_source_id: Optional[str] = Field(default=None, alias="dataSourceId", max_length=200)
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class DataRequestDecline(BaseModel):
+    """Body for declining: an optional reason the requester sees."""
+    model_config = ConfigDict(populate_by_name=True)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class DataRequestResponse(BaseModel):
+    """Wire shape of a data request. ``status`` is ``pending``, ``in_progress``
+    (``assigneeId`` is connecting it), ``connected`` (``dataSourceId`` names the
+    source it became, when one was named), ``declined`` or ``withdrawn``."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    workspace_id: str = Field(alias="workspaceId")
+    workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
+    requested_by: str = Field(alias="requestedBy")
+    requester_name: Optional[str] = Field(default=None, alias="requesterName")
+    title: str
+    system: str
+    details: Optional[str] = None
+    purpose: Optional[str] = None
+    urgency: str
+    contact_ids: list[str] = Field(default_factory=list, alias="contactIds")
+    contacts: list[WorkspaceRequestPerson] = Field(default_factory=list)
+    status: str
+    assignee_id: Optional[str] = Field(default=None, alias="assigneeId")
+    assignee_name: Optional[str] = Field(default=None, alias="assigneeName")
+    resolution_note: Optional[str] = Field(default=None, alias="resolutionNote")
+    data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
+    data_source_label: Optional[str] = Field(default=None, alias="dataSourceLabel")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+    resolved_at: Optional[str] = Field(default=None, alias="resolvedAt")
+    resolved_by: Optional[str] = Field(default=None, alias="resolvedBy")
+
+
 # ── Access reviews ───────────────────────────────────────────────────
 
 class AccessReviewCounts(BaseModel):

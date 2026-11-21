@@ -235,6 +235,7 @@ feature open to anyone who knows the URL.
 | Find a workspace | `workspaceDirectoryEnabled` | `false` | `GET /workspace-directory` is refused. Access requests still work from a shared link; while it is off, a requester sees a workspace's name in `POST /access-requests` and `GET /me/access-requests` only if they can open it (on: also if it is listed) | Security: unreadable means off |
 | Playground | `playgroundEnabled` | `false` | `POST /playground/join` is refused. `GET /playground` answers `enabled: false` and, to anyone not already in it, names nothing; members keep their access, and `PUT /playground` (platform administrators) still works | Security: unreadable means off |
 | Workspace requests | `workspaceRequestsEnabled` | `false` | `POST /workspace-requests` and `PUT /me/workspace-requests/{id}` (resubmitting) are refused `403 feature_disabled`. Reading and withdrawing requests (`/me/workspace-requests`), and answering them under `/admin/workspace-requests` (`system:workspaces:create`), still work | Preview. Unreadable means off |
+| Data requests | `dataRequestsEnabled` | `false` | `POST /admin/workspaces/{ws_id}/data-requests` is refused `403 feature_disabled`. Reading a workspace's requests (`GET` on the same path), your own (`/me/data-requests`) and withdrawing them, and answering under `/admin/data-requests` (`system:workspaces:create`; start and connect also `workspace:datasource:manage` in the request's workspace), still work | Preview. Unreadable means off |
 
 ### Lineage
 

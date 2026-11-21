@@ -46,6 +46,7 @@ import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { SectionTitle } from './SectionTitle'
 import { PlaygroundExperiments } from './PlaygroundExperiments'
 import { WorkspaceRequestPrompt } from '@/components/workspace-requests/WorkspaceRequestCard'
+import { AskForDataPrompt } from '@/components/data-requests/AskForData'
 import type { DataSection, WorkspaceTab } from '../workspaceTabs'
 
 interface WorkspaceOverviewProps {
@@ -231,6 +232,8 @@ export function WorkspaceOverview({
                         </>
                     )
                     : isManager && <SetupChecklist wsId={wsId} steps={steps} />}
+                {/* Nothing connected yet: the way to ask for it (nothing in the Playground, or while off). */}
+                {sources.length === 0 && <AskForDataPrompt workspace={workspace} canAddSources={canManageSources} />}
 
                 {views.length === 0 ? (isPlayground ? null : (
                     <section className="rounded-3xl border border-dashed border-glass-border bg-canvas-elevated">

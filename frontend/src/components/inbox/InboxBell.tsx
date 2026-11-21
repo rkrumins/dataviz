@@ -26,8 +26,10 @@ import {
     CheckCircle2,
     ClipboardCheck,
     Clock,
+    Database,
     GitMerge,
     GitPullRequestArrow,
+    Hand,
     KeyRound,
     KeySquare,
     LayoutTemplate,
@@ -186,6 +188,28 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         tile: 'bg-rose-500/10',
     },
     'workspace_request.declined': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    // Asking for data in a workspace: the ask reaches the platform team and the workspace's
+    // admins; taking it on, connecting it or declining it reaches the person who asked.
+    'data_request.submitted': {
+        Icon: Database,
+        icon: 'text-indigo-500',
+        tile: 'bg-indigo-500/10',
+    },
+    'data_request.started': {
+        Icon: Hand,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'data_request.connected': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'data_request.declined': {
         Icon: XCircle,
         icon: 'text-rose-500',
         tile: 'bg-rose-500/10',

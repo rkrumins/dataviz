@@ -21,6 +21,8 @@ import { WORKSPACE_REQUESTS_FEATURE, useRequestWorkspaceWizard, useWorkspaceRequ
 import { WorkspaceRequestsPanel } from '@/components/workspace-requests/WorkspaceRequestsPanel'
 import { IdpLinkRequestsPanel } from '@/components/workspaces/IdpLinkRequestsPanel'
 import { useIdpLinkRequests } from '@/hooks/useWorkspaceGroups'
+import { DataRequestsPanel } from '@/components/data-requests/DataRequestsPanel'
+import { useDataRequestsToAnswer } from '@/hooks/useDataRequests'
 import { WorkspaceListRow, WORKSPACE_LIST_GRID } from '@/components/admin/workspace/WorkspaceListRow'
 import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHealthBadge'
@@ -450,8 +452,10 @@ export function WorkspacesPage() {
     const newWorkspaces = toAnswer?.filter(r => r.status === 'pending')
     // And, for platform administrators, groups waiting to be linked to the identity provider.
     const idpLinks = useIdpLinkRequests('pending').data
-    const waitingCount = waiting || incoming || newWorkspaces || idpLinks
-        ? (waiting?.length ?? 0) + (incoming?.length ?? 0) + (newWorkspaces?.length ?? 0) + (idpLinks?.length ?? 0) : null
+    // And requests for data nobody has taken on yet.
+    const newData = useDataRequestsToAnswer('open').data?.filter(r => r.status === 'pending')
+    const waitingCount = waiting || incoming || newWorkspaces || idpLinks || newData
+        ? (waiting?.length ?? 0) + (incoming?.length ?? 0) + (newWorkspaces?.length ?? 0) + (idpLinks?.length ?? 0) + (newData?.length ?? 0) : null
     const tabParam = searchParams.get('tab')
     const tab: 'mine' | 'discover' | 'requests' =
         canAnswer && tabParam === 'requests'
@@ -574,6 +578,7 @@ export function WorkspacesPage() {
             {tab === 'requests' && (
                 <div className="space-y-4">
                     <WorkspaceRequestsPanel hideWhenEmpty />
+                    <DataRequestsPanel hideWhenEmpty />
                     <IdpLinkRequestsPanel />
                     <TransferRequestsPanel />
                     <ReviewRequestsPanel />

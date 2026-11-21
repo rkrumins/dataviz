@@ -157,6 +157,12 @@ def _summary_idp_link_request(verb: str):
     return _build
 
 
+def _summary_data_request(verb: str):
+    def _build(p: dict) -> str:
+        return f"Data request '{p.get('title') or p.get('request_id') or '?'}' {verb}"
+    return _build
+
+
 def _summary_idp_provider(verb: str):
     def _build(p: dict) -> str:
         slug = p.get("slug") or p.get("provider_id") or "?"
@@ -583,6 +589,11 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.idp_link_request.linked": ("info", _summary_idp_link_request("made")),
     "rbac.idp_link_request.declined": ("warning", _summary_idp_link_request("declined")),
     "rbac.idp_link_request.cancelled": ("info", _summary_idp_link_request("cancelled")),
+    "workspace.data_request.submitted": ("info", _summary_data_request("submitted")),
+    "workspace.data_request.started": ("info", _summary_data_request("started")),
+    "workspace.data_request.connected": ("info", _summary_data_request("connected")),
+    "workspace.data_request.declined": ("warning", _summary_data_request("declined")),
+    "workspace.data_request.withdrawn": ("info", _summary_data_request("withdrawn")),
     "identity.api_key.created": (
         "info", lambda p: f"API key {_api_key_label(p)} created",
     ),
@@ -1055,6 +1066,11 @@ LABELS: dict[str, str] = {
     "rbac.idp_link_request.linked": "Linked a group to the identity provider",
     "rbac.idp_link_request.declined": "Declined linking a group to the identity provider",
     "rbac.idp_link_request.cancelled": "Cancelled a group's identity-provider link request",
+    "workspace.data_request.submitted": "Asked for data",
+    "workspace.data_request.started": "Started connecting requested data",
+    "workspace.data_request.connected": "Connected requested data",
+    "workspace.data_request.declined": "Declined a data request",
+    "workspace.data_request.withdrawn": "Withdrew a data request",
     "rbac.role.created": "Created a role",
     "rbac.role.updated": "Changed a role",
     "rbac.role.deleted": "Deleted a role",
@@ -1182,6 +1198,8 @@ _WORKSPACE_PREFIXES: tuple[str, ...] = (
     "workspace.data_source.",
     "workspace.datasource.moved",
     "workspace.versioning.",
+    # Every reader of the workspace already sees its data requests.
+    "workspace.data_request.",
 )
 
 #: Payload keys that name who acted, in the order they are trusted. Payloads
@@ -1318,7 +1336,7 @@ def _subject_user(event_type: str, p: dict) -> Optional[str]:
     """The person an event is ABOUT, when it is about one."""
     if p.get("subject_type") == "user":
         return _str(p.get("subject_id"), 128)
-    if event_type.startswith(("rbac.access_request.", "workspace.request.")):
+    if event_type.startswith(("rbac.access_request.", "workspace.request.", "workspace.data_request.")):
         return _str(p.get("requester_id"), 128)
     return _str(p.get("user_id") or p.get("target_user_id"), 128)
 
