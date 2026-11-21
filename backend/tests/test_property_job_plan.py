@@ -49,10 +49,11 @@ def test_the_plan_compares_what_a_write_stores():
 
 
 def test_fill_empty_writes_only_where_the_key_is_absent_null_or_blank():
+    """Empty as a publish's required field reads it: an empty list is no value either."""
     op = _op("fillEmpty", value="ana")
-    for props in ({}, {"owner": None}, {"owner": ""}):
+    for props in ({}, {"owner": None}, {"owner": ""}, {"owner": []}):
         assert pj.plan_patch(op, props) == {"owner": "ana"}
-    for held in ("bo", 0, False, []):
+    for held in ("bo", 0, False, [""], {}):
         assert pj.plan_patch(op, {"owner": held}) is None
 
 
@@ -215,9 +216,58 @@ def test_a_window_plans_each_entity_once_and_counts_what_it_skips():
     assert ops == [{"op": "update", "entity_kind": "node", "entity_id": "A",
                     "payload": {"properties": {"steward": "x", "owner": PROP_DELETE}}}]
     assert counts == {"changed": 1, "unchanged": 2, "missing": 0, "deletedInDraft": 0, "conflicts": 1,
-                      "unconvertible": 0}
+                      "unconvertible": 0, "noLongerMatches": 0}
     assert refused == [{"urn": "urn:b", "entityId": "B", "reason": "conflict",
                         "detail": "It already has steward."}]
+
+
+# ── a search target's matches, checked again on the draft's values ───────────
+def test_a_search_answered_by_an_entitys_own_values_is_checked_again():
+    gold = {"kind": "property", "key": "tier", "op": "eq", "value": "gold"}
+    for exact in (gold, {"kind": "hasProperty", "key": "owner"},
+                  {"kind": "group", "op": "and", "children": [gold, {"kind": "tag", "values": ["pii"]}]},
+                  {"kind": "is", "refs": [{"urn": "urn:a"}]}):
+        assert pj.predicate_recheck(exact) is not None, exact
+        assert pj.recheck_summary(pj.predicate_recheck(exact)) == {"exact": True, "note": None}
+    check = pj.predicate_recheck(gold)
+    assert check({"urn": "u", "entityType": "Table", "tier": "gold"})
+    assert not check({"urn": "u", "entityType": "Table", "tier": "silver"})
+
+
+def test_a_search_its_own_values_cant_answer_is_not_checked_again():
+    """Relationships, the view's layers, where an entity sits, a field the platform keeps, a name
+    to resolve, a Connections search: the job edits what the published graph matched."""
+    for approximate in (
+            {"kind": "degree", "direction": "in", "op": "gt", "value": 0},
+            {"kind": "layer", "layerAssignment": "gold"},
+            {"kind": "descendantOf", "urns": ["urn:db"]},
+            {"kind": "property", "key": "childCount", "op": "gt", "value": 1, "valueType": "number"},
+            {"kind": "is", "refs": [{"path": ["Sales", "Orders"]}]},
+            {"kind": "edges", "edgeTypes": ["FLOWS_TO"]},
+            {"kind": "group", "op": "or", "children": [
+                {"kind": "hasProperty", "key": "owner"}, {"kind": "isOrphan"}]}):
+        assert pj.predicate_recheck(approximate) is None, approximate
+    assert pj.recheck_summary(None) == {"exact": False, "note": pj.RECHECK_APPROXIMATE}
+
+
+def test_a_window_leaves_alone_what_the_search_no_longer_matches_in_the_draft():
+    from backend.app.services.versioning.import_export.snapshot import Winner
+
+    def winner(eid, **props):
+        return Winner(entity_id=eid, live=True, urn=f"urn:{eid}", payload=json.dumps({
+            "urn": f"urn:{eid}", "entityType": "Table", "displayName": eid, "properties": props}))
+    at = {"urn:a": "a", "urn:b": "b", "urn:gone": "g", "urn:c": "c"}
+    winners = {"a": winner("a", tier="gold"), "b": winner("b", tier="silver"),
+               # Stored with no tags and no properties at all: read as a draft's reads read it.
+               "c": Winner(entity_id="c", live=True, urn="urn:c", payload=json.dumps({
+                   "urn": "urn:c", "entityType": "Table", "tags": None, "properties": None}))}
+    check = pj.predicate_recheck({"kind": "property", "key": "tier", "op": "eq", "value": "gold"})
+    found, stale, gone = pj.parse_targets(at, winners, check)
+    assert found == {"urn:a": ("a", {"tier": "gold"}, "urn:a")}
+    assert stale == {"urn:b": "b", "urn:c": "c"} and gone == ["urn:gone"]
+    # Not checked again (an id target, or a search its values can't answer): every one is found.
+    found, stale, _gone = pj.parse_targets(at, winners)
+    assert set(found) == {"urn:a", "urn:b", "urn:c"} and stale == {}
 
 
 def test_commits_are_named_by_the_operation_and_the_window():
@@ -567,6 +617,30 @@ async def test_a_search_target_reads_every_match_of_its_export(monkeypatch, V):
     assert await seen["can_read"](view)
     for other in ({"id": "v2"}, {"workspace_id": "ws2"}, {"data_source_id": "ds2"}):
         assert not await seen["can_read"](SimpleNamespace(**{**vars(view), **other}))
+
+
+async def test_a_search_matching_too_much_stops_before_its_export_is_whole(monkeypatch, V):
+    """The export is followed a few seconds a request, and the job stops once it has written more
+    rows than a job edits — not once it has written them all, and never reading them."""
+    from backend.app.services import advanced_search_service
+    from backend.common.models.search import SearchExportResult
+
+    seen = _search_hook(monkeypatch)
+    monkeypatch.setattr(config, "PROPERTY_JOB_MAX_TARGETS", 10)
+
+    class Growing(advanced_search_service.AdvancedSearchService):
+        async def export(self, request, *, principal, signing_key, run_context):
+            seen["exports"].append((request.session_id, request.wait_ms))
+            rows = 6 * len(seen["exports"])
+            return SearchExportResult(session_id="s1", status="running", format="ndjson", rows=rows)
+
+        async def open_export(self, session_id, scope_hash):
+            raise AssertionError("a search matching too much is never read")
+    monkeypatch.setattr(advanced_search_service, "AdvancedSearchService", Growing)
+    with pytest.raises(pj.PropertyJobStopped) as stopped:
+        [urn async for urn in V._property_targets_from_job(_SEARCH_JOB)]
+    assert stopped.value.code == "too_many_targets" and "more than 10 entities" in str(stopped.value)
+    assert seen["exports"] == [(None, 5000), ("s1", 5000)]          # 6 rows, then 12: stopped
 
 
 async def test_a_search_the_engine_refuses_stops_the_job_saying_why(monkeypatch, V):

@@ -34,7 +34,8 @@ such entity in the draft), ``deleted_in_draft``, ``conflict`` (a rename or copy 
 held already, skipped), ``unconvertible`` (a ``convert`` whose value is not of the kind asked for,
 left as it is — with ``onFail: remove`` it is removed, and counted but not refused),
 ``write_refused`` (the write gate turned it away; the window's other entities are written, as an
-import's are) and, for an edge job, ``derived`` (a roll-up).
+import's are), ``no_longer_matches`` (a search target's entity the draft has changed so that the
+search no longer matches it, :func:`predicate_recheck`) and, for an edge job, ``derived`` (a roll-up).
 
 When the draft is published, the jobs that wrote to it are listed in the publish's commit
 (``stats.propertyJobs``, :func:`audit_entry`) and its activity event, and stamped with that commit
@@ -84,7 +85,8 @@ REFUSED_EXAMPLES = 20
 _QUARANTINE_ROUNDS = 4
 _DETAIL_CHARS = 300
 #: What a job's summary counts, before its first window.
-COUNTERS = ("changed", "unchanged", "missing", "deletedInDraft", "conflicts", "unconvertible")
+COUNTERS = ("changed", "unchanged", "missing", "deletedInDraft", "conflicts", "unconvertible",
+            "noLongerMatches")
 #: The bulk property jobs a publish lists in its commit; past these it counts them.
 AUDIT_LISTED = 20
 
@@ -102,7 +104,8 @@ def empty_summary(chunks: int = 0) -> Dict[str, Any]:
 # The plan: what one operation does to one entity's properties (pure)          #
 # --------------------------------------------------------------------------- #
 def _empty(value: Any) -> bool:
-    return value is None or value == ""
+    """No value, as a publish's required field reads it (``ontology._empty``)."""
+    return value is None or value == "" or value == []
 
 
 def _same(a: Any, b: Any) -> bool:
@@ -121,7 +124,7 @@ def plan_patch(op: Mapping[str, Any], props: Mapping[str, Any],
     :data:`PROP_DELETE` — or ``None`` when it changes nothing:
 
     * ``set`` writes ``value``, unless the entity holds it already;
-    * ``fillEmpty`` writes ``value`` only where the key is absent, null or ``''``;
+    * ``fillEmpty`` writes ``value`` only where the key is absent, null, ``''`` or ``[]``;
     * ``remove`` removes the key, where it is held;
     * ``rename`` moves the key's value to ``to`` and removes the key; ``copy`` keeps the key. An
       entity without the key is left as it is, and so is one that holds ``to`` already (a conflict,
@@ -514,13 +517,87 @@ def _refused(urn: Optional[str], eid: Optional[str], reason: str, detail: str) -
 
 
 # --------------------------------------------------------------------------- #
+# A search target's matches, checked again on the draft's values               #
+# --------------------------------------------------------------------------- #
+#: What a search target's summary says (``recheck.note``) when its matches can't be checked again.
+RECHECK_APPROXIMATE = ("This search follows relationships, tests the view's layers or where "
+                       "entities sit, reads a field the platform keeps, or names entities by their "
+                       "path, so it can't be checked against your draft's values: the job edits "
+                       "what it matches in the published graph.")
+
+
+def predicate_recheck(predicate: Any) -> Optional[Callable[[Dict[str, Any]], bool]]:
+    """A test of whether an entity still matches a search target, as the draft holds it — over its
+    node dict (``draft_search.node_dict``) — or None when its own values can't tell: the predicate
+    follows relationships, tests the view's layers or where an entity sits (``descendantOf``),
+    reads a field only the platform keeps, names an entity by its path, or is a Connections search.
+
+    The search runs on the published graph, so an entity the draft has changed may be among its
+    matches and no longer match on the draft — as the draft-aware counts of the Review step see it.
+    Checked again, a window leaves it alone. ``predicate``: as the job keeps it (JSON)."""
+    from pydantic import TypeAdapter
+
+    from backend.app.providers.draft_search import inexact
+    from backend.common.models.search import Predicate, unwrap_edges
+    from backend.common.predicate_eval import matches
+
+    p = unwrap_edges(TypeAdapter(Predicate).validate_python(predicate))
+    if inexact(p, set()) is not None or not _own_values(p):
+        return None
+    return lambda node: matches(node, p)
+
+
+def _own_values(p) -> bool:
+    """Whether ``p`` reads only an entity's own values — no layer, place or path to resolve."""
+    if p.kind == "group":
+        return all(_own_values(c) for c in p.children)
+    if p.kind in ("layer", "descendantOf", "edges"):
+        return False
+    return p.kind != "is" or all(ref.urn for ref in p.refs)
+
+
+def recheck_summary(recheck) -> Dict[str, Any]:
+    """A search target's ``summary.recheck``: whether its matches are checked again on the draft's
+    values (``exact``), and, when they can't be, why (``note``)."""
+    return {"exact": recheck is not None, "note": None if recheck is not None else RECHECK_APPROXIMATE}
+
+
+# --------------------------------------------------------------------------- #
 # Reading a window's entities from the draft                                    #
 # --------------------------------------------------------------------------- #
-async def read_targets(snap: Snapshot, keys: Iterable[str]):
+def parse_targets(at: Mapping[str, str], winners: Mapping[str, Winner], recheck=None):
+    """What :func:`read_targets` found, parsed (CPU, off the event loop): ``key -> (entity id,
+    properties, urn)`` for each key ``at`` places whose entity is live; with ``recheck``
+    (:func:`predicate_recheck`), ``key -> entity id`` apart for those whose value it no longer
+    matches — tested on the node as a draft's reads shape it, as the draft-aware counts test it;
+    and the keys whose entity went between the two reads."""
+    from backend.app.providers.draft_search import node_dict
+    from backend.common.models.graph import GraphNode
+    from ..service import _graphnode_dict
+
+    found: Dict[str, Tuple[str, Dict[str, Any], Optional[str]]] = {}
+    stale: Dict[str, str] = {}
+    gone: List[str] = []
+    for k, eid in at.items():
+        w = winners.get(eid)
+        if w is None:
+            gone.append(k)
+            continue
+        payload = json.loads(w.payload) if w.payload else {}
+        if recheck is not None and not recheck(node_dict(GraphNode(**_graphnode_dict(
+                eid, w.urn or payload.get("urn") or k, payload)))):
+            stale[k] = eid
+            continue
+        found[k] = (eid, dict(payload.get("properties") or {}), w.urn)
+    return found, stale, gone
+
+
+async def read_targets(snap: Snapshot, keys: Iterable[str], recheck=None):
     """What ``keys`` name in the draft ``snap`` reads: ``key -> (entity id, properties, urn)`` for
-    those live there; ``key -> entity id`` for those main holds and the draft deleted; and the keys
-    neither holds. A key is an entity's urn or ``gv:<entity id>``; one whose urn the draft changed
-    is found by what main calls it."""
+    those live there; ``key -> entity id`` for those main holds and the draft deleted; the keys
+    neither holds; and — given a search target's ``recheck`` — ``key -> entity id`` for those live
+    there that the search no longer matches. A key is an entity's urn or ``gv:<entity id>``; one
+    whose urn the draft changed is found by what main calls it."""
     keys = list(dict.fromkeys(k for k in keys if k))
     at = await resolve_placements(snap, keys)
     rest = [k for k in keys if k not in at]
@@ -540,19 +617,8 @@ async def read_targets(snap: Snapshot, keys: Iterable[str]):
     else:
         missing = rest
     winners = await snap.lookup_live("node", set(at.values()), payload=True)
-
-    def parse() -> Dict[str, Tuple[str, Dict[str, Any], Optional[str]]]:
-        out = {}
-        for k, eid in at.items():
-            w = winners.get(eid)
-            if w is None:                       # gone between the two reads
-                missing.append(k)
-                continue
-            payload = json.loads(w.payload) if w.payload else {}
-            out[k] = (eid, dict(payload.get("properties") or {}), w.urn)
-        return out
-
-    return await asyncio.to_thread(parse), deleted, missing
+    found, stale, gone = await asyncio.to_thread(parse_targets, at, winners, recheck)
+    return found, deleted, missing + gone, stale
 
 
 def _triple(key: str) -> Optional[Tuple[str, str, str]]:
@@ -698,6 +764,13 @@ class PropertyJobStopped(Exception):
         self.code, self.action = code, action
 
 
+def too_many_targets(cap: int) -> PropertyJobStopped:
+    """A search target that matches more than ``cap`` entities: the job stops before it edits."""
+    return PropertyJobStopped(
+        f"The search matches more than {cap:,} entities, the most one job edits. Narrow it, or "
+        "split the edit into several jobs.", "too_many_targets")
+
+
 def _tally(summary: Mapping[str, Any], counts: Mapping[str, int], refused: List[Dict[str, Any]],
            commit_id: Optional[str]) -> Dict[str, Any]:
     """The running summary with one window's counts, refused rows and commit added."""
@@ -739,12 +812,16 @@ class PropertyJobWorker:
         self._targets = targets
         self._write_context = write_context
         self._lease: Optional[Lease] = None
+        self._recheck = None
 
     async def run(self, job_id: str, *, lease: Lease) -> Dict[str, Any]:
         """Run the job to the end on ``lease``; returns its summary. Raises :class:`Superseded`
         once it is no longer this worker's (taken over, or cancelled)."""
         self._lease = lease
         job = await self._job(job_id)
+        target = job.get("target") or {}
+        if target.get("kind") == "predicate" and (job.get("entityKind") or "node") == "node":
+            self._recheck = predicate_recheck(target["predicate"])
         context = (await lease.retry_transient(lambda: self._write_context(job))
                    if self._write_context is not None else {})
         if (await self._position(job_id)).cursor is None:
@@ -792,9 +869,7 @@ class PropertyJobWorker:
             keys.append(key)
             total += 1
             if total > cap:
-                raise PropertyJobStopped(
-                    f"The search matches more than {cap:,} entities, the most one job edits. Narrow "
-                    "it, or split the edit into several jobs.", "too_many_targets")
+                raise too_many_targets(cap)
             if len(keys) >= config.PROPERTY_JOB_WINDOW:
                 chunks += await write_targets(self._store, job_id, keys, start=chunks)
                 keys = []
@@ -806,7 +881,8 @@ class PropertyJobWorker:
         async with db.graphver_session() as s:
             await self._lease.checkpoint(s, expect_cursor=None, last_cursor="apply:0", total=total,
                                          processed=0, progress=0, current_phase="apply",
-                                         summary={**pos.summary, "chunks": chunks})
+                                         summary={**pos.summary, "chunks": chunks,
+                                                  "recheck": recheck_summary(self._recheck)})
 
     async def _next_window(self, job_id: str, job: Dict[str, Any], context: Dict[str, Any]) -> bool:
         """Write the window after the job's cursor; False once none is left."""
@@ -822,15 +898,19 @@ class PropertyJobWorker:
         keys = await read_lines(self._store, targets_key(job_id, i))
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         kind = job.get("entityKind") or "node"
+        stale: Dict[str, str] = {}
         if kind == "edge":
             found, deleted, missing, derived = await read_edge_targets(snap, keys)
         else:
-            (found, deleted, missing), derived = await read_targets(snap, keys), {}
+            (found, deleted, missing, stale), derived = await read_targets(snap, keys, self._recheck), {}
         ops, counts, refused = await asyncio.to_thread(plan_window, op, found, kind)
         counts["missing"] += len(missing)
         counts["deletedInDraft"] += len(deleted)
+        counts["noLongerMatches"] += len(stale)
         refused += [_refused(k, eid, "deleted_in_draft", "Deleted in this draft.") for k, eid in deleted.items()]
         refused += [_refused(k, None, "missing", "Not in this draft.") for k in missing]
+        refused += [_refused(k, eid, "no_longer_matches", "In this draft it no longer matches the "
+                             "search.") for k, eid in stale.items()]
         refused += [_refused(k, eid, "derived", "A roll-up: change the relationships it summarises.")
                     for k, eid in derived.items()]
         message = window_message(op, job.get("message"), i + 1, chunks)

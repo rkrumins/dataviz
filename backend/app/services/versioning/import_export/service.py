@@ -1068,6 +1068,12 @@ class ImportExportService:
         if summary.get("publishedCommitId"):
             # The publish that took what it wrote to main, and listed it (property_job.audit_entry).
             shown["publishedCommitId"] = summary["publishedCommitId"]
+        if summary.get("landedCommitIds"):
+            # Reviews merged in part that took some of what it wrote to main.
+            shown["landedCommitIds"] = list(summary["landedCommitIds"])
+        if summary.get("recheck"):
+            # A search target: whether its matches were checked again on the draft's values.
+            shown["recheck"] = summary["recheck"]
         if summary.get("cancelled"):
             shown["cancelled"] = True
         done = row.status == "completed"
@@ -1110,7 +1116,7 @@ class ImportExportService:
         if entity_kind == "edge":
             found, deleted, missing, derived = await property_job.read_edge_targets(snap, ids)
         else:
-            found, deleted, missing = await property_job.read_targets(snap, ids)
+            found, deleted, missing, _stale = await property_job.read_targets(snap, ids)
         props = {eid: p for eid, p, _urn in found.values()}
         to = op.get("to") if op.get("kind") in ("rename", "copy") else None
         rewrite = property_job.rewriter(op)

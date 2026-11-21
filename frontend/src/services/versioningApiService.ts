@@ -2022,8 +2022,11 @@ export interface PropertyJobSummary {
   conflicts: number
   /** A convert's values that weren't of the kind asked for — left as they were, or removed. */
   unconvertible: number
+  /** A search target's matches the draft has changed so the search no longer matches them, left alone. */
+  noLongerMatches?: number
   /** Every target not written as asked — by reason: `missing`, `deleted_in_draft`, `conflict`,
-   *  `unconvertible` and `write_refused` (the write gate turned it away). Its rows download as a CSV. */
+   *  `unconvertible`, `no_longer_matches` and `write_refused` (the write gate turned it away). Its
+   *  rows download as a CSV. */
   refused: { count: number; byReason: Record<string, number>; examples: Array<Record<string, unknown>> }
   commits: number
   firstCommitId?: string | null
@@ -2031,6 +2034,10 @@ export interface PropertyJobSummary {
   cancelled?: boolean
   /** The publish that took what it changed to Published (and lists it in its audit). */
   publishedCommitId?: string | null
+  /** Reviews merged in part that took some of what it changed to Published. */
+  landedCommitIds?: string[]
+  /** A search target: whether its matches were checked again on the draft's values, and why not. */
+  recheck?: { exact: boolean; note: string | null }
 }
 
 export interface PropertyJob {

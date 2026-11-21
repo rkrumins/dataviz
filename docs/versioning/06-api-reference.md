@@ -359,7 +359,8 @@ and a merge's first 50 values (`mapSize` says how many it has). Each job listed 
 commit (`summary.publishedCommitId`, which `GET …/property-jobs/{jobId}` returns), so no later publish
 lists it again. A review merged in part lists a job only when some of what it changed landed: all of
 it, and the job is stamped; some of it, and it is listed `partial: true`, unstamped, and listed again
-by the merge that lands the rest. The event's summary names the first: "Published 27,110 changes to
+by the merge that lands the rest — that merge's commit is added to the job's `summary.landedCommitIds`,
+which `GET …/property-jobs/{jobId}` returns too. The event's summary names the first: "Published 27,110 changes to
 Sales, including Rename owner → steward and 2 more bulk edits".
 
 ### 2.8 Versioned graph read (canvas neighbors)

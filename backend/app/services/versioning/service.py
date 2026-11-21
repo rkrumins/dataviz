@@ -37,7 +37,7 @@ from typing import (Any, Awaitable, Callable, Collection, Dict, Iterable, List, 
                     Optional, Sequence, Set, Tuple)
 
 from sqlalchemy import (TIMESTAMP, Boolean, Text, TextClause, any_, bindparam, cast, insert, select, func,
-                        delete, null, literal, text, true, update, or_, tuple_, and_, case)
+                        delete, null, literal, text, true, update, or_, tuple_, and_, case, union)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -2017,8 +2017,10 @@ class GraphVersioningService:
 
         ``only``: a review merged in part (:meth:`_landed_in_part`) — the entities that landed. A job
         none of whose changes landed is not listed; one some of whose did is listed ``partial`` and
-        not stamped, so the squash that lands the rest lists it again; one all of whose did is listed
-        and stamped. What a job changed is what its window commits wrote (found by their messages)."""
+        not stamped, so the squash that lands the rest lists it again — but the squash is added to its
+        ``summary.landedCommitIds``, so what reads the job (an undo) knows part of it is on ``main``;
+        one all of whose did is listed and stamped. What a job changed is what its window commits
+        wrote (found by their messages)."""
         from .import_export import property_job
         rows = (await s.execute(select(JobORM).where(
             JobORM.graph_id == graph_id, JobORM.status.in_(("completed", "failed", "cancelled")),
@@ -2031,21 +2033,26 @@ class GraphVersioningService:
                 continue
             partial = False
             if only is not None:
-                wrote = await self._property_job_entities(s, graph_id, draft_id, row)
-                landed = wrote & only
+                wrote, landed = await self._property_job_entities(s, graph_id, draft_id, row, only)
                 if not landed:
                     continue
-                partial = len(landed) < len(wrote)
+                partial = landed < wrote
             entries.append(property_job.audit_entry(row, partial=partial))
-            if not partial:
+            if partial:
+                row.summary = {**summary, "landedCommitIds": [
+                    *(summary.get("landedCommitIds") or []), squash.id]}
+            else:
                 row.summary = {**summary, "publishedCommitId": squash.id}
         if entries:
             squash.stats = {**dict(squash.stats or {}), "propertyJobs": {
                 "total": len(entries), "jobs": entries[:property_job.AUDIT_LISTED]}}
 
     @staticmethod
-    async def _property_job_entities(s, graph_id: str, draft_id: str, job) -> set:
-        """The entities a bulk property job's window commits wrote on its draft."""
+    async def _property_job_entities(s, graph_id: str, draft_id: str, job,
+                                     landed: Collection[str]) -> Tuple[int, int]:
+        """How many entities a bulk property job's window commits wrote on its draft, and how many
+        of those are among ``landed`` — counted in SQL, never loaded: the version rows of the draft
+        within the job's seqs (its changeset index), of the job's commits."""
         from .import_export import property_job
         fields = job.field_scope if isinstance(job.field_scope, dict) else {}
         summary = job.summary if isinstance(job.summary, dict) else {}
@@ -2053,18 +2060,23 @@ class GraphVersioningService:
         seqs = dict((await s.execute(select(CommitORM.id, CommitORM.commit_seq).where(
             CommitORM.graph_id == graph_id, CommitORM.id.in_([e for e in ends if e])))).all())
         if not all(e in seqs for e in ends) or not isinstance(fields.get("op"), dict):
-            return set()
+            return 0, 0
+        lo, hi = seqs[ends[0]], seqs[ends[1]]
         commits = select(CommitORM.id).where(
             CommitORM.graph_id == graph_id, CommitORM.branch_id == draft_id,
-            CommitORM.commit_seq.between(seqs[ends[0]], seqs[ends[1]]),
+            CommitORM.commit_seq.between(lo, hi),
             CommitORM.actor == fields.get("actor"),
             CommitORM.message.in_(property_job.window_messages(
                 fields["op"], fields.get("message"), int(summary.get("chunks") or 0))))
-        out: set = set()
-        for table in (NodeVersionORM, EdgeVersionORM):
-            out.update((await s.execute(select(table.entity_id).where(
-                table.graph_id == graph_id, table.commit_id.in_(commits)))).scalars())
-        return out
+        wrote = union(*(select(table.entity_id).where(
+            table.graph_id == graph_id, table.branch_id == draft_id,
+            table.commit_seq.between(lo, hi), table.commit_id.in_(commits))
+            for table in (NodeVersionORM, EdgeVersionORM))).subquery()
+        row = (await s.execute(
+            select(func.count(), func.count().filter(
+                wrote.c.entity_id == any_(bindparam("landed", type_=ARRAY(Text))))).select_from(wrote),
+            {"landed": sorted(landed)})).one()
+        return int(row[0]), int(row[1])
 
     @staticmethod
     def _narrow_squash(graph, draft, resolutions) -> bool:
