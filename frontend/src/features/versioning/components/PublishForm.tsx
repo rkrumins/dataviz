@@ -319,7 +319,7 @@ export function PublishBody({ flow, offerSave = true }: {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="text-[11px] text-ink-muted leading-relaxed">
-            <span className="font-medium text-amber-500">{unsaved} unsaved edit{unsaved === 1 ? '' : 's'} on the canvas.</span>{' '}
+            <span className="font-medium text-amber-700 dark:text-amber-300">{unsaved} unsaved edit{unsaved === 1 ? '' : 's'} on the canvas.</span>{' '}
             They aren’t part of this draft yet, so publishing now would leave them behind. Save them
             in Review &amp; Save first, or discard them.
             {offerSave && (
@@ -339,7 +339,7 @@ export function PublishBody({ flow, offerSave = true }: {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <ShieldAlert className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="text-[11px] text-ink-muted leading-relaxed">
-            <span className="font-medium text-amber-500">This skips the open review.</span>{' '}
+            <span className="font-medium text-amber-700 dark:text-amber-300">This skips the open review.</span>{' '}
             Publishing sends these changes straight to the Published version. The review will be
             closed as merged, without its reviewers seeing it. Press{' '}
             <span className="font-medium text-ink">Publish anyway</span> to continue.
@@ -351,7 +351,7 @@ export function PublishBody({ flow, offerSave = true }: {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="text-[11px] text-ink-muted">
-            <span className="font-medium text-amber-500">The Published version changed — {conflicts} conflict{conflicts === 1 ? '' : 's'}.</span>{' '}
+            <span className="font-medium text-amber-700 dark:text-amber-300">The Published version changed — {conflicts} conflict{conflicts === 1 ? '' : 's'}.</span>{' '}
             Submit for review to resolve them, or archive this draft and start again from the latest.
           </div>
         </div>
@@ -361,7 +361,7 @@ export function PublishBody({ flow, offerSave = true }: {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="min-w-0 text-[11px] text-ink-muted">
-            <span className="font-medium text-amber-500">
+            <span className="font-medium text-amber-700 dark:text-amber-300">
               Nothing was published — {unique.total === 1
                 ? '1 value that must be unique is'
                 : `${unique.total} values that must be unique are`} used more than once.
@@ -381,7 +381,7 @@ export function PublishBody({ flow, offerSave = true }: {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="min-w-0 flex-1 text-[11px] text-ink-muted">
-            <span className="font-medium text-amber-500">
+            <span className="font-medium text-amber-700 dark:text-amber-300">
               Nothing was published — {fieldRefusal.total === 1
                 ? '1 value breaks'
                 : `${fieldRefusal.total.toLocaleString()} values break`} the fields their entity types define.
@@ -389,17 +389,20 @@ export function PublishBody({ flow, offerSave = true }: {
             Change them in the draft, then publish.
             {(fieldRefusal.total > Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN) || fieldRefusal.byField.some(fills))
               && fieldRefusal.byField.length > 0 && (
-              <ul aria-label="Values to change by field" className="mt-1.5 space-y-0.5 text-ink">
+              <ul aria-label="Values to change by field" className="mt-1.5 space-y-1 text-ink">
                 {fieldRefusal.byField.map((c) => (
-                  <li key={`${c.entityType}:${c.field}:${c.rule}`}>
-                    <span className="font-medium">{c.entityType} · {c.fieldName || c.field}</span>
-                    <span className="text-ink-muted">: {c.count.toLocaleString()} {FIELD_RULE_PHRASE[c.rule]}</span>
+                  <li key={`${c.entityType}:${c.field}:${c.rule}`} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2">
+                    <span className="min-w-0">
+                      <span className="font-medium">{c.entityType} · {c.fieldName || c.field}</span>
+                      <span className="text-ink-muted">: {c.count.toLocaleString()} {FIELD_RULE_PHRASE[c.rule]}</span>
+                    </span>
                     {fills(c) && <FillRefused count={c} onOpen={() => { onClose(); onLeave?.() }} />}
                   </li>
                 ))}
               </ul>
             )}
-            <ul aria-label="Values to change" className="mt-1.5 space-y-1 text-ink">
+            {/* Some six rows, then it scrolls: the fills above stay in sight. */}
+            <ul aria-label="Values to change" className="mt-1.5 max-h-56 overflow-y-auto custom-scrollbar pr-1 space-y-1 text-ink">
               {fieldRefusal.violations.slice(0, UNIQUE_SHOWN).map((v, i) => (
                 <FieldViolationRow key={`${v.entity_id}:${v.field}:${i}`} v={v} onOpen={() => { onClose(); onLeave?.() }} />
               ))}
@@ -415,7 +418,7 @@ export function PublishBody({ flow, offerSave = true }: {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="text-[11px] text-ink-muted">
-            <span className="font-medium text-amber-500">
+            <span className="font-medium text-amber-700 dark:text-amber-300">
               {notUpToDate.reason === 'overlap' ? 'Automation changed something you changed.' : 'Updates are available for this draft.'}
             </span>{' '}
             {refusalCopy(notUpToDate.reason)} Use “Get latest updates” on the toolbar.
@@ -438,13 +441,14 @@ function FillRefused({ count, onOpen }: { count: FieldViolationCount; onOpen: ()
       entityType: count.entityType, field: count.field, fieldName: count.fieldName, ids, complete,
     }))
   }
+  // A column of their own at the row's end; the rest said under the fill, across the row.
   return (
     <>
       <button type="button" onClick={fill}
-        className="ml-1.5 px-1.5 h-5 rounded text-[10.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10">
+        className="-mt-0.5 px-1.5 h-5 rounded text-[10.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10">
         {complete ? `Fill ${count.count.toLocaleString()} missing…` : `Fill the first ${ids.length.toLocaleString()}…`}
       </button>
-      {!complete && <span className="text-ink-muted"> then publish again for the rest</span>}
+      {!complete && <span className="col-span-2 px-1.5 text-right text-[10.5px] text-ink-muted"> then publish again for the rest</span>}
     </>
   )
 }

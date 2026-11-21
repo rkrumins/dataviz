@@ -86,6 +86,9 @@ export const ComparisonRow = memo(function ComparisonRow({
   const has = field?.has ?? 0
   const removing = change?.kind === 'unset'
   const pending = change !== null
+  // Of these, the ones of the field's type with no value: those its rule asks one of.
+  const lacking = rule?.field.required && editable && field && has < total
+    ? missing(keyName).filter((id) => memberOf(id).type === rule.typeId).length : 0
   const set = (value: unknown) => {
     if (field?.kind === 'same' && sameJson(field.value, value)) onChange(keyName, null)
     else onChange(keyName, { kind: 'set', value })
@@ -170,10 +173,10 @@ export const ComparisonRow = memo(function ComparisonRow({
           </div>
         )}
         {rule && editable && <PendingWarning rule={rule} change={change} />}
-        {rule?.field.required && editable && field && has < total && !pending && form === null && (
+        {rule && lacking > 0 && !pending && form === null && (
           <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
             <FieldNote>
-              {rule.field.name || keyName} is required for {rule.typeLabel} — {(total - has).toLocaleString()} of these {total - has === 1 ? 'has' : 'have'} none.
+              {rule.field.name || keyName} is required for {rule.typeLabel} — {lacking.toLocaleString()} of these {rule.typeLabel} {lacking === 1 ? 'has' : 'have'} none.
             </FieldNote>
             <FillMissingButton typeName={rule.typeName} onClick={() => usePropertyJobsStore.getState().requestOp(fillRequiredRequest({
               entityType: rule.typeId, entityTypeName: rule.typeName, field: keyName, fieldName: rule.field.name, scopeMode: 'view',

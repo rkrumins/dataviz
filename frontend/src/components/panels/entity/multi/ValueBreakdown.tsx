@@ -15,7 +15,8 @@ import { toneOf } from './tones'
 const GROUPS_PAGE = 20
 const MEMBERS_PAGE = 50
 
-export interface Member { id: string; name: string }
+/** One of the entities compared — and its entity type, where the drawer knows it. */
+export interface Member { id: string; name: string; type?: string }
 
 export function ValueBreakdown({
   field, missing, memberOf, editable, onApply, onFill, onFocusNode, onOpenNode,

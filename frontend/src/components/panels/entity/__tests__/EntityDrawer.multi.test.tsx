@@ -295,7 +295,7 @@ describe('several entities: what the fields of their type ask', () => {
     ] } as never)
     usePropertyJobsStore.setState({ request: null } as never)
     render(<EntityDrawer canEdit />)
-    expect(within(rowOf('owner')).getByText('Owner is required for Datasets — 2 of these have none.')).toBeInTheDocument()
+    expect(within(rowOf('owner')).getByText('Owner is required for Datasets — 2 of these Datasets have none.')).toBeInTheDocument()
     await user.click(within(rowOf('owner')).getByRole('button', { name: 'Fill missing on every Dataset…' }))
     expect(usePropertyJobsStore.getState().request).toEqual({
       op: { kind: 'fillEmpty', key: 'owner' }, scopeMode: 'view',
@@ -304,6 +304,19 @@ describe('several entities: what the fields of their type ask', () => {
     })
     // Not offered where none lacks it, nor outside a draft.
     expect(within(rowOf('sla')).queryByRole('button', { name: /Fill missing/ })).toBeNull()
+  })
+
+  it('counts only the entities of the field’s type that lack it, among several types', () => {
+    useCanvasStore.setState({ nodes: [
+      node('orders', { owner: 'ana' }), node('returns', {}), node('refunds', {}, { type: 'table' }),
+    ] } as never)
+    render(<EntityDrawer canEdit />)
+    expect(within(rowOf('owner')).getByText('Owner is required for Datasets — 1 of these Datasets has none.')).toBeInTheDocument()
+    // None of the type lacks it: nothing to say, though another type does.
+    act(() => useCanvasStore.setState({ nodes: [
+      node('orders', { owner: 'ana' }), node('returns', { owner: 'bo' }), node('refunds', {}, { type: 'table' }),
+    ] } as never))
+    expect(within(rowOf('owner')).queryByText(/is required for Datasets/)).toBeNull()
   })
 })
 
