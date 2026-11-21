@@ -31,11 +31,6 @@ import {
 import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
-import { useSaveProblemsStore } from '@/store/saveProblemsStore'
-import { BranchClosedError, DraftRoleRequiredError, IntegrityError, MergeConflictError, NotDraftOwnerError, OntologyViolationError, type Branch } from '@/services/versioningApiService'
-import { markConflicts } from '@/features/versioning/model/mapConflicts'
-import { copyStagedToNewDraft } from '@/features/versioning/model/copyStagedToNewDraft'
-import { mapSaveProblems } from '@/features/versioning/model/saveProblems'
 import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
@@ -63,7 +58,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { usePermission, useAuthStore } from '@/store/auth'
 import { graphStoreLimitsPath } from '@/components/admin/shared/aggregationKnobs'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
-import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
+import { remapIdSet, useDraftSave, useStagedUndoShortcuts } from '@/features/versioning/canvas/useDraftSave'
 import { VERSIONING_KEYS, useResolveGraph } from '@/features/versioning/hooks/useVersioning'
 import { useActiveDraftAccess } from '@/features/versioning/hooks/useActiveDraftAccess'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
@@ -78,7 +73,6 @@ import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { SelectionBar } from './SelectionBar'
-import { BulkEditPanel } from './BulkEditPanel'
 import { LayerSettingsPanel } from './LayerSettingsPanel'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { ChangeNavigator } from './ChangeNavigator'
@@ -117,7 +111,7 @@ import { renderedAggregationTargets, unparentedRows } from './aggregationTargets
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/entity/EntityDrawer'
 import { RelationshipDrawer } from '../../panels/RelationshipDrawer'
-import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
+import { lineForTarget, targetFromLine, targetFromMembers, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel, type ContractRowLayer } from '../create/buildmode/BuildPanel'
@@ -141,6 +135,7 @@ import { getEdgeTypeDefinition, getEdgeTypeFromSchema, type EdgeTypeDefinition }
 
 // UX-first interaction components
 import { CanvasContextMenu, type ContextMenuAction } from '../CanvasContextMenu'
+import { compareSelectionAction, menuSelection } from '../selectionMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette, type CommandItem } from '../CommandPalette'
 import { useEdgeConnect } from '../edge-create/useEdgeConnect'
@@ -379,6 +374,10 @@ import {
 } from '../search/session/useViewSearchSessionController'
 import { questionsFromHere } from '../search/session/queryFromHere'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
+import { PropertyOpHost } from '../property-manager/PropertyOpHost'
+import { MAX_CONTAINERS, searchPreset, type TargetPreset } from '../property-manager/op/opModel'
+import { useCanvasPropertyJobs } from '@/features/versioning/canvas/useCanvasPropertyJobs'
+import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { OrphansDrawer } from './OrphansDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
@@ -499,8 +498,8 @@ function paintedRow(nodeId: string): HTMLElement | null {
 }
 
 
-/** Give the right rail to a panel of the canvas's own (several entities, a
- *  layer's settings) in place of the drawers there — once an unsaved edit in
+/** Give the right rail to a panel of the canvas's own (a layer's settings) in
+ *  place of the drawers there — once an unsaved edit in
  *  one of them is settled, as any move of the drawer waits for. */
 function takeRail(open: () => void) {
   useCanvasStore.getState().requestDrawerMove(() => {
@@ -535,6 +534,9 @@ export function ContextViewCanvas({
   // Set form for the columns, which ask "is this row selected?" per row.
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  // The entity drawer is open on one entity, or on several compared as one.
+  const drawerNodeIds = useCanvasStore((s) => s.drawerNodeIds)
+  const entityDrawerOpen = !!drawerNodeId || !!drawerNodeIds
   const drawerEdge = useCanvasStore((s) => s.drawerEdge)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
@@ -943,13 +945,13 @@ export function ContextViewCanvas({
     },
     onCloseEdgePanel: () => {
       // The Explorer is only on screen when neither drawer is.
-      if (isEdgePanelOpen && !drawerNodeId && !drawerEdge) { closeEdgePanel(); return true }
+      if (isEdgePanelOpen && !entityDrawerOpen && !drawerEdge) { closeEdgePanel(); return true }
       return false
     },
     onCloseEntityDrawer: () => {
       // Held while a save or a publish from it runs.
       if (isStagedPanelOpen) { if (useStagedChangesStore.getState().applyStatus !== 'applying') closeStagedChangesPanel(); return true }
-      if (drawerNodeId || drawerEdge) {
+      if (entityDrawerOpen || drawerEdge) {
         // One move: with unsaved edits in the drawer, neither happens until the reader decides.
         useCanvasStore.getState().requestDrawerMove(() => { closeNodeDrawer(); clearSelection() })
         return true
@@ -1781,7 +1783,6 @@ export function ContextViewCanvas({
   // What the import did, said once its changes are on the canvas.
   const importedSummaryRef = useRef<ImportSummary | null>(null)
   const { notify: notifyImport } = useAppNotifications()
-  const applyStagedChanges = useStagedChangesStore(s => s.applyAll)
   const queryClient = useQueryClient()
   // Refresh the canvas + versioning surfaces after an import — but only on dialog exit, and only if
   // an import happened (re-hydrating while the dialog is open unmounts its preview). In order: the
@@ -1823,28 +1824,7 @@ export function ContextViewCanvas({
 
   // Keyboard shortcuts for Undo/Redo — works anywhere on the canvas, but only in draft (edit)
   // mode: Published is read-only, so there are no staged changes to undo/redo.
-  useEffect(() => {
-    if (!isDraft) return
-    const onKey = (e: KeyboardEvent) => {
-      // Ignore when the user is typing in an input/textarea
-      const t = e.target as HTMLElement | null
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
-      const isMod = e.metaKey || e.ctrlKey
-      if (!isMod) return
-      // Nothing is undone under a save in flight: it already carries the change.
-      if (useStagedChangesStore.getState().applyStatus === 'applying') return
-      const key = e.key.toLowerCase()
-      if (key === 'z' && !e.shiftKey) {
-        e.preventDefault()
-        undoStagedChange()
-      } else if ((key === 'z' && e.shiftKey) || key === 'y') {
-        e.preventDefault()
-        redoStagedChange()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [isDraft, undoStagedChange, redoStagedChange])
+  useStagedUndoShortcuts(isDraft)
 
   // Ref to trigger edge redraw from child components
   const triggerEdgeRedrawRef = useRef<(() => void) | null>(null)
@@ -2187,7 +2167,7 @@ export function ContextViewCanvas({
     const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
     const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
     return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
-  }, [drawerNodeId, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+  }, [drawerNodeId, drawerNodeIds, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
 
   // A relationship the drawer shows was resolved from THIS view's lines. Leaving
   // the view (or this canvas) closes it, trail and all, rather than carrying a
@@ -2432,21 +2412,16 @@ export function ContextViewCanvas({
   // Where a click doesn't open an entity's details, the selection bar offers
   // them for one held entity while the drawer is closed.
   const opensDetailsOnSelect = useOpensDetailsOnSelect()
-  const offerDetails = !opensDetailsOnSelect && bulkSelection.length === 1 && !drawerNodeId && !drawerEdge
-  // Several held entities, read — and in a draft edited — as one (BulkEditPanel),
-  // as selected when it opened. An entity's or a relationship's own details take
-  // the rail back.
-  const [bulkEditFor, setBulkEditFor] = useState<string[] | null>(null)
-  // Adjusted while rendering, not in an effect: the two never paint together.
-  if (bulkEditFor && (drawerNodeId || drawerEdge)) setBulkEditFor(null)
-  // One layer's settings (LayerSettingsPanel), in the same rail.
+  const offerDetails = !opensDetailsOnSelect && bulkSelection.length === 1 && !entityDrawerOpen && !drawerEdge
+  // One layer's settings (LayerSettingsPanel), in the same rail. An entity's or a
+  // relationship's own details take the rail back — adjusted while rendering, not
+  // in an effect: the two never paint together.
   const [layerSettingsFor, setLayerSettingsFor] = useState<string | null>(null)
-  if (layerSettingsFor && (drawerNodeId || drawerEdge || bulkEditFor)) setLayerSettingsFor(null)
+  if (layerSettingsFor && (entityDrawerOpen || drawerEdge)) setLayerSettingsFor(null)
 
-  const openShared = () => {
-    const ids = [...bulkSelection]
-    takeRail(() => setBulkEditFor(ids))
-  }
+  // Several held entities, read — and in a draft edited — as one, in the entity
+  // drawer: as selected when it opened.
+  const openShared = () => useCanvasStore.getState().openNodesDrawer(bulkSelection)
   const bulkSelectionCount = bulkSelection.length
   // The server refuses trace requests when this is off; the header hides its
   // Trace and Focus for it, and the SelectionBar follows suit.
@@ -4851,6 +4826,11 @@ export function ContextViewCanvas({
   // Warn the user once when any child fetch fails — gives them an explicit
   // signal beyond the inline error rows inside the affected parent's subtree.
   const { notify } = useAppNotifications()
+
+  // BULK PROPERTY CHANGES — written to the draft open here by a job on the server, while the canvas
+  // can write to it; followed to the end, the canvas re-read once one lands (useCanvasPropertyJobs).
+  const propertyGraphWrite = useCanvasPropertyJobs({ wsId: scopeWsId, graphId, branchId: effectiveBranchId, writable: canvasWritable })
+  const propertyLayers = useMemo(() => storeLayers.map((l) => ({ id: l.id, name: l.name })), [storeLayers])
   const lastFailedCountRef = useRef(0)
   useEffect(() => {
     const count = failedNodes?.size ?? 0
@@ -4912,6 +4892,13 @@ export function ContextViewCanvas({
     window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
     void narrowNow({ spec: initialNarrowShare.spec, seedsLabel: initialNarrowShare.label ?? 'the shared starting points' })
   }, [initialNarrowShare, narrowEnabled, narrowViewId, narrowNow])
+  // A property changed on every match of a search — the exact match set, every page — on the draft.
+  const editFromSearch = useCallback((query: SearchQuery, count: number | null) => {
+    usePropertyJobsStore.getState().requestOp({
+      // A Connections search's relationships, or any other search's matches.
+      target: searchPreset(query.predicate, query.scope?.scopeMode === 'data_source' ? 'data_source' : 'view', count ?? undefined),
+    })
+  }, [])
   const narrowFromSearch = useCallback((query: SearchQuery) => {
     openNarrow({
       spec: specFor({ query: query.predicate }, {}, query.scope?.scopeMode === 'data_source' ? 'dataSource' : 'view'),
@@ -5140,7 +5127,33 @@ export function ContextViewCanvas({
     return actions
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactions.state.contextMenu.target, membersEditable, displayMap, applyMemberOps, notify])
-  const nodeCustomActions = useMemo(() => [...memberMenuActions, ...reorderMenuActions], [memberMenuActions, reorderMenuActions])
+  // PROPERTIES from a right-click: compare a selection in the entity drawer; change a property on a
+  // container's children, or on everything inside it — however many, on the draft.
+  const propertyMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const target = interactions.state.contextMenu.target
+    if (!target || target.type !== 'node' || !isSelectableNode(target.id)) return []
+    const ids = menuSelection(target.id, selectedNodeIds)
+    const actions: ContextMenuAction[] = []
+    if (ids.length > 1) actions.push(compareSelectionAction(ids, interactions.closeContextMenu))
+    const containers = canvasWritable
+      ? ids.filter((id) => Number(displayMap.get(id)?.data?.childCount ?? 0) > 0).slice(0, MAX_CONTAINERS) : []
+    if (containers.length > 0) {
+      const urns = containers.map((id) => (displayMap.get(id)?.data?.urn as string | undefined) ?? id)
+      const label = urns.length === 1 ? canvasDisplayName(urns[0]!) : `${urns.length} containers`
+      const ask = (target: TargetPreset) => () => { interactions.closeContextMenu(); usePropertyJobsStore.getState().requestOp({ target }) }
+      actions.push(
+        { id: 'properties-children', label: `Change properties of ${urns.length === 1 ? 'its' : 'their'} children…`, icon: 'ListTree',
+          onClick: ask({ kind: 'children', urns, label }) },
+        { id: 'properties-inside', label: 'Change properties of everything inside…', icon: 'FolderTree',
+          onClick: ask({ kind: 'inside', urns, label, includeSelf: false }) },
+      )
+    }
+    if (actions.length) actions[actions.length - 1] = { ...actions[actions.length - 1], dividerAfter: true }
+    return actions
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.state.contextMenu.target, selectedNodeIds, canvasWritable, displayMap])
+  const nodeCustomActions = useMemo(() => [...propertyMenuActions, ...memberMenuActions, ...reorderMenuActions],
+    [propertyMenuActions, memberMenuActions, reorderMenuActions])
   // Right-click → Narrow to this: one entry per reach, applied at once; or
   // choose in the composer. The selection the entity is part of narrows together.
   const narrowMenuActions = useMemo<ContextMenuAction[]>(() => {
@@ -5176,6 +5189,35 @@ export function ContextViewCanvas({
   // shared `ensureDraftOpen` stays the path for the OTHER authoring entry points (create-link,
   // hierarchy builder, blank-model auto-draft) so this deliberate choice is only for the Edit button.
   const handleEnterEdit = useCallback(() => setShowStartEditing(true), [])
+
+  // Review & Save's save — the one every canvas runs (useDraftSave), with what this canvas keeps
+  // besides the graph: the view's layout.
+  const saveToDraft = useDraftSave({
+    wsId: scopeWsId,
+    viewId: activeView?.id ?? null,
+    // Re-key every new entity's layer assignment temp→real, so a node created in a
+    // layer keeps its layer column after Save. Re-keys BOTH the canonical view-config
+    // entry (assignEntities/onEntityStaged wrote it at create time, keyed by the temp
+    // urn) and the session store mirror — all of a save's creates at once: one layout
+    // write, which also drops a placement still on a temp urn (a create staged, then
+    // discarded before this Save — see assignmentMutations).
+    remapEntityIds: (ids) => {
+      remapEntityIds(ids)
+      persistReferenceLayout(assignmentOps.pruneTempAssignments(
+        assignmentOps.remapAssignmentUrns(currentLayout(), ids)))
+      // An entity open before the save stays open after it: its expanded state was
+      // keyed by the temp urn, so a saved parent came back collapsed ("my children
+      // vanished").
+      setExpandedNodes(prev => remapIdSet(prev, ids))
+    },
+    // A save that created nothing still drops any placement keyed by a temp urn — a create
+    // that was staged (writing its placement) then discarded before this Save.
+    pruneTempAssignments: () => {
+      persistReferenceLayout(assignmentOps.pruneTempAssignments(currentLayout()))
+    },
+    flushLayoutSave,
+    onOpenDraft: canManage && versioningEnabled && canEnterEdit && editModeEnabled ? handleEnterEdit : undefined,
+  })
 
   // Done: switching branches reloads the canvas, which would silently drop
   // staged edits — so route the user through the review panel instead.
@@ -6032,7 +6074,7 @@ export function ContextViewCanvas({
         : undefined,
       onDelete: () => deleteLayerWithUndo(layer.id),
       onStartEditing: !isDraft && canEnterEdit ? handleEnterEdit : undefined,
-      onOpenSettings: () => takeRail(() => { setBulkEditFor(null); setLayerSettingsFor(layer.id) }),
+      onOpenSettings: () => takeRail(() => setLayerSettingsFor(layer.id)),
       // The Business view's header keeps to the essentials; its own actions are here.
       ...(personaMode !== 'technical' && {
         onAddEntity: canEditGraph && !serverPlaced ? () => openBuilderForLayer(layer.id) : undefined,
@@ -6046,11 +6088,15 @@ export function ContextViewCanvas({
           seedsLabel: `everything in ${layer.name}`,
         })
         : undefined,
+      // A property changed on every entity the view places in it — however many — on the draft.
+      onEditProperties: canvasWritable
+        ? () => usePropertyJobsStore.getState().requestOp({ target: { kind: 'layer', layerId: layer.id, name: layer.name } })
+        : undefined,
     }
   }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
     canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, personaMode, canEditGraph, subsetView,
-    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setBulkEditFor, setLayerSettingsFor])
+    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setLayerSettingsFor, canvasWritable])
 
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
@@ -7083,6 +7129,14 @@ export function ContextViewCanvas({
         onRevealNode={revealSearchHit}
         onFrameMatches={handleFrameMatches}
         onNarrowMatches={narrowEnabled ? narrowFromSearch : undefined}
+        onEditMatches={canvasWritable ? editFromSearch : undefined}
+        onEditPicked={canvasWritable
+          ? (urns) => usePropertyJobsStore.getState().requestOp({ target: { kind: 'selection', ids: urns } })
+          : undefined}
+        onEditPickedEdges={canvasWritable
+          ? (ids) => usePropertyJobsStore.getState().requestOp({ target: { kind: 'relationships', ids } })
+          : undefined}
+        onComparePickedEdges={(members) => useCanvasStore.getState().openEdgeDrawer(targetFromMembers(members))}
         onSaveMatchesAsView={(canSaveSearchAsView || editingSubset) ? onSaveMatchesAsView : undefined}
         saveMatchesLabel={editingSubset ? `Update “${editingSubset.name}”…` : undefined}
       />
@@ -7515,141 +7569,7 @@ export function ContextViewCanvas({
           }}
           // True once the changes are written: the panel then closes (Save to draft) or goes on to
           // Publish. Every other way out leaves it open.
-          onConfirm={async () => {
-          if (!scopeWsId) return false
-          const stagedChangeList = useStagedChangesStore.getState().changes
-          // Draft mode: persist EVERY change type — creates, edges, updates/deletes, and layer
-          // moves — to the draft branch as ONE atomic, server-merged /graph/changes commit. One
-          // Review & Save is exactly one commit (the backend mints urns + resolves temp refs).
-          const bs = useBranchStore.getState()
-          if (bs.currentBranchId && bs.graphId && bs.dataSourceId) {
-            try {
-              const { commitId, unsaved } = await saveStagedChangesToDraft(stagedChangeList, {
-                wsId: bs.workspaceId ?? scopeWsId,
-                dataSourceId: bs.dataSourceId,
-                branchId: bs.currentBranchId,
-                provider,
-                // Re-key every new entity's layer assignment temp→real, so a node created in a
-                // layer keeps its layer column after Save. Re-keys BOTH the canonical view-config
-                // entry (assignEntities/onEntityStaged wrote it at create time, keyed by the temp
-                // urn) and the session store mirror — all of a save's creates at once: one layout
-                // write, which also drops a placement still on a temp urn (a create staged, then
-                // discarded before this Save — see assignmentMutations).
-                remapEntityIds: (ids) => {
-                  remapEntityIds(ids)
-                  persistReferenceLayout(assignmentOps.pruneTempAssignments(
-                    assignmentOps.remapAssignmentUrns(currentLayout(), ids)))
-                  // An entity open before the save stays open after it: its expanded state was
-                  // keyed by the temp urn, so a saved parent came back collapsed ("my children
-                  // vanished").
-                  setExpandedNodes(prev => {
-                    if (![...ids.keys()].some(oldId => prev.has(oldId))) return prev
-                    return new Set([...prev].map(id => ids.get(id) ?? id))
-                  })
-                },
-                // A save that created nothing still drops any placement keyed by a temp urn — a create
-                // that was staged (writing its placement) then discarded before this Save.
-                pruneTempAssignments: () => {
-                  persistReferenceLayout(assignmentOps.pruneTempAssignments(currentLayout()))
-                },
-                message: `Canvas edits (${stagedChangeList.length})`,
-              })
-              // Clear only what this save carried (a change staged while it ran stays); no discard
-              // hooks run, so the optimistic canvas is kept.
-              useStagedChangesStore.getState().clearSaved(stagedChangeList.map(c => c.id))
-              // A save creates a new draft commit that every versioning surface must reflect — the
-              // cumulative branch diff (Changes tab), the commit log (Commits tab), and per-entity
-              // history. Invalidate the whole versioning namespace so saved changes appear at once
-              // (a save is user-initiated and infrequent, so the broad refetch is fine).
-              queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
-              await flushLayoutSave()   // durably persist the view's referenceLayout (layers + assignments)
-              // Only claim what was written. `unsaved` names node fields the op mapper cannot carry
-              // (the entity drawer's schema-property inputs, a raw-JSON edit) — an edit made only of
-              // those sends no ops at all, and a zero-op save resolves exactly like a commit. A green
-              // "Saved to draft." over that is the lie this reports instead.
-              // A zero-OP batch is not a zero-WORK batch: layer moves produce no graph ops (so no
-              // commitId) and were just persisted durably by the flushLayoutSave above. Telling that
-              // user nothing was saved sends them to redo work that already landed.
-              const carriedSomething = !!commitId || stagedChangeList.some(
-                c => c.type !== 'update_entity' && c.type !== 'rename_entity')
-              if (unsaved.length > 0) {
-                notify('warning', carriedSomething
-                  ? `Saved, except ${unsaved.join(', ')} — the app can't store ${unsaved.length === 1 ? 'that field' : 'those fields'} on an entity yet.`
-                  : `Nothing was saved — the app can't store ${unsaved.join(', ')} on an entity yet.`)
-              } else {
-                notify('success', 'Saved to draft.')
-              }
-              useSaveProblemsStore.getState().clear()
-              // What was carried is cleared either way; the notification above says what landed.
-              return true
-            } catch (e) {
-              if (e instanceof OntologyViolationError) {
-                // Refused as a whole — nothing was written. Say exactly what and why, on the changes
-                // that caused it, and keep Review & Save open on them.
-                const problems = mapSaveProblems(e.violations, stagedChangeList)
-                useSaveProblemsStore.getState().report(problems)
-                const failing = new Map(problems.flatMap(p => p.changeIds.map(id => [id, p.reason] as const)))
-                useStagedChangesStore.setState(st => ({
-                  changes: st.changes.map(c => (failing.has(c.id) || c.error
-                    ? { ...c, error: failing.get(c.id) } : c)),
-                }))
-                useStagedChangesStore.getState().openReviewPanel()
-                notify('error', problems.length === 1
-                  ? `Nothing was saved. ${problems[0].reason}`
-                  : `Nothing was saved. ${problems.length} changes need attention.`,
-                  { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
-              } else if (e instanceof MergeConflictError && Object.keys(e.current).length > 0) {
-                // Refused as a whole: someone else changed fields these edits change. Put each
-                // conflict on its change — with the current value — for the user to settle there.
-                const n = markConflicts(e) || e.conflicts.length
-                useStagedChangesStore.getState().openReviewPanel()
-                notify('error', `Nothing was saved — ${n === 1 ? 'a change conflicts' : `${n} changes conflict`} with edits made since you opened ${n === 1 ? 'it' : 'them'}.`,
-                  { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
-              } else if (e instanceof IntegrityError) {
-                notify('error', `Nothing was saved. ${e.message}`)
-              } else if (e instanceof BranchClosedError || e instanceof NotDraftOwnerError || e instanceof DraftRoleRequiredError) {
-                // The draft closed under the save, is someone else's private draft, or is a shared
-                // draft the user no longer edits. Keep the staged edits; they can go to a new draft.
-                const fromBranchId = bs.currentBranchId
-                const ownerName = e instanceof NotDraftOwnerError && e.owner
-                  ? queryClient.getQueriesData<Branch[]>({ queryKey: [...VERSIONING_KEYS.all, 'branches'] })
-                      .flatMap(([, branches]) => branches ?? [])
-                      .find(b => b.branchId === fromBranchId)?.userNames?.[e.owner]
-                  : undefined
-                const why = e instanceof NotDraftOwnerError
-                  ? `This draft belongs to ${ownerName ?? 'someone else'} — copy your edits to a new draft.`
-                  : e instanceof DraftRoleRequiredError
-                  ? 'You’re no longer an editor of this shared draft.'
-                  : e.message
-                notify('error', `Nothing was saved. ${why} Your changes are still here.`, {
-                  label: 'Copy to a new draft',
-                  onClick: () => {
-                    void copyStagedToNewDraft(fromBranchId, activeView?.id ?? null)
-                      .catch(err => notify('error', (err as Error).message))
-                  },
-                })
-              } else {
-                notify('error', (e as Error).message)
-              }
-              return false
-            }
-          }
-          // Main mode: the view's layout changes persist with the view; graph edits never write to
-          // the published graph — they stay staged, marked, for the user to take to a draft.
-          const result = stagedChangeList.length > 0
-            ? await applyStagedChanges(provider, scopeWsId, { graphWrites: false })
-            : { ok: 0, failed: 0 }
-          if (result.failed === 0) {
-            await flushLayoutSave()
-            return true
-          } else {
-            if (result.ok > 0) await flushLayoutSave()
-            notify('warning', `${result.failed} ${result.failed === 1 ? 'change edits' : 'changes edit'} the published graph — open a draft to save ${result.failed === 1 ? 'it' : 'them'}.`,
-              canManage && versioningEnabled && canEnterEdit && editModeEnabled
-                ? { label: 'Open a draft', onClick: handleEnterEdit } : undefined)
-            return false
-          }
-        }} />
+          onConfirm={saveToDraft} />
 
         {/* The bottom-right dock — Data loads above Connections, one stack. Docked
             in the reserved band, never over rows: it publishes its collapsed
@@ -8402,7 +8322,7 @@ export function ContextViewCanvas({
             }}
           />
         )}
-        {!builderOpen && !buildOpen && drawerNodeId && (
+        {!builderOpen && !buildOpen && entityDrawerOpen && (
           <EntityDrawer
             key="entity-drawer"
             // Edits are draft-only, and a trace is read-only for its whole life.
@@ -8419,7 +8339,7 @@ export function ContextViewCanvas({
             onLocateMany={drawerLocateMany}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && drawerEdge && (
+        {!builderOpen && !buildOpen && !entityDrawerOpen && drawerEdge && (
           <RelationshipDrawer
             key="relationship-drawer"
             // Edits are draft-only, and a trace is read-only for its whole life.
@@ -8433,7 +8353,7 @@ export function ContextViewCanvas({
             onStartEditing={drawerStartEditing}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && !bulkEditFor && layerSettingsFor
+        {!builderOpen && !buildOpen && !entityDrawerOpen && !drawerEdge && layerSettingsFor
           && sortedLayers.some((l) => l.id === layerSettingsFor) && (
           <LayerSettingsPanel
             // Afresh when a draft starts or ends: its fields are that layout's.
@@ -8447,17 +8367,7 @@ export function ContextViewCanvas({
             onClose={() => setLayerSettingsFor(null)}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && bulkEditFor && (
-          <BulkEditPanel
-            key="bulk-edit-panel"
-            nodeIds={bulkEditFor}
-            // Edits are draft-only, and a trace is read-only for its whole life.
-            canEdit={canvasWritable && !traceActive}
-            onStartEditing={drawerStartEditing}
-            onClose={() => setBulkEditFor(null)}
-          />
-        )}
-        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && !bulkEditFor && !layerSettingsFor && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !entityDrawerOpen && !drawerEdge && !layerSettingsFor && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}
@@ -8485,6 +8395,13 @@ export function ContextViewCanvas({
           useSearchStore.getState().requestSearchRun(p, 'property-manager')
           search.openPanel()
         }}
+      />
+      <PropertyOpHost
+        viewId={activeView?.id ?? ''}
+        graphWrite={propertyGraphWrite}
+        knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
+        layers={propertyLayers}
+        onOpenManager={() => setPropertyManagerOpen(true)}
       />
       {/* Orphaned entities — independent like the Property Manager; fetches nothing while closed. */}
       <OrphansDrawer

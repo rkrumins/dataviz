@@ -9,6 +9,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { useBranchStore } from '@/store/branchStore'
 import type { SearchCatalogRequest, SearchCatalogResult } from '@/types/search'
 
 import { usePropertyCatalog } from '../usePropertyCatalog'
@@ -91,6 +92,49 @@ describe('usePropertyCatalog', () => {
         expect(result.current.catalog).toBeNull()
         // A refresh asked for in the first view does not follow to the second.
         expect((searchCatalog.mock.calls[1][0] as SearchCatalogRequest).refresh).toBeUndefined()
+    })
+
+    it('reads a draft again as it changes, keeping its last complete catalog meanwhile', async () => {
+        useBranchStore.setState({ graphId: 'g1', mainBranchId: 'main', currentBranchId: 'd1', draftEpoch: 0 })
+        searchCatalog.mockResolvedValueOnce(answer({ entities: 100 }))
+        const { result } = renderHook(() => usePropertyCatalog('view-1'))
+        await waitFor(() => expect(result.current.catalog?.entities).toBe(100))
+        act(() => result.current.refresh())
+        await waitFor(() => expect(searchCatalog).toHaveBeenCalledTimes(2))
+
+        // Others' saves taken in (or a bulk change's next window): read again, not refreshed —
+        // the server folds what changed in — and the last complete catalog stays meanwhile.
+        searchCatalog.mockImplementationOnce(() => new Promise(() => {}))
+        act(() => useBranchStore.getState().bumpDraftEpoch())
+        await waitFor(() => expect(searchCatalog).toHaveBeenCalledTimes(3))
+        expect((searchCatalog.mock.calls[2][0] as SearchCatalogRequest).refresh).toBeUndefined()
+        expect(result.current.catalog?.entities).toBe(100)
+        useBranchStore.setState({ currentBranchId: null })
+    })
+
+    it('shares one read of a view between its readers — the Properties tab and the bulk dialog', async () => {
+        let finish: (a: SearchCatalogResult) => void = () => {}
+        searchCatalog
+            .mockResolvedValueOnce(answer({ status: 'running', entities: 40,
+                                            progress: { scanned: 40, total: 100, matched: 40 } }))
+            .mockImplementationOnce(() => new Promise((r) => { finish = r }))
+        const tab = renderHook(() => usePropertyCatalog('view-1'))
+        await waitFor(() => expect(tab.result.current.catalog?.entities).toBe(40))
+        // The dialog opens while the read is under way: it joins it, and hears what it heard so far.
+        const dialog = renderHook(() => usePropertyCatalog('view-1'))
+        expect(dialog.result.current.catalog?.entities).toBe(40)
+
+        act(() => finish(answer({ entities: 100 })))
+        await waitFor(() => expect(dialog.result.current.catalog?.entities).toBe(100))
+        expect(tab.result.current.catalog?.entities).toBe(100)
+        expect(searchCatalog).toHaveBeenCalledTimes(2)
+
+        // The read stops only once neither follows it.
+        const signal = () => (searchCatalog.mock.calls[1][1] as { signal: AbortSignal }).signal
+        tab.unmount()
+        expect(signal().aborted).toBe(false)
+        dialog.unmount()
+        expect(signal().aborted).toBe(true)
     })
 
     it("shows a view's last complete catalog at once when it is opened again", async () => {

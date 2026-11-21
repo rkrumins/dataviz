@@ -6,7 +6,7 @@
  * ones, left out, or copied by name.
  */
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Copy, ExternalLink, Filter, Focus, Sparkles, X } from 'lucide-react'
+import { Copy, ExternalLink, Filter, Focus, PencilLine, Sparkles, X } from 'lucide-react'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
@@ -43,6 +43,8 @@ export interface ResultsTableProps {
     onOpen?: (urn: string) => void
     onLookInside: (ancestor: AncestorRef) => void
     onFrame?: (urns: string[]) => void
+    /** Change a property on the picked rows' entities (on the draft). */
+    onEditPicked?: (urns: string[]) => void
     canLoadMore: boolean
     isLoadingMore: boolean
     /** Why the last page failed: the table stops asking by itself and
@@ -56,7 +58,7 @@ export interface ResultsTableProps {
 }
 
 
-export function ResultsTable({ hits, query, draft, onRefine, onReveal, onOpen, onLookInside, onFrame,
+export function ResultsTable({ hits, query, draft, onRefine, onReveal, onOpen, onLookInside, onFrame, onEditPicked,
     canLoadMore, isLoadingMore, loadMoreError, onLoadMore, viewId = null, total = null }: ResultsTableProps) {
     const scrollRef = useRef<HTMLDivElement>(null)
     const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set())
@@ -112,6 +114,9 @@ export function ResultsTable({ hits, query, draft, onRefine, onReveal, onOpen, o
                     <span className="font-medium text-ink">{picked.size.toLocaleString()} picked</span>
                     {onFrame && (
                         <BulkButton icon={Focus} label="Frame on canvas" onClick={() => onFrame([...picked])} />
+                    )}
+                    {onEditPicked && (
+                        <BulkButton icon={PencilLine} label="Edit properties…" onClick={() => onEditPicked([...picked])} />
                     )}
                     <BulkButton icon={Filter} label={picked.size > KEEP_MAX ? `Keep only the first ${KEEP_MAX}` : 'Keep only these'}
                                 onClick={() => onRefine(andWith(draft, { kind: 'is', refs: named }))} />

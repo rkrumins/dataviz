@@ -95,6 +95,7 @@ tests/test_draft_overlay_lazy.py
 tests/test_draft_overlay_paging.py
 tests/test_draft_overlay_revision.py
 tests/test_draft_retention.py
+tests/test_draft_search.py
 tests/test_drafts_policy.py
 tests/test_drift_probe_cost.py
 tests/test_edge_integrity_index.py
@@ -224,6 +225,7 @@ tests/test_projection_single_flight.py
 tests/test_projection_stalled_reconcile.py
 tests/test_projection_verify_unit.py
 tests/test_property_index.py
+tests/test_property_job_plan.py
 tests/test_property_patch.py
 tests/test_provider_failover_pause.py
 tests/test_provider_fleet_admission.py

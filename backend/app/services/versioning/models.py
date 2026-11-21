@@ -606,7 +606,7 @@ class ProjectionStateORM(VersioningBase):
 # An import that holds its draft (``uq_jobs_ingest_active``).
 _INGEST_ACTIVE = "job_type = 'ingest' AND status IN ('pending','running')"
 JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish", "purge",
-             "package_inspect", "fork_update", "fork_merge", "save")
+             "package_inspect", "fork_update", "fork_merge", "save", "property")
 
 
 class ProjectionQuarantineORM(VersioningBase):
@@ -808,8 +808,10 @@ class JobORM(VersioningBase):
             # large draft's publish on the transfer runner; 'purge' = reclaiming a deleted graph
             # (purge_worker); 'package_inspect' = checking an uploaded view package; 'fork_update'
             # and 'fork_merge' = a large Update from parent and a large fork review's merge, on the
-            # transfer runner. Existing DBs are widened by migration (20261008_1000_jobs_check_widen,
-            # 20261101_1000_gv_fork_sync) and, for a separate GRAPHVER_DB_URL alembic never reaches,
+            # transfer runner; 'save' = a draft save sent in parts; 'property' = a bulk property
+            # edit of a draft (import_export.property_job). Existing DBs are widened by migration
+            # (20261008_1000_jobs_check_widen, 20261101_1000_gv_fork_sync,
+            # 20261121_1000_gv_property_jobs) and, for a separate GRAPHVER_DB_URL alembic never reaches,
             # by _ensure_schema_upgrades.
             "job_type IN (" + ",".join(f"'{t}'" for t in JOB_TYPES) + ")",
             name="ck_jobs_type",

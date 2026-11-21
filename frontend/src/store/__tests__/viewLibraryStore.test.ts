@@ -12,12 +12,14 @@ const api = vi.hoisted(() => ({
     orderViewRules: vi.fn(),
     putViewQuery: vi.fn(),
     deleteViewQuery: vi.fn(),
+    putViewRecipe: vi.fn(),
+    deleteViewRecipe: vi.fn(),
 }))
 vi.mock('@/services/viewLibraryService', () => api)
 const queries = vi.hoisted(() => ({ invalidateQueries: vi.fn() }))
 vi.mock('@/lib/queryClient', () => ({ getQueryClient: () => queries }))
 
-import type { SavedViewQuery, ViewLibrary } from '@/services/viewLibraryService'
+import type { BulkRecipe, SavedViewQuery, ViewLibrary } from '@/services/viewLibraryService'
 import type { DisplayRuleConfig } from '@/types/schema'
 
 import { useReferenceModelStore } from '../referenceModelStore'
@@ -31,6 +33,10 @@ const rule = (id: string, over: Partial<DisplayRuleConfig> = {}): DisplayRuleCon
 
 const query = (id: string): SavedViewQuery => ({
     id, name: `Query ${id}`, predicate: { kind: 'hasProperty', key: id },
+})
+
+const recipe = (id: string): BulkRecipe => ({
+    id, name: `Recipe ${id}`, op: { kind: 'remove', key: id }, target: { kind: 'hasKey', key: id, scopeMode: 'view' },
 })
 
 const library = (over: Partial<ViewLibrary> = {}): ViewLibrary => ({
@@ -56,7 +62,7 @@ async function open(over: Partial<ViewLibrary> = {}, branchId: string | null = n
 beforeEach(() => {
     for (const fn of Object.values(api)) fn.mockReset()
     useViewLibraryStore.setState({
-        viewId: null, branchId: null, status: 'idle', error: null, canEdit: false, savedQueries: [],
+        viewId: null, branchId: null, status: 'idle', error: null, canEdit: false, savedQueries: [], bulkRecipes: [],
     })
     useReferenceModelStore.setState({ displayRules: [] })
 })
@@ -219,6 +225,47 @@ describe('saved queries', () => {
         expect(store().savedQueries.map((q) => q.id)).toEqual(['q2'])
         await expect(removing).rejects.toThrow('Service Unavailable')
         await vi.waitFor(() => expect(store().savedQueries.map((q) => q.id)).toEqual(['q1', 'q2']))
+    })
+})
+
+
+describe('bulk recipes', () => {
+    it('loads with the library, and none of one view\'s show on another', async () => {
+        await open({ bulkRecipes: [recipe('r1')] })
+        expect(store().bulkRecipes).toEqual([recipe('r1')])
+        const next = deferred<ViewLibrary>()
+        api.getViewLibrary.mockReturnValueOnce(next.promise)
+        const loading = store().load('v2', null)
+        expect(store().bulkRecipes).toEqual([])
+        next.resolve(library({ viewId: 'v2' }))
+        await loading
+        expect(store().bulkRecipes).toEqual([])
+    })
+
+    it('saves one under a new id and lists it; saved again, it is replaced where it stands', async () => {
+        await open({ bulkRecipes: [recipe('r1')] })
+        api.putViewRecipe.mockImplementation(async (_view: string, id: string, body: object) => ({ id, ...body }))
+        const body = { name: 'Own them', op: { kind: 'set' as const, key: 'owner', value: 'x' }, target: { kind: 'view' as const } }
+        const saved = await store().saveRecipe(body)
+        expect(api.putViewRecipe).toHaveBeenCalledWith('v1', expect.stringMatching(/^recipe/), body)
+        await store().saveRecipe({ ...recipe('r1'), name: 'Renamed' })
+        expect(store().bulkRecipes.map((r) => [r.id, r.name])).toEqual([['r1', 'Renamed'], [saved.id, 'Own them']])
+    })
+
+    it('removes one at once, and brings it back if the server refuses', async () => {
+        await open({ bulkRecipes: [recipe('r1'), recipe('r2')] })
+        api.deleteViewRecipe.mockRejectedValueOnce(new Error('Service Unavailable'))
+        api.getViewLibrary.mockResolvedValueOnce(library({ bulkRecipes: [recipe('r1'), recipe('r2')] }))
+        const removing = store().removeRecipe('r1')
+        expect(store().bulkRecipes.map((r) => r.id)).toEqual(['r2'])
+        await expect(removing).rejects.toThrow('Service Unavailable')
+        await vi.waitFor(() => expect(store().bulkRecipes.map((r) => r.id)).toEqual(['r1', 'r2']))
+    })
+
+    it('says who can change them', async () => {
+        await open({ canEdit: false })
+        await expect(store().saveRecipe({ ...recipe('r1') })).rejects.toThrow(/can't change this view's library/)
+        expect(api.putViewRecipe).not.toHaveBeenCalled()
     })
 })
 

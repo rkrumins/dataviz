@@ -87,7 +87,7 @@ function seed() {
   useCanvasStore.setState({
     nodes, edges,
     _nodeIndex: new Set(nodes.map((n) => n.id)), _edgeIndex: new Set(edges.map((e) => e.id)),
-    drawerNodeId: null, drawerEdge: null, drawerEdgeEditRequest: false,
+    drawerNodeId: null, drawerNodeIds: null, drawerEdge: null, drawerEdgeEditRequest: false,
     drawerHistory: { entries: [], cursor: -1 },
     selectedNodeIds: [], selectedEdgeIds: [], drawerDirty: false, pendingDrawerMove: null,
   } as never)
@@ -151,6 +151,20 @@ describe('the entity drawer at scale', () => {
     commits.count = 0
     unrelatedWrites()
     expect(commits.count).toBe(0)
+  })
+
+  it('comparing 3,000 entities, is not re-rendered by writes to others — and is by a change to one of them', () => {
+    const ids = Array.from({ length: 3000 }, (_, i) => `n${1000 + i}`)
+    act(() => useCanvasStore.getState().openNodesDrawer(ids))
+    const t = performance.now()
+    const { commits } = profiled(<EntityDrawer canEdit />)
+    expect(performance.now() - t).toBeLessThan(2000)
+    expect(screen.getByRole('heading', { name: '3,000 entities' })).toBeInTheDocument()
+    commits.count = 0
+    unrelatedWrites()
+    expect(commits.count).toBe(0)
+    act(() => { useCanvasStore.getState().updateNode('n1500', { properties: { owner: 'bo' } }) })
+    expect(commits.count).toBeGreaterThan(0)
   })
 
   it('re-renders when its own entity changes', () => {

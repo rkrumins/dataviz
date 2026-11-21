@@ -14,6 +14,7 @@
  */
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
+import type { Predicate } from '@/types/search'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { remember, sendNdjsonInParts } from './importExportApiService'
 import { pollJob } from './importExportApiService'
@@ -767,6 +768,54 @@ export class UniqueViolationError extends Error {
   }
 }
 
+/** One property value a publish refused by its entity type's fields: not of the field's type
+ *  (`field_type`), not one of its allowed values (`field_not_allowed`), or a required field left
+ *  without one (`field_required`). `entity_id` is the server's; `urn` and `name` as the entity
+ *  carries them; `reason` says it in a sentence. */
+export interface FieldViolation {
+  entity_id: string
+  kind: 'node'
+  type: string
+  name?: string | null
+  urn?: string | null
+  rule: 'field_type' | 'field_not_allowed' | 'field_required'
+  field: string
+  fieldName?: string
+  value: unknown
+  reason: string
+}
+
+/** How many values a publish refused for one field of one entity type, by one rule — and which:
+ *  `ids`, as a bulk property job's `ids` target names them (the first 20,000), all of them when
+ *  `idsComplete`. */
+export interface FieldViolationCount {
+  entityType: string
+  field: string
+  fieldName?: string
+  rule: FieldViolation['rule']
+  count: number
+  ids?: string[]
+  idsComplete?: boolean
+}
+
+/** A publish refused because property values break the fields their entity types define. Nothing
+ *  was published. `total`: how many there are — `violations` may list fewer; `byField`: how many
+ *  per entity type, field and rule, the most first. */
+export class FieldViolationError extends Error {
+  violations: FieldViolation[]
+  total: number
+  byField: FieldViolationCount[]
+  constructor(violations: FieldViolation[], total?: number, byField?: FieldViolationCount[]) {
+    const n = total ?? violations.length
+    super(`${n === 1 ? 'A value breaks' : `${n} values break`} the fields their entity types define. `
+      + violations.slice(0, 2).map((v) => `${v.name || v.urn || v.entity_id}: ${v.reason}`).join('; '))
+    this.name = 'FieldViolationError'
+    this.violations = violations
+    this.total = n
+    this.byField = byField ?? []
+  }
+}
+
 /** A fork's review merges only up to date with its parent: the parent has changed since the fork
  *  last took its changes, so it updates from its parent first. `behind`: the entities the parent
  *  changed that the fork has not taken in; `graphId`: the fork. Not a draft's NotUpToDateError: a
@@ -996,6 +1045,8 @@ type RefusalDetail = string | {
   branchId?: string
   /** A closed draft's status (`branch_closed`). */
   status?: string
+  /** The job already running (`job_active`). */
+  jobId?: string
   /** Which refusal an `access_denied` is, e.g. `not_draft_owner`. */
   code?: string
   owner?: string
@@ -1018,6 +1069,8 @@ type RefusalDetail = string | {
    *  were when a job kept only the first ones (`fork_update_conflicts`). */
   seeds?: Record<string, Record<string, unknown> | null>
   total?: number
+  /** A field refusal's counts per entity type, field and rule (`field_violation`). */
+  byField?: FieldViolationCount[]
   /** The draft's head now (`head_moved`). */
   headCommitId?: string | null
   /** Whose staged edits could not be saved first (`staged_changes_unsaved`). */
@@ -1044,6 +1097,40 @@ export class DiffTooLargeError extends Error {
   }
 }
 
+/** Another job is already running on the draft (409 `job_active`) — an import, or another bulk
+ *  property change: `jobId` names it, to follow. */
+export class JobActiveError extends Error {
+  readonly status = 409
+  constructor(readonly jobId: string, message?: string) {
+    super(message ?? 'Another change is still being applied to this draft.')
+    this.name = 'JobActiveError'
+  }
+}
+
+/** Why the server won't make a bulk property change as asked (422): `reserved_key`, `same_key`,
+ *  `too_many_ids`, `visible_scope` or `unique_field`. */
+export class PropertyJobRefusedError extends Error {
+  readonly status = 422
+  constructor(readonly code: string, message: string) {
+    super(message)
+    this.name = 'PropertyJobRefusedError'
+  }
+}
+
+const PROPERTY_JOB_REFUSALS = new Set(['reserved_key', 'same_key', 'too_many_ids', 'visible_scope', 'unique_field'])
+
+/** Why a bulk property change can't be undone: `job_published` or `already_undone` (409; `jobId`
+ *  names the undo that did it), `nothing_to_undo` or `undo_of_undo` (422). Another change running on
+ *  the draft is a {@link JobActiveError}. */
+export class PropertyJobUndoRefusedError extends Error {
+  constructor(readonly status: number, readonly code: string, message: string, readonly jobId?: string) {
+    super(message)
+    this.name = 'PropertyJobUndoRefusedError'
+  }
+}
+
+const UNDO_REFUSALS = new Set(['job_published', 'already_undone', 'nothing_to_undo', 'undo_of_undo'])
+
 /** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
  *  from the request or from a job the request queued (a large draft's publish). */
 function versioningError(status: number, detail: RefusalDetail, fallback: string): Error {
@@ -1060,6 +1147,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && d?.type === 'unique_violation') {
     return new UniqueViolationError((d.violations ?? []) as unknown as UniqueViolation[], d.total)
+  }
+  if (status === 409 && d?.type === 'field_violation') {
+    return new FieldViolationError((d.violations ?? []) as unknown as FieldViolation[], d.total, d.byField)
   }
   if (status === 409 && d?.type === 'not_up_to_date' && d.reason === 'parent_moved') {
     return new ForkNotUpToDateError(d)
@@ -1096,6 +1186,15 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && d?.type === 'graph_not_writable') {
     return new GraphNotWritableError(d.message)
+  }
+  if (status === 409 && d?.type === 'job_active' && d.jobId) {
+    return new JobActiveError(d.jobId, d.message)
+  }
+  if (status === 422 && d?.code && PROPERTY_JOB_REFUSALS.has(d.code)) {
+    return new PropertyJobRefusedError(d.code, d.message ?? fallback)
+  }
+  if ((status === 409 || status === 422) && d?.code && UNDO_REFUSALS.has(d.code)) {
+    return new PropertyJobUndoRefusedError(status, d.code, d.message ?? fallback, d.jobId)
   }
   if (status === 409 && d?.type === 'pull_request_exists') {
     return new PullRequestExistsError(d as { prId: string })
@@ -1920,6 +2019,238 @@ export async function saveGraphChangesInParts(
   if (job.status === 'completed' && job.result) return job.result
   throw versioningError(job.error?.status ?? 500, job.error?.detail ?? 'The save did not finish. Save again.',
     'The save did not finish. Save again.')
+}
+
+// ============================================
+// Bulk property changes — one operation on every entity a target reaches, applied to a draft by a
+// job on the server (a window of entities per commit), followed here until it ends.
+// ============================================
+
+export type PropertyOpKind = 'set' | 'fillEmpty' | 'remove' | 'rename' | 'copy'
+  | 'replace' | 'normalize' | 'mapValues' | 'convert'
+
+/** A kind a value is stored as, as the property catalog names it. */
+export type ValueKind = 'Integer' | 'Float' | 'String' | 'Boolean'
+
+/** One value a merge turns into another — each with the kind it is stored as (JSON writes the
+ *  decimal 1.0 as 1, so the kind says which one is meant). */
+export interface ValueMapping {
+  from: unknown
+  fromKind?: ValueKind
+  to: unknown
+  toKind?: ValueKind
+}
+
+export interface PropertyJobOp {
+  /** `undo`: it puts back what another change (`sourceJobId`, named `sourceLabel`) wrote. */
+  kind: PropertyOpKind | 'undo'
+  key: string
+  /** The new name — rename and copy. */
+  to?: string
+  /** The value — set and fill. */
+  value?: unknown
+  /** Where an entity already holds `to`: leave it (`skip`) or replace its value. */
+  onConflict?: 'skip' | 'overwrite'
+  /** Replace: the text to find (in any case unless `matchCase`; the whole value with `wholeValue`). */
+  find?: string
+  replaceWith?: string
+  matchCase?: boolean
+  wholeValue?: boolean
+  /** Normalize: trim, collapse runs of spaces, one case; in lists, each value once. */
+  trim?: boolean
+  collapseSpaces?: boolean
+  case?: 'lower' | 'upper' | 'title' | null
+  dedupeList?: boolean
+  /** Merge values: each value named becomes its `to` (at most 1,000). */
+  map?: ValueMapping[]
+  /** Convert: the kind every value is stored as; one that won't convert is left (`skip`) or removed. */
+  toKind?: ValueKind
+  onFail?: 'skip' | 'remove'
+  /** Undo: the change it undoes, and what that one did. */
+  sourceJobId?: string
+  sourceLabel?: string
+}
+
+/** Which entities: named ones, or every entity criteria match — in the view, or the whole data source.
+ *  Relationships: named ones (`edgeIds`: an edge's own id, or `source|TYPE|target`), or every one a
+ *  Connections search (an `edges` predicate) matches. */
+export type PropertyJobTarget =
+  | { ids: string[] }
+  | { edgeIds: string[] }
+  | { viewId: string; predicate: Predicate; scopeMode: 'view' | 'data_source' }
+
+export interface PropertyJobSummary {
+  changed: number
+  unchanged: number
+  /** Not in the draft. */
+  missing: number
+  deletedInDraft: number
+  /** A rename or copy onto a name an entity already held, left alone. */
+  conflicts: number
+  /** A convert's values that weren't of the kind asked for — left as they were, or removed. */
+  unconvertible: number
+  /** A search target's matches the draft has changed so the search no longer matches them, left alone. */
+  noLongerMatches?: number
+  /** An undo's entities changed again since the change it undoes, left as they are. */
+  changedSince?: number
+  /** Every target not written as asked — by reason: `missing`, `deleted_in_draft`, `conflict`,
+   *  `unconvertible`, `no_longer_matches`, `changed_since` and `write_refused` (the write gate turned
+   *  it away). Its rows download as a CSV. */
+  refused: { count: number; byReason: Record<string, number>; examples: Array<Record<string, unknown>> }
+  commits: number
+  firstCommitId?: string | null
+  lastCommitId?: string | null
+  cancelled?: boolean
+  /** The publish that took what it changed to Published (and lists it in its audit). */
+  publishedCommitId?: string | null
+  /** Reviews merged in part that took some of what it changed to Published. */
+  landedCommitIds?: string[]
+  /** A search target: whether its matches were checked again on the draft's values, and why not. */
+  recheck?: { exact: boolean; note: string | null }
+  /** The undo that put back what it wrote. */
+  undoneBy?: string | null
+}
+
+export interface PropertyJob {
+  jobId: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  phase?: string | null
+  /** 0–1. */
+  progress?: number | null
+  processed?: number | null
+  total?: number | null
+  error?: string | { code?: string; message?: string } | null
+  summary?: Partial<PropertyJobSummary> | null
+  op?: PropertyJobOp
+  /** What it was started on: named ones (how many), or a search's matches. */
+  target?: { kind: 'ids'; count?: number } | { kind: 'predicate'; scopeMode?: string } | null
+  /** `edge`: it edits relationships. */
+  entityKind?: 'node' | 'edge'
+  branchId?: string
+  createdAt?: string
+}
+
+export interface PropertyNameBudget {
+  registered: number | null
+  nativeBudget: number | null
+  ceiling: number
+  isNew: boolean | null
+  /** `raw`: past the native budget, kept as raw JSON (not searchable by value). */
+  verdict: 'ok' | 'raw' | 'refused'
+}
+
+export interface PropertyJobPreview {
+  refusal: { code: string; message: string } | null
+  nameBudget: PropertyNameBudget | null
+  activeJobId: string | null
+  /** Exact, read from the draft — for a target of named entities only: what they hold, how many
+   *  the change would change, how many hold a value a convert can't convert, and `derived`: the
+   *  roll-ups among named relationships, which are never edited. */
+  counts: {
+    matched: number; haveKey: number; haveTo: number | null; missing: number
+    wouldChange?: number; unconvertible?: number | null; derived?: number
+  } | null
+  /** What it would leave that publishing the draft refuses (the entity types' fields) — said,
+   *  never a refusal: the change applies all the same. */
+  warnings?: PropertyJobWarning[]
+}
+
+/** One thing a bulk change would leave that a publish refuses, per entity type defining the key. */
+export interface PropertyJobWarning {
+  code: 'field_type' | 'field_not_allowed' | 'field_required' | 'field_checked'
+  entityType: string
+  field: string
+  message: string
+}
+
+const propertyJobs = (wsId: string, graphId: string) => `${base(wsId)}/graphs/${graphId}/property-jobs`
+
+/** What applying `op` to `target` on the draft would meet, before it is applied. */
+export function previewPropertyJob(
+  wsId: string, graphId: string, branchId: string, op: PropertyJobOp, target: PropertyJobTarget, signal?: AbortSignal,
+): Promise<PropertyJobPreview> {
+  return vfetch<PropertyJobPreview>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/property-jobs/preview`, {
+    method: 'POST', body: JSON.stringify({ op, target }), signal,
+  })
+}
+
+/** Start applying `op` to `target` on the draft. The same key answers with the same job, so a
+ *  retried request never applies it twice. */
+export function createPropertyJob(
+  wsId: string, graphId: string, branchId: string, op: PropertyJobOp, target: PropertyJobTarget,
+  idempotencyKey: string, message?: string,
+): Promise<PropertyJob> {
+  return vfetch<PropertyJob>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/property-jobs`, {
+    method: 'POST', body: JSON.stringify({ op, target, ...(message ? { message } : {}) }),
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
+}
+
+export function getPropertyJob(wsId: string, graphId: string, jobId: string, signal?: AbortSignal): Promise<PropertyJob> {
+  return vfetch<PropertyJob>(`${propertyJobs(wsId, graphId)}/${jobId}`, { signal })
+}
+
+/** Stop it at its next window. What it already applied stays on the draft. */
+export function cancelPropertyJob(wsId: string, graphId: string, jobId: string): Promise<PropertyJob> {
+  return vfetch<PropertyJob>(`${propertyJobs(wsId, graphId)}/${jobId}/cancel`, { method: 'POST' })
+}
+
+/** Undo a change that has ended: what it wrote is put back on the draft by another change, returned
+ *  to follow. The same key answers with the same undo. Refused as a {@link JobActiveError}, a
+ *  {@link BranchClosedError} or a {@link PropertyJobUndoRefusedError}. */
+export function undoPropertyJob(wsId: string, graphId: string, jobId: string, idempotencyKey: string): Promise<PropertyJob> {
+  return vfetch<PropertyJob>(`${propertyJobs(wsId, graphId)}/${jobId}/undo`, {
+    method: 'POST', headers: { 'Idempotency-Key': idempotencyKey },
+  })
+}
+
+/** The entities it could not change, and why — a CSV to download. */
+export const refusedPropertyJobUrl = (wsId: string, graphId: string, jobId: string) =>
+  `${propertyJobs(wsId, graphId)}/${jobId}/refused?format=csv`
+
+/** A relationship to read: its id — and, for one the canvas names by another id, its ends and type. */
+export interface EdgeReadRef { id: string; source?: string; target?: string; edgeType?: string }
+
+/** A relationship as the line being read has it, with the token an edit of it is sent with. */
+export interface EdgeRecord {
+  /** The ref's id, as asked. */
+  id: string
+  /** The versioned entity id — what an edit addresses. */
+  entityId: string
+  version: string | null
+  edgeType: string
+  sourceEntityId: string
+  targetEntityId: string
+  confidence?: number | null
+  properties: Record<string, unknown>
+}
+
+export interface EdgeReadResult {
+  edges: EdgeRecord[]
+  /** Refs whose relationship this draft deleted. */
+  deleted: string[]
+  /** Refs that name no relationship here. */
+  missing: string[]
+}
+
+/** The most relationships one read names. */
+export const EDGE_READ_MAX = 1000
+
+/** Several relationships at once, as main — or the open draft — has them (`POST …/edges/read`). */
+export function readEdges(
+  wsId: string, graphId: string, branchId: string | null | undefined, refs: EdgeReadRef[], signal?: AbortSignal,
+): Promise<EdgeReadResult> {
+  const qs = branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''
+  return vfetch<EdgeReadResult>(`${base(wsId)}/graphs/${graphId}/edges/read${qs}`, {
+    method: 'POST', body: JSON.stringify({ refs }), signal,
+  })
+}
+
+/** Follow a job until it ends — through blips, and paused while the tab is hidden. */
+export function followPropertyJob(
+  wsId: string, graphId: string, jobId: string, onTick: (job: PropertyJob) => void, signal?: AbortSignal,
+): Promise<PropertyJob> {
+  return pollJob(() => getPropertyJob(wsId, graphId, jobId, signal), { onTick, signal })
 }
 
 /**

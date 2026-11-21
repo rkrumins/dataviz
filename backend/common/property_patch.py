@@ -16,6 +16,11 @@ value drops them; a full payload (a create) never carries one.
 Every property written through here that holds a date or a moment is stored one way
 (``backend.common.moments``): a date as ``YYYY-MM-DD``, a moment in UTC as
 ``YYYY-MM-DDTHH:MM:SSZ`` — however a client, a spreadsheet or the API wrote it.
+
+A value sent back in a lossier form keeps the stored one (``typed_merge.preserve_stored_type``),
+unless the write is ``exact``: a bulk property job's, whose values the server computed from what is
+stored and whose kind is the one asked for (``convert`` writes 42 over "42", ``set`` 1 over 1.0).
+Dates and moments are stored one way all the same.
 """
 from __future__ import annotations
 
@@ -87,43 +92,45 @@ def normalize_update(payload: Optional[Mapping], unset: Optional[Iterable[str]])
     return patch
 
 
-def apply_patch(base: Optional[Mapping], patch: Mapping) -> dict:
+def apply_patch(base: Optional[Mapping], patch: Mapping, *, exact: bool = False) -> dict:
     """Apply a partial update onto a concrete value.
 
     Top-level fields override; ``properties`` is merged one level deep; a
     property marked :data:`PROP_DELETE` is removed. The result never carries the
     marker. A key the base already has keeps its stored value when the patch sends
-    the same value back in a lossier form (``typed_merge.preserve_stored_type``).
+    the same value back in a lossier form (``typed_merge.preserve_stored_type``) —
+    unless ``exact``, which writes each value as sent (see the module docstring).
     """
     base = dict(base or {})
     out = {**base, **dict(patch)}
     if patch.get("properties") is not None or base.get("properties") is not None:
-        out["properties"] = {k: v for k, v in _merge_props(base, patch).items()
+        out["properties"] = {k: v for k, v in _merge_props(base, patch, exact).items()
                              if not _is_delete(v)}
     return out
 
 
-def compose_patches(first: Mapping, second: Mapping) -> dict:
+def compose_patches(first: Mapping, second: Mapping, *, exact: bool = False) -> dict:
     """Two patches to one entity, in order, as one patch.
 
     The second's top-level fields win. Property entries merge with the second
     winning — KEEPING removal markers, so a removal in the first survives, and a
     value set by the second re-adds a property the first removed. A value the
-    second re-sends in a lossier form keeps the first's, as two saves in turn would.
+    second re-sends in a lossier form keeps the first's, as two saves in turn would
+    (unless ``exact``).
     """
     out = {**dict(first), **dict(second)}
     if first.get("properties") is not None or second.get("properties") is not None:
-        out["properties"] = _merge_props(first, second)
+        out["properties"] = _merge_props(first, second, exact)
     return out
 
 
-def _merge_props(base: Mapping, patch: Mapping) -> dict:
+def _merge_props(base: Mapping, patch: Mapping, exact: bool = False) -> dict:
     """``base``'s properties with ``patch``'s merged over them, key by key."""
     before = base.get("properties") or {}
     merged = dict(before)
     for k, v in (patch.get("properties") or {}).items():
         v = canonical(v) if isinstance(v, str) else v          # a date or moment, stored one way
-        merged[k] = preserve_stored_type(before[k], v) if k in before else v
+        merged[k] = preserve_stored_type(before[k], v) if k in before and not exact else v
     return merged
 
 

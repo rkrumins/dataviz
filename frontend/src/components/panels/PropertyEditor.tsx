@@ -71,6 +71,9 @@ import { detectValue, parsePastedLines, rankSuggestions, type PastedProperty, ty
 import { useRecentPropertyKeys } from '@/store/recentPropertyKeys'
 import { usePersonaMode } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
+import { fieldWarning } from '@/lib/fieldRules'
+import { GovernedFieldsContext, type GovernedFields } from './property/governedFields'
+import { AllowedValuePicker, FieldNote } from './property/FieldGovernance'
 
 // ============================================
 // Types
@@ -126,6 +129,9 @@ export interface PropertyEditorProps {
   featuredKeys?: readonly string[]
   /** Feature a property at a glance, or stop — offered on each row. */
   onToggleFeatured?: (key: string) => void
+  /** The entity type's fields a publish judges: their rows offer the allowed values and, edited,
+   *  warn of a value publishing would refuse (a removed required one too). Never a block. */
+  governed?: GovernedFields | null
 }
 
 const MAX_DEPTH = 6
@@ -171,13 +177,16 @@ export function PropertyEditor({
   sectionsKey,
   featuredKeys,
   onToggleFeatured,
+  governed = null,
 }: PropertyEditorProps) {
   return (
     <InlineModeContext.Provider value={!!inline && !readOnly}>
-      <PropertyEditorRoot value={value} onChange={onChange} readOnlyKeys={readOnlyKeys} bare={bare} readOnly={readOnly}
-        searchable={searchable} groupByPath={groupByPath} original={original} published={published}
-        startAdding={startAdding} suggestions={suggestions} sectionsKey={sectionsKey}
-        featuredKeys={featuredKeys} onToggleFeatured={onToggleFeatured} />
+      <GovernedFieldsContext.Provider value={governed}>
+        <PropertyEditorRoot value={value} onChange={onChange} readOnlyKeys={readOnlyKeys} bare={bare} readOnly={readOnly}
+          searchable={searchable} groupByPath={groupByPath} original={original} published={published}
+          startAdding={startAdding} suggestions={suggestions} sectionsKey={sectionsKey}
+          featuredKeys={featuredKeys} onToggleFeatured={onToggleFeatured} />
+      </GovernedFieldsContext.Provider>
     </InlineModeContext.Provider>
   )
 }
@@ -197,7 +206,7 @@ function PropertyEditorRoot({
   sectionsKey,
   featuredKeys,
   onToggleFeatured,
-}: Omit<PropertyEditorProps, 'inline'>) {
+}: Omit<PropertyEditorProps, 'inline' | 'governed'>) {
   const rootKind = kindOf(value)
 
   // If the root isn't an object/array, render a single value editor.
@@ -601,6 +610,8 @@ interface PropertyRowProps {
   featured?: boolean
   /** Feature it at a glance, or stop. */
   onToggleFeatured?: () => void
+  /** The property's whole key, when the entity type's fields may govern it (`governed`). */
+  governKey?: string
 }
 
 /** A key as stored. A flat key's folders (`Technical/Physical/`) read quieter than its own name;
@@ -651,8 +662,14 @@ const PropertyRow = memo(function PropertyRow({
   onRevert,
   featured,
   onToggleFeatured,
+  governKey,
 }: PropertyRowProps) {
   const inline = useContext(InlineModeContext)
+  const governed = useContext(GovernedFieldsContext)
+  // A field of the entity's type: edited, its allowed values are offered, and a value the draft
+  // gives it (a marked row) that publishing would refuse is said under it.
+  const rule = governKey && !readOnly ? governed?.fields.get(governKey) : undefined
+  const warning = rule && mark ? fieldWarning(rule, value, governed!.typeLabel) : null
   const fieldType = inferFieldType(value)
   const isContainer = fieldType === 'group' || fieldType === 'list'
   // Long text takes the row's whole width, under its key: a paragraph squeezed beside the key
@@ -794,6 +811,10 @@ const PropertyRow = memo(function PropertyRow({
               </span>
             </HoverTip>
           )}
+          {rule && (rule.allowedValues?.length ?? 0) > 0 && (
+            <AllowedValuePicker field={rule} value={value} label={rule.name || rowKey} onPick={onValueChange} className="mt-1" />
+          )}
+          {warning && <FieldNote className="mt-1">{warning}</FieldNote>}
         </div>
 
         {/* Inline, the row reads as a value: its type and actions float over its end when you
@@ -1173,7 +1194,7 @@ function FieldTypeChip({
 // PropertyComposer — guided add: key + type + value in one step
 // ============================================
 
-function PropertyComposer({
+export function PropertyComposer({
   onAdd,
   onCancel,
   existingKeys,
@@ -2257,6 +2278,13 @@ function RemovedRows({ rows, onRestore, unsaved }: {
   onRestore?: (key: string) => void
   unsaved?: ReadonlySet<string>
 }) {
+  // A required field removed: publishing refuses the entity until it has one again.
+  const governed = useContext(GovernedFieldsContext)
+  const warnings = onRestore && governed ? rows.flatMap(([key]) => {
+    const rule = governed.fields.get(key)
+    const warning = rule ? fieldWarning(rule, undefined, governed.typeLabel) : null
+    return warning ? [warning] : []
+  }) : []
   if (rows.length === 0) return null
   return (
     <div className="space-y-1 pt-1">
@@ -2279,6 +2307,7 @@ function RemovedRows({ rows, onRestore, unsaved }: {
           </button>}
         </div>
       ))}
+      {warnings.map((w) => <FieldNote key={w} className="pl-5">{w}</FieldNote>)}
     </div>
   )
 }
@@ -2326,6 +2355,7 @@ const LeafRow = memo(function LeafRow({
       onRevert={mark && !readOnly ? () => api.revert(leaf.fullKey) : undefined}
       featured={featured}
       onToggleFeatured={canFeature ? () => api.toggleFeatured(leaf.fullKey) : undefined}
+      governKey={leaf.fullKey}
     />
   )
 }, (prev, next) =>

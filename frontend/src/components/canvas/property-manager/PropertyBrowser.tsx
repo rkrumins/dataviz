@@ -10,16 +10,27 @@
  * being read, the tab shows what has been read so far and how far the read
  * has got.
  *
- * Lifecycle operations are staged IN-SESSION (``propertyDraftStore``) and
- * surfaced optimistically over the catalogue — there is no backend
- * node-property write yet, so the copy makes clear nothing is persisted.
- * They are offered only where an entity edit could be kept, in a draft
- * (``useEntityEditing``); elsewhere they are disabled and say why.
+ * A property is changed in bulk — set, filled, renamed, copied, removed — through
+ * the one guided dialog (``requestOp``), applied to the draft by a job on the
+ * server; the draft's jobs are listed with how far each has got and what it
+ * did, and their properties are marked in the list. Changes kept to run again
+ * are listed under Recipes (``RecipesPanel``). Changes are offered only
+ * where an entity edit could be kept, in a draft (``useEntityEditing``);
+ * elsewhere they are disabled and say why. With several entities selected on
+ * the canvas, it offers to compare and edit them in the entity drawer.
+ *
+ * "Make it a field…" promotes a property to a field of the entity types that carry it, in the
+ * data source's semantic layer (``PromoteFieldDialog``) — offered to who may edit the layer.
+ *
+ * Its values are cleaned up the same way: **Clean up…** on a property, **Merge
+ * similar values…** where values differ only in case or spaces, **Convert all
+ * to …** where a property is stored as several kinds, and **Merge into…** for
+ * values picked from its value bars.
  */
 import { motion } from 'framer-motion'
 import {
-    AlertTriangle, ArrowDownWideNarrow, ChevronRight, CircleSlash, Copy, Database, Layers, Loader2,
-    Pencil, Plus, ScanSearch, Search, Sparkles, Tag, Tags, Trash2, Undo2,
+    AlertTriangle, ArrowDownWideNarrow, ArrowRightLeft, ChevronRight, CircleSlash, Combine, Copy, CopyPlus, Database, Layers, ListChecks, Loader2,
+    Pencil, Plus, ScanSearch, Search, Sparkles, Tag, Tags, Trash2, WandSparkles,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
@@ -27,18 +38,25 @@ import { cn } from '@/lib/utils'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
+import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
 import { useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
+import { useCurrentBranchId, useGraphId } from '@/store/branchStore'
+import { useCanvasStore } from '@/store/canvas'
 import {
-    usePropertyCatalogOverlay, usePropertyDraftStore, usePropertyOps,
-    type CatalogOverlayEntry, type PropertyOp,
-} from '@/store/propertyDraftStore'
+    useDraftPropertyJobs, usePropertyCatalogOverlay, usePropertyJobsStore, type CatalogOverlayEntry, type OpRequest,
+} from '@/store/propertyJobsStore'
+import type { ValueKind, ValueMapping } from '@/services/versioningApiService'
 import type { Predicate, SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
 
 import { fieldClass } from '../search/builder/editors/shared'
 
+import { similarGroups } from './op/cleanup'
 import { PropertyInsightsHeader } from './PropertyInsightsHeader'
-import { PropertyOperationDialog, type PropertyDialogMode } from './PropertyOperationDialog'
+import { PropertyJobsPanel } from './PropertyJobsPanel'
+import { PromoteFieldDialog } from './PromoteFieldDialog'
+import { RecipesPanel } from './RecipesPanel'
 import { RankedValueBars, UsageGauge } from './PropertyInsightCharts'
 import { EntityTypeChips, SampleValueChips, TypeTile } from './PropertyValueChips'
 import { KIND_LABEL, storedType } from './propertyValueTypes'
@@ -46,8 +64,6 @@ import { KIND_LABEL, storedType } from './propertyValueTypes'
 
 export interface PropertyBrowserProps {
     viewId: string
-    knownEntityTypes: string[]
-    knownLayers: string[]
     onCreateRuleFromPredicate: (predicate: Predicate, suggestedName: string) => void
     /** Open + run a predicate in the Advanced Search panel (canvas-owned). */
     onSearchPredicate?: (predicate: Predicate) => void
@@ -56,7 +72,6 @@ export interface PropertyBrowserProps {
 /** A bound "search this in Advanced Search" callback passed to rows. */
 export type SearchHandler = (predicate: Predicate, label: string) => void
 
-type DialogState = { mode: PropertyDialogMode; key?: string } | null
 type SortMode = 'usage' | 'name'
 
 /** Rows drawn at first, and added per "Show more" — a view can carry
@@ -65,7 +80,7 @@ const ROWS_PAGE = 100
 
 
 export function PropertyBrowser({
-    viewId, knownEntityTypes, knownLayers, onCreateRuleFromPredicate, onSearchPredicate,
+    viewId, onCreateRuleFromPredicate, onSearchPredicate,
 }: PropertyBrowserProps) {
     const { notify } = useAppNotifications()
     // Open + run a constructed predicate in the real Advanced Search panel.
@@ -85,38 +100,48 @@ export function PropertyBrowser({
     const { catalog, reading, error, unavailable, refresh } = usePropertyCatalog(viewId)
     const [query, setQuery] = useState('')
     const [sort, setSort] = useState<SortMode>('usage')
-    const [dialog, setDialog] = useState<DialogState>(null)
     const [shown, setShown] = useState(ROWS_PAGE)
 
-    const pendingOps = usePropertyOps()
-    const overlay = usePropertyCatalogOverlay()
+    // The draft's bulk changes — running and ended — and what they do to each property.
+    const jobs = useDraftPropertyJobs(useGraphId(), useCurrentBranchId())
+    const overlay = usePropertyCatalogOverlay(jobs)
     // Where editing isn't offered the change actions go; where it is but
     // can't be kept yet, they stay disabled with the reason.
     const editing = useEntityEditing()
-    const change = (mode: PropertyDialogMode, key?: string) =>
-        editing.offered ? () => setDialog({ mode, key }) : undefined
+    const change = (request: OpRequest) =>
+        editing.offered ? () => usePropertyJobsStore.getState().requestOp(request) : undefined
+    const selected = useCanvasStore((s) => s.selectedNodeIds.filter((id) => !id.startsWith('logical:')).length)
+    // A property made a field of its types, in the semantic layer — by who may edit the layer.
+    const canEditLayer = useSemanticLayerAccess().canEdit
+    const [promoting, setPromoting] = useState<SearchCatalogProperty | null>(null)
 
     const properties = useMemo(() => catalog?.properties ?? [], [catalog])
     const tags = useMemo(() => catalog?.tags ?? [], [catalog])
     const entities = catalog?.entities ?? 0
 
     const knownKeys = useMemo(() => new Set(properties.map((p) => p.key)), [properties])
-    const pendingNewKeys = useMemo(
-        () => [...overlay.keys()].filter(
-            (k) => !knownKeys.has(k) && (overlay.get(k)!.kinds.has('set') || overlay.get(k)!.kinds.has('fillEmpty')),
-        ).sort(),
-        [overlay, knownKeys],
-    )
-    // The value a staged-new property will be set to (for its preview chip).
+    // Properties a change on the draft gives entities that none held before (a set, a fill, or the
+    // new name of a rename or a copy). The catalog is the draft's, so each joins it with its real
+    // counts as the change's first batch lands; until then it is shown here, as what is coming.
+    const pendingNewKeys = useMemo(() => {
+        const keys = new Set<string>()
+        for (const t of jobs) {
+            if (t.job?.status === 'failed' || t.job?.status === 'cancelled') continue
+            const k = t.op.kind === 'rename' || t.op.kind === 'copy' ? t.op.to : t.op.kind === 'remove' ? undefined : t.op.key
+            if (k && !knownKeys.has(k)) keys.add(k)
+        }
+        return [...keys].sort()
+    }, [jobs, knownKeys])
+    // The value a new property is set to (for its preview chip).
     const stagedValueByKey = useMemo(() => {
         const m = new Map<string, string>()
-        for (const op of pendingOps) {
-            if ((op.kind === 'set' || op.kind === 'fillEmpty') && op.value !== undefined && !m.has(op.key)) {
-                m.set(op.key, String(op.value))
+        for (const t of jobs) {
+            if ((t.op.kind === 'set' || t.op.kind === 'fillEmpty') && t.op.value !== undefined && !m.has(t.op.key)) {
+                m.set(t.op.key, String(t.op.value))
             }
         }
         return m
-    }, [pendingOps])
+    }, [jobs])
 
     const q = query.trim().toLowerCase()
     // The catalog lists keys most-carried first; A–Z is the other order.
@@ -131,17 +156,6 @@ export function PropertyBrowser({
     const filteredTags = useMemo(
         () => (q ? tags.filter((t) => t.tag.toLowerCase().includes(q)) : tags),
         [tags, q],
-    )
-
-    const dialogEl = dialog && (
-        <PropertyOperationDialog
-            viewId={viewId}
-            mode={dialog.mode}
-            initialKey={dialog.key}
-            knownEntityTypes={knownEntityTypes}
-            knownLayers={knownLayers}
-            onClose={() => setDialog(null)}
-        />
     )
 
     if (unavailable) {
@@ -176,9 +190,9 @@ export function PropertyBrowser({
     if (nothingFound) {
         return (
             <div className="flex flex-col gap-3">
-                {pendingOps.length > 0 && <PendingChanges ops={pendingOps} />}
-                <EmptyHero onNew={change('create')} blocked={editing.blocked} />
-                {dialogEl}
+                <PropertyJobsPanel jobs={jobs} />
+                <RecipesPanel viewId={viewId} />
+                <EmptyHero onNew={change({})} blocked={editing.blocked} />
             </div>
         )
     }
@@ -189,7 +203,23 @@ export function PropertyBrowser({
         <div className="flex flex-col gap-3">
             <PropertyInsightsHeader catalog={catalog} reading={reading} error={error} onRefresh={refresh} />
 
-            {pendingOps.length > 0 && <PendingChanges ops={pendingOps} />}
+            <PropertyJobsPanel jobs={jobs} />
+            <RecipesPanel viewId={viewId} />
+
+            {selected >= 2 && (
+                <button
+                    type="button"
+                    onClick={() => useCanvasStore.getState().openNodesDrawer(useCanvasStore.getState().selectedNodeIds)}
+                    className="flex items-center gap-3 rounded-2xl border border-accent-lineage/30 bg-accent-lineage/[0.06] px-3.5 py-2.5 text-left hover:bg-accent-lineage/[0.1] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                >
+                    <Layers className="w-4 h-4 text-accent-lineage shrink-0" aria-hidden />
+                    <span className="flex-1 min-w-0">
+                        <span className="block text-[12.5px] font-semibold text-ink">{selected.toLocaleString()} selected on the canvas</span>
+                        <span className="block text-[11px] text-ink-muted">Compare their properties — and change them together</span>
+                    </span>
+                    <ChevronRight className="w-3.5 h-3.5 text-accent-lineage shrink-0" aria-hidden />
+                </button>
+            )}
 
             {/* Toolbar: filter + sort + New */}
             <div className="flex items-center gap-2">
@@ -207,13 +237,13 @@ export function PropertyBrowser({
                 <SortToggle sort={sort} onChange={setSort} />
                 {editing.offered && (
                     <HoverTip
-                        label="Define a new property and apply it to matched entities"
-                        detail={editing.blocked ?? undefined}
+                        label="Change a property on many entities"
+                        detail={editing.blocked ?? 'Set, fill, rename, copy or remove it — on a layer, inside a container, a search’s matches, or the whole view'}
                         className="shrink-0 inline-flex"
                     >
                         <button
                             type="button"
-                            onClick={() => setDialog({ mode: 'create' })}
+                            onClick={() => usePropertyJobsStore.getState().requestOp({})}
                             disabled={!!editing.blocked}
                             className="inline-flex items-center gap-1.5 px-2.5 h-9 rounded-lg text-[12px] font-semibold bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30 transition-colors disabled:opacity-50 disabled:shadow-none disabled:hover:bg-accent-lineage"
                         >
@@ -235,8 +265,8 @@ export function PropertyBrowser({
                                 key={`new-${key}`}
                                 propertyKey={key}
                                 stagedValue={stagedValueByKey.get(key)}
-                                onUpdate={change('update', key)}
-                                onRemove={change('remove', key)}
+                                onUpdate={change({ kind: 'set', key })}
+                                onRemove={change({ kind: 'remove', key })}
                                 blocked={editing.blocked}
                                 onCreateRule={() => onCreateRuleFromPredicate({ kind: 'hasProperty', key, negate: false }, key)}
                             />
@@ -249,12 +279,19 @@ export function PropertyBrowser({
                                 exact={catalog.status === 'complete'}
                                 onSearch={search}
                                 overlay={overlay.get(property.key)}
-                                onUpdate={change('update', property.key)}
-                                onRemove={change('remove', property.key)}
+                                onUpdate={change({ kind: 'set', key: property.key })}
+                                onDuplicate={change({ kind: 'copy', key: property.key })}
+                                onRemove={change({ kind: 'remove', key: property.key })}
+                                onCleanUp={change({ kind: 'normalize', key: property.key })}
+                                onMerge={editing.offered ? (map) => usePropertyJobsStore.getState().requestOp(
+                                    { kind: 'mapValues', key: property.key, ...(map ? { map } : {}) }) : undefined}
+                                onConvert={editing.offered ? (toKind) => usePropertyJobsStore.getState().requestOp(
+                                    { kind: 'convert', key: property.key, toKind }) : undefined}
                                 blocked={editing.blocked}
                                 onCreateRule={() => onCreateRuleFromPredicate(
                                     { kind: 'hasProperty', key: property.key, negate: false }, property.key)}
                                 onCopy={() => copyKey(property.key)}
+                                onPromote={canEditLayer ? () => setPromoting(property) : undefined}
                             />
                         ))}
                     </div>
@@ -302,7 +339,12 @@ export function PropertyBrowser({
                 </div>
             )}
 
-            {dialogEl}
+            {promoting && (
+                <PanelErrorBoundary resetKeys={[promoting.key]} onClose={() => setPromoting(null)}>
+                    <PromoteFieldDialog property={promoting} onClose={() => setPromoting(null)} />
+                </PanelErrorBoundary>
+            )}
+
         </div>
     )
 }
@@ -370,78 +412,11 @@ function EmptyHero({ onNew, blocked }: { onNew?: () => void; blocked: string | n
                 <div className="text-[15px] font-display font-semibold text-ink">Manage properties for this view</div>
                 <p className="mt-1 text-[12px] text-ink-muted leading-snug max-w-[280px]">
                     Define a property and roll it out to every matched entity, audit how existing
-                    ones are used, and clean up in bulk. Changes stage in-session — nothing is saved yet.
+                    ones are used, and clean up in bulk — on your draft, however many entities.
                 </p>
             </div>
             {cta && (blocked ? <HoverTip label={blocked} className="relative inline-flex">{cta}</HoverTip> : cta)}
         </motion.div>
-    )
-}
-
-
-// ---------------------------------------------------------------------------
-// Pending changes review
-// ---------------------------------------------------------------------------
-
-function opSummary(op: PropertyOp): string {
-    const n = `${op.targetCount} ${op.targetCount === 1 ? 'entity' : 'entities'}`
-    switch (op.kind) {
-        case 'set': return `Set ${op.key} = ${String(op.value)} · ${n}`
-        case 'fillEmpty': return `Fill ${op.key} (if empty) = ${String(op.value)} · ${n}`
-        case 'rename': return `Rename ${op.key} → ${op.newKey} · ${n}`
-        case 'remove': return `Remove ${op.key} · ${n}`
-    }
-}
-
-function PendingChanges({ ops }: { ops: PropertyOp[] }) {
-    const [open, setOpen] = useState(false)
-    const removeOp = usePropertyDraftStore((s) => s.removeOp)
-    const clearOps = usePropertyDraftStore((s) => s.clearOps)
-
-    const rollup = useMemo(() => {
-        const counts: Record<string, number> = {}
-        let entities = 0
-        for (const op of ops) { counts[op.kind] = (counts[op.kind] ?? 0) + 1; entities += op.targetCount }
-        const parts = Object.entries(counts).map(([k, v]) => `${v} ${k}`)
-        return { parts, entities }
-    }, [ops])
-
-    return (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 overflow-hidden">
-            <button type="button" onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-2 px-3 py-2 text-left">
-                <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span className="flex-1 min-w-0 text-[11.5px] text-amber-100/90 leading-tight">
-                    <span className="font-semibold">{ops.length} staged change{ops.length === 1 ? '' : 's'}</span>
-                    {' '}— in-session only, not saved to the graph
-                </span>
-                <ChevronRight className={cn('w-3.5 h-3.5 text-amber-300/80 shrink-0 transition-transform', open && 'rotate-90')} />
-            </button>
-            {open && (
-                <div className="px-2 pb-2 flex flex-col gap-1 border-t border-amber-500/20 pt-1.5">
-                    <div className="px-2 text-[10px] text-amber-200/70">
-                        Would {rollup.parts.join(' · ')} across ~{rollup.entities} {rollup.entities === 1 ? 'entity' : 'entities'}.
-                    </div>
-                    {ops.map((op) => (
-                        <div key={op.id} className="group flex items-center gap-2 px-2 py-1 rounded-md hover:bg-amber-500/10">
-                            <span className="flex-1 min-w-0 truncate text-[11px] font-mono text-amber-100/90" title={opSummary(op)}>
-                                {opSummary(op)}
-                            </span>
-                            <button
-                                type="button"
-                                onClick={() => removeOp(op.id)}
-                                title="Undo this staged change"
-                                className="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded text-amber-300/70 hover:text-amber-100 hover:bg-amber-500/20 transition-colors"
-                            >
-                                <Undo2 className="w-3 h-3" />
-                            </button>
-                        </div>
-                    ))}
-                    <button type="button" onClick={clearOps} className="self-end mt-0.5 text-[10.5px] text-amber-300/80 hover:text-amber-100 transition-colors">
-                        Discard all
-                    </button>
-                </div>
-            )}
-        </div>
     )
 }
 
@@ -477,8 +452,17 @@ function valuePredicate(key: string, v: SearchCatalogValue): Predicate {
     return { kind: 'property', key, op: 'eq', value: v.value, valueType } as Predicate
 }
 
+/** One value, as its kind and itself: the text "1" and the number 1 are two values. */
+const valueKey = (v: { value: unknown; kind: string }) => JSON.stringify([v.kind, v.value])
+
+/** The kind most of a property's entities store it as (a list's elements aside). */
+function dominantKind(kinds: Readonly<Record<string, number>>): ValueKind {
+    const held = Object.entries(kinds).filter(([k]) => k in KIND_LABEL && k !== 'List').sort((a, b) => b[1] - a[1])
+    return (held[0]?.[0] as ValueKind | undefined) ?? 'String'
+}
+
 function PropertyRow({
-    property, entities, exact, overlay, onUpdate, onRemove, blocked, onCreateRule, onCopy, onSearch,
+    property, entities, exact, overlay, onUpdate, onDuplicate, onRemove, onCleanUp, onMerge, onConvert, blocked, onCreateRule, onCopy, onSearch, onPromote,
 }: {
     property: SearchCatalogProperty
     /** Entities in the view — what coverage is a share of. */
@@ -487,15 +471,52 @@ function PropertyRow({
     exact: boolean
     overlay?: CatalogOverlayEntry
     onUpdate?: () => void
+    /** Copy its values to a new property. */
+    onDuplicate?: () => void
     onRemove?: () => void
+    /** Tidy its values (find & replace, normalize, …). */
+    onCleanUp?: () => void
+    /** Merge values into one — these, or the near-duplicates it holds. */
+    onMerge?: (map?: ValueMapping[]) => void
+    /** Store every value as one kind. */
+    onConvert?: (toKind: ValueKind) => void
     blocked: string | null
     onCreateRule: () => void
     onCopy: () => void
     onSearch?: SearchHandler
+    /** Make it a field of the types that carry it, in the semantic layer. */
+    onPromote?: () => void
 }) {
     const [expanded, setExpanded] = useState(false)
     const key = property.key
     const { type, mixed } = storedType(property.kinds)
+    // Values that differ only in case or in spaces around them: a merge waiting to be made.
+    const similar = useMemo(() => similarGroups(property.values), [property.values])
+    const dominant = dominantKind(property.kinds)
+    // Values picked from the bars to merge into one — by value, not by place: the values reorder
+    // while the catalog is read.
+    const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set())
+    const togglePicked = (i: number) => setPicked((s) => {
+        const next = new Set(s)
+        const k = valueKey(property.values[i]!)
+        if (!next.delete(k)) next.add(k)
+        return next
+    })
+    const pickedAt = useMemo(
+        () => new Set(property.values.flatMap((v, i) => (picked.has(valueKey(v)) ? [i] : []))),
+        [property.values, picked],
+    )
+    const mergePicked = () => {
+        // Into the most held of them as they stand now; the dialog offers to keep another.
+        const held = new Map(property.values.map((v) => [valueKey(v), v.count]))
+        const chosen = [...picked]
+            .map((k) => { const [kind, value] = JSON.parse(k) as [ValueKind, unknown]; return { kind, value, count: held.get(k) ?? -1 } })
+            .sort((a, b) => b.count - a.count)
+        const [into, ...rest] = chosen
+        if (!into || !onMerge) return
+        onMerge(rest.map((v) => ({ from: v.value, fromKind: v.kind, to: into.value, toKind: into.kind })))
+        setPicked(new Set())
+    }
     const byType = useMemo(
         () => Object.entries(property.byEntityType).sort((a, b) => b[1] - a[1]),
         [property.byEntityType],
@@ -539,17 +560,25 @@ function PropertyRow({
                                 <AlertTriangle className="w-2.5 h-2.5" /> mixed
                             </span>
                         )}
+                        {similar.length > 0 && (
+                            <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide border bg-sky-500/15 text-sky-600 dark:text-sky-300 border-sky-500/30">
+                                <Combine className="w-2.5 h-2.5" aria-hidden /> similar values
+                            </span>
+                        )}
                         {overlay && (
                             <PendingBadge
-                                label={pendingRemove ? 'remove' : overlay.kinds.has('rename') ? 'rename' : 'edit'}
+                                label={`${pendingRemove ? 'removed' : overlay.kinds.has('rename') ? 'renamed' : overlay.kinds.has('copy') ? 'copied' : 'changed'}${overlay.running ? '…' : ''}`}
                                 tone={pendingRemove ? 'rose' : 'amber'}
                             />
                         )}
                         <div className="ml-auto shrink-0 flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                                 <RowAction icon={<Copy className="w-3 h-3" />} label="Copy the name" onClick={onCopy} />
-                                {onUpdate && <RowAction icon={<Pencil className="w-3 h-3" />} label="Update" onClick={onUpdate} blocked={blocked} />}
+                                {onUpdate && <RowAction icon={<Pencil className="w-3 h-3" />} label="Change" onClick={onUpdate} blocked={blocked} />}
+                                {onDuplicate && <RowAction icon={<CopyPlus className="w-3 h-3" />} label="Duplicate as…" onClick={onDuplicate} blocked={blocked} />}
+                                {onCleanUp && <RowAction icon={<WandSparkles className="w-3 h-3" />} label="Clean up…" onClick={onCleanUp} blocked={blocked} />}
                                 {onRemove && <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger blocked={blocked} />}
+                                {onPromote && <RowAction icon={<ListChecks className="w-3 h-3" />} label="Make it a field…" onClick={onPromote} />}
                                 <RowAction icon={<Plus className="w-3 h-3" />} label="Create rule" onClick={onCreateRule} />
                             </div>
                             <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg text-ink-muted group-hover:bg-glass transition-colors">
@@ -615,7 +644,27 @@ function PropertyRow({
                             tone="accent"
                             onClick={onCreateRule}
                         />
+                        {similar.length > 0 && onMerge && !blocked && (
+                            <QuickActionCard
+                                icon={<Combine className="w-3.5 h-3.5" />}
+                                label="Merge similar values…"
+                                onClick={() => onMerge()}
+                            />
+                        )}
                     </div>
+
+                    {similar.length > 0 && (
+                        <p className="text-[11px] text-ink-muted leading-snug">
+                            {similar.slice(0, 2).map((g, i) => (
+                                <span key={g.key}>
+                                    {i > 0 && '; '}
+                                    {g.members.map((m) => `“${String(m.value)}”`).join(', ')}
+                                </span>
+                            ))}
+                            {similar.length > 2 && ` and ${similar.length - 2} more`} differ only in case or spaces — a search
+                            or a rule tells them apart.
+                        </p>
+                    )}
 
                     <UsageGauge
                         total={property.count}
@@ -639,13 +688,25 @@ function PropertyRow({
                                     {' '}on {n.toLocaleString()}
                                 </span>
                             ))} entities. A search compares each kind as its own — pick the kind you mean.
+                            {onConvert && !blocked && (
+                                <button
+                                    type="button"
+                                    onClick={() => onConvert(dominant)}
+                                    className="mt-2 flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] font-semibold text-amber-100 hover:bg-amber-500/20 transition-colors"
+                                >
+                                    <ArrowRightLeft className="w-3 h-3" aria-hidden /> Convert all to {KIND_LABEL[dominant] ?? dominant}…
+                                </button>
+                            )}
                         </div>
                     )}
 
                     {property.min !== undefined && property.min !== null && (
                         <div className="text-[11px] text-ink-muted">
-                            Numbers from <span className="font-mono text-ink">{String(property.min)}</span>
+                            Numbers {property.rangeExact === false ? 'within' : 'from'}{' '}
+                            <span className="font-mono text-ink">{String(property.min)}</span>
                             {' '}to <span className="font-mono text-ink">{String(property.max)}</span>
+                            {/* A draft took out a value at an end: every value is still in this range. */}
+                            {property.rangeExact === false && ' — your draft changed values at its ends'}
                         </div>
                     )}
 
@@ -661,7 +722,24 @@ function PropertyRow({
                                 total={property.count}
                                 limit={values.length}
                                 onItemClick={searchLabel ? (it) => searchLabel(it.label) : undefined}
+                                selectable={onMerge && !blocked && values.length > 1 ? { selected: pickedAt, onToggle: togglePicked } : undefined}
                             />
+                            {picked.size > 0 && onMerge && (
+                                <div className="flex items-center gap-2 rounded-lg border border-accent-lineage/30 bg-accent-lineage/[0.06] px-2.5 py-1.5 text-[11px] text-ink-secondary" aria-live="polite">
+                                    <span className="flex-1 min-w-0">
+                                        {picked.size === 1 ? 'Pick another value to merge it with' : `${picked.size} values picked — they become one`}
+                                    </span>
+                                    <button type="button" onClick={() => setPicked(new Set())} className="text-ink-muted hover:text-ink">Clear</button>
+                                    <button
+                                        type="button"
+                                        disabled={picked.size < 2}
+                                        onClick={mergePicked}
+                                        className="inline-flex items-center gap-1 rounded-md bg-accent-lineage px-2 py-1 font-semibold text-white hover:bg-accent-lineage/90 disabled:opacity-50 transition-colors"
+                                    >
+                                        <Combine className="w-3 h-3" aria-hidden /> Merge into…
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     ) : (
                         <p className="text-[11px] text-ink-muted leading-snug">
@@ -684,7 +762,7 @@ function PropertyRow({
 }
 
 
-/** A property staged in this session that no entity carries yet. */
+/** A property a change on the draft gives entities, that none carried before. */
 function PendingNewRow({
     propertyKey, stagedValue, onUpdate, onRemove, blocked, onCreateRule,
 }: {

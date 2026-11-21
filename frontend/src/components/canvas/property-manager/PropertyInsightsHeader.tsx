@@ -5,7 +5,7 @@
  * and, below them, how the numbers were come by: how far a read that is
  * still running has got, or when the catalog was read, with a refresh.
  */
-import { Boxes, Database, Layers, RefreshCw, Tag } from 'lucide-react'
+import { Boxes, Database, Info, Layers, RefreshCw, Tag } from 'lucide-react'
 import { type FC, type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
@@ -78,6 +78,13 @@ export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
                         Couldn't read the view again — {error}
                     </p>
                 )}
+                {/* How the numbers were come by, where it matters: part of the view left
+                    out, or — on a draft — what of it is still the published graph's. */}
+                {(catalog.notes ?? []).map((note) => (
+                    <p key={note} className="mt-1 flex items-start gap-1 text-[10.5px] leading-snug text-ink-muted">
+                        <Info className="mt-px w-3 h-3 shrink-0" aria-hidden /> {note}
+                    </p>
+                ))}
             </div>
         </div>
     )

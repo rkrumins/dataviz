@@ -1720,6 +1720,10 @@ class SearchMembershipResult(_Base):
     )
     data_version: Optional[str] = Field(None, alias="dataVersion")
     elapsed_ms: int = Field(0, alias="elapsedMs")
+    notes: List[str] = Field(
+        default_factory=list,
+        description="On a draft: the rules whose matches among the entities the draft "
+                    "changed are the published graph's, and why.")
 
 
 class SearchCountsRequest(_Base):
@@ -1756,6 +1760,11 @@ class SearchRuleCount(_Base):
         False, alias="lowerBound",
         description="Complete, but a floor: part of the view couldn't be read in time and "
                     "was left out, so there may be more matches.")
+    approximate: bool = Field(
+        False,
+        description="On a draft: the published graph's count, not corrected for what the "
+                    "draft changed — ``note`` says why.")
+    note: Optional[str] = Field(None, description="Why the count is approximate.")
 
 
 class SearchCountsResult(_Base):
@@ -1814,6 +1823,10 @@ class SearchCatalogRequest(_Base):
     session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
     refresh: bool = Field(
         False, description="Read the view again, even when a recent catalog of it is at hand.")
+    values_for: Optional[str] = Field(
+        None, alias="valuesFor", min_length=1, max_length=512,
+        description="A key whose every value the catalog keeps (up to 1,000) is listed, not "
+                    "only the 20 most held — for merging near-duplicate values.")
 
 
 class SearchCatalogValue(_Base):
@@ -1840,6 +1853,10 @@ class SearchCatalogProperty(_Base):
                     "are listed.")
     residual: int = Field(
         0, description="Entities holding it in propertiesRaw, past the native-key budget.")
+    range_exact: bool = Field(
+        True, alias="rangeExact",
+        description="False on a draft that changed a value at either end of the range: "
+                    "``min`` and ``max`` still bound every value, but may be wider than they are.")
 
 
 class SearchCatalogEntityType(_Base):

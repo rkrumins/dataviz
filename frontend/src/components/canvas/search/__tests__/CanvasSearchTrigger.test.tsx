@@ -1,6 +1,6 @@
 /**
- * CanvasSearchTrigger — the floating search button on canvases without a
- * dedicated header (GraphCanvas, HierarchyCanvas). Its keyboard shortcut
+ * CanvasSearchTrigger — the search button on canvases without ContextView's
+ * header (floating on GraphCanvas, in HierarchyCanvas's header). Its keyboard shortcut
  * moved from ⌘K to ⌘⇧F so ⌘K is free for the app-wide palette.
  */
 import { render, fireEvent } from '@testing-library/react'

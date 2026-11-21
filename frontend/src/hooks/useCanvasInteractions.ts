@@ -93,6 +93,8 @@ export interface UseCanvasInteractionsOptions {
     onConnectTool?: () => void
     /** ⇧⌘D on one selected entity: open Duplicate… for it. */
     onDuplicateWithOptions?: (nodeId: string) => void
+    /** What ⌘A selects: the entities the canvas shows. Absent, every entity it holds. */
+    selectableIds?: () => readonly string[]
 }
 
 export interface UseCanvasInteractionsResult {
@@ -266,6 +268,7 @@ export function useCanvasInteractions(
         onConnectMode,
         onConnectTool,
         onDuplicateWithOptions,
+        selectableIds,
     } = options
     
     const provider = useGraphProvider()
@@ -603,9 +606,12 @@ export function useCanvasInteractions(
     // Canvas Actions
     // ===================
     
+    // One write, whatever the count — a write per entity re-rendered the canvas that many times —
+    // and only what is on screen when the canvas says what that is.
     const selectAll = useCallback(() => {
-        useCanvasStore.getState().nodes.forEach(n => selectNode(n.id, true))
-    }, [selectNode])
+        const { nodes, setSelection } = useCanvasStore.getState()
+        setSelection([...(selectableIds?.() ?? nodes.map(n => n.id))])
+    }, [selectableIds])
     
     // Several entities deleted at once: staged together (one write, one Undo step), then what each
     // takes with it is read a few at a time and filled in with one update — not a request per

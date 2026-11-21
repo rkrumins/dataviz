@@ -9,9 +9,36 @@ as ``ontology_rules=``.
 """
 from __future__ import annotations
 
-from backend.app.services.versioning.ontology import EdgeRule, EntityRule, OntologyRules
+from typing import Dict, Iterable
 
-from .models import ResolvedOntology
+from backend.app.services.versioning.ontology import (
+    JUDGED_TYPES, EdgeRule, EntityRule, FieldRule, OntologyRules,
+)
+
+from .models import FieldData, ResolvedOntology
+
+#: Field ids that are the entity's name, which the platform keeps (``displayName``), not a property.
+_NAME_FIELDS = frozenset({"name", "label"})
+
+
+def field_rules(fields: Iterable[FieldData]) -> Dict[str, FieldRule]:
+    """The fields a publish judges the values of (see ``versioning.ontology.field_violations``),
+    by property key — a field's id is the property it is stored as. Only a field with something
+    to judge is one: required, with allowed values that aren't mere suggestions, or of a type a
+    value can fail. A field the platform stores itself (the name, a description, a urn: a
+    reserved node key) is left to the platform."""
+    from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
+    out: Dict[str, FieldRule] = {}
+    for f in fields or []:
+        if not f.id or f.id in _NAME_FIELDS or f.id in _RESERVED_NODE_KEYS:
+            continue
+        allowed = () if getattr(f, "allow_other", False) else tuple(getattr(f, "allowed_values", None) or ())
+        ftype = (getattr(f, "type", None) or "text").lower()
+        required = bool(getattr(f, "required", False))
+        if required or allowed or ftype in JUDGED_TYPES:
+            out[f.id] = FieldRule(type=ftype, required=required, allowed=allowed,
+                                  name=getattr(f, "name", None) or f.id)
+    return out
 
 
 def resolved_ontology_to_rules(resolved: ResolvedOntology) -> OntologyRules:
@@ -23,7 +50,8 @@ def resolved_ontology_to_rules(resolved: ResolvedOntology) -> OntologyRules:
     entity_types = {
         type_id: EntityRule(can_contain=frozenset(entry.hierarchy.can_contain or []),
                             unique_fields=frozenset(f.id for f in (entry.fields or [])
-                                                    if getattr(f, "unique", False)))
+                                                    if getattr(f, "unique", False)),
+                            fields=field_rules(entry.fields))
         for type_id, entry in (resolved.entity_type_definitions or {}).items()
     }
     edge_types = {

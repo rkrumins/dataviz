@@ -304,6 +304,8 @@ def _entity_def_to_dict(e: EntityTypeDefEntry) -> dict:
                 "format": f.format,
                 "reconciliation_key": f.reconciliation_key,
                 "unique": f.unique,
+                "allowed_values": list(f.allowed_values),
+                "allow_other": f.allow_other,
             }
             for f in e.fields
         ],

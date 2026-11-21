@@ -1,18 +1,19 @@
 /**
  * viewLibraryService — a view's library on the server: its display rules
- * (a draft's own on its branch), its saved queries, and the pack both are
- * exported and imported in. Backend: ``/api/v1/views/{id}/library``
- * (``backend/app/api/v1/endpoints/views.py``).
+ * (a draft's own on its branch), its saved queries, its bulk recipes, and
+ * the pack the rules and queries are exported and imported in. Backend:
+ * ``/api/v1/views/{id}/library`` (``backend/app/api/v1/endpoints/views.py``).
  *
  * Rules are written one at a time: each call writes only the rule it names
  * and answers with the view's rules as they now stand, edits other people
- * made meanwhile included. Saved queries belong to the view, whichever
- * branch is open.
+ * made meanwhile included. Saved queries and recipes belong to the view,
+ * whichever branch is open.
  */
 import type { DisplayRuleConfig } from '@/types/schema'
 import type { Predicate } from '@/types/search'
 
 import { authFetch } from './apiClient'
+import type { PropertyJobOp, PropertyOpKind } from './versioningApiService'
 
 
 export interface SavedViewQuery {
@@ -42,11 +43,53 @@ export interface OtherViewQuery {
     query: SavedViewQuery
 }
 
+/** Which entities a recipe reaches, as the bulk dialog's Where step names
+ *  them — never by id: run again, the entities picked then may not be the
+ *  ones it should reach. A layer is kept by name, and found by it where the
+ *  recipe runs. */
+export type RecipeTarget =
+    | { kind: 'view'; scopeMode?: 'view' | 'data_source' }
+    | { kind: 'hasKey'; key: string; scopeMode?: 'view' | 'data_source' }
+    | { kind: 'layer'; layerName: string; scopeMode?: 'view' }
+    | { kind: 'search' | 'custom' | 'connections'; predicate: Predicate; scopeMode?: 'view' | 'data_source' }
+
+/** A bulk property change kept under a name in a view's library, to run again. */
+export interface BulkRecipe {
+    id: string
+    name: string
+    description?: string | null
+    /** The change, as a job keeps it — never an undo, which only undoes a change already made. */
+    op: PropertyJobOp & { kind: PropertyOpKind }
+    target: RecipeTarget
+    createdAt?: string | null
+    createdBy?: string | null
+    updatedAt?: string | null
+    updatedBy?: string | null
+}
+
+export interface BulkRecipeInput {
+    name: string
+    description?: string | null
+    op: PropertyJobOp
+    target: RecipeTarget
+}
+
+/** A recipe saved on another view of the workspace that the caller may open. */
+export interface OtherViewRecipe {
+    viewId: string
+    viewName: string
+    /** The other view reads this one's data source, so the recipe's keys,
+     *  types and layers mean what they meant there. */
+    sameSource: boolean
+    recipe: BulkRecipe
+}
+
 export interface ViewLibrary {
     viewId: string
     branchId?: string | null
     displayRules: DisplayRuleConfig[]
     savedQueries: SavedViewQuery[]
+    bulkRecipes?: BulkRecipe[]
     /** Whether the caller may change the library (the server's own check). */
     canEdit: boolean
 }
@@ -152,6 +195,26 @@ export function deleteViewQuery(viewId: string, queryId: string): Promise<void> 
  *  those over this view's data source first. */
 export function listQueriesFromOtherViews(viewId: string, signal?: AbortSignal): Promise<OtherViewQuery[]> {
     return authFetch<OtherViewQuery[]>(libraryUrl(viewId, '/from-other-views'), { signal })
+}
+
+export function putViewRecipe(
+    viewId: string, recipeId: string, body: BulkRecipeInput,
+): Promise<BulkRecipe> {
+    return authFetch<BulkRecipe>(libraryUrl(viewId, `/recipes/${encodeURIComponent(recipeId)}`), {
+        method: 'PUT', body: JSON.stringify(body),
+    })
+}
+
+export function deleteViewRecipe(viewId: string, recipeId: string): Promise<void> {
+    return authFetch<void>(libraryUrl(viewId, `/recipes/${encodeURIComponent(recipeId)}`), {
+        method: 'DELETE',
+    })
+}
+
+/** The recipes saved on the workspace's other views the caller may open —
+ *  those over this view's data source first. */
+export function listRecipesFromOtherViews(viewId: string, signal?: AbortSignal): Promise<OtherViewRecipe[]> {
+    return authFetch<OtherViewRecipe[]>(libraryUrl(viewId, '/recipes/from-other-views'), { signal })
 }
 
 export function exportViewLibrary(viewId: string, branchId?: string | null): Promise<LibraryPack> {

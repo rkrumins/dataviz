@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import time
 from collections import ChainMap, OrderedDict
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
@@ -107,6 +108,7 @@ class _OverlayDelta:
         self.node_index: Dict[str, GraphNode] = {}
         self.node_new: set = set(raw.get("nodesNew", []))   # urns CREATED in the draft (vs modified)
         self.node_remove: set = set()
+        self.node_remove_ids: Dict[str, Optional[str]] = {}  # removed urn → its entity id
         self.edge_upsert: Dict[str, GraphEdge] = {}
         # Each of edge_upsert by the urn of either end, once per patch set: a read naming its ends
         # walks the edges it asks about, never every edge a 100k-edge import added.
@@ -142,6 +144,7 @@ class _OverlayDelta:
         self._edges_loaded: Dict[str, GraphEdge] = {}
         for d in raw.get("nodesRemove", []):
             self.node_remove.add(d["urn"])
+            self.node_remove_ids[d["urn"]] = d.get("entityId")
         for d in raw.get("edgesUpsert", []):
             # ``was``: the base holds this edge too, there — its ends and type. It is served with
             # the overlay's value, and counted where it runs now: an edge still between the same
@@ -553,6 +556,7 @@ class DraftOverlayProvider:
 
             shared = await _DELTAS.get(key, build)
             self._delta = shared.for_request(self._load_modified, self._load_edges)
+            self._version = version                  # what the delta is of (``draft_search``)
         return self._delta
 
     def _at(self) -> Dict[str, Any]:
@@ -1266,22 +1270,110 @@ class DraftOverlayProvider:
         self._now_only("Search")
         return await self._base.deep_search_session(query, context=context)
 
+    # ---- counts, membership and the catalog: main's, corrected for the draft (draft_search) -- #
+    def _searches_draft(self) -> bool:
+        """Whether this overlay's counts, rule membership and catalog are its own: a draft's
+        over main's store. A fork's (or a draft on one) are its root's, as its search is."""
+        return (not self._fork and self._as_of is None
+                and not getattr(self._base, "is_overlay", False))
+
+    def _main_context(self, context):
+        """``context`` keyed by main's version, not the draft's: main's answers read here are
+        main's own sessions — shared with main, and kept across the draft's commits."""
+        if context is None:
+            return context
+        from dataclasses import replace
+        from backend.app.services.graph_reads import published_data_version
+        return replace(context, data_version=published_data_version(context.data_version,
+                                                                    self._base))
+
+    async def _draft_search(self, context):
+        """The draft's patch set and its search over it, or None when the draft changes nothing."""
+        from .draft_search import DraftSearch
+        d = await self._delta_()
+        if d.empty:
+            return None
+        return await DraftSearch.of(self, d, context, self._main_context(context))
+
     async def deep_search_count(self, query, *, context, advance=True):
-        """A rule's total — the base's, like :meth:`deep_search`."""
+        """A rule's total on main — main's own count session (:meth:`_main_context`). What the
+        draft changed is counted apart, for every rule of a request at once
+        (:meth:`deep_search_count_deltas`)."""
         self._now_only("Search")
+        if self._searches_draft():
+            context = self._main_context(context)
         return await self._base.deep_search_count(query, context=context, advance=advance)
 
-    async def deep_search_membership(self, scope, items, urns, *, context):
-        """Rule membership — the base's, like :meth:`deep_search`."""
+    async def deep_search_count_deltas(self, scope, items, *, context, wait_ms):
+        """How far each rule's count on the draft is from main's — ``draft_search``'s answer —
+        or None when the counts are main's (a draft that changes nothing, a fork). Whatever
+        can't be counted on the draft is main's, said so; never a failure."""
         self._now_only("Search")
-        return await self._base.deep_search_membership(scope, items, urns, context=context)
+        if not self._searches_draft():
+            return None
+        from .draft_search import NOT_DRAFT_AWARE
+        try:
+            search = await self._draft_search(context)
+            if search is None:
+                return None
+            return await search.count_deltas(scope, items, context.named or {}, wait_ms)
+        except Exception:
+            logger.warning("draft counts: counted as main", exc_info=True)
+            return {"deltas": {}, "approximate": {rid: NOT_DRAFT_AWARE for rid, _ in items},
+                    "status": "complete", "progress": {"scanned": 0, "total": 0}}
+
+    async def deep_search_membership(self, scope, items, urns, *, context):
+        """Rule membership: main's, with the entities the draft changed answered on the draft —
+        a removed one matches nothing, a created one gets its chips (``draft_search``)."""
+        self._now_only("Search")
+        if not self._searches_draft():
+            return await self._base.deep_search_membership(scope, items, urns, context=context)
+        from .draft_search import MEMBERSHIP_NOT_DRAFT_AWARE
+        try:
+            search = await self._draft_search(context)
+        except Exception:
+            logger.warning("draft membership: answered as main", exc_info=True)
+            out = await self._base.deep_search_membership(
+                scope, items, urns, context=self._main_context(context))
+            return {**out, "notes": [MEMBERSHIP_NOT_DRAFT_AWARE]}
+        if search is None:
+            return await self._base.deep_search_membership(
+                scope, items, urns, context=self._main_context(context))
+        return await search.membership(scope, items, urns, context.named or {})
 
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
-                                  refresh=False):
-        """The property catalog — the base's, like :meth:`deep_search_session`."""
+                                  refresh=False, values_for=None):
+        """The property catalog: main's — its own session, read once per version of main — with
+        what the draft changed folded in (``draft_search``)."""
         self._now_only("Search")
-        return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
-                                                    session_id=session_id, refresh=refresh)
+        extra = {"values_for": values_for} if values_for else {}
+        if not self._searches_draft():
+            return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
+                                                        session_id=session_id, refresh=refresh, **extra)
+        from .draft_search import CATALOG_NOT_DRAFT_AWARE
+        started = time.monotonic()
+        search, failed = None, False
+        try:
+            search = await self._draft_search(context)
+        except Exception:
+            logger.warning("draft catalog: read as main", exc_info=True)
+            failed = True
+        # Main's share first, half the wait while the draft has its own to read: a catalog main
+        # has at hand answers at once, and the rest of the wait is the draft's.
+        answer = await self._base.deep_search_catalog(
+            scope, context=self._main_context(context),
+            wait_ms=wait_ms // 2 if search is not None else wait_ms,
+            session_id=session_id, refresh=refresh, **extra)
+        if search is not None:
+            try:
+                left = max(0, wait_ms - int((time.monotonic() - started) * 1000))
+                return await search.catalog(scope, answer, left, values_for=values_for)
+            except Exception:
+                logger.warning("draft catalog: read as main", exc_info=True)
+                failed = True
+        if failed:
+            answer = {**answer, "notes": [*(answer.get("notes") or []), CATALOG_NOT_DRAFT_AWARE]}
+        return answer
 
     async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
                                  session_id=None):

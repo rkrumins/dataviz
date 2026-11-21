@@ -487,3 +487,22 @@ def test_each_eviction_and_load_says_which_graph_where_how_big_and_why_or_how_lo
     assert says("platform.versioning.graph_loaded", graphId="g1", master="10.0.0.2:6379",
                 bytes=512 * 1024 ** 2, secs=42) == (
         "Loaded versioned graph g1 into FalkorDB master 10.0.0.2:6379 in 42 s (512.0 MiB)")
+
+
+def test_a_publish_names_the_bulk_property_edits_it_took_to_main():
+    def says(**details):
+        return catalogue.summarize("workspace.versioning.published",
+                                   {"target_label": "Sales", "details": details})[1]
+
+    changes = {"create": 0, "update": 27_110, "delete": 0}
+    rename = {"jobId": "vjob_1", "label": "Rename owner → steward", "changed": 27_000}
+    assert says(changes=changes) == "Published 27,110 changes to Sales"
+    assert says(changes=changes, propertyJobs={"total": 1, "jobs": [rename]}) == (
+        "Published 27,110 changes to Sales, including Rename owner → steward")
+    assert says(changes=changes, propertyJobs={"total": 3, "jobs": [rename, {"label": "Remove x"}]}) == (
+        "Published 27,110 changes to Sales, including Rename owner → steward and 2 more bulk edits")
+    assert says(changes=changes, propertyJobs={"total": 2, "jobs": [{**rename, "partial": True}, {}]}) == (
+        "Published 27,110 changes to Sales, including part of Rename owner → steward and 1 more bulk edit")
+    # Whatever a record holds, it still reads as a sentence.
+    for odd in ({"jobs": "x"}, {"jobs": [None]}, {"total": "many", "jobs": [rename]}, []):
+        assert says(changes=changes, propertyJobs=odd).startswith("Published 27,110 changes to Sales")

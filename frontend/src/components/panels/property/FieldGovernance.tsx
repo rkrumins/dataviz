@@ -1,0 +1,99 @@
+/**
+ * A governed field's value, helped along while it is edited (`lib/fieldRules`): its allowed values
+ * picked with one click — the one held marked — and a warning, said where the value is, of what
+ * publishing would refuse. Neither blocks the edit. A required one left without a value offers the
+ * way to fill it on every entity of its type missing it (`FillMissingButton`).
+ */
+import type { ReactNode } from 'react'
+import { AlertTriangle } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { inputTypeOf, storedAllowed, valueText } from '@/lib/fieldRules'
+import type { EntityFieldDefinition } from '@/types/schema'
+
+/** Past this many allowed values the picker is a menu, not chips. */
+const CHIPS_MAX = 12
+
+type PickerField = Pick<EntityFieldDefinition, 'type' | 'allowedValues' | 'allowOther'>
+
+const asList = (value: unknown): unknown[] =>
+  Array.isArray(value) ? value
+    : typeof value === 'string' && value.trim() ? value.split(',').map((s) => s.trim()).filter(Boolean) : []
+
+export function AllowedValuePicker({ field, value, label, onPick, className }: {
+  field: PickerField
+  value: unknown
+  /** The field's name, for what the picker is called. */
+  label: string
+  onPick: (next: unknown) => void
+  className?: string
+}) {
+  const allowed = field.allowedValues ?? []
+  if (allowed.length === 0) return null
+  const tags = inputTypeOf(field.type) === 'tags'
+  const held = new Set((tags ? asList(value) : [value]).map(valueText).filter((t): t is string => !!t))
+  const what = field.allowOther ? 'Suggested values' : 'Allowed values'
+
+  if (!tags && allowed.length > CHIPS_MAX) {
+    const current = [...held][0]
+    return (
+      <select
+        aria-label={`${what} of ${label}`}
+        value={current && allowed.includes(current) ? current : ''}
+        onChange={(e) => { if (e.target.value) onPick(storedAllowed(field, e.target.value)) }}
+        className={cn('max-w-full rounded-md border border-black/[0.10] dark:border-white/[0.12] bg-canvas-elevated px-2 py-1 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-accent-lineage/30', className)}
+      >
+        <option value="" disabled>{field.allowOther ? 'Pick a suggested value…' : 'Pick one of the allowed values…'}</option>
+        {allowed.map((a) => <option key={a} value={a}>{a}</option>)}
+      </select>
+    )
+  }
+  const pick = (a: string) => {
+    if (!tags) { onPick(storedAllowed(field, a)); return }
+    const list = asList(value)
+    onPick(held.has(a) ? list.filter((x) => valueText(x) !== a) : [...list, a])
+  }
+  return (
+    <div role="group" aria-label={`${what} of ${label}`} className={cn('flex flex-wrap items-center gap-1', className)}>
+      {allowed.map((a) => {
+        const on = held.has(a)
+        return (
+          <button
+            key={a}
+            type="button"
+            aria-pressed={on}
+            onClick={() => pick(a)}
+            className={cn(
+              'max-w-[12rem] truncate rounded-md border px-1.5 py-px text-[11px] font-medium transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+              on ? 'border-accent-lineage/50 bg-accent-lineage/15 text-accent-lineage'
+                : 'border-black/[0.10] dark:border-white/[0.12] text-ink-secondary hover:border-accent-lineage/40 hover:text-ink',
+            )}
+          >
+            {a}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/** From a required field left without a value to the bulk dialog: "Fill if empty" on every entity
+ *  of its type missing it. */
+export function FillMissingButton({ typeName, onClick, className }: { typeName: string; onClick: () => void; className?: string }) {
+  return (
+    <button type="button" onClick={onClick}
+      className={cn('shrink-0 rounded px-1 text-2xs font-semibold text-accent-lineage hover:bg-accent-lineage/10', className)}>
+      Fill missing on every {typeName}…
+    </button>
+  )
+}
+
+/** What publishing would refuse, said under the value — never a block. */
+export function FieldNote({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <p role="status" className={cn('flex items-start gap-1 text-2xs leading-snug text-amber-700 dark:text-amber-300', className)}>
+      <AlertTriangle className="mt-px h-3 w-3 shrink-0" aria-hidden />
+      <span className="min-w-0">{children}</span>
+    </p>
+  )
+}

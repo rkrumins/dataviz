@@ -4,7 +4,8 @@
  *
  *   • Properties tab — browse every property key / value / tag in use
  *     across the view (sourced from Advanced-Search discovery), with a
- *     one-click handoff to create a rule from any of them.
+ *     one-click handoff to create a rule from any of them, and change any
+ *     of them in bulk on the draft.
  *   • Display rules tab — CRUD the view's rules; each tags its matched
  *     entities with a colored chip on the canvas. Every change is saved to
  *     the view's library as it is made (on a draft, to the draft's own
@@ -166,7 +167,7 @@ export function PropertyManagerDrawer({
                                             Property Manager
                                         </h2>
                                         <p className="text-[10px] text-ink-muted/80">
-                                            Browse properties · tag matched entities
+                                            Browse · change in bulk · tag matched entities
                                         </p>
                                     </div>
                                 </div>
@@ -207,8 +208,6 @@ export function PropertyManagerDrawer({
                             {tab === 'properties' && (
                                 <PropertyBrowser
                                     viewId={viewId}
-                                    knownEntityTypes={knownEntityTypes}
-                                    knownLayers={knownLayers}
                                     onCreateRuleFromPredicate={handleCreateFromPredicate}
                                     onSearchPredicate={onSearchPredicate}
                                 />

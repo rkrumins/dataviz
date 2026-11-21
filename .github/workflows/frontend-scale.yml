@@ -1,7 +1,9 @@
 # Holds the change review surfaces to their budgets at volume, in a real browser:
 # Review & Save on 50,000 staged changes (open, step, scroll, filter, the Map), a
-# 100,000-change list, the canvas navigator — `npm run harness:scale`, which fails
-# past a budget (shown in under 1 s, no task over 200 ms while in use).
+# 100,000-change list, the canvas navigator — and bulk editing: the drawer on
+# 10,000 entities and on 1,000 relationships, a merge of 1,000 values, 60 jobs
+# ticking — `npm run harness:scale`, which fails past a budget (shown in under
+# 1 s, no task over 200 ms while in use).
 #
 # Not required: a shared runner's timing is noisier than a developer's machine, so
 # a red run here is a prompt to look (its screenshots and report are uploaded),
@@ -15,6 +17,11 @@ on:
       - "frontend/src/features/versioning/**"
       - "frontend/src/features/reviews/**"
       - "frontend/src/components/canvas/context-view/**"
+      - "frontend/src/components/canvas/property-manager/**"
+      - "frontend/src/components/panels/entity/multi/**"
+      - "frontend/src/components/panels/relationship/multi/**"
+      - "frontend/src/hooks/usePropertyCatalog.ts"
+      - "frontend/src/services/propertyCatalog.ts"
       - "frontend/src/store/**"
       - "frontend/src/harness/scaleHarness.tsx"
       - "frontend/scripts/scale-shot.mjs"
