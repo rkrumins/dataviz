@@ -223,6 +223,23 @@ async def holders(
     ])
 
 
+async def workspaces_run_by(session: AsyncSession, user_id: str) -> set[str]:
+    """The workspaces someone administers through a binding there (directly or through a
+    group; unexpired) — not the everywhere of an Org Admin."""
+    groups = (await session.execute(
+        select(GroupMemberORM.group_id).where(GroupMemberORM.user_id == user_id)
+    )).scalars().all()
+    rows = [b for b in await binding_repo.list_for_user_with_groups(session, user_id=user_id, group_ids=list(groups))
+            if b.scope_type == "workspace" and b.scope_id]
+    role_perms = await permission_repo.get_role_permissions_for_roles(session, sorted({b.role_name for b in rows}))
+    categories = await permission_repo.get_permission_categories(session)
+    return {
+        b.scope_id for b in rows
+        if _confers("workspace", frozenset(p for p in role_perms.get(b.role_name, ())
+                                           if categories.get(p, "system") == "workspace"), WORKSPACE_ADMIN)
+    }
+
+
 async def workspace_admins(session: AsyncSession, workspace_id: str) -> set[str]:
     """The workspace's own admins (bound there), active people only."""
     return await active_people(session, await holders(session, workspace_id, WORKSPACE_ADMIN, global_too=False))

@@ -21,7 +21,7 @@ from .endpoints import (
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
     workspace_directory, data_source_transfers, workspace_requests, workspace_groups, data_requests,
-    discussions, data_source_contacts,
+    discussions, data_source_contacts, people,
     versioning,
     versioning_admin,
     review_center,
@@ -318,6 +318,16 @@ api_router.include_router(
     discussions.router,
     prefix="/discussions",
     tags=["discussions"],
+)
+api_router.include_router(
+    discussions.me_router,
+    prefix="/me",
+    tags=["me:discussions"],
+)
+api_router.include_router(
+    people.router,
+    prefix="/people",
+    tags=["people"],
 )
 api_router.include_router(
     data_source_contacts.router,

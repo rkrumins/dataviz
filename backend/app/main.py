@@ -1677,6 +1677,20 @@ async def lifespan(_app: FastAPI):
             name="access-housekeeping",
         )
 
+    # Conversations: watcher notices of new questions, reminders when nobody answers,
+    # retention and archiving. Same owner role, a lock per transaction.
+    _app.state._discussions_housekeeping_shutdown = asyncio.Event()
+    _app.state._discussions_housekeeping_task = None
+    if runs_scheduler():
+        from .services.discussions.housekeeping import run_sweeper as _run_discussions_housekeeping
+        _app.state._discussions_housekeeping_task = asyncio.create_task(
+            _run_discussions_housekeeping(
+                get_jobs_session,
+                _app.state._discussions_housekeeping_shutdown,
+            ),
+            name="discussions-housekeeping",
+        )
+
     # Product-event retention sweep. ``product_events`` now takes a row per
     # view open, lineage trace and graph search, so it grows with usage and
     # needs a horizon. Same owner role, same reason.
@@ -1898,6 +1912,21 @@ async def lifespan(_app: FastAPI):
             _access_hk_task.cancel()
             try:
                 await _access_hk_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose, past its grace: shutting down regardless
+
+    # Stop the conversations housekeeping before DB pool teardown, same shape.
+    _disc_hk_shutdown = getattr(_app.state, "_discussions_housekeeping_shutdown", None)
+    _disc_hk_task = getattr(_app.state, "_discussions_housekeeping_task", None)
+    if _disc_hk_shutdown is not None:
+        _disc_hk_shutdown.set()
+    if _disc_hk_task is not None and not _disc_hk_task.done():
+        try:
+            await asyncio.wait_for(_disc_hk_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _disc_hk_task.cancel()
+            try:
+                await _disc_hk_task
             except (asyncio.CancelledError, Exception):
                 pass  # cancelled on purpose, past its grace: shutting down regardless
 

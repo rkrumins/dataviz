@@ -7,6 +7,8 @@ Routes (mounted from ``api.py`` at ``/discussions``):
   GET    /subjects/{type}/{id}/people          who to ask: view owners, data contacts, fallback
   GET    /subjects/{type}/{id}/mentionable     people who can open it, for @mentions
   POST   /subjects/{type}/{id}                 ask (201; 200 replaying a clientKey)
+  PUT    /subjects/{type}/{id}/watch           watch it: hear about each new open question
+  DELETE /subjects/{type}/{id}/watch           stop watching
   GET    /{id}                                 a thread and its messages (?cursor= older, ?since=)
   POST   /{id}/messages                        reply (201; 200 replaying a clientKey)
   PATCH  /{id}/messages/{mid}                  edit (expectedVersion)
@@ -16,6 +18,12 @@ Routes (mounted from ``api.py`` at ``/discussions``):
   DELETE /{id}                                 delete the question and its thread
   PUT    /{id}/me                              mute, follow
   POST   /{id}/read                            mark read (and its notifications)
+
+and, mounted at ``/me`` (``me_router``):
+
+  GET    /discussions                          ?box=to-me|mine|mentions|watching &status= &cursor=
+  GET    /discussions/summary                  unread per box (ETag)
+  GET    /watches                              what you watch
 
 ``conversationsEnabled`` off makes conversations read-only: asking, replying, editing
 and watching are refused ``403 feature_disabled``; reading, marking read, muting,
@@ -53,10 +61,14 @@ from backend.common.models.discussions import (
     ThreadList,
     ThreadResponse,
     VersionBody,
+    WatchList,
+    WatchResponse,
     WhoToAskResponse,
+    MySummary,
 )
 
 router = APIRouter()
+me_router = APIRouter()
 
 SubjectPath = Literal["view", "data_source"]
 #: It ships off, so a definition not seeded yet means off too.
@@ -154,6 +166,27 @@ async def ask(
     if not created:
         response.status_code = status.HTTP_200_OK
     return out
+
+
+@router.put(_SUBJECT + "/watch", response_model=WatchResponse, response_model_by_alias=True,
+            dependencies=_writing)
+async def watch(
+    subject_type: SubjectPath = Path(...),
+    subject_id: str = Path(...),
+    caller: access.Caller = Depends(_caller),
+    session: AsyncSession = Depends(get_db_session),
+):
+    return WatchResponse(watching=await service.set_watch(session, caller, subject_type, subject_id, watching=True))
+
+
+@router.delete(_SUBJECT + "/watch", response_model=WatchResponse, response_model_by_alias=True)
+async def unwatch(
+    subject_type: SubjectPath = Path(...),
+    subject_id: str = Path(...),
+    caller: access.Caller = Depends(_caller),
+    session: AsyncSession = Depends(get_db_session),
+):
+    return WatchResponse(watching=await service.set_watch(session, caller, subject_type, subject_id, watching=False))
 
 
 # ── One thread ───────────────────────────────────────────────────────
@@ -278,3 +311,46 @@ async def mark_read(
     session: AsyncSession = Depends(get_db_session),
 ):
     return ReadResponse(last_read_at=await service.mark_read(session, caller, discussion_id))
+
+
+# ── Your own ─────────────────────────────────────────────────────────
+
+
+@me_router.get("/discussions", response_model=ThreadList, response_model_by_alias=True)
+async def my_discussions(
+    box: Literal["to-me", "mine", "mentions", "watching"] = Query("to-me"),
+    status_filter: Literal["open", "answered", "closed", "all"] = Query("all", alias="status"),
+    cursor: Optional[str] = Query(None, max_length=500),
+    limit: int = Query(20, ge=1, le=50),
+    caller: access.Caller = Depends(_caller),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Asked of you, asked by you, mentioning you, or on what you watch — most recently active first."""
+    return await service.my_threads(session, caller, box=box, status=status_filter, cursor=cursor, limit=limit)
+
+
+@me_router.get("/discussions/summary", response_model=MySummary, response_model_by_alias=True)
+async def my_discussions_summary(
+    request: Request,
+    response: Response,
+    caller: access.Caller = Depends(_caller),
+    session: AsyncSession = Depends(get_db_session),
+):
+    summary = await service.my_summary(session, caller)
+    etag = make_etag("my-discussions", caller.id, summary.model_dump_json())
+    not_modified = maybe_not_modified(request, etag)
+    if not_modified is not None:
+        return not_modified
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
+    return summary
+
+
+@me_router.get("/watches", response_model=WatchList, response_model_by_alias=True)
+async def my_watches(
+    cursor: Optional[str] = Query(None, max_length=500),
+    limit: int = Query(50, ge=1, le=100),
+    caller: access.Caller = Depends(_caller),
+    session: AsyncSession = Depends(get_db_session),
+):
+    return await service.list_watches(session, caller, cursor=cursor, limit=limit)

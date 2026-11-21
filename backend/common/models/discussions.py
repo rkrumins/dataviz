@@ -291,3 +291,65 @@ class ReadResponse(_Wire):
 
 class WatchResponse(_Wire):
     watching: bool
+
+
+# ── Your own conversations, watches and profiles ─────────────────────
+
+
+class Unread(_Wire):
+    unread: int = 0
+
+
+class ToMe(Unread):
+    #: Asked of you, still open, and you haven't replied.
+    waiting: int = 0
+
+
+class Mine(Unread):
+    open: int = 0
+
+
+class MySummary(_Wire):
+    """``GET /me/discussions/summary``."""
+    to_me: ToMe = Field(default_factory=ToMe)
+    mine: Mine = Field(default_factory=Mine)
+    mentions: Unread = Field(default_factory=Unread)
+    watching: Unread = Field(default_factory=Unread)
+    total_unread: int = 0
+
+
+class WatchItem(_Wire):
+    subject: SubjectRef
+    created_at: str
+    open: int = 0
+
+
+class WatchList(_Wire):
+    items: list[WatchItem]
+    next_cursor: Optional[str] = None
+
+
+class ProfilePerson(Person):
+    is_service_account: bool = False
+
+
+class NamedRef(_Wire):
+    id: str
+    name: str
+
+
+class ProfileDataContact(_Wire):
+    data_source_id: str
+    data_source_name: str
+    workspace_id: str
+    workspace_name: Optional[str] = None
+    role: Literal["owner", "steward"]
+    via: Literal["direct", "group"]
+
+
+class ProfileResponse(_Wire):
+    """``GET /people/{userId}``: scoped to what the reader can see."""
+    person: ProfilePerson
+    is_me: bool
+    workspaces_they_run: list[NamedRef] = Field(default_factory=list)
+    data_contacts: list[ProfileDataContact] = Field(default_factory=list)

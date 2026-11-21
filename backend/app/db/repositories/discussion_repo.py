@@ -16,7 +16,7 @@ import re
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import and_, case, exists, func, or_, select, update
+from sqlalchemy import and_, case, delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -355,6 +355,44 @@ async def is_watching(session: AsyncSession, user_id: str, subject_type: str, su
     ))).first() is not None
 
 
+async def watch(session: AsyncSession, user_id: str, subject_type: str, subject_id: str, *, now: str) -> None:
+    """Start watching (already watching is fine, even when a concurrent request won)."""
+    try:
+        async with session.begin_nested():
+            session.add(WatchORM(user_id=user_id, subject_type=subject_type, subject_id=subject_id, created_at=now))
+            await session.flush()
+    except IntegrityError:
+        pass
+
+
+async def unwatch(session: AsyncSession, user_id: str, subject_type: str, subject_id: str) -> None:
+    await session.execute(delete(WatchORM).where(
+        WatchORM.user_id == user_id, WatchORM.subject_type == subject_type, WatchORM.subject_id == subject_id,
+    ))
+
+
+async def watches_page(session: AsyncSession, user_id: str, *, cursor: Optional[str],
+                       limit: int) -> tuple[list[WatchORM], bool]:
+    """What someone watches, newest first, and whether more follow."""
+    stmt = select(WatchORM).where(WatchORM.user_id == user_id)
+    after = before(WatchORM.created_at, WatchORM.id, cursor)
+    if after is not None:
+        stmt = stmt.where(after)
+    rows = list((await session.execute(
+        stmt.order_by(WatchORM.created_at.desc(), WatchORM.id.desc()).limit(limit + 1)
+    )).scalars().all())
+    return rows[:limit], len(rows) > limit
+
+
+async def watchers_after(session: AsyncSession, subject_type: str, subject_id: str, after: Optional[str],
+                         limit: int) -> list[str]:
+    """The next ``limit`` watchers of a subject after ``after``, in the unique index's order."""
+    stmt = select(WatchORM.user_id).where(WatchORM.subject_type == subject_type, WatchORM.subject_id == subject_id)
+    if after:
+        stmt = stmt.where(WatchORM.user_id > after)
+    return list((await session.execute(stmt.order_by(WatchORM.user_id).limit(limit))).scalars().all())
+
+
 def visible_to(user_id: str):
     """SQL: a thread anyone who reads its subject sees — open — or a private one ``user_id``
     is in. (The subject's maintainers and admins see more; that is decided per subject.)"""
@@ -363,3 +401,70 @@ def visible_to(user_id: str):
         DiscussionORM.visibility == "open",
         exists(select(them.id).where(them.discussion_id == DiscussionORM.id, them.user_id == user_id)),
     )
+
+
+async def open_counts(session: AsyncSession, refs: Iterable[tuple[str, str]], user_id: str) -> dict[tuple[str, str], int]:
+    """Open threads ``user_id`` sees on each subject, in one GROUP BY."""
+    refs = sorted(set(refs))
+    if not refs:
+        return {}
+    rows = (await session.execute(
+        select(DiscussionORM.subject_type, DiscussionORM.subject_id, func.count()).where(
+            live(), DiscussionORM.status == "open", visible_to(user_id),
+            or_(*[and_(DiscussionORM.subject_type == t, DiscussionORM.subject_id == i) for t, i in refs]),
+        ).group_by(DiscussionORM.subject_type, DiscussionORM.subject_id)
+    )).all()
+    return {(t, i): int(n) for t, i, n in rows}
+
+
+# ── Someone's own conversations ──────────────────────────────────────
+
+BOXES = ("to-me", "mine", "mentions", "watching")
+
+
+def box(name: str, user_id: str):
+    """SQL for one of a person's boxes: asked of them, asked by them, mentioning them,
+    or on what they watch (open threads, and private ones they are in)."""
+    them = aliased(DiscussionParticipantORM)
+
+    def theirs(*conds):
+        return exists(select(them.id).where(them.discussion_id == DiscussionORM.id, them.user_id == user_id, *conds))
+
+    if name == "to-me":
+        return theirs(them.asked_to.is_(True))
+    if name == "mine":
+        return DiscussionORM.asked_by == user_id
+    if name == "mentions":
+        return theirs(them.mentioned_at.is_not(None))
+    if name == "watching":
+        return and_(exists(select(WatchORM.id).where(
+            WatchORM.user_id == user_id, WatchORM.subject_type == DiscussionORM.subject_type,
+            WatchORM.subject_id == DiscussionORM.subject_id,
+        )), visible_to(user_id))
+    raise ValueError(f"box must be one of {BOXES}, got {name!r}")
+
+
+async def my_counts(session: AsyncSession, user_id: str) -> list:
+    """Per subject, what is waiting for ``user_id`` in the threads they are in:
+    ``(subject_type, subject_id, to_me_unread, waiting, mine_unread, mine_open,
+    mentions_unread, unread)``. One GROUP BY over their participant rows."""
+    p = DiscussionParticipantORM
+    unread = and_(DiscussionORM.last_message_by != user_id,
+                  or_(p.last_read_at.is_(None), DiscussionORM.last_activity_at > p.last_read_at))
+
+    def n(*conds):
+        return func.sum(case((and_(*conds), 1), else_=0))
+
+    return list((await session.execute(
+        select(
+            DiscussionORM.subject_type, DiscussionORM.subject_id,
+            n(p.asked_to.is_(True), unread),
+            n(p.asked_to.is_(True), DiscussionORM.status == "open", p.posted_at.is_(None)),
+            n(DiscussionORM.asked_by == user_id, unread),
+            n(DiscussionORM.asked_by == user_id, DiscussionORM.status == "open"),
+            n(p.mentioned_at.is_not(None), unread),
+            n(unread),
+        ).select_from(DiscussionORM).join(p, p.discussion_id == DiscussionORM.id)
+        .where(p.user_id == user_id, live())
+        .group_by(DiscussionORM.subject_type, DiscussionORM.subject_id)
+    )).all())

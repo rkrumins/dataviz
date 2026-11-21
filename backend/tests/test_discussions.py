@@ -15,7 +15,9 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import select, update
 
-from backend.app.db.models import DiscussionORM, DiscussionParticipantORM, GroupMemberORM, NotificationORM
+from backend.app.db.models import (
+    DiscussionORM, DiscussionParticipantORM, GroupMemberORM, NotificationORM, ResourceGrantORM,
+)
 from backend.app.services.discussions import service
 from tests.common import discussions_world as w
 
@@ -491,3 +493,73 @@ async def test_a_retry_racing_its_original_is_caught_by_the_unique_key(world, db
     again = await reply(test_client, db_session, w.BEN, tid, key="race", status=200)
     assert again["message"]["id"] == first["message"]["id"] and calls["n"] == 2
     assert (await thread_row(db_session, tid)).message_count == 2
+
+
+# ── Watching, and your own conversations ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_watching_a_subject(world, db_session, test_client):
+    url = f"{BASE}/subjects/view/{w.V_WS}/watch"
+    assert (await call(test_client, db_session, w.GIL, "PUT", url)).json() == {"watching": True}
+    assert (await call(test_client, db_session, w.GIL, "PUT", url)).json() == {"watching": True}   # still once
+    assert (await call(test_client, db_session, w.EVE, "PUT", url)).status_code == 404            # can't open it
+    await ask(test_client, db_session)
+    await ask(test_client, db_session, visibility="private", clientKey="priv")
+    listed = (await call(test_client, db_session, w.GIL, "GET", "/api/v1/me/watches")).json()
+    assert [(i["subject"]["id"], i["open"]) for i in listed["items"]] == [(w.V_WS, 1)]   # not the private one
+    w.switch(False)
+    assert (await call(test_client, db_session, w.GIL, "PUT", url)).status_code == 403
+    assert (await call(test_client, db_session, w.GIL, "DELETE", url)).json() == {"watching": False}
+    assert (await call(test_client, db_session, w.GIL, "GET", "/api/v1/me/watches")).json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_your_boxes_and_what_is_waiting(world, db_session, test_client):
+    to_ben = (await ask(test_client, db_session, clientKey="1"))["thread"]["id"]            # asked of Ben
+    mine = (await ask(test_client, db_session, uid=w.BEN, clientKey="2", mentions=[w.ADA]))["thread"]["id"]
+    await call(test_client, db_session, w.BEN, "PUT", f"{BASE}/subjects/view/{w.V_ENT}/watch")
+    watched = (await ask(test_client, db_session, uid=w.EVE, subject=f"view/{w.V_ENT}", clientKey="3",
+                         route={"viewOwners": False, "dataContacts": False}))["thread"]["id"]
+
+    async def box(uid, name, **params):
+        r = await call(test_client, db_session, uid, "GET", "/api/v1/me/discussions", params={"box": name, **params})
+        assert r.status_code == 200, r.text
+        return [t["id"] for t in r.json()["threads"]]
+
+    assert await box(w.BEN, "to-me") == [to_ben]
+    assert await box(w.BEN, "mine") == [mine]
+    assert await box(w.ADA, "mentions") == [mine]
+    assert await box(w.BEN, "watching") == [watched]
+    assert await box(w.BEN, "to-me", status="closed") == []
+    url = "/api/v1/me/discussions/summary"
+    summary = await call(test_client, db_session, w.BEN, "GET", url)
+    assert summary.json() == {"toMe": {"unread": 1, "waiting": 1}, "mine": {"unread": 0, "open": 1},
+                              "mentions": {"unread": 0}, "watching": {"unread": 0}, "totalUnread": 1}
+    assert (await call(test_client, db_session, w.BEN, "GET", url,
+                       headers={"If-None-Match": summary.headers["ETag"]})).status_code == 304
+    await reply(test_client, db_session, w.BEN, to_ben, "On it")
+    after = (await call(test_client, db_session, w.BEN, "GET", url)).json()
+    assert after["toMe"] == {"unread": 0, "waiting": 0}
+
+
+@pytest.mark.asyncio
+async def test_a_box_reads_past_subjects_you_can_no_longer_open(world, db_session, test_client):
+    """Threads about a subject the caller lost are left out of a page without leaving it
+    short, and the cursor moves past what was skipped."""
+    keep = [(await ask(test_client, db_session, uid=w.GIL, clientKey=f"k{i}"))["thread"]["id"] for i in range(2)]
+    # Gil can open the private view for a while, asks there, then loses it.
+    db_session.add(ResourceGrantORM(resource_type="view", resource_id=w.V_PRIV, subject_type="user",
+                                      subject_id=w.GIL, role_name="viewer"))
+    await db_session.commit()
+    gone = [(await ask(test_client, db_session, uid=w.GIL, subject=f"view/{w.V_PRIV}", clientKey=f"g{i}"))
+            ["thread"]["id"] for i in range(3)]
+    grant = (await db_session.execute(select(ResourceGrantORM).where(ResourceGrantORM.subject_id == w.GIL))).scalar_one()
+    await db_session.delete(grant)
+    await db_session.commit()
+    r = await call(test_client, db_session, w.GIL, "GET", "/api/v1/me/discussions", params={"box": "mine", "limit": 2})
+    page = r.json()
+    assert [t["id"] for t in page["threads"]] == list(reversed(keep)) and page["nextCursor"] is None
+    assert not set(gone) & {t["id"] for t in page["threads"]}
+    summary = (await call(test_client, db_session, w.GIL, "GET", "/api/v1/me/discussions/summary")).json()
+    assert summary["mine"]["open"] == 2

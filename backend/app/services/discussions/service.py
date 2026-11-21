@@ -32,12 +32,12 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import exists
+from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.feature_gate import feature_disabled
-from backend.app.db.models import DiscussionMessageORM, DiscussionORM, DiscussionParticipantORM
+from backend.app.db.models import DiscussionMessageORM, DiscussionORM, DiscussionParticipantORM, NotificationORM
 from backend.app.db.repositories import (
     data_source_contact_repo,
     discussion_repo as repo,
@@ -65,6 +65,8 @@ from backend.common.models.discussions import (
     MentionCandidate,
     Message,
     MessageResponse,
+    Mine,
+    MySummary,
     NotReached,
     ReplyBody,
     SubjectRef,
@@ -74,6 +76,10 @@ from backend.common.models.discussions import (
     ThreadList,
     ThreadResponse,
     ThreadSummary,
+    ToMe,
+    Unread,
+    WatchItem,
+    WatchList,
     BODY_MAX,
 )
 
@@ -830,8 +836,115 @@ async def mentionable(session: AsyncSession, caller: Caller, subject_type: str, 
     return MentionableResponse(people=[MentionCandidate(**people[u].model_dump(), hint=hints.get(u)) for u in ids])
 
 
+# ── Watching ─────────────────────────────────────────────────────────
+
+
+async def set_watch(session: AsyncSession, caller: Caller, subject_type: str, subject_id: str, *,
+                    watching: bool) -> bool:
+    """Watch (the route checks the switch) or unwatch a subject the caller can open.
+    Unwatching works on a subject that has since gone, or is no longer readable."""
+    require_person(caller.user)
+    if not watching:
+        await repo.unwatch(session, caller.id, subject_type, subject_id)
+        return False
+    subject = await access.readable_subject(session, caller, subject_type, subject_id)
+    await repo.watch(session, caller.id, subject.type, subject.id, now=repo.now_iso())
+    return True
+
+
+#: Rows one request reads ahead past subjects the caller can no longer open, at most.
+_READ_AHEAD = 3
+
+
+async def _readable_page(session: AsyncSession, caller: Caller, fetch, ref, *, cursor: Optional[str],
+                         limit: int, at) -> tuple[list, Optional[str], dict[tuple[str, str], rd.Subject]]:
+    """A page of rows whose subjects the caller can still open, reading ahead past the
+    rest (up to :data:`_READ_AHEAD` batches). The next cursor is the last row examined, so
+    what was skipped is not read again."""
+    shown, last, more = [], None, False
+    for _ in range(_READ_AHEAD):
+        try:
+            rows, more = await fetch(cursor, limit)
+        except repo.InvalidCursor:
+            raise refuse(400, "invalid_cursor", "That page cursor isn't one this list gave out.")
+        if not rows:
+            more = False
+            break
+        readable = await access.readable_subject_ids(session, caller, {ref(r) for r in rows})
+        for i, r in enumerate(rows):
+            last = r
+            if ref(r) in readable:
+                shown.append(r)
+            if len(shown) == limit:
+                more = more or i < len(rows) - 1
+                break
+        if len(shown) == limit or not more:
+            break
+        cursor = repo.encode_cursor(*at(last))
+    subjects = await rd.load_subjects(session, {ref(r) for r in shown})
+    return shown, repo.encode_cursor(*at(last)) if more and last is not None else None, subjects
+
+
+async def list_watches(session: AsyncSession, caller: Caller, *, cursor: Optional[str], limit: int) -> WatchList:
+    rows, next_cursor, subjects = await _readable_page(
+        session, caller, lambda c, n: repo.watches_page(session, caller.id, cursor=c, limit=n),
+        lambda r: (r.subject_type, r.subject_id), cursor=cursor, limit=limit, at=lambda r: (r.created_at, r.id),
+    )
+    refs = await subject_refs(session, subjects.values())
+    counts = await repo.open_counts(session, subjects.keys(), caller.id)
+    return WatchList(items=[
+        WatchItem(subject=refs[(r.subject_type, r.subject_id)], created_at=r.created_at,
+                  open=counts.get((r.subject_type, r.subject_id), 0))
+        for r in rows if (r.subject_type, r.subject_id) in refs
+    ], next_cursor=next_cursor)
+
+
+# ── Your own conversations ───────────────────────────────────────────
+
+
+async def my_threads(session: AsyncSession, caller: Caller, *, box: str, status: str, cursor: Optional[str],
+                     limit: int) -> ThreadList:
+    """Threads asked of the caller, by them, mentioning them, or on what they watch —
+    those about subjects they can still open."""
+    where = [repo.box(box, caller.id)]
+    if status != "all":
+        where.append(DiscussionORM.status == status)
+    rows, next_cursor, subjects = await _readable_page(
+        session, caller, lambda c, n: repo.page(session, *where, cursor=c, limit=n),
+        lambda t: (t.subject_type, t.subject_id), cursor=cursor, limit=limit,
+        at=lambda t: (t.last_activity_at, t.id),
+    )
+    shown = await summaries(session, caller.id, rows, await subject_refs(session, subjects.values()))
+    return ThreadList(threads=shown, next_cursor=next_cursor, people=await people_map(session, _referenced(shown)))
+
+
+async def my_summary(session: AsyncSession, caller: Caller) -> MySummary:
+    """What is waiting for the caller, box by box, counted only on subjects they can
+    still open. Watching counts the unread notices of new questions on what they watch."""
+    rows = await repo.my_counts(session, caller.id)
+    readable = await access.readable_subject_ids(session, caller, {(r[0], r[1]) for r in rows})
+    sums = [0] * 6
+    for r in rows:
+        if (r[0], r[1]) in readable:
+            sums = [a + int(b or 0) for a, b in zip(sums, r[2:])]
+    to_me_unread, waiting, mine_unread, mine_open, mentions_unread, unread = sums
+    watched = await _unread_watched(session, caller.id)
+    return MySummary(
+        to_me=ToMe(unread=to_me_unread, waiting=waiting), mine=Mine(unread=mine_unread, open=mine_open),
+        mentions=Unread(unread=mentions_unread), watching=Unread(unread=watched), total_unread=unread + watched,
+    )
+
+
+async def _unread_watched(session: AsyncSession, user_id: str) -> int:
+    return int((await session.execute(select(func.count()).select_from(NotificationORM).where(
+        NotificationORM.user_id == user_id, NotificationORM.kind == "discussion.watched",
+        NotificationORM.read_at.is_(None),
+    ))).scalar() or 0)
+
+
 __all__ = [
     "ask", "reply", "edit", "delete_message", "answer", "unanswer", "close", "reopen", "delete_thread",
     "set_mine", "mark_read", "list_for_subject", "subject_summary", "mentionable", "open_thread", "detail",
-    "summaries", "subject_refs", "thread_link", "subject_link", "switch_on", "FLAG",
+    "summaries", "subject_refs", "thread_link", "subject_link", "switch_on", "FLAG", "set_watch",
+    "list_watches", "my_threads", "my_summary",
 ]

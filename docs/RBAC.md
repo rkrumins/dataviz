@@ -1217,6 +1217,15 @@ participant nothing, and nobody who can no longer open the subject is told.
 `workspace.data_source.contacts_changed`. The `collaboration.*` events are for
 auditors only.
 
+**Watching** a view or a data source (`PUT /discussions/subjects/{type}/{id}/watch`)
+takes being able to open it; the background pass tells watchers of each new open
+question, only while they can still open it — never of a private one. **Your own
+conversations** (`/me/discussions?box=to-me|mine|mentions|watching`,
+`/me/discussions/summary`, `/me/watches`) list only threads about subjects you can
+still open. **Profiles** (`GET /people/{userId}`, anyone signed in) name the
+workspaces the person runs and the sources they are a data contact for only where the
+reader can open them; a service account has none (404).
+
 With `conversationsEnabled` off, asking, replying, editing, watching, following and
 changing data contacts are refused `403 feature_disabled`; reading, marking read,
 muting, unfollowing, unwatching, answering, closing and deleting still work, and

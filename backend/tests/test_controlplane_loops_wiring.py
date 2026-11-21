@@ -31,7 +31,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 _LOOPS = (
     "run_relay(", "run_product_event_gc(", "run_refresh_token_gc(",
     "run_activity_retention(", "run_warmer(", "run_api_key_housekeeping(",
-    "run_access_housekeeping(",
+    "run_access_housekeeping(", "run_discussions_housekeeping(",
 )
 
 
@@ -48,7 +48,7 @@ def test_the_monolith_still_starts_them_on_the_scheduler_role():
     source = (_APP / "main.py").read_text()
     for module in (
         "outbox_relay", "refresh_token_gc", "product_event_gc", "activity_retention",
-        "analytics_warmer", "api_key_housekeeping", "access_housekeeping",
+        "analytics_warmer", "api_key_housekeeping", "access_housekeeping", "discussions.housekeeping",
     ):
         assert f"services.{module} import" in source
 
@@ -74,6 +74,7 @@ def test_the_loops_import_without_a_signing_secret_or_the_web_tier():
         import backend.app.services.analytics_warmer
         import backend.app.services.api_key_housekeeping
         import backend.app.services.access_housekeeping
+        import backend.app.services.discussions.housekeeping
         bad = sorted(
             m for m in sys.modules
             if m.startswith(("backend.app.api", "backend.app.auth", "backend.auth_service.core"))
