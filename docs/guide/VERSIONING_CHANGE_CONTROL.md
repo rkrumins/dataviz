@@ -347,6 +347,8 @@ View's sharing.
 | **Propose to parent** | Anyone who can read the fork |
 | **Drafts and reviews** settings | **Workspace admins** |
 | Switch version control or edit mode off for everyone | Administrators, in **Administration → Features** |
+| In the **Playground**: start a draft, **Review & Save**, **Submit for review** on a graph | The graph's maker (a **Playground member**). Other members can't open, change or resolve drafts on a graph they didn't make, and drafts there start private |
+| In the **Playground**: **Publish now**, **Merge** a review, import straight to Published | The graph's maker, without the publish permission — and the Playground's admins. Approving works as anywhere else |
 
 Organisation-wide admin roles can do all of the above in every workspace.
 

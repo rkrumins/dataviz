@@ -264,14 +264,6 @@ export const guideEntries: GuideEntry[] = [
     importFn: () => import('@docs/guide/REQUESTING_ACCESS.md?raw'),
   },
   {
-    slug: 'playground',
-    section: 'viewer',
-    persona: 'viewer',
-    title: 'The Playground',
-    description: 'A sandbox anyone may join to build graphs of their own and try views out, apart from production',
-    importFn: () => import('@docs/guide/PLAYGROUND.md?raw'),
-  },
-  {
     slug: 'requesting-a-workspace',
     section: 'viewer',
     persona: 'viewer',
@@ -297,6 +289,14 @@ export const guideEntries: GuideEntry[] = [
   },
 
   // For Builders
+  {
+    slug: 'playground',
+    section: 'builder',
+    persona: 'builder',
+    title: 'The Playground',
+    description: 'Your workspace at its first stage: start from a sample, your own data or blank, build, review and publish your own, then move it into a workspace',
+    importFn: () => import('@docs/guide/PLAYGROUND.md?raw'),
+  },
   {
     slug: 'creating-views',
     section: 'builder',
