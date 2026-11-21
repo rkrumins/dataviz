@@ -20,12 +20,39 @@ beforeEach(() => {
 
 describe('propertyJobsStore', () => {
   it('keeps the jobs it tracks across a reload, with how each last stood', async () => {
+    vi.useFakeTimers()
     const first = await import('../propertyJobsStore')
     first.usePropertyJobsStore.getState().track(tracked('j1'))
     first.usePropertyJobsStore.getState().update('j1', { jobId: 'j1', status: 'running', progress: 0.4 })
+    vi.advanceTimersByTime(first.SAVE_PROGRESS_MS)
+    vi.useRealTimers()
     vi.resetModules()
     const reloaded = await import('../propertyJobsStore')
     expect(reloaded.usePropertyJobsStore.getState().jobs).toMatchObject([{ jobId: 'j1', job: { progress: 0.4 } }])
+  })
+
+  it('saves progress at most every SAVE_PROGRESS_MS, and how a job starts and ends at once', async () => {
+    vi.useFakeTimers()
+    try {
+      const { usePropertyJobsStore, SAVE_PROGRESS_MS } = await import('../propertyJobsStore')
+      const writes = vi.spyOn(Storage.prototype, 'setItem')
+      const s = usePropertyJobsStore.getState()
+      for (let i = 0; i < 40; i++) s.track(tracked(`r${i}`))
+      writes.mockClear()
+      // A tick of progress on 40 running jobs: nothing written yet, then once.
+      for (let i = 0; i < 40; i++) s.update(`r${i}`, { jobId: `r${i}`, status: 'running', progress: 0.5 })
+      expect(writes).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(SAVE_PROGRESS_MS)
+      expect(writes).toHaveBeenCalledTimes(1)
+      expect(JSON.parse(localStorage.getItem('property-jobs:v1')!)[0].job.progress).toBe(0.5)
+      // An end is kept at once.
+      writes.mockClear()
+      s.update('r0', { jobId: 'r0', status: 'completed' })
+      expect(writes).toHaveBeenCalledTimes(1)
+      writes.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('forgets a dismissed job, and keeps only the newest ended ones', async () => {

@@ -26,6 +26,9 @@ const KEEP_ENDED = 20
 const KEEP_LOST_MS = 7 * 24 * 60 * 60 * 1000
 /** While a job runs, its draft's written epoch moves at most this often. */
 const WRITTEN_EVERY_MS = 30_000
+/** Progress alone is kept (in localStorage) at most this often: 40 running jobs tick together, and a
+ *  reload asks each job afresh anyway. How a job starts, ends or is lost is kept at once. */
+export const SAVE_PROGRESS_MS = 2_000
 
 export interface TrackedJob {
   jobId: string
@@ -126,13 +129,19 @@ interface PropertyJobsState {
 }
 
 export const usePropertyJobsStore = create<PropertyJobsState>((set, get) => {
-  const write = (jobs: TrackedJob[], also: Partial<PropertyJobsState> = {}) => {
+  let saving: ReturnType<typeof setTimeout> | null = null
+  const write = (jobs: TrackedJob[], also: Partial<PropertyJobsState> = {}, progressOnly = false) => {
     // Running ones always kept (a lost one for a week); of the ended, the newest.
     const running = jobs.filter((j) => !jobEnded(j) && !lostForGood(j))
     const ended = jobs.filter(jobEnded).slice(-KEEP_ENDED)
     const kept = jobs.filter((j) => running.includes(j) || ended.includes(j))
-    save(kept)
     set({ jobs: kept, ...also })
+    if (progressOnly) {
+      saving ??= setTimeout(() => { saving = null; save(get().jobs) }, SAVE_PROGRESS_MS)
+      return
+    }
+    if (saving) { clearTimeout(saving); saving = null }
+    save(kept)
   }
   return {
     jobs: load(),
@@ -146,7 +155,8 @@ export const usePropertyJobsStore = create<PropertyJobsState>((set, get) => {
       if (!before) return
       // An answer: it is followed again, whatever was lost.
       const after = { ...before, job, lost: undefined }
-      write(jobs.map((j) => (j.jobId === jobId ? after : j)), { writtenEpochs: written(get().writtenEpochs, before, after) })
+      write(jobs.map((j) => (j.jobId === jobId ? after : j)), { writtenEpochs: written(get().writtenEpochs, before, after) },
+        before.job?.status === job.status && !before.lost)
     },
     lose: (jobId, message, gone = false) => write(get().jobs.map((j) => (j.jobId === jobId
       ? { ...j, lost: { at: j.lost?.at ?? new Date().toISOString(), message, ...(gone ? { gone } : {}) } } : j))),
