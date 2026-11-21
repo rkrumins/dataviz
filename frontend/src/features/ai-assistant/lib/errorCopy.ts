@@ -1,9 +1,9 @@
 /** What a failed turn says, by the service's code — plain words, and what to do next. */
 const COPY: Record<string, { title: string; hint: string; retry: boolean }> = {
-    not_configured: { title: 'The assistant isn’t set up yet', hint: 'An administrator needs to connect an AI model under Administration → AI.', retry: false },
+    not_configured: { title: 'No AI model is connected yet', hint: 'An administrator needs to connect an AI model under Administration → AI.', retry: false },
     feature_disabled: { title: 'The assistant is switched off', hint: 'An administrator can turn it on under Administration → Features.', retry: false },
     missing_permission: { title: 'You can’t use the assistant here', hint: 'Ask an administrator for access to the assistant in this workspace.', retry: false },
-    budget_exhausted: { title: 'You’ve reached today’s limit', hint: 'Your allowance of questions resets tomorrow.', retry: false },
+    budget_exhausted: { title: 'You’ve used today’s assistant budget', hint: 'It resets at midnight UTC, or an administrator can raise it.', retry: false },
     busy: { title: 'The assistant is busy', hint: 'You already have a question being answered. Try again in a moment.', retry: true },
     timeout: { title: 'That took too long', hint: 'Try again, or ask something narrower — one table, one view.', retry: true },
     llm_error: { title: 'The AI model didn’t answer properly', hint: 'Try again in a moment.', retry: true },

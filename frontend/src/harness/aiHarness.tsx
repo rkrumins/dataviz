@@ -78,6 +78,8 @@ useSchemaStore.setState({
 } as never)
 
 
+// A Vite entry, not a module anyone imports: there is nothing to fast-refresh into.
+// eslint-disable-next-line react-refresh/only-export-components
 function Harness() {
     const setTheme = usePreferencesStore((s) => s.setTheme)
     const [canvasSaid, setCanvasSaid] = useState<string | null>(null)

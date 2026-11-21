@@ -10,10 +10,12 @@ import { IconButton } from '@/components/ui/Button'
 import { Segmented } from '@/components/ui/Segmented'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { keyboardScopeProps } from '@/lib/keyboardScope'
+import { queryClient } from '@/lib/queryClient'
 import { formatShortcut } from '@/lib/platform'
 import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
-import { useConversations } from '../api/aiQueries'
+import { AI_CONCEPTS_KEY, useConcepts, useConversations } from '../api/aiQueries'
+import { aiService } from '../api/aiService'
 import type { AssistantPersona } from '../api/types'
 import { deleteConversation, openConversation, startNewChat } from '../lib/chatController'
 import { pageName, type AssistantPageContext } from '../lib/useAssistantContext'
@@ -48,7 +50,7 @@ export function AssistantHeader({ page, connectionName, personas, onClose }: {
                     <p className="truncate text-xs text-ink-muted">{connectionName ? `Answers by ${connectionName}` : 'Answers from your data and the guide'}</p>
                 </div>
                 <IconButton icon={SquarePen} label="New chat" size="sm" onClick={startNewChat} />
-                <HistoryMenu />
+                <HistoryMenu dataSourceId={page.detached ? undefined : page.context.dataSourceId} />
                 <IconButton icon={X} label="Close the assistant" size="sm" shortcut={formatShortcut('mod+j')} onClick={onClose} />
             </div>
             <div className="relative flex flex-col gap-2 px-3.5 pb-3">
@@ -95,16 +97,20 @@ function ContextChip({ page }: { page: AssistantPageContext }) {
     )
 }
 
-/** The person's conversations, newest first: open one, or delete it. */
-function HistoryMenu() {
+/**
+ * The person's conversations, newest first — open one, or delete it — and the readings they asked
+ * the assistant to remember for this data source, each of their own forgettable.
+ */
+function HistoryMenu({ dataSourceId }: { dataSourceId?: string }) {
     const [open, setOpen] = useState(false)
     const current = useAssistantStore((s) => s.conversationId)
     const { data, isLoading, isError } = useConversations(open)
     const items = data?.items ?? []
+    const concepts = useConcepts(dataSourceId, open)
 
     return (
         <Popover.Root open={open} onOpenChange={setOpen}>
-            <HoverTip label="Your conversations" className="inline-flex">
+            <HoverTip label="Your conversations" detail="And the readings you asked it to remember" className="inline-flex">
                 <Popover.Trigger asChild>
                     <button type="button" aria-label="Your conversations"
                             className={cn('inline-flex h-7 w-7 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-black/[0.05] hover:text-ink',
@@ -157,6 +163,33 @@ function HistoryMenu() {
                                 </li>
                             ))}
                         </ul>
+                        {(concepts.data?.items ?? []).length > 0 && (
+                            <>
+                                <div className="mt-1 border-t border-glass-border px-2 pb-1 pt-2.5 text-2xs font-semibold uppercase tracking-wider text-ink-muted">
+                                    Remembered readings
+                                </div>
+                                <ul>
+                                    {concepts.data!.items.map((c) => (
+                                        <li key={c.id} className="flex items-center gap-1 rounded-lg px-2 py-1.5 pr-1">
+                                            <span className="min-w-0 flex-1">
+                                                <span className="block truncate text-sm text-ink">
+                                                    “{c.concept}” <span className="text-ink-muted">means</span> {c.label}
+                                                </span>
+                                                <span className="block text-xs text-ink-muted">
+                                                    {c.scope === 'workspace' ? 'Everyone’s, set by an administrator' : 'Yours'}
+                                                    {c.uses > 0 ? ` · used ${c.uses} ${c.uses === 1 ? 'time' : 'times'}` : ''}
+                                                </span>
+                                            </span>
+                                            {c.scope === 'personal' && (
+                                                <IconButton icon={X} label={`Forget what “${c.concept}” means`} size="sm" variant="danger" tip={false}
+                                                            onClick={() => void aiService.deleteConcept(c.id).then(
+                                                                () => queryClient.invalidateQueries({ queryKey: AI_CONCEPTS_KEY }), () => {})} />
+                                            )}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </>
+                        )}
                     </div>
                 </Popover.Content>
             </Popover.Portal>

@@ -4153,7 +4153,18 @@ export function ContextViewCanvas({
     const urns = selection.length > 1 && selection.includes(target.id) ? selection : [target.id]
     // Entities holding others: their lineage questions take in what is inside.
     const containers = new Set(urns.filter((urn) => Number(displayMap.get(urn)?.data?.childCount ?? 0) > 0))
-    return questionsFromHere(urns, { readOnly, containers }).map((q) => ({
+    // The AI assistant's impact question about it, while the assistant is on.
+    const askAssistant: ContextMenuAction[] = assistantEnabled ? [{
+      id: 'ai-what-breaks', label: 'What breaks if this changes?', icon: 'Bot',
+      onClick: () => {
+        interactions.closeContextMenu()
+        useAssistantStore.getState().openAssistant({
+          persona: 'data',
+          context: { focusUrn: urns[0], focusName: canvasDisplayName(urns[0]), prompt: 'What breaks if this changes?' },
+        })
+      },
+    }] : []
+    return [...askAssistant, ...questionsFromHere(urns, { readOnly, containers }).map((q) => ({
       id: `query-${q.id}`, label: q.label, icon: q.icon as ContextMenuAction['icon'],
       onClick: () => {
         // Named before the query is committed, so its sentence and chips
@@ -4170,9 +4181,9 @@ export function ContextViewCanvas({
         }
         interactions.closeContextMenu()
       },
-    }))
+    }))]
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interactions.state.contextMenu.target, selectedNodeIds, readOnly, search.refine, search.openPanel, displayMap])
+  }, [interactions.state.contextMenu.target, selectedNodeIds, readOnly, search.refine, search.openPanel, displayMap, assistantEnabled])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {

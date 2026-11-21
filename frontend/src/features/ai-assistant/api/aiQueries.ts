@@ -15,6 +15,7 @@ import type { AssistantPersona } from './types'
 export const AI_STATUS_KEY = ['ai', 'status'] as const
 export const AI_CONVERSATIONS_KEY = ['ai', 'conversations'] as const
 export const aiConversationKey = (id: string) => ['ai', 'conversation', id] as const
+export const AI_CONCEPTS_KEY = ['ai', 'concepts'] as const
 
 /** Whether the assistant is set up. Only asked while the feature is on. */
 export function useAiStatus() {
@@ -43,6 +44,18 @@ export function useConversations(enabled: boolean) {
     return useQuery({
         queryKey: AI_CONVERSATIONS_KEY,
         queryFn: () => aiService.listConversations(30),
+        enabled,
+        staleTime: 15_000,
+        retry: false,
+    }, queryClient)
+}
+
+/** The readings the person asked the assistant to remember ("PII" means the tag pii), and the
+ *  ones an administrator made everyone's — for a data source, or all of them. */
+export function useConcepts(dataSourceId: string | undefined, enabled: boolean) {
+    return useQuery({
+        queryKey: [...AI_CONCEPTS_KEY, dataSourceId ?? null],
+        queryFn: () => aiService.listConcepts(dataSourceId),
         enabled,
         staleTime: 15_000,
         retry: false,

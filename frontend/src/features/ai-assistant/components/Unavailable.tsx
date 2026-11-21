@@ -18,7 +18,7 @@ export function Unavailable({ reason, onRetry }: { reason: UnavailableReason; on
             {reason === 'not_configured' && (
                 <EmptyState
                     icon={PlugZap}
-                    title="The assistant isn’t set up yet"
+                    title="No AI model is connected yet"
                     description="An administrator needs to connect an AI model under Administration → AI. Until then there’s nothing to answer with."
                     action={isAdmin ? { label: 'Set up the assistant', icon: Settings, onClick: () => navigate('/admin/ai') } : undefined}
                 />

@@ -184,7 +184,7 @@ export function AssistantRail() {
                 onStop={stopStreaming}
                 onEscape={close}
                 streaming={streaming}
-                disabled={!ready}
+                disabled={!ready || loadingConversation}
                 placeholder={persona === 'help' ? 'Ask how to do something…' : page.view && !page.detached ? 'Ask about this view…' : 'Ask about your data…'}
                 footer="Answers can be wrong — check the evidence."
             />

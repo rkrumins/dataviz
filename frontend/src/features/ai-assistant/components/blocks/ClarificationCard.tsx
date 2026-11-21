@@ -148,8 +148,8 @@ function Option({ option, total, checked, tabbable, disabled, onPick }: {
                 checked ? 'border-accent-lineage/50 bg-accent-lineage/10' : 'border-glass-border hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.03]',
             )}
         >
-            {/* How much each reading finds, as a quiet bar behind it. */}
-            <span aria-hidden className="absolute inset-y-0 left-0 bg-accent-lineage/5" style={{ width: `${share * 100}%` }} />
+            {/* How much each reading finds, against the most any finds: a hairline along its foot. */}
+            <span aria-hidden className="absolute bottom-0 left-0 h-0.5 bg-accent-lineage/30" style={{ width: `${share * 100}%` }} />
             <span aria-hidden className={cn('relative flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2',
                 checked ? 'border-accent-lineage' : 'border-ink-muted/50')}>
                 {checked && <span className="h-2 w-2 rounded-full bg-accent-lineage" />}

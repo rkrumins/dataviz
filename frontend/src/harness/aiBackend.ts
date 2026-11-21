@@ -17,7 +17,7 @@ function eventStream(frames: ScriptFrame[], delayMs: number, holdAfter?: number,
     let i = 0
     const body = new ReadableStream<Uint8Array>({
         async pull(controller) {
-            if (holdAfter !== undefined && i >= holdAfter) return new Promise<void>(() => {})
+            if (holdAfter !== undefined && i >= Math.min(holdAfter, frames.length)) return new Promise<void>(() => {})
             if (i >= frames.length) { controller.close(); return }
             await new Promise((r) => setTimeout(r, delayMs))
             if (signal?.aborted) { controller.error(new DOMException('aborted', 'AbortError')); return }
@@ -41,6 +41,11 @@ const CONVERSATIONS = [
     { id: 'conv_h1', title: 'What breaks if first_name is dropped?', persona: 'data', updatedAt: new Date(Date.now() - 4 * 60_000).toISOString(), messageCount: 2 },
     { id: 'conv_h2', title: 'PII updated last week', persona: 'data', updatedAt: new Date(Date.now() - 3 * 3600_000).toISOString(), messageCount: 6 },
     { id: 'conv_h3', title: 'How do I share a view?', persona: 'help', updatedAt: new Date(Date.now() - 2 * 86400_000).toISOString(), messageCount: 2 },
+]
+
+const CONCEPTS = [
+    { id: 'cpt_1', concept: 'PII', label: 'Tag “pii”', scope: 'personal', predicate: { kind: 'tag', op: 'hasAny', values: ['pii'] }, uses: 4, updatedAt: '2026-11-20T10:00:00Z' },
+    { id: 'cpt_2', concept: 'owner', label: 'the data_owner property', scope: 'workspace', predicate: { kind: 'property', key: 'data_owner', op: 'exists' }, uses: 12, updatedAt: '2026-11-01T10:00:00Z' },
 ]
 
 export function installAiBackend(fixture: AiFixture, { frameDelayMs = 40 } = {}): void {
@@ -71,6 +76,8 @@ export function installAiBackend(fixture: AiFixture, { frameDelayMs = 40 } = {})
             ] })
         }
         if (/^\/api\/v1\/ai\/messages\/[^/]+\/feedback$/.test(path)) return json(null, 204)
+        if (path === '/api/v1/ai/concepts') return json({ items: CONCEPTS })
+        if (/^\/api\/v1\/ai\/concepts\/[^/]+$/.test(path) && method === 'DELETE') return json(null, 204)
         return json({ detail: 'Not in the harness' }, 404)
     }
 }

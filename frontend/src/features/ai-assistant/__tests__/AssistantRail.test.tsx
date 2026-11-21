@@ -85,7 +85,7 @@ describe('AssistantRail', () => {
         status = { configured: false, personas: { data: true, help: true } }
         useAuthStore.setState({ permissions: { global: ['system:admin'], ws: {} } } as never)
         renderRail()
-        expect(await screen.findByText('The assistant isn’t set up yet')).toBeInTheDocument()
+        expect(await screen.findByText('No AI model is connected yet')).toBeInTheDocument()
         expect(screen.getByText(/Administration → AI/)).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Set up the assistant' })).toBeInTheDocument()
         expect(composer()).toBeDisabled()
