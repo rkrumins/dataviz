@@ -452,6 +452,16 @@ export const PAGE_INDEX: PageEntry[] = [
         path: '/admin/service-accounts',
         gate: { kind: 'admin', key: 'service-accounts' },
     },
+    {
+        id: 'admin-ai',
+        category: 'Setting',
+        title: 'AI',
+        description: 'Model connections, data sharing, knowledge and usage',
+        keywords: ['admin', 'ai', 'assistant', 'llm', 'model', 'openai', 'azure', 'gateway', 'embeddings', 'mcp', 'vocabulary'],
+        path: '/admin/ai',
+        gate: { kind: 'admin', key: 'ai' },
+        feature: 'aiAssistantEnabled',
+    },
 ]
 
 /**

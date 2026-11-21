@@ -62,6 +62,7 @@ const AdminSso = lazyWithRetry(() => import('@/components/admin/AdminSso').then(
 const AdminActivity = lazyWithRetry(() => import('@/components/admin/AdminActivity').then(m => ({ default: m.AdminActivity })))
 const AdminApiKeys = lazyWithRetry(() => import('@/components/admin/AdminApiKeys').then(m => ({ default: m.AdminApiKeys })))
 const AdminServiceAccounts = lazyWithRetry(() => import('@/components/admin/AdminServiceAccounts').then(m => ({ default: m.AdminServiceAccounts })))
+const AdminAi = lazyWithRetry(() => import('@/components/admin/ai/AdminAi').then(m => ({ default: m.AdminAi })))
 const AdminTelemetry = lazyWithRetry(() => import('@/components/admin/AdminTelemetry/index').then(m => ({ default: m.AdminTelemetry })))
 const IngestionPage = lazyWithRetry(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const DataSourceOverviewPage = lazyWithRetry(() => import('@/pages/DataSourceOverviewPage').then(m => ({ default: m.DataSourceOverviewPage })))
@@ -408,6 +409,16 @@ export const router = createBrowserRouter([
             element: (
               <RequireNav group="admin" sectionKey="service-accounts">
                 <ServiceAccountsAdmin />
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'ai',
+            element: (
+              <RequireNav group="admin" sectionKey="ai">
+                <RequireFeature feature="aiAssistantEnabled" explain title="The AI assistant is turned off" message="The assistant isn’t enabled for this deployment. An administrator can turn it on under Administration → Features, then connect a model here." guideSlug="ai-assistant">
+                  <Lazy><AdminAi /></Lazy>
+                </RequireFeature>
               </RequireNav>
             ),
           },

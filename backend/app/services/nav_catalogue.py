@@ -123,6 +123,8 @@ _ADMIN_SECTIONS: dict[str, tuple[str, NavSpec]] = {
     "api-keys":      ("API keys",        NavSpecPerm(perm="system:audit:read")),
     # Super and org admins: the people who look after integrations.
     "service-accounts": ("Service accounts", NavSpecPerm(perm="system:service-accounts:manage")),
+    # The AI service's administration routes (`/ai/admin/*`).
+    "ai":            ("AI",              NavSpecPerm(perm="system:admin")),
 }
 
 

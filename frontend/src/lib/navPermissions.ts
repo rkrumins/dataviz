@@ -103,6 +103,7 @@ export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec
     audit:         { kind: 'perm', perm: 'system:audit:read' },
     'api-keys':    { kind: 'perm', perm: 'system:audit:read' },
     'service-accounts': { kind: 'perm', perm: 'system:service-accounts:manage' },
+    ai:            { kind: 'perm', perm: 'system:admin' },
 }
 
 

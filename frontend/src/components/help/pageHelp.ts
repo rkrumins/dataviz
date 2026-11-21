@@ -44,6 +44,7 @@ export const PAGE_HELP: ReadonlyArray<{ path: string; slugs: readonly string[] }
   { path: '/admin/audit', slugs: ['governance-ops'] },
   { path: '/admin/api-keys', slugs: ['api-keys', 'governance-ops'] },
   { path: '/admin/service-accounts', slugs: ['service-accounts', 'users-access'] },
+  { path: '/admin/ai', slugs: ['ai-assistant', 'feature-switches', 'governance-ops'] },
 ]
 
 /** The guide slugs for the page at `pathname`, most relevant first. */

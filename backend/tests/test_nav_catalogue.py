@@ -128,6 +128,7 @@ _ADMIN_SECTION_ANCHORS: dict[str, tuple[str, ...]] = {
     "audit":         ("/admin/audit", "/admin/activity"),
     "api-keys":      ("/admin/api-keys",),
     "service-accounts": ("/admin/service-accounts",),
+    "ai":            ("/ai/admin",),
 }
 
 # The sidebar entries are ``anyPerm`` unions of two universal global

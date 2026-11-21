@@ -9,12 +9,13 @@ import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
     Activity, BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
-    UserCog, Users2, KeyRound, KeySquare, Network, History, Palette, Database, LineChart, HardDrive, Bot,
+    UserCog, Users2, KeyRound, KeySquare, Network, History, Palette, Database, LineChart, HardDrive, Bot, Sparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useNavPermission, usePermissionsReady } from '@/store/auth'
 import { GuardSkeleton } from '@/components/auth/RequirePermission'
 import { useAdminSectionSpec } from '@/store/navCatalogue'
+import { useFeature } from '@/store/features'
 import { useBrand } from '@/store/branding'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
@@ -44,6 +45,7 @@ const adminGroups = [
             { path: 'graph-store', label: 'Graph store', icon: HardDrive, description: 'Shards, replicas, memory and where every graph lives' },
             { path: 'branding', label: 'Branding', icon: Palette, description: 'App name, logo & theme' },
             { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
+            { path: 'ai', label: 'AI', icon: Sparkles, description: 'Model connections, data sharing & knowledge' },
             { path: 'telemetry', label: 'Telemetry', icon: LineChart, description: 'Product usage & content gaps' },
             { path: 'announcements', label: 'Announcements', icon: Megaphone, description: 'Global banner messages' },
         ]
@@ -96,6 +98,10 @@ export function AdminPage() {
     const auditVisible         = useNavPermission(useAdminSectionSpec('audit'))
     const apiKeysVisible       = useNavPermission(useAdminSectionSpec('api-keys'))
     const serviceAccountsVisible = useNavPermission(useAdminSectionSpec('service-accounts'))
+    // A switch, not a permission: while the assistant is off its section is
+    // absent here, and a deep link explains why (RequireFeature in the route).
+    const aiAllowed = useNavPermission(useAdminSectionSpec('ai'))
+    const aiOn = useFeature('aiAssistantEnabled')
 
     const itemVisibility: Record<string, boolean> = {
         overview:       overviewVisible,
@@ -113,6 +119,7 @@ export function AdminPage() {
         audit:         auditVisible,
         'api-keys':    apiKeysVisible,
         'service-accounts': serviceAccountsVisible,
+        ai:            aiAllowed && aiOn,
     }
 
     // Filter items out of each group; drop groups that end up empty.
