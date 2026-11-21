@@ -13,7 +13,8 @@
  * REAL tabs against it. No API, no providers, no auth.
  */
 import type {
-    AnalyticsDataDoc, AnalyticsSummary, AnalyticsUsageDoc, WorkspaceAnalyticsRow,
+    AnalyticsCollaborationDoc, AnalyticsDataDoc, AnalyticsSummary, AnalyticsUsageDoc,
+    DiscussedView, WorkspaceAnalyticsDetail, WorkspaceAnalyticsRow,
 } from '../services/analyticsService'
 
 const BUCKETS = Array.from({ length: 14 }, (_, i) => {
@@ -419,6 +420,42 @@ export const DATA_PRIVILEGED: AnalyticsDataDoc = {
         },
         share: { versioned: 17, total: 58 },
     },
+    details: {
+        sources: 58, described: 41, tagged: 33, withContacts: 26,
+        trust: [
+            { key: 'certified', count: 17 }, { key: 'in_review', count: 6 },
+            { key: 'deprecated', count: 3 }, { key: 'none', count: 32 },
+        ],
+        classification: [
+            { key: 'public', count: 4 }, { key: 'internal', count: 22 },
+            { key: 'confidential', count: 11 }, { key: 'restricted', count: 2 },
+            { key: 'none', count: 19 },
+        ],
+        topTags: [
+            { key: 'finance', count: 14 }, { key: 'pii', count: 9 }, { key: 'dbt', count: 8 },
+            { key: 'marketing', count: 6 }, { key: 'month-end', count: 5 }, { key: 'events', count: 4 },
+            { key: 'gold', count: 3 },
+        ],
+        byWorkspace: [
+            { workspaceId: 'ws1', name: 'Data Platform', sources: 34, described: 27, tagged: 22, withContacts: 18, certified: 11, canOpen: true },
+            { workspaceId: 'ws2', name: 'Finance', sources: 12, described: 10, tagged: 8, withContacts: 6, certified: 5, canOpen: true },
+            { workspaceId: 'ws3', name: 'Growth', sources: 7, described: 3, tagged: 2, withContacts: 1, certified: 1, canOpen: true },
+            { workspaceId: 'ws4', name: 'Archive 2024', sources: 2, described: 0, tagged: 0, withContacts: 0, certified: 0, canOpen: true },
+        ],
+    },
+    requests: {
+        data: {
+            asked: metric(64, 9, 6), connected: 5, declined: 1, open: 7,
+            openByUrgency: [
+                { key: 'this_week', count: 2 }, { key: 'this_month', count: 3 }, { key: 'no_rush', count: 2 },
+            ],
+            medianHoursToConnect: 52,
+        },
+        workspaces: {
+            submitted: metric(23, 4, 2), approved: 3, declined: 0, open: 2,
+            changesRequested: 1, medianHoursToDecision: 19,
+        },
+    },
 }
 
 /** As a member of one team sees it: two of the workspaces are not theirs. */
@@ -437,7 +474,18 @@ export const DATA_LOCKED: AnalyticsDataDoc = {
                 }
                 : m)),
     },
-    redaction: { applied: true, reportsAllWorkspaces: false },
+    details: {
+        ...DATA_PRIVILEGED.details!,
+        // `marketing` and `events` are only used in workspaces not theirs.
+        topTags: DATA_PRIVILEGED.details!.topTags.filter((t) => !['marketing', 'events'].includes(t.key)),
+        byWorkspace: DATA_PRIVILEGED.details!.byWorkspace.map((r) => (
+            r.workspaceId && hidden.has(r.workspaceId)
+                ? { ...r, workspaceId: null, name: 'Restricted workspace', redacted: true, canOpen: false }
+                : r)),
+    },
+    // Below the posture that shows operations.
+    requests: undefined,
+    redaction: { applied: true, reportsAllWorkspaces: false, showsOperations: false },
 }
 
 const zeros = BUCKETS.map(() => 0)
@@ -458,6 +506,205 @@ export const DATA_FIRST_RUN: AnalyticsDataDoc = {
         available: true, byKind: [],
         adopted: { buckets: BUCKETS, series: [] }, share: { versioned: 0, total: 0 },
     },
+    details: {
+        sources: 0, described: 0, tagged: 0, withContacts: 0,
+        trust: DATA_PRIVILEGED.details!.trust.map((t) => ({ ...t, count: 0 })),
+        classification: DATA_PRIVILEGED.details!.classification.map((c) => ({ ...c, count: 0 })),
+        topTags: [], byWorkspace: [],
+    },
+    requests: {
+        data: {
+            asked: metric(0, 0, 0), connected: 0, declined: 0, open: 0,
+            openByUrgency: DATA_PRIVILEGED.requests!.data.openByUrgency.map((u) => ({ ...u, count: 0 })),
+            medianHoursToConnect: null,
+        },
+        workspaces: {
+            submitted: metric(0, 0, 0), approved: 0, declined: 0, open: 0,
+            changesRequested: 0, medianHoursToDecision: null,
+        },
+    },
+}
+
+// ── The Collaboration tab's document ─────────────────────────────────
+
+const ASKED = series(9, 0.11)
+const ANSWERED = ASKED.map((v, i) => Math.max(0, v - (i % 3 === 0 ? 2 : 1)))
+const sum = (values: number[]) => values.reduce((a, b) => a + b, 0)
+
+const discussed = (questions: number, replies: number, answered: number, open: number) => ({
+    questions, replies, messages: questions + replies, answered, open, canOpen: true,
+})
+
+export const COLLAB_PRIVILEGED: AnalyticsCollaborationDoc = {
+    windowDays: 14,
+    generatedAt: PRIVILEGED.generatedAt,
+    range: PRIVILEGED.range,
+    bucket: 'day',
+    kpis: {
+        asked: metric(412, sum(ASKED), 51),
+        answerRate: {
+            current: Math.round((sum(ANSWERED) / sum(ASKED)) * 1000) / 1000,
+            previous: 0.64, answered: sum(ANSWERED),
+        },
+        firstResponseHours: { current: 5.5, previous: 7.2, changePct: -23.6, measured: 44 },
+        answerHours: { current: 26, previous: 31.5, changePct: -17.5, measured: 27 },
+        waitingOverWeek: { total: 5 },
+        open: { total: 19 },
+        askers: metric(38, 38, 33),
+        answerers: metric(21, 21, 24),
+        replies: metric(186, 186, 152),
+        privateShare: { current: 0.12, previous: 0.09 },
+    },
+    series: { buckets: BUCKETS, asked: ASKED, answered: ANSWERED },
+    leaderboards: {
+        views: [
+            { viewId: 'v1', name: 'Revenue lineage', workspaceId: 'ws2', workspaceName: 'Finance', visibility: 'workspace', ...discussed(9, 23, 7, 3) },
+            { viewId: 'v2', name: 'Customer 360', workspaceId: 'ws1', workspaceName: 'Data Platform', visibility: 'enterprise', ...discussed(6, 14, 5, 1) },
+            { viewId: 'v3', name: 'Orders pipeline', workspaceId: 'ws1', workspaceName: 'Data Platform', visibility: 'workspace', ...discussed(5, 9, 3, 2) },
+            { viewId: 'v4', name: 'Marketing attribution', workspaceId: 'ws3', workspaceName: 'Growth', visibility: 'private', ...discussed(3, 7, 1, 2) },
+            { viewId: 'v5', name: 'Churn model inputs', workspaceId: 'ws3', workspaceName: 'Growth', visibility: 'workspace', ...discussed(2, 4, 2, 0) },
+            { viewId: 'v6', name: 'Warehouse overview', workspaceId: 'ws1', workspaceName: 'Data Platform', visibility: 'enterprise', ...discussed(1, 3, 1, 0) },
+        ],
+        sources: [
+            { dataSourceId: 'ds2', name: 'Ledger', workspaceId: 'ws2', workspaceName: 'Finance', ...discussed(7, 18, 5, 2) },
+            { dataSourceId: 'ds1', name: 'Warehouse lineage', workspaceId: 'ws1', workspaceName: 'Data Platform', ...discussed(5, 11, 4, 1) },
+            { dataSourceId: 'ds3', name: 'Events catalogue', workspaceId: 'ws3', workspaceName: 'Growth', ...discussed(4, 6, 2, 2) },
+            { dataSourceId: 'ds5', name: 'Payments', workspaceId: 'ws2', workspaceName: 'Finance', ...discussed(2, 2, 2, 0) },
+            { dataSourceId: 'ds6', name: 'CRM', workspaceId: 'ws1', workspaceName: 'Data Platform', ...discussed(1, 0, 0, 1) },
+        ],
+        workspaces: [
+            { workspaceId: 'ws2', name: 'Finance', questions: 18, answered: 14, answerRate: 0.778, firstResponseHours: 4.2, replies: 43, canOpen: true },
+            { workspaceId: 'ws1', name: 'Data Platform', questions: 18, answered: 14, answerRate: 0.778, firstResponseHours: 3.1, replies: 37, canOpen: true },
+            { workspaceId: 'ws3', name: 'Growth', questions: 9, answered: 5, answerRate: 0.556, firstResponseHours: 11.5, replies: 17, canOpen: true },
+            { workspaceId: 'ws4', name: 'Archive 2024', questions: 1, answered: 0, answerRate: 0, firstResponseHours: null, replies: 0, canOpen: true },
+        ],
+        answerers: [
+            { userId: 'u1', name: 'Priya Raman', accepted: 9, replies: 31 },
+            { userId: 'u2', name: 'Tom Okafor', accepted: 7, replies: 22 },
+            { userId: 'u3', name: 'Lena Fischer', accepted: 5, replies: 19 },
+            { userId: 'u4', name: 'Marco Rossi', accepted: 3, replies: 12 },
+            { userId: 'u5', name: 'Ada Lovelace', accepted: 2, replies: 9 },
+            { userId: 'u6', name: 'Sam Chen', accepted: 1, replies: 14 },
+        ],
+        waiting: [
+            { discussionId: 'd1', subjectType: 'data_source', subjectId: 'ds2', subjectName: 'Ledger', workspaceId: 'ws2', workspaceName: 'Finance', askedAt: '2026-05-23T09:00:00+00:00', ageDays: 23, replies: 2, private: false, excerpt: 'Why does the daily balance here differ from the finance close?', askedByName: 'Asha Patel', canOpen: true },
+            { discussionId: 'd2', subjectType: 'view', subjectId: 'v4', subjectName: 'Marketing attribution', workspaceId: 'ws3', workspaceName: 'Growth', askedAt: '2026-05-29T09:00:00+00:00', ageDays: 17, replies: 0, private: true, excerpt: null, askedByName: 'Bo Lindqvist', canOpen: true },
+            { discussionId: 'd3', subjectType: 'view', subjectId: 'v2', subjectName: 'Customer 360', workspaceId: 'ws1', workspaceName: 'Data Platform', askedAt: '2026-06-03T09:00:00+00:00', ageDays: 12, replies: 1, private: false, excerpt: 'Is the churn flag computed nightly or on demand?', askedByName: 'Chen Wei', canOpen: true },
+            { discussionId: 'd4', subjectType: 'data_source', subjectId: 'ds3', subjectName: 'Events catalogue', workspaceId: 'ws3', workspaceName: 'Growth', askedAt: '2026-06-06T09:00:00+00:00', ageDays: 9, replies: 0, private: false, excerpt: 'Which events are deduplicated before they land here?', askedByName: 'Dana Ortiz', canOpen: true },
+            { discussionId: 'd5', subjectType: 'view', subjectId: 'v3', subjectName: 'Orders pipeline', workspaceId: 'ws1', workspaceName: 'Data Platform', askedAt: '2026-06-07T09:00:00+00:00', ageDays: 8, replies: 3, private: false, excerpt: 'What does the dashed edge between staging and orders mean?', askedByName: 'Eli Novak', canOpen: true },
+            { discussionId: 'd6', subjectType: 'data_source', subjectId: 'ds1', subjectName: 'Warehouse lineage', workspaceId: 'ws1', workspaceName: 'Data Platform', askedAt: '2026-06-10T09:00:00+00:00', ageDays: 5, replies: 0, private: false, excerpt: 'Can the dbt docs be linked from this source?', askedByName: 'Fay Morgan', canOpen: true },
+            { discussionId: 'd7', subjectType: 'view', subjectId: 'v1', subjectName: 'Revenue lineage', workspaceId: 'ws2', workspaceName: 'Finance', askedAt: '2026-06-13T09:00:00+00:00', ageDays: 2, replies: 1, private: false, excerpt: 'Who owns the FX conversion step?', askedByName: 'Gus Hale', canOpen: true },
+        ],
+    },
+}
+
+/** As a member of Data Platform and Archive 2024 sees it — the same rules as
+ *  `analytics_collaboration_repo.redact_collaboration`. */
+const hiddenView = (v: DiscussedView): boolean =>
+    v.visibility !== 'enterprise' && !!v.workspaceId && hidden.has(v.workspaceId)
+export const COLLAB_STRICT: AnalyticsCollaborationDoc = {
+    ...COLLAB_PRIVILEGED,
+    leaderboards: {
+        views: COLLAB_PRIVILEGED.leaderboards.views.map((v) => (hiddenView(v)
+            ? { ...v, viewId: null, name: 'Restricted view', workspaceId: null, workspaceName: 'Restricted workspace', visibility: 'restricted', redacted: true, canOpen: false }
+            : v)),
+        sources: COLLAB_PRIVILEGED.leaderboards.sources.map((s) => (s.workspaceId && hidden.has(s.workspaceId)
+            ? { ...s, dataSourceId: null, name: 'Restricted source', workspaceId: null, workspaceName: 'Restricted workspace', redacted: true, canOpen: false }
+            : s)),
+        workspaces: COLLAB_PRIVILEGED.leaderboards.workspaces.map((w) => (hidden.has(w.workspaceId)
+            ? { ...w, name: 'Restricted workspace', redacted: true, canOpen: false }
+            : w)),
+        answerers: [],
+        waiting: COLLAB_PRIVILEGED.leaderboards.waiting.map(({ excerpt: _e, askedByName: _a, ...q }) => (
+            q.private || (q.workspaceId && hidden.has(q.workspaceId))
+                ? {
+                    ...q, discussionId: null, subjectId: null, subjectName: null,
+                    workspaceId: q.workspaceId && !hidden.has(q.workspaceId) ? q.workspaceId : null,
+                    workspaceName: q.workspaceId && !hidden.has(q.workspaceId) ? q.workspaceName : null,
+                    redacted: true, canOpen: false,
+                }
+                : q)),
+    },
+    redaction: {
+        applied: true, showsPeople: false, reportsAllWorkspaces: false,
+        hidden: ['Who answers most', 'What was asked, and by whom'],
+    },
+}
+
+/** Questions are on, and nobody has asked one yet. */
+export const COLLAB_EMPTY: AnalyticsCollaborationDoc = {
+    ...COLLAB_PRIVILEGED,
+    kpis: {
+        asked: metric(0, 0, 0),
+        answerRate: { current: null, previous: null, answered: 0 },
+        firstResponseHours: { current: null, previous: null, changePct: null, measured: 0 },
+        answerHours: { current: null, previous: null, changePct: null, measured: 0 },
+        waitingOverWeek: { total: 0 }, open: { total: 0 },
+        askers: metric(0, 0, 0), answerers: metric(0, 0, 0), replies: metric(0, 0, 0),
+        privateShare: { current: null, previous: null },
+    },
+    series: { buckets: BUCKETS, asked: zeros, answered: zeros },
+    leaderboards: { views: [], sources: [], workspaces: [], answerers: [], waiting: [] },
+}
+
+// ── One workspace's drill-in ─────────────────────────────────────────
+
+export const DETAIL_PRIVILEGED: WorkspaceAnalyticsDetail = {
+    workspaceId: 'ws1', name: 'Data Platform',
+    description: 'Warehouse, pipelines and the lineage between them',
+    createdAt: '2025-11-04T00:00:00+00:00', isActive: true,
+    windowDays: 14, generatedAt: PRIVILEGED.generatedAt, range: PRIVILEGED.range, bucket: 'day',
+    totals: {
+        views: metric(412, 21, 17), viewOpens: metric(9200, 9200, 8100),
+        activeUsers: metric(44, 44, 39), activity: metric(18400, 18400, 16900),
+        members: { total: 48 }, dataSources: { total: 34 }, layoutTemplates: { total: 12 },
+    },
+    series: {
+        buckets: BUCKETS,
+        viewsCreated: series(4, 0.08), cumulativeViews: running(391, series(4, 0.08)),
+        activityEvents: series(5, 22), activeUsers: series(2, 0.9), viewOpens: series(3, 12),
+        entities: share(ENTITIES, 0.46), relationships: share(ENTITIES, 1.2),
+    },
+    growth: { entities: level(188_600, 196_400), relationships: level(492_000, 511_000) },
+    breakdowns: {
+        viewsByVisibility: [{ key: 'workspace', count: 230 }, { key: 'enterprise', count: 92 }, { key: 'private', count: 90 }],
+        viewsByType: [{ key: 'graph', count: 210 }, { key: 'reference', count: 120 }, { key: 'layered-lineage', count: 82 }],
+        activityByAction: [{ key: 'updated', count: 9800 }, { key: 'created', count: 3100 }],
+    },
+    topViews: PRIVILEGED.leaderboards.topViews.slice(0, 4),
+    topContributors: [
+        { userId: 'u1', name: 'Priya Raman', events: 1840 },
+        { userId: 'u2', name: 'Tom Okafor', events: 1210 },
+        { userId: 'u3', name: 'Lena Fischer', events: 960 },
+    ],
+    graph: { nodes: 4_100_000, edges: 12_800_000, entityTypes: 31, sourcesWithStats: 34 },
+    collaboration: {
+        asked: metric(96, 18, 15),
+        answerRate: { current: 0.778, previous: 0.7, answered: 14 },
+        firstResponseHours: { current: 3.1, previous: 4.4, changePct: -29.5, measured: 16 },
+        waitingOverWeek: { total: 2 },
+        open: { total: 6 },
+        views: COLLAB_PRIVILEGED.leaderboards.views.filter((v) => v.workspaceId === 'ws1'),
+        sources: COLLAB_PRIVILEGED.leaderboards.sources.filter((s) => s.workspaceId === 'ws1'),
+    },
+    sourceDetails: {
+        sources: 34, described: 27, tagged: 22, withContacts: 18,
+        trust: [
+            { key: 'certified', count: 11 }, { key: 'in_review', count: 4 },
+            { key: 'deprecated', count: 2 }, { key: 'none', count: 17 },
+        ],
+        classification: DATA_PRIVILEGED.details!.classification,
+    },
+}
+
+/** A member at the strict level — as the server redacts the drill-in for
+ *  them: the people are withheld; its questions are counts and views they
+ *  may open, so those stay. */
+export const DETAIL_STRICT: WorkspaceAnalyticsDetail = {
+    ...DETAIL_PRIVILEGED,
+    topContributors: [],
+    operations: undefined,
+    redaction: { applied: true, showsPeople: false, member: true },
 }
 
 // ── The usage document ───────────────────────────────────────────────
@@ -574,13 +821,26 @@ export const USAGE_FIRST_RUN: AnalyticsUsageDoc = {
 }
 
 export const ANALYTICS_FIXTURES = {
-    privileged: { summary: PRIVILEGED, rows: WORKSPACE_ROWS, data: DATA_PRIVILEGED, usage: USAGE_PRIVILEGED },
-    strict: { summary: STRICT, rows: WORKSPACE_ROWS_LOCKED, data: DATA_LOCKED, usage: USAGE_LOCKED },
-    internal: { summary: INTERNAL, rows: WORKSPACE_ROWS_LOCKED, data: DATA_LOCKED, usage: USAGE_LOCKED },
-    reported: { summary: REPORTED, rows: WORKSPACE_ROWS, data: DATA_PRIVILEGED, usage: USAGE_LOCKED },
+    privileged: {
+        summary: PRIVILEGED, rows: WORKSPACE_ROWS, data: DATA_PRIVILEGED, usage: USAGE_PRIVILEGED,
+        collaboration: COLLAB_PRIVILEGED, detail: DETAIL_PRIVILEGED,
+    },
+    strict: {
+        summary: STRICT, rows: WORKSPACE_ROWS_LOCKED, data: DATA_LOCKED, usage: USAGE_LOCKED,
+        collaboration: COLLAB_STRICT, detail: DETAIL_STRICT,
+    },
+    internal: {
+        summary: INTERNAL, rows: WORKSPACE_ROWS_LOCKED, data: DATA_LOCKED, usage: USAGE_LOCKED,
+        collaboration: COLLAB_STRICT, detail: DETAIL_STRICT,
+    },
+    reported: {
+        summary: REPORTED, rows: WORKSPACE_ROWS, data: DATA_PRIVILEGED, usage: USAGE_LOCKED,
+        collaboration: COLLAB_STRICT, detail: DETAIL_STRICT,
+    },
     firstRun: {
         summary: FIRST_RUN, rows: [] as WorkspaceAnalyticsRow[],
         data: DATA_FIRST_RUN, usage: USAGE_FIRST_RUN,
+        collaboration: COLLAB_EMPTY, detail: DETAIL_PRIVILEGED,
     },
 } as const
 

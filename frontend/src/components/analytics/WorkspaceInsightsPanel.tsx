@@ -6,16 +6,23 @@
  * sort order and scroll position on the way back.
  */
 import { useEffect, useRef } from 'react'
-import { Activity, LayoutGrid, MousePointerClick, Users, X } from 'lucide-react'
+import {
+    Activity, CheckCircle2, Hourglass, LayoutGrid, MessageCircleQuestion, MousePointerClick,
+    Reply, Users, X,
+} from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { runOriginLabel, viewTypeLabel, visibilityLabel } from '@/lib/domainLabels'
-import type { AnalyticsRangeSelection, LevelChange, RunOrigin } from '@/services/analyticsService'
+import type {
+    AnalyticsRangeSelection, LevelChange, RunOrigin, WorkspaceAnalyticsDetail,
+} from '@/services/analyticsService'
 import { timeAgo } from '@/lib/timeAgo'
-import { compact, exact, percent, shortDate } from '@/lib/formatMetric'
+import { compact, exact, percent, shortDate, waitPhrase } from '@/lib/formatMetric'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useWorkspaceAnalyticsDetail } from '@/hooks/useAnalytics'
-import { ViewLink } from './EntityLink'
+import { useFeature } from '@/store/features'
+import { SourceLink, ViewLink } from './EntityLink'
+import { MetricInfo } from './MetricInfo'
 import { WithheldPanel } from './Redacted'
 import { KpiCard } from './KpiCard'
 import { Leaderboard } from './Leaderboard'
@@ -27,7 +34,7 @@ import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar } from './charts/StackedShareBar'
 import { comparisonLabel, rangePhrase } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
-import { RUN_ORIGIN_SLOT } from './slots'
+import { RUN_ORIGIN_SLOT, trustLabel, trustSlot } from './slots'
 
 export function WorkspaceInsightsPanel({
     workspaceId, range, onClose,
@@ -38,6 +45,7 @@ export function WorkspaceInsightsPanel({
 }) {
     const theme = useChartTheme()
     const { data, isLoading, isFetching, error } = useWorkspaceAnalyticsDetail(workspaceId, range)
+    const conversations = useFeature('conversationsEnabled')
     const closeRef = useRef<HTMLButtonElement>(null)
 
     useEffect(() => {
@@ -246,6 +254,13 @@ export function WorkspaceInsightsPanel({
                                 )}
                             </div>
 
+                            {/* Absent from a document cached before it existed;
+                                with questions switched off and none ever asked
+                                there is nothing to say, so it says nothing. */}
+                            {data.collaboration && (conversations || data.collaboration.asked.total > 0) && (
+                                <Questions block={data.collaboration} range={range} />
+                            )}
+
                             {/* Both absent from a document cached before they
                                 existed, and operations is withheld below the
                                 posture that shows it — so each stands alone. */}
@@ -312,6 +327,27 @@ export function WorkspaceInsightsPanel({
                                     <PanelStat label="Data sources" value={data.totals.dataSources.total} />
                                 </dl>
                             </ChartFrame>
+
+                            {data.sourceDetails && data.sourceDetails.sources > 0 && (
+                                <ChartFrame
+                                    title="How its sources are described"
+                                    subtitle="Descriptions, tags, named contacts and trust"
+                                >
+                                    <dl className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                                        <PanelShare label="Described" metric="sourcesDescribed"
+                                            part={data.sourceDetails.described} whole={data.sourceDetails.sources} />
+                                        <PanelShare label="Tagged" metric="sourcesTagged"
+                                            part={data.sourceDetails.tagged} whole={data.sourceDetails.sources} />
+                                        <PanelShare label="Named contacts" metric="sourcesWithContacts"
+                                            part={data.sourceDetails.withContacts} whole={data.sourceDetails.sources} />
+                                    </dl>
+                                    <p className="mt-4 mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">Trust</p>
+                                    <StackedShareBar
+                                        slices={data.sourceDetails.trust.filter((t) => t.count > 0)}
+                                        labelOf={trustLabel} slotOf={trustSlot}
+                                    />
+                                </ChartFrame>
+                            )}
                         </div>
                     )}
                 </div>
@@ -324,6 +360,105 @@ export function WorkspaceInsightsPanel({
 function holdingsPhrase(level: LevelChange, phrase: string): string {
     if (level.change === 0) return `No change in entities in ${phrase}`
     return `${level.change > 0 ? '+' : '−'}${compact(Math.abs(level.change))} entities in ${phrase}`
+}
+
+/** Questions about this workspace's views and sources. */
+function Questions({
+    block, range,
+}: {
+    block: NonNullable<WorkspaceAnalyticsDetail['collaboration']>
+    range: AnalyticsRangeSelection
+}) {
+    const vs = comparisonLabel(range)
+    const phrase = rangePhrase(range)
+    const asked = block.asked.current ?? 0
+    return (
+        <section aria-labelledby="ws-questions" className="space-y-3 pt-2">
+            <div>
+                <h3 id="ws-questions" className="text-sm font-bold text-ink">Questions</h3>
+                <p className="text-[11px] text-ink-muted">Asked about its views and data sources in {phrase}</p>
+            </div>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <KpiCard
+                    label="Questions asked" metric="questionsAsked" icon={MessageCircleQuestion} accent="indigo"
+                    value={asked} changePct={block.asked.changePct} comparisonLabel={vs}
+                    sub={`${exact(block.open.total)} open now`}
+                />
+                <KpiCard
+                    label="Answer rate" metric="answerRate" icon={CheckCircle2}
+                    accent={block.answerRate.current != null && block.answerRate.current < 0.5 ? 'amber' : 'emerald'}
+                    value={percent(block.answerRate.current)}
+                    sub={asked ? `${exact(block.answerRate.answered)} of ${exact(asked)}` : `Nothing asked in ${phrase}`}
+                />
+                <KpiCard
+                    label="Time to first reply" metric="firstResponse" icon={Reply} accent="cyan"
+                    value={waitPhrase(block.firstResponseHours.current)}
+                    changePct={block.firstResponseHours.changePct} comparisonLabel={vs}
+                    higherIsBetter={false}
+                />
+                <KpiCard
+                    label="Waiting over a week" metric="waitingOverWeek" icon={Hourglass}
+                    accent={block.waitingOverWeek.total ? 'amber' : 'emerald'}
+                    value={exact(block.waitingOverWeek.total)} higherIsBetter={false}
+                />
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <ChartFrame
+                    title="Most discussed views"
+                    action={<MetricInfo metric="mostDiscussed" />}
+                    isEmpty={block.views.length === 0}
+                    emptyLabel={`Nobody asked about a view here in ${phrase}.`}
+                >
+                    <Leaderboard
+                        unit="messages" unitOne="message" slot={0}
+                        rows={block.views.map((v, i) => ({
+                            id: v.viewId ?? `hidden-${i}`,
+                            label: <ViewLink viewId={v.viewId ?? ''} name={v.name} canOpen={!v.redacted && v.canOpen} />,
+                            value: v.messages,
+                            detail: `${exact(v.questions)} asked · ${exact(v.open)} open`,
+                        }))}
+                    />
+                </ChartFrame>
+                <ChartFrame
+                    title="Sources with the most questions"
+                    isEmpty={block.sources.length === 0}
+                    emptyLabel={`Nobody asked about a source here in ${phrase}.`}
+                >
+                    <Leaderboard
+                        unit="messages" unitOne="message" slot={4}
+                        rows={block.sources.map((s, i) => ({
+                            id: s.dataSourceId ?? `hidden-${i}`,
+                            label: s.dataSourceId && s.workspaceId
+                                ? <SourceLink workspaceId={s.workspaceId} dataSourceId={s.dataSourceId} name={s.name} canOpen={s.canOpen} />
+                                : s.name,
+                            value: s.messages,
+                            detail: `${exact(s.questions)} asked · ${exact(s.open)} open`,
+                        }))}
+                    />
+                </ChartFrame>
+            </div>
+        </section>
+    )
+}
+
+function PanelShare({
+    label, part, whole, metric,
+}: {
+    label: string
+    part: number
+    whole: number
+    metric: 'sourcesDescribed' | 'sourcesTagged' | 'sourcesWithContacts'
+}) {
+    return (
+        <div className="rounded-xl border border-glass-border bg-glass-base/30 p-3">
+            <dt className="flex items-center gap-1 text-[10px] text-ink-muted">
+                {label}
+                <MetricInfo metric={metric} />
+            </dt>
+            <dd className="mt-0.5 text-lg font-bold text-ink">{percent(whole ? part / whole : null)}</dd>
+            <dd className="text-[10px] text-ink-muted">{exact(part)} of {exact(whole)}</dd>
+        </div>
+    )
 }
 
 function PanelStat({ label, value }: { label: string; value: number }) {

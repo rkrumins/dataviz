@@ -109,6 +109,10 @@ export const INSIGHT_TARGETS: Record<string, { anchor?: string; action?: Insight
         },
     },
 
+    // ── Collaboration ───────────────────────────────────────────────
+    'questions-waiting': { anchor: 'chart-longest-waiting' },
+    'most-discussed': { anchor: 'chart-most-discussed' },
+
     // ── Platform health ─────────────────────────────────────────────
     'refresh-failures': { action: FRESHNESS },
     'stale-sources': { action: FRESHNESS },

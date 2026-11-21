@@ -411,6 +411,18 @@ export interface WorkspaceAnalyticsDetail {
      *  people, so it is optional here rather than `string | null`. */
     topContributors: { userId: string; name: string; email?: string | null; events: number }[]
     graph: GraphScale
+    /** Questions about its views and sources. Absent from older documents. */
+    collaboration?: {
+        asked: Metric
+        answerRate: ShareMeasure & { answered: number }
+        firstResponseHours: TimedMeasure
+        waitingOverWeek: { total: number }
+        open: { total: number }
+        views: DiscussedView[]
+        sources: DiscussedSource[]
+    }
+    /** How well its sources are described. Absent from older documents. */
+    sourceDetails?: SourceCoverage
     /**
      * Present when the server filtered this document. `member` says whether the
      * reader is actually in the workspace — reporting on a workspace never
@@ -479,7 +491,178 @@ export interface AnalyticsDataDoc {
         firstBuild: { medianHours: number | null; p90Hours: number | null; measured: number; awaiting: number }
     }
     versionControl: VersionControlSection
-    redaction?: { applied: boolean; reportsAllWorkspaces: boolean }
+    /** How well the listed sources describe themselves. Absent from a
+     *  document built before it existed. */
+    details?: SourceCoverage & {
+        /** A reader sees only the tags used somewhere they may see; the counts
+         *  are platform-wide. */
+        topTags: { key: string; count: number }[]
+        /** The workspaces with the most sources. */
+        byWorkspace: {
+            workspaceId: string | null
+            name: string
+            sources: number
+            described: number
+            tagged: number
+            withContacts: number
+            certified: number
+            redacted?: boolean
+            canOpen?: boolean
+        }[]
+    }
+    /** Data asked for, and workspaces asked for. Withheld below the posture
+     *  that shows operations, like the summary's access requests. */
+    requests?: {
+        data: {
+            asked: Metric
+            connected: number
+            declined: number
+            open: number
+            openByUrgency: ClassCount[]
+            medianHoursToConnect: number | null
+        }
+        workspaces: {
+            submitted: Metric
+            approved: number
+            declined: number
+            open: number
+            /** Waiting on the person who asked, not on an approver. */
+            changesRequested: number
+            medianHoursToDecision: number | null
+        }
+    }
+    redaction?: { applied: boolean; reportsAllWorkspaces: boolean; showsOperations?: boolean }
+}
+
+/** A set of sources: how many describe themselves, are tagged, name who to
+ *  ask, and how they are marked for trust and sensitivity. */
+export interface SourceCoverage {
+    sources: number
+    described: number
+    tagged: number
+    /** Sources that NAME an Owner or a Steward. */
+    withContacts: number
+    /** certified · in_review · deprecated · none, in that order. */
+    trust: ClassCount[]
+    /** public · internal · confidential · restricted · none, in that order. */
+    classification: ClassCount[]
+}
+
+// ── Collaboration: questions and conversations ───────────────────────
+
+/** A median wait, in hours, against the window before. `null` when nothing
+ *  was measured — "no replies yet" is not "instant". */
+export interface TimedMeasure {
+    current: number | null
+    previous: number | null
+    changePct: number | null
+    measured: number
+}
+
+/** A share in [0, 1], against the window before. Compared in points rather
+ *  than as a percent of a percent. */
+export interface ShareMeasure {
+    current: number | null
+    previous: number | null
+}
+
+interface DiscussedCounts {
+    workspaceId: string | null
+    workspaceName: string | null
+    /** Asked in the window. */
+    questions: number
+    /** Posted in the window, on any of its threads. */
+    replies: number
+    /** Questions plus replies — what ranks it. */
+    messages: number
+    /** Of the questions asked in the window, those with an accepted answer. */
+    answered: number
+    /** Open now, whatever their age. */
+    open: number
+    redacted?: boolean
+    canOpen?: boolean
+}
+
+export interface DiscussedView extends DiscussedCounts {
+    viewId: string | null
+    name: string
+    visibility: string
+}
+
+export interface DiscussedSource extends DiscussedCounts {
+    dataSourceId: string | null
+    name: string
+}
+
+export interface CollaborationWorkspaceRow {
+    workspaceId: string
+    name: string
+    questions: number
+    answered: number
+    answerRate: number | null
+    firstResponseHours: number | null
+    replies: number
+    redacted?: boolean
+    canOpen?: boolean
+}
+
+export interface Answerer {
+    userId: string
+    name: string
+    /** Questions asked in the window whose accepted answer they wrote. */
+    accepted: number
+    /** Replies to other people's questions. */
+    replies: number
+}
+
+export interface WaitingQuestion {
+    /** `null` with the subject when the row is redacted. */
+    discussionId: string | null
+    subjectType: 'view' | 'data_source'
+    subjectId: string | null
+    subjectName: string | null
+    workspaceId: string | null
+    workspaceName: string | null
+    askedAt: string
+    ageDays: number | null
+    replies: number
+    private: boolean
+    /** Privileged readers only, and never for a private question. */
+    excerpt?: string | null
+    askedByName?: string | null
+    redacted?: boolean
+    canOpen?: boolean
+}
+
+export interface AnalyticsCollaborationDoc {
+    windowDays: number | null
+    generatedAt: string
+    range: AnalyticsRange
+    bucket: 'day' | 'week'
+    kpis: {
+        asked: Metric
+        answerRate: ShareMeasure & { answered: number }
+        firstResponseHours: TimedMeasure
+        answerHours: TimedMeasure
+        /** As of now: open, and asked more than seven days ago. */
+        waitingOverWeek: { total: number }
+        open: { total: number }
+        askers: Metric
+        answerers: Metric
+        replies: Metric
+        privateShare: ShareMeasure
+    }
+    series: { buckets: string[]; asked: number[]; answered: number[] }
+    leaderboards: {
+        views: DiscussedView[]
+        sources: DiscussedSource[]
+        workspaces: CollaborationWorkspaceRow[]
+        /** Empty for every non-privileged reader. */
+        answerers: Answerer[]
+        waiting: WaitingQuestion[]
+    }
+    /** Present when filtered for a non-privileged reader. */
+    redaction?: { applied: boolean; showsPeople: boolean; reportsAllWorkspaces: boolean; hidden: string[] }
 }
 
 // ── Usage: what is used, when, and how ingestion is driven ────────────
@@ -601,6 +784,11 @@ export const analyticsService = {
     /** How the platform is used — content, presence, ingestion, pulse. */
     getUsage(range: AnalyticsRangeSelection): Promise<AnalyticsUsageDoc> {
         return authFetch<AnalyticsUsageDoc>(`${ANALYTICS_API}/usage?${rangeQuery(range)}`)
+    },
+
+    /** Questions and conversations — the Collaboration tab's document. */
+    getCollaboration(range: AnalyticsRangeSelection): Promise<AnalyticsCollaborationDoc> {
+        return authFetch<AnalyticsCollaborationDoc>(`${ANALYTICS_API}/collaboration?${rangeQuery(range)}`)
     },
 
     /** Full insights for a single workspace. */

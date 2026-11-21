@@ -233,6 +233,15 @@ export const PAGE_INDEX: PageEntry[] = [
         gate: { kind: 'analytics' },
     },
     {
+        id: 'analytics-collaboration',
+        category: 'Page',
+        title: 'Analytics · Collaboration',
+        description: 'Questions asked and answered, and what about',
+        keywords: ['collaboration', 'questions', 'answers', 'conversations', 'discussions', 'comments'],
+        path: '/analytics?tab=collaboration',
+        gate: { kind: 'analytics' },
+    },
+    {
         id: 'analytics-health',
         category: 'Page',
         title: 'Analytics · Health',

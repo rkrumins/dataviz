@@ -9,18 +9,28 @@
  *   2. What was connected, and how quickly did it become usable? Sources
  *      onboarded, versioned against external, and the wait for a first build.
  *   3. How much of it is under version control, and kept how?
+ *   4. Do the sources say what they are — a description, tags, someone to
+ *      ask, whether to trust them — and who is waiting for data or a
+ *      workspace? (The requests are an operator's view, withheld below the
+ *      posture that shows operations.)
  *
  * Entity counts are levels, not flows: a bucket shows what was held at its
  * end, so the line can fall — a source deleted, a graph pruned — and that fall
  * is information the dashboard used to have no way to show.
  */
-import { ArrowDownRight, ArrowUpRight, Boxes, Clock, Database, GitBranch, Hourglass, Network } from 'lucide-react'
+import {
+    ArrowDownRight, ArrowUpRight, Boxes, CheckCircle2, Clock, Database, FileText, GitBranch, Hourglass,
+    Inbox, Network, PlugZap, ShieldCheck, Tags, UserCheck,
+} from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { compact, exact, percent, shortDate, waitPhrase } from '@/lib/formatMetric'
-import { providerTypeLabel, versionKindLabel } from '@/lib/domainLabels'
+import { humaniseKey, providerTypeLabel, versionKindLabel } from '@/lib/domainLabels'
 import type { AnalyticsDataDoc, AnalyticsRangeSelection, DataMover } from '@/services/analyticsService'
 import { KpiCard } from './KpiCard'
+import { Leaderboard } from './Leaderboard'
+import { MetricInfo } from './MetricInfo'
+import { WithheldPanel } from './Redacted'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { TimeSeriesChart } from './charts/TimeSeriesChart'
@@ -28,9 +38,9 @@ import { StackedAreaChart, type StackedSeries } from './charts/StackedAreaChart'
 import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar } from './charts/StackedShareBar'
 import { useChartTheme } from './charts/chartTheme'
-import { providerSlot } from './slots'
+import { classificationLabel, classificationSlot, providerSlot, trustLabel, trustSlot } from './slots'
 import { WorkspaceLink } from './EntityLink'
-import { rangePhrase } from './RangePicker'
+import { comparisonLabel, rangePhrase } from './RangePicker'
 
 /** `+1,204`, `−30` — a true minus, which a hyphen only resembles. */
 function signed(n: number): string {
@@ -295,7 +305,238 @@ export function DataTab({
                     </div>
                 )}
             </section>
+
+            {/* Both absent from a document built before they existed. */}
+            {data.details && <SourceDetails details={data.details} isStale={isStale} />}
+            {data.requests ? (
+                <Requests requests={data.requests} range={range} />
+            ) : data.redaction?.applied && (
+                <section aria-labelledby="data-requests" className="space-y-4">
+                    <RequestsHeading />
+                    <WithheldPanel
+                        title="Requests are hidden"
+                        shape="stats"
+                        reason="Who is waiting for data or for a workspace, and how quickly requests are answered, is visible to administrators and auditors."
+                    />
+                </section>
+            )}
         </div>
+    )
+}
+
+/** A share, or `null` when there is nothing to divide. */
+function share(part: number, whole: number): number | null {
+    return whole ? part / whole : null
+}
+
+function SourceDetails({
+    details, isStale,
+}: {
+    details: NonNullable<AnalyticsDataDoc['details']>
+    isStale: boolean
+}) {
+    const { sources } = details
+    const count = (rows: { key: string; count: number }[], key: string) =>
+        rows.find((r) => r.key === key)?.count ?? 0
+    const certified = count(details.trust, 'certified')
+    const tags = details.topTags.slice(0, 10)
+    const of = (n: number) => `${exact(n)} of ${exact(sources)} sources`
+
+    return (
+        <section aria-labelledby="data-details" className="space-y-4">
+            <div>
+                <h2 id="data-details" className="text-sm font-bold text-ink mb-1">How sources are described</h2>
+                <p className="text-[11px] text-ink-muted">
+                    Whether each connected source says what it is, how it is labelled, who to ask about it, and whether to trust it.
+                </p>
+            </div>
+            <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+                <KpiCard
+                    label="Described" metric="sourcesDescribed" icon={FileText} accent="indigo"
+                    value={percent(share(details.described, sources))} sub={of(details.described)}
+                />
+                <KpiCard
+                    label="Tagged" metric="sourcesTagged" icon={Tags} accent="violet"
+                    value={percent(share(details.tagged, sources))} sub={of(details.tagged)}
+                />
+                <KpiCard
+                    label="Named contacts" metric="sourcesWithContacts" icon={UserCheck} accent="emerald"
+                    value={percent(share(details.withContacts, sources))} sub={of(details.withContacts)}
+                />
+                <KpiCard
+                    label="Certified" metric="trustStatus" icon={ShieldCheck} accent="cyan"
+                    value={percent(share(certified, sources))}
+                    sub={`${exact(count(details.trust, 'in_review'))} in review · ${exact(count(details.trust, 'deprecated'))} deprecated`}
+                />
+            </div>
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                <ChartFrame
+                    title="Trust" subtitle="Every connected source, by how it is marked"
+                    action={<MetricInfo metric="trustStatus" />}
+                    isStale={isStale} isEmpty={sources === 0}
+                    emptyLabel="No sources are connected yet."
+                    table={<ChartTable rowLabel="Trust" rows={details.trust.map((t) => trustLabel(t.key))}
+                        columns={[{ key: 'n', label: 'Sources', values: details.trust.map((t) => t.count) }]} />}
+                >
+                    <StackedShareBar slices={details.trust} labelOf={trustLabel} slotOf={trustSlot} />
+                </ChartFrame>
+                <ChartFrame
+                    title="Classification" subtitle="How sensitive their data is marked to be"
+                    action={<MetricInfo metric="classification" />}
+                    isStale={isStale} isEmpty={sources === 0}
+                    emptyLabel="No sources are connected yet."
+                    table={<ChartTable rowLabel="Classification" rows={details.classification.map((c) => classificationLabel(c.key))}
+                        columns={[{ key: 'n', label: 'Sources', values: details.classification.map((c) => c.count) }]} />}
+                >
+                    <StackedShareBar slices={details.classification} labelOf={classificationLabel} slotOf={classificationSlot} />
+                </ChartFrame>
+                <ChartFrame
+                    title="Most used tags" subtitle="Tags on the most sources"
+                    action={<MetricInfo metric="topTags" />}
+                    isStale={isStale} isEmpty={tags.length === 0}
+                    emptyLabel="No source has a tag yet."
+                >
+                    <Leaderboard
+                        unit="sources" unitOne="source" slot={5}
+                        rows={tags.map((t) => ({ id: t.key, label: t.key, value: t.count }))}
+                    />
+                </ChartFrame>
+            </div>
+            {details.byWorkspace.length > 0 && (
+                <ChartFrame
+                    title="By workspace" subtitle="The workspaces with the most sources"
+                    isStale={isStale}
+                >
+                    <CoverageTable rows={details.byWorkspace} />
+                </ChartFrame>
+            )}
+        </section>
+    )
+}
+
+function CoverageTable({ rows }: { rows: NonNullable<AnalyticsDataDoc['details']>['byWorkspace'] }) {
+    const cell = (part: number, whole: number) => (
+        <td className="px-3 py-1.5 text-right tabular-nums text-ink" title={`${exact(part)} of ${exact(whole)}`}>
+            {percent(share(part, whole))}
+        </td>
+    )
+    return (
+        <div className="overflow-x-auto">
+            <table className="w-full min-w-[34rem] text-xs">
+                <caption className="sr-only">How the sources in each workspace are described</caption>
+                <thead>
+                    <tr className="border-b border-glass-border text-[10px] text-ink-muted">
+                        <th scope="col" className="px-3 py-2 text-left font-semibold">Workspace</th>
+                        <th scope="col" className="px-3 py-2 text-right font-semibold">Sources</th>
+                        <th scope="col" className="px-3 py-2 text-right font-semibold">Described</th>
+                        <th scope="col" className="px-3 py-2 text-right font-semibold">Tagged</th>
+                        <th scope="col" className="px-3 py-2 text-right font-semibold">Named contacts</th>
+                        <th scope="col" className="px-3 py-2 text-right font-semibold">Certified</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows.map((r, i) => (
+                        <tr key={r.workspaceId ?? `hidden-${i}`} className="border-b border-glass-border last:border-b-0">
+                            <th scope="row" className="max-w-[14rem] truncate px-3 py-1.5 text-left font-medium text-ink-secondary">
+                                {r.workspaceId
+                                    ? <WorkspaceLink workspaceId={r.workspaceId} name={r.name} canOpen={r.canOpen} />
+                                    : <span className="text-ink-muted">{r.name}</span>}
+                            </th>
+                            <td className="px-3 py-1.5 text-right tabular-nums text-ink">{exact(r.sources)}</td>
+                            {cell(r.described, r.sources)}
+                            {cell(r.tagged, r.sources)}
+                            {cell(r.withContacts, r.sources)}
+                            {cell(r.certified, r.sources)}
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    )
+}
+
+function RequestsHeading() {
+    return (
+        <div>
+            <h2 id="data-requests" className="text-sm font-bold text-ink mb-1">Requests</h2>
+            <p className="text-[11px] text-ink-muted">
+                Data people asked to have connected, and workspaces people asked for — and how long they waited.
+            </p>
+        </div>
+    )
+}
+
+const URGENCY_LABEL: Record<string, string> = {
+    this_week: 'this week', this_month: 'this month', no_rush: 'no rush',
+}
+
+function Requests({
+    requests, range,
+}: {
+    requests: NonNullable<AnalyticsDataDoc['requests']>
+    range: AnalyticsRangeSelection
+}) {
+    const { data, workspaces } = requests
+    const vs = comparisonLabel(range)
+    const phrase = rangePhrase(range)
+    return (
+        <section aria-labelledby="data-requests" className="space-y-4">
+            <RequestsHeading />
+            <div className="space-y-2">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Data requests</h3>
+                <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+                    <KpiCard
+                        label="Asked for" metric="dataRequests" icon={Inbox} accent="indigo"
+                        value={data.asked.current ?? 0} changePct={data.asked.changePct} comparisonLabel={vs}
+                        sub={`${exact(data.asked.total)} in all`}
+                    />
+                    <KpiCard
+                        label="Connected" icon={PlugZap} accent="emerald"
+                        value={data.connected} sub={`${exact(data.declined)} declined in ${phrase}`}
+                    />
+                    <KpiCard
+                        label="Open now" icon={Hourglass} accent={data.open ? 'amber' : 'emerald'}
+                        value={data.open} higherIsBetter={false}
+                        sub={data.open
+                            ? data.openByUrgency.filter((u) => u.count).map((u) => `${exact(u.count)} ${URGENCY_LABEL[u.key] ?? humaniseKey(u.key)}`).join(' · ')
+                            : 'Nothing waiting'}
+                    />
+                    <KpiCard
+                        label="Time to connect" metric="timeToConnect" icon={Clock} accent="violet"
+                        value={waitPhrase(data.medianHoursToConnect)} higherIsBetter={false}
+                        sub={data.connected ? `middle of ${exact(data.connected)} connected` : `None connected in ${phrase}`}
+                    />
+                </div>
+            </div>
+            <div className="space-y-2">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Workspace requests</h3>
+                <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+                    <KpiCard
+                        label="Submitted" metric="workspaceRequests" icon={Inbox} accent="indigo"
+                        value={workspaces.submitted.current ?? 0} changePct={workspaces.submitted.changePct}
+                        comparisonLabel={vs} sub={`${exact(workspaces.submitted.total)} in all`}
+                    />
+                    <KpiCard
+                        label="Approved" icon={CheckCircle2} accent="emerald"
+                        value={workspaces.approved} sub={`${exact(workspaces.declined)} declined in ${phrase}`}
+                    />
+                    <KpiCard
+                        label="Open now" icon={Hourglass} accent={workspaces.open ? 'amber' : 'emerald'}
+                        value={workspaces.open} higherIsBetter={false}
+                        sub={workspaces.changesRequested
+                            ? `${exact(workspaces.changesRequested)} waiting on the person who asked`
+                            : workspaces.open ? 'All waiting on an approver' : 'Nothing waiting'}
+                    />
+                    <KpiCard
+                        label="Time to a decision" metric="timeToDecision" icon={Clock} accent="violet"
+                        value={waitPhrase(workspaces.medianHoursToDecision)} higherIsBetter={false}
+                        sub={workspaces.approved + workspaces.declined
+                            ? `middle of ${exact(workspaces.approved + workspaces.declined)} decided`
+                            : `None decided in ${phrase}`}
+                    />
+                </div>
+            </div>
+        </section>
     )
 }
 

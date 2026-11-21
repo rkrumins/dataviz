@@ -55,6 +55,62 @@ export function ViewLink({
     )
 }
 
+/** Where a data source's conversations are: its Questions tab, in its workspace. */
+function sourceQuestionsPath(workspaceId: string, dataSourceId: string): string {
+    return `/workspaces/${encodeURIComponent(workspaceId)}?tab=data&section=sources`
+        + `&ds=${encodeURIComponent(dataSourceId)}&dstab=questions`
+}
+
+export function SourceLink({
+    workspaceId, dataSourceId, name, canOpen, className,
+}: {
+    workspaceId: string
+    dataSourceId: string
+    name: string
+    canOpen?: boolean
+    className?: string
+}) {
+    return (
+        <EntityLink
+            to={sourceQuestionsPath(workspaceId, dataSourceId)}
+            name={name}
+            canOpen={canOpen}
+            lockedHint="Counted here, but you do not have access to open it"
+            className={className}
+        />
+    )
+}
+
+/** One question, opened where it was asked: on its view, or on its source's
+ *  Questions tab. */
+export function QuestionLink({
+    subjectType, subjectId, workspaceId, discussionId, name, canOpen, className,
+}: {
+    subjectType: 'view' | 'data_source'
+    subjectId: string
+    workspaceId: string | null
+    discussionId: string
+    name: string
+    canOpen?: boolean
+    className?: string
+}) {
+    const thread = `discussion=${encodeURIComponent(discussionId)}`
+    const to = subjectType === 'view'
+        ? `/views/${encodeURIComponent(subjectId)}?${thread}`
+        : `${sourceQuestionsPath(workspaceId ?? '', subjectId)}&${thread}`
+    return (
+        <EntityLink
+            to={to}
+            name={name}
+            // A source's questions live in its workspace; without one there
+            // is nowhere to send the reader.
+            canOpen={canOpen && (subjectType === 'view' || !!workspaceId)}
+            lockedHint="Counted here, but you do not have access to open it"
+            className={className}
+        />
+    )
+}
+
 function EntityLink({
     to, name, canOpen, lockedHint, className,
 }: {
