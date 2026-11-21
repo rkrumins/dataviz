@@ -10,8 +10,9 @@ is decided by ``backend.app.services.playground_policy``.
 ``GET /playground/samples`` lists the graphs a member may start from a sample, and how many more
 graphs they may start; ``POST /playground/samples/{sample_id}`` makes one — a blank graph loaded
 with the sample as its first version, its views, library, details and an example change waiting
-for review (``backend.app.services.playground_samples``). It is a starter
-graph (``backend.app.services.playground_starter``).
+for review (``backend.app.services.playground_samples``). ``POST /playground/imports`` makes one
+from the person's own things and connections (``backend.app.services.playground_imports``). Both
+are starter graphs, made the same way (``backend.app.services.playground_starter``).
 """
 from __future__ import annotations
 
@@ -39,9 +40,10 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.models import OntologyORM, ProviderORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM
 from backend.app.db.repositories import (binding_repo, user_repo, view_activity_repo, view_repo,
                                          view_version_repo)
-from backend.app.services import (playground_policy, playground_samples, playground_starter,
-                                  view_library, workspace_access)
+from backend.app.services import (playground_imports, playground_policy, playground_samples,
+                                  playground_starter, view_library, workspace_access)
 from backend.app.services.feature_flags import feature_flags
+from backend.app.services.playground_imports import PlaygroundImport
 from backend.app.services.playground_starter import Example, Starter
 from backend.app.services.versioning.import_export.resolve import pointer_id, pointer_seed
 from backend.common.models.view_library import DisplayRule, SavedQueryInput
@@ -355,6 +357,31 @@ async def start_sample(
     await playground_starter.ensure_ontology(session, starter)
     return StartedSample(**await _start(request, background, session, svc, user, ws_id, provider_id,
                                         starter, failure="sample_load_failed", own_ontology=False))
+
+
+@router.post("/imports", response_model=StartedImport, response_model_by_alias=True,
+             status_code=status.HTTP_201_CREATED, dependencies=_SAMPLE_GATES)
+async def import_own_data(
+    body: PlaygroundImport,
+    request: Request,
+    background: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Start a graph from your own data: the things and connections the client read from a file
+    (``playground_imports``: its limits, 413 ``too_large``, 422 ``invalid_rows``), on a data model
+    made for this graph from their types — then as a sample is: a blank graph of the person's
+    quota whose first version is the rows, a Context View (to open first) and a Graph view, and
+    the data source described. Refused, or failing, it leaves nothing behind, its data model
+    included."""
+    starter = playground_imports.starter_of(body, playground_imports.new_ontology_id())
+    ws_id, provider_id = await _may_start(session, claims, user, starter)
+    await playground_starter.ensure_ontology(session, starter)
+    made = await _start(request, background, session, svc, user, ws_id, provider_id, starter,
+                        failure="import_load_failed", own_ontology=True)
+    return StartedImport(**made)
 
 
 async def _start(request: Request, background: BackgroundTasks, session: AsyncSession,
