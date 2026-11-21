@@ -17,9 +17,14 @@ const { state } = vi.hoisted(() => ({
         transfers: [] as unknown[],
         ownerLeft: [] as unknown[],
         playground: { graphQuota: 3, graphsUsed: 1, sandboxProviderId: 'prov_sb' } as Record<string, unknown> | undefined,
+        samples: { quotaLeft: 2, samples: [{ id: 'retail-pipeline', title: 'Retail data pipeline', description: 'Sales to dashboards.', icon: 'ShoppingCart', color: 'amber', viewType: 'graph', nodeCount: 46, edgeCount: 58, entityTypes: [] }] },
     },
 }))
-vi.mock('@/hooks/usePlayground', () => ({ usePlayground: () => ({ data: state.playground }) }))
+vi.mock('@/hooks/usePlayground', () => ({
+    usePlayground: () => ({ data: state.playground }),
+    usePlaygroundSamples: () => ({ data: state.samples }),
+    useStartSample: () => ({ mutate: vi.fn(), isPending: false }),
+}))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
     useReviewInboxCounts: () => ({ data: { counts: state.reviews } }),
     useDraftsWhoseOwnerLeft: (ws: string | null) => ({ data: ws ? state.ownerLeft : undefined }),
@@ -204,6 +209,25 @@ describe('In the Playground', () => {
         renderOverview({ workspace: playground({ dataSources: [] }) })
         expect(screen.getByText('Start a blank graph')).toBeInTheDocument()
         expect(screen.queryByText('No views here yet')).toBeNull()
+    })
+
+    it('offers the samples first to a reader with no graph yet, and still under the graphs of one who has', () => {
+        const { unmount } = renderOverview({ workspace: playground({ dataSources: [] }), onNewGraph: vi.fn() })
+        const panel = screen.getByRole('region', { name: 'Your experiments' })
+        const gallery = within(panel).getByRole('region', { name: 'Start from a sample' })
+        expect(within(gallery).getByRole('button', { name: 'Start Retail data pipeline' })).toBeEnabled()
+        // Above the first steps of a blank graph.
+        expect(gallery.compareDocumentPosition(within(panel).getByText('Start a blank graph')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+        unmount()
+
+        renderOverview({ workspace: playground(), onNewGraph: vi.fn() })
+        const later = screen.getByRole('region', { name: 'Start from a sample' })
+        expect(screen.getByRole('list', { name: 'Your graphs' }).compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    })
+
+    it('offers no samples to a reader who can’t start a graph', () => {
+        renderOverview({ workspace: playground({ dataSources: [] }) })
+        expect(screen.queryByRole('region', { name: 'Start from a sample' })).toBeNull()
     })
 
     it('takes one of the reader’s graphs into a workspace of theirs', () => {

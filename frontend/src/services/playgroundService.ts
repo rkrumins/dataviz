@@ -20,6 +20,33 @@ export interface PlaygroundInfo {
     starterOntologyIds?: string[] | null
 }
 
+/** A graph a member may start from a sample: a card in the gallery. */
+export interface PlaygroundSample {
+    id: string
+    title: string
+    description: string
+    /** A lucide icon name, and a colour name for its tile. */
+    icon: string
+    color: string
+    /** The layout its view opens in. */
+    viewType: string
+    nodeCount: number
+    edgeCount: number
+    entityTypes: string[]
+}
+
+export interface PlaygroundSamples {
+    samples: PlaygroundSample[]
+    /** How many more graphs this person may start — a sample is one. */
+    quotaLeft: number
+}
+
+/** What starting a sample made: a graph of the person's, and a view on it. */
+export interface StartedSample {
+    dataSourceId: string
+    viewId: string
+}
+
 export interface PlaygroundSetup {
     name: string
     description?: string
@@ -38,4 +65,7 @@ export const playgroundService = {
     join: () => authFetch<PlaygroundInfo>(`${BASE}/join`, { method: 'POST' }),
     leave: () => authFetch<void>(`${BASE}/leave`, { method: 'POST' }),
     setUp: (body: PlaygroundSetup) => authFetch<PlaygroundInfo>(BASE, json(body)),
+    samples: () => authFetch<PlaygroundSamples>(`${BASE}/samples`, { silent403: true }),
+    startSample: (sampleId: string) => authFetch<StartedSample>(
+        `${BASE}/samples/${encodeURIComponent(sampleId)}`, { method: 'POST' }),
 }

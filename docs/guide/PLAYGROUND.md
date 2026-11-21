@@ -13,8 +13,10 @@ apart from production, and how an administrator sets it up.
 
 ```mermaid
 flowchart LR
-  You([You]) -->|Open the Playground| Graph[Start a blank graph<br/>from a starter data model]
-  Graph --> View[Build views on it]
+  You([You]) -->|Open the Playground| Sample[Start from a sample<br/>a ready-made graph and view]
+  You -->|or| Graph[Start a blank graph<br/>from a starter data model]
+  Sample --> View[Build views on it]
+  Graph --> View
   View -->|Shared with everyone there| Others([Everyone in the Playground])
   Prod[(Production data)] -. nothing attaches or moves in .-x Graph
 ```
@@ -35,6 +37,41 @@ Playground opens.
 
 Being in the Playground gives you nothing anywhere else: you still ask to join a
 team's workspace the usual way (see [Requesting Access](/guide/requesting-access)).
+
+## Start from a sample
+
+Never built a graph? Start from one that's already made. The Playground opens on
+**Your experiments**, and before your first graph it leads with **Start from a
+sample**: a few realistic graphs, each with a view on it.
+
+| Sample | What it shows |
+| --- | --- |
+| **Retail data pipeline** | Sales data on its way from the online store, the tills and payments, through syncs, warehouse tables and transformations, to the dashboards the business reads. |
+| **Customer 360** | The CRM, support, billing and product systems, the records each keeps, how they're matched into one customer and one account, and the reports built on them. |
+| **ML feature pipeline** | Raw events and databases becoming datasets and feature sets, the models they train, and the services that use the models' predictions. |
+
+Each card says how many things, connections and kinds of thing the sample holds,
+and the layout its view opens in.
+
+1. Click **Start** on a sample. The button says **Starting…** while the graph is
+   made.
+2. Its view opens. Explore it: select things, trace where data comes from and
+   goes, filter by type.
+3. Change it as you would any graph of yours: add, rename, connect, remove. Your
+   changes go into a draft, as on any blank graph.
+
+What you get is yours, like any graph you start:
+
+* It is one of your graphs, so it counts towards
+  [how many graphs you may have](#how-many-graphs-you-may-have). When you've used
+  them all, the samples say so and wait until you delete one.
+* Its data model — the kinds of things it holds — comes with the sample, and is
+  the same for everyone who starts that sample.
+* Its view starts **shared with everyone in the Playground**, like any view you
+  make there. Choose **Only me** from **Share** to keep it to yourself.
+
+You can start the same sample more than once; each time makes a new graph. Once
+you have graphs of your own, the samples are still there, under them.
 
 ## Start a graph of your own
 
@@ -125,6 +162,11 @@ The server enforces each of these, whatever the screen shows:
 * No existing data source can be attached to the Playground, and none can be moved
   into it.
 * A blank graph is made only on the sandbox provider, within the person's quota.
+  A graph started from a sample is a blank graph too, loaded with the sample: the
+  same provider, the same quota. Each sample's data model is made, published, the
+  first time anyone starts it, and appears among the data models as
+  "*sample name* (sample)". If a sample can't be loaded, its graph is removed and
+  nothing counts against the quota.
 * A member changes or deletes only the graphs and views they made. Workspace admins
   of the Playground and platform administrators can change anything there.
 * Nothing in the Playground is published to everyone, and its publishing and
@@ -136,6 +178,9 @@ The server enforces each of these, whatever the screen shows:
 Turning **Playground** off hides the card and refuses new members. People already
 in it keep their access and everything they made, and an administrator still sees
 it. Turning it back on changes nothing that was there.
+
+Samples are blank graphs, so they're offered only while **Build lineage from
+scratch** and **Version control** are on too.
 
 ## Where to next
 

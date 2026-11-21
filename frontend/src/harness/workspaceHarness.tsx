@@ -28,7 +28,10 @@
  *   details  0 — data source details off (on by default): the About card, badges, tags,
  *            the Sources filter and a source's Activity tab (open one with &ds=…&dstab=activity)
  *   steward  1 — the reader is a named Steward of every source, so may change its status
- *   click    a button's text, clicked once the page has loaded (e.g. "Edit details")
+ *   click    a button's text, clicked once the page has loaded (e.g. "Edit details"; "Start"
+ *            starts the first Playground sample, and it stays starting)
+ *   fresh    1 — fixture=playground before the reader's first graph (their graphs and views gone)
+ *   full     1 — fixture=playground with every graph of the reader's used
  *
  * `npm run harness:workspace` drives Chromium over the main combinations and
  * writes PNGs to .harness/.
@@ -75,6 +78,11 @@ const tourStep = Number(params.get('step') ?? 0)
 const platform = params.get('platform') === '1'
 const steward = params.get('steward') === '1'
 const click = params.get('click')
+const fresh = params.get('fresh') === '1'
+const full = params.get('full') === '1'
+/** Without the reader's own rows, before their first graph (`&fresh=1`). */
+const notMine = <T,>(rows: readonly T[]): T[] => rows.filter(r => !fresh || (r as { createdBy?: string }).createdBy !== 'usr_me')
+const graphsUsed = full ? 5 : fresh ? 0 : 2
 
 // The People tab's groups: two of the workspace's own, one following the directory and one
 // whose link waits; and a platform-wide group bound here.
@@ -127,6 +135,18 @@ const REVIEWS = [
     reviewRow(3, 'Retire legacy GL mappings', REVIEW_WS[0], 7, 'Priya Nair'),
     reviewRow(4, 'Campaign attribution owners', REVIEW_WS[2], 20, 'Tom Weiss'),
 ]
+// The Playground's samples, as GET /playground/samples lists them.
+const PLAYGROUND_SAMPLES = [
+    { id: 'retail-pipeline', title: 'Retail data pipeline', icon: 'ShoppingCart', color: 'amber', nodeCount: 46, edgeCount: 58,
+        description: 'Sales from the store, tills and payments, through the warehouse to the dashboards.',
+        entityTypes: ['Source system', 'Ingestion job', 'Warehouse table', 'Transformation', 'Dashboard'] },
+    { id: 'customer-360', title: 'Customer 360', icon: 'Users', color: 'sky', nodeCount: 36, edgeCount: 50,
+        description: 'CRM, support and billing records matched into one view of each customer.',
+        entityTypes: ['Business system', 'Source record', 'Unified entity', 'Profile', 'Report'] },
+    { id: 'ml-features', title: 'ML feature pipeline', icon: 'BrainCircuit', color: 'emerald', nodeCount: 26, edgeCount: 33,
+        description: 'Raw events becoming features, the models they train, and where predictions go.',
+        entityTypes: ['Data source', 'Dataset', 'Feature set', 'Model', 'Application'] },
+].map(s => ({ ...s, viewType: 'graph' }))
 // A workspace request: Ada's proof of concept, with a teammate and a Playground graph.
 const WS_REQUEST = {
     id: 'wsr_1', requesterId: 'usr_ada', requesterName: 'Ada Okafor', name: 'ML platform lineage', purpose: 'poc',
@@ -181,8 +201,9 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, window.location.origin)
     const p = url.pathname
     if (!p.startsWith('/api/')) return realFetch(input, init)
-    const ws = workspaceOf(fixture)
-    const views = viewsOf(fixture)
+    const base = workspaceOf(fixture)
+    const ws = { ...base, dataSources: notMine<(typeof base.dataSources)[number]>(base.dataSources) }
+    const views = notMine<ReturnType<typeof viewsOf>[number]>(viewsOf(fixture))
     let m: RegExpMatchArray | null
     // A data source's details, contacts and history.
     if ((m = p.match(/^\/api\/v1\/admin\/workspaces\/ws_fin\/data-sources\/([^/]+)\/metadata(\/trust)?$/))) {
@@ -235,9 +256,12 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (p === '/api/v1/playground') {
         return json({
             enabled: true, exists: true, workspaceId: 'ws_fin', name: 'Playground', joined: params.get('joined') !== '0',
-            graphQuota: 5, graphsUsed: 2, canSetUp: as === 'admin', sandboxProviderId: 'prov_sandbox',
+            graphQuota: 5, graphsUsed, canSetUp: as === 'admin', sandboxProviderId: 'prov_sandbox',
         })
     }
+    if (p === '/api/v1/playground/samples') return json({ quotaLeft: 5 - graphsUsed, samples: PLAYGROUND_SAMPLES })
+    // Starting one stays starting: the card's spinner, for a screenshot.
+    if (p.startsWith('/api/v1/playground/samples/')) return new Promise<Response>(() => {})
     if (p === '/api/v1/admin/workspaces/summary') {
         const row = { id: ws.id, name: ws.name, isDefault: false, dataSources: ws.dataSources.length, activeDataSources: ws.dataSources.length,
             pendingDataSources: 0, nodes: 64_610, edges: 160_655, entityTypes: ['Table', 'Column', 'Report'], views: views.length, sources: {} }

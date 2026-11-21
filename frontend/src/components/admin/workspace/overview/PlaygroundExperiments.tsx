@@ -5,7 +5,8 @@
  * steps left to set it up. Neither means anything in the Playground: nobody joins
  * it to run it, they come to try something. So it leads with their own work — the
  * graphs they started and the views they built — how many more graphs they may
- * start, and the one button that starts the next.
+ * start, and the one button that starts the next. Beside it, samples: a ready-made
+ * graph to explore — first of all, for someone who has never built one.
  */
 import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -15,6 +16,7 @@ import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { View } from '@/services/viewApiService'
 import { useAuthStore } from '@/store/auth'
 import { usePlayground } from '@/hooks/usePlayground'
+import { SampleGallery } from '@/components/playground/SampleGallery'
 import { OverviewViewGrid } from './OverviewViewGrid'
 import type { OverviewLayout } from './overviewLayout'
 
@@ -117,15 +119,19 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                 )}
 
                 {graphs.length === 0 ? (
-                    <ol className="mt-5 grid gap-3 sm:grid-cols-3">
-                        {FIRST_STEPS.map((s, i) => (
-                            <li key={s.title} className="rounded-2xl border border-glass-border bg-canvas/60 p-4">
-                                <span className="inline-flex w-6 h-6 items-center justify-center rounded-full bg-violet-500/10 text-xs font-bold text-violet-600 dark:text-violet-300">{i + 1}</span>
-                                <p className="mt-2 text-sm font-semibold text-ink">{s.title}</p>
-                                <p className="mt-0.5 text-xs text-ink-muted">{s.detail}</p>
-                            </li>
-                        ))}
-                    </ol>
+                    <>
+                        {/* Before their first graph, a sample is the quickest way to see what one is for. */}
+                        {onNewGraph && <SampleGallery workspaceId={workspace.id} className="mt-5" />}
+                        <ol className="mt-5 grid gap-3 sm:grid-cols-3">
+                            {FIRST_STEPS.map((s, i) => (
+                                <li key={s.title} className="rounded-2xl border border-glass-border bg-canvas/60 p-4">
+                                    <span className="inline-flex w-6 h-6 items-center justify-center rounded-full bg-violet-500/10 text-xs font-bold text-violet-600 dark:text-violet-300">{i + 1}</span>
+                                    <p className="mt-2 text-sm font-semibold text-ink">{s.title}</p>
+                                    <p className="mt-0.5 text-xs text-ink-muted">{s.detail}</p>
+                                </li>
+                            ))}
+                        </ol>
+                    </>
                 ) : (
                     <div className="mt-5 space-y-4">
                         <ul aria-label="Your graphs" className="grid gap-2 sm:grid-cols-2">
@@ -165,6 +171,7 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                                     meta={v => v.visibility === 'private' ? 'Only you' : 'Shared with everyone here'} />
                             </div>
                         )}
+                        {onNewGraph && <SampleGallery workspaceId={workspace.id} className="border-t border-glass-border pt-4" />}
                     </div>
                 )}
             </div>

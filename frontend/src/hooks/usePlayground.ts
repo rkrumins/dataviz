@@ -36,6 +36,36 @@ export function useJoinPlayground() {
     })
 }
 
+/** The samples a member may start a graph from, and how many more graphs they may start. A
+ *  sample is a blank graph, so they're offered only while blank graphs and version control are. */
+export function usePlaygroundSamples() {
+    const playground = useFeature(PLAYGROUND_FEATURE)
+    const blankModels = useFeature('blankModelsEnabled')
+    const versioning = useFeature('versioningEnabled')
+    return useQuery({
+        queryKey: [...KEY, 'samples'],
+        queryFn: () => playgroundService.samples(),
+        enabled: playground && blankModels && versioning,
+        staleTime: 60_000,
+        retry: false,
+    })
+}
+
+/** Start a graph from a sample. After it, the workspace and the quota are read again — and the
+ *  workspaces store, which the new view's page reads its data source from. */
+export function useStartSample(workspaceId: string) {
+    const queryClient = useQueryClient()
+    return useMutation({
+        mutationFn: (sampleId: string) => playgroundService.startSample(sampleId),
+        onSuccess: async () => {
+            void queryClient.invalidateQueries({ queryKey: ['workspace', workspaceId] })
+            void queryClient.invalidateQueries({ queryKey: ['workspace-detail-phase2', workspaceId] })
+            void queryClient.invalidateQueries({ queryKey: KEY })
+            await useWorkspacesStore.getState().loadWorkspaces().catch(() => {})
+        },
+    })
+}
+
 export function useSetUpPlayground() {
     const queryClient = useQueryClient()
     return useMutation({
