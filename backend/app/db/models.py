@@ -3215,6 +3215,11 @@ class GroupORM(Base):
     # an IdP group->group mapping. Set on groups that confer elevated
     # access so admin-only flows remain the only way to add members.
     is_protected = Column(Boolean, nullable=False, default=False)
+    # The workspace that owns the group, when one does: its admins manage it from
+    # the workspace (``services.workspace_groups``), and its name carries the
+    # workspace's — ``"<workspace> · <name>"``. NULL: a platform group. A plain id.
+    workspace_id = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)
@@ -3228,6 +3233,7 @@ class GroupORM(Base):
         UniqueConstraint("name", name="uq_groups_name"),
         Index("idx_groups_deleted_at", "deleted_at"),
         Index("idx_groups_external_id", "external_id"),
+        Index("idx_groups_workspace", "workspace_id"),
         CheckConstraint(
             "source IN ('local', 'scim')",
             name="ck_groups_source",
@@ -3380,6 +3386,69 @@ class IdpGroupRoleMappingORM(Base):
             f"<IdpGroupRoleMapping id={self.id!r} "
             f"group={self.idp_group!r} role={self.role_name!r} "
             f"{self.scope_type}={self.scope_id!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
+# idp_link_requests  (asking a platform admin to link a group to the   #
+# identity provider)                                                   #
+# ------------------------------------------------------------------ #
+
+
+class IdpLinkRequestORM(Base):
+    """A workspace's group waiting to be linked to an identity-provider group.
+
+    Linking a group to the identity provider is a platform administrator's call
+    (``system:admin``, the SSO rules' bar), so a workspace admin — or an approval
+    by someone without it — asks for one here. ``pending`` → ``linked`` (the
+    mapping it made: ``mapping_id``) | ``declined`` (``resolution_note``) |
+    ``cancelled`` (the group was deleted). ``source`` says where it was asked:
+    ``workspace`` (the workspace's Groups) or ``workspace_request`` (an approved
+    workspace request: ``source_id``). One pending per group
+    (``uq_idp_link_requests_one_pending``). No foreign keys: the group, workspace,
+    provider and people are named by id, and the record outlives them.
+    """
+    __tablename__ = "idp_link_requests"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ilr_{uuid.uuid4().hex[:12]}")
+    group_id = Column(Text, nullable=False)
+    workspace_id = Column(Text, nullable=False)
+    idp_group = Column(Text, nullable=False)
+    provider_id = Column(Text, nullable=True)
+    requested_by = Column(Text, nullable=False)
+    requested_at = Column(Text, nullable=False, default=_now)
+    status = Column(Text, nullable=False, default="pending")
+    source = Column(Text, nullable=False, default="workspace")
+    source_id = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    resolved_at = Column(Text, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    mapping_id = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_idp_link_requests_status", "status", "requested_at"),
+        Index("idx_idp_link_requests_group", "group_id"),
+        CheckConstraint(
+            "status IN ('pending', 'linked', 'declined', 'cancelled')",
+            name="ck_idp_link_requests_status",
+        ),
+        CheckConstraint(
+            "source IN ('workspace', 'workspace_request')",
+            name="ck_idp_link_requests_source",
+        ),
+        # Both dialects, or SQLite silently builds a plain UNIQUE.
+        Index(
+            "uq_idp_link_requests_one_pending", "group_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<IdpLinkRequest id={self.id!r} group={self.group_id!r} "
+            f"idp_group={self.idp_group!r} status={self.status!r}>"
         )
 
 

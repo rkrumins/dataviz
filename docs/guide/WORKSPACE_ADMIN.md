@@ -156,9 +156,10 @@ bound in this workspace and you hold everything they grant.
 
 > **Note:** Binding a group needs only this workspace's admin role, not the
 > platform's group list: **Group** searches every group, and a bound group's
-> row opens to show the people it lets in here. Creating groups and changing
-> who is in them stays with `system:groups:manage` — Org Admins and Super
-> Admins have it.
+> row opens to show the people it lets in here. Creating platform-wide groups
+> and changing who is in them stays with `system:groups:manage` — Org Admins
+> and Super Admins have it. The workspace's own groups are its admins' to
+> manage (see [Your workspace's groups](#your-workspaces-groups)).
 
 ### Seeing who can actually get in
 
@@ -200,6 +201,29 @@ whose role here gives more than they would keep, the preview names it:
 through its keys they could still act here. Tick **Remove its role here
 too** to remove that as well, or ask its other managers to remove them as a
 manager.
+
+### Your workspace's groups
+
+A workspace can have groups of its own — the ones an approved [workspace
+request](/guide/requesting-a-workspace) made, and any its admins make. The
+workspace's admins manage them here, without the platform's group list: make
+one with a name, a role (**Workspace viewer**, **Workspace member** or
+**Publisher**) and the people in it; rename it, change its role, add and remove
+people, or delete it. Its name always starts with the workspace's — "Lab ·
+Engineers" — because group names are unique across {brand}. Stewards see the
+groups and who is in them; only admins change them.
+
+Groups bound here that the workspace doesn't own are listed too, but they're
+managed on the platform's Groups page. So is a group of yours that has also been
+given access somewhere you can't grant, or that manages a service account: who is
+in it decides more than this workspace.
+
+A group can be **linked to a group in your identity provider** (an Active
+Directory group, say), so its members follow the directory at each sign-in.
+Linking is a Super Admin's call: when you ask for a link, a Super Admin is told
+and links or declines it, and you hear which. People the identity provider put in
+a group leave it there, not here. Only the identity-provider groups you yourself
+had at your last sign-in are suggested as you type — nobody sees anyone else's.
 
 ### Answering access requests
 

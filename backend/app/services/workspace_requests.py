@@ -7,10 +7,12 @@ workspaces (``system:workspaces:create``: Org and Super Admins) answer:
 * **approve** — optionally with another name or description. The workspace is
   created; the requester becomes its Workspace Admin and the teammates its Members;
   the groups asked for are made (``"<workspace> · <name>"``), bound to it with their
-  roles and filled with the people named for them — and each group that names an
-  identity-provider group is linked to it, when the approver is a platform
-  administrator (the SSO rules' own bar); otherwise the link waits in ``outcome``
-  for one to confirm (``link_idp_group``). Then each chosen Playground graph moves
+  roles and filled with the people named for them; they are the workspace's own,
+  its admins manage them (``workspace_groups``). Each group that names an
+  identity-provider group is linked to it when the approver is a platform
+  administrator (the SSO rules' own bar); otherwise a link request asks one
+  (``idp_links``), and the link waits in ``outcome`` until it is answered — or
+  confirmed here (``link_idp_group``). Then each chosen Playground graph moves
   into it with its views (``data_source_transfer.move``). A graph that can't move is
   recorded in the request's ``outcome`` and the rest go on: the workspace is never
   lost to one.
@@ -38,14 +40,14 @@ from backend.app.db.models import (
 )
 from backend.app.db.repositories import (
     group_repo,
-    idp_group_mapping_repo,
+    idp_link_request_repo,
     notification_repo,
     outbox_event_repo,
     user_repo,
     workspace_repo,
     workspace_request_repo as repo,
 )
-from backend.app.services import data_source_transfer, workspace_access
+from backend.app.services import data_source_transfer, idp_links, workspace_access
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.playground_policy import get_playground, graphs_made_by
 from backend.app.services.revocation_service import revoke_subject_sessions
@@ -69,7 +71,7 @@ PURPOSES = ("team", "project", "poc", "reporting", "other")
 NAME_MAX = 120
 APPROVER_PERMISSION = "system:workspaces:create"
 #: Linking a group to the identity provider: the SSO rules' own bar.
-IDP_LINK_PERMISSION = "system:admin"
+IDP_LINK_PERMISSION = idp_links.LINK_PERMISSION
 GROUP_NAME_MAX = 200
 _ADMIN_ROLE = "workspace_admin"
 _MEMBER_ROLE = "workspace_member"
@@ -441,9 +443,10 @@ async def _group_names(session: AsyncSession, proposals: list[dict], ws_name: st
 async def _make_groups(session: AsyncSession, row: WorkspaceRequestORM, proposals: list[dict],
                        names: dict[str, str], ws_id: str, ws_name: str, approver: User,
                        claims: PermissionClaims, provider_id: Optional[str]) -> dict:
-    """Make the proposed groups: bound to the workspace with their roles, the people named
-    for them in them, and linked to their identity-provider groups when the approver may
-    link them — else those links wait for a platform administrator."""
+    """Make the proposed groups, the workspace's own: bound to it with their roles, the
+    people named for them in them, and linked to their identity-provider groups when the
+    approver may link them — else a link request (the requester's) asks a platform
+    administrator."""
     made: list[dict] = []
     linked: list[dict] = []
     waiting: list[dict] = []
@@ -451,7 +454,8 @@ async def _make_groups(session: AsyncSession, row: WorkspaceRequestORM, proposal
     people = sorted({uid for g in proposals for uid in g.get("memberIds", [])})
     active = await _active_people(session, people) if people else set()
     for g in proposals:
-        group = await group_repo.create_group(session, name=names[g["key"]], description=g.get("description"))
+        group = await group_repo.create_group(session, name=names[g["key"]], description=g.get("description"),
+                                              workspace_id=ws_id, created_by=approver.id)
         await user_repo.create_outbox_event(
             session, event_type="rbac.group.created",
             payload={"group_id": group.id, "name": group.name, "actor_id": approver.id, "request_id": row.id},
@@ -488,40 +492,20 @@ async def _make_groups(session: AsyncSession, row: WorkspaceRequestORM, proposal
         idp_group = g.get("idpGroup")
         if not idp_group:
             continue
-        link = {"groupId": group.id, "groupName": group.name, "idpGroup": idp_group}
-        if can_link and await _link(session, group.id, idp_group, provider_id, approver.id) is None:
-            linked.append({"groupId": group.id, "idpGroup": idp_group})
-        else:
-            waiting.append(link)
-    if waiting:
-        await notification_repo.notify(
-            session, user_ids=await notification_repo.users_with_global_permission(session, IDP_LINK_PERMISSION),
-            kind="workspace_request.idp_links_pending",
-            title=f"{len(waiting)} group{'s' if len(waiting) != 1 else ''} in {ws_name} to link to your identity provider",
-            body=", ".join(f"{w['groupName']} → {w['idpGroup']}" for w in waiting),
-            link=_APPROVERS_LINK, actor_id=approver.id, resource_type="workspace_request", resource_id=row.id,
+        if can_link:
+            try:
+                await idp_links.link_group(session, group_id=group.id, idp_group=idp_group,
+                                           provider_id=provider_id, actor_id=approver.id)
+                linked.append({"groupId": group.id, "idpGroup": idp_group})
+                continue
+            except HTTPException:
+                pass   # nothing was written: a platform administrator looks at it
+        waiting.append({"groupId": group.id, "groupName": group.name, "idpGroup": idp_group})
+        await idp_links.request_link(
+            session, group=group, ws_id=ws_id, idp_group=idp_group, provider_id=provider_id,
+            requested_by=row.requester_id, source="workspace_request", source_id=row.id, actor_id=approver.id,
         )
     return {"groupsCreated": made, "idpLinksCreated": linked, "idpLinksPending": waiting}
-
-
-async def _link(session: AsyncSession, group_id: str, idp_group: str, provider_id: Optional[str],
-                actor_id: str) -> Optional[str]:
-    """Link a group to its identity-provider group — membership then follows the
-    directory at each sign-in. None when linked; otherwise why not (nothing is written)."""
-    try:
-        async with session.begin_nested():
-            mapping = await idp_group_mapping_repo.create_group_membership_mapping(
-                session, idp_group=idp_group, target_group_id=group_id, provider_id=provider_id,
-                created_by=actor_id,
-            )
-    except (idp_group_mapping_repo.MappingValidationError, ValueError) as exc:
-        return str(exc)
-    await user_repo.create_outbox_event(
-        session, event_type="rbac.sso_mapping.created",
-        payload={"mapping_id": mapping.id, "target_type": "group_membership", "idp_group": mapping.idp_group,
-                 "target_group_id": group_id, "provider_id": provider_id, "actor_id": actor_id},
-    )
-    return None
 
 
 async def _sandbox_provider(session: AsyncSession) -> Optional[ProviderORM]:
@@ -657,7 +641,8 @@ async def approve(session: AsyncSession, approver: User, claims: PermissionClaim
 async def link_idp_group(session: AsyncSession, admin: User, request_id: str, group_id: str,
                          provider_id: Optional[str]) -> WorkspaceRequestORM:
     """A platform administrator links a group an approved request made to the
-    identity-provider group it named — the link an Org Admin's approval left waiting."""
+    identity-provider group it named — the link an Org Admin's approval left waiting,
+    answering its link request."""
     row = await repo.get(session, request_id, for_update=True)
     if row is None:
         raise HTTPException(status_code=404, detail="Workspace request not found")
@@ -669,13 +654,18 @@ async def link_idp_group(session: AsyncSession, admin: User, request_id: str, gr
                       "That group has no identity-provider link waiting.")
     if provider_id and await session.get(IdpProviderORM, provider_id) is None:
         raise HTTPException(status_code=422, detail="That identity-provider connection doesn't exist.")
-    why = await _link(session, group_id, link["idpGroup"], provider_id or None, admin.id)
-    if why is not None:
-        raise HTTPException(status_code=400, detail=why)
-    outcome["idpLinksPending"] = [w for w in waiting if w is not link]
-    outcome["idpLinksCreated"] = [*(outcome.get("idpLinksCreated") or []),
-                                  {"groupId": group_id, "idpGroup": link["idpGroup"]}]
-    row.outcome = json.dumps(outcome)
+    asked = (await idp_link_request_repo.pending_for_groups(session, [group_id])).get(group_id)
+    if asked is not None and asked.source_id == row.id:
+        # The link request the approval made: answering it puts ``outcome`` right.
+        await idp_links.link_request(session, admin, asked.id, provider_id or None)
+    else:
+        # Approved before link requests were recorded.
+        await idp_links.link_group(session, group_id=group_id, idp_group=link["idpGroup"],
+                                   provider_id=provider_id or None, actor_id=admin.id)
+        outcome["idpLinksPending"] = [w for w in waiting if w is not link]
+        outcome["idpLinksCreated"] = [*(outcome.get("idpLinksCreated") or []),
+                                      {"groupId": group_id, "idpGroup": link["idpGroup"]}]
+        row.outcome = json.dumps(outcome)
     await session.flush()
     return row
 

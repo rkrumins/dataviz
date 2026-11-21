@@ -150,6 +150,13 @@ def _summary_workspace_request(verb: str):
     return _build
 
 
+def _summary_idp_link_request(verb: str):
+    def _build(p: dict) -> str:
+        return (f"Link of group '{p.get('group_id') or '?'}' to IdP group "
+                f"'{p.get('idp_group') or '?'}' {verb}")
+    return _build
+
+
 def _summary_idp_provider(verb: str):
     def _build(p: dict) -> str:
         slug = p.get("slug") or p.get("provider_id") or "?"
@@ -572,6 +579,10 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "workspace.request.sent_back": ("info", _summary_workspace_request("sent back with a question")),
     "workspace.request.declined": ("warning", _summary_workspace_request("declined")),
     "workspace.request.withdrawn": ("info", _summary_workspace_request("withdrawn")),
+    "rbac.idp_link_request.created": ("info", _summary_idp_link_request("requested")),
+    "rbac.idp_link_request.linked": ("info", _summary_idp_link_request("made")),
+    "rbac.idp_link_request.declined": ("warning", _summary_idp_link_request("declined")),
+    "rbac.idp_link_request.cancelled": ("info", _summary_idp_link_request("cancelled")),
     "identity.api_key.created": (
         "info", lambda p: f"API key {_api_key_label(p)} created",
     ),
@@ -1040,6 +1051,10 @@ LABELS: dict[str, str] = {
     "workspace.request.sent_back": "Sent a workspace request back",
     "workspace.request.declined": "Declined a workspace request",
     "workspace.request.withdrawn": "Withdrew a workspace request",
+    "rbac.idp_link_request.created": "Asked to link a group to the identity provider",
+    "rbac.idp_link_request.linked": "Linked a group to the identity provider",
+    "rbac.idp_link_request.declined": "Declined linking a group to the identity provider",
+    "rbac.idp_link_request.cancelled": "Cancelled a group's identity-provider link request",
     "rbac.role.created": "Created a role",
     "rbac.role.updated": "Changed a role",
     "rbac.role.deleted": "Deleted a role",

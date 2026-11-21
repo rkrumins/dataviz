@@ -964,6 +964,150 @@ class WorkspaceRequestDetail(WorkspaceRequestResponse):
     sandbox_admits_new: Optional[bool] = Field(default=None, alias="sandboxAdmitsNew")
 
 
+# ── Workspace groups ─────────────────────────────────────────────────
+
+
+class WorkspaceGroupIdpLink(BaseModel):
+    """A ``group_membership`` mapping filling the group from an identity-provider
+    group; ``providerId`` none: from any connection."""
+    model_config = ConfigDict(populate_by_name=True)
+    mapping_id: str = Field(alias="mappingId")
+    idp_group: str = Field(alias="idpGroup")
+    provider_id: Optional[str] = Field(default=None, alias="providerId")
+    provider_name: Optional[str] = Field(default=None, alias="providerName")
+
+
+class WorkspaceGroupPendingLink(BaseModel):
+    """A link to an identity-provider group, asked for and waiting for a platform
+    administrator."""
+    model_config = ConfigDict(populate_by_name=True)
+    request_id: str = Field(alias="requestId")
+    idp_group: str = Field(alias="idpGroup")
+    requested_by: str = Field(alias="requestedBy")
+    requested_by_name: Optional[str] = Field(default=None, alias="requestedByName")
+    requested_at: str = Field(alias="requestedAt")
+
+
+class WorkspaceGroupResponse(BaseModel):
+    """A group bound in the workspace. ``owned``: the workspace owns it, so its admins
+    manage it here; ``name`` is then ``"<workspace> · <shortName>"``. ``role``: the role
+    it holds here (none for an owned group whose binding has gone)."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    name: str
+    short_name: str = Field(alias="shortName")
+    description: Optional[str] = None
+    owned: bool
+    role: Optional[str] = None
+    role_label: Optional[str] = Field(default=None, alias="roleLabel")
+    member_count: int = Field(alias="memberCount")
+    member_preview: list[WorkspaceRequestPerson] = Field(default_factory=list, alias="memberPreview")
+    source: str
+    idp_links: list[WorkspaceGroupIdpLink] = Field(default_factory=list, alias="idpLinks")
+    pending_idp_link: Optional[WorkspaceGroupPendingLink] = Field(default=None, alias="pendingIdpLink")
+    created_at: str = Field(alias="createdAt")
+
+
+class WorkspaceGroupCreate(BaseModel):
+    """Body for ``POST /admin/workspaces/{ws}/groups``: the short name (the group is
+    made as ``"<workspace> · <name>"``), its role here, the people to put in it, and
+    the identity-provider group to link it to."""
+    model_config = ConfigDict(populate_by_name=True)
+    name: str = Field(min_length=1, max_length=80)
+    description: Optional[str] = Field(default=None, max_length=500)
+    role: ProposedGroupRole
+    member_ids: list[str] = Field(default_factory=list, alias="memberIds", max_length=100)
+    idp_group: Optional[str] = Field(default=None, alias="idpGroup", max_length=200)
+
+
+class WorkspaceGroupUpdate(BaseModel):
+    """Body for ``PATCH …/groups/{id}``: only what is sent changes."""
+    model_config = ConfigDict(populate_by_name=True)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    description: Optional[str] = Field(default=None, max_length=500)
+    role: Optional[ProposedGroupRole] = None
+
+
+class WorkspaceGroupMember(BaseModel):
+    """Someone in a group: ``source`` ``local`` (added in the app) or ``sso`` (the
+    identity provider put them there, and takes them out)."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    email: Optional[str] = None
+    source: str = "local"
+    added_at: str = Field(alias="addedAt")
+
+
+class WorkspaceGroupMemberAdd(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    user_id: str = Field(alias="userId", min_length=1, max_length=200)
+
+
+class WorkspaceGroupIdpLinkCreate(BaseModel):
+    """Body for ``POST …/groups/{id}/idp-link``: the identity-provider group, and the
+    connection (none: any connection)."""
+    model_config = ConfigDict(populate_by_name=True)
+    idp_group: str = Field(alias="idpGroup", min_length=1, max_length=200)
+    provider_id: Optional[str] = Field(default=None, alias="providerId", max_length=200)
+
+
+# ── Identity-provider link requests ──────────────────────────────────
+
+
+class IdpLinkRequestResponse(BaseModel):
+    """A request to link a group to an identity-provider group. ``status``:
+    ``pending``, ``linked``, ``declined`` or ``cancelled``; ``source``: ``workspace``
+    or ``workspace_request`` (``sourceId`` the request). ``seenCount``: how many
+    people's last sign-in asserted ``idpGroup``."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    group_id: str = Field(alias="groupId")
+    group_name: Optional[str] = Field(default=None, alias="groupName")
+    workspace_id: str = Field(alias="workspaceId")
+    workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
+    idp_group: str = Field(alias="idpGroup")
+    provider_id: Optional[str] = Field(default=None, alias="providerId")
+    requested_by: str = Field(alias="requestedBy")
+    requested_by_name: Optional[str] = Field(default=None, alias="requestedByName")
+    requested_at: str = Field(alias="requestedAt")
+    status: str
+    source: str
+    source_id: Optional[str] = Field(default=None, alias="sourceId")
+    resolved_by: Optional[str] = Field(default=None, alias="resolvedBy")
+    resolved_at: Optional[str] = Field(default=None, alias="resolvedAt")
+    resolution_note: Optional[str] = Field(default=None, alias="resolutionNote")
+    seen_count: int = Field(default=0, alias="seenCount")
+
+
+class IdpLinkRequestLink(BaseModel):
+    """Body for linking: the connection (none: the one asked for, or any)."""
+    model_config = ConfigDict(populate_by_name=True)
+    provider_id: Optional[str] = Field(default=None, alias="providerId", max_length=200)
+
+
+class IdpLinkRequestDecline(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class IdpGroupSuggestion(BaseModel):
+    """An identity-provider group someone's sign-in asserted. ``seenCount`` only for
+    platform administrators."""
+    model_config = ConfigDict(populate_by_name=True)
+    idp_group: str = Field(alias="idpGroup")
+    seen_count: Optional[int] = Field(default=None, alias="seenCount")
+
+
+class IdpGroupPreview(BaseModel):
+    """Who had an identity-provider group at their last sign-in."""
+    model_config = ConfigDict(populate_by_name=True)
+    idp_group: str = Field(alias="idpGroup")
+    seen_count: int = Field(alias="seenCount")
+    people: list[WorkspaceRequestPerson] = Field(default_factory=list)
+    note: str
+
+
 # ── Access reviews ───────────────────────────────────────────────────
 
 class AccessReviewCounts(BaseModel):

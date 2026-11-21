@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from backend.app.auth.dependencies import get_current_user, get_optional_user, get_permission_claims
 from backend.app.db.models import (
-    GroupMemberORM, GroupORM, IdpGroupRoleMappingORM, NotificationORM, OutboxEventORM, ProviderORM,
+    GroupMemberORM, GroupORM, IdpGroupRoleMappingORM, IdpLinkRequestORM, NotificationORM, OutboxEventORM, ProviderORM,
     RoleBindingORM, RoleORM, RolePermissionORM, UserORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM,
     WorkspaceRequestORM,
 )
@@ -540,7 +540,7 @@ async def test_an_org_admins_approval_leaves_the_links_for_a_platform_admin_to_c
     assert out["idpLinksCreated"] == []
     assert out["idpLinksPending"] == [{"groupId": eng, "groupName": "Ada's Lab · Engineers", "idpGroup": "ML-Engineers"}]
     assert (await db_session.execute(select(IdpGroupRoleMappingORM))).scalars().all() == []
-    assert (await _kinds(db_session, ROOT.id))["workspace_request.idp_links_pending"] == "/workspaces?tab=requests"
+    assert (await _kinds(db_session, ROOT.id))["idp_link.requested"] == "/workspaces?tab=requests"
 
     with _as(OLGA, APPROVER):
         refused = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/idp-links", json={"groupId": eng})
@@ -710,3 +710,44 @@ async def test_nobody_else_moves_or_asks_to_move_someone_elses_experiment(test_c
     assert {d["id"]: d["mode"] for d in dests.json()}["ws_team"] is None
     assert asked.status_code == 403
     assert moved.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_the_groups_an_approval_makes_are_the_workspaces_and_their_links_are_requests(
+    test_client: AsyncClient, estate, db_session, flag_on,
+):
+    groups = [*GROUPS, {"key": "g3", "name": "Ops", "role": "workspace_member", "idpGroup": "Ops-All"}]
+    req = await _submit(test_client, groups=groups, playgroundSourceIds=[])
+    with _as(OLGA, APPROVER):
+        r = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/approve")
+    assert r.status_code == 200, r.text
+    out = r.json()["outcome"]
+    ws_id = out["workspaceId"]
+    made = {g["key"]: g["groupId"] for g in out["groupsCreated"]}
+    owners = dict((await db_session.execute(
+        select(GroupORM.id, GroupORM.workspace_id).where(GroupORM.id.in_(list(made.values())))
+    )).all())
+    assert owners == {gid: ws_id for gid in made.values()}
+    asked = {a.group_id: a for a in (await db_session.execute(select(IdpLinkRequestORM))).scalars().all()}
+    assert sorted(asked) == sorted([made["g1"], made["g3"]])
+    assert {(a.status, a.source, a.source_id, a.requested_by, a.workspace_id) for a in asked.values()} == {
+        ("pending", "workspace_request", req["id"], ADA.id, ws_id)}
+
+    root = PermissionClaims(sid="s_r", global_perms=("system:admin",), ws_perms={})
+    with _as(ROOT, root):
+        linked = await test_client.post(f"/api/v1/admin/idp-link-requests/{asked[made['g1']].id}/link")
+        declined = await test_client.post(f"/api/v1/admin/idp-link-requests/{asked[made['g3']].id}/decline",
+                                          json={"reason": "No such group"})
+        confirm = await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/idp-links",
+                                         json={"groupId": made["g1"]})
+    assert linked.status_code == 200 and declined.status_code == 200, (linked.text, declined.text)
+    assert confirm.status_code == 409 and confirm.json()["detail"]["type"] == "no_pending_link"
+    stored = (await db_session.execute(
+        select(WorkspaceRequestORM).where(WorkspaceRequestORM.id == req["id"]).execution_options(populate_existing=True)
+    )).scalar_one()
+    outcome = json.loads(stored.outcome)
+    assert outcome["idpLinksPending"] == []
+    assert outcome["idpLinksCreated"] == [{"groupId": made["g1"], "idpGroup": "ML-Engineers"}]
+    assert outcome["idpLinksDeclined"] == [{"groupId": made["g3"], "idpGroup": "Ops-All", "reason": "No such group"}]
+    assert {k: v for k, v in (await _kinds(db_session, ADA.id)).items() if k.startswith("idp_link.")} == {
+        "idp_link.linked": f"/workspaces/{ws_id}?tab=members", "idp_link.declined": f"/workspaces/{ws_id}?tab=members"}

@@ -1098,10 +1098,64 @@ over; admins get `access_review.overdue`.
   `workspace_request.declined` (linking to `/my/access?tab=workspaces`);
 * teammates the approval adds, and the people it puts in the groups the request
   asked for, get `workspace.member_added`, linking to `/workspaces/{id}`;
-* platform administrators (`system:admin`) get
-  `workspace_request.idp_links_pending` when an Org Admin's approval made groups
-  that name identity-provider groups: linking a group to the identity provider is
-  theirs (`POST /admin/workspace-requests/{id}/idp-links`), as every SSO rule is.
+* when an Org Admin's approval made groups that name identity-provider groups, each
+  link becomes an [identity-provider link request](#identity-provider-link-requests)
+  (`source: "workspace_request"`), and platform administrators get
+  `idp_link.requested`: linking a group to the identity provider is theirs, as every
+  SSO rule is. `POST /admin/workspace-requests/{id}/idp-links` still confirms one,
+  and answers its link request. The request's `outcome` keeps `idpLinksPending`,
+  `idpLinksCreated` and `idpLinksDeclined` in step.
+
+**Workspace groups** (`/admin/workspaces/{ws}/groups`). A group with
+`groups.workspace_id` set is the workspace's own: its admins (`workspace:admin`
+there — Org and Super Admins hold it everywhere) manage it from the workspace,
+without `system:groups:manage`. Its name is always `"<workspace> · <name>"`
+(`shortName` drops the prefix); groups an approved workspace request makes are the
+workspace's.
+
+| Route | Gate | Does |
+| --- | --- | --- |
+| `GET ""` | `workspace:members:add` | Every group bound here, owned or not: role, members preview, `idpLinks`, `pendingIdpLink` |
+| `POST ""` | `workspace:admin` | Make an owned group (`name`, `description`, `role`: Viewer, Member or Publisher, `memberIds`, `idpGroup`), bound here |
+| `PATCH /{id}` | `workspace:admin` | Rename (the prefix stays), describe, change its role (the old binding goes; members' sessions end) |
+| `DELETE /{id}` | `workspace:admin` | As the Groups page's delete, plus its identity-provider links; a waiting link request is `cancelled` |
+| `GET /{id}/members` | `workspace:members:add` | Who is in it, with `source` `local` or `sso` |
+| `POST /{id}/members`, `DELETE /{id}/members/{user}` | `workspace:admin` | Add an active person; remove one the app added |
+| `POST /{id}/idp-link` | `workspace:admin` | `system:admin` links at once; anyone else makes a link request |
+| `DELETE /{id}/idp-links/{mapping}` | `system:admin` | Remove a link, sweeping the memberships it made |
+
+Everything but the two reads and unlinking is for owned groups only (403
+`not_owned`). Changing who is in a group grants or takes away everything it
+carries, so membership changes and deletion are refused while the group carries a
+binding the caller couldn't grant (403 `reaches_beyond_workspace` — bound in
+another workspace, say) or manages a service account (409
+`manages_service_accounts`); people the identity provider put in a group leave it
+there (409 `managed_by_idp`). A taken name — a deleted group's too — is 409
+`group_name_taken` with a free short name as `suggestion`. Writes record
+`rbac.group.*` with `via: "workspace"` and `rbac.workspace.member_bound` /
+`member_revoked`; people put in a group get `workspace.member_added`.
+
+### Identity-provider link requests
+
+`idp_link_requests`: someone without `system:admin` asking for a group to be linked
+to an identity-provider group (`pending` → `linked` | `declined` | `cancelled`;
+one pending per group, 409 `link_pending`). Answered under
+`/admin/idp-link-requests` (`system:admin`): `GET ?status=pending|all` (each with
+`seenCount`), `POST /{id}/link` (`providerId`; makes the `group_membership`
+mapping) and `POST /{id}/decline` (`reason`). A mapping made on the SSO mappings
+page for a group waiting on the same identity-provider group answers its request
+too. Notifications: platform administrators get `idp_link.requested`, linking to
+`/workspaces?tab=requests`; the requester gets `idp_link.linked` or
+`idp_link.declined`, linking to `/workspaces/{ws}?tab=members`. Events:
+`rbac.idp_link_request.created`, `.linked`, `.declined`, `.cancelled`.
+
+There is no directory of the identity provider's groups: what is known is what each
+person's sign-in asserted, recorded at every SSO sign-in (`users.metadata.idp_groups`,
+`user_identities.metadata.groups`). `GET /idp-groups/suggestions?q=&limit=` (anyone
+signed in) offers only the caller's own sign-ins' groups — group names say a lot
+about an organization — and, to `system:admin`, everyone's with `seenCount`.
+`GET /admin/idp-groups/preview?idpGroup=` (`system:admin`) names up to ten people
+whose last sign-in had it.
 
 ## Invites
 
@@ -1255,6 +1309,8 @@ last 7 days. Through the API:
 | Role names and assignable tiers        | `backend/common/roles.py`                                     |
 | Role bindability                       | `backend/app/db/repositories/role_repo.py`                    |
 | Who may let whom in (ceilings, requestable roles, provenance) | `backend/app/services/workspace_access.py` |
+| A workspace's own groups               | `backend/app/services/workspace_groups.py`                    |
+| Identity-provider link requests, sign-in group snapshots | `backend/app/services/idp_links.py`         |
 | Access requests and Find a workspace   | `backend/app/api/v1/endpoints/access_requests.py`, `workspace_directory.py` |
 | Access reviews                         | `backend/app/api/v1/endpoints/access_reviews.py`              |
 | Access reminders (ending, waiting, overdue reviews) | `backend/app/services/access_housekeeping.py` |

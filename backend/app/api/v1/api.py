@@ -20,12 +20,13 @@ from .endpoints import (
     view_membership, search_views,
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
-    workspace_directory, data_source_transfers, workspace_requests,
+    workspace_directory, data_source_transfers, workspace_requests, workspace_groups,
     versioning,
     versioning_admin,
     review_center,
     playground,
     admin_idp_groups,
+    idp_links,
     admin_idp_providers,
     admin_user_identities,
     admin_users_lookup,
@@ -176,6 +177,13 @@ api_router.include_router(
     workspace_members.router,
     prefix="/admin/workspaces/{ws_id}/members",
     tags=["admin:rbac:workspace-members"],
+)
+# A workspace's groups: every group bound in it, and those it owns, which its
+# admins manage there.
+api_router.include_router(
+    workspace_groups.router,
+    prefix="/admin/workspaces/{ws_id}/groups",
+    tags=["admin:rbac:workspace-groups"],
 )
 api_router.include_router(
     role_bindings.router,
@@ -370,6 +378,23 @@ api_router.include_router(
     admin_idp_groups.router,
     prefix="/admin/idp-group-mappings",
     tags=["admin:rbac:idp-groups"],
+)
+# Linking a group to the identity provider, asked for by whoever may not make the
+# link (system:admin answers); and the IdP groups people's sign-ins asserted.
+api_router.include_router(
+    idp_links.requests_router,
+    prefix="/admin/idp-link-requests",
+    tags=["admin:rbac:idp-links"],
+)
+api_router.include_router(
+    idp_links.admin_groups_router,
+    prefix="/admin/idp-groups",
+    tags=["admin:rbac:idp-links"],
+)
+api_router.include_router(
+    idp_links.groups_router,
+    prefix="/idp-groups",
+    tags=["idp-groups"],
 )
 
 # SSO Phase 3 — IdP provider CRUD (multi-IdP DB-stored config).
