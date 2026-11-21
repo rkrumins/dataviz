@@ -13,11 +13,12 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { formatShortcut } from '@/lib/platform'
+import { formatShortcut, isApplePlatform } from '@/lib/platform'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
-import { useCanvasStore } from '@/store/canvas'
+import { isSelectableNode, useCanvasStore } from '@/store/canvas'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { useFeature } from '@/store/features'
@@ -27,7 +28,12 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useLoadingNotification } from '@/components/ui/notifications'
 
 // UX-first interaction components (shared across canvases)
-import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
+import { CanvasContextMenu, type ContextMenuAction, type ContextMenuTarget } from './CanvasContextMenu'
+import { compareSelectionAction, menuSelection } from './selectionMenu'
+import { SelectionBar } from './context-view/SelectionBar'
+import { StagedChangesPanel } from './context-view/StagedChangesPanel'
+import { DraftSaveControls } from '@/features/versioning/canvas/DraftSaveControls'
+import { remapIdSet, useCanvasEditGate, useDraftSave, useStagedUndoShortcuts } from '@/features/versioning/canvas/useDraftSave'
 import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
 import { useCreateLinkStore } from './edge-create/createLinkStore'
 import { InlineNodeEditor } from './InlineNodeEditor'
@@ -86,8 +92,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const nodes = useCanvasStore(s => s.nodes)
   const edges = useCanvasStore(s => s.edges)
   const selectNode = useCanvasStore(s => s.selectNode)
+  const clearSelection = useCanvasStore(s => s.clearSelection)
   const selectedNodeIds = useCanvasStore(s => s.selectedNodeIds)
-  const selectedNodeId = selectedNodeIds[0] ?? null
+  // Every selected row wears its ring — the selection is the store's, all of it.
+  const selectedIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   // Mirrors ContextViewCanvas's isHydratingInitial — CanvasRouter writes
   // hydrationPhase into the canvas store for every canvas type, so the empty
   // state can avoid flashing before the initial load lands.
@@ -188,6 +196,18 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
   // routes are hidden rather than left to fail.
   const editModeEnabled = useFeature('editModeEnabled')
+  // Graph edits are kept only in a draft the caller may write, with edit mode on — and a trace is
+  // read-only for its whole life. The same gate as the Context View's, and the same save.
+  const { scopeWsId, dataSourceId, viewId, graphId, isDraft, canEditGraph } = useCanvasEditGate()
+  const canvasWritable = canEditGraph && !trace.isTracing
+  const saveToDraft = useDraftSave({
+    wsId: scopeWsId,
+    viewId,
+    // An entity open before the save stays open after it: its expansion was keyed by its temp urn.
+    remapEntityIds: (ids) => setExpandedNodes((prev) => remapIdSet(prev, ids)),
+  })
+  useStagedUndoShortcuts(isDraft)
+  const isStagedPanelOpen = useStagedChangesStore((s) => s.isReviewPanelOpen)
   const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
@@ -205,7 +225,25 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         return next
       })
     },
+    onCloseEntityDrawer: () => {
+      // Review & Save takes Esc first — held while a save or a publish from it runs.
+      if (isStagedPanelOpen) {
+        if (useStagedChangesStore.getState().applyStatus !== 'applying') useStagedChangesStore.getState().closeReviewPanel()
+        return true
+      }
+      // Several entities compared: Esc closes the drawer, and the selection with it.
+      if (useCanvasStore.getState().drawerNodeIds) {
+        useCanvasStore.getState().requestDrawerMove(() => {
+          useCanvasStore.getState().closeNodeDrawer()
+          clearSelection()
+        })
+        return true
+      }
+      return false
+    },
     onExitTrace: exitTrace,
+    // ⌘A: the rows on screen — not what is collapsed away.
+    selectableIds: () => visibleRowIds,
   })
 
   // Keyboard shortcuts
@@ -294,31 +332,73 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     setSearchResults(results)
   }, [searchQuery, flatNodes])
 
-  // Expand path to search result
-  const expandToNode = useCallback((nodeId: string) => {
-    const node = flatNodes.find((n) => n.id === nodeId)
-    if (!node) return
+  const flatIndex = useMemo(() => new Map(flatNodes.map((n) => [n.id, n])), [flatNodes])
 
-    const path = node.data._path as string[] | undefined
-    if (path) {
-      setExpandedNodes((prev) => {
-        const next = new Set(prev)
-        path.forEach((id) => next.add(id))
-        return next
-      })
-    }
-
-    // Select and scroll to node
-    selectNode(nodeId)
-
-    // Scroll to node after expansion, then pulse so the user sees where
-    // they landed (matches the jump-to-node feedback in other canvases).
+  // Show rows: open the path to each, then scroll the first into view and pulse it (matches the
+  // jump-to-node feedback in other canvases). Never selects — the entity drawer's "locate" leaves
+  // what the drawer holds (several entities, compared) as it is. False when none is in the tree.
+  const revealRows = useCallback((nodeIds: readonly string[]) => {
+    const paths = nodeIds.map((id) => flatIndex.get(id)?.data._path as string[] | undefined)
+    const first = nodeIds.find((id) => flatIndex.has(id))
+    if (!first) return false
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      paths.forEach((path) => path?.forEach((id) => next.add(id)))
+      return next
+    })
     setTimeout(() => {
-      const element = document.getElementById(`hierarchy-node-${nodeId}`)
+      const element = document.getElementById(`hierarchy-node-${first}`)
       element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      useCanvasStore.getState().pulseNode(nodeId)
+      useCanvasStore.getState().pulseNode(first)
     }, 100)
-  }, [flatNodes, selectNode])
+    return true
+  }, [flatIndex])
+  const revealRow = useCallback((nodeId: string) => { revealRows([nodeId]) }, [revealRows])
+  const locateRows = useCallback((nodeIds: string[]) => { revealRows(nodeIds) }, [revealRows])
+
+  // Expand path to search result, and select it
+  const expandToNode = useCallback((nodeId: string) => {
+    if (revealRows([nodeId])) selectNode(nodeId)
+  }, [revealRows, selectNode])
+
+  // The rows on screen, in the order they are drawn: a collapsed subtree contributes nothing.
+  const visibleRowIds = useMemo(() => {
+    const ids: string[] = []
+    const walk = (n: HierarchyNode) => {
+      ids.push(n.id)
+      if (expandedNodes.has(n.id)) n.children.forEach(walk)
+    }
+    hierarchyTree.forEach(walk)
+    return ids
+  }, [hierarchyTree, expandedNodes])
+  const rowIndex = useMemo(() => new Map(visibleRowIds.map((id, i) => [id, i])), [visibleRowIds])
+
+  // Row click → selection, as on the Context View's columns. Cmd/Ctrl toggles the row; Shift ADDS
+  // every row between the last-clicked one and this one, as drawn; a plain click selects it alone.
+  // With no last click on screen, a Shift-click toggles the row in, as Cmd/Ctrl would.
+  const handleRowSelect = useCallback((id: string, e: React.MouseEvent) => {
+    // A Mac Ctrl-click is the secondary click: the context menu answers it.
+    if (isApplePlatform() && e.ctrlKey && !e.metaKey) return
+    if (e.shiftKey) {
+      const { lastNodeClick, selectedNodeIds: held, setSelection } = useCanvasStore.getState()
+      const from = lastNodeClick.nodeId ? rowIndex.get(lastNodeClick.nodeId) : undefined
+      const to = rowIndex.get(id)
+      if (from !== undefined && to !== undefined) {
+        const [lo, hi] = from <= to ? [from, to] : [to, from]
+        setSelection([...new Set([...held, ...visibleRowIds.slice(lo, hi + 1)])])
+        return
+      }
+    }
+    selectNode(id, e.shiftKey || e.metaKey || e.ctrlKey)
+  }, [rowIndex, visibleRowIds, selectNode])
+
+  // A right-click on a row that is part of a selection of several offers the several together.
+  const contextTarget = interactions.state.contextMenu.target
+  const selectionMenuActions = useMemo<ContextMenuAction[]>(() => {
+    if (contextTarget?.type !== 'node' || !isSelectableNode(contextTarget.id)) return []
+    const ids = menuSelection(contextTarget.id, selectedNodeIds)
+    return ids.length > 1 ? [compareSelectionAction(ids, interactions.closeContextMenu)] : []
+  }, [contextTarget, selectedNodeIds, interactions.closeContextMenu])
 
   // Toggle node expansion with lazy loading
   const toggleNode = useCallback(async (nodeId: string) => {
@@ -413,6 +493,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       {/* Header */}
       <div className="flex-shrink-0 bg-canvas-elevated/95 backdrop-blur border-b border-glass-border px-6 py-3">
         <div className="flex items-center justify-end gap-4">
+          {/* In a draft: Undo, Redo and the way to Review & Save what was staged here. */}
+          {isDraft && <DraftSaveControls />}
+
           {/* Search */}
           <div className="relative">
             <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
@@ -486,8 +569,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           SearchMapPanel/PropertyManagerDrawer stay outside this row, same as
           GraphCanvas — they mount below as their own flex-sibling drawers. */}
       <div className="flex-1 min-h-0 flex">
-        {/* Hierarchy Content */}
-        <div className="relative flex-1 min-w-0 overflow-auto p-6 custom-scrollbar">
+        {/* Hierarchy Content — the selection bar floats over it, outside the scroll. */}
+        <div className="relative flex-1 min-w-0">
+        <div className={cn('relative h-full overflow-auto p-6 custom-scrollbar', selectedNodeIds.length > 1 && 'pb-24')}>
           {hierarchyTree.length === 0 ? (
             !isHydratingInitial && <BuilderEmptyState />
           ) : (
@@ -497,10 +581,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
                   key={rootNode.id}
                   node={rootNode}
                   schema={schema}
-                  selectedNodeId={selectedNodeId}
+                  selectedIds={selectedIdSet}
                   expandedNodes={expandedNodes}
                   searchResults={searchResults}
-                  onSelect={selectNode}
+                  onSelect={handleRowSelect}
                   onToggle={toggleNode}
                   onContextMenu={(e, nodeId) => {
                     interactions.openContextMenu(e, {
@@ -530,6 +614,16 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             </div>
           )}
         </div>
+        <SelectionBar
+          nodeIds={selectedNodeIds}
+          labelFor={(id) => flatIndex.get(id)?.name || id}
+          onRemove={(id) => selectNode(id, true)}
+          onClear={clearSelection}
+          onOpenShared={() => useCanvasStore.getState().openNodesDrawer(selectedNodeIds)}
+          sharedEditable={canvasWritable}
+          placementClassName="left-4 right-4 bottom-16"
+        />
+        </div>
 
         {/* Right rail — mutual exclusion: creation takes the rail (an
             explicit action), so the builder is never hidden behind an
@@ -547,10 +641,14 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         )}
         {!builderOpen && !buildOpen && (
           <EntityDrawer
+            // Edits are draft-only, and a trace is read-only for its whole life.
+            canEdit={canvasWritable}
+            writesLocked={trace.isTracing}
             onTraceUp={trace.traceUpstream}
             onTraceDown={trace.traceDownstream}
             onFullTrace={trace.traceFullLineage}
-            onFocusNode={expandToNode}
+            onFocusNode={revealRow}
+            onLocateMany={locateRows}
           />
         )}
       </div>{/* end tree + right-rail row */}
@@ -647,6 +745,18 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onReverseEdge={editModeEnabled ? interactions.reverseEdge : undefined}
         onCreateNode={editModeEnabled ? () => useHierarchyBuilderStore.getState().open() : undefined}
         onSelectAll={interactions.selectAll}
+        customActions={selectionMenuActions}
+      />
+
+      {/* Review & Save — opened from the header's controls, a drawer's "Review & Save", or a
+          notification; saves this canvas's staged edits to the draft as one commit. */}
+      <StagedChangesPanel
+        wsId={scopeWsId} graphId={graphId} dataSourceId={dataSourceId} viewId={viewId}
+        onReveal={(id) => {
+          useCanvasStore.getState().openNodeDrawer(id)
+          revealRow(id)
+        }}
+        onConfirm={saveToDraft}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}
@@ -679,10 +789,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 interface HierarchyContainerProps {
   node: HierarchyNode
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
-  selectedNodeId: string | null
+  selectedIds: ReadonlySet<string>
   expandedNodes: Set<string>
   searchResults: string[]
-  onSelect: (id: string) => void
+  onSelect: (id: string, event: React.MouseEvent) => void
   onToggle: (id: string) => void
   onContextMenu?: (e: React.MouseEvent, nodeId: string) => void
   onDoubleClick?: (nodeId: string, event: React.MouseEvent) => void
@@ -696,7 +806,7 @@ interface HierarchyContainerProps {
 function HierarchyContainer({
   node,
   schema,
-  selectedNodeId,
+  selectedIds,
   expandedNodes,
   searchResults,
   onSelect,
@@ -713,7 +823,7 @@ function HierarchyContainer({
   const childCount = (node.data.childCount as number) || 0
   const hasChildren = node.children.length > 0 || childCount > 0
   const isExpanded = expandedNodes.has(node.id)
-  const isSelected = selectedNodeId === node.id
+  const isSelected = selectedIds.has(node.id)
   const isSearchResult = searchResults.includes(node.id)
   // Where a click doesn't open an entity's details, its row offers them.
   const offerDetails = !useOpensDetailsOnSelect()
@@ -825,7 +935,10 @@ function HierarchyContainer({
             "group/row flex items-center gap-3 px-4 py-3 cursor-pointer",
             "hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
           )}
-          onClick={() => onSelect(node.id)}
+          // Shift-click takes a range; without this the browser also paints a text selection
+          // across every row between the two clicks.
+          onMouseDown={(e) => { if (e.shiftKey) e.preventDefault() }}
+          onClick={(e) => onSelect(node.id, e)}
           onDoubleClick={(e) => onDoubleClick?.(node.id, e)}
           onContextMenu={(e) => {
             e.preventDefault()
@@ -973,7 +1086,7 @@ function HierarchyContainer({
                     key={child.id}
                     node={child}
                     schema={schema}
-                    selectedNodeId={selectedNodeId}
+                    selectedIds={selectedIds}
                     expandedNodes={expandedNodes}
                     searchResults={searchResults}
                     onSelect={onSelect}

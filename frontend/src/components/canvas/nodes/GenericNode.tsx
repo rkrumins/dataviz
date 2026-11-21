@@ -75,6 +75,9 @@ export const GenericNode = memo(function GenericNode({
   // Where a click doesn't open an entity's details, the selected card's
   // toolbar offers them.
   const offerDetails = !useOpensDetailsOnSelect() && !!selected
+  // The toolbar is one card's: several selected are acted on together from the selection bar, and
+  // a toolbar over each of them would bury the canvas.
+  const soleSelection = useCanvasStore((s) => !!selected && s.selectedNodeIds.length < 2)
   // Handle both nested (data.data) and flat (data) structures
   const rawData = (data as Record<string, unknown>)
   const entityData: GenericNodeData = rawData.data
@@ -238,7 +241,7 @@ export const GenericNode = memo(function GenericNode({
           editing, and opens the Hierarchy Builder scoped to this node. */}
       {(canTrace || offerAddInside || offerDetails) && (
         <NodeToolbar
-          isVisible={!!selected}
+          isVisible={soleSelection}
           position={Position.Top}
           className="flex items-center gap-1 glass-panel-subtle rounded-lg p-1"
         >

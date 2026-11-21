@@ -20,7 +20,7 @@
  * reserves its own band (`--selection-bar-height`) so a column's last row
  * can still scroll clear of it — see useBandReservation.
  */
-import { useRef } from 'react'
+import { useRef, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 
@@ -71,6 +71,13 @@ export interface SelectionBarProps {
   /** Show the bar for ONE held entity too: where nothing else offers its actions (a trace, whose
    *  cards have no context menu). */
   offerForOne?: boolean
+  /** Where the bar's lane sits on a canvas other than the Context View, as position classes
+   *  (`left-4 right-4 bottom-16`). Absent, the Context View's lane: above its trace dock and layer
+   *  strip, short of its right-hand dock. */
+  placementClassName?: string
+  /** How the selection is changed on this canvas, in its own gestures. Absent, the Context View's
+   *  rows: Cmd-click adds one, Shift-click adds a range. */
+  hint?: ReactNode
 }
 
 export function SelectionBar({
@@ -88,6 +95,8 @@ export function SelectionBar({
   sharedEditable = false,
   onExport,
   offerForOne = false,
+  placementClassName,
+  hint,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
   useBandReservation(ref, '--selection-bar-height')
@@ -116,8 +125,8 @@ export function SelectionBar({
           // as the trace dock), and stops short of the right-hand Data
           // loads / Flows column (w-80 at right-4) instead of sliding under it
           // — which is what put the Trace button out of reach.
-          className="absolute z-50 left-4 pointer-events-none flex justify-center"
-          style={{
+          className={cn('absolute z-50 pointer-events-none flex justify-center', placementClassName ?? 'left-4')}
+          style={placementClassName ? undefined : {
             right: 'calc(20rem + 1.75rem)',
             bottom: 'calc(0.75rem + var(--trace-dock-height, 0px) + var(--layer-strip-height, 0px))',
           }}
@@ -215,9 +224,13 @@ export function SelectionBar({
           <div className="flex flex-wrap items-center h-[18px] basis-0 grow min-w-0 overflow-hidden">
             <span className="w-0 h-[18px]" aria-hidden />
             <span className="flex items-center gap-1 text-[11px] text-ink-muted whitespace-nowrap">
-              <Kbd shortcut="mod" /> click adds one
-              <span className="mx-0.5 text-ink-muted/60" aria-hidden>·</span>
-              <Kbd shortcut="shift" /> click adds a range
+              {hint ?? (
+                <>
+                  <Kbd shortcut="mod" /> click adds one
+                  <span className="mx-0.5 text-ink-muted/60" aria-hidden>·</span>
+                  <Kbd shortcut="shift" /> click adds a range
+                </>
+              )}
             </span>
           </div>
 
