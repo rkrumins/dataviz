@@ -366,10 +366,12 @@ async def test_view_grants_router_rejects_unauthenticated(
 _DS_METADATA = "/api/v1/admin/workspaces/ws_a/data-sources/ds_ghost/metadata"
 _DS_DETAILS_BODY = {"description": None, "links": [], "tags": [], "expectedUpdatedAt": None}
 _DS_TRUST_BODY = {"classification": None, "trustStatus": None, "trustNote": None, "expectedUpdatedAt": None}
+_DS_HISTORY = "/api/v1/admin/workspaces/ws_a/data-sources/ds_ghost/activity/events"
 _DS_METADATA_CALLS = [
     ("GET", _DS_METADATA, None),
     ("PUT", _DS_METADATA, _DS_DETAILS_BODY),
     ("PUT", f"{_DS_METADATA}/trust", _DS_TRUST_BODY),
+    ("GET", _DS_HISTORY, None),
 ]
 _READER = PermissionClaims(sid="sess_reader", ws_perms={"ws_a": ("workspace:datasource:read",)})
 
@@ -402,9 +404,10 @@ async def test_data_source_details_reject_the_unauthenticated_and_other_workspac
 async def test_data_source_details_take_manage_to_edit_and_read_to_read(test_client: AsyncClient, _details_on):
     with _auth(user=_NON_ADMIN, claims=_READER):
         read = await test_client.get(_DS_METADATA)
+        history = await test_client.get(_DS_HISTORY)
         edit = await test_client.put(_DS_METADATA, json=_DS_DETAILS_BODY)
         trust = await test_client.put(f"{_DS_METADATA}/trust", json=_DS_TRUST_BODY)
-    assert read.status_code == 404          # through the gate; the source doesn't exist
+    assert read.status_code == history.status_code == 404   # through the gate; the source doesn't exist
     assert edit.status_code == 403
     assert trust.status_code == 404         # through the route's gate; the service decides who
     manager = PermissionClaims(sid="sess_mgr", ws_perms={"ws_a": ("workspace:datasource:*",)})

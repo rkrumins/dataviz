@@ -1267,6 +1267,27 @@ _WORKSPACE_PREFIXES: tuple[str, ...] = (
     "workspace.data_request.",
 )
 
+#: What a data source's history shows everyone who can read the source
+#: (``GET …/data-sources/{ds}/activity/events``): changes to the source itself. An
+#: allow-list on purpose, like the one above — and narrower: no operations, no queries
+#: anyone ran, nothing about access.
+SOURCE_HISTORY_TYPES: tuple[str, ...] = (
+    "workspace.data_source.added",
+    "workspace.data_source.updated",
+    "workspace.data_source.removed",
+    "workspace.data_source.restored",
+    "workspace.data_source.primary_set",
+    "workspace.data_source.projection_changed",
+    "workspace.data_source.contacts_changed",
+    "workspace.data_source.moved",
+    "workspace.data_source.move_undone",
+    "workspace.data_source.metadata_changed",
+    "workspace.data_source.trust_changed",
+    "workspace.datasource.moved",
+    "workspace.data_request.connected",
+    "workspace.versioning.enabled",
+)
+
 #: Payload keys that name who acted, in the order they are trusted. Payloads
 #: grew these one emitter at a time; reading only the first three left the
 #: actor blank on approvals, suspensions, resets and invites.

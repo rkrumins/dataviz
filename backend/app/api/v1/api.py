@@ -402,6 +402,11 @@ api_router.include_router(
     prefix="/admin/workspaces/{ws_id}/activity",
     tags=["admin:activity:workspace"],
 )
+api_router.include_router(
+    activity.source_router,
+    prefix="/admin/workspaces/{ws_id}/data-sources/{ds_id}/activity",
+    tags=["admin:activity:data-source"],
+)
 
 # Who could not sign in, why, and whether they have since — the audit
 # trail's sign-in failures summarised per person for SSO diagnostics.
