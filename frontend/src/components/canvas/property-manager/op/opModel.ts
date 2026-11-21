@@ -65,6 +65,9 @@ export const EDGE_RESERVED_KEYS: ReadonlySet<string> = new Set([
 export const MAX_CONTAINERS = 24
 /** A selection is sent as its ids — at most this many. */
 export const MAX_IDS = 20_000
+/** Changed entities past which a draft's counts and property list show the published graph, and it
+ *  is slower to open — the server's GRAPHVER_DRAFT_SEARCH_MAX_DELTA, at its default. */
+export const DRAFT_LARGE = 200_000
 /** Names are at most this long: the longest a search can look a property up by. */
 export const NAME_MAX = 128
 /** Past this many entities — or across the whole data source — a removal, a rename or an

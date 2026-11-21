@@ -593,7 +593,7 @@ async def test_a_catalog_of_a_draft_too_large_to_read_whole_is_mains_said_so(mon
     out = await _overlay(_first_draft()).deep_search_catalog(SCOPE, context=CONTEXT, wait_ms=2000)
     rows = {p["key"]: p for p in out["properties"]}["rows"]
     assert (rows["min"], rows["max"]) == (5, 20)            # main's: the draft's c2 holds 50
-    assert out["notes"][-1] == draft_search.TOO_LARGE.format(n=2)
+    assert out["notes"][-1] == draft_search.TOO_LARGE_CATALOG.format(n=2)
 
 
 def test_a_change_to_too_many_tags_stops_counting_them(monkeypatch):

@@ -33,6 +33,7 @@ import {
 import type { SearchCatalogProperty } from '@/types/search'
 import { useDiscovery } from '../../search/builder/useDiscovery'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useBranchStore } from '@/store/branchStore'
 import { usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
 import {
   EDGE_RESERVED_KEYS, impactOf, isCleanup, isEdgeTarget, jobOp, needsTypedConfirm, opProblem, predicateOf, propertyJobLabel,
@@ -134,6 +135,11 @@ export function PropertyOpDialog({
   const final = ids ? !!preview.data?.counts : counts.complete || counts.unavailable
   const exact = final && (ids || ![...counts.counts.values()].some((c) => c.approximate || c.lowerBound))
   const stagedCount = useStagedChangesStore((s) => s.changes.length)
+  // How many entities the draft has changed already, when it's the draft the change is made on.
+  const draftChanges = useBranchStore((s) => {
+    const c = s.currentBranchId === graphWrite.branchId ? s.activeChangeSet?.counts : null
+    return c ? c.added + c.modified + c.removed : undefined
+  })
   // Applied only on a final count: what it says it changes is what it changes.
   const blocked = !!preview.data?.refusal || !!preview.data?.activeJobId || preview.data?.nameBudget?.verdict === 'refused'
     || stagedCount > 0 || preview.loading || !!preview.error || !final || (!ids && !!counts.error) || (exact && impact?.changes === 0)
@@ -263,7 +269,7 @@ export function PropertyOpDialog({
                     op={op} preset={preset} scopeMode={effectiveScope} counts={ids ? null : counts} impact={impact} exact={exact}
                     preview={preview.data} previewLoading={preview.loading} previewError={preview.error} onRetry={retry}
                     sample={sample.data} sampleLoading={sample.loading}
-                    stagedCount={stagedCount} reason={reason} onReason={setReason} edges={edges}
+                    stagedCount={stagedCount} draftChanges={draftChanges} reason={reason} onReason={setReason} edges={edges}
                     onFollow={(jobId) => void follow(jobId)} onChangeTarget={() => setStep(1)}
                   />
                 )}

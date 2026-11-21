@@ -15,7 +15,8 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import type { AffectedSample } from '@/services/propertyInsights'
 import type { PropertyJobPreview } from '@/services/versioningApiService'
 import {
-  OP_LABEL, isCleanup, jobOp, needsTo, needsValue, propertyJobLabel, targetLabel, type Impact, type OpDraft, type ScopeMode, type TargetPreset,
+  DRAFT_LARGE, OP_LABEL, isCleanup, jobOp, needsTo, needsValue, propertyJobLabel, targetLabel, type Impact, type OpDraft, type ScopeMode,
+  type TargetPreset,
 } from './opModel'
 import { SaveRecipe } from './SaveRecipe'
 import { FIELD, LABEL } from './styles'
@@ -25,7 +26,7 @@ export type { Impact } from './opModel'
 
 export function ReviewStep({
   op, preset, scopeMode, counts, impact, exact, preview, previewLoading, previewError = null, onRetry, sample, sampleLoading, stagedCount,
-  reason = '', onReason, edges = false, onFollow, onChangeTarget,
+  reason = '', onReason, edges = false, onFollow, onChangeTarget, draftChanges,
 }: {
   op: OpDraft
   preset: TargetPreset
@@ -43,6 +44,8 @@ export function ReviewStep({
   sample: AffectedSample | null
   sampleLoading: boolean
   stagedCount: number
+  /** How many entities the draft has changed already, where it's known. */
+  draftChanges?: number
   /** Why it is made — kept as its message, in the draft's history and the publish's audit. */
   reason?: string
   onReason?: (reason: string) => void
@@ -173,6 +176,12 @@ export function ReviewStep({
       {budget?.isNew && budget.verdict === 'ok' && needsTo(op.kind) && (
         <Notice tone="neutral" icon={Info}>
           A new property name stays registered in the graph even after it is renamed away — names are never freed.
+        </Notice>
+      )}
+      {draftChanges !== undefined && impact && draftChanges + impact.changes > DRAFT_LARGE && (
+        <Notice tone="warning" icon={AlertTriangle}>
+          Your draft will hold about {(draftChanges + impact.changes).toLocaleString()} changed entities. Past {DRAFT_LARGE.toLocaleString()},
+          its counts and property list show the published graph, and it is slower to open — publish it in parts to keep it quick.
         </Notice>
       )}
       {stagedCount > 0 && (

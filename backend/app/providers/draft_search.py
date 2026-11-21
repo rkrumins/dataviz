@@ -28,7 +28,7 @@ relationships, tests the view's layers, reads a field only the platform keeps, o
 the draft changed — keeps main's answer, flagged (``approximate``, a note). Any failure in the
 correction does the same: main's answer, said to be main's, never a 500 or a wrong number. So does
 a draft too large to read whole: a correction that would read more than ``DRAFT_SEARCH_MAX_DELTA``
-entities of ``D`` afresh answers with main's counts and catalog (``TOO_LARGE``); a fold of a later
+entities of ``D`` afresh answers with main's counts and catalog (``TOO_LARGE``, ``TOO_LARGE_CATALOG``); a fold of a later
 commit reads only what it wrote, and stays exact at any size.
 """
 from __future__ import annotations
@@ -96,6 +96,8 @@ MEMBERSHIP_MAINS = ("{n} of your rules can't be answered on your draft's values 
 MEMBERSHIP_NOT_DRAFT_AWARE = ("Your draft's changes couldn't be read just now, so the chips show "
                               "the published graph — they will catch up.")
 TOO_LARGE = "Your draft changed more than {n:,} entities, so these counts show the published graph."
+TOO_LARGE_CATALOG = ("Your draft changed more than {n:,} entities, so these properties and values show "
+                     "the published graph.")
 
 #: A rule kind whose answer for an entity depends on other entities or on the view.
 _RELATIONAL = frozenset({"related", "degree", "isOrphan", "isLeaf", "isRoot", "hasIncoming",
@@ -477,7 +479,7 @@ class DraftSearch:
                                     step, wait_ms, keep)
         if state.get("tooLarge"):
             return {**main_answer, "notes": [*(main_answer.get("notes") or []),
-                                             TOO_LARGE.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA)]}
+                                             TOO_LARGE_CATALOG.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA)]}
         main_progress = main_answer.get("progress") or {}
         progress = {"scanned": int(main_progress.get("scanned") or 0) + state["cursor"],
                     "total": int(main_progress.get("total") or 0) + state["total"]}

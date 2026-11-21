@@ -1424,13 +1424,13 @@ async def run_draft_search(*, graph_id: str, branch_id: str, falkor_graph: str, 
     The draft changed ``changed`` nodes (``run property``'s ``op``). Within ``DRAFT_SEARCH_MAX_DELTA``
     its answers must be exact: each count moved by what the job did, and the catalog holding
     ``bench_owner`` on every node it changed. Past it, main's, every rule and the catalog with the
-    cutoff note (``draft_search.TOO_LARGE``). Also measured: the cache Redis' memory (where the
+    cutoff note (``draft_search.TOO_LARGE`` / ``TOO_LARGE_CATALOG``). Also measured: the cache Redis' memory (where the
     sessions are kept) before and after the draft's requests."""
     from falkordb.asyncio import FalkorDB
     from pydantic import TypeAdapter
 
     from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
-    from backend.app.providers.draft_search import TOO_LARGE
+    from backend.app.providers.draft_search import TOO_LARGE, TOO_LARGE_CATALOG
     from backend.app.providers.falkordb_provider import FalkorDBProvider
     from backend.app.services.deep_search import SearchRunContext
     from backend.app.services.versioning import config as vconfig
@@ -1526,7 +1526,7 @@ async def run_draft_search(*, graph_id: str, branch_id: str, falkor_graph: str, 
     held = {p["key"]: p["count"] for p in catalog.get("properties") or []}
     if catalog.get("status") != "complete":
         catalog_answer = "wrong"
-    elif note in (catalog.get("notes") or []):
+    elif TOO_LARGE_CATALOG.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA) in (catalog.get("notes") or []):
         catalog_answer = "cutoff"
     else:
         catalog_answer = "exact" if held.get("bench_owner") == changed else "wrong"

@@ -301,7 +301,12 @@ A few things are still the published graph's, and say so:
 - a property's least and greatest value, where your draft took out the value
   at either end: every value is still within the range shown, which may be
   wider than it is (**Numbers within …**);
-- Advanced Search's matches and exports.
+- Advanced Search's matches and exports;
+- everything, in a draft that has changed more than 200,000 entities and then
+  has its counts read afresh: its counts and property list are the published
+  graph's, and say so. A draft that large is also slower to open, so **Review**
+  warns before a change takes it past that — publish in parts to keep it quick.
+  (An administrator sets the limit: `GRAPHVER_DRAFT_SEARCH_MAX_DELTA`.)
 
 When the draft is published, the **Activity** log's entry for the publish lists
 the bulk changes it included — "Published 27,110 changes to Sales, including

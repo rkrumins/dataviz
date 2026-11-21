@@ -224,7 +224,7 @@ def test_a_draft_too_large_to_read_whole_answers_with_mains_counts_said_so(monke
         assert deltas["deltas"] == {} and deltas["approximate"] == {rid: note for rid, _ in items}
         catalog = await overlay.deep_search_catalog(SCOPE, context=CONTEXT, wait_ms=5000)
         mains = await catalog_of(await _stub(svc, gid, main), SCOPE, CONTEXT)
-        assert catalog["notes"][-1] == note
+        assert catalog["notes"][-1] == draft_search.TOO_LARGE_CATALOG.format(n=2)
         assert {p["key"]: (p["count"], p["values"]) for p in catalog["properties"]} == \
             {p["key"]: (p["count"], p["values"]) for p in mains["properties"]}
     _run(case)
