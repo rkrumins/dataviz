@@ -491,8 +491,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         )}
       </div>
 
-      {/* Header */}
-      <div className="flex-shrink-0 bg-canvas-elevated/95 backdrop-blur border-b border-glass-border px-6 py-3">
+      {/* Header — no backdrop-blur: nothing scrolls beneath it to blur, and a blur would make it a
+          stacking context its buttons (the search trigger among them) can't paint out of. */}
+      <div className="flex-shrink-0 bg-canvas-elevated/95 border-b border-glass-border px-6 py-3">
         <div className="flex items-center justify-end gap-4">
           {/* In a draft: Undo, Redo and the way to Review & Save what was staged here. */}
           {isDraft && <DraftSaveControls />}
