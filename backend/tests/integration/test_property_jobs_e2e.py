@@ -264,6 +264,145 @@ def test_a_draft_closed_under_a_job_stops_it_saying_why(monkeypatch):
     asyncio.run(_draft_closed(monkeypatch))
 
 
+# ── clean-ups write the kind they ask for; a publish lists the jobs it took ───
+def _cleanup(kind, key, **kw):
+    return {"kind": kind, "key": key, "onConflict": "skip", **kw}
+
+
+async def _stats(gid, commit_id):
+    async with db.graphver_session() as s:
+        return (await s.execute(select(models.CommitORM.stats).where(
+            models.CommitORM.graph_id == gid, models.CommitORM.id == commit_id))).scalar_one()
+
+
+async def _cleanups_and_their_audit() -> None:
+    from .test_main_activity import _events
+
+    svc, ds, gid, draft = await _draft(nodes=[
+        _node(0, dept="Finance", tier="42", score=1.0), _node(1, dept="finance ", tier=7, score=2.5),
+        _node(2, dept="FINANCE", tier="x"), _node(3, dept=["fin  ops", "FIN OPS"], tier=1.0)])
+    ie = ImportExportService(versioning=svc)
+    ids = [f"urn:n{i}" for i in range(4)]
+
+    async def run(op, key, target=ids, message=None):
+        job_id = (await ie.create_property_job(
+            workspace_id="ws1", data_source_id=ds, graph_id=gid, branch_id=draft, actor="alice",
+            op=op, target={"ids": target}, message=message, key=key))["job_id"]
+        return job_id, await ie.run_property(job_id)
+
+    # A convert writes the kind asked for — over what a save would keep — and leaves what won't.
+    convert = _cleanup("convert", "tier", toKind="Integer", onFail="skip")
+    counts = await ie.preview_property_counts(graph_id=gid, branch_id=draft, op=convert, ids=ids)
+    assert (counts["wouldChange"], counts["unconvertible"]) == (2, 1), counts
+    convert_job, summary = await run(convert, "key-convert-0001", message="Tier is a number")
+    assert (summary["changed"], summary["unchanged"], summary["unconvertible"]) == (2, 1, 1)
+    assert summary["refused"]["byReason"] == {"unconvertible": 1}
+    tiers = [(await _props(svc, gid, draft, f"N{i}"))["tier"] for i in range(4)]
+    assert tiers == [42, 7, "x", 1] and [type(t) for t in tiers] == [int, int, str, int]
+    assert await _csv(ie, convert_job) == [
+        "urn,entityId,reason,detail", "urn:n2,N2,unconvertible,\"Its tier holds \"\"x\"\", which isn't an integer.\""]
+    assert (await _props(svc, gid, None, "N0"))["tier"] == "42"                       # main untouched
+
+    # A set of 1 over 1.0 is written as counted (a save would have kept 1.0).
+    _job, summary = await run(_cleanup("set", "score", value=1), "key-set-score-01", ids[:2])
+    assert summary["changed"] == 2
+    assert [(await _props(svc, gid, draft, f"N{i}"))["score"] for i in (0, 1)] == [1, 1]
+    assert type((await _props(svc, gid, draft, "N0"))["score"]) is int
+
+    # Near-duplicates merged; a list normalised; text replaced in any case.
+    merge = _cleanup("mapValues", "dept", map=[
+        {"from": "finance ", "fromKind": "String", "to": "Finance", "toKind": "String"},
+        {"from": "FINANCE", "fromKind": "String", "to": "Finance", "toKind": "String"}], dedupeList=True)
+    _job, summary = await run(merge, "key-merge-dept-1")
+    assert (summary["changed"], summary["unchanged"]) == (2, 2)
+    _job, summary = await run(_cleanup("normalize", "dept", trim=True, collapseSpaces=True, case="lower",
+                                       dedupeList=True), "key-normalize-01", ids[3:])
+    assert summary["changed"] == 1 and (await _props(svc, gid, draft, "N3"))["dept"] == ["fin ops"]
+    _job, summary = await run(_cleanup("replace", "dept", find="FIN", replaceWith="Fin", matchCase=False,
+                                       wholeValue=False), "key-replace-0001")
+    assert (summary["changed"], summary["unchanged"]) == (1, 3)
+    assert [(await _props(svc, gid, draft, f"N{i}"))["dept"] for i in range(4)] == [
+        "Finance", "Finance", "Finance", ["Fin ops"]]
+    # One that changes nothing writes no commit, and a publish has nothing of it to list.
+    _job, summary = await run(_cleanup("replace", "dept", find="zzz", replaceWith="y"), "key-replace-0002")
+    assert summary["commits"] == 0
+
+    # The publish lists every job that wrote to the draft, oldest first, and stamps each.
+    published = await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="Clean up")
+    listed = (await _stats(gid, published))["propertyJobs"]
+    assert listed["total"] == 5 and [j["label"] for j in listed["jobs"]] == [
+        "Convert tier to Integer", "Set score", "Merge 2 values of dept",
+        "Normalize dept (trim, collapse spaces, lower case, each value once)", "Replace “FIN” → “Fin” in dept"]
+    first = listed["jobs"][0]
+    assert (first["jobId"], first["changed"], first["refused"], first["actor"], first["message"],
+            first["status"]) == (convert_job, 2, 1, "alice", "Tier is a number", "completed")
+    job = await ie.get_property_job(convert_job)
+    assert job["summary"]["publishedCommitId"] == published
+    assert (await ie.get_property_job(_job))["summary"].get("publishedCommitId") is None    # wrote nothing
+    assert (await _props(svc, gid, None, "N0"))["tier"] == 42                             # on main, as converted
+
+    # Its activity event carries them, and says so.
+    from backend.app.services.activity import catalogue
+    [event] = [p for t, p in await _events(ds) if t == "workspace.versioning.published"]
+    assert event["details"]["propertyJobs"] == listed and "jobId" not in event["details"]
+    assert catalogue.summarize("workspace.versioning.published", {**event, "target_label": "Sales"})[1] == (
+        "Published 4 changes to Sales, including Convert tier to Integer and 4 more bulk edits")
+
+    # A later publish lists none of them again.
+    again = await svc.open_draft(graph_id=gid, owner="alice")
+    await svc.apply_ops(graph_id=gid, branch_id=again, actor="alice", message="one more",
+                        ops=[{"op": "update", "entity_kind": "node", "entity_id": "N1",
+                              "payload": {"properties": {"tier": 8}}}])
+    later = await svc.publish(graph_id=gid, branch_id=again, actor="alice", message="later")
+    assert "propertyJobs" not in (await _stats(gid, later))
+    await db.dispose_engine()
+
+
+def test_clean_ups_write_the_kind_they_ask_for_and_a_publish_lists_the_jobs_it_took():
+    asyncio.run(_cleanups_and_their_audit())
+
+
+async def _partial_merge() -> None:
+    """A review merged in part lists a job all of whose changes landed (and stamps it), lists one
+    only some of whose did as partial (unstamped), and leaves out one none of whose did; the
+    review that merges the rest lists what is left."""
+    cont = ["CONTAINS"]
+    svc, ds, gid, draft = await _draft(n=5)
+    ie = ImportExportService(versioning=svc)
+    rename = await _create(ie, ds, gid, draft, RENAME, {"ids": ["urn:n0", "urn:n1"]}, key="key-partial-001")
+    await ie.run_property(rename)
+    tier = await _create(ie, ds, gid, draft, {"kind": "set", "key": "tier", "value": "gold", "onConflict": "skip"},
+                         {"ids": ["urn:n2"]}, key="key-partial-002")
+    await ie.run_property(tier)
+    gone = await _create(ie, ds, gid, draft, {"kind": "remove", "key": "owner", "onConflict": "skip"},
+                         {"ids": ["urn:n3"]}, key="key-partial-003")
+    await ie.run_property(gone)
+
+    pr = await svc.open_draft_mr(graph_id=gid, branch_id=draft, actor="alice", title="Stewards")
+    await svc.decide_changes(pr_id=pr, actor="bo", verdict="accepted", entity_ids=["N0", "N2"],
+                             containment_edge_types=cont)
+    await svc.decide_changes(pr_id=pr, actor="bo", verdict="rejected", entity_ids=["N1", "N3"],
+                             reason="Later", containment_edge_types=cont)
+    part = await svc.merge_mr(mr_id=pr, actor="cy", message="Some", containment_edge_types=cont, mode="accepted")
+    listed = (await _stats(gid, part))["propertyJobs"]
+    assert [(j["jobId"], j.get("partial", False)) for j in listed["jobs"]] == [(rename, True), (tier, False)]
+    assert (await ie.get_property_job(rename))["summary"].get("publishedCommitId") is None
+    assert (await ie.get_property_job(tier))["summary"]["publishedCommitId"] == part
+    assert (await ie.get_property_job(gone))["summary"].get("publishedCommitId") is None
+
+    rest = await svc.open_draft_mr(graph_id=gid, branch_id=draft, actor="alice", title="The rest")
+    merged = await svc.merge_mr(mr_id=rest, actor="cy", message="Rest", containment_edge_types=cont)
+    listed = (await _stats(gid, merged))["propertyJobs"]
+    assert [(j["jobId"], j.get("partial", False)) for j in listed["jobs"]] == [(rename, False), (gone, False)]
+    for job_id in (rename, gone):
+        assert (await ie.get_property_job(job_id))["summary"]["publishedCommitId"] == merged
+    await db.dispose_engine()
+
+
+def test_a_review_merged_in_part_lists_the_jobs_whose_changes_landed():
+    asyncio.run(_partial_merge())
+
+
 # ── the routes ────────────────────────────────────────────────────────────────
 async def _routes() -> None:
     from httpx import ASGITransport, AsyncClient
@@ -282,7 +421,8 @@ async def _routes() -> None:
         assert r.status_code == 200, r.text
         preview = r.json()
         assert preview["refusal"] is None and preview["activeJobId"] is None
-        assert preview["counts"] == {"matched": 2, "haveKey": 2, "haveTo": 0, "missing": 1}
+        assert preview["counts"] == {"matched": 2, "haveKey": 2, "haveTo": 0, "missing": 1,
+                                     "wouldChange": 2, "unconvertible": None}
         assert preview["nameBudget"]["verdict"] == "ok" and preview["nameBudget"]["ceiling"] == 65_534
         reserved = {"op": {"kind": "set", "key": "displayName", "value": "x"}, "target": {"ids": ids}}
         r = await c.post(f"{jobs}/preview", json=reserved, headers=PAT)

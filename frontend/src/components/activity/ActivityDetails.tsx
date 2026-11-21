@@ -8,6 +8,8 @@
  * - several changed at once (`changes: [{ field, from, to }]`, a job's live
  *   limits): a before → after per field;
  * - an update that records only which fields it set (`fields`): those fields;
+ * - a publish that took bulk property edits to Published (`propertyJobs`):
+ *   each edit, what it did, to how many entities, who ran it and why;
  * - everything else: labelled values, each drawn as its kind (`ValueView`).
  *
  * Ids the record names are named here too, from the names the server already
@@ -18,6 +20,8 @@ import { ArrowRight } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { KeyValueList, ValueView, humanizeKey, type KnownNames } from '@/components/ui/ValueView'
+import { propertyJobLabel } from '@/components/canvas/property-manager/op/opModel'
+import type { PropertyJobOp } from '@/services/versioningApiService'
 
 type Details = Record<string, unknown>
 
@@ -64,6 +68,62 @@ export function splitChanges(details: Details): { changes: Change[]; fields: str
         delete rest.fields
     }
     return { changes, fields, rest }
+}
+
+/** One bulk property edit a publish lists (`property_job.audit_entry`). */
+export interface BulkEdit {
+    jobId?: string
+    label: string
+    changed: number
+    refused: number
+    actor?: string
+    message?: string
+    /** A review merged in part landed some of what it changed. */
+    partial: boolean
+}
+
+/** The bulk property edits a publish took to Published (`propertyJobs: {total, jobs}`), and the
+ *  rest of the record without them. */
+export function splitBulkEdits(details: Details): { edits: BulkEdit[]; total: number; rest: Details } {
+    const record = details.propertyJobs
+    const listed = isPlainObject(record) && Array.isArray(record.jobs) ? record.jobs.filter(isPlainObject) : null
+    if (!listed || listed.length === 0) return { edits: [], total: 0, rest: details }
+    const rest: Details = { ...details }
+    delete rest.propertyJobs
+    const edits = listed.map((j) => ({
+        jobId: typeof j.jobId === 'string' ? j.jobId : undefined,
+        label: typeof j.label === 'string' && j.label ? j.label
+            : isPlainObject(j.op) && typeof j.op.kind === 'string' ? propertyJobLabel(j.op as unknown as PropertyJobOp) : 'Bulk property edit',
+        changed: typeof j.changed === 'number' ? j.changed : 0,
+        refused: typeof j.refused === 'number' ? j.refused : 0,
+        actor: typeof j.actor === 'string' ? j.actor : undefined,
+        message: typeof j.message === 'string' && j.message ? j.message : undefined,
+        partial: j.partial === true,
+    }))
+    const total = isPlainObject(record) && typeof record.total === 'number' ? Math.max(record.total, edits.length) : edits.length
+    return { edits, total, rest }
+}
+
+function BulkEditRow({ edit, names }: { edit: BulkEdit; names?: KnownNames }) {
+    return (
+        <li className="min-w-0">
+            <p className="flex flex-wrap items-baseline gap-x-1.5 text-xs font-semibold text-ink">
+                <span className="min-w-0 break-words">{edit.label}</span>
+                {edit.partial && (
+                    <span className="rounded bg-amber-500/10 px-1 text-[10px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">in part</span>
+                )}
+            </p>
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-1 text-[11px] text-ink-muted">
+                <span>
+                    <span className="tabular-nums text-ink-secondary">{edit.changed.toLocaleString()}</span>{' '}
+                    {edit.changed === 1 ? 'entity' : 'entities'} changed in the draft
+                    {edit.refused > 0 && <> · <span className="tabular-nums">{edit.refused.toLocaleString()}</span> not changed</>}
+                </span>
+                {edit.actor && <span className="inline-flex items-center gap-1">· by <ValueView value={edit.actor} keyHint="actor" names={names} /></span>}
+            </div>
+            {edit.message && <p className="mt-0.5 text-[11px] text-ink-secondary break-words">“{edit.message}”</p>}
+        </li>
+    )
 }
 
 function Side({ value, field, names, tone, label }: {
@@ -126,12 +186,24 @@ export function ActivityDetails({ details, names, className }: {
     names?: KnownNames
     className?: string
 }): ReactNode {
-    const { changes, fields, rest } = splitChanges(details)
+    const bulk = splitBulkEdits(details)
+    const { changes, fields, rest } = splitChanges(bulk.rest)
     const hasRest = Object.keys(rest).length > 0
-    if (changes.length === 0 && fields.length === 0 && !hasRest) return null
+    if (changes.length === 0 && fields.length === 0 && !hasRest && bulk.edits.length === 0) return null
 
     return (
         <div className={cn('space-y-4', className)}>
+            {bulk.edits.length > 0 && (
+                <div>
+                    <p className={SUBSECTION}>{bulk.total === 1 ? 'Bulk property edit' : `Bulk property edits · ${bulk.total.toLocaleString()}`}</p>
+                    <ul className="space-y-2.5 rounded-xl border border-black/[0.06] p-3 dark:border-white/[0.08]">
+                        {bulk.edits.map((e, i) => <BulkEditRow key={e.jobId ?? i} edit={e} names={names} />)}
+                        {bulk.total > bulk.edits.length && (
+                            <li className="text-[11px] text-ink-muted">and {(bulk.total - bulk.edits.length).toLocaleString()} more</li>
+                        )}
+                    </ul>
+                </div>
+            )}
             {changes.length > 0 && (
                 <div>
                     <p className={SUBSECTION}>{changes.length === 1 ? 'What changed' : `What changed · ${changes.length}`}</p>

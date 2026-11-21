@@ -28,10 +28,17 @@ vi.mock('@/hooks/usePropertyCatalog', () => ({
       properties: [
         { key: 'owner', count: 900, values: [{ value: 'ana', kind: 'String', count: 700 }], kinds: { String: 900 }, byEntityType: {}, distinct: 1, distinctExact: true, residual: 0 },
         { key: 'steward', count: 40, values: [], kinds: { String: 40 }, byEntityType: {}, distinct: 1, distinctExact: true, residual: 0 },
+        { key: 'dept', count: 300, kinds: { String: 300 }, byEntityType: {}, distinct: 3, distinctExact: true, residual: 0, values: [
+          { value: 'Finance', kind: 'String', count: 200 }, { value: 'finance ', kind: 'String', count: 80 },
+          { value: 'FINANCE', kind: 'String', count: 20 }] },
+        { key: 'rank', count: 17, kinds: { Integer: 10, String: 7 }, byEntityType: {}, distinct: 3, distinctExact: true, residual: 0, values: [
+          { value: 7, kind: 'Integer', count: 10 }, { value: '42', kind: 'String', count: 5 }, { value: 'n/a', kind: 'String', count: 2 }] },
       ],
     },
   }),
 }))
+let allValues: unknown[] | null = null
+vi.mock('../useAllValues', () => ({ useAllValues: () => ({ values: allValues, loading: false, error: null }) }))
 vi.mock('@/hooks/usePropertyInsights', () => ({
   useAffectedSample: () => ({ data: { entities: [{ urn: 'u1', displayName: 'orders', entityType: 'Table' }], truncated: true }, loading: false, error: null }),
 }))
@@ -66,6 +73,7 @@ beforeEach(() => {
   api.preview.mockReset().mockResolvedValue({ refusal: null, nameBudget: { registered: 10, nativeBudget: 50000, ceiling: 65534, isNew: false, verdict: 'ok' }, activeJobId: null, counts: null })
   api.create.mockReset().mockResolvedValue({ jobId: 'job-1', status: 'pending' })
   counts = exact(120, 30)
+  allValues = null
   useStagedChangesStore.setState({ changes: [] } as never)
   usePropertyJobsStore.setState({ jobs: [], request: null } as never)
 })
@@ -191,5 +199,89 @@ describe('PropertyOpDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Try again' }))
     expect(api.create).toHaveBeenCalledTimes(2)
     expect(api.create.mock.calls[0][5]).toBe(api.create.mock.calls[1][5])
+  })
+})
+
+describe('PropertyOpDialog — cleaning up a property’s values', () => {
+  it('normalizes from Clean up…: opens on What with before → after, counts at most, and keeps the reason', async () => {
+    const user = userEvent.setup()
+    open({ kind: 'normalize', key: 'dept' })
+    expect(screen.getByRole('heading', { name: 'Clean up a property' })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /Normalize/ })).toHaveAttribute('aria-checked', 'true')
+    await user.click(screen.getByRole('radio', { name: 'lower' }))
+    const preview = within(screen.getByRole('list', { name: 'Before and after' }))
+    expect(preview.getAllByText('“finance”')).toHaveLength(3)
+    expect(preview.getByText('“finance ”')).toBeInTheDocument()
+    expect(screen.getByText(/Two or more values become one/)).toBeInTheDocument()
+
+    await user.click(next())
+    await user.click(next())
+    expect(screen.getByText('Will change').nextSibling).toHaveTextContent(/up to\s*30/)
+    expect(screen.getByText(/At most: what it changes is known/)).toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: /Reason/ }), 'One spelling per department')
+    await user.click(screen.getByRole('button', { name: 'Apply to up to 30' }))
+    expect(api.create).toHaveBeenCalledWith('ws', 'g1', 'd1',
+      { kind: 'normalize', key: 'dept', trim: true, collapseSpaces: false, case: 'lower', dedupeList: false },
+      { viewId: 'v1', predicate: { kind: 'hasProperty', key: 'dept', negate: false }, scopeMode: 'view' },
+      expect.any(String), 'One spelling per department')
+    expect(usePropertyJobsStore.getState().jobs[0]!.op.kind).toBe('normalize')
+  })
+
+  it('finds a property’s near-duplicates among every value it holds, and merges each group into the one picked', async () => {
+    const user = userEvent.setup()
+    allValues = [
+      { value: 'Finance', kind: 'String', count: 200 }, { value: 'finance ', kind: 'String', count: 80 },
+      { value: 'FINANCE', kind: 'String', count: 20 }, { value: 'Ops', kind: 'String', count: 50 }, { value: 'ops ', kind: 'String', count: 5 },
+    ]
+    open({ kind: 'mapValues', key: 'dept' })
+    const groups = within(screen.getByRole('list', { name: 'Values to merge' }))
+    expect(groups.getByText(/3 values →/)).toHaveTextContent('3 values → “Finance”')
+    await user.click(groups.getAllByRole('checkbox')[1]!)                       // not the Ops ones
+    await user.click(groups.getByRole('radio', { name: 'Keep “FINANCE”' }))
+    expect(screen.getByText(/Merges/)).toHaveTextContent('Merges 2 values into another — held by about 280 entities in this view.')
+    await user.click(next())
+    await user.click(next())
+    await user.click(screen.getByRole('button', { name: /^Apply/ }))
+    expect(api.create.mock.calls[0][3]).toEqual({ kind: 'mapValues', key: 'dept', dedupeList: true, map: [
+      { from: 'Finance', fromKind: 'String', to: 'FINANCE', toKind: 'String' },
+      { from: 'finance ', fromKind: 'String', to: 'FINANCE', toKind: 'String' }] })
+  })
+
+  it('merges the values picked on the catalog into the one they chose', async () => {
+    const user = userEvent.setup()
+    const map = [{ from: 'FINANCE', fromKind: 'String' as const, to: 'Finance', toKind: 'String' as const }]
+    open({ kind: 'mapValues', key: 'dept', map })
+    expect(within(screen.getByRole('list', { name: 'Values to merge' })).getAllByRole('checkbox')).toHaveLength(1)
+    await user.click(next())
+    await user.click(next())
+    await user.click(screen.getByRole('button', { name: /^Apply/ }))
+    expect(api.create.mock.calls[0][3]).toEqual({ kind: 'mapValues', key: 'dept', dedupeList: true, map })
+  })
+
+  it('converts to one kind, saying how it is stored now and which values won’t convert', async () => {
+    const user = userEvent.setup()
+    open({ kind: 'convert', key: 'rank', toKind: 'Integer' })
+    expect(screen.getByText(/^Stored as/)).toHaveTextContent('Stored as Integer on 10 and Text on 7 entities in this view.')
+    expect(within(screen.getByRole('list', { name: 'Before and after' })).getByText('“42”')).toBeInTheDocument()
+    expect(within(screen.getByRole('list', { name: 'Values that won’t convert' })).getByText('“n/a”')).toBeInTheDocument()
+    await user.click(screen.getByRole('radio', { name: 'Remove rank from them' }))
+    await user.click(next())
+    await user.click(next())
+    // At most those holding it as another kind, in this view.
+    expect(screen.getByText(/A value that won’t convert is removed/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Apply to up to 7' }))
+    expect(api.create.mock.calls[0][3]).toEqual({ kind: 'convert', key: 'rank', toKind: 'Integer', onFail: 'remove' })
+  })
+
+  it('counts a clean-up of named entities exactly, from the draft', async () => {
+    const user = userEvent.setup()
+    api.preview.mockResolvedValue({ refusal: null, nameBudget: null, activeJobId: null,
+      counts: { matched: 3, haveKey: 3, haveTo: null, missing: 0, wouldChange: 2, unconvertible: 1 } })
+    open({ kind: 'convert', key: 'rank', toKind: 'Integer' }, ['a', 'b', 'c'])
+    await user.click(next())
+    await user.click(screen.getByRole('radio', { name: /The 3 selected/ }))
+    await user.click(next())
+    expect(await screen.findByRole('button', { name: 'Apply to 2' })).toBeEnabled()
+    expect(screen.getByText(/1 of them hold a value that won’t convert/)).toBeInTheDocument()
   })
 })

@@ -2875,6 +2875,21 @@
           "default": null,
           "title": "Sessionid"
         },
+        "valuesFor": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A key whose every value the catalog keeps (up to 1,000) is listed, not only the 20 most held \u2014 for merging near-duplicate values.",
+          "title": "Valuesfor"
+        },
         "waitMs": {
           "default": 800,
           "maximum": 60000,

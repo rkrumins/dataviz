@@ -100,13 +100,14 @@ def fold_batch_ops(
     *,
     is_edge_payload: Callable[[Mapping], bool],
     sanitize_node: Callable[[dict], dict],
+    exact: bool = False,
 ) -> BatchFold:
     """Compose a batch's ops per entity, in order.
 
     An update after a create patches the create's payload (a node renamed before
     its first save); two updates compose into one patch that keeps both
     removals; a create or delete restarts the entity. A create never carries a
-    removal marker.
+    removal marker. ``exact``: each value is kept as sent (``property_patch``).
     """
     out = BatchFold()
     for op in ops:
@@ -116,8 +117,8 @@ def fold_batch_ops(
                                    or ("edge" if is_edge_payload(payload) else "node"))
         earlier = out.new_vals.get(eid)
         if op["op"] == "update" and earlier is not None:
-            out.new_vals[eid] = (compose_patches(earlier, payload) if eid in out.update_ids
-                                 else apply_patch(earlier, payload))
+            out.new_vals[eid] = (compose_patches(earlier, payload, exact=exact) if eid in out.update_ids
+                                 else apply_patch(earlier, payload, exact=exact))
         else:
             if op["op"] == "delete":
                 out.new_vals[eid] = None

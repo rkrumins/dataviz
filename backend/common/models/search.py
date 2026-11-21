@@ -1814,6 +1814,10 @@ class SearchCatalogRequest(_Base):
     session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
     refresh: bool = Field(
         False, description="Read the view again, even when a recent catalog of it is at hand.")
+    values_for: Optional[str] = Field(
+        None, alias="valuesFor", min_length=1, max_length=512,
+        description="A key whose every value the catalog keeps (up to 1,000) is listed, not "
+                    "only the 20 most held — for merging near-duplicate values.")
 
 
 class SearchCatalogValue(_Base):

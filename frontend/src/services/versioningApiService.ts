@@ -1929,6 +1929,19 @@ export async function saveGraphChangesInParts(
 // ============================================
 
 export type PropertyOpKind = 'set' | 'fillEmpty' | 'remove' | 'rename' | 'copy'
+  | 'replace' | 'normalize' | 'mapValues' | 'convert'
+
+/** A kind a value is stored as, as the property catalog names it. */
+export type ValueKind = 'Integer' | 'Float' | 'String' | 'Boolean'
+
+/** One value a merge turns into another — each with the kind it is stored as (JSON writes the
+ *  decimal 1.0 as 1, so the kind says which one is meant). */
+export interface ValueMapping {
+  from: unknown
+  fromKind?: ValueKind
+  to: unknown
+  toKind?: ValueKind
+}
 
 export interface PropertyJobOp {
   kind: PropertyOpKind
@@ -1939,6 +1952,21 @@ export interface PropertyJobOp {
   value?: unknown
   /** Where an entity already holds `to`: leave it (`skip`) or replace its value. */
   onConflict?: 'skip' | 'overwrite'
+  /** Replace: the text to find (in any case unless `matchCase`; the whole value with `wholeValue`). */
+  find?: string
+  replaceWith?: string
+  matchCase?: boolean
+  wholeValue?: boolean
+  /** Normalize: trim, collapse runs of spaces, one case; in lists, each value once. */
+  trim?: boolean
+  collapseSpaces?: boolean
+  case?: 'lower' | 'upper' | 'title' | null
+  dedupeList?: boolean
+  /** Merge values: each value named becomes its `to` (at most 1,000). */
+  map?: ValueMapping[]
+  /** Convert: the kind every value is stored as; one that won't convert is left (`skip`) or removed. */
+  toKind?: ValueKind
+  onFail?: 'skip' | 'remove'
 }
 
 /** Which entities: named ones, or every entity criteria match — in the view, or the whole data source. */
@@ -1954,13 +1982,17 @@ export interface PropertyJobSummary {
   deletedInDraft: number
   /** A rename or copy onto a name an entity already held, left alone. */
   conflicts: number
-  /** Every target not written as asked — by reason: `missing`, `deleted_in_draft`, `conflict`, and
-   *  `write_refused` (the write gate turned it away). Its rows download as a CSV. */
+  /** A convert's values that weren't of the kind asked for — left as they were, or removed. */
+  unconvertible: number
+  /** Every target not written as asked — by reason: `missing`, `deleted_in_draft`, `conflict`,
+   *  `unconvertible` and `write_refused` (the write gate turned it away). Its rows download as a CSV. */
   refused: { count: number; byReason: Record<string, number>; examples: Array<Record<string, unknown>> }
   commits: number
   firstCommitId?: string | null
   lastCommitId?: string | null
   cancelled?: boolean
+  /** The publish that took what it changed to Published (and lists it in its audit). */
+  publishedCommitId?: string | null
 }
 
 export interface PropertyJob {
@@ -1991,8 +2023,12 @@ export interface PropertyJobPreview {
   refusal: { code: string; message: string } | null
   nameBudget: PropertyNameBudget | null
   activeJobId: string | null
-  /** Exact, read from the draft — for a target of named entities only. */
-  counts: { matched: number; haveKey: number; haveTo: number | null; missing: number } | null
+  /** Exact, read from the draft — for a target of named entities only: what they hold, how many
+   *  the change would change, and how many hold a value a convert can't convert. */
+  counts: {
+    matched: number; haveKey: number; haveTo: number | null; missing: number
+    wouldChange?: number; unconvertible?: number | null
+  } | null
 }
 
 const propertyJobs = (wsId: string, graphId: string) => `${base(wsId)}/graphs/${graphId}/property-jobs`

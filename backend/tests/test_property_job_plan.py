@@ -37,6 +37,17 @@ def test_set_compares_values_as_stored():
     assert pj.plan_patch(_op("set", value=None), {"owner": None}) is None
 
 
+def test_the_plan_compares_what_a_write_stores():
+    """A date or a moment is stored one way, so one written another way changes nothing — and one
+    that changes is planned in the form it will be stored in. (The job's writes are exact, so 1
+    over 1.0 is written as planned: ``test_typed_patch_merge``.)"""
+    held = {"owner": "2026-01-05T10:00:00Z"}
+    assert pj.plan_patch(_op("set", value="2026-01-05 12:00+02:00"), held) is None
+    assert pj.plan_patch(_op("set", value="2026-01-06 12:00+02:00"), held) == {"owner": "2026-01-06T10:00:00Z"}
+    assert pj.plan_patch(_op("fillEmpty", value="2026-01-06T00:00"), {}) == {"owner": "2026-01-06T00:00:00Z"}
+    assert pj.plan_patch(_op("copy", to="since"), {"owner": "2026-01-05 10:00"}) == {"since": "2026-01-05T10:00:00Z"}
+
+
 def test_fill_empty_writes_only_where_the_key_is_absent_null_or_blank():
     op = _op("fillEmpty", value="ana")
     for props in ({}, {"owner": None}, {"owner": ""}):
@@ -74,6 +85,127 @@ def test_copy_is_a_rename_that_keeps_the_key():
     assert not pj.is_conflict(op, {"steward": "bo"})                      # no source: no conflict
 
 
+# ── clean-ups: the values a key holds, rewritten where it is held ─────────────
+def test_replace_finds_text_in_any_case_unless_asked_and_whole_values_when_asked():
+    op = _op("replace", key="dept", find="fin", replaceWith="Finance")
+    assert pj.plan_patch(op, {"dept": "FIN ops, fin"}) == {"dept": "Finance ops, Finance"}
+    assert pj.plan_patch({**op, "matchCase": True}, {"dept": "FIN ops, fin"}) == {"dept": "FIN ops, Finance"}
+    whole = {**op, "wholeValue": True}
+    assert pj.plan_patch(whole, {"dept": " Fin"}) is None and pj.plan_patch(whole, {"dept": "FIN"}) == {"dept": "Finance"}
+    # Case folds as search folds it: one character at a time, "İ" to "i".
+    assert pj.plan_patch(_op("replace", key="k", find="istanbul", replaceWith="X"), {"k": "İSTANBUL!"}) == {"k": "X!"}
+    # A list's text elements; numbers, booleans and an entity without the key are left alone.
+    assert pj.plan_patch(op, {"dept": ["fin", 1, True, "ops"]}) == {"dept": ["Finance", 1, True, "ops"]}
+    for held in ({"dept": 12}, {"dept": None}, {"dept": "ops"}, {}):
+        assert pj.plan_patch(op, held) is None
+    assert pj.plan_patch({**op, "replaceWith": ""}, {"dept": "fin-ops"}) == {"dept": "-ops"}
+
+
+def test_a_replaced_text_that_reads_as_a_date_is_stored_as_dates_are():
+    op = _op("replace", key="d", find="/", replaceWith="-")
+    assert pj.plan_patch(op, {"d": "2026/01/05"}) == {"d": "2026-01-05"}
+    # Rewritten to the form a date is stored in already: nothing changes.
+    assert pj.plan_patch(_op("replace", key="d", find="Z", replaceWith="+00:00"), {"d": "2026-01-05T10:00:00Z"}) is None
+    # A value it leaves as it is is never re-stored in another form.
+    assert pj.plan_patch(_op("replace", key="d", find="x", replaceWith="y"), {"d": "2026-01-05 10:00"}) is None
+
+
+def test_normalize_trims_collapses_cases_and_dedupes_text():
+    op = _op("normalize", key="k", trim=True, collapseSpaces=True, case="title")
+    assert pj.plan_patch(op, {"k": "  data   PLATFORM team "}) == {"k": "Data Platform Team"}
+    assert pj.plan_patch(_op("normalize", key="k", trim=True, case="lower"), {"k": " ΑΣ "}) == {"k": "ασ"}
+    assert pj.plan_patch(_op("normalize", key="k", trim=False, case="upper"), {"k": " a "}) == {"k": " A "}
+    assert pj.plan_patch(_op("normalize", key="k", trim=True), {"k": "tidy"}) is None
+    listed = _op("normalize", key="k", trim=True, case="lower", dedupeList=True)
+    assert pj.plan_patch(listed, {"k": ["A ", "a", 1, 1.0, 1, " b"]}) == {"k": ["a", 1, 1.0, "b"]}
+    assert pj.plan_patch({**listed, "dedupeList": False}, {"k": ["A ", "a"]}) == {"k": ["a", "a"]}
+
+
+def test_merging_values_matches_each_exactly_as_the_catalog_counts_it():
+    op = _op("mapValues", key="dept", map=[
+        {"from": "finance ", "fromKind": "String", "to": "Finance", "toKind": "String"},
+        {"from": "FINANCE", "to": "Finance"},
+        {"from": 1, "fromKind": "Float", "to": "one"}])
+    for held, out in (("finance ", "Finance"), ("FINANCE", "Finance"), ("Finance", None), ("finance", None),
+                      (1.0, "one"), (1, None), (True, None)):
+        assert pj.plan_patch(op, {"dept": held}) == (None if out is None else {"dept": out}), held
+    # In a list, each element — then each value once (unless told to keep duplicates).
+    assert pj.plan_patch(op, {"dept": ["FINANCE", "Finance", "ops"]}) == {"dept": ["Finance", "ops"]}
+    assert pj.plan_patch({**op, "dedupeList": False}, {"dept": ["FINANCE", "Finance"]}) == {"dept": ["Finance", "Finance"]}
+    # Applied once, not followed: a → b, b → c leaves a at b.
+    chain = _op("mapValues", key="k", map=[{"from": "a", "to": "b"}, {"from": "b", "to": "c"}])
+    assert pj.plan_patch(chain, {"k": ["a", "b"]}) == {"k": ["b", "c"]}
+
+
+@pytest.mark.parametrize("held, kind, out", [
+    ("42", "Integer", 42), (" +42.0 ", "Integer", 42), (42.0, "Integer", 42), (-0.0, "Integer", 0),
+    ("9223372036854775807", "Integer", 9223372036854775807),
+    ("1.5", "Float", 1.5), (".5", "Float", 0.5), (3, "Float", 3.0), (2 ** 60, "Float", float(2 ** 60)),
+    (42, "String", "42"), (1.0, "String", "1.0"), (0.1, "String", "0.1"), (True, "String", "true"),
+    (" TRUE ", "Boolean", True), ("false", "Boolean", False),
+])
+def test_convert_stores_each_value_as_the_kind_asked_for(held, kind, out):
+    assert pj.plan_patch(_op("convert", key="k", toKind=kind), {"k": held}) == {"k": out}
+
+
+@pytest.mark.parametrize("held, kind", [
+    ("x", "Integer"), (42.5, "Integer"), (True, "Integer"), ("1e3", "Integer"), (2 ** 63, "Integer"),
+    ("9223372036854775808", "Integer"), ("1e3", "Float"), ("nan", "Float"), (2 ** 53 + 1, "Float"),
+    (False, "Float"), (1, "Boolean"), ("yes", "Boolean"),
+])
+def test_a_value_that_does_not_convert_is_left_or_removed(held, kind):
+    skip = _op("convert", key="k", toKind=kind)
+    assert pj.plan_patch(skip, {"k": held}) is None and pj.unconvertible(skip, {"k": held})
+    drop = {**skip, "onFail": "remove"}
+    assert pj.plan_patch(drop, {"k": held}) == {"k": PROP_DELETE} and pj.unconvertible(drop, {"k": held})
+
+
+def test_convert_leaves_what_is_already_that_kind_and_converts_a_list_element_by_element():
+    op = _op("convert", key="k", toKind="Integer")
+    for held in ({"k": 7}, {"k": None}, {"k": {"a": 1}}, {}):
+        assert pj.plan_patch(op, held) is None and not pj.unconvertible(op, held)
+    assert pj.plan_patch(op, {"k": ["1", 2, 3.0]}) == {"k": [1, 2, 3]}
+    # One element that won't: the list is left whole, or loses just that element.
+    assert pj.plan_patch(op, {"k": ["1", "x"]}) is None and pj.unconvertible(op, {"k": ["1", "x"]})
+    assert pj.plan_patch({**op, "onFail": "remove"}, {"k": ["1", "x"]}) == {"k": [1]}
+    # Text that already is text — even a legacy date — is not re-stored.
+    assert pj.plan_patch(_op("convert", key="k", toKind="String"), {"k": "2026-01-05 10:00"}) is None
+
+
+def test_a_window_counts_what_does_not_convert_and_lists_what_it_left():
+    found = {"urn:a": ("A", {"k": "3"}, "urn:a"), "urn:b": ("B", {"k": "x"}, "urn:b"),
+             "urn:c": ("C", {"k": 4}, "urn:c")}
+    ops, counts, refused = pj.plan_window(_op("convert", key="k", toKind="Integer"), found)
+    assert [o["entity_id"] for o in ops] == ["A"] and ops[0]["payload"] == {"properties": {"k": 3}}
+    assert (counts["changed"], counts["unchanged"], counts["unconvertible"]) == (1, 1, 1)
+    assert refused == [{"urn": "urn:b", "entityId": "B", "reason": "unconvertible",
+                        "detail": 'Its k holds "x", which isn\'t an integer.'}]
+    # Removed as asked: written, counted, not refused.
+    ops, counts, refused = pj.plan_window(_op("convert", key="k", toKind="Integer", onFail="remove"), found)
+    assert {o["entity_id"] for o in ops} == {"A", "B"} and refused == []
+    assert (counts["changed"], counts["unconvertible"]) == (2, 1)
+
+
+def test_the_kinds_values_are_told_apart_by_are_the_catalogs():
+    from backend.app.providers.falkordb_search import catalog
+    for value in (1, 1.0, True, "1", "x", [1], {"a": 1}, None, 2 ** 60, -0.5):
+        assert pj.kind_of(value) == catalog._kind_of(value), value
+        assert pj._slot(pj.kind_of(value), value) == catalog._slot(pj.kind_of(value), value)
+
+
+def test_each_clean_up_names_its_commits():
+    assert pj.describe(_op("replace", key="dept", find="Fin", replaceWith="Finance")) == \
+        "Replace “Fin” → “Finance” in dept"
+    assert pj.describe(_op("replace", key="d", find="x" * 60, replaceWith="")) == \
+        f"Replace “{'x' * 39}…” → “” in d"
+    assert pj.describe(_op("normalize", key="dept", trim=True, collapseSpaces=True, case="lower")) == \
+        "Normalize dept (trim, collapse spaces, lower case)"
+    assert pj.describe(_op("mapValues", key="dept", map=[{"from": "a", "to": "b"}] * 3)) == "Merge 3 values of dept"
+    assert pj.describe(_op("convert", key="tier", toKind="Float")) == "Convert tier to Decimal"
+    assert pj.window_message(_op("convert", key="tier", toKind="Integer"), None, 1, 2) == \
+        "Bulk property: Convert tier to Integer (1/2)"
+
+
 def test_a_window_plans_each_entity_once_and_counts_what_it_skips():
     found = {"urn:a": ("A", {"owner": "x"}, "urn:a"),
              "gv:A": ("A", {"owner": "x"}, "urn:a"),                     # the same entity again
@@ -82,7 +214,8 @@ def test_a_window_plans_each_entity_once_and_counts_what_it_skips():
     ops, counts, refused = pj.plan_window(_op("rename", to="steward"), found)
     assert ops == [{"op": "update", "entity_kind": "node", "entity_id": "A",
                     "payload": {"properties": {"steward": "x", "owner": PROP_DELETE}}}]
-    assert counts == {"changed": 1, "unchanged": 2, "missing": 0, "deletedInDraft": 0, "conflicts": 1}
+    assert counts == {"changed": 1, "unchanged": 2, "missing": 0, "deletedInDraft": 0, "conflicts": 1,
+                      "unconvertible": 0}
     assert refused == [{"urn": "urn:b", "entityId": "B", "reason": "conflict",
                         "detail": "It already has steward."}]
 
@@ -219,6 +352,78 @@ def test_the_job_keeps_its_op_as_the_plan_reads_it(V):
     assert op == {"kind": "rename", "key": "owner", "to": "steward", "onConflict": "overwrite"}
     assert pj.plan_patch(op, {"owner": 1, "steward": 2}) == {"steward": 1, "owner": PROP_DELETE}
     json.dumps(op)
+
+
+def test_a_clean_up_says_everything_its_kind_needs(V):
+    for bad in ({"kind": "replace", "key": "k", "replaceWith": "x"},
+                {"kind": "replace", "key": "k", "find": "x"},
+                {"kind": "replace", "key": "k", "find": "", "replaceWith": "x"},
+                {"kind": "replace", "key": "k", "find": "x" * 257, "replaceWith": ""},
+                {"kind": "normalize", "key": "k", "trim": False},
+                {"kind": "normalize", "key": "k", "case": "camel"},
+                {"kind": "mapValues", "key": "k"}, {"kind": "mapValues", "key": "k", "map": []},
+                {"kind": "mapValues", "key": "k", "map": [{"from": "a", "to": "b"}, {"from": "a", "to": "c"}]},
+                {"kind": "mapValues", "key": "k", "map": [{"from": None, "to": "b"}]},
+                {"kind": "mapValues", "key": "k", "map": [{"from": ["a"], "to": "b"}]},
+                {"kind": "mapValues", "key": "k", "map": [{"from": "a", "fromKind": "Integer", "to": "b"}]},
+                {"kind": "mapValues", "key": "k", "map": [{"from": 1.5, "fromKind": "Integer", "to": "b"}]},
+                {"kind": "mapValues", "key": "k", "map": [{"from": f"v{i}", "to": "x"} for i in range(1001)]},
+                {"kind": "convert", "key": "k"}, {"kind": "convert", "key": "k", "toKind": "Date"},
+                {"kind": "convert", "key": "k", "toKind": "Integer", "onFail": "keep"}):
+        with pytest.raises(ValidationError):
+            _request(V, bad)
+
+
+def test_a_clean_up_is_kept_with_every_choice_it_makes(V):
+    wire = lambda op: _request(V, op).op.wire()
+    assert wire({"kind": "replace", "key": "dept", "find": "Fin", "replaceWith": "", "value": "ignored"}) == {
+        "kind": "replace", "key": "dept", "onConflict": "skip", "find": "Fin", "replaceWith": "",
+        "matchCase": False, "wholeValue": False}
+    assert wire({"kind": "normalize", "key": "dept", "case": "lower"}) == {
+        "kind": "normalize", "key": "dept", "onConflict": "skip", "trim": True, "collapseSpaces": False,
+        "case": "lower", "dedupeList": False}
+    # Each value's kind is kept with it — a whole decimal stays one, though JSON writes it as 1.
+    assert wire({"kind": "mapValues", "key": "n", "map": [
+        {"from": 1, "fromKind": "Float", "to": "one"}, {"from": "finance ", "to": "Finance"}]}) == {
+        "kind": "mapValues", "key": "n", "onConflict": "skip", "dedupeList": True, "map": [
+            {"from": 1.0, "fromKind": "Float", "to": "one", "toKind": "String"},
+            {"from": "finance ", "fromKind": "String", "to": "Finance", "toKind": "String"}]}
+    assert wire({"kind": "convert", "key": "tier", "toKind": "Integer", "onFail": "remove", "to": "x"}) == {
+        "kind": "convert", "key": "tier", "onConflict": "skip", "toKind": "Integer", "onFail": "remove"}
+    json.dumps(wire({"kind": "mapValues", "key": "n", "map": [{"from": 1, "fromKind": "Float", "to": 2.5}]}))
+
+
+def test_merging_values_of_a_unique_field_into_one_is_refused_on_several_entities(V):
+    rules = OntologyRules(entity_types={"Dataset": EntityRule(unique_fields=frozenset({"code"}))})
+    merge = {"kind": "mapValues", "key": "code", "map": [{"from": "a", "to": "A"}, {"from": "a ", "to": "A"}]}
+    assert _code(V, merge, rules=rules) == (422, "unique_field")
+    assert _code(V, merge, {"ids": ["urn:a"]}, rules=rules) is None
+    # One value to another, or a normalize, may not collide: publishing refuses what does.
+    assert _code(V, {**merge, "map": [{"from": "a", "to": "A"}, {"from": "b", "to": "B"}]}, rules=rules) is None
+    assert _code(V, {"kind": "normalize", "key": "code", "case": "upper"}, rules=rules) is None
+    assert _code(V, {"kind": "replace", "key": "displayName", "find": "a", "replaceWith": "b"}) == (422, "reserved_key")
+
+
+def test_a_publish_lists_a_job_by_what_it_did_who_ran_it_and_why():
+    from types import SimpleNamespace
+    big = [{"from": f"v{i}", "fromKind": "String", "to": "V", "toKind": "String"} for i in range(80)]
+    job = SimpleNamespace(
+        id="vjob_1", status="completed", created_at="2026-11-21T10:00:00Z",
+        field_scope={"actor": "usr_ana", "key": "k1", "message": "Merge the Finance spellings",
+                     "op": {"kind": "mapValues", "key": "dept", "map": big, "dedupeList": True}},
+        summary={"changed": 27110, "refused": {"count": 3}, "commits": 3, "firstCommitId": "cmt_1",
+                 "lastCommitId": "cmt_3"})
+    entry = pj.audit_entry(job)
+    assert {k: v for k, v in entry.items() if k != "op"} == {
+        "jobId": "vjob_1", "label": "Merge 80 values of dept", "changed": 27110, "refused": 3,
+        "status": "completed", "actor": "usr_ana", "message": "Merge the Finance spellings",
+        "createdAt": "2026-11-21T10:00:00Z", "firstCommitId": "cmt_1", "lastCommitId": "cmt_3"}
+    assert len(entry["op"]["map"]) == 50 and entry["op"]["mapSize"] == 80
+    assert pj.audit_entry(job, partial=True)["partial"] is True
+    job.field_scope["op"] = {"kind": "set", "key": "blob", "value": "x" * 2000}
+    assert "value" not in pj.audit_entry(job)["op"] and pj.audit_entry(job)["label"] == "Set blob"
+    assert pj.window_messages({"kind": "remove", "key": "k"}, None, 2) == [
+        "Bulk property: Remove k (1/2)", "Bulk property: Remove k (2/2)"]
 
 
 # ── the property-name budget ──────────────────────────────────────────────────

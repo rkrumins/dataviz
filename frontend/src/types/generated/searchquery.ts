@@ -155,6 +155,10 @@ export type Status = 'complete' | 'running' | 'expired'
  */
 export type Refresh = boolean
 export type Sessionid1 = string | null
+/**
+ * A key whose every value the catalog keeps (up to 1,000) is listed, not only the 20 most held — for merging near-duplicate values.
+ */
+export type Valuesfor = string | null
 export type Waitms = number
 /**
  * When the read began (UTC).
@@ -1219,6 +1223,7 @@ export interface SearchCatalogRequest {
     refresh?: Refresh
     scope: SearchScope
     sessionId?: Sessionid1
+    valuesFor?: Valuesfor
     waitMs?: Waitms
 }
 export interface SearchCatalogResult {

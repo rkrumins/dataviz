@@ -1,9 +1,16 @@
 """Bulk property jobs: one property operation over many entities of a draft, run on the transfer lane.
 
 A job is ONE operation (``op``) — ``set``, ``fillEmpty``, ``remove``, ``rename`` or ``copy`` of one
-property key — over a target: up to ``PROPERTY_JOB_MAX_IDS`` entities named by id (their urns, or
+property key, or a clean-up of the values it holds (``replace``, ``normalize``, ``mapValues``,
+``convert``) — over a target: up to ``PROPERTY_JOB_MAX_IDS`` entities named by id (their urns, or
 ``gv:<entity id>`` as the canvas names them), or every entity an Advanced Search predicate matches
 in a view (``PROPERTY_JOB_MAX_TARGETS`` at most). It writes only to its draft, never to main.
+
+Its writes are exact (``apply_ops``' ``exact_types``): a value is stored as the job computed it,
+kind and all — a ``convert`` to Integer writes 42 over "42", a ``set`` of 1 writes 1 over 1.0 —
+where a save keeps a stored value sent back in a lossier form. A value that ends up reading as a
+date or a moment is stored the one way every write stores dates (``backend.common.moments``), and
+the plan compares what is stored with that, so it counts as changed only what a write changes.
 
 Its targets are kept as chunk files in the object store, ``property-jobs/{job}/targets/{i}.ndjson``,
 ``PROPERTY_JOB_WINDOW`` keys each: an id target's are written when the job is made; a search
@@ -20,8 +27,14 @@ no longer running) stops it at its next checkpoint, keeping the windows already 
 What a window could not write as asked is kept in ``property-jobs/{job}/refused/{i}.ndjson`` (the
 job's refused rows, as CSV through the API) and counted in the summary by reason: ``missing`` (no
 such entity in the draft), ``deleted_in_draft``, ``conflict`` (a rename or copy whose new key is
-held already, skipped) and ``write_refused`` (the write gate turned it away; the window's other
-entities are written, as an import's are).
+held already, skipped), ``unconvertible`` (a ``convert`` whose value is not of the kind asked for,
+left as it is — with ``onFail: remove`` it is removed, and counted but not refused) and
+``write_refused`` (the write gate turned it away; the window's other entities are written, as an
+import's are).
+
+When the draft is published, the jobs that wrote to it are listed in the publish's commit
+(``stats.propertyJobs``, :func:`audit_entry`) and its activity event, and stamped with that commit
+(``summary.publishedCommitId``), so a later publish never lists them again.
 """
 from __future__ import annotations
 
@@ -30,13 +43,17 @@ import csv
 import io
 import json
 import logging
+import math
+import re
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
 from sqlalchemy import select
 
 from backend.app.services.storage.object_store import storage_key
+from backend.common.moments import canonical
 from backend.common.property_patch import PROP_DELETE
+from backend.common.search_semantics import INT64_MAX, INT64_MIN, fold_case
 
 from .. import config, db
 from ..change_csv import cell
@@ -49,7 +66,12 @@ from .stream import resolve_placements
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("set", "fillEmpty", "remove", "rename", "copy")
+KINDS = ("set", "fillEmpty", "remove", "rename", "copy", "replace", "normalize", "mapValues", "convert")
+#: The kinds that rewrite the values a key holds, where it is held — a clean-up. Each writes the key
+#: itself, so none adds a property name.
+CLEANUPS = ("replace", "normalize", "mapValues", "convert")
+#: The kinds a ``convert`` writes, as the catalog names them (``typeOf``).
+CONVERT_KINDS = ("Integer", "Float", "String", "Boolean")
 #: The refused rows a job's summary shows; every one is in its refused files.
 REFUSED_EXAMPLES = 20
 #: Times a window's other entities are written again after the write gate refused some of them
@@ -57,7 +79,9 @@ REFUSED_EXAMPLES = 20
 _QUARANTINE_ROUNDS = 4
 _DETAIL_CHARS = 300
 #: What a job's summary counts, before its first window.
-COUNTERS = ("changed", "unchanged", "missing", "deletedInDraft", "conflicts")
+COUNTERS = ("changed", "unchanged", "missing", "deletedInDraft", "conflicts", "unconvertible")
+#: The bulk property jobs a publish lists in its commit; past these it counts them.
+AUDIT_LISTED = 20
 
 
 def _now() -> str:
@@ -81,7 +105,13 @@ def _same(a: Any, b: Any) -> bool:
     return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
 
 
-def plan_patch(op: Mapping[str, Any], props: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+def _written(value: Any) -> Any:
+    """``value`` as a write stores it: a date or a moment in its one form (``property_patch``)."""
+    return canonical(value) if isinstance(value, str) else value
+
+
+def plan_patch(op: Mapping[str, Any], props: Mapping[str, Any],
+               rewrite: Optional["Rewrite"] = None) -> Optional[Dict[str, Any]]:
     """The properties patch ``op`` makes to an entity holding ``props`` — a removal as
     :data:`PROP_DELETE` — or ``None`` when it changes nothing:
 
@@ -90,21 +120,270 @@ def plan_patch(op: Mapping[str, Any], props: Mapping[str, Any]) -> Optional[Dict
     * ``remove`` removes the key, where it is held;
     * ``rename`` moves the key's value to ``to`` and removes the key; ``copy`` keeps the key. An
       entity without the key is left as it is, and so is one that holds ``to`` already (a conflict,
-      :func:`is_conflict`) unless ``onConflict`` is ``overwrite``."""
+      :func:`is_conflict`) unless ``onConflict`` is ``overwrite``;
+    * a clean-up (``CLEANUPS``) rewrites the value the key holds (:func:`rewriter`); an entity
+      without the key, or whose value it leaves as it is, is unchanged.
+
+    Compared as written — exactly, a date in its one form — so what it plans to change is what the
+    job's (exact) write changes. ``rewrite``: the op's :func:`rewriter`, made once for many
+    entities."""
     kind, key = op["kind"], op["key"]
+    if kind in CLEANUPS:
+        return _cleanup(op, props, rewrite or rewriter(op))[0]
     if kind == "set":
-        return None if key in props and _same(props[key], op["value"]) else {key: op["value"]}
+        value = _written(op["value"])
+        return None if key in props and _same(props[key], value) else {key: value}
     if kind == "fillEmpty":
-        return {key: op["value"]} if _empty(props.get(key)) else None
+        return {key: _written(op["value"])} if _empty(props.get(key)) else None
     if kind == "remove":
         return {key: PROP_DELETE} if key in props else None
     to = op["to"]
     if key not in props or is_conflict(op, props):
         return None
-    patch = {} if to in props and _same(props[to], props[key]) else {to: props[key]}
+    value = _written(props[key])
+    patch = {} if to in props and _same(props[to], value) else {to: value}
     if kind == "rename":
         patch[key] = PROP_DELETE
     return patch or None
+
+
+# --------------------------------------------------------------------------- #
+# Clean-ups: the values a key holds, rewritten where it is held                #
+# --------------------------------------------------------------------------- #
+#: What a clean-up makes of one stored value: the value to store (``_REMOVE``: none), and whether it
+#: held something a ``convert`` could not convert.
+Rewrite = Callable[[Any], Tuple[Any, bool]]
+_REMOVE = object()
+_FAIL = object()
+_SPACES = re.compile(r"\s+")
+_WORD = re.compile(r"\S+")
+_INT_TEXT = re.compile(r"[+-]?\d+(?:\.0*)?")
+_DEC_TEXT = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)")
+
+
+def kind_of(value: Any) -> Optional[str]:
+    """``typeOf`` for a value read from JSON, as the catalog names it
+    (``falkordb_search.catalog._kind_of``)."""
+    if isinstance(value, bool):
+        return "Boolean"
+    if isinstance(value, int):
+        return "Integer"
+    if isinstance(value, float):
+        return "Float"
+    if isinstance(value, str):
+        return "String"
+    if isinstance(value, list):
+        return "List"
+    return None
+
+
+def _slot(kind: Optional[str], value: Any) -> str:
+    """A value's identity, as the catalog counts it (``catalog._slot``): its kind with its JSON, so
+    the Integer 1, the Float 1.0, the Boolean true and the String "1" stay four values."""
+    return json.dumps([kind, value], separators=(",", ":"), sort_keys=True)
+
+
+def as_kind(kind: str, value: Any) -> Any:
+    """``value`` as the scalar of ``kind`` it stands for — a whole number sent for a Float is that
+    Float (JSON writes 1.0 as 1). Raises ``ValueError`` for a value of another kind."""
+    number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if kind == "Float" and number and math.isfinite(value):
+        return float(value)
+    if kind == "Integer" and number and math.isfinite(value) and float(value).is_integer():
+        return int(value)
+    if kind == "Boolean" and isinstance(value, bool):
+        return value
+    if kind == "String" and isinstance(value, str):
+        return value
+    raise ValueError(f"{json.dumps(value)} is not a {kind}")
+
+
+def convert_value(value: Any, kind: str) -> Any:
+    """``value`` stored as ``kind``, exactly — or ``_FAIL`` when it is not one. Null and objects are
+    no kind, and are left as they are.
+
+    * String: text as it is; a boolean as ``true`` / ``false``; a number as its exact digits (a
+      decimal as the shortest text that reads back as it: 1.5 → "1.5", 1.0 → "1.0").
+    * Integer: a whole number in int64 — an integer, a whole decimal, or text that spells one
+      ("42", "+42", "42.0").
+    * Float: a decimal; an integer a double holds exactly (past 2^53 it would be rounded); text that
+      spells a decimal ("1.5", ".5", "15"). No exponents, hex, inf or nan, as search reads text.
+    * Boolean: a boolean, or the text true / false in any case.
+
+    A boolean is never a number, nor a number a boolean."""
+    if value is None or isinstance(value, dict):
+        return value
+    if kind == "String":
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return repr(value) if isinstance(value, float) else str(value)
+    if kind == "Boolean":
+        if isinstance(value, bool):
+            return value
+        word = fold_case(value.strip()) if isinstance(value, str) else None
+        return (word == "true") if word in ("true", "false") else _FAIL
+    if isinstance(value, bool):
+        return _FAIL
+    if kind == "Integer":
+        if isinstance(value, float):
+            n = int(value) if math.isfinite(value) and value.is_integer() else None
+        elif isinstance(value, int):
+            n = value
+        else:
+            text = value.strip()
+            n = int(text.partition(".")[0]) if _INT_TEXT.fullmatch(text) else None
+        return n if n is not None and INT64_MIN <= n <= INT64_MAX else _FAIL
+    if isinstance(value, float):
+        return value
+    try:
+        if isinstance(value, int):
+            f = float(value)
+            return f if int(f) == value else _FAIL
+        text = value.strip()
+        f = float(text) if _DEC_TEXT.fullmatch(text) else math.nan
+    except OverflowError:
+        return _FAIL
+    return f if math.isfinite(f) else _FAIL
+
+
+def _dedupe(items: List[Any]) -> List[Any]:
+    """A list's elements, each value once (as the catalog tells values apart), in order."""
+    seen, out = set(), []
+    for item in items:
+        slot = _slot(kind_of(item), item)
+        if slot not in seen:
+            seen.add(slot)
+            out.append(item)
+    return out
+
+
+def _strings(one: Callable[[str], str], dedupe: bool = False) -> "Rewrite":
+    """``one`` over a string, or over each string element of a list (``dedupe``: then each value
+    once); any other value is left as it is."""
+    def rewrite(value: Any) -> Tuple[Any, bool]:
+        if isinstance(value, str):
+            return one(value), False
+        if isinstance(value, list):
+            out = [one(e) if isinstance(e, str) else e for e in value]
+            return (_dedupe(out) if dedupe else out), False
+        return value, False
+    return rewrite
+
+
+def _replacer(op: Mapping[str, Any]) -> "Rewrite":
+    """``replace``: every ``find`` in the text by ``replaceWith`` — or, ``wholeValue``, a text that
+    is ``find`` — in any case unless ``matchCase`` (``fold_case``, as search folds case)."""
+    find, to = op["find"], op.get("replaceWith") or ""
+    match_case, whole = bool(op.get("matchCase")), bool(op.get("wholeValue"))
+    folded = find if match_case else fold_case(find)
+
+    def one(text: str) -> str:
+        if whole:
+            return to if (text if match_case else fold_case(text)) == folded else text
+        if match_case:
+            return text.replace(find, to)
+        # fold_case keeps every character one character, so a match in the folded text is the
+        # same span of the text itself.
+        hay, parts, at = fold_case(text), [], 0
+        while (i := hay.find(folded, at)) >= 0:
+            parts += [text[at:i], to]
+            at = i + len(folded)
+        return "".join(parts) + text[at:] if parts else text
+    return _strings(one)
+
+
+def _normalizer(op: Mapping[str, Any]) -> "Rewrite":
+    """``normalize``: the text trimmed (``trim``), each run of white space one space
+    (``collapseSpaces``), in ``lower`` / ``upper`` / ``title`` case (``case``); a list's elements
+    so, and each value once (``dedupeList``)."""
+    trim, collapse, case = op.get("trim", True), op.get("collapseSpaces"), op.get("case")
+
+    def one(text: str) -> str:
+        if trim:
+            text = text.strip()
+        if collapse:
+            text = _SPACES.sub(" ", text)
+        if case == "lower":
+            text = fold_case(text)
+        elif case == "upper":
+            text = text.upper()
+        elif case == "title":
+            text = _WORD.sub(lambda m: m.group()[:1].upper() + fold_case(m.group()[1:]), text)
+        return text
+    return _strings(one, dedupe=bool(op.get("dedupeList")))
+
+
+def _mapper(op: Mapping[str, Any]) -> "Rewrite":
+    """``mapValues``: each value the map names — exactly, kind and all, as the catalog counts it
+    (``fromKind``, else the kind ``from`` is) — becomes its ``to`` (of ``toKind``, else the kind it
+    is); in a list, each element, and then each value once (``dedupeList``, on unless turned off).
+    Applied once: with a → b and b → c, a becomes b."""
+    table: Dict[str, Any] = {}
+    for entry in op["map"]:
+        kind = entry.get("fromKind") or kind_of(entry["from"])
+        table[_slot(kind, as_kind(kind, entry["from"]))] = as_kind(
+            entry.get("toKind") or kind_of(entry["to"]), entry["to"])
+    dedupe = op.get("dedupeList", True)
+
+    def one(value: Any) -> Any:
+        kind = kind_of(value)
+        return value if kind in (None, "List") else table.get(_slot(kind, value), value)
+
+    def rewrite(value: Any) -> Tuple[Any, bool]:
+        if isinstance(value, list):
+            out = [one(e) for e in value]
+            return (_dedupe(out) if dedupe else out), False
+        return one(value), False
+    return rewrite
+
+
+def _converter(op: Mapping[str, Any]) -> "Rewrite":
+    """``convert``: the value stored as ``toKind`` (:func:`convert_value`); a list, element by
+    element. A value that does not convert is left as it is (``onFail: skip``) or removed
+    (``remove``); a list with one that doesn't is left whole (``skip``), or loses those elements
+    (``remove``)."""
+    kind, drop = op["toKind"], op.get("onFail") == "remove"
+
+    def rewrite(value: Any) -> Tuple[Any, bool]:
+        if isinstance(value, list):
+            out = [convert_value(e, kind) for e in value]
+            if not any(e is _FAIL for e in out):
+                return out, False
+            return ([e for e in out if e is not _FAIL] if drop else value), True
+        out = convert_value(value, kind)
+        if out is _FAIL:
+            return (_REMOVE if drop else value), True
+        return out, False
+    return rewrite
+
+
+def rewriter(op: Mapping[str, Any]) -> Optional["Rewrite"]:
+    """What a clean-up makes of each value — made once for a window; ``None`` for another kind."""
+    make = {"replace": _replacer, "normalize": _normalizer, "mapValues": _mapper,
+            "convert": _converter}.get(op["kind"])
+    return make(op) if make else None
+
+
+def _cleanup(op: Mapping[str, Any], props: Mapping[str, Any],
+             rewrite: "Rewrite") -> Tuple[Optional[Dict[str, Any]], bool]:
+    """A clean-up's patch for one entity (or None), and whether its value didn't convert."""
+    key = op["key"]
+    if key not in props:
+        return None, False
+    held = props[key]
+    value, failed = rewrite(held)
+    if value is _REMOVE:
+        return {key: PROP_DELETE}, failed
+    if _same(held, value):                      # left as it is: never re-stored in another form
+        return None, failed
+    value = _written(value)
+    return (None if _same(held, value) else {key: value}), failed
+
+
+def unconvertible(op: Mapping[str, Any], props: Mapping[str, Any],
+                  rewrite: Optional["Rewrite"] = None) -> bool:
+    """A ``convert`` whose entity holds a value that is not of the kind asked for."""
+    return op["kind"] == "convert" and _cleanup(op, props, rewrite or rewriter(op))[1]
 
 
 def is_conflict(op: Mapping[str, Any], props: Mapping[str, Any]) -> bool:
@@ -113,15 +392,77 @@ def is_conflict(op: Mapping[str, Any], props: Mapping[str, Any]) -> bool:
             and op.get("onConflict", "skip") != "overwrite")
 
 
+#: How a ``convert``'s kind reads (the catalog's labels).
+KIND_LABEL = {"Integer": "Integer", "Float": "Decimal", "String": "Text", "Boolean": "Boolean"}
+_KIND_PHRASE = {"Integer": "an integer", "Float": "a decimal", "String": "text",
+                "Boolean": "true or false"}
+
+
+def _quoted(text: str, most: int = 40) -> str:
+    return f"“{text if len(text) <= most else text[:most - 1] + '…'}”"
+
+
 def describe(op: Mapping[str, Any]) -> str:
     """The operation as its commits name it."""
-    key, to = op["key"], op.get("to")
+    key, to, kind = op["key"], op.get("to"), op["kind"]
+    if kind == "replace":
+        return f"Replace {_quoted(op['find'])} → {_quoted(op.get('replaceWith') or '')} in {key}"
+    if kind == "normalize":
+        parts = [label for on, label in (
+            (op.get("trim", True), "trim"), (op.get("collapseSpaces"), "collapse spaces"),
+            (op.get("case") == "lower", "lower case"), (op.get("case") == "upper", "UPPER CASE"),
+            (op.get("case") == "title", "Title Case"), (op.get("dedupeList"), "each value once"))
+            if on]
+        return f"Normalize {key}" + (f" ({', '.join(parts)})" if parts else "")
+    if kind == "mapValues":
+        n = len(op.get("map") or ())
+        return f"Merge {n:,} value{'' if n == 1 else 's'} of {key}"
+    if kind == "convert":
+        return f"Convert {key} to {KIND_LABEL.get(op.get('toKind'), op.get('toKind'))}"
     return {"set": f"Set {key}", "fillEmpty": f"Fill {key} where empty", "remove": f"Remove {key}",
-            "rename": f"Rename {key} → {to}", "copy": f"Copy {key} → {to}"}[op["kind"]]
+            "rename": f"Rename {key} → {to}", "copy": f"Copy {key} → {to}"}[kind]
 
 
 def window_message(op: Mapping[str, Any], message: Optional[str], window: int, windows: int) -> str:
     return f"{message or 'Bulk property: ' + describe(op)} ({window}/{windows})"
+
+
+def window_messages(op: Mapping[str, Any], message: Optional[str], windows: int) -> List[str]:
+    """Every window commit's message, as the job names them — how its commits are found."""
+    return [window_message(op, message, i, windows) for i in range(1, windows + 1)]
+
+
+def _audit_op(op: Mapping[str, Any]) -> Dict[str, Any]:
+    """The op as an audit lists it: a value past 1 KiB, and a map past its first 50 values, left
+    out (``mapSize`` says how many it has) — the label says what it did."""
+    out = {k: v for k, v in op.items() if k not in ("value", "map")}
+    if "value" in op and len(json.dumps(op["value"], ensure_ascii=False)) <= 1024:
+        out["value"] = op["value"]
+    if "map" in op:
+        out["map"], out["mapSize"] = list(op["map"] or [])[:50], len(op["map"] or [])
+    return out
+
+
+def audit_entry(job: Any, *, partial: bool = False) -> Dict[str, Any]:
+    """A bulk property job as a publish lists it (``stats.propertyJobs``): which job, what it did
+    (``label``) and to how many entities of the draft (``changed`` — changed in the draft: a later
+    edit may have changed some again), what it couldn't write (``refused``), how it ended, who ran it
+    and why (``message``), when, and its first and last commit on the draft. ``partial``: a review
+    merged in part landed some of what it changed, the rest still on the draft. ``job``: its row."""
+    fields = job.field_scope if isinstance(job.field_scope, dict) else {}
+    summary = job.summary if isinstance(job.summary, dict) else {}
+    op = fields.get("op") if isinstance(fields.get("op"), dict) else {}
+    out = {
+        "jobId": job.id, "op": _audit_op(op), "label": describe(op) if op else "Bulk property edit",
+        "changed": int(summary.get("changed") or 0),
+        "refused": int((summary.get("refused") or {}).get("count") or 0),
+        "status": job.status, "actor": fields.get("actor"), "message": fields.get("message"),
+        "createdAt": job.created_at, "firstCommitId": summary.get("firstCommitId"),
+        "lastCommitId": summary.get("lastCommitId"),
+    }
+    if partial:
+        out["partial"] = True
+    return out
 
 
 class Planned(NamedTuple):
@@ -137,12 +478,14 @@ def plan_window(op: Mapping[str, Any], found: Mapping[str, Tuple[str, Dict[str, 
     counts = dict.fromkeys(COUNTERS, 0)
     refused: List[Dict[str, Any]] = []
     seen = set()
+    rewrite = rewriter(op)
     for key, (eid, props, urn) in found.items():
         if eid in seen:
             counts["unchanged"] += 1
             continue
         seen.add(eid)
-        patch = plan_patch(op, props)
+        patch, failed = _cleanup(op, props, rewrite) if rewrite else (plan_patch(op, props), False)
+        counts["unconvertible"] += failed
         if patch is not None:
             ops.append({"op": "update", "entity_kind": "node", "entity_id": eid,
                         "payload": {"properties": patch}})
@@ -150,6 +493,11 @@ def plan_window(op: Mapping[str, Any], found: Mapping[str, Tuple[str, Dict[str, 
         elif is_conflict(op, props):
             counts["conflicts"] += 1
             refused.append(_refused(urn or key, eid, "conflict", f"It already has {op['to']}."))
+        elif failed:
+            held = json.dumps(props[op["key"]], ensure_ascii=False)
+            refused.append(_refused(urn or key, eid, "unconvertible", (
+                f"Its {op['key']} holds {held[:120]}, which isn't "
+                f"{_KIND_PHRASE.get(op.get('toKind'), op.get('toKind'))}.")))
         else:
             counts["unchanged"] += 1
     return Planned(ops, counts, refused)
@@ -444,7 +792,7 @@ class PropertyJobWorker:
                     graph_id=graph_id, branch_id=branch_id, ops=ops, actor=actor, message=message,
                     on_commit=on_commit, ontology_rules=context.get("ontology_rules"),
                     containment_edge_types=context.get("containment") or None,
-                    node_identity=context.get("node_identity"))
+                    node_identity=context.get("node_identity"), exact_types=True)
                 return
             except OntologyViolation as exc:
                 reasons: Dict[str, List[str]] = {}

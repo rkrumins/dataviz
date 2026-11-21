@@ -75,7 +75,16 @@ function JobRow({ tracked }: { tracked: TrackedJob }) {
               <span className="tabular-nums">{(s.changed ?? 0).toLocaleString()}</span> changed
               {(s.unchanged ?? 0) + (s.conflicts ?? 0) > 0 && <> · <span className="tabular-nums">{((s.unchanged ?? 0) + (s.conflicts ?? 0)).toLocaleString()}</span> left as they were</>}
               {notFound > 0 && <> · <span className="tabular-nums">{notFound.toLocaleString()}</span> not in the draft</>}
+              {(s.unconvertible ?? 0) > 0 && (
+                <> · <span className="tabular-nums text-amber-700 dark:text-amber-300">{(s.unconvertible ?? 0).toLocaleString()}</span>{' '}
+                  {tracked.op.onFail === 'remove' ? 'removed — they wouldn’t convert' : 'wouldn’t convert'}</>
+              )}
               {refused > 0 && <> · <span className="tabular-nums text-amber-700 dark:text-amber-300">{refused.toLocaleString()}</span> couldn’t be</>}
+            </p>
+          )}
+          {s.publishedCommitId && (
+            <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-[10.5px] font-semibold text-emerald-700 dark:text-emerald-300">
+              <CheckCircle2 className="h-3 w-3" aria-hidden /> Published — listed in the publish’s audit
             </p>
           )}
         </div>

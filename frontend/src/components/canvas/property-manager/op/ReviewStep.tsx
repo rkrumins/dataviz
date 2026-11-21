@@ -3,7 +3,8 @@
  * entities it changes, whose values it replaces, which it leaves alone — with a few of them by
  * name, anything that would stop it (a name the platform keeps, the property-name ceiling, another
  * change still running on the draft), and how it lands: on the draft, a window of entities at a
- * time, in counts after publish.
+ * time, in counts after publish. A clean-up's count is a bound until it runs. An optional reason is
+ * kept as the change's message — in the draft's history, and in the audit of its publish.
  */
 import { AlertTriangle, Ban, GitBranch, Info, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -11,13 +12,16 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import { Skeleton } from '@/components/ui/Skeleton'
 import type { AffectedSample } from '@/services/propertyInsights'
 import type { PropertyJobPreview } from '@/services/versioningApiService'
-import { OP_LABEL, needsTo, needsValue, targetLabel, type OpDraft, type ScopeMode, type TargetPreset } from './opModel'
+import {
+  OP_LABEL, isCleanup, jobOp, needsTo, needsValue, propertyJobLabel, targetLabel, type Impact, type OpDraft, type ScopeMode, type TargetPreset,
+} from './opModel'
+import { FIELD, LABEL } from './styles'
 import type { ReviewCounts } from './useReviewCounts'
 
-export interface Impact { changes: number; replaced: number; untouched: number }
+export type { Impact } from './opModel'
 
 export function ReviewStep({
-  op, preset, scopeMode, counts, impact, exact, preview, previewLoading, sample, sampleLoading, stagedCount,
+  op, preset, scopeMode, counts, impact, exact, preview, previewLoading, sample, sampleLoading, stagedCount, reason = '', onReason,
 }: {
   op: OpDraft
   preset: TargetPreset
@@ -31,24 +35,47 @@ export function ReviewStep({
   sample: AffectedSample | null
   sampleLoading: boolean
   stagedCount: number
+  /** Why it is made — kept as its message, in the draft's history and the publish's audit. */
+  reason?: string
+  onReason?: (reason: string) => void
 }) {
   const budget = preview?.nameBudget
   const newName = needsTo(op.kind) ? op.to.trim() : op.key.trim()
+  const cleanup = isCleanup(op.kind)
+  const unconvertible = preview?.counts?.unconvertible
   return (
     <div className="space-y-4">
       <p className="text-[13px] leading-relaxed text-ink">
-        <span className="font-semibold">{OP_LABEL[op.kind]}</span>{' '}
-        <span className="font-mono">{op.key.trim()}</span>
-        {needsTo(op.kind) && <> → <span className="font-mono">{op.to.trim()}</span></>}
-        {needsValue(op.kind) && <> = <span className="font-mono">{String(op.value)}</span></>}
+        {cleanup ? <span className="font-semibold">{propertyJobLabel(jobOp(op))}</span> : (
+          <>
+            <span className="font-semibold">{OP_LABEL[op.kind]}</span>{' '}
+            <span className="font-mono">{op.key.trim()}</span>
+            {needsTo(op.kind) && <> → <span className="font-mono">{op.to.trim()}</span></>}
+            {needsValue(op.kind) && <> = <span className="font-mono">{String(op.value)}</span></>}
+          </>
+        )}
         {' '}on {targetLabel(preset)}{preset.kind !== 'selection' && scopeMode === 'data_source' ? ', across the whole data source' : ''}.
       </p>
 
       <div className="grid grid-cols-3 gap-2" aria-live="polite">
-        <Tile label="Will change" value={impact?.changes} tone="accent" />
-        <Tile label={op.kind === 'set' || needsTo(op.kind) ? 'Values replaced' : 'Replaced'} value={impact?.replaced} tone={impact?.replaced ? 'warning' : 'neutral'} />
+        <Tile label="Will change" value={impact?.changes} tone="accent" upTo={impact?.upTo} />
+        <Tile label={cleanup ? 'Values rewritten' : op.kind === 'set' || needsTo(op.kind) ? 'Values replaced' : 'Replaced'} value={impact?.replaced}
+          tone={impact?.replaced ? 'warning' : 'neutral'} upTo={impact?.upTo} />
         <Tile label="Left as they are" value={impact?.untouched} tone="neutral" />
       </div>
+      {impact?.upTo && (
+        <p className="flex items-start gap-1.5 text-[11px] text-ink-muted">
+          <Info className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden /> At most: what it changes is known as each entity is read — the job says exactly when it ends.
+        </p>
+      )}
+      {op.kind === 'convert' && (
+        <Notice tone={unconvertible ? 'warning' : 'neutral'} icon={unconvertible ? AlertTriangle : Info}>
+          {unconvertible ? <>{unconvertible.toLocaleString()} of them hold a value that won’t convert. </> : null}
+          {(op.onFail ?? 'skip') === 'remove'
+            ? <>A value that won’t convert is removed; the job counts them.</>
+            : <>A value that won’t convert is left as it is; the job lists each one when it ends (<span className="font-semibold">Which, and why</span>).</>}
+        </Notice>
+      )}
       {counts && !counts.complete && !counts.error && !counts.unavailable && (
         <div className="flex items-center gap-2 text-[11px] text-ink-muted">
           <ProgressBar value={counts.percent} label="Counting the entities" className="w-32" />
@@ -109,6 +136,15 @@ export function ReviewStep({
         </Notice>
       )}
 
+      {onReason && (
+        <div>
+          <label className={LABEL} htmlFor="op-reason">Reason <span className="normal-case tracking-normal font-normal">(optional)</span></label>
+          <input id="op-reason" value={reason} onChange={(e) => onReason(e.target.value)} maxLength={2000}
+            placeholder="e.g. One spelling of each department, per the data owners" className={FIELD} />
+          <p className="mt-1 text-[11px] text-ink-muted">Kept with the change: in the draft’s history, and in the audit of the publish that takes it to Published.</p>
+        </div>
+      )}
+
       <div className="flex items-start gap-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] p-2.5 text-[11.5px] leading-snug text-ink-secondary">
         <GitBranch className="mt-px h-3.5 w-3.5 shrink-0 text-ink-muted" aria-hidden />
         <span>
@@ -121,7 +157,7 @@ export function ReviewStep({
   )
 }
 
-function Tile({ label, value, tone }: { label: string; value: number | undefined; tone: 'accent' | 'warning' | 'neutral' }) {
+function Tile({ label, value, tone, upTo }: { label: string; value: number | undefined; tone: 'accent' | 'warning' | 'neutral'; upTo?: boolean }) {
   return (
     <div className={cn('rounded-xl border px-3 py-2',
       tone === 'accent' ? 'border-accent-lineage/30 bg-accent-lineage/[0.05]'
@@ -130,6 +166,7 @@ function Tile({ label, value, tone }: { label: string; value: number | undefined
       {value === undefined ? <Skeleton className="mt-1 h-5 w-14" /> : (
         <div className={cn('mt-0.5 text-lg font-semibold tabular-nums',
           tone === 'accent' ? 'text-accent-lineage' : tone === 'warning' ? 'text-amber-700 dark:text-amber-300' : 'text-ink')}>
+          {upTo && <span className="mr-1 text-[11px] font-medium text-ink-muted">up to</span>}
           {value.toLocaleString()}
         </div>
       )}

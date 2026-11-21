@@ -93,6 +93,8 @@ class TestStats:
         d = s.describe("k", True)
         assert len(d["values"]) == VALUES_SHOWN and d["values"][0]["value"] == 0
         assert d["distinct"] == 50
+        # Every value kept, for the one key a request names (merging near-duplicates).
+        assert [v["value"] for v in s.describe("k", True, shown=VALUES_MAX)["values"]] == list(range(50))
 
     def test_past_the_cap_a_key_is_high_cardinality_and_its_distinct_a_floor(self):
         s = CatalogStats()
@@ -342,6 +344,13 @@ class TestSessions:
                                               context=context, wait_ms=0)
         assert again["sessionId"] == first["sessionId"] and again["status"] == "complete"
         assert len(graph.statements) == seen and not again["stale"]
+        # Asked for every value of one key, it answers from the same catalog, with no scan.
+        monkeypatch.setattr(catalog_mod, "VALUES_SHOWN", 1)
+        every = await execute_catalog_session(_Provider(graph), SearchScope(view_id="v"),
+                                              context=context, wait_ms=0, values_for="owner")
+        props = {p["key"]: p for p in every["properties"]}
+        assert [v["value"] for v in props["owner"]["values"]] == ["ann", "bob"]
+        assert len(props["code"]["values"]) == 1 and len(graph.statements) == seen
 
     async def test_after_the_data_changes_a_recent_catalog_is_served_as_of(self, monkeypatch):
         monkeypatch.setattr(catalog_mod, "make_plan", _plan(UNITS))
@@ -431,6 +440,19 @@ class TestService:
         assert seen == {"types": ["dataset"], "scope_hash": "scope-1", "wait": 500,
                         "sid": "prev", "refresh": True}
         assert out.properties[0].values[0].value == "ann"
+
+    async def test_every_value_of_one_key_is_asked_for_by_name(self):
+        seen = {}
+
+        class _Catalog:
+            async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                          refresh=False, values_for=None):
+                seen["values_for"] = values_for
+                return {"sessionId": "s", "status": "complete"}
+
+        request = SearchCatalogRequest.model_validate({"scope": {"viewId": "v"}, "valuesFor": "dept"})
+        await _service(_Catalog()).catalog(request)
+        assert seen == {"values_for": "dept"}
 
     async def test_roots_all_outside_the_view_read_nothing(self):
         request = SearchCatalogRequest.model_validate({

@@ -257,6 +257,19 @@ This is doc 12's D2 gate, without its structural heuristics.
   nothing, and a failure to record never fails the commit. Turning version control on and updating
   a fork from its parent keep the events they already had. The events filter and export like the
   rest.
+- **A publish names the bulk property jobs it took to main.** Where a squash lands
+  (`_squash_landed`, and `_landed_in_part` for a review merged in part), inside the publish's
+  transaction with the draft locked, the draft's property jobs that ended having written to it and
+  that no publish has listed are written into the commit as `stats.propertyJobs = {total, jobs}`
+  (`property_job.audit_entry`: job, op, label, entities changed in the draft, refused, status, who,
+  the reason it was started with, when, its first and last draft commit) and stamped with the commit
+  (`summary.publishedCommitId`). `main_activity.details_of` copies the record into the
+  `workspace.versioning.published` event, whose summary is computed when it is read ("Published
+  27,110 changes to Sales, including Rename owner → steward"), so text search finds a publish by
+  what its jobs did. A job none of whose changes a partial merge landed is not listed; one some of
+  whose did is listed `partial` and left unstamped, to be listed again by the merge that lands the
+  rest. None can be running: a publish waits for them (`_require_no_import`). The record has no
+  top-level `jobId`, which the activity log reads as an aggregation job.
 - **History APIs say what they store.**
   - The commit log takes `origin=people|automation`; default: everything.
   - Each entry carries `actorKind`, `apiKeyId`, `correlationId`, `automation` and `changeReason`.

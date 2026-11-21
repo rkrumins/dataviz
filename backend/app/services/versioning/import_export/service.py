@@ -1062,6 +1062,9 @@ class ImportExportService:
         shown.update(refused=summary.get("refused") or {"count": 0, "byReason": {}, "examples": []},
                      commits=int(summary.get("commits") or 0), firstCommitId=summary.get("firstCommitId"),
                      lastCommitId=summary.get("lastCommitId"))
+        if summary.get("publishedCommitId"):
+            # The publish that took what it wrote to main, and listed it (property_job.audit_entry).
+            shown["publishedCommitId"] = summary["publishedCommitId"]
         if summary.get("cancelled"):
             shown["cancelled"] = True
         done = row.status == "completed"
@@ -1094,14 +1097,20 @@ class ImportExportService:
                                       ids: List[str]) -> Dict[str, Any]:
         """What an id target finds in the draft, as it stands: the entities it names
         (``matched``), how many hold ``op``'s key and its ``to`` (null for an op without one), and
-        the ids that name nothing there — deleted in the draft, or never in it (``missing``)."""
+        the ids that name nothing there — deleted in the draft, or never in it (``missing``). Exactly
+        how many the op would change (``wouldChange``: its plan, run over each one), and, for a
+        ``convert``, how many hold a value that doesn't convert (``unconvertible``; else null)."""
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         found, deleted, missing = await property_job.read_targets(snap, ids)
         props = {eid: p for eid, p, _urn in found.values()}
         to = op.get("to") if op.get("kind") in ("rename", "copy") else None
+        rewrite = property_job.rewriter(op)
         return {"matched": len(props), "haveKey": sum(op["key"] in p for p in props.values()),
                 "haveTo": sum(to in p for p in props.values()) if to else None,
-                "missing": len(deleted) + len(missing)}
+                "missing": len(deleted) + len(missing),
+                "wouldChange": sum(property_job.plan_patch(op, p, rewrite) is not None for p in props.values()),
+                "unconvertible": sum(property_job.unconvertible(op, p, rewrite) for p in props.values())
+                if op.get("kind") == "convert" else None}
 
     async def start_publish(self, job_id: str) -> str:
         """Queue the publish job (see :meth:`_start`). Returns the status to report."""

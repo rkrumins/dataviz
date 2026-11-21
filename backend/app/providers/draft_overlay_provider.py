@@ -1277,11 +1277,12 @@ class DraftOverlayProvider:
         return await self._base.deep_search_membership(scope, items, urns, context=context)
 
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
-                                  refresh=False):
+                                  refresh=False, values_for=None):
         """The property catalog — the base's, like :meth:`deep_search_session`."""
         self._now_only("Search")
-        return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
-                                                    session_id=session_id, refresh=refresh)
+        return await self._base.deep_search_catalog(
+            scope, context=context, wait_ms=wait_ms, session_id=session_id, refresh=refresh,
+            **({"values_for": values_for} if values_for else {}))
 
     async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
                                  session_id=None):
