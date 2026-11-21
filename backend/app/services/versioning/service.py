@@ -7139,8 +7139,11 @@ class GraphVersioningService:
             oet = _etype(op_)
             by_triple.setdefault((osrc, otgt, oet), set()).add(oeid)
             if oet in cset and osrc and otgt:
-                oparent, ochild = _parent_child(osrc, otgt, oet)
-                parents_of.setdefault(ochild, {})[oeid] = oparent
+                # Inline, not _parent_child: this runs once per live edge into the batch's targets.
+                if oet in upward:
+                    parents_of.setdefault(osrc, {})[oeid] = otgt
+                else:
+                    parents_of.setdefault(otgt, {})[oeid] = osrc
         viol: List[dict] = []
         batch_parent: Dict[str, set] = {}     # target → containment sources added in THIS batch
         batch_seen: set = set()               # (src,tgt,type) created in THIS batch
