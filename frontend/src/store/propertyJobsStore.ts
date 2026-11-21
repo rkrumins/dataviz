@@ -22,6 +22,8 @@ import type { TargetPreset } from '@/components/canvas/property-manager/op/opMod
 const STORAGE_KEY = 'property-jobs:v1'
 /** Ended jobs kept for the panel — the newest; older ones are forgotten. */
 const KEEP_ENDED = 20
+/** A job this browser lost track of is forgotten this long after it was lost. */
+const KEEP_LOST_MS = 7 * 24 * 60 * 60 * 1000
 /** While a job runs, its draft's written epoch moves at most this often. */
 const WRITTEN_EVERY_MS = 30_000
 
@@ -39,6 +41,9 @@ export interface TrackedJob {
   startedAt: string
   /** How it last stood. */
   job: PropertyJob | null
+  /** It couldn't be followed: since when (the first time), and why. `gone`: the server no longer
+   *  has it. `checking`: it is being asked about again. */
+  lost?: { at: string; message: string; gone?: boolean; checking?: boolean }
 }
 
 /** What a surface knows when it asks for a change: any of it seeds the dialog — a merge, the values
@@ -80,11 +85,15 @@ function written(epochs: Record<string, WrittenEpoch>, before: TrackedJob, after
   return { ...epochs, [draft]: { epoch: (last?.epoch ?? 0) + 1, at: now, jobId: after.jobId, commits } }
 }
 
+/** Lost long enough ago to forget. */
+const lostForGood = (t: TrackedJob) => !!t.lost && Date.now() - Date.parse(t.lost.at) > KEEP_LOST_MS
+
 function load(): TrackedJob[] {
   try {
     const raw = remembered(STORAGE_KEY)
     const parsed = raw ? (JSON.parse(raw) as unknown) : []
-    return Array.isArray(parsed) ? (parsed as TrackedJob[]).filter((j) => j && typeof j.jobId === 'string') : []
+    return Array.isArray(parsed)
+      ? (parsed as TrackedJob[]).filter((j) => j && typeof j.jobId === 'string' && !lostForGood(j)) : []
   } catch {
     return []
   }
@@ -104,6 +113,10 @@ interface PropertyJobsState {
   writtenEpochs: Record<string, WrittenEpoch>
   track: (job: TrackedJob) => void
   update: (jobId: string, job: PropertyJob) => void
+  /** Its follow failed: it is lost (`gone` when the server no longer has it), until it answers. */
+  lose: (jobId: string, message: string, gone?: boolean) => void
+  /** Ask about lost jobs again. */
+  checkAgain: (jobIds: readonly string[]) => void
   dismiss: (jobId: string) => void
   requestOp: (request?: OpRequest) => void
   consumeRequest: () => OpRequest | null
@@ -111,8 +124,8 @@ interface PropertyJobsState {
 
 export const usePropertyJobsStore = create<PropertyJobsState>((set, get) => {
   const write = (jobs: TrackedJob[], also: Partial<PropertyJobsState> = {}) => {
-    // Running ones always kept; of the ended, the newest.
-    const running = jobs.filter((j) => !jobEnded(j))
+    // Running ones always kept (a lost one for a week); of the ended, the newest.
+    const running = jobs.filter((j) => !jobEnded(j) && !lostForGood(j))
     const ended = jobs.filter(jobEnded).slice(-KEEP_ENDED)
     const kept = jobs.filter((j) => running.includes(j) || ended.includes(j))
     save(kept)
@@ -128,8 +141,16 @@ export const usePropertyJobsStore = create<PropertyJobsState>((set, get) => {
       const jobs = get().jobs
       const before = jobs.find((j) => j.jobId === jobId)
       if (!before) return
-      const after = { ...before, job }
+      // An answer: it is followed again, whatever was lost.
+      const after = { ...before, job, lost: undefined }
       write(jobs.map((j) => (j.jobId === jobId ? after : j)), { writtenEpochs: written(get().writtenEpochs, before, after) })
+    },
+    lose: (jobId, message, gone = false) => write(get().jobs.map((j) => (j.jobId === jobId
+      ? { ...j, lost: { at: j.lost?.at ?? new Date().toISOString(), message, ...(gone ? { gone } : {}) } } : j))),
+    checkAgain: (jobIds) => {
+      const asked = new Set(jobIds)
+      if (!get().jobs.some((j) => asked.has(j.jobId) && j.lost && !j.lost.checking)) return
+      write(get().jobs.map((j) => (asked.has(j.jobId) && j.lost ? { ...j, lost: { ...j.lost, checking: true } } : j)))
     },
     dismiss: (jobId) => write(get().jobs.filter((j) => j.jobId !== jobId)),
     requestOp: (request = {}) => set((s) => ({ request, requestSeq: s.requestSeq + 1 })),

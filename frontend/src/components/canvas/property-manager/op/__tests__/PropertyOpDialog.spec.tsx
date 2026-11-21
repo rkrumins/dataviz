@@ -14,6 +14,9 @@ import type { ReviewCounts } from '../useReviewCounts'
 const api = vi.hoisted(() => ({
   preview: vi.fn(),
   create: vi.fn(),
+  get: vi.fn(),
+  /** The What step fails to draw. */
+  crash: false,
   /** How many times the counts were asked again (`useReviewCounts`' retry), as each render asked. */
   countRetries: [] as number[],
 }))
@@ -23,7 +26,18 @@ vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/versioningApiService')>()),
   previewPropertyJob: api.preview,
   createPropertyJob: api.create,
+  getPropertyJob: api.get,
 }))
+vi.mock('../WhatStep', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../WhatStep')>()
+  return {
+    ...actual,
+    WhatStep: (props: Parameters<typeof actual.WhatStep>[0]) => {
+      if (api.crash) throw new Error('The What step failed to draw')
+      return <actual.WhatStep {...props} />
+    },
+  }
+})
 vi.mock('@/hooks/usePropertyCatalog', () => ({
   usePropertyCatalog: () => ({
     catalog: {
@@ -70,11 +84,13 @@ const exact = (target: number, haveKey: number, haveTo = 0): ReviewCounts => ({
 
 function open(seed = {}, selectionIds: string[] = []) {
   const onClose = vi.fn()
+  const onOpenManager = vi.fn()
   render(
     <PropertyOpDialog viewId="v1" graphWrite={GRAPH} seed={seed} knownEntityTypes={['Table']}
-      layers={[{ id: 'L1', name: 'Gold' }, { id: 'L2', name: 'Silver' }]} selectionIds={selectionIds} onClose={onClose} />,
+      layers={[{ id: 'L1', name: 'Gold' }, { id: 'L2', name: 'Silver' }]} selectionIds={selectionIds} onClose={onClose}
+      onOpenManager={onOpenManager} />,
   )
-  return { onClose }
+  return { onClose, onOpenManager }
 }
 const next = () => screen.getByRole('button', { name: /^Next/ })
 
@@ -82,6 +98,9 @@ beforeEach(() => {
   localStorage.clear()
   api.preview.mockReset().mockResolvedValue({ refusal: null, nameBudget: { registered: 10, nativeBudget: 50000, ceiling: 65534, isNew: false, verdict: 'ok' }, activeJobId: null, counts: null })
   api.create.mockReset().mockResolvedValue({ jobId: 'job-1', status: 'pending' })
+  api.get.mockReset().mockResolvedValue({ jobId: 'job-0', status: 'running', progress: 0.3, op: { kind: 'rename', key: 'owner', to: 'steward' },
+    target: { kind: 'predicate', scopeMode: 'view' }, createdAt: '2026-11-21T00:00:00Z' })
+  api.crash = false
   counts = exact(120, 30)
   api.countRetries.length = 0
   allValues = null
@@ -279,6 +298,57 @@ describe('PropertyOpDialog', () => {
     expect(screen.getAllByText('20,000 is the most a selection can change — use Whole view, Has key or a layer instead.').length).toBeGreaterThan(0)
     await user.click(screen.getByRole('radio', { name: /Every entity with owner/ }))
     expect(next()).toBeEnabled()
+  })
+
+  it('offers to follow the change already running on the draft — from Review, and when starting is refused', async () => {
+    const user = userEvent.setup()
+    api.preview.mockResolvedValue({ refusal: null, nameBudget: null, activeJobId: 'job-0', counts: null })
+    const { onClose, onOpenManager } = open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    expect(await screen.findByText(/Another change is still being applied/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Apply/ })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Follow it' }))
+    expect(api.get).toHaveBeenCalledWith('ws', 'g1', 'job-0')
+    expect(usePropertyJobsStore.getState().jobs).toMatchObject([{
+      jobId: 'job-0', branchId: 'd1', op: { kind: 'rename', key: 'owner' }, targetLabel: 'the entities a search matches',
+    }])
+    expect(onClose).toHaveBeenCalled()
+    expect(onOpenManager).toHaveBeenCalled()
+  })
+
+  it('a refusal to start because another is running offers to follow it', async () => {
+    const user = userEvent.setup()
+    const { JobActiveError } = await import('@/services/versioningApiService')
+    api.create.mockRejectedValueOnce(new JobActiveError('job-0', 'Another bulk property edit is running on this draft (job job-0).'))
+    const { onOpenManager } = open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    await user.click(screen.getByRole('button', { name: 'Apply to 30' }))
+    expect(await screen.findByText(/Another bulk property edit is running/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Follow it' }))
+    expect(usePropertyJobsStore.getState().jobs.map((j) => j.jobId)).toEqual(['job-0'])
+    expect(onOpenManager).toHaveBeenCalled()
+  })
+
+  it('a target the server won\'t take by its ids offers to choose another', async () => {
+    const user = userEvent.setup()
+    api.preview.mockResolvedValue({ refusal: { code: 'too_many_ids', message: 'A job names up to 5,000 entities by id.' }, nameBudget: null, activeJobId: null, counts: { matched: 3, haveKey: 3, haveTo: 0, missing: 0 } })
+    open({ kind: 'remove', key: 'owner' }, ['a', 'b', 'c'])
+    await user.click(screen.getByRole('radio', { name: /The 3 selected/ }))
+    await user.click(next())
+    expect(await screen.findByText('A job names up to 5,000 entities by id.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Choose another target' }))
+    expect(screen.getByRole('radiogroup', { name: 'Which entities' })).toBeInTheDocument()
+  })
+
+  it('a step that fails to draw is held to the dialog, which can still be closed', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    api.crash = true
+    const { onClose } = open()
+    const fallback = within(screen.getByText('The What step failed to draw').parentElement!)
+    await user.click(fallback.getByRole('button', { name: 'Close' }))
+    expect(onClose).toHaveBeenCalled()
+    vi.mocked(console.error).mockRestore()
   })
 
   it('says what publishing the draft would refuse of it — and applies it all the same', async () => {

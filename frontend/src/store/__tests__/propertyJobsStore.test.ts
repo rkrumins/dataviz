@@ -41,6 +41,21 @@ describe('propertyJobsStore', () => {
     expect(usePropertyJobsStore.getState().jobs.map((j) => j.jobId)).not.toContain('live')
   })
 
+  it('forgets a job it lost track of a week after losing it', async () => {
+    const day = 24 * 60 * 60 * 1000
+    const lostAgo = (ms: number) => ({ at: new Date(Date.now() - ms).toISOString(), message: 'Failed to fetch' })
+    localStorage.setItem('property-jobs:v1', JSON.stringify([
+      tracked('old', { lost: lostAgo(8 * day) }), tracked('recent', { lost: lostAgo(day) }), tracked('live'),
+    ]))
+    const { usePropertyJobsStore } = await import('../propertyJobsStore')
+    expect(usePropertyJobsStore.getState().jobs.map((j) => j.jobId)).toEqual(['recent', 'live'])
+    // A lost one is dismissed like an ended one; checked again, it is followed once more.
+    usePropertyJobsStore.getState().checkAgain(['recent'])
+    expect(usePropertyJobsStore.getState().jobs[0]!.lost).toMatchObject({ checking: true })
+    usePropertyJobsStore.getState().dismiss('recent')
+    expect(usePropertyJobsStore.getState().jobs.map((j) => j.jobId)).toEqual(['live'])
+  })
+
   it('reads a broken stored list as empty', async () => {
     localStorage.setItem('property-jobs:v1', '{not json')
     const { usePropertyJobsStore } = await import('../propertyJobsStore')

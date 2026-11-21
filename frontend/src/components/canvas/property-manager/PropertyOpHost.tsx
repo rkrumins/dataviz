@@ -16,7 +16,7 @@ import type { LayerOption } from './op/WhereStep'
 
 const NO_LAYERS: readonly LayerOption[] = []
 
-export function PropertyOpHost({ viewId, graphWrite, blocked, knownEntityTypes, layers = NO_LAYERS }: {
+export function PropertyOpHost({ viewId, graphWrite, blocked, knownEntityTypes, layers = NO_LAYERS, onOpenManager }: {
   viewId: string
   /** The draft a change is written to; null where none can be. */
   graphWrite: GraphWrite | null
@@ -25,6 +25,8 @@ export function PropertyOpHost({ viewId, graphWrite, blocked, knownEntityTypes, 
   knownEntityTypes: string[]
   /** The view's layers, where the canvas places entities in them. */
   layers?: readonly LayerOption[]
+  /** Open Property Manager, where the draft's changes are followed. */
+  onOpenManager?: () => void
 }) {
   const seq = usePropertyJobsStore((s) => s.requestSeq)
   // The requests this host answers: those made since it mounted.
@@ -51,6 +53,7 @@ export function PropertyOpHost({ viewId, graphWrite, blocked, knownEntityTypes, 
       layers={layers}
       selectionIds={selectionIds.filter((id) => !id.startsWith('logical:'))}
       onClose={() => usePropertyJobsStore.getState().consumeRequest()}
+      onOpenManager={onOpenManager}
     />
   )
 }

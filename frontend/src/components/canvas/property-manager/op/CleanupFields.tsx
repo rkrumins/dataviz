@@ -15,8 +15,9 @@
  * the server's reading of every entity is the one applied.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { ArrowRight, Info } from 'lucide-react'
+import { ArrowRight, Info, RotateCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/Button'
 import { Segmented } from '@/components/ui/Segmented'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { DrawerScrollContext } from '@/components/panels/shell/drawerScroll'
@@ -26,7 +27,7 @@ import type { SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
 import { cleanValue, mergeMap, similarGroups, type SimilarGroup } from './cleanup'
 import { VALUE_KIND_LABEL, type OpDraft } from './opModel'
 import { FIELD, LABEL } from './styles'
-import { useAllValues } from './useAllValues'
+import { useAllValues, type AllValues } from './useAllValues'
 
 /** Rows a preview shows of each list. */
 const SHOWN = 6
@@ -70,7 +71,7 @@ function ReplaceFields({ op, onChange, known }: { op: OpDraft; onChange: (p: Par
         <Toggle label="Whole value only" checked={!!op.wholeValue} onChange={(wholeValue) => onChange({ wholeValue })}
           detail="Replace a value only when it is all of it" />
       </div>
-      {op.find ? <Preview op={op} values={known?.values ?? []} distinct={known?.distinct} />
+      {op.find ? <Preview op={op} values={known?.values ?? []} distinct={known?.distinct} unlisted={unlisted(known)} />
         : <Hint>Type what to find to see what it changes in the values this view holds.</Hint>}
       <Hint>Only text is changed — in a list, each text value. A value that ends up reading as a date is stored the way dates are (YYYY-MM-DD).</Hint>
     </div>
@@ -111,7 +112,7 @@ function NormalizeFields({ op, onChange, known }: { op: OpDraft; onChange: (p: P
           ]}
         />
       </div>
-      <Preview op={op} values={values} distinct={known?.distinct} />
+      <Preview op={op} values={values} distinct={known?.distinct} unlisted={unlisted(known)} />
       {merged.length > 0 && (
         <Hint tone="warning">
           {merged.length === 1 ? 'Two or more values become one' : `${merged.length} sets of values become one each`}:{' '}
@@ -171,6 +172,7 @@ function MergeFields({ op, onChange, known, viewId }: {
   const entities = map.reduce((n, m) => n + (held.get(key({ value: m.from, kind: m.fromKind ?? '' })) ?? 0), 0)
   return (
     <div className="space-y-3">
+      <ReadFailed all={all} listed={values.length} />
       {groups.length === 0 ? (
         <Hint>
           None of its {values.length.toLocaleString()} values differ only in case or in spaces around them. To merge other values,
@@ -283,6 +285,7 @@ function ConvertFields({ op, onChange, known, viewId }: {
   }, [values, fails])
   return (
     <div className="space-y-3">
+      <ReadFailed all={all} listed={values.length} />
       {kinds.length > 0 && (
         <p className="text-[11.5px] text-ink-secondary">
           Stored as {kinds.map(([kind, n], i) => (
@@ -305,7 +308,7 @@ function ConvertFields({ op, onChange, known, viewId }: {
       </div>
       {op.toKind && (
         <>
-          <Preview op={{ ...op, onFail: 'skip' }} values={converts} distinct={known?.distinct} title="Converts" />
+          <Preview op={{ ...op, onFail: 'skip' }} values={converts} distinct={known?.distinct} unlisted={unlisted(known)} title="Converts" />
           {fails.length > 0 ? (
             <fieldset className="rounded-lg border border-amber-500/30 bg-amber-500/[0.06] p-2.5">
               <legend className="px-1 text-[11px] text-amber-700 dark:text-amber-300">
@@ -340,12 +343,37 @@ function ConvertFields({ op, onChange, known, viewId }: {
 }
 
 // ── Shared ─────────────────────────────────────────────────────────────────────
+/** The catalog counts the property's values but lists none: it holds too many to list. */
+const unlisted = (known: SearchCatalogProperty | null) => !!known && !known.distinctExact && known.values.length === 0
+
+/** Every value it holds couldn't be read: said, with the values shown instead, and a retry. */
+function ReadFailed({ all, listed }: { all: AllValues; listed: number }) {
+  if (!all.error) return null
+  return (
+    <div role="alert" className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-500/[0.06] p-2.5 text-[11.5px] leading-snug text-amber-800 dark:text-amber-200">
+      <Info className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0 flex-1">
+        Couldn’t read every value it holds: {all.error}.{' '}
+        {listed === 0 ? 'None are shown.' : listed === 1 ? 'Only the one most held is shown.' : `Only the ${listed.toLocaleString()} most held are shown.`}
+      </span>
+      <Button size="sm" variant="ghost" leftIcon={RotateCw} className="-my-1 h-6 shrink-0 px-2 text-2xs" onClick={all.retry}>Retry</Button>
+    </div>
+  )
+}
+
 /** Before → after for the values listed that the clean-up changes, the most held first. */
-function Preview({ op, values, distinct, title = 'Changes' }: {
-  op: OpDraft; values: readonly SearchCatalogValue[]; distinct?: number; title?: string
+function Preview({ op, values, distinct, unlisted: tooMany = false, title = 'Changes' }: {
+  op: OpDraft; values: readonly SearchCatalogValue[]; distinct?: number
+  /** It holds more values than the catalog lists. */
+  unlisted?: boolean
+  title?: string
 }) {
   const changed = values.map((v) => ({ v, out: cleanValue(op, v.value, v.kind) })).filter((r) => r.out.changed)
-  if (values.length === 0) return <Hint>This view’s entities hold none of its values yet, so there is nothing to preview.</Hint>
+  if (values.length === 0) {
+    return tooMany
+      ? <Hint>It holds more than {(distinct ?? 0).toLocaleString()} values — too many to preview here. The change still reaches every entity holding one.</Hint>
+      : <Hint>This view’s entities hold none of its values yet, so there is nothing to preview.</Hint>
+  }
   const entities = changed.reduce((n, r) => n + r.v.count, 0)
   const of = distinct !== undefined && distinct > values.length ? ` of the ${values.length.toLocaleString()} most held` : ''
   return (

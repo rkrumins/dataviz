@@ -1833,6 +1833,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       <PropertyOpHost
         viewId={activeView?.id ?? ''}
         graphWrite={propertyGraphWrite}
+        onOpenManager={() => setPropertyManagerOpen(true)}
         knownEntityTypes={schemaEntityTypes.map((et) => et.id)}
       />
 

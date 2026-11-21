@@ -24,7 +24,7 @@ export type { Impact } from './opModel'
 
 export function ReviewStep({
   op, preset, scopeMode, counts, impact, exact, preview, previewLoading, previewError = null, onRetry, sample, sampleLoading, stagedCount,
-  reason = '', onReason, edges = false,
+  reason = '', onReason, edges = false, onFollow, onChangeTarget,
 }: {
   op: OpDraft
   preset: TargetPreset
@@ -47,6 +47,10 @@ export function ReviewStep({
   onReason?: (reason: string) => void
   /** It changes relationships, not entities. */
   edges?: boolean
+  /** Follow the change already running on the draft, in Property Manager. */
+  onFollow?: (jobId: string) => void
+  /** Go back and choose another target. */
+  onChangeTarget?: () => void
 }) {
   const budget = preview?.nameBudget
   const noun = edges ? 'relationship' : 'entity'
@@ -134,13 +138,22 @@ export function ReviewStep({
           Couldn’t check it can be applied: {previewError}
         </Notice>
       )}
-      {preview?.refusal && <Notice tone="danger" icon={Ban}>{preview.refusal.message}</Notice>}
+      {preview?.refusal && (
+        <Notice tone="danger" icon={Ban} action={preview.refusal.code === 'too_many_ids' && onChangeTarget
+          ? <NoticeButton onClick={onChangeTarget}>Choose another target</NoticeButton> : undefined}>
+          {preview.refusal.message}
+        </Notice>
+      )}
       {derived > 0 && (
         <Notice tone="neutral" icon={Info}>
           {derived.toLocaleString()} of them {derived === 1 ? 'is a roll-up' : 'are roll-ups'} — a summary the aggregation computes — and {derived === 1 ? 'is' : 'are'} left as {derived === 1 ? 'it is' : 'they are'}.
         </Notice>
       )}
-      {preview?.activeJobId && <Notice tone="danger" icon={Ban}>Another change is still being applied to this draft. Wait for it to finish, then apply this one.</Notice>}
+      {preview?.activeJobId && (
+        <Notice tone="danger" icon={Ban} action={onFollow && <NoticeButton onClick={() => onFollow(preview.activeJobId!)}>Follow it</NoticeButton>}>
+          Another change is still being applied to this draft. Wait for it to finish, then apply this one.
+        </Notice>
+      )}
       {/* What publishing would refuse (the entity types' fields): said, never a block. */}
       {preview?.warnings?.map((w) => (
         <Notice key={`${w.code}:${w.entityType}:${w.field}`} tone="warning" icon={AlertTriangle}>{w.message}</Notice>
@@ -234,3 +247,6 @@ function RetryButton({ onClick }: { onClick: () => void }) {
   return <Button size="sm" variant="ghost" leftIcon={RotateCw} className="-my-1 h-6 shrink-0 px-2 text-2xs" onClick={onClick}>Try again</Button>
 }
 
+function NoticeButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+  return <Button size="sm" variant="ghost" className="-my-1 h-6 shrink-0 px-2 text-2xs" onClick={onClick}>{children}</Button>
+}

@@ -1,18 +1,22 @@
 /**
  * CleanupFields — a merge of near-duplicate values at scale: each click sends one change, and
- * re-renders the list once; a thousand values draw only the groups in view.
+ * re-renders the list once; a thousand values draw only the groups in view. A failed read of every
+ * value says so, with a retry, and a property with too many values to list says it can't be
+ * previewed rather than that it holds none.
  */
 import { Profiler, useState } from 'react'
 import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { SearchCatalogValue } from '@/types/search'
+import type { SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
 import type { OpDraft } from '../opModel'
 
 let allValues: SearchCatalogValue[] | null = null
+let readError: string | null = null
+const retry = vi.fn()
 vi.mock('../useAllValues', () => ({
-  useAllValues: () => ({ values: allValues, loading: false, error: null }),
+  useAllValues: () => ({ values: allValues, loading: false, error: readError, retry }),
 }))
 
 import { CleanupFields } from '../CleanupFields'
@@ -37,7 +41,16 @@ function Harness({ onChange, onRender }: { onChange: (patch: Partial<OpDraft>) =
   )
 }
 
-beforeEach(() => { allValues = null })
+const property = (over: Partial<SearchCatalogProperty> & { key: string }): SearchCatalogProperty => ({
+  count: 0, distinct: 0, distinctExact: true, byEntityType: {}, kinds: { String: 1 }, values: [], residual: 0, ...over,
+})
+const draft = (patch: Partial<OpDraft>): OpDraft => ({ kind: 'mapValues', key: 'dept', to: '', value: '', onConflict: 'skip', ...patch })
+
+beforeEach(() => {
+  allValues = null
+  readError = null
+  retry.mockReset()
+})
 
 describe('CleanupFields — merging values', () => {
   it('sends one change per click, and draws the list once for it', async () => {
@@ -83,5 +96,32 @@ describe('CleanupFields — merging values', () => {
     } finally {
       Object.defineProperty(HTMLElement.prototype, 'offsetHeight', offsetHeight)
     }
+  })
+})
+
+describe('CleanupFields — when values can\'t be read or listed', () => {
+  it('says every value couldn\'t be read, shows the ones listed instead, and retries', async () => {
+    const user = userEvent.setup()
+    readError = 'timed out'
+    render(<CleanupFields op={draft({})} onChange={vi.fn()} viewId="v1"
+      known={property({ key: 'dept', count: 60, distinct: 3, values: departments(1) })} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('Couldn’t read every value it holds: timed out. Only the 3 most held are shown.')
+    expect(within(screen.getByRole('list', { name: 'Values to merge' })).getAllByRole('checkbox')).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it('a convert says so too', () => {
+    readError = 'timed out'
+    render(<CleanupFields op={draft({ kind: 'convert', key: 'rank', toKind: 'Integer' })} onChange={vi.fn()} viewId="v1"
+      known={property({ key: 'rank', count: 5, distinct: 1, values: [{ value: '42', kind: 'String', count: 5 }] })} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('Only the one most held is shown.')
+  })
+
+  it('a property holding more values than are listed is too large to preview — not one holding none', () => {
+    render(<CleanupFields op={draft({ kind: 'normalize', key: 'code' })} onChange={vi.fn()} viewId="v1"
+      known={property({ key: 'code', count: 9000, distinct: 5000, distinctExact: false })} />)
+    expect(screen.getByText(/It holds more than 5,000 values — too many to preview here/)).toBeInTheDocument()
+    expect(screen.queryByText(/hold none of its values/)).toBeNull()
   })
 })

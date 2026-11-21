@@ -730,6 +730,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       <PropertyOpHost
         viewId={activeView?.id ?? ''}
         graphWrite={propertyGraphWrite}
+        onOpenManager={() => setPropertyManagerOpen(true)}
         knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
       />
 

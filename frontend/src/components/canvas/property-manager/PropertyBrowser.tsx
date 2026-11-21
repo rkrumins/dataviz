@@ -37,6 +37,7 @@ import { cn } from '@/lib/utils'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
+import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
 import { useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
@@ -334,7 +335,11 @@ export function PropertyBrowser({
                 </div>
             )}
 
-            {promoting && <PromoteFieldDialog property={promoting} onClose={() => setPromoting(null)} />}
+            {promoting && (
+                <PanelErrorBoundary resetKeys={[promoting.key]} onClose={() => setPromoting(null)}>
+                    <PromoteFieldDialog property={promoting} onClose={() => setPromoting(null)} />
+                </PanelErrorBoundary>
+            )}
 
         </div>
     )

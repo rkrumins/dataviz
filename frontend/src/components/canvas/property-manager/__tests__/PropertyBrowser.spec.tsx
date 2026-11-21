@@ -394,6 +394,38 @@ describe('PropertyBrowser — the draft\'s bulk changes', () => {
         expect(panel.getByRole('button', { name: 'Which, and why' })).toBeInTheDocument()
     })
 
+    it('says how many a search no longer matched on the draft, and why its matches were judged as published', () => {
+        usePropertyJobsStore.getState().track(tracked('j6', {
+            op: { kind: 'set', key: 'tier', value: 'gold' },
+            job: { jobId: 'j6', status: 'completed', summary: {
+                changed: 40, unchanged: 0, conflicts: 0, noLongerMatches: 3,
+                refused: { count: 3, byReason: { no_longer_matches: 3 }, examples: [] },
+                recheck: { exact: false, note: 'Your draft changed more than 200,000 entities, so its matches were judged as published.' },
+            } },
+        }))
+        renderBrowser()
+        const panel = within(screen.getByRole('region', { name: 'Changes on this draft' }))
+        expect(panel.getByText(/40/).closest('p')!.textContent)
+            .toMatch(/40 changed · 3 no longer matched the search on your draft — left as they are/)
+        expect(panel.getByText('Your draft changed more than 200,000 entities, so its matches were judged as published.'))
+            .toBeInTheDocument()
+    })
+
+    it('says when it lost track of one, and offers to check again — or to dismiss it', async () => {
+        const user = userEvent.setup()
+        usePropertyJobsStore.getState().track(tracked('j4', { lost: { at: '2026-11-21T00:00:00Z', message: 'Failed to fetch' } }))
+        usePropertyJobsStore.getState().track(tracked('j5', { lost: { at: '2026-11-21T00:00:00Z', message: 'the server no longer has it', gone: true } }))
+        renderBrowser()
+        const panel = within(screen.getByRole('region', { name: 'Changes on this draft' }))
+        expect(panel.getByText(/Lost track of this change: Failed to fetch/)).toBeInTheDocument()
+        expect(panel.getByText(/can’t be found on the server any more/)).toBeInTheDocument()
+        expect(panel.queryByRole('button', { name: 'Stop' })).toBeNull()
+        await user.click(panel.getByRole('button', { name: 'Check again' }))
+        expect(usePropertyJobsStore.getState().jobs.find((j) => j.jobId === 'j4')!.lost?.checking).toBe(true)
+        await user.click(panel.getAllByRole('button', { name: 'Dismiss' })[0]!)
+        expect(usePropertyJobsStore.getState().jobs.map((j) => j.jobId)).toEqual(['j4'])
+    })
+
     it('offers to compare several entities selected on the canvas', async () => {
         useCanvasStore.setState({ selectedNodeIds: ['a', 'b', 'logical:g'] } as never)
         renderBrowser()

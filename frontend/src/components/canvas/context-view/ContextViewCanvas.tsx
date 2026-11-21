@@ -8401,6 +8401,7 @@ export function ContextViewCanvas({
         graphWrite={propertyGraphWrite}
         knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
         layers={propertyLayers}
+        onOpenManager={() => setPropertyManagerOpen(true)}
       />
       {/* Orphaned entities — independent like the Property Manager; fetches nothing while closed. */}
       <OrphansDrawer
