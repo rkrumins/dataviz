@@ -284,40 +284,40 @@ async def test_a_query_id_another_view_holds_is_refused(test_client: AsyncClient
     assert resp.status_code == 409
 
 
-# ── bulk recipes ─────────────────────────────────────────────────────
+# ── reusable changes ─────────────────────────────────────────────────
 
-def _recipe(name: str, target: dict | None = None, **over) -> dict:
+def _change(name: str, target: dict | None = None, **over) -> dict:
     return {"name": name, "op": {"kind": "set", "key": "owner", "value": "data-team"},
             "target": target or {"kind": "hasKey", "key": "owner"}, **over}
 
 
-async def test_recipes_are_kept_named_ordered_and_removed(test_client: AsyncClient):
+async def test_reusable_changes_are_kept_named_ordered_and_removed(test_client: AsyncClient):
     view_id = await _view(test_client)
-    base = f"/api/v1/views/{view_id}/library/recipes"
-    first = await test_client.put(f"{base}/b1", json=_recipe("Own them", description="Every owner"))
+    base = f"/api/v1/views/{view_id}/library/reusable-changes"
+    first = await test_client.put(f"{base}/b1", json=_change("Own them", description="Every owner"))
     assert first.status_code == 200, first.text
     body = first.json()
     assert body["createdBy"] and body["createdAt"] and body["description"] == "Every owner"
     # The change as a job keeps it, the target as sent with its scope.
     assert body["op"] == {"kind": "set", "key": "owner", "value": "data-team", "onConflict": "skip"}
     assert body["target"] == {"kind": "hasKey", "key": "owner", "scopeMode": "view"}
-    await test_client.put(f"{base}/b2", json=_recipe("Tidy", {"kind": "layer", "layerName": "Gold"},
+    await test_client.put(f"{base}/b2", json=_change("Tidy", {"kind": "layer", "layerName": "Gold"},
                                                     op={"kind": "normalize", "key": "name"}))
 
-    renamed = await test_client.put(f"{base}/b1", json=_recipe("Own every one"))
+    renamed = await test_client.put(f"{base}/b1", json=_change("Own every one"))
     assert renamed.json()["createdAt"] == first.json()["createdAt"]
-    assert (await test_client.put(f"{base}/b3", json=_recipe("tidy"))).status_code == 409
+    assert (await test_client.put(f"{base}/b3", json=_change("tidy"))).status_code == 409
 
     ordered = await test_client.put(base, json={"ids": ["b2", "b1"]})
     assert _names(ordered.json()) == ["Tidy", "Own every one"]
     assert (await test_client.delete(f"{base}/b2")).status_code == 204
     library = await _library(test_client, view_id)
-    assert _names(library["bulkRecipes"]) == ["Own every one"]
+    assert _names(library["reusableChanges"]) == ["Own every one"]
 
 
-async def test_recipes_keep_each_kind_of_target_but_ids(test_client: AsyncClient):
+async def test_reusable_changes_keep_each_kind_of_target_but_ids(test_client: AsyncClient):
     view_id = await _view(test_client)
-    base = f"/api/v1/views/{view_id}/library/recipes"
+    base = f"/api/v1/views/{view_id}/library/reusable-changes"
     connections = {"kind": "edges", "edgeTypes": ["FLOWS_TO"]}
     for i, target in enumerate([
         {"kind": "view", "scopeMode": "data_source"},
@@ -325,74 +325,74 @@ async def test_recipes_keep_each_kind_of_target_but_ids(test_client: AsyncClient
         {"kind": "custom", "predicate": {"kind": "entityType", "values": ["Table"]}, "scopeMode": "data_source"},
         {"kind": "connections", "predicate": connections, "scopeMode": "view"},
     ]):
-        resp = await test_client.put(f"{base}/t{i}", json=_recipe(f"R{i}", target))
+        resp = await test_client.put(f"{base}/t{i}", json=_change(f"R{i}", target))
         assert resp.status_code == 200, resp.text
         assert resp.json()["target"] == target
 
 
-async def test_a_recipe_never_keeps_ids(test_client: AsyncClient):
+async def test_a_reusable_change_never_keeps_ids(test_client: AsyncClient):
     view_id = await _view(test_client)
-    base = f"/api/v1/views/{view_id}/library/recipes"
+    base = f"/api/v1/views/{view_id}/library/reusable-changes"
     for target in ({"kind": "selection", "ids": ["urn:a"]},
                    {"kind": "relationships", "ids": ["e1"]},
                    {"kind": "children", "urns": ["urn:a"], "label": "Orders"},
                    {"kind": "view", "ids": ["urn:a"]},
                    {"kind": "view", "edgeIds": ["e1"]}):
-        resp = await test_client.put(f"{base}/x", json=_recipe("Picked", target))
+        resp = await test_client.put(f"{base}/x", json=_change("Picked", target))
         assert resp.status_code == 422, target
         assert "picked by id" in resp.text
-    assert (await _library(test_client, view_id))["bulkRecipes"] == []
+    assert (await _library(test_client, view_id))["reusableChanges"] == []
 
 
-async def test_a_recipes_target_and_change_are_checked(test_client: AsyncClient):
+async def test_a_reusable_changes_target_and_operation_are_checked(test_client: AsyncClient):
     view_id = await _view(test_client)
-    base = f"/api/v1/views/{view_id}/library/recipes"
+    base = f"/api/v1/views/{view_id}/library/reusable-changes"
     refused = [
-        _recipe("No key", {"kind": "hasKey"}),
-        _recipe("Stray predicate", {"kind": "view", "predicate": {"kind": "all"}}),
-        _recipe("Layer everywhere", {"kind": "layer", "layerName": "Gold", "scopeMode": "data_source"}),
-        _recipe("Visible", {"kind": "view", "scopeMode": "visible"}),
-        _recipe("Nameless", {"kind": "search", "predicate": {"kind": "nonsense"}}),
-        _recipe("No value", op={"kind": "set", "key": "owner"}),
+        _change("No key", {"kind": "hasKey"}),
+        _change("Stray predicate", {"kind": "view", "predicate": {"kind": "all"}}),
+        _change("Layer everywhere", {"kind": "layer", "layerName": "Gold", "scopeMode": "data_source"}),
+        _change("Visible", {"kind": "view", "scopeMode": "visible"}),
+        _change("Nameless", {"kind": "search", "predicate": {"kind": "nonsense"}}),
+        _change("No value", op={"kind": "set", "key": "owner"}),
     ]
     for body in refused:
         assert (await test_client.put(f"{base}/x", json=body)).status_code == 422, body["name"]
     # A predicate is checked as a saved query's is, and says what is wrong.
-    bad = await test_client.put(f"{base}/x", json=_recipe("Bad", {
+    bad = await test_client.put(f"{base}/x", json=_change("Bad", {
         "kind": "search", "predicate": {"kind": "property", "key": "n", "op": "gt", "value": "x",
                                         "valueType": "number"}}))
     assert bad.status_code == 422 and isinstance(bad.json()["detail"], str)
     # A Connections search is a connections target, and only it is.
     edges = {"kind": "edges", "edgeTypes": ["FLOWS_TO"]}
-    wrong = await test_client.put(f"{base}/x", json=_recipe("Edges", {"kind": "search", "predicate": edges}))
+    wrong = await test_client.put(f"{base}/x", json=_change("Edges", {"kind": "search", "predicate": edges}))
     assert wrong.status_code == 422 and "connections target" in wrong.json()["detail"]
-    nodes = await test_client.put(f"{base}/x", json=_recipe("Nodes", {
+    nodes = await test_client.put(f"{base}/x", json=_change("Nodes", {
         "kind": "connections", "predicate": {"kind": "hasProperty", "key": "pii"}}))
     assert nodes.status_code == 422 and "Connections search" in nodes.json()["detail"]
-    assert (await _library(test_client, view_id))["bulkRecipes"] == []
+    assert (await _library(test_client, view_id))["reusableChanges"] == []
 
 
-async def test_a_view_holds_a_bounded_number_of_recipes(test_client: AsyncClient, monkeypatch):
-    monkeypatch.setattr(view_library, "LIBRARY_RECIPES_MAX", 2)
+async def test_a_view_holds_a_bounded_number_of_reusable_changes(test_client: AsyncClient, monkeypatch):
+    monkeypatch.setattr(view_library, "LIBRARY_REUSABLE_CHANGES_MAX", 2)
     view_id = await _view(test_client)
-    base = f"/api/v1/views/{view_id}/library/recipes"
-    await test_client.put(f"{base}/a", json=_recipe("A"))
-    await test_client.put(f"{base}/b", json=_recipe("B"))
-    assert (await test_client.put(f"{base}/c", json=_recipe("C"))).status_code == 422
+    base = f"/api/v1/views/{view_id}/library/reusable-changes"
+    await test_client.put(f"{base}/a", json=_change("A"))
+    await test_client.put(f"{base}/b", json=_change("B"))
+    assert (await test_client.put(f"{base}/c", json=_change("C"))).status_code == 422
     # Replacing one is not adding one.
-    assert (await test_client.put(f"{base}/a", json=_recipe("A2"))).status_code == 200
+    assert (await test_client.put(f"{base}/a", json=_change("A2"))).status_code == 200
 
 
-async def test_recipes_belong_to_the_view_on_every_branch(test_client: AsyncClient, any_open_draft):
+async def test_reusable_changes_belong_to_the_view_on_every_branch(test_client: AsyncClient, any_open_draft):
     view_id = await _view(test_client)
-    await test_client.put(f"/api/v1/views/{view_id}/library/recipes/b1", json=_recipe("Own them"))
-    assert _names((await _library(test_client, view_id, "br_any"))["bulkRecipes"]) == ["Own them"]
+    await test_client.put(f"/api/v1/views/{view_id}/library/reusable-changes/b1", json=_change("Own them"))
+    assert _names((await _library(test_client, view_id, "br_any"))["reusableChanges"]) == ["Own them"]
 
 
-async def test_a_recipe_id_another_view_holds_is_refused(test_client: AsyncClient):
+async def test_a_reusable_change_id_another_view_holds_is_refused(test_client: AsyncClient):
     one, two = await _view(test_client, "One"), await _view(test_client, "Two")
-    await test_client.put(f"/api/v1/views/{one}/library/recipes/b1", json=_recipe("Own them"))
-    resp = await test_client.put(f"/api/v1/views/{two}/library/recipes/b1", json=_recipe("Own them"))
+    await test_client.put(f"/api/v1/views/{one}/library/reusable-changes/b1", json=_change("Own them"))
+    resp = await test_client.put(f"/api/v1/views/{two}/library/reusable-changes/b1", json=_change("Own them"))
     assert resp.status_code == 409
 
 
@@ -562,11 +562,11 @@ async def test_a_reader_sees_the_library_but_cannot_change_it(test_client: Async
         query = await test_client.put(f"/api/v1/views/{view_id}/library/queries/q1",
                                       json=_query("Tables"))
         assert query.status_code == 403
-        recipes = f"/api/v1/views/{view_id}/library/recipes"
-        assert (await test_client.put(f"{recipes}/b1", json=_recipe("Own them"))).status_code == 403
-        assert (await test_client.delete(f"{recipes}/b1")).status_code == 403
-        assert (await test_client.put(recipes, json={"ids": ["b1"]})).status_code == 403
-        assert (await test_client.get(f"{recipes}/from-other-views")).status_code == 200
+        changes = f"/api/v1/views/{view_id}/library/reusable-changes"
+        assert (await test_client.put(f"{changes}/b1", json=_change("Own them"))).status_code == 403
+        assert (await test_client.delete(f"{changes}/b1")).status_code == 403
+        assert (await test_client.put(changes, json={"ids": ["b1"]})).status_code == 403
+        assert (await test_client.get(f"{changes}/from-other-views")).status_code == 200
         assert (await test_client.get(f"/api/v1/views/{view_id}/library/export")).status_code == 200
         imported = await test_client.post(f"/api/v1/views/{view_id}/library/import",
                                           json={"format": "synodic.view-library", "version": 1})
@@ -653,30 +653,30 @@ async def test_a_stranger_finds_no_view_to_list_from(test_client: AsyncClient, d
     assert resp.status_code == 404
 
 
-async def test_recipes_from_other_views_are_the_ones_the_caller_may_open(test_client: AsyncClient, db_session):
-    from backend.app.db.models import ViewBulkRecipeORM
+async def test_reusable_changes_from_other_views_are_the_ones_the_caller_may_open(test_client: AsyncClient, db_session):
+    from backend.app.db.models import ViewReusableChangeORM
 
     await _views_around(db_session)
-    recipe = '{"op": {"kind": "remove", "key": "tmp"}, "target": {"kind": "view", "scopeMode": "view"}}'
+    change = '{"op": {"kind": "remove", "key": "tmp"}, "target": {"kind": "view", "scopeMode": "view"}}'
     for vid in ("view_team", "view_zeta", "view_alpha", "view_secret", "view_gone", "view_far"):
-        db_session.add(ViewBulkRecipeORM(id=f"b_{vid}", view_id=vid, position=0,
-                                         name=f"{vid} recipe", recipe=recipe))
+        db_session.add(ViewReusableChangeORM(id=f"b_{vid}", view_id=vid, position=0,
+                                             name=f"{vid} change", change=change))
     await db_session.commit()
     reader = PermissionClaims(sid="s_reader", ws_perms={WS: ("workspace:view:read",)})
     with _as(_user("usr_reader"), reader):
-        resp = await test_client.get("/api/v1/views/view_team/library/recipes/from-other-views")
+        resp = await test_client.get("/api/v1/views/view_team/library/reusable-changes/from-other-views")
         # A reader sees the view's own, and can run them.
-        assert _names((await _library(test_client, "view_team"))["bulkRecipes"]) == ["view_team recipe"]
+        assert _names((await _library(test_client, "view_team"))["reusableChanges"]) == ["view_team change"]
     assert resp.status_code == 200, resp.text
     found = resp.json()
     # Over this view's data source first, then by name. Not this view's own, a private view of
     # someone else's, a deleted view, or another workspace's.
-    assert [(r["viewName"], r["recipe"]["name"], r["sameSource"]) for r in found] == [
-        ("Zeta", "view_zeta recipe", True), ("Alpha", "view_alpha recipe", False),
+    assert [(r["viewName"], r["change"]["name"], r["sameSource"]) for r in found] == [
+        ("Zeta", "view_zeta change", True), ("Alpha", "view_alpha change", False),
     ]
     assert found[0]["viewId"] == "view_zeta"
-    assert found[0]["recipe"]["op"] == {"kind": "remove", "key": "tmp"}
-    assert found[0]["recipe"]["target"] == {"kind": "view", "scopeMode": "view"}
+    assert found[0]["change"]["op"] == {"kind": "remove", "key": "tmp"}
+    assert found[0]["change"]["target"] == {"kind": "view", "scopeMode": "view"}
     with _as(_user("usr_stranger"), PermissionClaims(sid="s_stranger")):
         assert (await test_client.get(
-            "/api/v1/views/view_team/library/recipes/from-other-views")).status_code == 404
+            "/api/v1/views/view_team/library/reusable-changes/from-other-views")).status_code == 404

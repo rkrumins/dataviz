@@ -149,6 +149,17 @@ describe('PropertyOpDialog', () => {
     expect(next()).toBeEnabled()
   })
 
+  it('a change to the whole view across the data source is listed as the data source', async () => {
+    const user = userEvent.setup()
+    counts = exact(300, 100)
+    open({ op: { kind: 'fillEmpty', key: 'owner', value: 'ana' }, target: { kind: 'view' }, scopeMode: 'data_source' })
+    await user.click(screen.getByRole('checkbox', { name: 'I mean the whole data source' }))
+    await user.click(next())
+    await user.click(screen.getByRole('button', { name: /^Apply/ }))
+    expect(usePropertyJobsStore.getState().jobs).toMatchObject([{ targetLabel: 'every entity in the data source' }])
+    expect(api.create.mock.calls[0][6]).toContain('on every entity in the data source')
+  })
+
   it('asks for the property name to be typed before removing it from a thousand or more', async () => {
     const user = userEvent.setup()
     counts = exact(5000, 1800)

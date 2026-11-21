@@ -14,7 +14,7 @@
  * the one guided dialog (``requestOp``), applied to the draft by a job on the
  * server; the draft's jobs are listed with how far each has got and what it
  * did, and their properties are marked in the list. Changes kept to run again
- * are listed under Recipes (``RecipesPanel``). Changes are offered only
+ * are listed under Reusable changes (``ReusableChangesPanel``). Changes are offered only
  * where an entity edit could be kept, in a draft (``useEntityEditing``);
  * elsewhere they are disabled and say why. With several entities selected on
  * the canvas, it offers to compare and edit them in the entity drawer.
@@ -56,7 +56,7 @@ import { similarGroups } from './op/cleanup'
 import { PropertyInsightsHeader } from './PropertyInsightsHeader'
 import { PropertyJobsPanel } from './PropertyJobsPanel'
 import { PromoteFieldDialog } from './PromoteFieldDialog'
-import { RecipesPanel } from './RecipesPanel'
+import { ReusableChangesPanel } from './ReusableChangesPanel'
 import { RankedValueBars, UsageGauge } from './PropertyInsightCharts'
 import { EntityTypeChips, SampleValueChips, TypeTile } from './PropertyValueChips'
 import { KIND_LABEL, storedType } from './propertyValueTypes'
@@ -191,7 +191,7 @@ export function PropertyBrowser({
         return (
             <div className="flex flex-col gap-3">
                 <PropertyJobsPanel jobs={jobs} />
-                <RecipesPanel viewId={viewId} />
+                <ReusableChangesPanel viewId={viewId} />
                 <EmptyHero onNew={change({})} blocked={editing.blocked} />
             </div>
         )
@@ -204,7 +204,7 @@ export function PropertyBrowser({
             <PropertyInsightsHeader catalog={catalog} reading={reading} error={error} onRefresh={refresh} />
 
             <PropertyJobsPanel jobs={jobs} />
-            <RecipesPanel viewId={viewId} />
+            <ReusableChangesPanel viewId={viewId} />
 
             {selected >= 2 && (
                 <button

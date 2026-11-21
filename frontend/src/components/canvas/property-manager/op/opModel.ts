@@ -156,6 +156,16 @@ export function targetLabel(preset: TargetPreset): string {
   }
 }
 
+/** The target with the scope it reaches in: the whole view across the whole data source is the data
+ *  source; any other target there says so after its own words. Picked by id, or a layer (always in
+ *  the view), the scope doesn't apply. */
+export function scopedTargetLabel(preset: TargetPreset, scope: ScopeMode): string {
+  if (scope !== 'data_source' || preset.kind === 'selection' || preset.kind === 'relationships' || scopeFixedToView(preset)) {
+    return targetLabel(preset)
+  }
+  return preset.kind === 'view' ? 'every entity in the data source' : `${targetLabel(preset)}, across the whole data source`
+}
+
 export interface OpDraft {
   kind: PropertyOpKind
   key: string
