@@ -665,9 +665,11 @@ function DestinationCards({ value, onChange, ctx, disabled }: {
   disabled: boolean
 }) {
   const canManage = usePermission('workspace:datasource:manage', ctx.wsId)
-  const canPublish = usePermission('workspace:datasource:publish', ctx.wsId)
+  const holdsPublish = usePermission('workspace:datasource:publish', ctx.wsId)
   const reviewOnly = useDataSourceDraftsPolicy(ctx.wsId, ctx.dataSourceId).data?.effective.selfMerge === false
   const access = useActiveDraftAccess(ctx.wsId, ctx.graphId, ctx.viewId, ctx.branchId)
+  // The server's word where it gives one: in the Playground, a graph's maker publishes it.
+  const canPublish = access.canPublish ?? holdsPublish
   const publishBlocked = !canManage || !canPublish ? 'Publishing straight away needs the publish permission'
     : !access.canManage ? 'Only the draft’s owner or a maintainer publishes it directly'
     : reviewOnly ? 'This data source publishes through a review someone else merges'
@@ -738,7 +740,7 @@ function PublishStep({ wsId, graphId, branchId, dataSourceId, viewId, destinatio
   const access = useActiveDraftAccess(wsId, graphId, viewId, branchId)
   const flow = usePublishFlow({
     workspaceId: wsId, graphId, branchId, changeSet, onClose, dataSourceId,
-    canPublishDraft: access.canManage, initialTitle,
+    canPublishDraft: access.canManage, canPublish: access.canPublish, initialTitle,
     changesLoading: summaryQ.isLoading || summaryQ.isFetching,
   })
   // A publish in flight holds the dialog, as a save does.

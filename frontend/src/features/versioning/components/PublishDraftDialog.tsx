@@ -15,7 +15,7 @@ import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { CommitDialog, type CommitDialogProps } from './CommitDialog'
 
 export function PublishDraftDialog({
-  wsId, graphId, branchId, onClose, onLeave, onPublished, canPublishDraft, dataSourceId,
+  wsId, graphId, branchId, onClose, onLeave, onPublished, canPublishDraft, canPublish, dataSourceId,
 }: {
   wsId: string
   graphId: string
@@ -25,6 +25,7 @@ export function PublishDraftDialog({
   onLeave?: CommitDialogProps['onLeave']
   onPublished?: CommitDialogProps['onPublished']
   canPublishDraft?: CommitDialogProps['canPublishDraft']
+  canPublish?: CommitDialogProps['canPublish']
 }) {
   // The dialog says how much the draft changes, so it reads the draft's counts — never the diff,
   // which for a 100,000-change draft was tens of megabytes to show three numbers.
@@ -57,6 +58,7 @@ export function PublishDraftDialog({
       onLeave={onLeave}
       onPublished={onPublished}
       canPublishDraft={canPublishDraft}
+      canPublish={canPublish}
       dataSourceId={dataSourceId}
     />,
     document.body,

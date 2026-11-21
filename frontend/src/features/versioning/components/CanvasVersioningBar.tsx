@@ -596,6 +596,7 @@ export function CanvasVersioningBar({
           changeSet={changeSet}
           onClose={() => setShowPublish(false)}
           canPublishDraft={manageable}
+          canPublish={draftAccess.canPublish}
           dataSourceId={dataSourceId}
         />
       )}

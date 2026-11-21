@@ -77,6 +77,9 @@ export interface BranchAccess {
   canRead: boolean
   canWrite: boolean
   canManage: boolean
+  /** May publish it straight to the live version: the publish permission on the workspace, or — in
+   *  the Playground — having made its graph. Absent from servers that predate it: the permission decides. */
+  canPublish?: boolean
 }
 
 export interface Branch {
