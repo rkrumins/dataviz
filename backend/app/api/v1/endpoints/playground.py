@@ -9,21 +9,26 @@ is decided by ``backend.app.services.playground_policy``.
 
 ``GET /playground/samples`` lists the graphs a member may start from a sample, and how many more
 graphs they may start; ``POST /playground/samples/{sample_id}`` makes one — a blank graph loaded
-with the sample as its first version, and a view on it (``backend.app.services.playground_samples``).
+with the sample as its first version, its views, library, details and an example change waiting
+for review (``backend.app.services.playground_samples``). It is a starter
+graph (``backend.app.services.playground_starter``).
 """
 from __future__ import annotations
 
 import json
 import logging
-from typing import List, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.versioning import (
-    CreateBlankGraphRequest, create_blank_graph, get_versioning_service, project_now,
+    CreateBlankGraphRequest, _live_containment_types, _node_identity_for_meta, _rules_for_meta,
+    create_blank_graph, get_versioning_service, project_now,
 )
 from backend.app.api.v1.endpoints.views import _compute_ontology_digest, authorize_view_create
 from backend.app.api.v1.feature_gate import ensure_view_mode_allowed, require_feature
@@ -31,10 +36,15 @@ from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import OntologyORM, ProviderORM, WorkspaceORM
-from backend.app.db.repositories import binding_repo, user_repo, view_activity_repo, view_repo
-from backend.app.services import playground_policy, playground_samples, workspace_access
+from backend.app.db.models import OntologyORM, ProviderORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM
+from backend.app.db.repositories import (binding_repo, user_repo, view_activity_repo, view_repo,
+                                         view_version_repo)
+from backend.app.services import (playground_policy, playground_samples, playground_starter,
+                                  view_library, workspace_access)
 from backend.app.services.feature_flags import feature_flags
+from backend.app.services.playground_starter import Example, Starter
+from backend.app.services.versioning.import_export.resolve import pointer_id, pointer_seed
+from backend.common.models.view_library import DisplayRule, SavedQueryInput
 from backend.app.services.managed_sources import drop_managed_data_source
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.playground_policy import (
@@ -250,11 +260,20 @@ class SampleCatalogue(BaseModel):
     quota_left: int = Field(alias="quotaLeft")
 
 
-class StartedSample(BaseModel):
+class StartedImport(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     data_source_id: str = Field(alias="dataSourceId")
+    #: The Context View: the one to open.
     view_id: str = Field(alias="viewId")
+    #: Every view it was made with, by kind: ``context``, ``graph`` (and a sample's ``hierarchy``).
+    view_ids: Dict[str, str] = Field(alias="viewIds")
+
+
+class StartedSample(StartedImport):
+    #: The example change waiting for review: a private draft on the Graph view, and its review.
+    draft_id: Optional[str] = Field(None, alias="draftId")
+    review_id: Optional[str] = Field(None, alias="reviewId")
 
 
 async def _members_playground(session: AsyncSession, claims: PermissionClaims) -> WorkspaceORM:
@@ -265,9 +284,25 @@ async def _members_playground(session: AsyncSession, claims: PermissionClaims) -
     if not has_permission(claims, "workspace:datasource:manage", workspace_id=ws.id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={
             "type": "playground_not_member",
-            "message": "Join the Playground to start a graph from a sample.",
+            "message": "Join the Playground to start a graph there.",
         })
     return ws
+
+
+async def _may_start(session: AsyncSession, claims: PermissionClaims, user: User, starter: Starter
+                     ) -> Tuple[str, Optional[str]]:
+    """What would refuse a starter graph, asked before anything is made: membership, the quota and
+    the sandbox provider, making views there, and each layout its views are in. Returns the
+    Playground's id and its sandbox provider (plain values: making a data model may roll the
+    session back, which expires the row)."""
+    ws = await _members_playground(session, claims)
+    ws_id, provider_id = ws.id, settings_of(ws).sandbox_provider_id
+    await playground_policy.assert_blank_graph(session, ws_id, provider_id, user.id)
+    await authorize_view_create(claims, session, workspace_id=ws_id, data_source_id=None,
+                                visibility="workspace")
+    for _key, view_type, _name, _config in playground_starter.views(starter):
+        await ensure_view_mode_allowed(view_type, session)
+    return ws_id, provider_id
 
 
 @router.get("/samples", response_model=SampleCatalogue, response_model_by_alias=True,
@@ -292,6 +327,7 @@ async def list_samples(
              status_code=status.HTTP_201_CREATED, dependencies=_SAMPLE_GATES)
 async def start_sample(
     sample_id: str,
+    request: Request,
     background: BackgroundTasks,
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -299,56 +335,147 @@ async def start_sample(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Start a graph from a sample: a blank graph on the Playground's sandbox provider — one of
-    the person's quota — whose first version is the sample, loaded as a day-0 import, and a view
-    on it, shared with everyone in the Playground. They change it as they would any blank graph.
+    the person's quota — whose first version is the sample, loaded as a day-0 import; a Context
+    View (to open first), a Graph view and a Hierarchy view on it, shared with everyone in the
+    Playground; saved queries and a display rule on the Context View; the data source described,
+    tagged and linked to how the Playground works; and an example change waiting for review — a
+    private draft on the Graph view, with a review that asks nobody. They change it as they would
+    any blank graph, and publish and merge their own changes (``playground_policy``).
 
     The sample is the platform's, not the person's, so it lands on main as the graph's first
     version, as its genesis did; what they change after goes through drafts like any edit.
 
     What would refuse it is asked first, so a refusal leaves nothing behind; a sample that can't
-    be loaded takes its graph and data source with it."""
+    be made takes its graph, data source, views and draft with it."""
     sample = playground_samples.get(sample_id)
     if sample is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="There is no such sample.")
-    ws = await _members_playground(session, claims)
-    # Plain values: making the data model may roll the session back, which expires ``ws``.
-    ws_id, provider_id = ws.id, settings_of(ws).sandbox_provider_id
-    await playground_policy.assert_blank_graph(session, ws_id, provider_id, user.id)
-    await authorize_view_create(claims, session, workspace_id=ws_id, data_source_id=None,
-                                visibility="workspace")
-    await ensure_view_mode_allowed(sample.view_type, session)
+    starter = playground_samples.starter(sample)
+    ws_id, provider_id = await _may_start(session, claims, user, starter)
+    await playground_starter.ensure_ontology(session, starter)
+    return StartedSample(**await _start(request, background, session, svc, user, ws_id, provider_id,
+                                        starter, failure="sample_load_failed", own_ontology=False))
 
-    made = await create_blank_graph(ws_id, CreateBlankGraphRequest(
-        name=sample.title, description=sample.description, provider_id=provider_id,
-        ontology_id=await playground_samples.ensure_ontology(session, sample)), user, svc, session)
+
+async def _start(request: Request, background: BackgroundTasks, session: AsyncSession,
+                 svc: GraphVersioningService, user: User, ws_id: str, provider_id: Optional[str],
+                 starter: Starter, *, failure: str, own_ontology: bool) -> dict:
+    """Make a starter graph on its data model (already made): the blank graph, its first version,
+    its views (each at version 1), the Context View's library, the data source's details and the
+    example change. Returns what the routes answer. Anything that fails takes all of it with it
+    (:func:`_discard`) — with ``own_ontology``, the data model too — and answers 502 ``failure``."""
+    try:
+        made = await create_blank_graph(ws_id, CreateBlankGraphRequest(
+            name=starter.title, description=starter.description, provider_id=provider_id,
+            ontology_id=starter.ontology_id), user, svc, session)
+    except Exception:
+        if own_ontology:
+            await _drop_ontology(session, starter.ontology_id)
+        raise
     ds_id, graph_id = made["data_source_id"], made["graph_id"]
     try:
-        await svc.bulk_ingest(graph_id=graph_id, rows=playground_samples.rows(sample), actor=user.id,
-                              message=f"Started from the {sample.title} sample", standard_ids=True)
-        view = await view_repo.create_view(session, ViewCreateRequest(
-            name=sample.view_name, description=sample.description, workspace_id=ws_id,
-            data_source_id=ds_id, view_type=sample.view_type, config=playground_samples.view_config(sample),
-            visibility="workspace", tags=["sample"],
-        ), ontology_digest=await _compute_ontology_digest(session, ws_id, ds_id), user_id=user.id)
-        await view_activity_repo.record_view_activity(
-            session, view_id=view.id, workspace_id=ws_id, action="created", actor=user.id,
-            summary=f'Created "{view.name}" from the {sample.title} sample',
-        )
+        loaded = await svc.bulk_ingest(graph_id=graph_id, rows=list(starter.rows), actor=user.id,
+                                       message=starter.message, standard_ids=True)
+        if loaded.get("rejected"):
+            raise RuntimeError(f"{len(loaded['rejected'])} rows were refused")
+        digest = await _compute_ontology_digest(session, ws_id, ds_id)
+        view_ids: Dict[str, str] = {}
+        for key, view_type, name, config in playground_starter.views(starter):
+            view = await view_repo.create_view(session, ViewCreateRequest(
+                name=name, description=starter.description, workspace_id=ws_id, data_source_id=ds_id,
+                view_type=view_type, config=config, visibility="workspace",
+                tags=list(starter.tags) or None,
+            ), ontology_digest=digest, user_id=user.id)
+            view_ids[key] = view.id
+            await view_activity_repo.record_view_activity(
+                session, view_id=view.id, workspace_id=ws_id, action="created", actor=user.id,
+                summary=f'Created "{view.name}" with {starter.title}',
+            )
+        context = view_ids["context"]
+        for query in starter.queries:
+            await view_library.put_query(session, context, f"{context}_{query.slug}", SavedQueryInput(
+                name=query.name, description=query.description, predicate=query.predicate), actor=user.id)
+        for rule in starter.rules:
+            await view_library.put_rule(session, context, None, DisplayRule(**rule))
+        for view_id in view_ids.values():
+            await view_version_repo.checkpoint(session, await session.get(ViewORM, view_id),
+                                               source="create", actor=user.id, message=starter.message)
+        if starter.tags or starter.links:
+            ds = await session.get(WorkspaceDataSourceORM, ds_id)
+            ds.tags = json.dumps(list(starter.tags)) if starter.tags else None
+            ds.links = json.dumps([{"label": label, "url": _on_this_site(request, path)}
+                                   for label, path in starter.links]) if starter.links else None
+            ds.metadata_updated_by = user.id
+            ds.metadata_updated_at = datetime.now(timezone.utc).isoformat()
+        draft_id = review_id = None
+        if starter.example is not None:
+            draft_id, review_id = await _example_change(session, svc, user.id, ws_id, ds_id, graph_id,
+                                                        view_ids["graph"], starter.example)
+        await session.commit()
     except Exception:
-        logger.exception("sample %s could not be loaded into graph %s; removing it", sample.id, graph_id)
+        logger.exception("starter graph %s could not be made in graph %s; removing it", starter.title, graph_id)
         await session.rollback()
-        await _discard(session, ws_id, ds_id, graph_id, user.id)
+        await _discard(session, ws_id, ds_id, graph_id, user.id,
+                       ontology_id=starter.ontology_id if own_ontology else None)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={
-            "type": "sample_load_failed",
-            "message": "The sample couldn't be loaded, so nothing was kept. Try again in a moment."})
+            "type": failure,
+            "message": "The graph couldn't be made, so nothing was kept. Try again in a moment."})
     background.add_task(project_now, graph_id)
-    return StartedSample(data_source_id=ds_id, view_id=view.id)
+    return {"data_source_id": ds_id, "view_id": view_ids["context"], "view_ids": view_ids,
+            "draft_id": draft_id, "review_id": review_id}
 
 
-async def _discard(session: AsyncSession, ws_id: str, ds_id: str, graph_id: str, actor: str) -> None:
-    """Take away a sample's graph that could not be loaded: its version history is queued for
-    purge, as a permanent delete queues it, and its data source goes. Never raises — what it
-    could not take away is logged."""
+async def _example_change(session: AsyncSession, svc: GraphVersioningService, actor: str, ws_id: str,
+                          ds_id: str, graph_id: str, view_id: str, example: Example) -> Tuple[str, str]:
+    """The example change waiting for review: a private draft opened from ``view_id`` that adds
+    one thing, connected from one the graph holds, saved; and a review of it that asks nobody, so
+    nobody is told. Returns the draft's and the review's ids."""
+    branch_id = await svc.open_draft(graph_id=graph_id, owner=actor, name=example.title,
+                                     originating_view_id=view_id, visibility="private")
+    await view_repo.ensure_overlay(session, view_id, branch_id)
+    meta = {"data_source_id": ds_id, "kind": "blank"}
+    rules = await _rules_for_meta(session, ws_id, meta)
+    node = {k: v for k, v in example.node.items() if k != "kind"}
+    # The thing it connects from has the id the first version's import gave it.
+    source = pointer_id(await svc.identity_scope(graph_id), pointer_seed(example.source))
+    await svc.stage_changes(graph_id=graph_id, branch_id=branch_id, actor=actor, ontology_rules=rules, ops=[
+        {"op": "create", "entity_kind": "node", "payload": node},
+        {"op": "create", "entity_kind": "edge", "payload": {
+            "edgeType": example.relationship, "sourceEntityId": source, "targetEntityId": node["urn"]}},
+    ])
+    await svc.checkpoint(graph_id=graph_id, branch_id=branch_id, actor=actor, message=example.title,
+                         containment_edge_types=await _live_containment_types(session, ws_id, ds_id),
+                         ontology_rules=rules, node_identity=await _node_identity_for_meta(session, meta))
+    review_id = await svc.open_draft_mr(graph_id=graph_id, branch_id=branch_id, actor=actor,
+                                        title=example.title, description=example.description,
+                                        reviewers=[], reviewer_groups=[])
+    return branch_id, review_id
+
+
+def _on_this_site(request: Request, path: str) -> str:
+    """``path`` on the site the person is using — the origin their browser sent the request from,
+    else this server's: a data source's link is a full web address."""
+    origin = request.headers.get("origin") or ""
+    parsed = urlparse(origin)
+    site = parsed.scheme in ("http", "https") and parsed.netloc and not parsed.path.strip("/")
+    return (origin if site else str(request.base_url)).rstrip("/") + path
+
+
+async def _drop_ontology(session: AsyncSession, ontology_id: str) -> None:
+    """Take away a data model made for a graph that wasn't made. Never raises."""
+    try:
+        await session.execute(delete(OntologyORM).where(OntologyORM.id == ontology_id))
+        await session.commit()
+    except Exception:
+        logger.exception("could not remove data model %s — left unused", ontology_id)
+
+
+async def _discard(session: AsyncSession, ws_id: str, ds_id: str, graph_id: str, actor: str, *,
+                   ontology_id: Optional[str] = None) -> None:
+    """Take away a starter graph that could not be made: its version history — its drafts and
+    reviews with it — is queued for purge, as a permanent delete queues it, its data source goes,
+    and so does ``ontology_id``, a data model made for it alone. Never raises — what it could not
+    take away is logged."""
     from backend.app.services.versioning import purge_worker
 
     try:
@@ -357,3 +484,5 @@ async def _discard(session: AsyncSession, ws_id: str, ds_id: str, graph_id: str,
     except Exception:
         logger.exception("could not queue the purge of graph %s — left in the version store", graph_id)
     await drop_managed_data_source(session, ds_id)
+    if ontology_id:
+        await _drop_ontology(session, ontology_id)

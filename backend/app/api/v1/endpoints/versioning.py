@@ -1989,7 +1989,7 @@ async def create_blank_graph(
         user_graph_name = await claim_graph_name(session, body.provider_id, body.graph_name)
     ds_id, graph_name = await create_managed_data_source(
         session, ws_id, provider_id=body.provider_id, ontology_id=body.ontology_id,
-        label=body.name, actor=user.id, graph_name=user_graph_name)
+        label=body.name, actor=user.id, graph_name=user_graph_name, description=body.description)
 
     # 4) Genesis-only versioned graph pinned to the minted name + provider.
     try:

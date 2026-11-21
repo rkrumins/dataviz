@@ -1,21 +1,25 @@
-"""The Playground's samples: a meaningful graph, with a view on it, in one click.
+"""The Playground's samples: a meaningful graph, with views on it, in one click.
 
 A business user opening the Playground faces a blank canvas, and a blank canvas asks them to
 know already what a graph is for. A sample answers that: a small, realistic graph — a retail
 data pipeline, a customer 360, an ML feature pipeline — that they can explore, then change.
 
-Each sample is everything the platform needs to make one, defined here and nowhere else:
+Each sample is everything the platform needs to make one, defined here and nowhere else, and
+made as every starter graph is (``playground_starter``, :func:`starter`):
 
 * its **data model** — the entity and relationship types it uses. It is an ordinary published
   data model with a stable id (``bp_sample_<id>``), made the first time anyone starts the sample
-  (:func:`ensure_ontology`) and shared by every graph made from it afterwards. Not marked
-  ``is_system``: the platform finds *the* system default data model as the ``is_system`` one with
-  the highest version (``ontology_definition_repo.get_system_default_ontology``), so a second one
-  would be mistaken for it. A data source on it keeps it from being deleted, like any data model
-  in use;
+  and shared by every graph made from it afterwards. A data source on it keeps it from being
+  deleted, like any data model in use. Its pipeline is lineage; at its end, each output holds
+  the measures it shows (a dashboard its metrics, a feature set its features) by a structural
+  containment, so nothing in the pipeline becomes a child;
 * its **things and connections** — the rows of a day-0 import (:func:`rows`), loaded into a new
   blank graph as its first version, the way ``POST …/bulk-ingest`` loads one;
-* its **view** — a ready-made one, configured as the View wizard configures one (:func:`view_config`).
+* its **views** — a Context View (opened first), a Graph view and a Hierarchy view — and, on the
+  Context View, saved queries and a display rule tinting personal data;
+* its **details** — a description, the tag ``sample`` and a link to how the Playground works;
+* an **example change** waiting for review: a private draft on the Graph view adding one thing,
+  and a review that asks nobody.
 
 Owners are teams and platforms are products: no sample names a person.
 
@@ -25,35 +29,12 @@ within the person's quota (``playground_policy``). The route that makes one is
 """
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from backend.app.db.models import OntologyORM
-from backend.app.ontology.resolver import (
-    derive_flat_lists, parse_entity_definitions, parse_relationship_definitions,
+from backend.app.services.playground_starter import (
+    EntityType, Example, RelationshipType, SavedQuery, Starter,
 )
-
-
-@dataclass(frozen=True)
-class EntityType:
-    name: str
-    plural: str
-    description: str
-    icon: str
-    color: str
-
-
-@dataclass(frozen=True)
-class RelationshipType:
-    name: str
-    description: str
-    color: str
-
 
 #: A thing: (key, entity type, name, description, owner, platform, tags).
 Node = Tuple[str, str, str, str, str, str, Tuple[str, ...]]
@@ -66,15 +47,24 @@ class Sample:
     id: str
     title: str
     description: str
-    #: A lucide icon name and a colour name, for the gallery card (the icon is its view's too).
+    #: A lucide icon name and a colour name, for the gallery card (the icon is its views' too).
     icon: str
     color: str
-    view_type: str
     view_name: str
+    #: The pipeline's types in order, then the type its outputs hold.
     entity_types: Dict[str, EntityType]
     relationship_types: Dict[str, RelationshipType]
     nodes: Tuple[Node, ...]
     edges: Tuple[Edge, ...]
+    #: The team most of it belongs to, and the output it leads to: saved queries name them.
+    team: str
+    key_output: str
+    #: The example change: a new thing, and the (thing, relationship) it is connected from.
+    example: Node
+    example_from: Tuple[str, str]
+
+    #: The layout of the view it opens: its Context View.
+    view_type = "reference"
 
     @property
     def ontology_id(self) -> str:
@@ -90,7 +80,7 @@ _RETAIL = Sample(
     id="retail-pipeline",
     title="Retail data pipeline",
     description="Sales from the store, tills and payments, through the warehouse to the dashboards.",
-    icon="ShoppingCart", color="amber", view_type="graph",
+    icon="ShoppingCart", color="amber",
     view_name="Retail pipeline: from store to dashboard",
     entity_types={
         "sourceSystem": EntityType("Source system", "Source systems",
@@ -108,12 +98,17 @@ _RETAIL = Sample(
         "dashboard": EntityType("Dashboard", "Dashboards",
                                 "What people read to run the business.",
                                 "LayoutDashboard", "#10b981"),
+        "metric": EntityType("Metric", "Metrics",
+                             "A number a dashboard shows: revenue, orders, margin.",
+                             "Gauge", "#14b8a6"),
     },
     relationship_types={
         "FEEDS": RelationshipType("Feeds", "A source system's data is picked up by a sync.", "#f59e0b"),
         "LOADS": RelationshipType("Loads into", "A sync writes what it picked up into a table.", "#0ea5e9"),
         "TRANSFORMS_INTO": RelationshipType("Transforms into", "Data is reshaped into the next model.", "#8b5cf6"),
         "POWERS": RelationshipType("Powers", "A model is what a dashboard shows.", "#10b981"),
+        "HAS_METRIC": RelationshipType("Has metric", "A dashboard shows this metric.", "#14b8a6",
+                                       containment=True),
     },
     nodes=(
         ("shopify", "sourceSystem", "Shopify store", "Online orders, customers and the product catalogue.", "E-commerce", "Shopify", ()),
@@ -162,6 +157,20 @@ _RETAIL = Sample(
         ("dash_marketing", "dashboard", "Marketing ROI", "What each channel and campaign brought in.", "Marketing", "Looker", ()),
         ("dash_cohorts", "dashboard", "Customer cohorts", "How customers who joined each month go on spending.", "Marketing", "Looker", ()),
         ("dash_products", "dashboard", "Product performance", "Best and worst sellers, by margin.", "Merchandising", "Looker", ()),
+        ("m_revenue", "metric", "Revenue", "Sales after discounts and refunds.", "Leadership", "Looker", ("certified",)),
+        ("m_orders", "metric", "Orders", "Orders placed, online and in store.", "Leadership", "Looker", ()),
+        ("m_gross_margin", "metric", "Gross margin %", "Revenue less the cost of what was sold, as a share of revenue.", "Leadership", "Looker", ("certified",)),
+        ("m_store_sales", "metric", "Sales per store", "Revenue taken in each store.", "Store operations", "Looker", ()),
+        ("m_basket_size", "metric", "Average basket size", "What a till sale comes to, on average.", "Store operations", "Looker", ()),
+        ("m_days_of_cover", "metric", "Days of cover", "How many days the stock on hand will last.", "Merchandising", "Looker", ()),
+        ("m_sell_through", "metric", "Sell-through rate", "Units sold as a share of units received.", "Merchandising", "Looker", ()),
+        ("m_low_stock", "metric", "Items running low", "Items with less than a week of cover.", "Merchandising", "Looker", ()),
+        ("m_roas", "metric", "Return on ad spend", "Revenue each channel brought in, for what was spent on it.", "Marketing", "Looker", ()),
+        ("m_cost_per_order", "metric", "Cost per order", "Marketing spend per order it led to.", "Marketing", "Looker", ()),
+        ("m_repeat_rate", "metric", "Repeat purchase rate", "Customers who ordered again within 90 days.", "Marketing", "Looker", ()),
+        ("m_cohort_ltv", "metric", "Lifetime value by cohort", "What each month's new customers have spent since.", "Marketing", "Looker", ()),
+        ("m_units_sold", "metric", "Units sold", "Items sold, per product.", "Merchandising", "Looker", ()),
+        ("m_product_margin", "metric", "Margin per product", "What each product earns after its cost.", "Merchandising", "Looker", ()),
     ),
     edges=(
         ("shopify", "FEEDS", "sync_shopify"), ("square", "FEEDS", "sync_square"),
@@ -193,7 +202,18 @@ _RETAIL = Sample(
         ("fct_attribution", "POWERS", "dash_marketing"), ("dim_customers", "POWERS", "dash_marketing"),
         ("dim_customers", "POWERS", "dash_cohorts"), ("customer_ltv", "POWERS", "dash_cohorts"),
         ("fct_order_items", "POWERS", "dash_products"), ("dim_products", "POWERS", "dash_products"),
+        ("dash_exec", "HAS_METRIC", "m_revenue"), ("dash_exec", "HAS_METRIC", "m_orders"),
+        ("dash_exec", "HAS_METRIC", "m_gross_margin"), ("dash_stores", "HAS_METRIC", "m_store_sales"),
+        ("dash_stores", "HAS_METRIC", "m_basket_size"), ("dash_inventory", "HAS_METRIC", "m_days_of_cover"),
+        ("dash_inventory", "HAS_METRIC", "m_sell_through"), ("dash_inventory", "HAS_METRIC", "m_low_stock"),
+        ("dash_marketing", "HAS_METRIC", "m_roas"), ("dash_marketing", "HAS_METRIC", "m_cost_per_order"),
+        ("dash_cohorts", "HAS_METRIC", "m_repeat_rate"), ("dash_cohorts", "HAS_METRIC", "m_cohort_ltv"),
+        ("dash_products", "HAS_METRIC", "m_units_sold"), ("dash_products", "HAS_METRIC", "m_product_margin"),
     ),
+    team="Analytics engineering", key_output="dash_exec",
+    example=("dash_finance", "dashboard", "Finance overview",
+             "Revenue, refunds and payments, for the month-end close.", "Finance", "Looker", ()),
+    example_from=("fct_orders", "POWERS"),
 )
 
 
@@ -203,7 +223,7 @@ _CUSTOMER_360 = Sample(
     id="customer-360",
     title="Customer 360",
     description="CRM, support and billing records matched into one view of each customer.",
-    icon="Users", color="sky", view_type="graph",
+    icon="Users", color="sky",
     view_name="Customer 360: every system behind one customer",
     entity_types={
         "businessSystem": EntityType("Business system", "Business systems",
@@ -221,12 +241,17 @@ _CUSTOMER_360 = Sample(
         "report": EntityType("Report", "Reports",
                              "What sales, support and finance read to act on it.",
                              "ChartColumn", "#10b981"),
+        "metric": EntityType("Metric", "Metrics",
+                             "A number a report shows: churn rate, health score, recurring revenue.",
+                             "Gauge", "#14b8a6"),
     },
     relationship_types={
         "SYNCS": RelationshipType("Syncs", "A system's records are brought in.", "#0ea5e9"),
         "MATCHES_INTO": RelationshipType("Matches into", "Records from different systems are matched as one.", "#8b5cf6"),
         "BUILDS": RelationshipType("Builds", "A unified entity adds to a profile.", "#ec4899"),
         "INFORMS": RelationshipType("Informs", "A report is drawn from it.", "#10b981"),
+        "HAS_METRIC": RelationshipType("Has metric", "A report shows this metric.", "#14b8a6",
+                                       containment=True),
     },
     nodes=(
         ("salesforce", "businessSystem", "Salesforce CRM", "Accounts, contacts and the sales pipeline.", "Sales operations", "Salesforce", ()),
@@ -265,6 +290,18 @@ _CUSTOMER_360 = Sample(
         ("rpt_sla", "report", "Support SLA & satisfaction", "Response times and ratings, per channel.", "Customer support", "Tableau", ()),
         ("rpt_upsell", "report", "Upsell opportunities", "Accounts outgrowing their plan.", "Sales operations", "Tableau", ()),
         ("rpt_nps", "report", "NPS trends", "How likely customers are to recommend us, over time.", "Customer success", "Tableau", ()),
+        ("m_churn_rate", "metric", "Churn rate", "Customers who left this month, as a share of all customers.", "Customer success", "Tableau", ("certified",)),
+        ("m_at_risk", "metric", "Customers at risk", "Customers scored likely to leave.", "Customer success", "Tableau", ()),
+        ("m_health_score", "metric", "Health score", "A score out of 100 from usage, support and billing.", "Customer success", "Tableau", ()),
+        ("m_active_users", "metric", "Active users", "People who used the product in the last 30 days.", "Customer success", "Tableau", ()),
+        ("m_arr", "metric", "Annual recurring revenue", "What subscriptions bring in over a year.", "Finance", "Tableau", ("certified",)),
+        ("m_nrr", "metric", "Net revenue retention", "Revenue kept from last year's customers, upgrades included.", "Finance", "Tableau", ()),
+        ("m_first_response", "metric", "First response time", "How long a customer waits for a first answer.", "Customer support", "Tableau", ()),
+        ("m_csat", "metric", "Satisfaction score", "How customers rated the help they got.", "Customer support", "Tableau", ()),
+        ("m_expansion", "metric", "Expansion revenue", "New revenue from customers moving to a bigger plan.", "Sales operations", "Tableau", ()),
+        ("m_seats_used", "metric", "Seats used", "Seats in use, as a share of seats bought.", "Sales operations", "Tableau", ()),
+        ("m_nps", "metric", "Net Promoter Score", "Promoters less detractors, out of 100.", "Customer success", "Tableau", ()),
+        ("m_nps_responses", "metric", "Survey responses", "How many customers answered the survey.", "Customer success", "Tableau", ()),
     ),
     edges=(
         ("salesforce", "SYNCS", "sf_account"), ("salesforce", "SYNCS", "sf_contact"),
@@ -292,7 +329,18 @@ _CUSTOMER_360 = Sample(
         ("subscription", "INFORMS", "rpt_revenue"), ("support_case", "INFORMS", "rpt_sla"),
         ("profile_account", "INFORMS", "rpt_upsell"), ("usage", "INFORMS", "rpt_upsell"),
         ("profile_customer", "INFORMS", "rpt_nps"), ("support_case", "INFORMS", "rpt_nps"),
+        ("rpt_churn", "HAS_METRIC", "m_churn_rate"), ("rpt_churn", "HAS_METRIC", "m_at_risk"),
+        ("rpt_health", "HAS_METRIC", "m_health_score"), ("rpt_health", "HAS_METRIC", "m_active_users"),
+        ("rpt_revenue", "HAS_METRIC", "m_arr"), ("rpt_revenue", "HAS_METRIC", "m_nrr"),
+        ("rpt_sla", "HAS_METRIC", "m_first_response"), ("rpt_sla", "HAS_METRIC", "m_csat"),
+        ("rpt_upsell", "HAS_METRIC", "m_expansion"), ("rpt_upsell", "HAS_METRIC", "m_seats_used"),
+        ("rpt_nps", "HAS_METRIC", "m_nps"), ("rpt_nps", "HAS_METRIC", "m_nps_responses"),
     ),
+    team="Data team", key_output="rpt_churn",
+    example=("rpt_renewals", "report", "Renewals forecast",
+             "Which subscriptions come up for renewal next quarter, and what they are worth.",
+             "Finance", "Tableau", ()),
+    example_from=("subscription", "INFORMS"),
 )
 
 
@@ -302,7 +350,7 @@ _ML_FEATURES = Sample(
     id="ml-features",
     title="ML feature pipeline",
     description="Raw events becoming features, the models they train, and where predictions go.",
-    icon="BrainCircuit", color="emerald", view_type="graph",
+    icon="BrainCircuit", color="emerald",
     view_name="ML features: from raw events to predictions",
     entity_types={
         "dataSource": EntityType("Data source", "Data sources",
@@ -320,12 +368,17 @@ _ML_FEATURES = Sample(
         "application": EntityType("Application", "Applications",
                                   "A service that acts on a model's predictions.",
                                   "Rocket", "#10b981"),
+        "feature": EntityType("Feature", "Features",
+                              "One signal a model learns from: a count, a ratio, a score.",
+                              "Sparkles", "#f97316"),
     },
     relationship_types={
         "FEEDS": RelationshipType("Feeds", "Raw data lands in a dataset.", "#0ea5e9"),
         "DERIVES": RelationshipType("Derives", "A dataset or feature set is computed from it.", "#6366f1"),
         "TRAINS": RelationshipType("Trains", "A model learns from it.", "#f59e0b"),
         "DEPLOYED_TO": RelationshipType("Deployed to", "A model's predictions are used here.", "#ec4899"),
+        "HAS_FEATURE": RelationshipType("Has feature", "A feature set holds this feature.", "#f97316",
+                                        containment=True),
     },
     nodes=(
         ("clickstream", "dataSource", "Clickstream", "Every page view and click, as it happens.", "Data platform", "Kafka", ()),
@@ -354,6 +407,21 @@ _ML_FEATURES = Sample(
         ("app_recs_api", "application", "Website recommendations", "The 'you may also like' row on the website.", "Engineering", "API", ()),
         ("app_checkout", "application", "Checkout fraud check", "Holds risky payments for review.", "Risk", "API", ()),
         ("app_forecast", "application", "Finance forecasting", "Revenue forecasts for planning.", "Finance", "Tableau", ()),
+        ("f_visits_7d", "feature", "Visits in the last 7 days", "How often the customer came to the website this week.", "Data science", "Feature store", ()),
+        ("f_dwell_time", "feature", "Average time on page", "How long the customer stays on a page, on average.", "Data science", "Feature store", ()),
+        ("f_categories", "feature", "Categories viewed", "How many product categories the customer looked at.", "Data science", "Feature store", ()),
+        ("f_orders_90d", "feature", "Orders in the last 90 days", "How many orders the customer placed this quarter.", "Data science", "Feature store", ()),
+        ("f_basket_value", "feature", "Average basket value", "What an order comes to, on average.", "Data science", "Feature store", ()),
+        ("f_days_since_order", "feature", "Days since last order", "How long ago the customer last bought.", "Data science", "Feature store", ()),
+        ("f_card_velocity", "feature", "Card velocity", "Payments on the same card in the last hour.", "Risk", "Feature store", ()),
+        ("f_address_mismatch", "feature", "Address mismatch", "Whether billing and delivery addresses differ.", "Risk", "Feature store", ("pii",)),
+        ("f_past_chargebacks", "feature", "Past chargebacks", "Chargebacks on the customer's account.", "Risk", "Feature store", ()),
+        ("f_ticket_sentiment", "feature", "Ticket sentiment", "How positive the customer's last tickets read.", "Data science", "Feature store", ()),
+        ("f_open_tickets", "feature", "Open tickets", "Tickets still waiting for an answer.", "Data science", "Feature store", ()),
+        ("f_tenure", "feature", "Tenure in months", "How long the customer has been with us.", "Data science", "Feature store", ()),
+        ("f_plan", "feature", "Plan", "The plan the customer is on.", "Data science", "Feature store", ()),
+        ("f_product_vector", "feature", "Product vector", "Where each product sits among the others it is bought with.", "Data science", "Feature store", ()),
+        ("f_co_purchase", "feature", "Bought-together score", "How often two products are bought together.", "Data science", "Feature store", ()),
     ),
     edges=(
         ("clickstream", "FEEDS", "raw_events"), ("orders_db", "FEEDS", "orders"),
@@ -373,7 +441,20 @@ _ML_FEATURES = Sample(
         ("fs_purchases", "TRAINS", "model_ltv"), ("fs_profile", "TRAINS", "model_ltv"),
         ("model_churn", "DEPLOYED_TO", "app_retention"), ("model_recs", "DEPLOYED_TO", "app_recs_api"),
         ("model_fraud", "DEPLOYED_TO", "app_checkout"), ("model_ltv", "DEPLOYED_TO", "app_forecast"),
+        ("fs_browsing", "HAS_FEATURE", "f_visits_7d"), ("fs_browsing", "HAS_FEATURE", "f_dwell_time"),
+        ("fs_browsing", "HAS_FEATURE", "f_categories"), ("fs_purchases", "HAS_FEATURE", "f_orders_90d"),
+        ("fs_purchases", "HAS_FEATURE", "f_basket_value"), ("fs_purchases", "HAS_FEATURE", "f_days_since_order"),
+        ("fs_payment_risk", "HAS_FEATURE", "f_card_velocity"), ("fs_payment_risk", "HAS_FEATURE", "f_address_mismatch"),
+        ("fs_payment_risk", "HAS_FEATURE", "f_past_chargebacks"), ("fs_sentiment", "HAS_FEATURE", "f_ticket_sentiment"),
+        ("fs_sentiment", "HAS_FEATURE", "f_open_tickets"), ("fs_profile", "HAS_FEATURE", "f_tenure"),
+        ("fs_profile", "HAS_FEATURE", "f_plan"), ("fs_embeddings", "HAS_FEATURE", "f_product_vector"),
+        ("fs_embeddings", "HAS_FEATURE", "f_co_purchase"),
     ),
+    team="Data science", key_output="model_churn",
+    example=("app_account_alerts", "application", "Account team alerts",
+             "Tells each account team which of their customers are likely to leave.",
+             "Customer success", "API", ()),
+    example_from=("model_churn", "DEPLOYED_TO"),
 )
 
 
@@ -387,88 +468,62 @@ def get(sample_id: str) -> Optional[Sample]:
 
 # ── What a sample is made of ──────────────────────────────────────────────
 
+def _node_row(sample: Sample, node: Node) -> dict:
+    key, etype, name, description, owner, platform, tags = node
+    return {"kind": "node", "urn": sample.urn(key), "entityType": etype, "displayName": name,
+            "description": description, "properties": {"owner": owner, "platform": platform},
+            "tags": list(tags)}
+
+
 def rows(sample: Sample) -> List[dict]:
     """Its things and connections as a day-0 import's rows (``bulk_ingest``): nodes named by urn,
     edges by the urns at their ends."""
-    return [
-        {"kind": "node", "urn": sample.urn(key), "entityType": etype, "displayName": name,
-         "description": description, "properties": {"owner": owner, "platform": platform},
-         "tags": list(tags)}
-        for key, etype, name, description, owner, platform, tags in sample.nodes
-    ] + [
+    return [_node_row(sample, node) for node in sample.nodes] + [
         {"kind": "edge", "edgeType": rtype, "source": sample.urn(source), "target": sample.urn(target)}
         for source, rtype, target in sample.edges
     ]
 
 
-_FIELDS = [
+_FIELDS = (
     {"id": "name", "name": "Name", "type": "string", "show_in_tooltip": True, "display_order": 1},
     {"id": "description", "name": "Description", "type": "markdown", "show_in_node": False, "display_order": 2},
     {"id": "owner", "name": "Owner", "type": "string", "show_in_node": False, "display_order": 3},
     {"id": "platform", "name": "Platform", "type": "string", "show_in_node": False, "display_order": 4},
-]
+)
+
+#: Where a sample's data source sends its reader to learn the Playground: a page of this site.
+GUIDE_LINK = ("How the Playground works", "/docs/playground")
+
+_PII = {"kind": "tag", "op": "has", "values": ["pii"]}
 
 
-async def ensure_ontology(session: AsyncSession, sample: Sample) -> str:
-    """The sample's data model, published, made the first time anyone starts the sample and the
-    same one every time after. Returns its id. Whatever is at its id is used as it is: an
-    administrator who withdrew it (unpublished, deleted) is answered as a blank graph on it would
-    be. Every type is a traceable root (a sample's graph is lineage, not containment), and each
-    relationship joins the types the sample joins with it.
-
-    Commits — and, when someone else made it a moment ago, rolls back: the caller reads nothing
-    from ORM rows it loaded before."""
-    if await session.get(OntologyORM, sample.ontology_id) is not None:
-        return sample.ontology_id
-    type_of = {key: etype for key, etype, *_ in sample.nodes}
-    entities = parse_entity_definitions({
-        tid: {"name": t.name, "plural_name": t.plural, "description": t.description,
-              "visual": {"icon": t.icon, "color": t.color}, "fields": _FIELDS}
-        for tid, t in sample.entity_types.items()
-    })
-    relationships = parse_relationship_definitions({
-        rid: {"name": r.name, "description": r.description, "category": "flow", "is_lineage": True,
-              "visual": {"stroke_color": r.color},
-              "source_types": sorted({type_of[s] for s, kind, _ in sample.edges if kind == rid}),
-              "target_types": sorted({type_of[t] for _, kind, t in sample.edges if kind == rid})}
-        for rid, r in sample.relationship_types.items()
-    })
-    flat = derive_flat_lists(entities, relationships)
-    session.add(OntologyORM(
-        id=sample.ontology_id, schema_id=sample.ontology_id, version=1,
-        name=f"{sample.title} (sample)",
-        description=f"The data model of the Playground's “{sample.title}” sample.",
-        entity_type_definitions=json.dumps({k: asdict(v) for k, v in entities.items()}),
-        relationship_type_definitions=json.dumps({k: asdict(v) for k, v in relationships.items()}),
-        containment_edge_types=json.dumps(flat.containment_edge_types),
-        lineage_edge_types=json.dumps(flat.lineage_edge_types),
-        edge_type_metadata=json.dumps(flat.edge_type_metadata),
-        entity_type_hierarchy=json.dumps(flat.entity_type_hierarchy),
-        root_entity_types=json.dumps(flat.root_entity_types),
-        is_published=True, published_at=datetime.now(timezone.utc).isoformat(),
-        scope="universal",
-    ))
-    try:
-        await session.commit()
-    except IntegrityError:
-        # Someone else started it first, a moment ago: theirs is the one.
-        await session.rollback()
-    return sample.ontology_id
-
-
-def view_config(sample: Sample) -> dict:
-    """The ready-made view's config, as the View wizard writes one for its layout
-    (``buildViewConfig`` in ``frontend/src/services/viewService.ts``)."""
-    return {
-        "icon": sample.icon,
-        "content": {"visibleEntityTypes": list(sample.entity_types),
-                    "visibleRelationshipTypes": list(sample.relationship_types),
-                    "defaultDepth": 5, "maxDepth": 10},
-        "layout": {"type": sample.view_type,
-                   "graphLayout": {"algorithm": "dagre", "direction": "LR",
-                                   "nodeSpacing": 60, "levelSpacing": 120},
-                   "lod": {"enabled": False, "levels": []}},
-        "filters": {"entityTypeFilters": [], "fieldFilters": [], "searchableFields": [],
-                    "quickFilters": []},
-        "entityOverrides": {},
-    }
+def starter(sample: Sample) -> Starter:
+    """The sample as a starter graph: its data model, rows and views, the details and library a
+    sample comes with, and its example change."""
+    names = {key: name for key, _type, name, *_ in sample.nodes}
+    output, (source, relationship) = names[sample.key_output], sample.example_from
+    return Starter(
+        title=sample.title, description=sample.description, icon=sample.icon,
+        ontology_id=sample.ontology_id, ontology_name=f"{sample.title} (sample)",
+        ontology_description=f"The data model of the Playground's “{sample.title}” sample.",
+        entity_types=sample.entity_types, relationship_types=sample.relationship_types,
+        fields=_FIELDS, rows=tuple(rows(sample)), message=f"Started from the {sample.title} sample",
+        view_name=sample.view_name, tags=("sample",), links=(GUIDE_LINK,),
+        queries=(
+            SavedQuery("pii", "PII data", "Everything that holds personal data.", _PII),
+            SavedQuery("certified", "Certified", "What its owners vouch for.",
+                       {"kind": "tag", "op": "has", "values": ["certified"]}),
+            SavedQuery("team", f"Owned by {sample.team}", f"Everything {sample.team} looks after.",
+                       {"kind": "property", "key": "owner", "op": "eq", "value": sample.team}),
+            SavedQuery("feeding", f"Everything feeding {output}",
+                       f"What {output} is built from, up to ten steps back.",
+                       {"kind": "related", "axis": "downstream", "maxHops": 10,
+                        "where": {"kind": "is", "refs": [{"urn": sample.urn(sample.key_output)}]}}),
+        ),
+        rules=({"id": "rule_pii", "name": "Personal data", "color": "#e11d48", "predicate": _PII},),
+        example=Example(
+            title=f"Add {sample.example[2]}",
+            description=(f"An example change, waiting for review: {sample.example[2]}, connected from "
+                         f"{names[source]}. Approve and merge it yourself, or discard it."),
+            node=_node_row(sample, sample.example), source=sample.urn(source), relationship=relationship),
+    )
