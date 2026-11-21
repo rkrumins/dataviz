@@ -1,4 +1,4 @@
-import { Sparkles, DatabaseZap, Compass, Boxes, Workflow, Import, Layers, GitPullRequestArrow, Focus } from 'lucide-react'
+import { Sparkles, DatabaseZap, Compass, Boxes, Workflow, Import, Layers, GitPullRequestArrow, Focus, FlaskConical, Rocket, Building2 } from 'lucide-react'
 import type { TourDefinition } from './types'
 
 /**
@@ -184,11 +184,56 @@ TOURS.push(
       },
       {
         title: 'Inside a workspace',
-        body: 'Open any workspace to manage its **data sources**, **views**, **ontology**, **members**, and **reviews** — each on its own tab.',
+        body: 'Open any workspace and it starts on its **Overview**: what needs you, the views you use, and the workspace at a glance. Its **views**, **data**, **reviews** and **people** each have a tab.',
       },
       {
         title: "That's workspaces",
         body: 'With a workspace in place, your team has an isolated home to explore lineage together. Open **Help** to replay any tour.',
+      },
+    ],
+  },
+  {
+    id: 'workspace-detail',
+    title: 'Find your way around a workspace',
+    description: 'What a workspace shows you first, and where everything else lives.',
+    icon: Boxes,
+    estimate: '1 min',
+    // Lives on /workspaces/:wsId, which has no static path to navigate to. Offered
+    // from the workspace's own header, and from Help while you're under /workspaces/.
+    contextual: true,
+    contextPathPrefix: '/workspaces/',
+    steps: [
+      {
+        title: 'A workspace, at a glance',
+        body: 'Each workspace opens on its **Overview** — built for using it, not configuring it. Leave any time with **Esc**.',
+      },
+      {
+        target: '[data-tour="workspace-health"]',
+        placement: 'bottom',
+        title: 'Can I use it right now?',
+        body: 'Its health, said as a sentence. If something needs fixing and you can fix it, the link takes you straight there.',
+      },
+      {
+        target: '[data-tour="workspace-actions"]',
+        placement: 'bottom',
+        title: 'The way in',
+        body: '**Explore views** opens everything built here. If you can create views, **New view** starts one in this workspace.',
+      },
+      {
+        target: '[data-tour="workspace-attention"]',
+        placement: 'bottom',
+        title: 'What needs you',
+        body: 'Reviews asking for you, people asking to join, a source that needs a look — only what is yours to act on.',
+      },
+      {
+        target: '[data-tour="workspace-tabs"]',
+        placement: 'bottom',
+        title: 'Everything else',
+        body: '**Views** to browse, **Data** for where it comes from and how fresh it is, **Reviews** for proposed changes — and, for the people who run it, **People** and **Settings**.',
+      },
+      {
+        title: 'Business or Technical',
+        body: 'Want identifiers, projection modes and raw errors? Switch to the **Technical** view at the top of the app — the same page, with every detail showing.',
       },
     ],
   },
@@ -316,11 +361,10 @@ TOURS.push(
     description: 'How drafts become reviewed, approved, and merged — a lap around the Review Center.',
     icon: GitPullRequestArrow,
     estimate: '2 min',
-    // Reviews live at the workspace-scoped route /workspaces/:wsId/reviews, which has
-    // no static path a route-step could navigate to. Offered from the reviews surface
-    // itself and from Help while you're anywhere under /workspaces/.
+    // Offered from the Review Center (/reviews) itself and from Help while you're there;
+    // its steps point at the queues, filters and list it shares with a workspace's Reviews tab.
     contextual: true,
-    contextPathPrefix: '/workspaces/',
+    contextPathPrefix: '/reviews',
     steps: [
       {
         title: 'Changes, reviewed',
@@ -421,8 +465,161 @@ TOURS.push({
   ],
 })
 
+// The self-service paths: the Playground, asking for a workspace, and answering those asks.
+TOURS.push(
+  {
+    id: 'playground',
+    title: 'Find your way around the Playground',
+    description: 'Your experiments, how many more you can start, what everyone else made — and the way to a workspace of your own.',
+    icon: FlaskConical,
+    estimate: '1 min',
+    // The Playground is a workspace page (/workspaces/<its id>): its ribbon tells it
+    // apart from every other workspace. Offered from its own header, and from Help there.
+    contextual: true,
+    contextPathPrefix: '/workspaces/',
+    contextAnchor: '[data-tour="playground-ribbon"]',
+    steps: [
+      {
+        title: 'Welcome to the Playground',
+        body: 'A common area for trying ideas: build graphs of your own, explore them in views, and see what others made. Leave any time with **Esc**.',
+      },
+      {
+        target: '[data-tour="playground-ribbon"]',
+        placement: 'bottom',
+        padding: 2,
+        title: 'Not production',
+        body: 'Nothing here is production data, and nothing you do here changes it — so **experiment freely**.',
+      },
+      {
+        target: '[data-tour="playground-experiments"]',
+        placement: 'right',
+        title: 'Your experiments',
+        body: 'The graphs you started and the views you built. The meter counts your graphs against your **quota** — delete one you’re done with to start another. Experiments don’t expire.',
+      },
+      {
+        target: '[data-tour="playground-new-graph"]',
+        placement: 'left',
+        title: 'Start a new graph',
+        body: 'Pick a **starter data model** and you have a blank graph of your own — draw on the canvas, or bring things in from a file.',
+      },
+      {
+        target: '[data-tour="playground-everyone"]',
+        placement: 'top',
+        title: 'Everyone’s experiments',
+        body: 'The latest from everyone else here. **Open one** for ideas — only the person who made it can change it.',
+      },
+      {
+        target: '[data-tour="overview-layout"]',
+        placement: 'bottom',
+        title: 'Your layout',
+        body: 'Show views as **Compact**, **Cards** or a **List** — whichever reads best. It remembers your choice.',
+      },
+      {
+        target: '[data-tour="workspace-request"]',
+        placement: 'top',
+        title: 'Ready for a workspace of your own?',
+        body: 'When an experiment outgrows the Playground, **ask for a workspace** of its own — the graphs you built here come with it, and you’ll run it.',
+      },
+      {
+        title: 'Happy experimenting',
+        body: 'Build, explore, share. Open **Help** to replay this tour any time.',
+      },
+    ],
+  },
+  {
+    id: 'request-workspace',
+    title: 'Get a workspace of your own',
+    description: 'Ask the platform team for a workspace, try ideas in the Playground meanwhile, and follow your request.',
+    icon: Rocket,
+    estimate: '1 min',
+    // For people who can't create workspaces: offered while the Request a workspace
+    // button is on the page. Its first step opens Workspaces, so Getting started can launch it.
+    contextual: true,
+    contextPathPrefix: '/workspaces',
+    contextAnchor: '[data-tour="workspaces-request"]',
+    steps: [
+      {
+        route: '/workspaces?tab=mine',
+        title: 'A workspace of your own',
+        body: 'Workspaces are made by the platform team — but you can **ask for one**, and try your ideas in the Playground while you wait. Leave any time with **Esc**.',
+      },
+      {
+        target: '[data-tour="workspaces-request"]',
+        placement: 'bottom',
+        title: 'Request a workspace',
+        body: 'A short guided form: what it’s for, who it’s for, and the teammates to bring. Once it’s approved, **you’ll be its admin**.',
+      },
+      {
+        target: '[data-tour="playground-card"]',
+        placement: 'bottom',
+        title: 'Try it in the Playground first',
+        body: 'Build graphs of your own and explore them, apart from production. **What you build there can come with you** to your new workspace.',
+      },
+      {
+        target: '[data-tour="workspace-request"]',
+        placement: 'bottom',
+        title: 'Where your request stands',
+        body: 'Before you ask, this card is the way in. Once you have, it follows your request — **Sent → Reviewed → Ready** — and if the platform team has a question, you answer it here.',
+      },
+      {
+        title: 'You know the way',
+        body: 'Ask when you’re ready — your **Inbox** tells you when it’s answered. Open **Help** to replay this tour.',
+      },
+    ],
+  },
+  {
+    id: 'workspace-approver',
+    title: 'Answer workspace requests',
+    description: 'Who is asking for a workspace and why — and how to approve, send back or decline.',
+    icon: Building2,
+    estimate: '1 min',
+    // On Workspaces → Requests, for the people who create workspaces, while requests wait there.
+    contextual: true,
+    contextPathPrefix: '/workspaces',
+    contextAnchor: '[data-tour="workspace-requests-queue"]',
+    steps: [
+      {
+        route: '/workspaces?tab=requests',
+        title: 'Requests for new workspaces',
+        body: 'People who can’t create workspaces ask for them here, and you answer. Leave any time with **Esc**.',
+      },
+      {
+        target: '[data-tour="workspace-requests-queue"]',
+        placement: 'bottom',
+        title: 'Who is waiting',
+        body: 'Who asked, what it’s for, what comes with it — teammates, groups, graphs from the Playground — and **how long they’ve waited**. **Waiting** is what needs you; **All** includes what’s been answered.',
+      },
+      {
+        target: '[data-tour="workspace-request-review"]',
+        placement: 'left',
+        title: 'Review',
+        body: 'Opens the whole request — its purpose, its people, the data it needs — beside the list.',
+      },
+      {
+        title: 'Approve, send back, or decline',
+        body: '**Approve** shows exactly what will be made before it is, and lets you tidy the name first. **Send back** asks the requester a question. **Decline** says why.',
+      },
+      {
+        title: 'Requests, answered',
+        body: 'The requester hears in their **Inbox** either way. Open **Help** to replay this tour.',
+      },
+    ],
+  },
+)
+
 export function getTour(id: string): TourDefinition | undefined {
   return TOURS.find((t) => t.id === id)
+}
+
+/**
+ * Is this tour offered from Help on the page the reader is on? A contextual tour
+ * only on its own surface: under its path, and — when it names one — while its
+ * anchor is on the page.
+ */
+export function isTourOffered(tour: TourDefinition, pathname: string, doc: ParentNode = document): boolean {
+  if (!tour.contextual) return true
+  if (!tour.contextPathPrefix || !pathname.startsWith(tour.contextPathPrefix)) return false
+  return !tour.contextAnchor || doc.querySelector(tour.contextAnchor) !== null
 }
 
 /** The tour offered to first-time users (once the feature is enabled). */

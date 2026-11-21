@@ -48,8 +48,8 @@ describe('WorkspaceAggregationDashboard — connections not up to date', () => {
             'Connections not up to date — 902 published changes behind',
         )
         // The action, and the action NOT to take: this card's own primary
-        // button is Re-aggregate, and it is the one thing that cannot help.
-        expect(screen.getByText(/Re-aggregating will not fix it/)).toBeInTheDocument()
+        // button is Rebuild, and it is the one thing that cannot help.
+        expect(screen.getByText(/Rebuilding will not fix it/)).toBeInTheDocument()
     })
 
     it('counts one change in the singular', () => {
@@ -78,12 +78,12 @@ describe('WorkspaceAggregationDashboard — connections not up to date', () => {
         // permanently in the wrong.
         renderCard({ projectorCurrent: null, projectionCommitsBehind: null })
         expect(screen.queryByText(/Connections not up to date/)).not.toBeInTheDocument()
-        expect(screen.queryByText(/Re-aggregating will not fix it/)).not.toBeInTheDocument()
+        expect(screen.queryByText(/Rebuilding will not fix it/)).not.toBeInTheDocument()
     })
 
     it('carries a different glyph from the drift warning it stacks above', () => {
         // The two banners can render together and prescribe OPPOSITE actions
-        // ("Re-aggregating will not fix it" vs "Re-trigger to reconcile"). With
+        // ("Rebuilding will not fix it" vs "Rebuild to bring them up to date"). With
         // the same triangle on both, only red-vs-amber separated them — the one
         // channel DriftStateBadge's own contract rules out, and the shape an
         // operator has already learned on the five other surfaces where this
@@ -92,7 +92,7 @@ describe('WorkspaceAggregationDashboard — connections not up to date', () => {
             projectorCurrent: false, projectionCommitsBehind: 902,
             driftDetected: true,
         })
-        expect(screen.getByText(/Re-trigger to reconcile/)).toBeInTheDocument()
+        expect(screen.getByText(/Rebuild to bring them up to date/)).toBeInTheDocument()
         expect(container.querySelector('.lucide-unplug')).not.toBeNull()
     })
 })

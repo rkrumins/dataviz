@@ -103,6 +103,7 @@ def _ds_to_response(row: WorkspaceDataSourceORM, identity=None) -> DataSourceRes
         # Ready / Syncing / Needs-attention options could never match anything.
         aggregationStatus=row.aggregation_status or "none",
         forkOf=fork_of(row),
+        createdBy=row.created_by,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -135,6 +136,7 @@ def _to_response(row: WorkspaceORM, identities=None) -> WorkspaceResponse:
         accessMode=row.access_mode or "app",
         accessNote=row.access_note,
         requestPolicy=row.request_policy or "approval",
+        kind=getattr(row, "kind", None) or "standard",
     )
 
 

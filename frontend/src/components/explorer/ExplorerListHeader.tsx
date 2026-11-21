@@ -15,42 +15,7 @@
 import { cn } from '@/lib/utils'
 import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
 import type { SortOption } from '@/hooks/useExplorerViews'
-
-/** A column key — the columns that support clickable sorting. */
-export type SortableColumn = 'name' | 'type' | 'owner' | 'likes' | 'updated'
-
-/** Default sort the list returns to when cycling off a column. */
-const DEFAULT_SORT: SortOption = 'newest'
-
-/**
- * Mapping from each column's ascending / descending sort to the
- * canonical ``SortOption`` string the hook understands.
- */
-const COLUMN_SORTS: Record<SortableColumn, { asc: SortOption; desc: SortOption }> = {
-  name: { asc: 'az', desc: 'za' },
-  type: { asc: 'type-az', desc: 'type-za' },
-  owner: { asc: 'owner-az', desc: 'owner-za' },
-  // "Popular" is already likes-desc; pairing it with likes-asc keeps
-  // the URL stable for users who bookmark their popular feed.
-  likes: { asc: 'likes-asc', desc: 'popular' },
-  updated: { asc: 'updated-asc', desc: 'updated' },
-}
-
-/** Resolve the column's current direction from the active sort value. */
-function directionFor(sort: SortOption, col: SortableColumn): 'asc' | 'desc' | null {
-  const m = COLUMN_SORTS[col]
-  if (sort === m.asc) return 'asc'
-  if (sort === m.desc) return 'desc'
-  return null
-}
-
-/** Click handler: cycle none → asc → desc → none for the given column. */
-function cycle(sort: SortOption, col: SortableColumn): SortOption {
-  const state = directionFor(sort, col)
-  if (state === null) return COLUMN_SORTS[col].asc
-  if (state === 'asc') return COLUMN_SORTS[col].desc
-  return DEFAULT_SORT
-}
+import { cycleColumnSort, directionFor, type SortableColumn } from './sortOptions'
 
 interface ExplorerListHeaderProps {
   sort: SortOption
@@ -129,7 +94,7 @@ function SortableHeaderCell({ label, col, sort, onSortChange }: SortableHeaderCe
   return (
     <button
       type="button"
-      onClick={() => onSortChange(cycle(sort, col))}
+      onClick={() => onSortChange(cycleColumnSort(sort, col))}
       className={cn(
         'inline-flex items-center gap-1 rounded px-1 -ml-1',
         'uppercase tracking-wider text-[10px] font-bold',

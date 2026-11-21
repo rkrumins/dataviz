@@ -228,6 +228,8 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
   // nothing here would report every workspace as "Checking…" forever.
   const healthStatus = useMemo(() => {
     if (!workspace) return 'unknown' as const
+    // No sources has no readiness to wait for: it is "empty", not "checking".
+    if ((workspace.dataSources ?? []).length === 0) return 'empty' as const
     const entries = Object.values(readinessMap)
     if (entries.length === 0) return 'unknown' as const
 

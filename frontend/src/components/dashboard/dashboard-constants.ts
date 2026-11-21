@@ -47,17 +47,6 @@ export const CARD_THEMES = [
 ]
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Workspace Card Palettes
-// ───────────────────────────────────────────────────────────────────────────────
-export const WORKSPACE_PALETTES = [
-    { icon: 'text-indigo-500 bg-indigo-500/10 border-indigo-500/20', accent: 'bg-indigo-500', label: 'text-indigo-500', ring: 'hover:border-indigo-500/40', shadow: 'hover:shadow-indigo-500/10' },
-    { icon: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20', accent: 'bg-emerald-500', label: 'text-emerald-500', ring: 'hover:border-emerald-500/40', shadow: 'hover:shadow-emerald-500/10' },
-    { icon: 'text-violet-500 bg-violet-500/10 border-violet-500/20', accent: 'bg-violet-500', label: 'text-violet-500', ring: 'hover:border-violet-500/40', shadow: 'hover:shadow-violet-500/10' },
-    { icon: 'text-rose-500 bg-rose-500/10 border-rose-500/20', accent: 'bg-rose-500', label: 'text-rose-500', ring: 'hover:border-rose-500/40', shadow: 'hover:shadow-rose-500/10' },
-    { icon: 'text-amber-500 bg-amber-500/10 border-amber-500/20', accent: 'bg-amber-500', label: 'text-amber-500', ring: 'hover:border-amber-500/40', shadow: 'hover:shadow-amber-500/10' },
-]
-
-// ───────────────────────────────────────────────────────────────────────────────
 // View Grid Layout Icons & Colors
 // ───────────────────────────────────────────────────────────────────────────────
 export const LAYOUT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {

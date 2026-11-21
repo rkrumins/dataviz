@@ -39,7 +39,8 @@ import type { ResolveContext } from '@/features/view-filters/params'
 import { filterChips, clearDimensions } from '@/features/view-filters/dimensions'
 import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
 import { useLiveFacets } from '@/features/view-filters/useLiveFacets'
-import { withCounts } from '@/features/view-filters/facetOptions'
+import { sourceAfterWorkspaces, withCounts } from '@/features/view-filters/facetOptions'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { SOURCE_KIND_META } from '@/features/view-filters/sourceKindMeta'
 import { SourceKindMenu } from '@/features/view-filters/components/SourceKindMenu'
 import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
@@ -108,8 +109,9 @@ export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, tr
   const set = (patch: Partial<ViewFilterState>) => onChange({ ...state, ...patch })
 
   const workspaces = useWorkspacesStore(s => s.workspaces)
+  const { notify } = useAppNotifications()
   const { universe, people, counts, sourceKinds, pending } = useLiveFacets(state, ctx)
-  const lookups = useFilterLookups(people, today, currentUser?.id)
+  const lookups = useFilterLookups(people, today, currentUser?.id, universe)
 
   // ── Options: from the universe, counts from the live facets ────────
 
@@ -122,9 +124,8 @@ export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, tr
       .map(({ option: w, count }) => ({ id: w.id, label: w.name, count }))
   }, [workspaces, universe.workspaces, counts.workspaces, workspaceIds])
 
-  // Sources of the chosen workspaces (all of them when none is chosen), each with
-  // its workspace and whether it is versioned.
-  const dataSourceOptions: FilterOption[] = useMemo(() => {
+  // Every source the reader can filter by, with its workspace and whether it is versioned.
+  const sourceRows = useMemo(() => {
     const byId = new Map<string, SourceRow>()
     for (const w of workspaces) {
       for (const d of w.dataSources ?? []) {
@@ -138,7 +139,12 @@ export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, tr
         workspaceName: known?.workspaceName ?? d.workspaceName ?? undefined, kind: d.kind,
       })
     }
-    const inScope = [...byId.values()]
+    return byId
+  }, [workspaces, universe.dataSources])
+
+  // Sources of the chosen workspaces (all of them when none is chosen).
+  const dataSourceOptions: FilterOption[] = useMemo(() => {
+    const inScope = [...sourceRows.values()]
       .filter(d => workspaceIds.length === 0 || workspaceIds.includes(d.workspaceId))
     return withCounts(inScope, d => d.id, counts.dataSources, dataSourceId ? [dataSourceId] : [],
       id => ({ id, label: id, workspaceId: '' }))
@@ -150,7 +156,7 @@ export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, tr
           iconClassName: meta?.glyph ?? 'text-emerald-500',
         }
       })
-  }, [workspaces, universe.dataSources, workspaceIds, counts.dataSources, dataSourceId])
+  }, [sourceRows, workspaceIds, counts.dataSources, dataSourceId])
 
   const viewTypeOptions: FilterOption[] = useMemo(
     () => withCounts(universe.viewTypes, vt => vt.value, counts.viewTypes, viewTypes, value => ({ value, count: 0 }))
@@ -245,7 +251,14 @@ export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, tr
           accent="indigo"
           options={workspaceOptions}
           selectedIds={workspaceIds}
-          onChange={ids => set({ workspaceIds: ids })}
+          onChange={ids => {
+            // A chosen source outside every chosen workspace would match nothing.
+            const kept = sourceAfterWorkspaces(dataSourceId, ids, sourceRows.get(dataSourceId ?? '')?.workspaceId || undefined)
+            if (dataSourceId && !kept) {
+              notify('info', `Source “${sourceRows.get(dataSourceId)?.label ?? dataSourceId}” isn’t in the chosen workspaces, so it was taken out of the filter.`)
+            }
+            set({ workspaceIds: ids, dataSourceId: kept })
+          }}
           countsPending={pending}
           emptyMessage="No workspaces"
         />

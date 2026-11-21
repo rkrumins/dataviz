@@ -45,7 +45,7 @@ export function ReviewHeader({ wsId, actions, primaryAction, shortcuts }: {
     <header aria-label="This review" className="shrink-0 border-b border-glass-border/60 bg-canvas">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 sm:px-6 py-3">
         <div className="min-w-0 flex-1">
-          <Link to={`/workspaces/${wsId}/reviews`} className="inline-flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink">
+          <Link to={`/reviews?workspace=${encodeURIComponent(wsId)}`} className="inline-flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink">
             <ArrowLeft className="w-3.5 h-3.5" aria-hidden /> Reviews
           </Link>
           <div className="flex items-center gap-2 mt-1 min-w-0">

@@ -8,8 +8,8 @@
  * corresponding category filter; the fourth is a passive last-activity
  * indicator.
  *
- * Data comes from the global facets query (shared cache via React
- * Query), so the bar adds zero new network cost.
+ * Each tile counts what clicking it shows: the page's filters with the tile's
+ * own category (``/views/stats``, asked without the open category).
  */
 import type { ComponentType } from 'react'
 import { Compass, Sparkles, AlertTriangle, Clock } from 'lucide-react'

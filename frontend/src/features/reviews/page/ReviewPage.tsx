@@ -60,7 +60,7 @@ function entryRow(d: ChangeListEntry | undefined): ChangeListRow | null {
 
 export function ReviewPage({ wsId, prId }: { wsId: string; prId: string }) {
   const navigate = useNavigate()
-  const inbox = `/workspaces/${wsId}/reviews`
+  const inbox = `/reviews?workspace=${encodeURIComponent(wsId)}`
   const actions = useReviewActions(wsId, prId, () => navigate(inbox))
   const { pr, prQ, user, draftReview, draftSummaryQ, forkSummaryQ, listOrigin, deciding, decisions, viewerCan } = actions
   const wide = useWide()

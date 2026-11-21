@@ -10,15 +10,19 @@
  * Design goals:
  * - 300 ms hover delay so incidental passes don't flash a card
  * - Smart edge-aware positioning so it never clips the viewport
- * - Pointer-events disabled on the card itself so it never blocks clicks
- *   on content underneath
- * - framer-motion fade + slight scale for a tactile feel
- * - No extra runtime deps (uses framer-motion already bundled)
+ * - With conversations on (or an `onAsk`), the card carries actions — View profile,
+ *   Ask a question — and stays open while the pointer is on it. Without any it is
+ *   a plain tooltip that never takes clicks.
+ * - Mount-only fade + slight scale: no exit animation, so a closing card can never
+ *   linger as an invisible layer over the page.
  */
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AnimatePresence, motion } from 'framer-motion'
+import { motion } from 'framer-motion'
+import { Link, useInRouterContext } from 'react-router-dom'
+import { MessageCircleQuestion, UserRound } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useFeature } from '@/store/features'
 import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 
@@ -49,6 +53,8 @@ interface PersonHoverCardProps {
   openDelayMs?: number
   /** Milliseconds after the pointer leaves before the card hides. */
   closeDelayMs?: number
+  /** Ask them a question about what the card sits on (a view, a data source). */
+  onAsk?: () => void
 }
 
 export function PersonHoverCard({
@@ -61,7 +67,12 @@ export function PersonHoverCard({
   accentClassName,
   openDelayMs = 300,
   closeDelayMs = 120,
+  onAsk,
 }: PersonHoverCardProps) {
+  const inRouter = useInRouterContext()
+  const profiles = useFeature('conversationsEnabled')
+  const profileHref = profiles && inRouter && userId ? `/people/${encodeURIComponent(userId)}` : null
+  const interactive = !!(profileHref || onAsk)
   const [open, setOpen] = useState(false)
   const [coords, setCoords] = useState<Placement | null>(null)
   const triggerRef = useRef<HTMLElement | null>(null)
@@ -112,6 +123,14 @@ export function PersonHoverCard({
     if (closeTimer.current) clearTimeout(closeTimer.current)
   }, [])
 
+  // Esc closes an open card.
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
+
   // Recompute on scroll / resize while open so the card follows the trigger.
   useEffect(() => {
     if (!open) return
@@ -161,22 +180,23 @@ export function PersonHoverCard({
   return (
     <>
       {trigger}
-      {typeof document !== 'undefined' && createPortal(
-        <AnimatePresence>
-          {open && coords && (
+      {typeof document !== 'undefined' && open && coords && createPortal(
             <motion.div
               // From the trigger's side: down when below it, up when above.
               initial={{ opacity: 0, y: coords.top === undefined ? 4 : -4, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: coords.top === undefined ? 4 : -4, scale: 0.98 }}
               transition={{ duration: 0.14, ease: 'easeOut' }}
               style={{ top: coords.top, bottom: coords.bottom, left: coords.left, width: 260 }}
               className={cn(
-                'fixed z-[1000] pointer-events-none',
+                'fixed z-[1000]',
+                interactive ? 'pointer-events-auto' : 'pointer-events-none',
                 'rounded-xl border border-glass-border bg-canvas-elevated shadow-xl',
                 'backdrop-blur-sm',
               )}
-              role="tooltip"
+              role={interactive ? 'dialog' : 'tooltip'}
+              aria-label={interactive ? name : undefined}
+              onMouseEnter={interactive ? () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null } } : undefined}
+              onMouseLeave={interactive ? handleLeave : undefined}
             >
               <div className="p-3 flex items-start gap-3">
                 {(() => {
@@ -223,15 +243,29 @@ export function PersonHoverCard({
                   </div>
                 </div>
               </div>
+              {interactive && (
+                <div className="flex items-center gap-1.5 border-t border-glass-border/60 px-3 py-2">
+                  {profileHref && (
+                    <Link to={profileHref} onClick={() => setOpen(false)}
+                      className="inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-lg border border-glass-border text-[11px] font-semibold text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+                      <UserRound className="h-3.5 w-3.5" aria-hidden /> View profile
+                    </Link>
+                  )}
+                  {onAsk && (
+                    <button type="button" onClick={() => { setOpen(false); onAsk() }}
+                      className="inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-500 to-fuchsia-500 text-[11px] font-semibold text-white hover:brightness-110">
+                      <MessageCircleQuestion className="h-3.5 w-3.5" aria-hidden /> Ask a question
+                    </button>
+                  )}
+                </div>
+              )}
               {/* User id as a dim footer for power-users / debugging. */}
-              {userId && (
+              {userId && !interactive && (
                 <div className="border-t border-glass-border/60 px-3 py-1.5 text-[10px] text-ink-muted/60 font-mono truncate">
                   {userId}
                 </div>
               )}
-            </motion.div>
-          )}
-        </AnimatePresence>,
+            </motion.div>,
         document.body,
       )}
     </>

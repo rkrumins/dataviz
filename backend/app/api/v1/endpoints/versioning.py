@@ -1958,6 +1958,10 @@ async def create_blank_graph(
     and is compensated away if graph creation fails."""
     from backend.app.db.repositories import ontology_definition_repo
 
+    # 0) In the Playground: on its own sandbox provider, within the person's quota.
+    from backend.app.services import playground_policy
+    await playground_policy.assert_blank_graph(session, ws_id, body.provider_id, user.id)
+
     # 1) Provider must exist, be active, FalkorDB (Neo4j later), workspace-permitted and
     #    REACHABLE — a model is worthless if its backing store is down.
     await assert_provider_usable(session, ws_id, body.provider_id)

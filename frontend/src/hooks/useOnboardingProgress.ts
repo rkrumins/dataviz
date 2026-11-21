@@ -6,24 +6,28 @@
  * can't perform:
  *
  *   • Set up the platform  — admins / provider-readers: connect → assets →
- *                            workspace → ontology. Auto-detected from real counts.
+ *                            workspace → ontology (and, for a platform admin,
+ *                            the Playground). Auto-detected from real counts.
  *   • Explore your data    — everyone: create a view, trace lineage — and,
  *                            for someone who can't create a workspace, first
- *                            join one.
- *   • Collaborate & govern — admins (invite team, access) and, when the
- *                            versioning flag is on, reviewing a change.
+ *                            join one; then the self-service way on: try the
+ *                            Playground, ask for a workspace of their own.
+ *   • Collaborate & govern — admins (invite team, access), whoever creates
+ *                            workspaces (answer requests for them) and, when
+ *                            the versioning flag is on, reviewing a change.
  *
  * Steps with a real signal (counts) tick themselves off; "learn"-style steps
  * with no persisted signal complete when the user acts on them (the hub records
  * a manual flag on click). The product tour is offered separately as a
- * persistent, replayable action — it is not a step here.
+ * persistent, replayable action — it is not a step here; a step whose page has
+ * a tour of its own names it (`tourId`), and the hub offers it beside the step.
  */
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { LucideIcon } from 'lucide-react'
 import {
   DatabaseZap, Boxes, Layers, Compass, GitBranch, PlusCircle,
-  Users, ShieldCheck, GitPullRequest, DoorOpen,
+  Users, ShieldCheck, GitPullRequest, DoorOpen, FlaskConical, Rocket, Building2,
 } from 'lucide-react'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
@@ -32,6 +36,8 @@ import { listViews } from '@/services/viewApiService'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
+import { usePlayground } from '@/hooks/usePlayground'
+import { useMyWorkspaceRequests, WORKSPACE_REQUESTS_FEATURE } from '@/hooks/useWorkspaceRequests'
 
 /** The product tour the hub offers (as a persistent action, not a step). */
 export const GETTING_STARTED_TOUR = 'getting-started'
@@ -50,6 +56,8 @@ export interface OnboardingStep {
   guideSlug?: string
   /** No auto-signal — the step completes when the user acts on it (marked on click). */
   manual?: boolean
+  /** A tour that shows the way, offered beside the step while tours are on. */
+  tourId?: string
 }
 
 export interface OnboardingTrack {
@@ -105,7 +113,7 @@ async function fetchOnboardingCounts(): Promise<OnboardingCounts> {
   }
 }
 
-interface StepOpts { href?: string; guideSlug?: string; manual?: boolean }
+interface StepOpts { href?: string; guideSlug?: string; manual?: boolean; tourId?: string }
 function makeStep(
   id: string, label: string, description: string, icon: LucideIcon, done: boolean, opts: StepOpts = {},
 ): OnboardingStep {
@@ -133,6 +141,14 @@ export function useOnboardingProgress(): OnboardingProgressResult {
   const canCreateWorkspace = usePermission('system:workspaces:create')
   const versioningEnabled = useFeature('versioningEnabled')
   const directoryEnabled = useFeature('workspaceDirectoryEnabled')
+  // The way in for someone who can't make a workspace: try the Playground, then ask for one.
+  const playground = usePlayground().data
+  const playgroundOpen = !!playground?.enabled && !!playground.exists
+  const playgroundJoined = !!playground?.joined
+  // A platform administrator opens it: until then, nobody can try it.
+  const playgroundToSetUp = !!playground?.enabled && !!playground.canSetUp
+  const requestsEnabled = useFeature(WORKSPACE_REQUESTS_FEATURE)
+  const asked = (useMyWorkspaceRequests().data?.length ?? 0) > 0
 
   // Who sees what. Setup is for people who can actually connect data; the
   // governance steps are admin/flag scoped. Explore is for everyone.
@@ -153,6 +169,9 @@ export function useOnboardingProgress(): OnboardingProgressResult {
         makeStep('discover-assets', 'Discover assets', 'Register data sources from your connected providers.', Boxes, counts.catalogItemCount > 0, { href: '/ingestion', guideSlug: 'admin-setup' }),
         makeStep('create-workspace', 'Create a workspace', 'Group data sources into a workspace for your team.', Layers, counts.workspaceCount > 0, { href: '/workspaces', guideSlug: 'workspace-admin' }),
         makeStep('assign-ontology', 'Assign an ontology', 'Give a data source a semantic layer to model against.', Layers, counts.hasOntology, { href: '/schema', guideSlug: 'semantic-layer' }),
+        ...(playgroundToSetUp ? [makeStep('set-up-playground', 'Set up the Playground',
+          'Give everyone a safe place to build graphs of their own, apart from production.',
+          FlaskConical, playgroundOpen, { href: '/playground', guideSlug: 'playground' })] : []),
       ]))
     }
 
@@ -165,16 +184,34 @@ export function useOnboardingProgress(): OnboardingProgressResult {
         DoorOpen, counts.workspaceCount > 0,
         { href: directoryEnabled ? '/workspaces?tab=discover' : '/my/access', guideSlug: 'requesting-access' })]
       : []
-    out.push(makeTrack('explore', 'Explore your data', 'See how everything connects', 'explore', Compass, [
-      ...join,
+    // The self-service way on, for anyone who can't make a workspace — whether or not
+    // they are in one already: try ideas in the Playground, then ask for their own.
+    const selfService = !canCreateWorkspace
+      ? [
+        ...(playgroundOpen ? [makeStep('try-playground', 'Try the Playground',
+          'Build a graph of your own and try views out in the common area, apart from production.',
+          FlaskConical, playgroundJoined, { href: '/playground', guideSlug: 'playground' })] : []),
+        ...(requestsEnabled ? [makeStep('request-workspace', 'Ask for your own workspace',
+          'Ready for more? Ask the platform team for a workspace of your own — bring what you built in the Playground.',
+          Rocket, asked, { href: '/my/access?tab=workspaces', guideSlug: 'requesting-a-workspace', tourId: 'request-workspace' })] : []),
+      ]
+      : []
+    const basics = [
       makeStep('create-view', 'Create a view', 'Build your first curated view of the lineage graph.', PlusCircle, counts.viewCount > 0 || did('create-view'), { href: '/workspaces', guideSlug: 'creating-views' }),
       makeStep('trace-lineage', 'Trace lineage', 'Follow data upstream and downstream on the canvas.', GitBranch, did('trace-lineage'), { href: '/explorer', guideSlug: 'reading-lineage', manual: true }),
-    ]))
+    ]
+    // Whoever must join a workspace starts with the way in; whoever sets data up, with the basics.
+    out.push(makeTrack('explore', 'Explore your data', 'See how everything connects', 'explore', Compass,
+      join.length ? [...join, ...selfService, ...basics] : [...basics, ...selfService]))
 
     const govern: OnboardingStep[] = []
     if (isAdmin) {
       govern.push(makeStep('invite-team', 'Invite your team', 'Bring teammates in so they can explore alongside you.', Users, did('invite-team'), { href: '/admin/users', guideSlug: 'users-access', manual: true }))
       govern.push(makeStep('configure-access', 'Set up access & roles', 'Control who can see and change what, with groups and SSO.', ShieldCheck, did('configure-access'), { href: '/admin/groups', guideSlug: 'users-access', manual: true }))
+    }
+    // Whoever creates workspaces answers the requests for them.
+    if (canCreateWorkspace && requestsEnabled) {
+      govern.push(makeStep('answer-workspace-requests', 'Answer workspace requests', 'People who can’t create workspaces ask for one — approve, ask a question, or decline.', Building2, did('answer-workspace-requests'), { href: '/workspaces?tab=requests', guideSlug: 'requesting-a-workspace', manual: true, tourId: 'workspace-approver' }))
     }
     if (versioningEnabled) {
       govern.push(makeStep('try-reviews', 'Review a change', 'Draft, review and merge changes like a pull request.', GitPullRequest, did('try-reviews'), { href: '/workspaces', guideSlug: 'versioning-change-control', manual: true }))
@@ -184,7 +221,8 @@ export function useOnboardingProgress(): OnboardingProgressResult {
     }
 
     return out.filter((t): t is OnboardingTrack => t !== null)
-  }, [counts, manual, canSetup, canCreateWorkspace, directoryEnabled, isAdmin, versioningEnabled])
+  }, [counts, manual, canSetup, canCreateWorkspace, directoryEnabled, isAdmin, versioningEnabled,
+    playgroundOpen, playgroundJoined, playgroundToSetUp, requestsEnabled, asked])
 
   const allSteps = tracks.flatMap((t) => t.steps)
   const completedCount = allSteps.filter((s) => s.done).length

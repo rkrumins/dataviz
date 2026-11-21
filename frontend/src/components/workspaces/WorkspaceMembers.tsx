@@ -28,20 +28,17 @@ import {
 import {
     workspaceMembersService,
     type ServiceAccountCandidate,
+    type WorkspaceAccessUser,
     type WorkspaceMemberResponse,
 } from '@/services/workspaceMembersService'
 import { WorkspaceAccessList } from './WorkspaceAccessList'
-import {
-    groupsService,
-    type GroupResponse,
-    type GroupMemberResponse,
-} from '@/services/groupsService'
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
 import type { ImpactPreviewResponse } from '@/services/permissionsService'
-import { searchDirectory } from '@/services/userDirectoryService'
+import { searchDirectory, type DirectoryGroup } from '@/services/userDirectoryService'
 import { ReviewRequestsPanel } from '@/components/access/ReviewRequestsPanel'
 import { WorkspaceReachNote } from '@/components/access/WorkspaceReachNote'
 import { WorkspaceAccessSettings } from './WorkspaceAccessSettings'
+import { WorkspaceGroupsPanel } from './WorkspaceGroupsPanel'
 import { AccessReviewPanel } from './AccessReviewPanel'
 import { useGrantOptions } from '@/hooks/useWorkspaceAccess'
 import { useAuthStore } from '@/store/auth'
@@ -301,7 +298,7 @@ function SubjectAvatar({ type, displayName, userId, size = 'md' }: {
 /** A compact, read-only member row for a group revealed inside the
  *  bindings table. Mirrors the /admin/groups drawer's member row: the id
  *  stays visible when it resolves to nobody, deleted/SSO are flagged. */
-function GroupMemberLine({ member: m }: { member: GroupMemberResponse }) {
+function GroupMemberLine({ member: m, sso }: { member: WorkspaceAccessUser; sso: boolean }) {
     const resolved = !!m.displayName
     const name = m.displayName ?? m.userId
     return (
@@ -327,7 +324,7 @@ function GroupMemberLine({ member: m }: { member: GroupMemberResponse }) {
                     )}>
                         {name}
                     </p>
-                    {m.source === 'sso' && (
+                    {sso && (
                         <span className="shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase tracking-wide bg-violet-500/15 text-violet-600 dark:text-violet-400">
                             SSO
                         </span>
@@ -378,11 +375,12 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
     // aware list of everyone who can actually get in).
     const [viewMode, setViewMode] = useState<'bindings' | 'people'>('bindings')
     // Group binding rows expand in place to reveal their members — the
-    // same list the /admin/groups drawer shows, fetched lazily and cached
+    // people the workspace's access list says the group lets in (the Groups
+    // admin API would need system:groups:manage), fetched lazily and cached
     // by group id so re-expanding is instant.
     const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
     const [groupMembers, setGroupMembers] = useState<
-        Record<string, GroupMemberResponse[] | 'loading' | 'error'>
+        Record<string, WorkspaceAccessUser[] | 'loading' | 'error'>
     >({})
     const { notify } = useAppNotifications()
 
@@ -392,10 +390,13 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
                 ? prev
                 : { ...prev, [groupId]: 'loading' },
         )
-        groupsService.listMembers(groupId)
-            .then(ms => setGroupMembers(prev => ({ ...prev, [groupId]: ms })))
+        workspaceMembersService.listEffective(workspaceId)
+            .then(({ users }) => setGroupMembers(prev => ({
+                ...prev,
+                [groupId]: users.filter(u => u.grants.some(g => g.via === 'group' && g.groupId === groupId)),
+            })))
             .catch(() => setGroupMembers(prev => ({ ...prev, [groupId]: 'error' })))
-    }, [])
+    }, [workspaceId])
 
     const toggleGroupRow = (bindingId: string, groupId: string) => {
         const willOpen = !expandedGroups.has(bindingId)
@@ -875,8 +876,7 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
                                         </td>
                                     </motion.tr>
 
-                                    {/* Group members, revealed in place — the same list the
-                                        /admin/groups drawer shows, and who this binding lets in. */}
+                                    {/* Group members, revealed in place — who this binding lets in. */}
                                     {isExpanded && (
                                         <tr className="border-b last:border-b-0 border-glass-border bg-black/[0.015] dark:bg-white/[0.015]">
                                             <td colSpan={4} className="px-5 pb-4 pt-0">
@@ -908,7 +908,11 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
                                                     ) : (
                                                         <div className="max-h-72 overflow-y-auto custom-scrollbar">
                                                             {membersState.map(gm => (
-                                                                <GroupMemberLine key={gm.userId} member={gm} />
+                                                                <GroupMemberLine
+                                                                    key={gm.userId}
+                                                                    member={gm}
+                                                                    sso={gm.grants.some(g => g.groupId === m.subject.id && g.provenance?.origin === 'idp')}
+                                                                />
                                                             ))}
                                                         </div>
                                                     )}
@@ -935,6 +939,9 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
             )}
             </>
             )}
+
+            {/* The teams that get access together, and their links to the identity provider */}
+            <WorkspaceGroupsPanel workspaceId={workspaceId} canManage={canManage} onChanged={() => void fetchMembers()} />
 
             {/* How people get in — listed, who decides, how people ask, the note for people asking */}
             {canManage && <WorkspaceAccessSettings workspaceId={workspaceId} />}
@@ -1058,7 +1065,7 @@ function AddMemberModal({
     /** Active users matching the search across every page. */
     const [userTotal, setUserTotal] = useState(0)
     const [userPage, setUserPage] = useState(0)
-    const [groups, setGroups] = useState<GroupResponse[] | null>(null)
+    const [groups, setGroups] = useState<DirectoryGroup[] | null>(null)
     // A service account holds only roles that neither administer the
     // workspace nor let people in.
     const availableRoles = options
@@ -1087,7 +1094,7 @@ function AddMemberModal({
 
     // Users are searched and paged by the server, so every active account is
     // reachable — the picker used to offer only the first page the user list
-    // returned (fifty people). Groups are still one local list.
+    // returned (fifty people). Groups are searched in the directory too.
     const debouncedSearch = useDebouncedValue(search.trim(), 300)
     useEffect(() => {
         if (kind !== 'user') return
@@ -1126,18 +1133,19 @@ function AddMemberModal({
         return () => { cancelled = true }
     }, [kind, debouncedSearch, workspaceId, notify])
 
+    // Every live group, searched in the directory any signed-in user may —
+    // what a workspace admin may bind. The Groups admin list needs
+    // system:groups:manage, so an admin without it was offered none.
     useEffect(() => {
-        ;(async () => {
-            try {
-                if (subjectType === 'group' && groups === null) {
-                    const data = await groupsService.list({ limit: 500 })
-                    setGroups(data)
-                }
-            } catch (err) {
-                notify('error', err instanceof Error ? err.message : 'Failed to load')
-            }
-        })()
-    }, [subjectType, groups, notify])
+        if (kind !== 'group') return
+        let cancelled = false
+        searchDirectory(debouncedSearch, { types: ['group'], limit: 50 })
+            .then(({ groups: found }) => { if (!cancelled) setGroups(found) })
+            .catch(err => {
+                if (!cancelled) notify('error', err instanceof Error ? err.message : 'Failed to load')
+            })
+        return () => { cancelled = true }
+    }, [kind, debouncedSearch, notify])
 
     // Reset selection when toggling subject type
     useEffect(() => { setSelected(null) }, [kind])
@@ -1154,11 +1162,8 @@ function AddMemberModal({
         // Already active-only, searched and name-sorted by the server.
         if (kind === 'service') return accounts ?? []
         if (subjectType === 'user') return users ?? []
-        const q = search.trim().toLowerCase()
-        return (groups ?? [])
-            .filter(g => !q || g.name.toLowerCase().includes(q) || (g.description ?? '').toLowerCase().includes(q))
-            .sort((a, b) => a.name.localeCompare(b.name))
-    }, [kind, subjectType, accounts, users, groups, search])
+        return groups ?? []
+    }, [kind, subjectType, accounts, users, groups])
 
     // A service account is never an exception: the provider doesn't know it.
     const needsException = idpRun && kind === 'user'
@@ -1240,7 +1245,7 @@ function AddMemberModal({
                                 const a = kind === 'service' ? (c as ServiceAccountCandidate) : null
                                 const isUser = subjectType === 'user' && !a
                                 const u = isUser ? (c as Pick<AdminUserResponse, 'id' | 'displayName' | 'email'>) : null
-                                const g = !isUser && !a ? (c as GroupResponse) : null
+                                const g = !isUser && !a ? (c as DirectoryGroup) : null
                                 const id = a ? a.id : isUser ? u!.id : g!.id
                                 const label = a ? a.name : isUser ? u!.displayName : g!.name
                                 // Whose integration it is: its managers, and
@@ -1252,7 +1257,7 @@ function AddMemberModal({
                                             ? `Managed by ${a.managers.map(m => m.fromIdp ? `${m.name} (from your identity provider)` : m.name).join(', ')}`
                                             : 'Nobody manages it',
                                     ].filter(Boolean).join(' · ')
-                                    : isUser ? u!.email : (g!.description ?? `${g!.memberCount} member${g!.memberCount === 1 ? '' : 's'}`)
+                                    : isUser ? u!.email : `${g!.memberCount} member${g!.memberCount === 1 ? '' : 's'}`
                                 const isSelected = selected?.id === id
                                 return (
                                     <button

@@ -70,6 +70,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { defaultVisibilityFor } from '@/lib/viewVisibility'
 import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import { usePreferencesStore } from '@/store/preferences'
 import { useFeature, useFeatureList } from '@/store/features'
@@ -149,8 +150,11 @@ export interface ViewWizardProps {
     /** Optional pre-selected scope (e.g. from a data source card). */
     initialWorkspaceId?: string
     initialDataSourceId?: string
-    /** 'import' opens the Import journey: a view from a file exported by another environment. */
-    journey?: 'build' | 'import'
+    /** 'import' opens the Import journey: a view from a file exported by another environment;
+     *  'blank' opens on a new blank graph. */
+    journey?: 'build' | 'import' | 'blank'
+    /** Blank graph: the provider it goes on, chosen already. */
+    initialProviderId?: string
     /** Import journey: a file already chosen (dropped on the Explorer, say). */
     importFile?: File | null
     /** Import journey: update this view from the file ("Update from file…"). */
@@ -513,7 +517,8 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     const { activeWorkspaceId, activeDataSourceId, workspaces, ...wizardProps } = props
     const loadWorkspaces = useWorkspacesStore(s => s.loadWorkspaces)
     const lastScope = useMemo(() => readLastScope(), [])
-    const startMode: ScopeMode = props.journey === 'import' ? 'import' : 'existing'
+    const startMode: ScopeMode = props.journey === 'import' || props.journey === 'blank' ? props.journey : 'existing'
+    const initialProvider = props.journey === 'blank' ? props.initialProviderId ?? null : null
 
     // Determine initial selections: explicit props > active context > last used
     const initialWs = props.initialWorkspaceId ?? activeWorkspaceId ?? lastScope.wsId ?? null
@@ -525,7 +530,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     const [selectedWsId, setSelectedWsId] = useState<string | null>(initialWs)
     const [selectedDsId, setSelectedDsId] = useState<string | null>(initialDs)
     const [scopeMode, setScopeMode] = useState<ScopeMode>(startMode)
-    const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null)
+    const [selectedProviderId, setSelectedProviderId] = useState<string | null>(initialProvider)
     const [selectedOntologyId, setSelectedOntologyId] = useState<string | null>(null)
     const [scopeConfirmed, setScopeConfirmed] = useState(false)
 
@@ -604,7 +609,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
             setSelectedDsId(initialDs)
             setScopeMode(startMode)
             setImportStep(firstImportStep)
-            setSelectedProviderId(null)
+            setSelectedProviderId(initialProvider)
             setSelectedOntologyId(null)
             setScopeConfirmed(false)
             setDataTargetMode('existing')
@@ -1188,13 +1193,16 @@ function ViewWizardBody({
 
     // Create-mode initial form: layers start empty for both existing and blank
     // scopes — blank models choose their starting layers via a template on Layout.
+    // In the Playground a new view is shared with everyone there to begin with.
+    const workspaceKind = useWorkspacesStore(s => s.workspaces.find(w => w.id === resolvedWorkspaceId)?.kind)
     const makeCreateFormData = useCallback((): WizardFormData => {
         const base = getInitialFormData(schema)
         return {
             ...base,
+            visibility: defaultVisibilityFor(workspaceKind),
             dataSourceId: resolvedDataSourceId ?? undefined,
         }
-    }, [schema, resolvedDataSourceId])
+    }, [schema, resolvedDataSourceId, workspaceKind])
 
     // When editing a draft, hydrate the wizard from the BRANCH-EFFECTIVE view
     // (base ⊕ overlay) — same branch the submit writes to (branchIdForScope

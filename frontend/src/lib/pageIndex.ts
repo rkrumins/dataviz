@@ -86,6 +86,16 @@ export const PAGE_INDEX: PageEntry[] = [
         feature: 'layoutTemplatesEnabled',
     },
     {
+        id: 'reviews',
+        category: 'Page',
+        title: 'Review Center',
+        description: 'Changes waiting on you, across your workspaces',
+        keywords: ['reviews', 'merge requests', 'approve', 'pull requests', 'changes'],
+        path: '/reviews',
+        gate: { kind: 'sidebar', key: 'reviews' },
+        feature: 'versioningEnabled',
+    },
+    {
         id: 'workspaces',
         category: 'Page',
         title: 'Workspaces',
@@ -93,6 +103,16 @@ export const PAGE_INDEX: PageEntry[] = [
         keywords: ['workspace', 'environments', 'projects', 'teams'],
         path: '/workspaces',
         gate: { kind: 'sidebar', key: 'workspaces' },
+    },
+    {
+        id: 'playground',
+        category: 'Page',
+        title: 'Playground',
+        description: 'A common area to build graphs and try ideas, apart from production',
+        keywords: ['sandbox', 'experiment', 'try', 'proof of concept', 'poc', 'practice', 'blank graph'],
+        path: '/playground',
+        gate: { kind: 'sidebar', key: 'playground' },
+        feature: 'playgroundEnabled',
     },
     {
         id: 'find-a-workspace',

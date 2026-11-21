@@ -93,6 +93,15 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "workspaceDirectoryEnabled":
         "Find a workspace is turned off for this deployment. Ask a colleague for a link to the "
         "workspace, or an administrator can enable it under Admin → Features.",
+    "playgroundEnabled":
+        "The Playground is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
+    "workspaceRequestsEnabled":
+        "Requesting a workspace is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
+    "dataRequestsEnabled":
+        "Asking for data is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
     "allowedViewModes":
         "That view type is not available in this deployment. "
         "An administrator chooses the available types under Admin → Features.",
@@ -609,6 +618,83 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "if the names of workspaces are themselves sensitive."
         ),
         "sort_order": 6,
+        "deprecated": False,
+    },
+    {
+        "key": "playgroundEnabled",
+        "name": "Playground",
+        "description": (
+            "One shared sandbox workspace that anyone who can sign in may join, to build their "
+            "own graphs from blank and try views out — without access to any team's workspace "
+            "or its data."
+        ),
+        "impact_when_off": (
+            "Try the Playground disappears and the server refuses joining it. People already in "
+            "it keep their graphs and views, which stay in the workspace; nothing is deleted."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "On, everyone who can sign in may join the Playground and create graphs on its "
+            "sandbox provider, up to the quota you set. Give it a provider of its own, kept apart "
+            "from production, before turning this on."
+        ),
+        "sort_order": 8,
+        "deprecated": False,
+    },
+    {
+        "key": "workspaceRequestsEnabled",
+        "name": "Workspace requests",
+        "description": (
+            "Let anyone who can sign in ask for a workspace of their own — its name, what it is "
+            "for, the teammates to add and the Playground graphs to bring along — for Org and "
+            "Super Admins to approve, send back with a question, or decline."
+        ),
+        "impact_when_off": (
+            "Request a workspace disappears and the server refuses new and resubmitted requests. "
+            "Requests already sent can still be read, withdrawn and answered, and workspaces made "
+            "from them keep everything. Nothing is deleted."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Approving creates the workspace, makes the requester its Workspace Admin and their "
+            "teammates its Members, and moves the Playground graphs they chose into it with their "
+            "views."
+        ),
+        "sort_order": 9,
+        "deprecated": False,
+    },
+    {
+        "key": "dataRequestsEnabled",
+        "name": "Data requests",
+        "description": (
+            "Let anyone who can read a workspace ask for data to be connected to it — where it "
+            "lives (Snowflake, Databricks, a dbt project, a file…), what of it, why, by when and "
+            "who knows it — for the platform team to take on, connect, or decline."
+        ),
+        "impact_when_off": (
+            "Ask for data disappears and the server refuses new requests. Requests already sent "
+            "can still be read, withdrawn and answered, and data sources connected for them are "
+            "kept. Nothing is deleted."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Org and Super Admins answer every workspace's requests under Workspaces → Requests. "
+            "People who manage a workspace's data may start and connect that workspace's requests "
+            "themselves."
+        ),
+        "sort_order": 10,
         "deprecated": False,
     },
     # ── Lineage ────────────────────────────────────────────────────────────────

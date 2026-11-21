@@ -195,15 +195,16 @@ vi.mock('../steps/ScopeStep', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../steps/ScopeStep')>()
   return {
     ...actual,
-    ScopeStep: ({ aboveSlot, scopeMode, providers, onSelectProvider, blankOntologySlot, blankBody }: {
+    ScopeStep: ({ aboveSlot, scopeMode, providers, selectedProviderId, onSelectProvider, blankOntologySlot, blankBody }: {
       aboveSlot?: React.ReactNode
       scopeMode: string
       providers: Array<{ provider: { id: string; name: string } }>
+      selectedProviderId?: string | null
       onSelectProvider: (id: string) => void
       blankOntologySlot?: React.ReactNode
       blankBody?: React.ReactNode
     }) => (
-      <div data-testid="scope-step">
+      <div data-testid="scope-step" data-mode={scopeMode} data-provider={selectedProviderId ?? ''}>
         {aboveSlot}
         {scopeMode === 'blank' && blankBody ? blankBody : (
           <>
@@ -1520,5 +1521,14 @@ describe('ViewWizard — a package’s data in a new data source', () => {
     expect(await screen.findByText('The package’s upload has expired')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Choose the file again/ }))
     expect(await screen.findByText('Drop a view file here')).toBeInTheDocument()
+  })
+})
+
+describe('the blank journey (the Playground’s Start a new graph)', () => {
+  it('opens on a blank graph with its provider already chosen', async () => {
+    renderImport({ journey: 'blank', initialProviderId: 'p1', importFile: undefined })
+    const scope = await screen.findByTestId('scope-step')
+    expect(scope).toHaveAttribute('data-mode', 'blank')
+    expect(scope).toHaveAttribute('data-provider', 'p1')
   })
 })

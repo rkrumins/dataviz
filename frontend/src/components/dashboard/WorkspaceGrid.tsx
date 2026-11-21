@@ -24,7 +24,7 @@ import {
 import { cn } from '@/lib/utils'
 import { compact } from '@/lib/formatMetric'
 import { HoverTip } from '@/components/ui/HoverTip'
-import { WORKSPACE_PALETTES } from './dashboard-constants'
+import { workspaceColor, type WorkspaceColorSet } from '@/lib/workspaceColor'
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Routing helper
@@ -52,7 +52,7 @@ function DataSourceList({ dataSources, activeDataSourceId, isActiveWs, sources, 
     /** Per-source numbers from the workspace summary, keyed by data source id. */
     sources: Record<string, WorkspaceSourceSummary>
     onSelect: (dsId: string) => void
-    palette: typeof WORKSPACE_PALETTES[0]
+    palette: WorkspaceColorSet
 }) {
     const [query, setQuery] = useState('')
     const filtered = useMemo(() => {
@@ -163,7 +163,8 @@ function WorkspaceCard({ ws, index, row, isActive, activeDataSourceId, onSelect 
     onSelect: (wsId: string) => void
 }) {
     const [expanded, setExpanded] = useState(isActive)
-    const palette = WORKSPACE_PALETTES[index % WORKSPACE_PALETTES.length]
+    // The workspace's own colour, as on every other surface — not its place in the list.
+    const palette = workspaceColor(ws.id)
     const dataSources = ws.dataSources || []
     const dsCount = row?.dataSources ?? dataSources.length
     const activeCount = row?.activeDataSources ?? dsCount

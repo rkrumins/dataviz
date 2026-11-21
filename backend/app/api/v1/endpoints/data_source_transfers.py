@@ -63,13 +63,13 @@ async def _one(session: AsyncSession, row, claims: PermissionClaims, user: User)
 async def list_move_destinations(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
-    _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
+    user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Where this source could go, and whether the caller may move it there or ask to."""
     ds = await transfers.source_in(session, ds_id, workspace_id)
-    return await transfers.destinations(session, ds=ds, claims=claims)
+    return await transfers.destinations(session, ds=ds, claims=claims, actor_id=user.id)
 
 
 @source_router.get("/move-preview", response_model=TransferPreview)
@@ -77,13 +77,13 @@ async def preview_move(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
     to: str = Query(..., description="The workspace it would move to."),
-    _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
+    user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Everything a move would take, who keeps, gains and loses access, and what's in its way."""
     ds = await transfers.source_in(session, ds_id, workspace_id)
-    return await transfers.preview(session, ds=ds, to_ws_id=to, claims=claims)
+    return await transfers.preview(session, ds=ds, to_ws_id=to, claims=claims, actor_id=user.id)
 
 
 @source_router.post("/transfer-requests", response_model=DataSourceTransferResponse,
@@ -92,7 +92,9 @@ async def propose_transfer(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
     req: DataSourceMoveRequest = Body(...),
-    user: User = Depends(requires("workspace:admin", workspace="workspace_id")),
+    # The service decides who may ask: the workspace's admins — and in the Playground, a
+    # graph's maker (who manages data sources there, and administers nothing).
+    user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):

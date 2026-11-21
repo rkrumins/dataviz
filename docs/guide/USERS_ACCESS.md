@@ -8,7 +8,7 @@ more access than people need, and no less.
 > **Administration**) need the **Super Admin** role. **Groups** also opens for
 > anyone with the `system:groups:manage` permission, which **Org Admins** have.
 > Giving someone a role inside one workspace happens on that workspace's
-> **Members** tab — see [Workspace Admin](/guide/workspace-admin#giving-people-access-the-members-tab).
+> **People** tab — see [Workspace Admin](/guide/workspace-admin#giving-people-access-the-people-tab).
 
 > **Note:** *Mental model* — *People* (and **groups** of people) are given
 > **roles**, roles carry **permissions**, and individual resources like Views
@@ -184,7 +184,7 @@ people** with **Active straight away** unticked. These accounts start as
 
 **You should now see** "*name* is approved — they can sign in now." Approved
 accounts start as **User**: give them workspace access next (see [Workspace
-Admin](/guide/workspace-admin#giving-people-access-the-members-tab)). A
+Admin](/guide/workspace-admin#giving-people-access-the-people-tab)). A
 rejected signup is kept as **Suspended** and can't sign in.
 
 ---

@@ -48,3 +48,16 @@ export function countMap<T>(
   if (!rows) return null
   return new Map(rows.map(r => [key(r), count(r)]))
 }
+
+/**
+ * The Source filter after the Workspace filter changes to ``workspaceIds``: kept
+ * while its workspace is still chosen (or none is), dropped once its workspace is
+ * not — a source outside every chosen workspace matches nothing. ``workspaceOf`` is
+ * the source's workspace, when known.
+ */
+export function sourceAfterWorkspaces(
+  dataSourceId: string | null, workspaceIds: string[], workspaceOf: string | undefined,
+): string | null {
+  if (!dataSourceId || workspaceIds.length === 0 || !workspaceOf) return dataSourceId
+  return workspaceIds.includes(workspaceOf) ? dataSourceId : null
+}

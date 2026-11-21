@@ -144,6 +144,25 @@ def _summary_access_request(verb: str):
     return _build
 
 
+def _summary_workspace_request(verb: str):
+    def _build(p: dict) -> str:
+        return f"Workspace request '{p.get('name') or p.get('request_id') or '?'}' {verb}"
+    return _build
+
+
+def _summary_idp_link_request(verb: str):
+    def _build(p: dict) -> str:
+        return (f"Link of group '{p.get('group_id') or '?'}' to IdP group "
+                f"'{p.get('idp_group') or '?'}' {verb}")
+    return _build
+
+
+def _summary_data_request(verb: str):
+    def _build(p: dict) -> str:
+        return f"Data request '{p.get('title') or p.get('request_id') or '?'}' {verb}"
+    return _build
+
+
 def _summary_idp_provider(verb: str):
     def _build(p: dict) -> str:
         slug = p.get("slug") or p.get("provider_id") or "?"
@@ -560,6 +579,21 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.logged_in": ("info", _summary_login),
     "rbac.workspace.created": ("info", _summary_workspace_lifecycle("created")),
     "rbac.workspace.updated": ("info", _summary_workspace_lifecycle("updated")),
+    "workspace.request.submitted": ("info", _summary_workspace_request("submitted")),
+    "workspace.request.resubmitted": ("info", _summary_workspace_request("resubmitted")),
+    "workspace.request.approved": ("info", _summary_workspace_request("approved")),
+    "workspace.request.sent_back": ("info", _summary_workspace_request("sent back with a question")),
+    "workspace.request.declined": ("warning", _summary_workspace_request("declined")),
+    "workspace.request.withdrawn": ("info", _summary_workspace_request("withdrawn")),
+    "rbac.idp_link_request.created": ("info", _summary_idp_link_request("requested")),
+    "rbac.idp_link_request.linked": ("info", _summary_idp_link_request("made")),
+    "rbac.idp_link_request.declined": ("warning", _summary_idp_link_request("declined")),
+    "rbac.idp_link_request.cancelled": ("info", _summary_idp_link_request("cancelled")),
+    "workspace.data_request.submitted": ("info", _summary_data_request("submitted")),
+    "workspace.data_request.started": ("info", _summary_data_request("started")),
+    "workspace.data_request.connected": ("info", _summary_data_request("connected")),
+    "workspace.data_request.declined": ("warning", _summary_data_request("declined")),
+    "workspace.data_request.withdrawn": ("info", _summary_data_request("withdrawn")),
     "identity.api_key.created": (
         "info", lambda p: f"API key {_api_key_label(p)} created",
     ),
@@ -1022,6 +1056,21 @@ LABELS: dict[str, str] = {
     "rbac.access_request.routed": "Pointed a request to the identity provider",
     "rbac.access_request.fulfilled": "Access arrived through the identity provider",
     "rbac.access_request.escalated": "Sent a waiting request to the Org Admins",
+    "workspace.request.submitted": "Requested a workspace",
+    "workspace.request.resubmitted": "Resubmitted a workspace request",
+    "workspace.request.approved": "Approved a workspace request",
+    "workspace.request.sent_back": "Sent a workspace request back",
+    "workspace.request.declined": "Declined a workspace request",
+    "workspace.request.withdrawn": "Withdrew a workspace request",
+    "rbac.idp_link_request.created": "Asked to link a group to the identity provider",
+    "rbac.idp_link_request.linked": "Linked a group to the identity provider",
+    "rbac.idp_link_request.declined": "Declined linking a group to the identity provider",
+    "rbac.idp_link_request.cancelled": "Cancelled a group's identity-provider link request",
+    "workspace.data_request.submitted": "Asked for data",
+    "workspace.data_request.started": "Started connecting requested data",
+    "workspace.data_request.connected": "Connected requested data",
+    "workspace.data_request.declined": "Declined a data request",
+    "workspace.data_request.withdrawn": "Withdrew a data request",
     "rbac.role.created": "Created a role",
     "rbac.role.updated": "Changed a role",
     "rbac.role.deleted": "Deleted a role",
@@ -1149,6 +1198,8 @@ _WORKSPACE_PREFIXES: tuple[str, ...] = (
     "workspace.data_source.",
     "workspace.datasource.moved",
     "workspace.versioning.",
+    # Every reader of the workspace already sees its data requests.
+    "workspace.data_request.",
 )
 
 #: Payload keys that name who acted, in the order they are trusted. Payloads
@@ -1285,7 +1336,7 @@ def _subject_user(event_type: str, p: dict) -> Optional[str]:
     """The person an event is ABOUT, when it is about one."""
     if p.get("subject_type") == "user":
         return _str(p.get("subject_id"), 128)
-    if event_type.startswith("rbac.access_request."):
+    if event_type.startswith(("rbac.access_request.", "workspace.request.", "workspace.data_request.")):
         return _str(p.get("requester_id"), 128)
     return _str(p.get("user_id") or p.get("target_user_id"), 128)
 

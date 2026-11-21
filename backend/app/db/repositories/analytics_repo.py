@@ -530,6 +530,23 @@ async def _opens_by_day(
 
 # ── Per-entity usage ────────────────────────────────────────────────
 
+async def view_open_counts(session: AsyncSession, *, since: str, limit: int) -> dict[str, int]:
+    """Opens per view since ``since``, for the ``limit`` most-opened views — what the
+    Explorer's "Most opened" sort ranks the catalogue by. Read here, from the event
+    log alone, and handed to the catalogue by id: no JOIN across the two."""
+    opens = func.count().label("opens")
+    rows = (await session.execute(
+        select(ProductEventORM.subject_id, opens)
+        .where(ProductEventORM.event_type == VIEW_OPENED,
+               ProductEventORM.subject_id.is_not(None),
+               ProductEventORM.created_at >= since)
+        .group_by(ProductEventORM.subject_id)
+        .order_by(opens.desc(), ProductEventORM.subject_id)
+        .limit(limit)
+    )).all()
+    return {subject: count for subject, count in rows}
+
+
 #: Ceiling on one batch. A gallery page is a few dozen cards; anything much
 #: larger is a caller using this as an export, which is what the dashboard's
 #: own endpoints are for.

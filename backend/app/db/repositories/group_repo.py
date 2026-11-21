@@ -28,12 +28,17 @@ async def create_group(
     description: Optional[str] = None,
     source: str = "local",
     external_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    created_by: Optional[str] = None,
 ) -> GroupORM:
+    """``workspace_id``: the workspace that owns it, whose admins manage it."""
     group = GroupORM(
         name=name.strip(),
         description=description,
         source=source,
         external_id=external_id,
+        workspace_id=workspace_id,
+        created_by=created_by,
     )
     session.add(group)
     await session.flush()

@@ -26,8 +26,10 @@ import {
     CheckCircle2,
     ClipboardCheck,
     Clock,
+    Database,
     GitMerge,
     GitPullRequestArrow,
+    Hand,
     KeyRound,
     KeySquare,
     LayoutTemplate,
@@ -134,6 +136,83 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: CheckCircle2,
         icon: 'text-emerald-500',
         tile: 'bg-emerald-500/10',
+    },
+    // Asking for a workspace of one's own: the ask (and an answer to a question) reaches the
+    // platform team; approval, a question or a no reaches the person who asked.
+    'workspace_request.submitted': {
+        Icon: Building2,
+        icon: 'text-violet-500',
+        tile: 'bg-violet-500/10',
+    },
+    'workspace_request.resubmitted': {
+        Icon: Building2,
+        icon: 'text-violet-500',
+        tile: 'bg-violet-500/10',
+    },
+    'workspace_request.approved': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'workspace_request.sent_back': {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    // A request for a workspace left waiting: brought up to the approvers, then further.
+    'workspace_request.reminder': {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'workspace_request.escalated': {
+        Icon: ShieldAlert,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    // A workspace group to link to the identity provider: asked of the platform
+    // administrators, then linked or declined.
+    'idp_link.requested': {
+        Icon: KeyRound,
+        icon: 'text-violet-500',
+        tile: 'bg-violet-500/10',
+    },
+    'idp_link.linked': {
+        Icon: KeyRound,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'idp_link.declined': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    'workspace_request.declined': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    // Asking for data in a workspace: the ask reaches the platform team and the workspace's
+    // admins; taking it on, connecting it or declining it reaches the person who asked.
+    'data_request.submitted': {
+        Icon: Database,
+        icon: 'text-indigo-500',
+        tile: 'bg-indigo-500/10',
+    },
+    'data_request.started': {
+        Icon: Hand,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'data_request.connected': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'data_request.declined': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
     },
     // A request nobody has answered, brought up again — then to the Org Admins.
     'access_request.reminder': {

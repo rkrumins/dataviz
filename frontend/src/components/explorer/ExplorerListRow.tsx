@@ -146,6 +146,8 @@ export function ExplorerListRow({
         {onToggleSelect && (
           <button
             type="button"
+            aria-label={`${isSelected ? 'Deselect' : 'Select'} ${view.name}`}
+            aria-pressed={!!isSelected}
             onClick={e => { e.stopPropagation(); onToggleSelect() }}
             className={cn(
               'w-5 h-5 rounded-md border flex items-center justify-center transition-all duration-150',
@@ -184,6 +186,18 @@ export function ExplorerListRow({
               <span className="flex items-center gap-1 text-[10px] text-ink-muted truncate">
                 <Box className="h-2.5 w-2.5 shrink-0" />
                 {view.contextModelName}
+              </span>
+            )}
+            {/* Terse, under the name. A list is where somebody scans many
+                unfamiliar views at once, which is exactly when "how many people
+                use this" earns its three characters — and exactly when a
+                sentence per row would drown the names. Inside this cell, not
+                beside it: as cells of their own they pushed every column after
+                Scope out from under its header. */}
+            {usage && (
+              <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0">
+                <ViewUsageCounters usage={usage} className="hidden sm:inline-flex shrink-0" />
+                <ViewUsageNote usage={usage} className="hidden lg:inline-flex shrink-0" />
               </span>
             )}
           </div>
@@ -229,13 +243,6 @@ export function ExplorerListRow({
           </div>
 
         </div>
-
-        {/* Terse, beside the other row meta. A list is where somebody scans
-            many unfamiliar views at once, which is exactly when "how many
-            people use this" earns its three characters — and exactly when a
-            sentence per row would drown the names. */}
-        <ViewUsageCounters usage={usage} className="hidden sm:inline-flex shrink-0" />
-        <ViewUsageNote usage={usage} className="hidden lg:inline-flex shrink-0" />
 
         {/* ── Type label ── */}
         <span className="text-xs text-ink-muted">

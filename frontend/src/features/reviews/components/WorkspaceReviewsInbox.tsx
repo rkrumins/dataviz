@@ -9,7 +9,8 @@
  * `?queue=` names the queue open (else the first with something for the reader); `?pr=` — an older
  * link — opens that review's quick peek. A row opens the review's own page; j / k move between the
  * rows and Enter opens the one focused. Self-contained (only needs `wsId`), reused by the standalone
- * page + the workspace Reviews tab.
+ * page + the workspace Reviews tab. `wsId` null reads every workspace the reader can (the Review
+ * Center's "All workspaces"): each row then names its workspace and opens there.
  */
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
@@ -22,7 +23,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { Segmented } from '@/components/ui/Segmented'
 import { Skeleton } from '@/components/ui/Skeleton'
 import type { ReviewInboxCounts, ReviewInboxQueue } from '@/services/versioningApiService'
-import { useReviewInbox, useReviewInboxCounts } from '@/features/versioning/hooks/useVersioning'
+import { useReviewCenterCounts, useReviewInbox, useReviewInboxCounts } from '@/features/versioning/hooks/useVersioning'
 import { ownerName } from '@/features/versioning/model/branchVocab'
 import { useReviewKeys } from '../page/useReviewKeys'
 import { PrListRow } from './PrListRow'
@@ -155,12 +156,13 @@ function QueueNav({ value, tally, onPick }: {
   )
 }
 
-export function WorkspaceReviewsInbox({ wsId }: { wsId: string }) {
+export function WorkspaceReviewsInbox({ wsId }: { wsId: string | null }) {
   const navigate = useNavigate()
+  const allWorkspaces = wsId === null
   const workspaces = useWorkspacesStore((s) => s.workspaces)
   const loadWorkspaces = useWorkspacesStore((s) => s.loadWorkspaces)
-  const workspace = workspaces.find((w) => w.id === wsId)
-  useEffect(() => { if (!workspace) loadWorkspaces() }, [workspace, loadWorkspaces])
+  const workspace = wsId ? workspaces.find((w) => w.id === wsId) : undefined
+  useEffect(() => { if (wsId && !workspace) loadWorkspaces() }, [wsId, workspace, loadWorkspaces])
   const dataSources = workspace?.dataSources ?? []
 
   // The queue open, and a review peeked at, are in the address.
@@ -175,7 +177,9 @@ export function WorkspaceReviewsInbox({ wsId }: { wsId: string }) {
 
   // No queue asked for: the first with something for the reader, chosen once, so it doesn't move
   // under them as they work through it.
-  const countsQ = useReviewInboxCounts(wsId)
+  const workspaceCounts = useReviewInboxCounts(wsId, !allWorkspaces)
+  const centerCounts = useReviewCenterCounts(allWorkspaces)
+  const countsQ = allWorkspaces ? centerCounts : workspaceCounts
   const [opened, setOpened] = useState<ReviewInboxQueue | null>(null)
   if (!isQueue(asked) && !opened && countsQ.data) setOpened(defaultQueue(countsQ.data.counts))
   const queue = isQueue(asked) ? asked : opened ?? (countsQ.isError ? 'open' : null)
@@ -208,7 +212,8 @@ export function WorkspaceReviewsInbox({ wsId }: { wsId: string }) {
 
   const hasFilters = !!(search.trim() || sourceFilter || authorFilter)
   const clearFilters = () => { setSearch(''); setSourceFilter(null); setAuthorFilter(null) }
-  const openReview = (prId: string) => navigate(`/workspaces/${wsId}/reviews/${prId}`)
+  // A row opens where its review lives — across workspaces, each names its own.
+  const openReview = (pr: { prId: string; workspaceId?: string }) => navigate(`/workspaces/${pr.workspaceId ?? wsId}/reviews/${pr.prId}`)
 
   // j / k move between the rows; Enter (the row's own) opens the one focused.
   const listRef = useRef<HTMLDivElement>(null)
@@ -224,6 +229,8 @@ export function WorkspaceReviewsInbox({ wsId }: { wsId: string }) {
   useReviewKeys({ next: () => moveFocus(1), prev: () => moveFocus(-1) })
 
   const empty = queue ? EMPTY[queue] : null
+  // An older `?pr=` peek: across workspaces, the review's own row says where it lives.
+  const peekWorkspace = wsId ?? items.find((pr) => pr.prId === peekId)?.workspaceId
 
   return (
     <div className="lg:grid lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-6">
@@ -260,8 +267,8 @@ export function WorkspaceReviewsInbox({ wsId }: { wsId: string }) {
 
         {tally?.capped && (
           <p role="note" className="mb-3 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-ink-muted">
-            More than 1,000 reviews are open in this workspace, so the oldest are left out of these queues and their
-            counts. Search or filter to find one.
+            More than 1,000 reviews are open in {allWorkspaces ? 'one of your workspaces' : 'this workspace'}, so the oldest
+            are left out of these queues and their counts. Search or filter to find one.
           </p>
         )}
 
@@ -269,8 +276,9 @@ export function WorkspaceReviewsInbox({ wsId }: { wsId: string }) {
         <div ref={listRef} data-tour="reviews-list"
           className={cn('space-y-2 transition-opacity', inbox.isPlaceholderData && 'opacity-60')}>
           {items.map((pr) => (
-            <PrListRow key={pr.prId} wsId={wsId} pr={pr} sourceLabel={sourceLabel(pr.targetDataSourceId)}
-              onOpen={() => openReview(pr.prId)} />
+            <PrListRow key={pr.prId} wsId={pr.workspaceId ?? wsId ?? ''} pr={pr} sourceLabel={sourceLabel(pr.targetDataSourceId)}
+              workspace={allWorkspaces && pr.workspaceId ? { id: pr.workspaceId, name: pr.workspaceName ?? 'Workspace' } : undefined}
+              onOpen={() => openReview(pr)} />
           ))}
 
           {!pages && !inbox.isError && (
@@ -300,7 +308,7 @@ export function WorkspaceReviewsInbox({ wsId }: { wsId: string }) {
         )}
       </div>
 
-      {peekId && <PrDetailDrawer wsId={wsId} prId={peekId} onClose={() => setParams({ pr: null, thread: null })}
+      {peekId && peekWorkspace && <PrDetailDrawer wsId={peekWorkspace} prId={peekId} onClose={() => setParams({ pr: null, thread: null })}
         focusThreadId={searchParams.get('thread')} />}
     </div>
   )

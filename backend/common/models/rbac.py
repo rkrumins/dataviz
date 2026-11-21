@@ -819,6 +819,360 @@ class WorkspaceDirectoryResponse(BaseModel):
     entries: list[WorkspaceDirectoryEntry] = Field(default_factory=list)
 
 
+# ── Workspace requests ───────────────────────────────────────────────
+
+#: What a proposed group may do in the workspace it is made for.
+ProposedGroupRole = Literal["workspace_viewer", "workspace_member", "workspace_publisher"]
+
+
+class ProposedGroup(BaseModel):
+    """A group asked for with a workspace: made when the request is approved, as
+    ``"<workspace> · <name>"``, bound to the workspace with ``role``, with ``memberIds``
+    in it. ``idpGroup`` names a group in the identity provider (an Active Directory
+    group, say) to link it to, so its membership follows the directory; a platform
+    administrator makes that link. ``key`` is the requester's own id for it."""
+    model_config = ConfigDict(populate_by_name=True)
+    key: str = Field(min_length=1, max_length=40)
+    name: str = Field(max_length=80)
+    description: Optional[str] = Field(default=None, max_length=500)
+    role: ProposedGroupRole
+    member_ids: list[str] = Field(default_factory=list, alias="memberIds", max_length=100)
+    idp_group: Optional[str] = Field(default=None, alias="idpGroup", max_length=200)
+
+
+class WorkspaceRequestCreate(BaseModel):
+    """Body for ``POST /api/v1/workspace-requests`` and, resubmitting one sent
+    back, ``PUT /api/v1/me/workspace-requests/{id}``. ``purpose`` is one of
+    ``team``, ``project``, ``poc``, ``reporting``, ``other``."""
+    model_config = ConfigDict(populate_by_name=True)
+    name: str = Field(max_length=200)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    purpose: str
+    team_name: Optional[str] = Field(default=None, alias="teamName", max_length=120)
+    teammate_ids: list[str] = Field(default_factory=list, alias="teammateIds", max_length=100)
+    playground_source_ids: list[str] = Field(
+        default_factory=list, alias="playgroundSourceIds", max_length=100,
+    )
+    groups: list[ProposedGroup] = Field(default_factory=list, max_length=10)
+    data_needs: Optional[str] = Field(default=None, alias="dataNeeds", max_length=2000)
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class WorkspaceRequestApprove(BaseModel):
+    """Body for approving: the name and description to create the workspace
+    with, when the approver changes what was asked for; full names for proposed
+    groups the approver renamed (by key); and the identity-provider connection
+    the groups' links are for (none: any connection)."""
+    model_config = ConfigDict(populate_by_name=True)
+    name: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    group_names: Optional[dict[str, str]] = Field(default=None, alias="groupNames")
+    idp_provider_id: Optional[str] = Field(default=None, alias="idpProviderId", max_length=200)
+    #: Allow the new workspace on the Playground's sandbox connection first, so the
+    #: graphs can move into it (platform administrators: connections are theirs).
+    admit_to_sandbox: bool = Field(default=False, alias="admitToSandbox")
+
+
+class WorkspaceRequestIdpLink(BaseModel):
+    """Body for linking a group made by an approved request to its identity-provider
+    group: the group, and the connection (none: any connection)."""
+    model_config = ConfigDict(populate_by_name=True)
+    group_id: str = Field(alias="groupId", max_length=200)
+    idp_provider_id: Optional[str] = Field(default=None, alias="idpProviderId", max_length=200)
+
+
+class WorkspaceRequestSendBack(BaseModel):
+    """Body for sending a request back: the question the requester answers."""
+    model_config = ConfigDict(populate_by_name=True)
+    question: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceRequestDecline(BaseModel):
+    """Body for declining: an optional reason the requester sees."""
+    model_config = ConfigDict(populate_by_name=True)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class WorkspaceRequestPerson(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+
+
+class ProposedGroupResponse(ProposedGroup):
+    """A proposed group as read back: its invited people by name."""
+    members: list[WorkspaceRequestPerson] = Field(default_factory=list)
+
+
+class WorkspaceRequestSource(BaseModel):
+    """A Playground graph the request brings along, and its live views."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    label: Optional[str] = None
+    view_count: int = Field(default=0, alias="viewCount")
+
+
+class WorkspaceRequestResponse(BaseModel):
+    """Wire shape of a workspace request. ``status`` is ``pending``,
+    ``changes_requested`` (``question`` waits for the requester), ``approved``,
+    ``declined`` or ``withdrawn``. An approved request names the workspace it
+    made, and ``outcome`` is ``{movedSources, failedSources: [{id, reason}],
+    membersAdded, workspaceId}``."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    requester_id: str = Field(alias="requesterId")
+    requester_name: Optional[str] = Field(default=None, alias="requesterName")
+    name: str
+    description: Optional[str] = None
+    purpose: str
+    team_name: Optional[str] = Field(default=None, alias="teamName")
+    teammate_ids: list[str] = Field(default_factory=list, alias="teammateIds")
+    teammates: list[WorkspaceRequestPerson] = Field(default_factory=list)
+    playground_source_ids: list[str] = Field(default_factory=list, alias="playgroundSourceIds")
+    playground_sources: list[WorkspaceRequestSource] = Field(default_factory=list, alias="playgroundSources")
+    groups: list[ProposedGroupResponse] = Field(default_factory=list)
+    data_needs: Optional[str] = Field(default=None, alias="dataNeeds")
+    note: Optional[str] = None
+    status: str
+    question: Optional[str] = None
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+    resolved_at: Optional[str] = Field(default=None, alias="resolvedAt")
+    resolved_by: Optional[str] = Field(default=None, alias="resolvedBy")
+    resolution_note: Optional[str] = Field(default=None, alias="resolutionNote")
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    outcome: Optional[dict] = None
+
+
+class WorkspaceRequestPlaygroundActivity(BaseModel):
+    """What the requester built in the Playground: their live graphs there, and
+    the live views on them."""
+    model_config = ConfigDict(populate_by_name=True)
+    graphs: int = 0
+    views: int = 0
+
+
+class WorkspaceRequestDetail(WorkspaceRequestResponse):
+    """A request as an approver reads it: who asked, and what they have built."""
+    requester_email: Optional[str] = Field(default=None, alias="requesterEmail")
+    playground_activity: WorkspaceRequestPlaygroundActivity = Field(
+        default_factory=WorkspaceRequestPlaygroundActivity, alias="playgroundActivity",
+    )
+    #: Whether the Playground's sandbox connection lets a new workspace in — when it
+    #: names its workspaces, the graphs can't move into the new one unless it is
+    #: allowed (``admitToSandbox`` on approval). None when no graph comes along.
+    sandbox_admits_new: Optional[bool] = Field(default=None, alias="sandboxAdmitsNew")
+
+
+# ── Workspace groups ─────────────────────────────────────────────────
+
+
+class WorkspaceGroupIdpLink(BaseModel):
+    """A ``group_membership`` mapping filling the group from an identity-provider
+    group; ``providerId`` none: from any connection."""
+    model_config = ConfigDict(populate_by_name=True)
+    mapping_id: str = Field(alias="mappingId")
+    idp_group: str = Field(alias="idpGroup")
+    provider_id: Optional[str] = Field(default=None, alias="providerId")
+    provider_name: Optional[str] = Field(default=None, alias="providerName")
+
+
+class WorkspaceGroupPendingLink(BaseModel):
+    """A link to an identity-provider group, asked for and waiting for a platform
+    administrator."""
+    model_config = ConfigDict(populate_by_name=True)
+    request_id: str = Field(alias="requestId")
+    idp_group: str = Field(alias="idpGroup")
+    requested_by: str = Field(alias="requestedBy")
+    requested_by_name: Optional[str] = Field(default=None, alias="requestedByName")
+    requested_at: str = Field(alias="requestedAt")
+
+
+class WorkspaceGroupResponse(BaseModel):
+    """A group bound in the workspace. ``owned``: the workspace owns it, so its admins
+    manage it here; ``name`` is then ``"<workspace> · <shortName>"``. ``role``: the role
+    it holds here (none for an owned group whose binding has gone)."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    name: str
+    short_name: str = Field(alias="shortName")
+    description: Optional[str] = None
+    owned: bool
+    role: Optional[str] = None
+    role_label: Optional[str] = Field(default=None, alias="roleLabel")
+    member_count: int = Field(alias="memberCount")
+    member_preview: list[WorkspaceRequestPerson] = Field(default_factory=list, alias="memberPreview")
+    source: str
+    idp_links: list[WorkspaceGroupIdpLink] = Field(default_factory=list, alias="idpLinks")
+    pending_idp_link: Optional[WorkspaceGroupPendingLink] = Field(default=None, alias="pendingIdpLink")
+    created_at: str = Field(alias="createdAt")
+
+
+class WorkspaceGroupCreate(BaseModel):
+    """Body for ``POST /admin/workspaces/{ws}/groups``: the short name (the group is
+    made as ``"<workspace> · <name>"``), its role here, the people to put in it, and
+    the identity-provider group to link it to."""
+    model_config = ConfigDict(populate_by_name=True)
+    name: str = Field(min_length=1, max_length=80)
+    description: Optional[str] = Field(default=None, max_length=500)
+    role: ProposedGroupRole
+    member_ids: list[str] = Field(default_factory=list, alias="memberIds", max_length=100)
+    idp_group: Optional[str] = Field(default=None, alias="idpGroup", max_length=200)
+
+
+class WorkspaceGroupUpdate(BaseModel):
+    """Body for ``PATCH …/groups/{id}``: only what is sent changes."""
+    model_config = ConfigDict(populate_by_name=True)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    description: Optional[str] = Field(default=None, max_length=500)
+    role: Optional[ProposedGroupRole] = None
+
+
+class WorkspaceGroupMember(BaseModel):
+    """Someone in a group: ``source`` ``local`` (added in the app) or ``sso`` (the
+    identity provider put them there, and takes them out)."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    email: Optional[str] = None
+    source: str = "local"
+    added_at: str = Field(alias="addedAt")
+
+
+class WorkspaceGroupMemberAdd(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    user_id: str = Field(alias="userId", min_length=1, max_length=200)
+
+
+class WorkspaceGroupIdpLinkCreate(BaseModel):
+    """Body for ``POST …/groups/{id}/idp-link``: the identity-provider group, and the
+    connection (none: any connection)."""
+    model_config = ConfigDict(populate_by_name=True)
+    idp_group: str = Field(alias="idpGroup", min_length=1, max_length=200)
+    provider_id: Optional[str] = Field(default=None, alias="providerId", max_length=200)
+
+
+# ── Identity-provider link requests ──────────────────────────────────
+
+
+class IdpLinkRequestResponse(BaseModel):
+    """A request to link a group to an identity-provider group. ``status``:
+    ``pending``, ``linked``, ``declined`` or ``cancelled``; ``source``: ``workspace``
+    or ``workspace_request`` (``sourceId`` the request). ``seenCount``: how many
+    people's last sign-in asserted ``idpGroup``."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    group_id: str = Field(alias="groupId")
+    group_name: Optional[str] = Field(default=None, alias="groupName")
+    workspace_id: str = Field(alias="workspaceId")
+    workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
+    idp_group: str = Field(alias="idpGroup")
+    provider_id: Optional[str] = Field(default=None, alias="providerId")
+    requested_by: str = Field(alias="requestedBy")
+    requested_by_name: Optional[str] = Field(default=None, alias="requestedByName")
+    requested_at: str = Field(alias="requestedAt")
+    status: str
+    source: str
+    source_id: Optional[str] = Field(default=None, alias="sourceId")
+    resolved_by: Optional[str] = Field(default=None, alias="resolvedBy")
+    resolved_at: Optional[str] = Field(default=None, alias="resolvedAt")
+    resolution_note: Optional[str] = Field(default=None, alias="resolutionNote")
+    seen_count: int = Field(default=0, alias="seenCount")
+
+
+class IdpLinkRequestLink(BaseModel):
+    """Body for linking: the connection (none: the one asked for, or any)."""
+    model_config = ConfigDict(populate_by_name=True)
+    provider_id: Optional[str] = Field(default=None, alias="providerId", max_length=200)
+
+
+class IdpLinkRequestDecline(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class IdpGroupSuggestion(BaseModel):
+    """An identity-provider group someone's sign-in asserted. ``seenCount`` only for
+    platform administrators."""
+    model_config = ConfigDict(populate_by_name=True)
+    idp_group: str = Field(alias="idpGroup")
+    seen_count: Optional[int] = Field(default=None, alias="seenCount")
+
+
+class IdpGroupPreview(BaseModel):
+    """Who had an identity-provider group at their last sign-in."""
+    model_config = ConfigDict(populate_by_name=True)
+    idp_group: str = Field(alias="idpGroup")
+    seen_count: int = Field(alias="seenCount")
+    people: list[WorkspaceRequestPerson] = Field(default_factory=list)
+    note: str
+
+
+# ── Data requests ────────────────────────────────────────────────────
+
+#: Where the data asked for lives.
+DataRequestSystem = Literal[
+    "snowflake", "databricks", "bigquery", "postgres", "dbt", "datahub", "neo4j", "file", "other",
+]
+#: By when it is needed.
+DataRequestUrgency = Literal["no_rush", "this_month", "this_week"]
+
+
+class DataRequestCreate(BaseModel):
+    """Body for ``POST /api/v1/admin/workspaces/{ws_id}/data-requests``: what data,
+    from where, why, by when, and who knows it."""
+    model_config = ConfigDict(populate_by_name=True)
+    title: str = Field(max_length=200)
+    system: DataRequestSystem
+    details: Optional[str] = Field(default=None, max_length=2000)
+    purpose: Optional[str] = Field(default=None, max_length=2000)
+    urgency: DataRequestUrgency = "no_rush"
+    contact_ids: list[str] = Field(default_factory=list, alias="contactIds", max_length=20)
+
+
+class DataRequestConnect(BaseModel):
+    """Body for marking a request connected: the data source it became, when there is
+    one in the workspace, and a note for the requester."""
+    model_config = ConfigDict(populate_by_name=True)
+    data_source_id: Optional[str] = Field(default=None, alias="dataSourceId", max_length=200)
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class DataRequestDecline(BaseModel):
+    """Body for declining: an optional reason the requester sees."""
+    model_config = ConfigDict(populate_by_name=True)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class DataRequestResponse(BaseModel):
+    """Wire shape of a data request. ``status`` is ``pending``, ``in_progress``
+    (``assigneeId`` is connecting it), ``connected`` (``dataSourceId`` names the
+    source it became, when one was named), ``declined`` or ``withdrawn``."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    workspace_id: str = Field(alias="workspaceId")
+    workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
+    requested_by: str = Field(alias="requestedBy")
+    requester_name: Optional[str] = Field(default=None, alias="requesterName")
+    title: str
+    system: str
+    details: Optional[str] = None
+    purpose: Optional[str] = None
+    urgency: str
+    contact_ids: list[str] = Field(default_factory=list, alias="contactIds")
+    contacts: list[WorkspaceRequestPerson] = Field(default_factory=list)
+    status: str
+    assignee_id: Optional[str] = Field(default=None, alias="assigneeId")
+    assignee_name: Optional[str] = Field(default=None, alias="assigneeName")
+    resolution_note: Optional[str] = Field(default=None, alias="resolutionNote")
+    data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
+    data_source_label: Optional[str] = Field(default=None, alias="dataSourceLabel")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+    resolved_at: Optional[str] = Field(default=None, alias="resolvedAt")
+    resolved_by: Optional[str] = Field(default=None, alias="resolvedBy")
+
+
 # ── Access reviews ───────────────────────────────────────────────────
 
 class AccessReviewCounts(BaseModel):

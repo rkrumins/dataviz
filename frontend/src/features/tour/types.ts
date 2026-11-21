@@ -30,4 +30,8 @@ export interface TourDefinition {
   contextual?: boolean
   /** Path prefix a contextual tour belongs to (e.g. "/views/"). */
   contextPathPrefix?: string
+  /** A contextual tour whose path is shared with others is offered from Help only
+   *  while this element is on the page too — e.g. the Playground's ribbon, which
+   *  tells its workspace page apart from every other workspace's. */
+  contextAnchor?: string
 }

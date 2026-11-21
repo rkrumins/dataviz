@@ -962,6 +962,8 @@ class DataSourceResponse(BaseModel):
     last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")
     aggregation_edge_count: int = Field(0, alias="aggregationEdgeCount")
     aggregation_schedule: Optional[str] = Field(None, alias="aggregationSchedule")
+    #: Who made it — in the Playground, the person whose experiment it is.
+    created_by: Optional[str] = Field(None, alias="createdBy")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -1040,6 +1042,8 @@ class WorkspaceResponse(BaseModel):
     access_mode: str = Field("app", alias="accessMode")
     access_note: Optional[str] = Field(None, alias="accessNote")
     request_policy: str = Field("approval", alias="requestPolicy")
+    #: 'standard', or 'playground' — the shared sandbox (see playground_policy).
+    kind: str = Field("standard", alias="kind")
 
     class Config:
         populate_by_name = True

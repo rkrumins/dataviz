@@ -88,6 +88,8 @@ export interface DataSourceResponse {
     /** A fork's data source: the data source and graph it was forked from. Null on every other
      *  data source; lists leave forks out unless asked (`includeForks`). */
     forkOf?: { dataSourceId: string; graphId: string | null } | null
+    /** Who made it — in the Playground, whose experiment it is. */
+    createdBy?: string | null
     createdAt: string
     updatedAt: string
 
@@ -183,6 +185,8 @@ export interface WorkspaceResponse {
     /** Live views built on this workspace that the caller can open — the full
      *  list only; null where it was not counted. */
     viewCount?: number | null
+    /** 'playground' — the shared sandbox anyone may join (see playgroundService). */
+    kind?: 'standard' | 'playground'
     /** Publication gate for this workspace's views. Absent on servers that
      *  predate the setting — treat a missing value as 'request'. */
     publishPolicy?: WorkspacePublishPolicy

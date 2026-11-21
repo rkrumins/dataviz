@@ -20,10 +20,13 @@ from .endpoints import (
     view_membership, search_views,
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
-    workspace_directory, data_source_transfers,
+    workspace_directory, data_source_transfers, workspace_requests, workspace_groups, data_requests,
     versioning,
     versioning_admin,
+    review_center,
+    playground,
     admin_idp_groups,
+    idp_links,
     admin_idp_providers,
     admin_user_identities,
     admin_users_lookup,
@@ -175,6 +178,13 @@ api_router.include_router(
     prefix="/admin/workspaces/{ws_id}/members",
     tags=["admin:rbac:workspace-members"],
 )
+# A workspace's groups: every group bound in it, and those it owns, which its
+# admins manage there.
+api_router.include_router(
+    workspace_groups.router,
+    prefix="/admin/workspaces/{ws_id}/groups",
+    tags=["admin:rbac:workspace-groups"],
+)
 api_router.include_router(
     role_bindings.router,
     prefix="/admin/role-bindings",
@@ -265,6 +275,42 @@ api_router.include_router(
     prefix="/admin/access-requests",
     tags=["admin:access-requests"],
 )
+# Workspace requests — anyone asks for a workspace of their own; whoever creates
+# workspaces answers. Three prefixes, like access requests: ask, "my requests",
+# and answering.
+api_router.include_router(
+    workspace_requests.public_router,
+    prefix="/workspace-requests",
+    tags=["workspace-requests"],
+)
+api_router.include_router(
+    workspace_requests.me_router,
+    prefix="/me",
+    tags=["me:workspace-requests"],
+)
+api_router.include_router(
+    workspace_requests.admin_router,
+    prefix="/admin/workspace-requests",
+    tags=["admin:workspace-requests"],
+)
+# Data requests — a workspace's readers ask for data to be connected to it; the
+# platform team (and the workspace's own data people) connect it. Three prefixes:
+# one workspace's, "my requests", and the platform team's queue.
+api_router.include_router(
+    data_requests.ws_router,
+    prefix="/admin/workspaces/{ws_id}/data-requests",
+    tags=["admin:data-requests:workspace"],
+)
+api_router.include_router(
+    data_requests.me_router,
+    prefix="/me",
+    tags=["me:data-requests"],
+)
+api_router.include_router(
+    data_requests.admin_router,
+    prefix="/admin/data-requests",
+    tags=["admin:data-requests"],
+)
 # Access reviews — a workspace admin keeps or removes each grant.
 api_router.include_router(
     access_reviews.router,
@@ -350,6 +396,23 @@ api_router.include_router(
     admin_idp_groups.router,
     prefix="/admin/idp-group-mappings",
     tags=["admin:rbac:idp-groups"],
+)
+# Linking a group to the identity provider, asked for by whoever may not make the
+# link (system:admin answers); and the IdP groups people's sign-ins asserted.
+api_router.include_router(
+    idp_links.requests_router,
+    prefix="/admin/idp-link-requests",
+    tags=["admin:rbac:idp-links"],
+)
+api_router.include_router(
+    idp_links.admin_groups_router,
+    prefix="/admin/idp-groups",
+    tags=["admin:rbac:idp-links"],
+)
+api_router.include_router(
+    idp_links.groups_router,
+    prefix="/idp-groups",
+    tags=["idp-groups"],
 )
 
 # SSO Phase 3 — IdP provider CRUD (multi-IdP DB-stored config).
@@ -472,6 +535,17 @@ api_router.include_router(
 api_router.include_router(
     layout_templates.router, prefix="/layout-templates", tags=["layout-templates"],
 )
+
+# ── The Review Center across workspaces ─────────────────────────────
+# Every review the reader may see, from every workspace they can read (or the
+# ones they name) — each read with that workspace's own permissions. Mounted
+# before the /{ws_id}/… routers so no workspace-scoped pattern can claim it.
+api_router.include_router(
+    review_center.router, prefix="/review-inbox", tags=["versioning:review-center"],
+)
+
+# ── The Playground: find it, join it, leave it; set it up (platform admin) ──
+api_router.include_router(playground.router, prefix="/playground", tags=["playground"])
 
 # ── Versioned graph editing (workspace-scoped) ───────────────────────
 # The ONLY path between the frontend and the graphver Postgres store; the

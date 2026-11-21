@@ -172,7 +172,11 @@ async def compute_visible_ontology_ids(
         claims,
     )
     result = await session.execute(stmt)
-    return {row[0] for row in result.all() if row[0] is not None}
+    visible = {row[0] for row in result.all() if row[0] is not None}
+    # A Playground member starts blank graphs from the data models its administrator chose,
+    # which no data source of theirs uses yet.
+    from backend.app.services.playground_policy import starter_ontology_ids
+    return visible | await starter_ontology_ids(session, claims)
 
 
 # ── Providers ──────────────────────────────────────────────────────

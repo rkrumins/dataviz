@@ -525,6 +525,62 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Workspaces, their access settings and every request are kept",
         ),
     ),
+    # Lets anyone who can sign in into a workspace and onto a provider: when it cannot
+    # be read, assume it is off, and nobody is let in.
+    "playgroundEnabled": FeatureWiring(
+        key="playgroundEnabled",
+        posture="security",
+        server_gates=(
+            "POST /playground/join — refused while off",
+            "GET /playground — says the Playground is off, and offers nothing",
+        ),
+        ui_surfaces=(
+            "Playground — in the sidebar, and on the Dashboard and Workspaces, opening it for anyone",
+            "Setting the Playground up, on Workspaces, for platform administrators",
+        ),
+        still_allowed=(
+            "People already in the Playground keep their graphs and views; nothing is deleted",
+            "Leaving the Playground",
+        ),
+    ),
+    # Preview: the screens are still being built, so it ships OFF, and the gates pass
+    # default=False — a definition not seeded yet means off, as on a fresh deployment.
+    "workspaceRequestsEnabled": FeatureWiring(
+        key="workspaceRequestsEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "POST /workspace-requests — refused while off",
+            "PUT /me/workspace-requests/{id} (resubmitting one sent back) — refused while off",
+        ),
+        ui_surfaces=(
+            "Request a workspace — the wizard, from the Playground, Dashboard and Workspaces",
+            "Workspace requests — Workspaces → Requests, for platform and org admins",
+        ),
+        still_allowed=(
+            "Reading and withdrawing requests already sent",
+            "Answering requests already sent: approving, sending back and declining",
+            "Workspaces made from a request keep everything; nothing is deleted",
+        ),
+    ),
+    # Preview, like workspace requests: it ships OFF and the gate passes default=False.
+    "dataRequestsEnabled": FeatureWiring(
+        key="dataRequestsEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "POST /admin/workspaces/{ws_id}/data-requests — refused while off",
+        ),
+        ui_surfaces=(
+            "Ask for data — the wizard, from a workspace's Data → Sources and its Overview",
+            "Data requests — a workspace's Data → Sources, and Workspaces → Requests for platform and org admins",
+        ),
+        still_allowed=(
+            "Reading and withdrawing requests already sent",
+            "Answering requests already sent: starting, connecting and declining",
+            "Data sources connected for a request are kept; nothing is deleted",
+        ),
+    ),
     # ── Notifications ──────────────────────────────────────────────────────────
     "announcementsEnabled": FeatureWiring(
         key="announcementsEnabled",

@@ -37,6 +37,7 @@ _ANALYTICS_PERM_MIGRATION_PATH = _VERSIONS_DIR / "20260823_1200_analytics_perm.p
 _DATASOURCE_PUBLISH_MIGRATION_PATH = (
     _VERSIONS_DIR / "20261017_1000_datasource_publish.py"
 )
+_PLAYGROUND_MIGRATION_PATH = _VERSIONS_DIR / "20261120_1000_playground.py"
 # Layout templates added system:templates:manage — curating organization
 # templates and hiding built-ins. Seeded by the layout-templates revision.
 _TEMPLATES_MIGRATION_PATH = _VERSIONS_DIR / "20261018_1200_layout_templates.py"
@@ -526,10 +527,12 @@ def test_native_query_permission_reaches_an_existing_database():
         mod._DESCRIPTION, mod._LONG_DESCRIPTION,
     )
     migration_grants = set(mod._ROLE_PERMISSIONS)
-    # workspace_publisher comes later, with 20261017_1000_datasource_publish, which grants it too.
+    # workspace_publisher comes later, with 20261017_1000_datasource_publish, which grants it too;
+    # and the Playground member, with the migration that makes the role.
     publish = _load_migration(_DATASOURCE_PUBLISH_MIGRATION_PATH, "_ds_publish_migration")
-    later = {(r, p) for r, p in publish._NEW_ROLE_PERMISSIONS if p == perm}
-    assert later == {("workspace_publisher", perm)}
+    playground = _load_migration(_PLAYGROUND_MIGRATION_PATH, "_playground_migration")
+    later = {(r, p) for r, p in publish._NEW_ROLE_PERMISSIONS + playground._ROLE_PERMISSIONS if p == perm}
+    assert later == {("workspace_publisher", perm), ("workspace_playground_member", perm)}
     assert migration_grants | later == {(r, perm) for r, p in rbac_seed.ROLE_GRANTS if p == perm}
     readers = {r for r, p in rbac_seed.ROLE_GRANTS if p == "workspace:datasource:read"}
     assert {r for r, _ in migration_grants | later} == readers

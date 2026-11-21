@@ -357,6 +357,8 @@ export function ExplorerViewCard({
           >
             <button
               type="button"
+              aria-label={`${isSelected ? 'Deselect' : 'Select'} ${view.name}`}
+              aria-pressed={!!isSelected}
               onClick={e => { e.stopPropagation(); onToggleSelect() }}
               className={cn(
                 'w-5 h-5 rounded-md border-2 flex items-center justify-center',

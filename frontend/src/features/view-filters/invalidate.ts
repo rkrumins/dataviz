@@ -10,4 +10,15 @@ export function invalidateViewAggregates(queryClient: QueryClient): void {
   for (const key of ['facets', 'stats', 'count', 'histogram']) {
     void queryClient.invalidateQueries({ queryKey: ['views', key] })
   }
+  invalidateOtherViewLists(queryClient)
+}
+
+/**
+ * Every Explorer list the reader has visited is stale too — All, Favorites, Deleted —
+ * so each refetches the next time it is shown. Marked, not refetched: the list on
+ * screen already carries the change (an optimistic patch), and refetching it would
+ * flash it for nothing.
+ */
+export function invalidateOtherViewLists(queryClient: QueryClient): void {
+  void queryClient.invalidateQueries({ queryKey: ['explorer-views'], refetchType: 'none' })
 }

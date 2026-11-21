@@ -56,7 +56,8 @@ export function usePublishGate(
             hasPublishPermission,
             publishPolicy: workspace?.publishPolicy,
             sourceRestricted: source?.isRestricted,
-            platformPolicy,
+            // Nothing in the Playground goes out to everyone: the tier isn't there.
+            platformPolicy: workspace?.kind === 'playground' ? 'off' : platformPolicy,
         })
     }, [hasPublishPermission, workspace, dataSourceId, platformPolicy])
 }
