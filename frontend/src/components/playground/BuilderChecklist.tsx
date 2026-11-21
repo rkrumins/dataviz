@@ -120,14 +120,15 @@ function Checklist({ me, workspace, views, className }: { me: string; workspace:
         writeMemory(key, { ...saved, done: [...new Set([...saved.done, ...(newlyKey.split(',') as StepId[])])] })
     }, [key, newlyKey])
 
-    const steps: Step[] = [
+    const plan: Omit<Step, 'done'>[] = [
         { id: 'graph', label: 'Make a graph', detail: 'Start from a sample, bring your own data, or start blank.', guide: '/guide/playground#start' },
         { id: 'view', label: 'Make a view of your own', detail: 'Another way to look at a graph — a graph, a hierarchy or a context view.', guide: '/guide/playground#views' },
         { id: 'draft', label: 'Change something in a draft', detail: 'Edit on the canvas. Your changes wait in a draft until you publish them.', guide: '/guide/playground#edit-in-a-draft' },
         { id: 'review', label: 'Send a change for review', detail: 'Ask someone to look first — the example review of a sample shows how.', guide: '/guide/playground#change-control' },
         ...(metadataOn ? [{ id: 'describe' as const, label: 'Describe your data', detail: 'Say what a graph holds and where it comes from, in its details.', guide: '/guide/playground#describe-your-data' }] : []),
         { id: 'publish', label: 'Publish a change', detail: 'Make a draft the live version. Graphs you made are yours to publish.', guide: '/guide/playground#publish-your-own' },
-    ].map(s => ({ ...s, done: isDone(s.id) }))
+    ]
+    const steps: Step[] = plan.map(s => ({ ...s, done: isDone(s.id) }))
 
     const done = steps.filter(s => s.done).length
     if (memory.dismissed || done === steps.length) return null
