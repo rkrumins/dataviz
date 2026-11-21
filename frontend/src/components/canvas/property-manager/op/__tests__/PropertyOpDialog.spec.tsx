@@ -14,6 +14,11 @@ import type { ReviewCounts } from '../useReviewCounts'
 const api = vi.hoisted(() => ({
   preview: vi.fn(),
   create: vi.fn(),
+  get: vi.fn(),
+  /** The What step fails to draw. */
+  crash: false,
+  /** How many times the counts were asked again (`useReviewCounts`' retry), as each render asked. */
+  countRetries: [] as number[],
 }))
 let counts: ReviewCounts
 
@@ -21,7 +26,18 @@ vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/versioningApiService')>()),
   previewPropertyJob: api.preview,
   createPropertyJob: api.create,
+  getPropertyJob: api.get,
 }))
+vi.mock('../WhatStep', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../WhatStep')>()
+  return {
+    ...actual,
+    WhatStep: (props: Parameters<typeof actual.WhatStep>[0]) => {
+      if (api.crash) throw new Error('The What step failed to draw')
+      return <actual.WhatStep {...props} />
+    },
+  }
+})
 vi.mock('@/hooks/usePropertyCatalog', () => ({
   usePropertyCatalog: () => ({
     catalog: {
@@ -45,7 +61,12 @@ vi.mock('@/hooks/usePropertyInsights', () => ({
 vi.mock('../../../search/builder/useDiscovery', () => ({
   useDiscovery: () => ({ keysByEdgeType: { FLOWS_TO: ['owner', 'confidence'], FEEDS: ['owner', 'sla'] } }),
 }))
-vi.mock('../useReviewCounts', () => ({ useReviewCounts: (_v: string, items: unknown) => (items ? counts : { counts: new Map(), complete: false, percent: 0, error: null, unavailable: false }) }))
+vi.mock('../useReviewCounts', () => ({
+  useReviewCounts: (_v: string, items: unknown, _s: string, retry = 0) => {
+    api.countRetries.push(retry)
+    return items ? counts : { counts: new Map(), complete: false, percent: 0, error: null, unavailable: false }
+  },
+}))
 
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { usePropertyJobsStore } from '@/store/propertyJobsStore'
@@ -63,11 +84,13 @@ const exact = (target: number, haveKey: number, haveTo = 0): ReviewCounts => ({
 
 function open(seed = {}, selectionIds: string[] = []) {
   const onClose = vi.fn()
+  const onOpenManager = vi.fn()
   render(
     <PropertyOpDialog viewId="v1" graphWrite={GRAPH} seed={seed} knownEntityTypes={['Table']}
-      layers={[{ id: 'L1', name: 'Gold' }, { id: 'L2', name: 'Silver' }]} selectionIds={selectionIds} onClose={onClose} />,
+      layers={[{ id: 'L1', name: 'Gold' }, { id: 'L2', name: 'Silver' }]} selectionIds={selectionIds} onClose={onClose}
+      onOpenManager={onOpenManager} />,
   )
-  return { onClose }
+  return { onClose, onOpenManager }
 }
 const next = () => screen.getByRole('button', { name: /^Next/ })
 
@@ -75,7 +98,11 @@ beforeEach(() => {
   localStorage.clear()
   api.preview.mockReset().mockResolvedValue({ refusal: null, nameBudget: { registered: 10, nativeBudget: 50000, ceiling: 65534, isNew: false, verdict: 'ok' }, activeJobId: null, counts: null })
   api.create.mockReset().mockResolvedValue({ jobId: 'job-1', status: 'pending' })
+  api.get.mockReset().mockResolvedValue({ jobId: 'job-0', status: 'running', progress: 0.3, op: { kind: 'rename', key: 'owner', to: 'steward' },
+    target: { kind: 'predicate', scopeMode: 'view' }, createdAt: '2026-11-21T00:00:00Z' })
+  api.crash = false
   counts = exact(120, 30)
+  api.countRetries.length = 0
   allValues = null
   useStagedChangesStore.setState({ changes: [] } as never)
   usePropertyJobsStore.setState({ jobs: [], request: null } as never)
@@ -202,6 +229,126 @@ describe('PropertyOpDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Try again' }))
     expect(api.create).toHaveBeenCalledTimes(2)
     expect(api.create.mock.calls[0][5]).toBe(api.create.mock.calls[1][5])
+  })
+
+  it('applies only on a final count: not while counting, nor once a count stops — Try again counts afresh', async () => {
+    const user = userEvent.setup()
+    const counting = { count: 10, complete: false, percent: 40 }
+    counts = { counts: new Map([['target', { ...counting, count: 40 }], ['haveKey', counting]]), complete: false, percent: 40, error: null, unavailable: false }
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    expect(screen.getByRole('button', { name: 'Apply to 10+' })).toBeDisabled()
+
+    counts = { ...counts, error: 'The count stopped: timed out' }
+    await user.click(screen.getByRole('button', { name: /Where/ }))
+    await user.click(next())
+    expect(screen.getByText(/The count stopped: timed out/)).toHaveTextContent(/can’t be applied until a count finishes/)
+    expect(screen.getByRole('button', { name: /^Apply/ })).toBeDisabled()
+    counts = exact(120, 30)
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(api.countRetries.at(-1)).toBe(1)
+    expect(screen.getByRole('button', { name: 'Apply to 30' })).toBeEnabled()
+  })
+
+  it('keeps a failed check as its own error, with Try again', async () => {
+    const user = userEvent.setup()
+    api.preview.mockRejectedValueOnce(new Error('The server is busy'))
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    expect(await screen.findByText(/Couldn’t check it can be applied: The server is busy/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Apply to 30' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByRole('button', { name: 'Apply to 30' })).toBeEnabled()
+    expect(api.preview).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText(/Couldn’t check it can be applied/)).toBeNull()
+  })
+
+  it('asks for the name to be typed when the counts are only approximate, however few', async () => {
+    const user = userEvent.setup()
+    counts = exact(120, 30)
+    counts.counts = new Map([...counts.counts].map(([id, c]) => [id, { ...c, approximate: true, note: 'Your draft changed more than 200,000 entities' }]))
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    await user.click(screen.getByRole('button', { name: 'Apply to about 30' }))
+    expect(api.create).not.toHaveBeenCalled()
+    expect(screen.getByText(/Remove owner on about 30 entities/)).toBeInTheDocument()
+  })
+
+  it('asks for the name to be typed when nothing could count it, and says the number is unknown', async () => {
+    const user = userEvent.setup()
+    counts = { counts: new Map(), complete: false, percent: 0, error: null, unavailable: true }
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    await user.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(api.create).not.toHaveBeenCalled()
+    expect(screen.getByText('Remove owner on an unknown number of entities?')).toBeInTheDocument()
+    expect(screen.getByText(/We couldn.t check what this will affect/)).toBeInTheDocument()
+    await user.type(screen.getByPlaceholderText('owner'), 'owner')
+    // The confirmation's own Apply — the dialog's sits behind it.
+    await user.click(screen.getAllByRole('button', { name: 'Apply' }).at(-1)!)
+    expect(api.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a selection past 20,000 whole — never a part of it — and says what to use instead', async () => {
+    const user = userEvent.setup()
+    const ids = Array.from({ length: 20_001 }, (_, i) => `n${i}`)
+    open({ kind: 'remove', key: 'owner', target: { kind: 'selection', ids } }, ids)
+    expect(screen.getByRole('radio', { name: /The 20,001 selected/ })).toHaveAttribute('aria-checked', 'true')
+    expect(next()).toBeDisabled()
+    expect(screen.getAllByText('20,000 is the most a selection can change — use Whole view, Has key or a layer instead.').length).toBeGreaterThan(0)
+    await user.click(screen.getByRole('radio', { name: /Every entity with owner/ }))
+    expect(next()).toBeEnabled()
+  })
+
+  it('offers to follow the change already running on the draft — from Review, and when starting is refused', async () => {
+    const user = userEvent.setup()
+    api.preview.mockResolvedValue({ refusal: null, nameBudget: null, activeJobId: 'job-0', counts: null })
+    const { onClose, onOpenManager } = open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    expect(await screen.findByText(/Another change is still being applied/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Apply/ })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Follow it' }))
+    expect(api.get).toHaveBeenCalledWith('ws', 'g1', 'job-0')
+    expect(usePropertyJobsStore.getState().jobs).toMatchObject([{
+      jobId: 'job-0', branchId: 'd1', op: { kind: 'rename', key: 'owner' }, targetLabel: 'the entities a search matches',
+    }])
+    expect(onClose).toHaveBeenCalled()
+    expect(onOpenManager).toHaveBeenCalled()
+  })
+
+  it('a refusal to start because another is running offers to follow it', async () => {
+    const user = userEvent.setup()
+    const { JobActiveError } = await import('@/services/versioningApiService')
+    api.create.mockRejectedValueOnce(new JobActiveError('job-0', 'Another bulk property edit is running on this draft (job job-0).'))
+    const { onOpenManager } = open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    await user.click(screen.getByRole('button', { name: 'Apply to 30' }))
+    expect(await screen.findByText(/Another bulk property edit is running/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Follow it' }))
+    expect(usePropertyJobsStore.getState().jobs.map((j) => j.jobId)).toEqual(['job-0'])
+    expect(onOpenManager).toHaveBeenCalled()
+  })
+
+  it('a target the server won\'t take by its ids offers to choose another', async () => {
+    const user = userEvent.setup()
+    api.preview.mockResolvedValue({ refusal: { code: 'too_many_ids', message: 'A job names up to 5,000 entities by id.' }, nameBudget: null, activeJobId: null, counts: { matched: 3, haveKey: 3, haveTo: 0, missing: 0 } })
+    open({ kind: 'remove', key: 'owner' }, ['a', 'b', 'c'])
+    await user.click(screen.getByRole('radio', { name: /The 3 selected/ }))
+    await user.click(next())
+    expect(await screen.findByText('A job names up to 5,000 entities by id.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Choose another target' }))
+    expect(screen.getByRole('radiogroup', { name: 'Which entities' })).toBeInTheDocument()
+  })
+
+  it('a step that fails to draw is held to the dialog, which can still be closed', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    api.crash = true
+    const { onClose } = open()
+    const fallback = within(screen.getByText('The What step failed to draw').parentElement!)
+    await user.click(fallback.getByRole('button', { name: 'Close' }))
+    expect(onClose).toHaveBeenCalled()
+    vi.mocked(console.error).mockRestore()
   })
 
   it('says what publishing the draft would refuse of it — and applies it all the same', async () => {

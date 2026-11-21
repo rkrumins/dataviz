@@ -229,7 +229,7 @@ describe('useDisplayRuleEngine', () => {
             op: { kind: 'set' as const, key: 'tier', value: 'gold' }, targetLabel: 'the view', startedAt: '',
             job: { jobId: 'j1', status: 'running' as const, summary: { commits } },
         })
-        usePropertyJobsStore.setState({ jobs: [job(1)] })
+        usePropertyJobsStore.setState({ jobs: [job(1)], writtenEpochs: {} })
         useReferenceModelStore.setState({ displayRules: [rule('pii')] })
         useCanvasStore.setState({ nodes: nodes(5) })
         membership().mockImplementation(async () => ({
@@ -242,7 +242,7 @@ describe('useDisplayRuleEngine', () => {
         expect(useDisplayRuleMatchStore.getState().membershipNote).toMatch(/published graph/)
 
         // The job's next window lands: the chips and the counts are the draft's again.
-        act(() => { usePropertyJobsStore.setState({ jobs: [job(2)] }) })
+        act(() => { usePropertyJobsStore.getState().update('j1', job(2).job) })
         await waitFor(() => expect(membership()).toHaveBeenCalledTimes(2))
         await waitFor(() => expect(countRules).toHaveBeenCalledTimes(2))
         usePropertyJobsStore.setState({ jobs: [] })

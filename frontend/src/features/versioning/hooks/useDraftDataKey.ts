@@ -1,12 +1,13 @@
 /**
  * useDraftDataKey — what a draft's counts, rule chips and property catalog depend on besides the
  * view: which branch is open, its epoch (an import, others' saves taken in), what it has saved, and
- * how far its bulk property jobs have written. The server answers those reads for the draft as it
- * stands, so a hook that keys its answers by this asks again as the draft changes — window by
- * window while a bulk change runs — and a draft's answers are never shown for Published's.
+ * how far its bulk property jobs have written (`writtenEpochs`: when one ends, and while one runs
+ * at most every 30 s). The server answers those reads for the draft as it stands, so a hook that
+ * keys its answers by this asks again as the draft changes, and a draft's answers are never shown
+ * for Published's.
  */
 import { useBranchStore } from '@/store/branchStore'
-import { useDraftPropertyJobs } from '@/store/propertyJobsStore'
+import { draftOf, usePropertyJobsStore } from '@/store/propertyJobsStore'
 
 export function useDraftDataKey(): string {
   const graphId = useBranchStore((s) => s.graphId)
@@ -17,9 +18,6 @@ export function useDraftDataKey(): string {
     const c = s.isDraftMode() ? s.activeChangeSet?.counts : null
     return c ? `${c.added}.${c.removed}.${c.modified}` : ''
   })
-  const jobs = useDraftPropertyJobs(graphId, branchId)
-  const written = jobs
-    .map((j) => `${j.jobId}:${j.job?.status ?? ''}:${j.job?.summary?.commits ?? j.job?.processed ?? 0}`)
-    .join(',')
+  const written = usePropertyJobsStore((s) => s.writtenEpochs[draftOf(graphId, branchId)]?.epoch ?? 0)
   return `${branchId ?? ''}|${epoch}|${changes}|${written}`
 }

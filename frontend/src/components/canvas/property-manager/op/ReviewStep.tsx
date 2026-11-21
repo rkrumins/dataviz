@@ -7,8 +7,9 @@
  * An optional reason is kept as the change's message — in the draft's history, and in the audit of
  * its publish.
  */
-import { AlertTriangle, Ban, GitBranch, Info, Loader2 } from 'lucide-react'
+import { AlertTriangle, Ban, GitBranch, Info, Loader2, RotateCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/Button'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { Skeleton } from '@/components/ui/Skeleton'
 import type { AffectedSample } from '@/services/propertyInsights'
@@ -23,8 +24,8 @@ import type { ReviewCounts } from './useReviewCounts'
 export type { Impact } from './opModel'
 
 export function ReviewStep({
-  op, preset, scopeMode, counts, impact, exact, preview, previewLoading, sample, sampleLoading, stagedCount, reason = '', onReason,
-  edges = false,
+  op, preset, scopeMode, counts, impact, exact, preview, previewLoading, previewError = null, onRetry, sample, sampleLoading, stagedCount,
+  reason = '', onReason, edges = false, onFollow, onChangeTarget,
 }: {
   op: OpDraft
   preset: TargetPreset
@@ -35,6 +36,10 @@ export function ReviewStep({
   exact: boolean
   preview: PropertyJobPreview | null
   previewLoading: boolean
+  /** Why the server's check of it failed — it can't be applied until a check answers. */
+  previewError?: string | null
+  /** Check and count it again. */
+  onRetry?: () => void
   sample: AffectedSample | null
   sampleLoading: boolean
   stagedCount: number
@@ -43,6 +48,10 @@ export function ReviewStep({
   onReason?: (reason: string) => void
   /** It changes relationships, not entities. */
   edges?: boolean
+  /** Follow the change already running on the draft, in Property Manager. */
+  onFollow?: (jobId: string) => void
+  /** Go back and choose another target. */
+  onChangeTarget?: () => void
 }) {
   const budget = preview?.nameBudget
   const noun = edges ? 'relationship' : 'entity'
@@ -92,9 +101,9 @@ export function ReviewStep({
         </div>
       )}
       {counts?.error && (
-        <p className="flex items-start gap-1.5 text-[11.5px] text-amber-700 dark:text-amber-300">
-          <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden /> {counts.error} — the numbers are what was counted before it stopped.
-        </p>
+        <Notice tone="warning" icon={AlertTriangle} action={onRetry && <RetryButton onClick={onRetry} />}>
+          {counts.error} — the numbers are what was counted before it stopped, so it can’t be applied until a count finishes.
+        </Notice>
       )}
       {approximate && (
         <p className="flex items-start gap-1.5 text-[11.5px] text-ink-muted">
@@ -125,13 +134,27 @@ export function ReviewStep({
       )}
 
       {previewLoading && <p className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Checking it can be applied…</p>}
-      {preview?.refusal && <Notice tone="danger" icon={Ban}>{preview.refusal.message}</Notice>}
+      {previewError && (
+        <Notice tone="danger" icon={Ban} action={onRetry && <RetryButton onClick={onRetry} />}>
+          Couldn’t check it can be applied: {previewError}
+        </Notice>
+      )}
+      {preview?.refusal && (
+        <Notice tone="danger" icon={Ban} action={preview.refusal.code === 'too_many_ids' && onChangeTarget
+          ? <NoticeButton onClick={onChangeTarget}>Choose another target</NoticeButton> : undefined}>
+          {preview.refusal.message}
+        </Notice>
+      )}
       {derived > 0 && (
         <Notice tone="neutral" icon={Info}>
           {derived.toLocaleString()} of them {derived === 1 ? 'is a roll-up' : 'are roll-ups'} — a summary the aggregation computes — and {derived === 1 ? 'is' : 'are'} left as {derived === 1 ? 'it is' : 'they are'}.
         </Notice>
       )}
-      {preview?.activeJobId && <Notice tone="danger" icon={Ban}>Another change is still being applied to this draft. Wait for it to finish, then apply this one.</Notice>}
+      {preview?.activeJobId && (
+        <Notice tone="danger" icon={Ban} action={onFollow && <NoticeButton onClick={() => onFollow(preview.activeJobId!)}>Follow it</NoticeButton>}>
+          Another change is still being applied to this draft. Wait for it to finish, then apply this one.
+        </Notice>
+      )}
       {/* What publishing would refuse (the entity types' fields): said, never a block. */}
       {preview?.warnings?.map((w) => (
         <Notice key={`${w.code}:${w.entityType}:${w.field}`} tone="warning" icon={AlertTriangle}>{w.message}</Notice>
@@ -206,15 +229,27 @@ function Tile({ label, value, tone, upTo }: { label: string; value: number | und
   )
 }
 
-function Notice({ tone, icon: Icon, children }: { tone: 'danger' | 'warning' | 'neutral'; icon: typeof Info; children: React.ReactNode }) {
+function Notice({ tone, icon: Icon, children, action }: {
+  tone: 'danger' | 'warning' | 'neutral'; icon: typeof Info; children: React.ReactNode
+  /** The next step it offers. */
+  action?: React.ReactNode
+}) {
   return (
     <div role={tone === 'danger' ? 'alert' : undefined} className={cn('flex items-start gap-2 rounded-lg border p-2.5 text-[11.5px] leading-snug',
       tone === 'danger' ? 'border-rose-500/35 bg-rose-500/[0.06] text-rose-800 dark:text-rose-200'
         : tone === 'warning' ? 'border-amber-500/35 bg-amber-500/[0.06] text-amber-800 dark:text-amber-200'
           : 'border-black/[0.07] dark:border-white/[0.08] text-ink-secondary')}>
       <Icon className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
-      <span>{children}</span>
+      <span className="min-w-0 flex-1">{children}</span>
+      {action}
     </div>
   )
 }
 
+function RetryButton({ onClick }: { onClick: () => void }) {
+  return <Button size="sm" variant="ghost" leftIcon={RotateCw} className="-my-1 h-6 shrink-0 px-2 text-2xs" onClick={onClick}>Try again</Button>
+}
+
+function NoticeButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+  return <Button size="sm" variant="ghost" className="-my-1 h-6 shrink-0 px-2 text-2xs" onClick={onClick}>{children}</Button>
+}
