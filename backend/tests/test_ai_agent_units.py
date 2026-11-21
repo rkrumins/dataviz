@@ -193,3 +193,19 @@ def test_connections_refuse_what_would_misroute_credentials():
             name="x", baseUrl="https://user:pw@gw.example/v1", models={"chat": "m"})))
     check(authType="token_mint", authConfig={"tokenUrl": "https://gw.example/token", "username": "svc"},
           secrets={"password": "p"})
+
+
+def test_the_service_holds_none_of_the_web_tier():
+    """It reads through the platform API as the person, so it must not carry the
+    web tier's auth, permission or routing code that would let it read past it."""
+    import subprocess
+    import sys
+
+    code = ("import sys; from backend.ai_service.app import create_app; create_app(start_background=False); "
+            "print([m for m in sys.modules if m == 'backend.app.main' or m.startswith(("
+            "'backend.app.auth', 'backend.app.api.v1.api', 'backend.app.services.permission_service', "
+            "'backend.app.services.view_service', 'backend.app.providers'))])")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120,
+                         cwd=__import__("pathlib").Path(__file__).resolve().parents[2])
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip().splitlines()[-1] == "[]"
