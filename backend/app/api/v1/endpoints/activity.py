@@ -577,4 +577,7 @@ async def list_data_source_history(
     except activity_repo.InvalidCursor:
         raise HTTPException(400, "Malformed cursor")
     events = await _events(session, rows, full=False)
+    # A request answered before the source moved here belongs to the workspace it was asked in;
+    # its title is not this workspace's to read (the move itself still shows).
+    events = [e for e in events if e.event_type != "workspace.data_request.connected" or e.workspace_id == ws_id]
     return ActivityPage(events=[_for_every_reader(e) for e in events], next_cursor=next_cursor)

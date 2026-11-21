@@ -104,6 +104,22 @@ async def test_only_safe_changes_to_this_source_and_nothing_personal(world, on, 
 
 
 @pytest.mark.asyncio
+async def test_a_request_answered_in_the_workspace_it_came_from_stays_there(world, on, db_session, test_client):
+    # Its title belongs to the old workspace: readers here see the move, not that workspace's requests.
+    _emit(db_session, "workspace.data_request.connected", {
+        "request_id": "dr_old", "workspace_id": w.OPS, "title": "Ops ledger", "actor_id": w.WALT, "data_source_id": w.DS,
+    }, minutes_ago=50, version=1)
+    _emit(db_session, "workspace.datasource.moved", {
+        "actor_id": w.WALT, "data_source_id": w.DS, "from_workspace_id": w.OPS, "to_workspace_id": w.WS,
+    }, minutes_ago=40, version=1)
+    await _relay(db_session)
+
+    r = await _get(test_client, db_session)
+    assert r.status_code == 200, r.text
+    assert [e["eventType"] for e in r.json()["events"]] == ["workspace.datasource.moved"]
+
+
+@pytest.mark.asyncio
 async def test_the_allow_list_is_changes_to_a_source_its_workspace_may_read():
     assert set(catalogue.SOURCE_HISTORY_TYPES) == {
         *(f"workspace.data_source.{verb}" for verb in (
