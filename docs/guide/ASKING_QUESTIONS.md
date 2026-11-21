@@ -113,8 +113,11 @@ belong to the data source. Open it from the workspace's **Data → Sources**:
 * **Watch** in the source's header tells you about every new open question on it.
 
 Anyone who manages the source can name its Stewards (**Edit**, or **Name them**), up to ten,
-each a person or a team of up to 50. The Owner is the workspace admins' to change, or the
-current Owner's — handing it on.
+each a person or a team of up to 50 — a bigger team is flagged before you save. The Owner is
+the workspace admins' to change, or the current Owner's — handing it on. **Who to ask about
+this data** is there, and editable, whenever conversations or **Data source details** are
+on; **Ask a question** needs conversations. The Owner and Stewards named here are the ones
+who can certify the source — see [Describing and Trusting Data](/guide/describing-data).
 
 ## Your conversations
 

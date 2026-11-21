@@ -390,6 +390,14 @@ export const guideEntries: GuideEntry[] = [
     importFn: () => import('@docs/guide/WORKSPACE_ADMIN.md?raw'),
   },
   {
+    slug: 'describing-data',
+    section: 'admin',
+    persona: 'admin',
+    title: 'Describing and Trusting Data',
+    description: 'Describe a data source, tag it, certify it or mark it deprecated, and label how sensitive it is',
+    importFn: () => import('@docs/guide/DESCRIBING_DATA.md?raw'),
+  },
+  {
     slug: 'users-access',
     section: 'admin',
     persona: 'admin',

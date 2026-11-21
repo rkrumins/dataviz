@@ -407,6 +407,16 @@ it from **Data → Processing** when you're ready (see below).
 > **Data → Sources**, select **Edit**, choose a **Semantic layer (ontology)**, then
 > **Save changes**.
 
+### Describe it, and name who vouches for it
+
+With **Data source details** on, a source's Overview opens with **About this data**:
+anyone who manages its sources can **Edit details** — a description, links and tags.
+Then name its **Owner** and **Stewards** under **Who to ask about this data**: they,
+and the workspace's admins, can **Change status** to certify it (or mark it in review
+or deprecated) and label how sensitive it is. A named Owner or Steward can also mark a
+data request connected to their source. See [Describing and Trusting
+Data](/guide/describing-data).
+
 ---
 
 ## Moving a data source between workspaces
@@ -696,6 +706,8 @@ spelling for you, so you don't need a manual data fix. The workspace's own
   roles, use groups, or invite people.
 - [Data Freshness & Ingestion](/guide/data-freshness) — when aggregation fails
   or data looks out of date.
+- [Describing and Trusting Data](/guide/describing-data) — when you want each
+  source to say what it is and whether to rely on it.
 - [The Semantic Layer](/guide/semantic-layer) — when you want to understand or
   improve a layer.
 - [The Admin Console](/guide/governance-ops) — when you want to keep the whole
