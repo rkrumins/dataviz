@@ -257,9 +257,11 @@ async def test_deleting_a_thread_deletes_its_replies_so_retention_blanks_them(wo
                                    json={"body": "Secret", "clientKey": "a", "mentions": [w.ADA]})
             early = (await test_client.post(f"{base}/{tid}/messages",
                                             json={"body": "Oops", "clientKey": "b"})).json()["message"]["id"]
-            assert (await test_client.delete(f"{base}/{tid}/messages/{early}")).status_code == 200
+            removed = await test_client.delete(f"{base}/{tid}/messages/{early}")
+            assert removed.status_code == 200
         with w.acting(w.ADA, await w.claims_for(db_session, w.ADA)):
-            assert (await test_client.delete(f"{base}/{tid}")).status_code == 204
+            gone = await test_client.delete(f"{base}/{tid}")
+            assert gone.status_code == 204
     await db_session.commit()
 
     async def messages():

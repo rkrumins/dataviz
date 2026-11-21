@@ -134,8 +134,8 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         t.lastActivityAt = message.createdAt
         return json({ message, thread: summaryOf(t), people: PEOPLE }, 201)
     }
-    if ((m = p.match(/^\/api\/v1\/discussions\/([^/]+)\/read$/))) return json({ lastReadAt: new Date().toISOString() })
-    if ((m = p.match(/^\/api\/v1\/discussions\/([^/]+)\/me$/))) return json({ muted: false, following: false, ...JSON.parse(String(init?.body ?? '{}')) })
+    if (/^\/api\/v1\/discussions\/[^/]+\/read$/.test(p)) return json({ lastReadAt: new Date().toISOString() })
+    if (/^\/api\/v1\/discussions\/[^/]+\/me$/.test(p)) return json({ muted: false, following: false, ...JSON.parse(String(init?.body ?? '{}')) })
     if ((m = p.match(/^\/api\/v1\/discussions\/([^/]+)$/))) {
         const t = THREADS[m[1]] ?? SOURCE_THREADS[m[1]]
         if (!t) return json({ detail: { type: 'not_found', message: 'Not found' } }, 404)

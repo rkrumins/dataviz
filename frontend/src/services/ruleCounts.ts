@@ -102,7 +102,8 @@ async function countGroup(
     counts: Map<string, RuleCount>,
     opts: CountRulesOptions,
 ): Promise<void> {
-    const sessions: Record<string, string> = {}
+    // A Map, not an object: a rule id is anyone's text ("__proto__" included).
+    const sessions = new Map<string, string>()
     const items = rules.map((r) => ({ id: r.id, predicate: asGroup(r.predicate) }))
     const scope = opts.scope ?? { viewId, scopeMode: 'view' }
     const started = Date.now()
@@ -111,7 +112,7 @@ async function countGroup(
         // The graph busy or failing over: asked again, for minutes.
         const answer = await rideOut(() => provider.searchCounts(
             { scope, items, waitMs: request === 0 ? FIRST_WAIT_MS : FOLLOW_WAIT_MS,
-              sessions: { ...sessions },
+              sessions: Object.fromEntries(sessions),
               ...(opts.purpose ? { purpose: opts.purpose } : {}) },
             { signal: opts.signal },
         ), opts.signal)
@@ -119,7 +120,7 @@ async function countGroup(
         for (const rule of rules) {
             const c = answer.counts[rule.id]
             if (!c) continue
-            if (c.sessionId) sessions[rule.id] = c.sessionId
+            if (c.sessionId) sessions.set(rule.id, c.sessionId)
             const done = c.status === 'complete'
             complete = complete && done
             counts.set(rule.id, {
