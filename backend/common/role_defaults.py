@@ -65,6 +65,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "system:users:manage",
             "system:workspaces:create",
             "workspace:admin",
+            "workspace:ai:use",
             "workspace:catalog:manage",
             "workspace:catalog:read",
             "workspace:datasource:manage",
@@ -96,6 +97,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "system:templates:manage",
             "system:workspaces:create",
             "workspace:admin",
+            "workspace:ai:use",
             "workspace:catalog:manage",
             "workspace:catalog:read",
             "workspace:datasource:manage",
@@ -156,6 +158,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         ),
         scope_type="global",
         permissions=frozenset({
+            "workspace:ai:use",
             "workspace:catalog:manage",
             "workspace:catalog:read",
             "workspace:datasource:manage",
@@ -178,6 +181,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         ),
         scope_type="global",
         permissions=frozenset({
+            "workspace:ai:use",
             "workspace:catalog:read",
             "workspace:datasource:manage",
             "workspace:datasource:read",
@@ -197,6 +201,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         ),
         scope_type="global",
         permissions=frozenset({
+            "workspace:ai:use",
             "workspace:catalog:read",
             "workspace:datasource:manage",
             "workspace:datasource:publish",
@@ -217,6 +222,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         ),
         scope_type="global",
         permissions=frozenset({
+            "workspace:ai:use",
             "workspace:catalog:read",
             "workspace:datasource:manage",
             "workspace:datasource:read",
@@ -236,6 +242,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         ),
         scope_type="global",
         permissions=frozenset({
+            "workspace:ai:use",
             "workspace:catalog:read",
             "workspace:datasource:read",
             "workspace:native-query:read",

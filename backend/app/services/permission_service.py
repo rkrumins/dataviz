@@ -538,6 +538,8 @@ _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:datasource:read",
     # Running one's own read-only queries on the workspace's data sources.
     "workspace:native-query:read",
+    # Asking the AI assistant about the workspace's data.
+    "workspace:ai:use",
     # Answering access requests and adding people: a workspace admin can do
     # whatever a Workspace steward can.
     "workspace:members:add",

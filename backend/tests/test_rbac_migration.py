@@ -51,6 +51,8 @@ _SERVICE_ACCOUNTS_MIGRATION_PATH = _VERSIONS_DIR / "20261023_1200_service_accoun
 _NATIVE_QUERY_MIGRATION_PATH = _VERSIONS_DIR / "20261024_1000_native_query.py"
 # Org-wide read for service accounts added the org_reader role.
 _ORG_READ_MIGRATION_PATH = _VERSIONS_DIR / "20261026_1200_sa_org_read.py"
+# The AI assistant added workspace:ai:use — asking it about a workspace's data.
+_AI_ASSISTANT_MIGRATION_PATH = _VERSIONS_DIR / "20261121_1000_ai_assistant.py"
 
 
 def _load_migration(path: Path, name: str):
@@ -255,8 +257,9 @@ def test_datasource_publish_seed_convergence():
     )
     assert SYSTEM_ROLE_DEFAULTS[role].description == description
 
-    # Grants: the migration adds exactly what the seed holds for them.
-    seed_grants = set(rbac_seed.ROLE_GRANTS)
+    # Grants: the migration adds exactly what the seed holds for them, less
+    # what a later revision (20261121_1000_ai_assistant) granted the role too.
+    seed_grants = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p != "workspace:ai:use"}
     assert set(mod._NEW_ROLE_PERMISSIONS) == {
         (r, p) for r, p in seed_grants if p == perm or r == role
     }
@@ -266,7 +269,7 @@ def test_datasource_publish_seed_convergence():
     }
     member = {p for r, p in seed_grants if r == "workspace_member"}
     assert {p for r, p in seed_grants if r == role} == member | {perm}
-    assert SYSTEM_ROLE_DEFAULTS[role].permissions == member | {perm}
+    assert SYSTEM_ROLE_DEFAULTS[role].permissions == member | {perm, "workspace:ai:use"}
     assert {
         n for n, d in SYSTEM_ROLE_DEFAULTS.items() if perm in d.permissions
     } == holders
@@ -468,7 +471,8 @@ def test_members_add_permission_and_steward_reach_an_existing_database():
 
     migration_grants = set(mod._ROLE_PERMISSIONS)
     # Less what a later revision granted the role too.
-    later = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == "workspace:native-query:read"}
+    later = {(r, p) for r, p in rbac_seed.ROLE_GRANTS
+             if p in ("workspace:native-query:read", "workspace:ai:use")}
     seed_grants = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm or r == role} - later
     assert seed_grants == migration_grants
     for granted_role, granted in migration_grants:
@@ -558,6 +562,35 @@ def test_the_org_reader_role_reaches_an_existing_database():
     assert set(mod._ROLE_PERMISSIONS) == {(role, "system:org-viewer")}
     assert {(r, p) for r, p in rbac_seed.ROLE_GRANTS if r == role} == set(mod._ROLE_PERMISSIONS)
     assert SYSTEM_ROLE_DEFAULTS[role].permissions == SERVICE_ACCOUNT_GLOBAL_PERMISSIONS
+
+
+def test_the_ai_permission_reaches_an_existing_database():
+    """``workspace:ai:use`` arrives by migration AND ``rbac_seed``, with the
+    same text and grants, and "Reset to default" restores it: every system
+    role that reads data sources holds it, and ``workspace:admin`` implies it
+    in code."""
+    from backend.app.config import rbac_seed
+    from backend.app.services.permission_service import _WORKSPACE_CATEGORY_LEAVES
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+
+    perm = "workspace:ai:use"
+    assert _AI_ASSISTANT_MIGRATION_PATH.exists(), f"missing migration: {_AI_ASSISTANT_MIGRATION_PATH}"
+    mod = _load_migration(_AI_ASSISTANT_MIGRATION_PATH, "_ai_assistant_migration")
+    assert mod._PERMISSION == perm
+
+    seed_perm = next(p for p in rbac_seed.PERMISSIONS if p["id"] == perm)
+    assert seed_perm["category"] == "workspace"
+    assert (seed_perm["description"], seed_perm["long_description"]) == (
+        mod._DESCRIPTION, mod._LONG_DESCRIPTION,
+    )
+    assert json.loads(seed_perm["examples"]) == mod._EXAMPLES
+    assert {(r, perm) for r in mod._ROLES} == {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm}
+    readers = {r for r, p in rbac_seed.ROLE_GRANTS if p == "workspace:datasource:read"}
+    assert set(mod._ROLES) == readers
+    for role, spec in SYSTEM_ROLE_DEFAULTS.items():
+        reads = "workspace:datasource:read" in spec.permissions
+        assert (perm in spec.permissions) == reads, role
+    assert perm in _WORKSPACE_CATEGORY_LEAVES
 
 
 def test_who_publishes_data_is_said_in_the_role_descriptions_everywhere():

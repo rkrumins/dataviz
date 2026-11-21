@@ -17,6 +17,7 @@ import sys
 import uuid
 
 import pytest
+from alembic.util import to_tuple
 
 from backend.app.db import schema_plan
 from backend.app.db.engine import _alembic_config
@@ -40,7 +41,7 @@ def test_the_plan_says_what_an_upgrade_would_do():
     assert _plan([head])["verdict"] == "up_to_date"
     assert _plan([], virgin=True)["verdict"] == "fresh_install"
 
-    behind = _plan(list(script.get_revision(head).down_revision))
+    behind = _plan(list(to_tuple(script.get_revision(head).down_revision)))
     assert behind["verdict"] == "upgrade" and behind["wouldRun"] == [head]
 
     # #670's stamp: placed exactly, then everything the heads need that it doesn't have.
@@ -57,7 +58,7 @@ def test_the_plan_says_what_an_upgrade_would_do():
 
 def test_the_plan_holds_a_shared_database_to_main():
     script = _script()
-    behind = list(script.get_revision(script.get_current_head()).down_revision)
+    behind = list(to_tuple(script.get_revision(script.get_current_head()).down_revision))
     branch = ("claude/x at abc", False)
     assert _plan(behind, shared=True, built=branch)["verdict"] == "refused"
     assert _plan([script.get_current_head()], shared=True, built=branch)["verdict"] == "up_to_date"

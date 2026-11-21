@@ -2998,7 +2998,7 @@ class _TimeoutMiddleware:
             ("/api/v1/admin/data-source-transfers/", move_secs),
             # The AI service: drafting a query or testing a connection waits on a model.
             # Below nginx's proxy_read_timeout (180s) for the same reason as versioning.
-            ("/api/v1/ai/",           float(os.getenv("HTTP_TIMEOUT_AI_SECS", "150"))),
+            ("/api/v1/ai/",           float(os.getenv("HTTP_TIMEOUT_AI_SECS", "120"))),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 
