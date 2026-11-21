@@ -1,10 +1,16 @@
 /**
  * The rail's header: who is answering, the persona switch (Ask about data · Help), what the next
- * question is about (the context chip — removable), the conversation history, and a new chat.
+ * question is about (the context chip — removable; where there is a "What I know" card, it opens
+ * it), the conversation history, and a new chat.
  */
-import { useState } from 'react'
+import { useState, type ComponentType, type ReactNode } from 'react'
 import * as Popover from '@radix-ui/react-popover'
-import { BookOpen, Database, Eye, FileText, History, MessagesSquare, Plus, SquarePen, Trash2, X } from 'lucide-react'
+import type { UseQueryResult } from '@tanstack/react-query'
+import {
+    AlertCircle, BookOpen, ChevronDown, Compass, Database, Eye, FileText, FolderKanban, History, MessagesSquare, Network,
+    Plus, SquarePen, Trash2, X,
+} from 'lucide-react'
+import { Button } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { IconButton } from '@/components/ui/Button'
 import { Segmented } from '@/components/ui/Segmented'
@@ -16,10 +22,12 @@ import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
 import { AI_CONCEPTS_KEY, useConcepts, useConversations } from '../api/aiQueries'
 import { aiService } from '../api/aiService'
-import type { AssistantPersona } from '../api/types'
+import type { AssistantPageKind, AssistantPersona, ContextBrief } from '../api/types'
 import { deleteConversation, openConversation, startNewChat } from '../lib/chatController'
-import { pageName, type AssistantPageContext } from '../lib/useAssistantContext'
+import { conceptName } from '../lib/conceptName'
+import type { AssistantPageContext } from '../lib/useAssistantContext'
 import { useAssistantStore } from '../store/assistantStore'
+import { ContextCard, ContextCardSkeleton } from './ContextCard'
 import { AssistantAvatar } from './MessageView'
 
 const PERSONAS = [
@@ -27,12 +35,15 @@ const PERSONAS = [
     { value: 'help' as const, label: 'Help', icon: BookOpen },
 ]
 
-export function AssistantHeader({ page, connectionName, personas, onClose }: {
+export function AssistantHeader({ page, brief, connectionName, personas, onClose, onAsk }: {
     page: AssistantPageContext
+    /** What it knows about the page, where there is a card for it here. */
+    brief: UseQueryResult<ContextBrief> | null
     connectionName?: string | null
     /** Which personas an administrator has turned on. */
     personas?: { data: boolean; help: boolean }
     onClose: () => void
+    onAsk: (question: string) => void
 }) {
     const persona = useAssistantStore((s) => s.persona)
     const setPersona = useAssistantStore((s) => s.setPersona)
@@ -55,17 +66,28 @@ export function AssistantHeader({ page, connectionName, personas, onClose }: {
             </div>
             <div className="relative flex flex-col gap-2 px-3.5 pb-3">
                 <Segmented<AssistantPersona> label="Who to ask" options={options} value={persona} onChange={setPersona} className="w-full [&>button]:flex-1 [&>button]:justify-center" />
-                <ContextChip page={page} />
+                <ContextChip page={page} brief={brief} onAsk={onAsk} />
             </div>
         </div>
     )
 }
 
-/** What the next question is about — the view (and what is selected on it), or the page. */
-function ContextChip({ page }: { page: AssistantPageContext }) {
+const PAGE_GLYPH: Record<AssistantPageKind, ComponentType<{ className?: string }>> = {
+    view: Eye, workspace: FolderKanban, data_source: Database, explorer: Compass, ontology: Network, doc: BookOpen,
+}
+
+/**
+ * What the next question is about — the view (and what is selected on it), or the page. Where
+ * there is a "What I know" card, the chip opens it.
+ */
+function ContextChip({ page, brief, onAsk }: {
+    page: AssistantPageContext
+    brief: UseQueryResult<ContextBrief> | null
+    onAsk: (question: string) => void
+}) {
     const detach = useAssistantStore((s) => s.detachContext)
     const attach = useAssistantStore((s) => s.attachContext)
-    const name = page.view ? page.view.name ?? 'This view' : pageName(page.context.route ?? '')
+    const name = page.label
     if (!name && !page.focus) return null
 
     if (page.detached) {
@@ -77,16 +99,23 @@ function ContextChip({ page }: { page: AssistantPageContext }) {
         )
     }
 
-    const Glyph = page.view ? Eye : FileText
+    const kind = page.context.page?.kind
+    const Glyph = kind ? PAGE_GLYPH[kind] : FileText
     const detail = page.selectedCount > 1 ? `${page.selectedCount} selected`
         : page.focus?.name ?? (page.selectedCount === 1 ? '1 selected' : null)
-    return (
-        <div className="flex min-w-0 items-center gap-1.5 self-start rounded-full border border-accent-lineage/25 bg-accent-lineage/5 py-0.5 pl-2.5 pr-1 text-xs">
+    const label = (
+        <>
             <Glyph className="h-3.5 w-3.5 shrink-0 text-accent-lineage" aria-hidden />
             <span className="min-w-0 truncate text-ink-secondary">
                 {page.view ? 'View ' : ''}<span className="font-semibold text-ink">{name}</span>
                 {detail && <span className="text-ink-muted"> · {detail}</span>}
             </span>
+        </>
+    )
+    return (
+        <div className={cn('flex min-w-0 items-center gap-1 self-start rounded-full border border-accent-lineage/25 bg-accent-lineage/5 py-0.5 pr-1 text-xs',
+            brief ? 'pl-1' : 'pl-2.5')}>
+            {brief ? <WhatIKnow brief={brief} onAsk={onAsk}>{label}</WhatIKnow> : label}
             <HoverTip label="Leave this out of the question" detail="The assistant then answers without knowing where you are">
                 <button type="button" onClick={() => detach(page.pageKey)} aria-label="Remove this page from the question"
                         className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-black/[0.06] hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:hover:bg-white/10">
@@ -94,6 +123,51 @@ function ContextChip({ page }: { page: AssistantPageContext }) {
                 </button>
             </HoverTip>
         </div>
+    )
+}
+
+/**
+ * The chip, as the way into the "What I know" card: a popover in the house shape (portaled, over
+ * the canvas's floating layers, in the assistant's keyboard scope). Open or closed in the store,
+ * so the welcome's "What I know ›" opens the same one.
+ */
+function WhatIKnow({ brief, onAsk, children }: {
+    brief: UseQueryResult<ContextBrief>
+    onAsk: (question: string) => void
+    children: ReactNode
+}) {
+    const open = useAssistantStore((s) => s.contextOpen)
+    const setOpen = useAssistantStore((s) => s.setContextOpen)
+    return (
+        <Popover.Root open={open} onOpenChange={setOpen}>
+            <Popover.Trigger asChild>
+                <button type="button" aria-label="What I know about this page"
+                        className={cn('flex min-w-0 items-center gap-1.5 rounded-full py-0.5 pl-1.5 pr-1 transition-colors hover:bg-accent-lineage/10',
+                            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40', open && 'bg-accent-lineage/10')}>
+                    {children}
+                    <ChevronDown className={cn('h-3 w-3 shrink-0 text-ink-muted transition-transform', open && 'rotate-180')} aria-hidden />
+                </button>
+            </Popover.Trigger>
+            <Popover.Portal>
+                <Popover.Content align="start" sideOffset={6} collisionPadding={12} aria-label="What I know"
+                                 data-floating-layer="" {...keyboardScopeProps('ai-chat')}
+                                 className="z-[70] flex max-h-[min(36rem,75vh)] w-[min(26rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-glass-border bg-canvas-elevated shadow-2xl shadow-black/25">
+                    {brief.data ? (
+                        <ContextCard variant="popover" brief={brief.data} onAsk={(q) => { setOpen(false); onAsk(q) }} />
+                    ) : brief.isError ? (
+                        <div className="flex flex-col items-start gap-2 p-4">
+                            <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
+                                <AlertCircle className="h-4 w-4 text-ink-muted" aria-hidden /> What I know about this page couldn’t be read
+                            </p>
+                            <p className="text-xs text-ink-muted">You can still ask — the answer reads the page itself.</p>
+                            <Button size="sm" variant="secondary" onClick={() => void brief.refetch()}>Try again</Button>
+                        </div>
+                    ) : (
+                        <ContextCardSkeleton variant="popover" />
+                    )}
+                </Popover.Content>
+            </Popover.Portal>
+        </Popover.Root>
     )
 }
 
@@ -173,7 +247,7 @@ function HistoryMenu({ dataSourceId }: { dataSourceId?: string }) {
                                         <li key={c.id} className="flex items-center gap-1 rounded-lg px-2 py-1.5 pr-1">
                                             <span className="min-w-0 flex-1">
                                                 <span className="block truncate text-sm text-ink">
-                                                    “{c.concept}” <span className="text-ink-muted">means</span> {c.label}
+                                                    “{conceptName(c.concept)}” <span className="text-ink-muted">means</span> {c.label}
                                                 </span>
                                                 <span className="block text-xs text-ink-muted">
                                                     {c.scope === 'workspace' ? 'Everyone’s, set by an administrator' : 'Yours'}
@@ -181,7 +255,7 @@ function HistoryMenu({ dataSourceId }: { dataSourceId?: string }) {
                                                 </span>
                                             </span>
                                             {c.scope === 'personal' && (
-                                                <IconButton icon={X} label={`Forget what “${c.concept}” means`} size="sm" variant="danger" tip={false}
+                                                <IconButton icon={X} label={`Forget what “${conceptName(c.concept)}” means`} size="sm" variant="danger" tip={false}
                                                             onClick={() => void aiService.deleteConcept(c.id).then(
                                                                 () => queryClient.invalidateQueries({ queryKey: AI_CONCEPTS_KEY }), () => {})} />
                                             )}

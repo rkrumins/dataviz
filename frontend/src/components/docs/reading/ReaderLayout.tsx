@@ -2,15 +2,23 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { Outlet, Link, useLocation } from 'react-router-dom'
 import { ArrowLeft, Sun, Moon, Search, Menu, X, type LucideIcon } from 'lucide-react'
 import { usePreferencesStore } from '@/store/preferences'
+import { useAuthStore } from '@/store/auth'
+import { useBrand } from '@/store/branding'
+import { useFeature } from '@/store/features'
 import { useAppliedTheme } from '@/hooks/useAppliedTheme'
+import { interpolateBrand } from '@/lib/brandText'
 import { formatShortcut } from '@/lib/platform'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { DocsSearchModal } from '@/components/docs/search/DocsSearchModal'
 import { prefetchSearchIndex } from '@/components/docs/search/useDocsSearchIndex'
+import { AssistantLauncher } from '@/features/ai-assistant/components/AssistantLauncher'
+import { AssistantRail } from '@/features/ai-assistant/components/AssistantRail'
+import { useAssistantPage } from '@/features/ai-assistant/lib/useAssistantPage'
+import { useAssistantShortcut } from '@/features/ai-assistant/lib/useAssistantShortcut'
 import { ScrollContainerContext } from './ScrollContainerContext'
 import { ReaderContext } from './ReaderContext'
 import { ReadingProgress } from './ReadingProgress'
-import type { ReaderArea } from './paths'
+import { pageInfo, type ReaderArea } from './paths'
 
 interface ReaderLayoutProps {
   area: ReaderArea
@@ -26,7 +34,8 @@ interface ReaderLayoutProps {
  * The frame both readers share — the Documentation at /docs and the User
  * Guide at /guide: the top bar, the sidebar (a drawer on narrow screens),
  * the scrolling article area and the search dialog every part of the reader
- * can open.
+ * can open. Signed in, with the assistant switched on, it also has the
+ * assistant — Help, asked about the page being read — on ⌘J (⌘K is search).
  */
 export function ReaderLayout({ area, title, logo, crossLink, sidebar }: ReaderLayoutProps) {
   const setTheme = usePreferencesStore((s) => s.setTheme)
@@ -38,6 +47,17 @@ export function ReaderLayout({ area, title, logo, crossLink, sidebar }: ReaderLa
   const [navOpenAt, setNavOpenAt] = useState<string | null>(null)
   const navOpen = navOpenAt === location.key
   const setNavOpen = (open: boolean) => setNavOpenAt(open ? location.key : null)
+
+  // The assistant, for a signed-in reader: Help, about the page they are reading.
+  const signedIn = useAuthStore((s) => s.isAuthenticated)
+  const assistant = useFeature('aiAssistantEnabled') && signedIn
+  const brand = useBrand()
+  const slug = location.pathname.split('/')[2]
+  const pageTitle = slug ? pageInfo(area, slug)?.title : undefined
+  useAssistantShortcut(assistant)
+  useAssistantPage(assistant ? {
+    kind: 'doc', id: location.pathname, title: pageTitle ? interpolateBrand(pageTitle, brand) : title, persona: 'help',
+  } : null)
 
   const openSearch = useCallback((query = '') => {
     setSearch((s) => (s.open ? s : { open: true, query, session: s.session + 1 }))
@@ -163,8 +183,11 @@ export function ReaderLayout({ area, title, logo, crossLink, sidebar }: ReaderLa
                 <Outlet />
               </main>
             </div>
+            {/* After the content column, which it measures to share the row with. */}
+            {assistant && <AssistantRail />}
           </div>
         </div>
+        {assistant && <AssistantLauncher />}
 
         {/* The table of contents as a drawer, below the md breakpoint */}
         <Backdrop open={navOpen} onClick={() => setNavOpen(false)} zClassName="z-[90] md:hidden" className="bg-black/40" />

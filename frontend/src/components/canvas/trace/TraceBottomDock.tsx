@@ -13,6 +13,7 @@ import { TraceDockSettings } from './TraceDockSettings'
 import { shouldShowTruncationNotice } from './TraceDockNoticeStrip'
 import type { GranularityOption } from './TraceDockControls'
 import { useTraceEscStack } from './useTraceEscStack'
+import { useViewportReservation } from '../context-view/useBandReservation'
 import type { TraceShareSummary } from './TraceSharePopover'
 import type { TraceSeed } from './TraceSeedsPopover'
 import type { TraceKeepActions } from './TraceKeepMenu'
@@ -192,6 +193,9 @@ export function TraceBottomDock({
       parent.style.removeProperty('--trace-dock-height')
     }
   }, [dockHeight])
+  // ...and to the document, so the app's bottom-right chrome (the assistant's bubble, the
+  // export tray, the notifications) starts above the dock instead of covering its right end.
+  useViewportReservation(dockRef, '--canvas-trace-height')
 
   const handleReduceDepth = useCallback(() => {
     trace.setConfig({

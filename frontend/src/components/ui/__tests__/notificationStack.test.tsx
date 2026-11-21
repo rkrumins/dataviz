@@ -26,9 +26,11 @@ afterEach(() => {
 const container = () => screen.getByTestId('notification-stack')
 
 describe('the notification stack clears the canvas dock', () => {
-  it('offsets its bottom by the reserved dock height, and the export tray above it', () => {
+  it('offsets its bottom by the reserved dock height, and the trace, the assistant bubble and the export tray above it', () => {
     render(<NotificationStack />)
-    expect(container().style.bottom).toBe('calc(1.5rem + var(--canvas-dock-height, 0px) + var(--export-tray-height, 0px))')
+    expect(container().style.bottom).toBe(
+      'calc(1.5rem + var(--canvas-dock-height, 0px) + var(--canvas-trace-height, 0px) + var(--assistant-launcher-height, 0px) + var(--export-tray-height, 0px))',
+    )
   })
 
   it('falls back to the plain inset when nothing reserves the corner', () => {

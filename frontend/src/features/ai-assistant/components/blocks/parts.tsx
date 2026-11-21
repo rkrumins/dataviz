@@ -79,14 +79,14 @@ export function TypeGlyph({ type, className }: { type: string; className?: strin
     return <DynamicIcon name={visual.icon} className={cn('h-3.5 w-3.5 shrink-0', className)} style={{ color: visual.color }} />
 }
 
-function TypeBar({ row, max }: { row: TypeCount; max: number }) {
+function TypeBar({ row, max, mono }: { row: TypeCount; max: number; mono?: boolean }) {
     const color = useEntityVisual(row.type).color
     const share = max > 0 ? Math.max(0.03, row.count / max) : 0
     return (
         <li className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1">
             <span className="flex min-w-0 items-center gap-1.5 text-xs text-ink-secondary">
                 <TypeGlyph type={row.type} />
-                <span className="truncate">{row.label}</span>
+                <span className={cn('truncate', mono && 'font-mono text-[11px]')}>{row.label}</span>
             </span>
             <span className="text-xs font-semibold tabular-nums text-ink">{compact(row.count)}</span>
             <span aria-hidden className="col-span-2 h-1.5 overflow-hidden rounded-full bg-black/[0.05] dark:bg-white/[0.07]">
@@ -96,15 +96,15 @@ function TypeBar({ row, max }: { row: TypeCount; max: number }) {
     )
 }
 
-/** Counts by type, largest first, as bars against the largest. */
-export function TypeBars({ rows, limit = 6 }: { rows: TypeCount[]; limit?: number }) {
+/** Counts by type, largest first, as bars against the largest. `mono`: the labels are ids. */
+export function TypeBars({ rows, limit = 6, mono }: { rows: TypeCount[]; limit?: number; mono?: boolean }) {
     const sorted = [...rows].sort((a, b) => b.count - a.count)
     const shown = sorted.slice(0, limit)
     const rest = sorted.slice(limit).reduce((n, r) => n + r.count, 0)
     const max = shown[0]?.count ?? 0
     return (
         <ul className="space-y-2">
-            {shown.map((r) => <TypeBar key={r.type} row={r} max={max} />)}
+            {shown.map((r) => <TypeBar key={r.type} row={r} max={max} mono={mono} />)}
             {rest > 0 && <li className="text-xs text-ink-muted">and {exact(rest)} more of {sorted.length - limit} other {sorted.length - limit === 1 ? 'type' : 'types'}</li>}
         </ul>
     )

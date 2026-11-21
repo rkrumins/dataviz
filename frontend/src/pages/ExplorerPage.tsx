@@ -53,6 +53,7 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { useCopyViewLink } from '@/lib/viewShareLink'
 import { AggregationProgressBanner } from '@/components/explorer/AggregationProgressBanner'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { useAssistantPage } from '@/features/ai-assistant/lib/useAssistantPage'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 import { isInKeyboardScope } from '@/lib/keyboardScope'
@@ -117,6 +118,7 @@ export function ExplorerPage() {
   // between renders and everything memoised on it stays memoised.
   const searchKey = searchParams.toString()
   const filterState = useMemo(() => readFilterState(new URLSearchParams(searchKey)), [searchKey])
+  useAssistantPage({ kind: 'explorer', workspaceId: filterState.workspaceIds.length === 1 ? filterState.workspaceIds[0] : undefined, dataSourceId: filterState.dataSourceId ?? undefined })
   const currentUser = useAuthStore(s => s.user)
   const me = useMemo(() => currentPersonOf(currentUser), [currentUser])
   const today = useLocalDay()

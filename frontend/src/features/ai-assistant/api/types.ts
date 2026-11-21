@@ -15,13 +15,24 @@ export interface AiStatus {
     configured: boolean
     personas: { data: boolean; help: boolean }
     knowledge?: { docs: 'ready' | 'lexical' | 'unavailable'; views: 'ready' | 'disabled' | 'unavailable' }
-    dataPolicy?: { sendDescriptions: boolean; sendPropertyValues: boolean }
+    dataPolicy?: { sendDescriptions: boolean; sendPropertyValues: boolean; sendSampleValues: boolean }
     /** Shown as "Answers by …". */
     connectionName?: string | null
     limits?: { maxStepsPerTurn: number }
 }
 
 // ─── Chat ─────────────────────────────────────────────────────────────────────
+
+export type AssistantPageKind = 'view' | 'workspace' | 'data_source' | 'explorer' | 'ontology' | 'doc'
+
+/** The page the question is asked on. On a view: `{kind: 'view', id: viewId, title: viewName}`. */
+export interface AssistantPage {
+    kind: AssistantPageKind
+    /** The viewId, workspaceId, catalogId (a data source page), ontologyId, or a doc's route. */
+    id?: string
+    /** What the page is called, for the chip and the model. */
+    title?: string
+}
 
 export interface ChatContext {
     route?: string
@@ -36,6 +47,7 @@ export interface ChatContext {
     /** The Advanced Search draft, if any. */
     searchPredicate?: Predicate
     personaMode?: 'business' | 'technical'
+    page?: AssistantPage
 }
 
 export interface ClarificationAnswer {
@@ -240,6 +252,116 @@ export interface Clarification {
     chosen?: string
 }
 
+// ─── Context brief (GET /context, and the `context` block) ────────────────────
+
+/** What the page knows about itself; send what it knows. */
+export interface ContextBriefParams {
+    viewId?: string
+    workspaceId?: string
+    dataSourceId?: string
+    pageKind?: AssistantPageKind
+    pageId?: string
+    pageTitle?: string
+}
+
+export interface BriefType {
+    id: string
+    name: string
+    plural?: string | null
+    description?: string | null
+    /** 0 = top of the hierarchy. */
+    level?: number | null
+    /** Entities of this type in the view (catalogue). */
+    inView?: number | null
+    /** Entities of this type in the whole data source (introspection). */
+    inSource?: number | null
+    /** Type ids. */
+    contains: string[]
+    containedBy: string[]
+    root: boolean
+}
+
+export interface BriefConnection {
+    id: string
+    name: string
+    class: 'containment' | 'lineage' | 'other'
+    category?: string | null
+    description?: string | null
+    /** Type ids. */
+    from: string[]
+    to: string[]
+    /** Edges of this type in the data source. */
+    count?: number | null
+}
+
+export interface BriefCaveat {
+    code: string
+    text: string
+    action?: 'confirm_type' | null
+}
+
+/** What the assistant knows about the page — everything the person can read, never cut by policy. */
+export interface ContextBrief {
+    kind: AssistantPageKind | 'app'
+    about: {
+        name: string
+        description?: string | null
+        workspace?: string | null
+        dataSource?: string | null
+        semanticLayer?: string | null
+        template?: string | null
+        layout?: string | null
+        tags?: string[]
+        owner?: string | null
+        updatedAt?: string | null
+        dataUpdatedAt?: string | null
+        visibility?: string | null
+        viewId?: string | null
+        workspaceId?: string | null
+        dataSourceId?: string | null
+    }
+    scope?: {
+        entityScope?: 'all' | 'curated' | null
+        visibleTypes?: string[]
+        maxDepth?: number | null
+        roots?: number | null
+    } | null
+    /** In order. */
+    layers?: Array<{ name: string; description?: string | null; types: string[] }>
+    /** Ranked: in view, then level. */
+    types?: BriefType[]
+    /** Up to 3 root→leaf chains of type ids. */
+    hierarchy?: { chains: string[][] }
+    /** Ranked by count. */
+    connections?: BriefConnection[]
+    contents?: {
+        entities?: number | null
+        /** False while the catalogue is still being read. */
+        complete: boolean
+        properties: Array<{ key: string; count: number; coverage?: number | null; kinds: string[] }>
+        propertiesNotShown: number
+        tags: Array<{ tag: string; count: number }>
+    } | null
+    /** The property that says what kind of thing each entity is, on a generic schema. */
+    typeProperty?: {
+        status: 'suggested' | 'confirmed'
+        on: string
+        key: string
+        values: Array<{ value: string; count: number }>
+        alternatives?: Array<{ key: string; coverage: number; distinct: number }>
+    } | null
+    caveats: BriefCaveat[]
+    notes: string[]
+    /** Data source and Explorer pages: the view the answers read through. */
+    seenThrough?: { viewId: string; name: string } | null
+    /** Workspace page. */
+    dataSources?: Array<{ id: string; name: string; semanticLayer?: string | null }>
+    /** Semantic layer page. */
+    usedBy?: Array<{ workspace: string; dataSource: string }>
+    /** Doc page: its section headings. */
+    headings?: string[]
+}
+
 export type Block =
     | { id: string; type: 'results'; data: ResultsData }
     | { id: string; type: 'impact'; data: ImpactData }
@@ -249,6 +371,7 @@ export type Block =
     | { id: string; type: 'entity'; data: EntityData }
     | { id: string; type: 'notice'; data: NoticeData }
     | { id: string; type: 'clarify'; data: Clarification }
+    | { id: string; type: 'context'; data: ContextBrief }
 
 // ─── Conversations (§3) ───────────────────────────────────────────────────────
 

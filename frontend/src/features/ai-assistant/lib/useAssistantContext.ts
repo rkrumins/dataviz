@@ -1,8 +1,12 @@
 /**
- * What the assistant's next question is about: the page the person is on, the view and what is
- * selected on its canvas (through the canvas bridge, live), the entity a launcher opened it on,
- * and the Advanced Search draft — unless the person removed it (the context chip's ✕), which
- * holds for this page only.
+ * What the assistant's next question is about: the page the person is on (a view, from the
+ * route; any other page, as it registered itself with `useAssistantPage`), what is selected on
+ * the canvas (through the canvas bridge, live — or, on the Graph and Hierarchy canvases, which
+ * register none, the canvas store), the entity a launcher opened it on, and the Advanced Search
+ * draft — unless the person removed it (the context chip's ✕), which holds for this page only.
+ *
+ * A view names its own workspace and data source (the bridge's, or the view's config): never the
+ * person's active ones, which on a view shared from another workspace are someone else's.
  */
 import { useMemo, useSyncExternalStore } from 'react'
 import { matchPath, useLocation } from 'react-router-dom'
@@ -12,7 +16,7 @@ import { usePersonaMode } from '@/store/persona'
 import { useSchemaStore } from '@/store/schema'
 import { useSearchStore } from '@/store/searchStore'
 import { useWorkspacesStore } from '@/store/workspaces'
-import type { ChatContext } from '../api/types'
+import type { AssistantPage, ChatContext } from '../api/types'
 import { useAssistantStore } from '../store/assistantStore'
 
 /** The most selected entities a question carries (the contract's cap). */
@@ -29,6 +33,8 @@ export interface AssistantPageContext {
     focus: { urn: string; name?: string } | null
     /** The person removed this page from the question. */
     detached: boolean
+    /** What the page is called, for the chip and the launcher ("Supply chain", "Dashboard"). */
+    label: string | null
 }
 
 const PAGE_NAMES: Array<[RegExp, string]> = [
@@ -43,6 +49,18 @@ export function pageName(pathname: string): string | null {
     return PAGE_NAMES.find(([re]) => re.test(pathname))?.[1] ?? null
 }
 
+/** The Graph and Hierarchy canvases' selection, from the canvas store (they register no bridge). */
+function canvasStoreSelection(selectedNodeIds: string[], drawerNodeId: string | null) {
+    const nodes = useCanvasStore.getState().nodes
+    const node = (id: string) => nodes.find((n) => n.id === id)
+    const urnOf = (id: string) => node(id)?.data.urn ?? id
+    return {
+        selectedUrns: selectedNodeIds.slice(0, SELECTION_CAP).map(urnOf),
+        focusUrn: drawerNodeId ? urnOf(drawerNodeId) : undefined,
+        focusName: drawerNodeId ? node(drawerNodeId)?.data.label : undefined,
+    }
+}
+
 export function useAssistantContext(): AssistantPageContext {
     const { pathname } = useLocation()
     const bridge = useSyncExternalStore(subscribeCanvasActions, canvasActions, () => null)
@@ -51,23 +69,47 @@ export function useAssistantContext(): AssistantPageContext {
     const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
     const routeViewId = matchPath('/views/:viewId', pathname)?.params.viewId ?? null
     const viewConfig = useSchemaStore((s) => (routeViewId ? s.schema?.views.find((v) => v.id === routeViewId) : undefined))
+    const activeViewId = useSchemaStore((s) => s.activeViewId)
     const activeWorkspaceId = useWorkspacesStore((s) => s.activeWorkspaceId)
     const activeDataSourceId = useWorkspacesStore((s) => s.activeDataSourceId)
     const pending = useAssistantStore((s) => s.pendingContext)
     const detachedFrom = useAssistantStore((s) => s.detachedFrom)
+    // A page that registered itself, while the person is still on it.
+    const registered = useAssistantStore((s) => (s.page?.path === pathname ? s.page : null))
     const draft = useSearchStore((s) => s.draftPredicate)
     const personaMode = usePersonaMode()
 
     return useMemo(() => {
         const canvas = bridge && bridge.viewId === routeViewId ? bridge.getContext() : null
+        const fromStore = !canvas && routeViewId && activeViewId === routeViewId
+            ? canvasStoreSelection(selectedNodeIds, drawerNodeId) : null
         const pageKey = routeViewId ? `view:${routeViewId}` : `page:${pathname}`
         const detached = detachedFrom === pageKey
         const viewName = canvas?.viewName ?? viewConfig?.name
-        const selected = (canvas?.selectedUrns ?? []).slice(0, SELECTION_CAP)
-        const focusUrn = pending?.focusUrn ?? canvas?.focusUrn ?? undefined
-        const focusName = pending?.focusUrn ? pending.focusName : canvas?.focusName
-        const workspaceId = canvas?.workspaceId ?? viewConfig?.workspaceId ?? activeWorkspaceId ?? undefined
-        const dataSourceId = canvas?.dataSourceId ?? viewConfig?.dataSourceId ?? activeDataSourceId ?? undefined
+        const selected = (canvas?.selectedUrns ?? fromStore?.selectedUrns ?? []).slice(0, SELECTION_CAP)
+        const focusUrn = pending?.focusUrn ?? canvas?.focusUrn ?? fromStore?.focusUrn ?? undefined
+        const focusName = pending?.focusUrn ? pending.focusName : canvas ? canvas.focusName : fromStore?.focusName
+
+        let workspaceId: string | undefined
+        let dataSourceId: string | undefined
+        if (routeViewId) {
+            workspaceId = canvas?.workspaceId ?? viewConfig?.workspaceId ?? undefined
+            dataSourceId = canvas?.dataSourceId ?? viewConfig?.dataSourceId ?? undefined
+        } else if (registered) {
+            workspaceId = registered.workspaceId ?? (registered.kind === 'workspace' ? registered.id : undefined)
+                ?? activeWorkspaceId ?? undefined
+            // Never a data source of another workspace; a data source page names its own (`id`).
+            dataSourceId = registered.dataSourceId
+                ?? (registered.kind !== 'data_source' && workspaceId === activeWorkspaceId ? activeDataSourceId ?? undefined : undefined)
+        } else {
+            workspaceId = activeWorkspaceId ?? undefined
+            dataSourceId = activeDataSourceId ?? undefined
+        }
+        const page: AssistantPage | undefined = routeViewId
+            ? { kind: 'view', id: routeViewId, ...(viewName ? { title: viewName } : {}) }
+            : registered
+                ? { kind: registered.kind, ...(registered.id ? { id: registered.id } : {}), ...(registered.title ? { title: registered.title } : {}) }
+                : undefined
 
         const context: ChatContext = detached ? { route: pathname, personaMode } : {
             route: pathname,
@@ -79,6 +121,7 @@ export function useAssistantContext(): AssistantPageContext {
             ...(selected.length ? { selectedUrns: selected } : {}),
             ...(focusUrn ? { focusUrn } : {}),
             ...(routeViewId && draft ? { searchPredicate: draft } : {}),
+            ...(page ? { page } : {}),
         }
         return {
             pageKey,
@@ -87,9 +130,10 @@ export function useAssistantContext(): AssistantPageContext {
             selectedCount: selected.length,
             focus: focusUrn ? { urn: focusUrn, name: focusName } : null,
             detached,
+            label: routeViewId ? viewName ?? 'This view' : registered?.title ?? pageName(pathname),
         }
         // selectedNodeIds / drawerNodeId: the canvas's context changes with them.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [bridge, routeViewId, pathname, viewConfig, activeWorkspaceId, activeDataSourceId, pending, detachedFrom,
-        draft, personaMode, selectedNodeIds, drawerNodeId])
+    }, [bridge, routeViewId, pathname, viewConfig, activeViewId, activeWorkspaceId, activeDataSourceId, pending, detachedFrom,
+        registered, draft, personaMode, selectedNodeIds, drawerNodeId])
 }

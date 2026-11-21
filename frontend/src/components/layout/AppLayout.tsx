@@ -37,6 +37,7 @@ import { TourOverlay } from '@/features/tour/TourOverlay'
 import { TourLauncher } from '@/features/tour/TourLauncher'
 import { useTourDeepLink } from '@/features/tour/useTourDeepLink'
 import { useInviteWelcome } from '@/hooks/useInviteWelcome'
+import { AssistantLauncher } from '@/features/ai-assistant/components/AssistantLauncher'
 import { AssistantRail } from '@/features/ai-assistant/components/AssistantRail'
 import { useAssistantShortcut } from '@/features/ai-assistant/lib/useAssistantShortcut'
 
@@ -238,6 +239,8 @@ export function AppLayout() {
         />
 
         <HelpPanel />
+        {/* The assistant's bubble, bottom right — under the export tray, which starts above it. */}
+        {aiAssistantEnabled && <AssistantLauncher />}
         {/* The exports the server prepares, followed and downloaded wherever the person goes. */}
         <ExportTray />
         <NotificationStack />

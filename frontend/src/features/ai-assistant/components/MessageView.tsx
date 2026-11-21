@@ -84,6 +84,7 @@ export function AssistantMessage({ turn, isLast, busy, onAsk, onRetry, onClarify
                         busy={busy || streaming}
                         onClarify={(id, choice) => onClarify(turn.id, id, choice)}
                         onOther={(id, text) => onOther(turn.id, id, text)}
+                        onAsk={onAsk}
                     />
                 ))}
 

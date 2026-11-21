@@ -17,6 +17,7 @@ import { ErrorBanner } from '@/components/admin/sso/tabs/ErrorBanner'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
 import { aiAdminService, AI_ADMIN_KEYS, type ConceptMapping } from '@/services/aiAdminService'
+import { conceptName } from '@/features/ai-assistant/lib/conceptName'
 
 /** A mapping's search as the Advanced Search text a person would type. */
 function predicateText(p: ConceptMapping['predicate']): string {
@@ -80,7 +81,7 @@ function ConceptList({ dataSourceId, workspaceName }: { dataSourceId: string; wo
     const promote = useMutation({
         mutationFn: (c: ConceptMapping) => aiAdminService.promoteConcept(c.id),
         onSuccess: (_, c) => {
-            notify('success', `“${c.concept}” now means the same for everyone in ${workspaceName}`)
+            notify('success', `“${conceptName(c.concept)}” now means the same for everyone in ${workspaceName}`)
             void qc.invalidateQueries({ queryKey: key })
         },
         onError: (err: Error) => notify('error', err.message || 'The meaning could not be shared.'),
@@ -116,7 +117,7 @@ function ConceptList({ dataSourceId, workspaceName }: { dataSourceId: string; wo
                         {rows.map(c => (
                             <tr key={c.id} className="border-b border-glass-border last:border-b-0 align-top">
                                 <td className="px-4 py-3">
-                                    <span className="block font-semibold text-ink">{c.concept}</span>
+                                    <span className="block font-semibold text-ink">{conceptName(c.concept)}</span>
                                     {c.label && c.label !== c.concept && <span className="block text-[10px] text-ink-muted">{c.label}</span>}
                                 </td>
                                 <td className="px-3 py-3 font-mono text-[11px] text-ink-secondary break-words max-w-md">{predicateText(c.predicate)}</td>
@@ -136,7 +137,7 @@ function ConceptList({ dataSourceId, workspaceName }: { dataSourceId: string; wo
                                                 Share with workspace
                                             </Button>
                                         )}
-                                        <IconButton icon={Trash2} size="sm" variant="danger" label={`Delete ${c.concept}`} onClick={() => setDeleting(c)} />
+                                        <IconButton icon={Trash2} size="sm" variant="danger" label={`Delete ${conceptName(c.concept)}`} onClick={() => setDeleting(c)} />
                                     </span>
                                 </td>
                             </tr>
@@ -147,7 +148,7 @@ function ConceptList({ dataSourceId, workspaceName }: { dataSourceId: string; wo
 
             <DangerConfirmDialog
                 isOpen={deleting !== null}
-                title={`Delete “${deleting?.concept ?? ''}”`}
+                title={`Delete “${deleting ? conceptName(deleting.concept) : ''}”`}
                 confirmPhrase=""
                 sections={[]}
                 safeMessage={deleting?.scope === 'workspace'
@@ -158,7 +159,7 @@ function ConceptList({ dataSourceId, workspaceName }: { dataSourceId: string; wo
                 onConfirm={async () => {
                     const gone = deleting!
                     await aiAdminService.deleteConcept(gone.id)
-                    notify('success', `Deleted “${gone.concept}”`)
+                    notify('success', `Deleted “${conceptName(gone.concept)}”`)
                     void qc.invalidateQueries({ queryKey: key })
                 }}
             />

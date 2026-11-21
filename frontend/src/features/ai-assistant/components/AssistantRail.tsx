@@ -21,8 +21,9 @@ import { CANVAS_MIN_WIDTH } from '@/components/panels/shell/drawerWidth'
 import { keyboardScopeProps } from '@/lib/keyboardScope'
 import { queryClient } from '@/lib/queryClient'
 import { cn } from '@/lib/utils'
-import { AI_STATUS_KEY, useAiStatus } from '../api/aiQueries'
+import { AI_STATUS_KEY, briefAvailable, useAiStatus, useContextBrief } from '../api/aiQueries'
 import { aiErrorCode } from '../api/aiService'
+import type { AssistantPageKind } from '../api/types'
 import { sendMessage, startNewChat, stopStreaming } from '../lib/chatController'
 import { markClarified } from '../lib/transcript'
 import { useAssistantContext } from '../lib/useAssistantContext'
@@ -38,6 +39,14 @@ export const RAIL_MIN_WIDTH = 360
 export const RAIL_MAX_WIDTH = 760
 const RAIL_DEFAULT_WIDTH = 420
 
+/** The composer's prompt, by the page the question is about. */
+const PLACEHOLDER: Partial<Record<AssistantPageKind, string>> = {
+    view: 'Ask about this view…',
+    workspace: 'Ask about this workspace…',
+    data_source: 'Ask about this data source…',
+    ontology: 'Ask about this semantic layer…',
+}
+
 export function AssistantRail() {
     const open = useAssistantStore((s) => s.open)
     const persona = useAssistantStore((s) => s.persona)
@@ -47,7 +56,18 @@ export function AssistantRail() {
     const close = useAssistantStore((s) => s.closeAssistant)
     const page = useAssistantContext()
     const status = useAiStatus()
+    const brief = useContextBrief(page)
     const composer = useRef<ComposerHandle>(null)
+    const pageKind = page.detached ? undefined : page.context.page?.kind
+
+    // A page that prefers a persona (the guide: Help) gets it when the rail opens on it — unless a
+    // conversation is already under way, which keeps the persona it was asked in.
+    const preferred = useAssistantStore((s) => (s.page?.path === page.context.route ? s.page.persona : undefined))
+    useEffect(() => {
+        if (!open || !preferred) return
+        const s = useAssistantStore.getState()
+        if (s.turns.length === 0 && !s.conversationId && !s.loadingConversation && s.persona !== preferred) s.setPersona(preferred)
+    }, [open, preferred])
 
     // ── Width: dragged at the left edge, never so wide the page drops below CANVAS_MIN_WIDTH ──
     const [aside, setAside] = useState<HTMLElement | null>(null)
@@ -143,7 +163,8 @@ export function AssistantRail() {
                 open ? 'flex' : 'hidden',
             )}
         >
-            <AssistantHeader page={page} connectionName={s?.connectionName} personas={s?.personas} onClose={close} />
+            <AssistantHeader page={page} brief={ready && briefAvailable(persona, page) ? brief : null}
+                             connectionName={s?.connectionName} personas={s?.personas} onClose={close} onAsk={ask} />
 
             <ErrorBoundary
                 resetKeys={[turns]}
@@ -162,7 +183,11 @@ export function AssistantRail() {
             ) : turns.length === 0 && !loadingConversation ? (
                 <Welcome
                     persona={persona}
-                    at={{ onView: !!page.view && !page.detached, selectedCount: page.detached ? 0 : page.selectedCount, focused: !page.detached && !!page.focus }}
+                    at={{
+                        onView: !!page.view && !page.detached, selectedCount: page.detached ? 0 : page.selectedCount,
+                        focused: !page.detached && !!page.focus, page: page.detached ? null : page.context.page,
+                    }}
+                    brief={briefAvailable(persona, page) ? brief : null}
                     onAsk={ask}
                 />
             ) : (
@@ -185,7 +210,9 @@ export function AssistantRail() {
                 onEscape={close}
                 streaming={streaming}
                 disabled={!ready || loadingConversation}
-                placeholder={persona === 'help' ? 'Ask how to do something…' : page.view && !page.detached ? 'Ask about this view…' : 'Ask about your data…'}
+                placeholder={persona === 'help'
+                    ? pageKind === 'doc' ? 'Ask about this page…' : 'Ask how to do something…'
+                    : (pageKind && PLACEHOLDER[pageKind]) ?? 'Ask about your data…'}
                 footer="Answers can be wrong — check the evidence."
             />
 

@@ -8,12 +8,14 @@ import { NoticeCallout } from './blocks/NoticeCallout'
 import { QueryBlock } from './blocks/QueryBlock'
 import { ResultSummaryCard } from './blocks/ResultSummaryCard'
 import { ViewSuggestionCard } from './blocks/ViewSuggestionCard'
+import { ContextCard } from './ContextCard'
 
-export function BlockView({ block, anchorPrefix, onClarify, onOther, busy }: {
+export function BlockView({ block, anchorPrefix, onClarify, onOther, onAsk, busy }: {
     block: Block
     anchorPrefix: string
     onClarify: (clarificationId: string, choice: ClarificationChoice) => void
     onOther: (clarificationId: string, text: string) => void
+    onAsk: (question: string) => void
     busy: boolean
 }) {
     switch (block.type) {
@@ -24,6 +26,7 @@ export function BlockView({ block, anchorPrefix, onClarify, onOther, busy }: {
         case 'citations': return <DocCitationList data={block.data} anchorPrefix={anchorPrefix} />
         case 'entity': return <EntityCard data={block.data} />
         case 'notice': return <NoticeCallout data={block.data} />
+        case 'context': return <ContextCard variant="block" brief={block.data} onAsk={onAsk} disabled={busy} />
         case 'clarify':
             return (
                 <ClarificationCard

@@ -90,6 +90,8 @@ export async function sendMessage(input: SendInput): Promise<void> {
         else end({ code: aiErrorCode(e) ?? 'request_failed', message: e instanceof Error ? e.message : String(e) })
     } finally {
         if (inFlight === controller) inFlight = null
+        // Finished while the rail was folded away: the launcher says a new answer is ready.
+        if (!controller.signal.aborted && !useAssistantStore.getState().open) useAssistantStore.getState().setUnread(true)
         void queryClient.invalidateQueries({ queryKey: AI_CONVERSATIONS_KEY })
     }
 }

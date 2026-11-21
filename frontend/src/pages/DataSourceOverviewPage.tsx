@@ -14,11 +14,13 @@ import { ArrowLeft } from 'lucide-react'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { DataSourceProfile } from '@/components/insights/DataSourceProfile'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { useAssistantPage } from '@/features/ai-assistant/lib/useAssistantPage'
 
 export function DataSourceOverviewPage() {
     const { catalogId = '' } = useParams()
     const navigate = useNavigate()
     useDocumentTitle('Data Source')
+    useAssistantPage(catalogId ? { kind: 'data_source', id: catalogId } : null)
 
     return (
         <div className="absolute inset-0 overflow-y-auto">

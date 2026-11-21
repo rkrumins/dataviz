@@ -49,6 +49,7 @@ import { MoveDataSourceWizard, type MoveDataSourceWizardProps } from '@/features
 import { TransferRequestsPanel } from '@/features/data-source-transfer/TransferRequestsPanel'
 import { useDataSourcesWithForks } from '@/features/versioning/hooks/useVersioning'
 import { isForkDataSourceId } from '@/features/versioning/model/forks'
+import { useAssistantPage } from '@/features/ai-assistant/lib/useAssistantPage'
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -188,6 +189,7 @@ export function WorkspaceDetailPage() {
 
     // ── Document title ────────────────────────────────────
     useDocumentTitle(workspace ? `${workspace.name} · Workspaces` : 'Workspace')
+    useAssistantPage(wsId ? { kind: 'workspace', id: wsId, title: workspace?.name } : null)
 
     // ── Derived data ───────────────────────────────────────
     const ontologyNameMap = useMemo(() => {

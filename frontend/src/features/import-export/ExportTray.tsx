@@ -11,8 +11,8 @@
  * started after that.
  *
  * Page chrome, not an overlay: it sits under a dialog's backdrop, never over a dialog's buttons,
- * above the canvas dock, and publishes its height (`--export-tray-height`) so the notification
- * stack starts above it. Mounted once, by AppLayout, and only there does it follow the exports.
+ * above the canvas dock, a trace and the assistant's bubble, and publishes its height
+ * (`--export-tray-height`) so the notification stack starts above it. Mounted once, by AppLayout, and only there does it follow the exports.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -57,7 +57,7 @@ export function ExportTray() {
 
   return (
     <div ref={ref} className="fixed right-6 z-40 flex flex-col items-end pointer-events-none"
-      style={{ bottom: 'calc(1.5rem + var(--canvas-dock-height, 0px))' }}>
+      style={{ bottom: 'calc(1.5rem + var(--canvas-dock-height, 0px) + var(--canvas-trace-height, 0px) + var(--assistant-launcher-height, 0px))' }}>
       <p className="sr-only" role="status" aria-live="polite">{announcement(mine)}</p>
       <AnimatePresence mode="wait" initial={false}>
         {items.length > 0 && (minimised ? (

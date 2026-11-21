@@ -25,6 +25,7 @@ import { useOntologies, useOntology } from '@/features/ontology/hooks/useOntolog
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { useInvalidateGraphSchema } from '@/hooks/useGraphSchema'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { useAssistantPage } from '@/features/ai-assistant/lib/useAssistantPage'
 import {
   entityDefToSchema,
   entitySchemaToBackend,
@@ -205,6 +206,7 @@ export function OntologySchemaPage() {
   const { data: ontologies = [], isLoading: isLoadingOntologies } = useOntologies()
   const { data: selectedOntology } = useOntology(ontologyId)
   useDocumentTitle(selectedOntology?.name ? `${selectedOntology.name} · Schema` : 'Schema')
+  useAssistantPage(ontologyId ? { kind: 'ontology', id: ontologyId, title: selectedOntology?.name } : null)
   const mutations = useOntologyMutations()
   // Invalidate the cached graph schema whenever a data-source-to-ontology
   // assignment changes. useOntologyMutations already does this for ontology

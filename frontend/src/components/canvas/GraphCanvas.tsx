@@ -1551,7 +1551,8 @@ export function GraphCanvas({ className }: { className?: string }) {
               maskColor="rgba(0, 0, 0, 0.1)"
               className={cn(
                 'glass-panel-subtle !rounded-xl !overflow-hidden',
-                '!bottom-4 !right-4',
+                // Up out of the way of the assistant's bubble, while it is there.
+                '!bottom-[calc(1rem_+_var(--assistant-launcher-height,0px))] !right-4',
               )}
               pannable
               zoomable
@@ -1626,7 +1627,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       {/* Clear of the details drawer, at whatever width it is dragged to. */}
       <div
         className={cn(
-          'absolute bottom-40 z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
+          'absolute bottom-[calc(10rem_+_var(--assistant-launcher-height,0px))] z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
           !(drawerNodeId || drawerEdge) && 'right-4',
         )}
         style={drawerNodeId || drawerEdge ? { right: `calc(${drawerWidthCss(drawerWidth)} + 1rem)` } : undefined}

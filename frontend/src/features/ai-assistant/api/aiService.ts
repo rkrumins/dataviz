@@ -10,7 +10,8 @@
 import { authFetch } from '@/services/apiClient'
 import { postEventStream, type SseFrame } from '../lib/sseStream'
 import type {
-    AiStatus, ChatRequest, Concept, Conversation, ConversationSummary, DraftRequest, DraftResponse,
+    AiStatus, ChatRequest, Concept, ContextBrief, ContextBriefParams, Conversation, ConversationSummary, DraftRequest,
+    DraftResponse,
 } from './types'
 
 const API = '/api/v1/ai'
@@ -34,6 +35,13 @@ export function aiErrorCode(err: unknown): string | null {
 export const aiService = {
     getStatus(): Promise<AiStatus> {
         return authFetch<AiStatus>(`${API}/status`, QUIET)
+    },
+
+    /** What the assistant knows about a page — the "What I know" card. No model is asked. */
+    getContext(params: ContextBriefParams): Promise<ContextBrief> {
+        const qs = new URLSearchParams()
+        for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+        return authFetch<ContextBrief>(`${API}/context?${qs}`, QUIET)
     },
 
     /** Stream one turn. `onFrame` sees every event in order; resolves once the stream ends. */

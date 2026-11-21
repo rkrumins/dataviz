@@ -10,7 +10,7 @@
  * replaced in ONE update when a stream names its conversation (`chatController`).
  */
 import { create } from 'zustand'
-import type { AssistantPersona } from '../api/types'
+import type { AssistantPage, AssistantPersona } from '../api/types'
 import type { AssistantTurn, Turn } from '../lib/transcript'
 
 export type { AssistantPersona }
@@ -22,6 +22,16 @@ export interface PendingContext {
     focusName?: string
     /** A question to ask as soon as it opens. Taken once (`consumePrompt`). */
     prompt?: string
+}
+
+/** A page's own account of itself (`useAssistantPage`): what it is, for the question and the card. */
+export interface RegisteredPage extends AssistantPage {
+    /** The route it registered on — read only while the person is still there. */
+    path: string
+    workspaceId?: string
+    dataSourceId?: string
+    /** The persona the rail opens on here, while no conversation is in progress. */
+    persona?: AssistantPersona
 }
 
 export interface OpenAssistantOptions {
@@ -42,6 +52,12 @@ interface AssistantState {
     detachedFrom: string | null
     /** The person's own width, once they drag the edge; null for the default. */
     railWidth: number | null
+    /** The page the person is on, as it registered itself; null where none did. */
+    page: RegisteredPage | null
+    /** An answer finished while the rail was closed — the launcher's dot. */
+    unread: boolean
+    /** The "What I know" card is open, over the context chip. */
+    contextOpen: boolean
 
     openAssistant: (opts?: OpenAssistantOptions) => void
     closeAssistant: () => void
@@ -60,6 +76,11 @@ interface AssistantState {
     detachContext: (pageKey: string) => void
     attachContext: () => void
     setRailWidth: (width: number | null) => void
+    setPage: (page: RegisteredPage) => void
+    /** Withdraw `page` — only if it is still the one registered. */
+    clearPage: (page: RegisteredPage) => void
+    setUnread: (unread: boolean) => void
+    setContextOpen: (open: boolean) => void
 }
 
 export const useAssistantStore = create<AssistantState>()((set, get) => ({
@@ -71,15 +92,19 @@ export const useAssistantStore = create<AssistantState>()((set, get) => ({
     pendingContext: null,
     detachedFrom: null,
     railWidth: null,
+    page: null,
+    unread: false,
+    contextOpen: false,
 
     openAssistant: (opts) => set((s) => ({
         open: true,
+        unread: false,
         persona: opts?.persona ?? s.persona,
         // A launcher's context replaces the last one — and brings the page back into the question.
         ...(opts?.context ? { pendingContext: opts.context, detachedFrom: null } : {}),
     })),
-    closeAssistant: () => set({ open: false }),
-    toggleAssistant: () => set((s) => ({ open: !s.open })),
+    closeAssistant: () => set({ open: false, contextOpen: false }),
+    toggleAssistant: () => set((s) => (s.open ? { open: false, contextOpen: false } : { open: true, unread: false })),
     setPersona: (persona) => set({ persona }),
     newChat: () => set({ conversationId: null, turns: [], loadingConversation: false, pendingContext: null }),
     showConversation: (id, turns, loading = false) => set({ conversationId: id, turns, loadingConversation: loading }),
@@ -96,4 +121,8 @@ export const useAssistantStore = create<AssistantState>()((set, get) => ({
     detachContext: (pageKey) => set({ detachedFrom: pageKey, pendingContext: null }),
     attachContext: () => set({ detachedFrom: null }),
     setRailWidth: (railWidth) => set({ railWidth }),
+    setPage: (page) => set({ page }),
+    clearPage: (page) => set((s) => (s.page === page ? { page: null } : {})),
+    setUnread: (unread) => set({ unread }),
+    setContextOpen: (contextOpen) => set({ contextOpen }),
 }))
