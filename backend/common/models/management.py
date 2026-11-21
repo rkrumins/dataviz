@@ -1355,6 +1355,9 @@ class ViewResponse(BaseModel):
     workspace_name: Optional[str] = Field(None, alias="workspaceName")
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")
     data_source_name: Optional[str] = Field(None, alias="dataSourceName")
+    #: The data source's trust, for "Built on" badges: null when it has none, or is deleted.
+    data_source_classification: Optional[str] = Field(None, alias="dataSourceClassification")
+    data_source_trust_status: Optional[str] = Field(None, alias="dataSourceTrustStatus")
     view_type: str = Field(alias="viewType")
     # Layout algorithm (reference | hierarchical | force | …). Projected from
     # config.layoutType so metadata-only consumers (e.g. the ViewWizard's

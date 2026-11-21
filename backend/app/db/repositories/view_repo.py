@@ -9,7 +9,7 @@ import logging
 import os
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Set
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import and_, case, false, literal_column, select, delete, func, or_, update
 from sqlalchemy.exc import IntegrityError
@@ -106,17 +106,23 @@ async def _get_context_model_name(
     return result.scalar_one_or_none()
 
 
-async def _get_data_source_name(
+_NO_SOURCE = (None, None, None)
+
+
+async def _get_data_source_facts(
     session: AsyncSession, data_source_id: Optional[str]
-) -> Optional[str]:
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """A live source's ``(label, classification, trust_status)``; Nones when there is none."""
     if not data_source_id:
-        return None
+        return _NO_SOURCE
     result = await session.execute(
-        select(WorkspaceDataSourceORM.label)
+        select(WorkspaceDataSourceORM.label, WorkspaceDataSourceORM.classification,
+               WorkspaceDataSourceORM.trust_status)
         .where(WorkspaceDataSourceORM.id == data_source_id)
         .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
-    return result.scalar_one_or_none()
+    row = result.one_or_none()
+    return tuple(row) if row else _NO_SOURCE
 
 
 async def _get_favourite_count(
@@ -290,6 +296,8 @@ def _to_response(
     *,
     workspace_name: Optional[str] = None,
     data_source_name: Optional[str] = None,
+    data_source_classification: Optional[str] = None,
+    data_source_trust_status: Optional[str] = None,
     context_model_name: Optional[str] = None,
     created_by_name: Optional[str] = None,
     created_by_email: Optional[str] = None,
@@ -341,6 +349,8 @@ def _to_response(
         workspaceName=workspace_name,
         dataSourceId=row.data_source_id,
         dataSourceName=data_source_name,
+        dataSourceClassification=data_source_classification,
+        dataSourceTrustStatus=data_source_trust_status,
         viewType=label.get("viewType") or row.view_type or "graph",
         layoutType=layout_type,
         config=config_dict,
@@ -390,7 +400,7 @@ async def _to_enriched_response(
     reads the row's stored config unchanged.
     """
     ws_name = await _get_workspace_name(session, row.workspace_id)
-    ds_name = await _get_data_source_name(session, row.data_source_id)
+    ds_name, ds_class, ds_trust = await _get_data_source_facts(session, row.data_source_id)
     cm_name = await _get_context_model_name(session, row.context_model_id, user_id)
     # Resolve creator, modifier AND data-publisher in one batched lookup
     # (dedupes when they're the same principal) — avatars included.
@@ -417,6 +427,8 @@ async def _to_enriched_response(
             getattr(row, 'publish_requested_by', None) or "", (None, None, None))[0],
         workspace_name=ws_name,
         data_source_name=ds_name,
+        data_source_classification=ds_class,
+        data_source_trust_status=ds_trust,
         context_model_name=cm_name,
         created_by_name=creator_name,
         created_by_email=creator_email,
@@ -506,14 +518,16 @@ async def _batch_enrich_rows(
         )
         ws_map = {wid: name for wid, name in res.all()}
 
-    ds_map: Dict[str, str] = {}
+    # id → (label, classification, trust status), for live sources only.
+    ds_map: Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]] = {}
     if ds_ids:
         res = await session.execute(
-            select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
+            select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label,
+                   WorkspaceDataSourceORM.classification, WorkspaceDataSourceORM.trust_status)
             .where(WorkspaceDataSourceORM.id.in_(ds_ids))
             .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         )
-        ds_map = {did: label for did, label in res.all()}
+        ds_map = {did: (label, cls, trust) for did, label, cls, trust in res.all()}
 
     cm_map: Dict[str, str] = {}
     if cm_ids:
@@ -560,11 +574,14 @@ async def _batch_enrich_rows(
         creator = user_map.get(row.created_by or "", (None, None, None))
         modifier = user_map.get(row.updated_by or "", (None, None, None))
         publisher = user_map.get(getattr(row, 'data_updated_by', None) or "", (None, None, None))
+        ds_name, ds_class, ds_trust = ds_map.get(row.data_source_id, _NO_SOURCE) if row.data_source_id else _NO_SOURCE
         responses.append(_to_response(
             row,
             config_override=followed.get(row.id),
             workspace_name=ws_map.get(row.workspace_id) if row.workspace_id else None,
-            data_source_name=ds_map.get(row.data_source_id) if row.data_source_id else None,
+            data_source_name=ds_name,
+            data_source_classification=ds_class,
+            data_source_trust_status=ds_trust,
             context_model_name=cm_map.get(row.context_model_id) if row.context_model_id else None,
             created_by_name=creator[0],
             created_by_email=creator[1],
@@ -2786,7 +2803,7 @@ async def list_popular_views(
         row = row_tuple[0]
         fav_count = row_tuple[1] or 0
         ws_name = await _get_workspace_name(session, row.workspace_id)
-        ds_name = await _get_data_source_name(session, row.data_source_id)
+        ds_name, ds_class, ds_trust = await _get_data_source_facts(session, row.data_source_id)
         cm_name = await _get_context_model_name(session, row.context_model_id, user_id)
         # The data publisher too, in the same lookup: without it this path showed
         # every trail without its last publisher, unlike the batched one.
@@ -2806,6 +2823,8 @@ async def list_popular_views(
             config_override=followed.get(row.id),
             workspace_name=ws_name,
             data_source_name=ds_name,
+            data_source_classification=ds_class,
+            data_source_trust_status=ds_trust,
             context_model_name=cm_name,
             created_by_name=creator_name,
             created_by_email=creator_email,

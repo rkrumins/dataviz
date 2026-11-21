@@ -953,6 +953,8 @@ async def get_view(
         if ds is not None:
             view.data_source_id = ds.id
             view.data_source_name = ds.label or view.data_source_name
+            view.data_source_classification = ds.classification
+            view.data_source_trust_status = ds.trust_status
     if ds is not None:
         view.provider_id = ds.provider_id
     # Classified by the source just resolved (its own, else the workspace default).
