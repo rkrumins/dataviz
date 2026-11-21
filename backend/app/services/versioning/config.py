@@ -465,6 +465,9 @@ PROPERTY_JOB_MAX_TARGETS: int = int(os.getenv("GRAPHVER_PROPERTY_JOB_MAX_TARGETS
 # afresh answers with main's counts and catalog instead, said so; one that folds a later commit in
 # reads only what that commit wrote, at any size.
 DRAFT_SEARCH_MAX_DELTA: int = int(os.getenv("GRAPHVER_DRAFT_SEARCH_MAX_DELTA", "200000"))
+# The nodes a publish judges by their fields at a time (``_field_violations``): the values it reads
+# for them, as written, as the draft holds them and as main does, are a page's.
+FIELD_CHECK_PAGE = 5000
 # What an import's rows find their entities by when the request names nothing (``identifier``):
 # ``entity_id`` (an entity id of the graph, else the urn, the identifier property, a field a type
 # matches imports by, then a unique qualifiedName), or ``urn`` (an entity id, else the urn only).

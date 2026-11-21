@@ -46,6 +46,13 @@ import { refusalCopy } from '../model/provenance'
 /** Shared values a refused publish lists before it says how many more there are. */
 const UNIQUE_SHOWN = 10
 
+/** What a field refusal's count says, by rule. */
+const FIELD_RULE_PHRASE: Record<FieldViolation['rule'], string> = {
+  field_required: 'missing',
+  field_not_allowed: 'not allowed',
+  field_type: 'of the wrong type',
+}
+
 export interface PublishFlowOptions {
   workspaceId: string
   graphId: string
@@ -371,16 +378,26 @@ export function PublishBody({ flow, offerSave = true }: {
             <span className="font-medium text-amber-500">
               Nothing was published — {fieldRefusal.total === 1
                 ? '1 value breaks'
-                : `${fieldRefusal.total} values break`} the fields their entity types define.
+                : `${fieldRefusal.total.toLocaleString()} values break`} the fields their entity types define.
             </span>{' '}
             Change them in the draft, then publish.
+            {fieldRefusal.total > Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN) && fieldRefusal.byField.length > 0 && (
+              <ul aria-label="Values to change by field" className="mt-1.5 space-y-0.5 text-ink">
+                {fieldRefusal.byField.map((c) => (
+                  <li key={`${c.entityType}:${c.field}:${c.rule}`}>
+                    <span className="font-medium">{c.entityType} · {c.fieldName || c.field}</span>
+                    <span className="text-ink-muted">: {c.count.toLocaleString()} {FIELD_RULE_PHRASE[c.rule]}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
             <ul aria-label="Values to change" className="mt-1.5 space-y-1 text-ink">
               {fieldRefusal.violations.slice(0, UNIQUE_SHOWN).map((v, i) => (
                 <FieldViolationRow key={`${v.entity_id}:${v.field}:${i}`} v={v} onOpen={() => { onClose(); onLeave?.() }} />
               ))}
             </ul>
             {fieldRefusal.total > Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN) && (
-              <p className="mt-1">…and {fieldRefusal.total - Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN)} more.</p>
+              <p className="mt-1">…and {(fieldRefusal.total - Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN)).toLocaleString()} more.</p>
             )}
           </div>
         </div>

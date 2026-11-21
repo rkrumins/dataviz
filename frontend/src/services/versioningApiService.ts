@@ -785,18 +785,30 @@ export interface FieldViolation {
   reason: string
 }
 
+/** How many values a publish refused for one field of one entity type, by one rule. */
+export interface FieldViolationCount {
+  entityType: string
+  field: string
+  fieldName?: string
+  rule: FieldViolation['rule']
+  count: number
+}
+
 /** A publish refused because property values break the fields their entity types define. Nothing
- *  was published. `total`: how many there are — `violations` may list fewer. */
+ *  was published. `total`: how many there are — `violations` may list fewer; `byField`: how many
+ *  per entity type, field and rule, the most first. */
 export class FieldViolationError extends Error {
   violations: FieldViolation[]
   total: number
-  constructor(violations: FieldViolation[], total?: number) {
+  byField: FieldViolationCount[]
+  constructor(violations: FieldViolation[], total?: number, byField?: FieldViolationCount[]) {
     const n = total ?? violations.length
     super(`${n === 1 ? 'A value breaks' : `${n} values break`} the fields their entity types define. `
       + violations.slice(0, 2).map((v) => `${v.name || v.urn || v.entity_id}: ${v.reason}`).join('; '))
     this.name = 'FieldViolationError'
     this.violations = violations
     this.total = n
+    this.byField = byField ?? []
   }
 }
 
@@ -1051,6 +1063,8 @@ type RefusalDetail = string | {
    *  were when a job kept only the first ones (`fork_update_conflicts`). */
   seeds?: Record<string, Record<string, unknown> | null>
   total?: number
+  /** A field refusal's counts per entity type, field and rule (`field_violation`). */
+  byField?: FieldViolationCount[]
   /** The draft's head now (`head_moved`). */
   headCommitId?: string | null
   /** Whose staged edits could not be saved first (`staged_changes_unsaved`). */
@@ -1095,7 +1109,7 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
     return new UniqueViolationError((d.violations ?? []) as unknown as UniqueViolation[], d.total)
   }
   if (status === 409 && d?.type === 'field_violation') {
-    return new FieldViolationError((d.violations ?? []) as unknown as FieldViolation[], d.total)
+    return new FieldViolationError((d.violations ?? []) as unknown as FieldViolation[], d.total, d.byField)
   }
   if (status === 409 && d?.type === 'not_up_to_date' && d.reason === 'parent_moved') {
     return new ForkNotUpToDateError(d)

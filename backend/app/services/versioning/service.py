@@ -72,7 +72,7 @@ from . import main_activity, provenance, review_state
 from .review_state import ReviewRule
 from .provenance import commit_provenance
 from .ontology import (
-    Ontology, OntologyRules, canonicalize_payload_types, field_violations,
+    FieldFindings, Ontology, OntologyRules, canonicalize_payload_types, field_violations,
     validate_entities, validate_entities_rich,
 )
 from .models import (
@@ -2256,7 +2256,11 @@ class GraphVersioningService:
         own view of them — ``main`` at its base, which is the head, where it left them alone — and
         whether a node is left outside every parent is asked last, of everything the squash wrote.
         Above ``BOOTSTRAP_MERKLE_INLINE_MAX`` changes the commit's Merkle root is left unset, as an
-        enable of that size leaves its own."""
+        enable of that size leaves its own.
+
+        A page whose values break their fields' rules stops the writing, but not the reading: the
+        nodes' pages after it are judged by their fields alone, so the refusal counts every value
+        to change (``FieldViolation``'s total and per-field counts), not only the first page's."""
         gid, base = graph.id, graph.main_head_commit_seq
         strict = graph.ontology_enforcement == "strict"
         ontology = Ontology.from_spec(graph.ontology_spec) if strict else None
@@ -2264,10 +2268,11 @@ class GraphVersioningService:
         stats = _delta_stats([])
         merkle: Optional[Dict[str, Optional[str]]] = {}
         squash: Optional[CommitORM] = None
+        fields = FieldFindings()                      # what the field rules refuse, every page's
 
         async def write(copies: List["_SquashRow"], deltas: List[Delta], kinds: Dict[str, str]):
             nonlocal squash, merkle
-            if not copies and not deltas:
+            if fields or (not copies and not deltas):  # refused: nothing more is written
                 return
             if squash is None:
                 squash = await self._squash_commit(s, graph, draft, main_id, actor, message)
@@ -2321,25 +2326,25 @@ class GraphVersioningService:
             written = await asyncio.to_thread(_written_values, copies, heads, deltas)
             if not written:
                 return
-            prior = await self._skeletons_at(s, gid, main_id, list(written), base)
-            if ontology is not None:
-                viol = validate_entities(
-                    [(eid, kinds.get(eid, "node"), v) for eid, v in written.items() if v is not None],
-                    ontology)
-                if viol:
-                    raise OntologyViolation(viol)
-            await self._enforce_written(
-                s, gid, main_id, written, prior, kinds, containment_edge_types=cset,
-                ontology_rules=ontology_rules, strict=strict, also_writing=draft.id,
-                parentless=False)
-            unique = await self._unique_violations(s, gid, main_id, written, ontology_rules,
-                                                   seen=unique_seen, source=(gid, draft.id))
-            if unique:
-                raise UniqueViolation(unique)
-            fields = await self._field_violations(s, gid, main_id, written, ontology_rules,
-                                                  source=(gid, draft.id))
-            if fields:
-                raise FieldViolation(fields)
+            if not fields:
+                prior = await self._skeletons_at(s, gid, main_id, list(written), base)
+                if ontology is not None:
+                    viol = validate_entities(
+                        [(eid, kinds.get(eid, "node"), v) for eid, v in written.items() if v is not None],
+                        ontology)
+                    if viol:
+                        raise OntologyViolation(viol)
+                await self._enforce_written(
+                    s, gid, main_id, written, prior, kinds, containment_edge_types=cset,
+                    ontology_rules=ontology_rules, strict=strict, also_writing=draft.id,
+                    parentless=False)
+                unique = await self._unique_violations(s, gid, main_id, written, ontology_rules,
+                                                       seen=unique_seen, source=(gid, draft.id))
+                if unique:
+                    raise UniqueViolation(unique)
+            # Refused already, a page is judged by its fields alone: how many break them in all.
+            await self._field_violations(s, gid, main_id, written, ontology_rules,
+                                         source=(gid, draft.id), into=fields)
 
         # 1. What the draft deleted, and the edges on it that the draft left alone.
         async for heads in self._head_pages(s, gid, draft.id, live=False):
@@ -2369,6 +2374,8 @@ class GraphVersioningService:
             kinds.update({eid: heads[eid].table for eid in slow})
             await judge(heads, copies, deltas, kinds)
             await write(copies, deltas, kinds)
+        if fields:                                    # only nodes have fields: every page is judged
+            raise FieldViolation(fields)
 
         # 3 and 4. Its edges: re-pointed or changed ones (and those on a node it deleted, which go),
         # then new ones — so a new edge is judged against where the changed ones now point.
@@ -13298,15 +13305,21 @@ class GraphVersioningService:
     async def _field_violations(self, s, graph_id: str, main_id: str,
                                 written: Mapping[str, Optional[dict]],
                                 ontology_rules: Optional[OntologyRules],
-                                source: Optional[Tuple[str, str]] = None) -> List[dict]:
+                                source: Optional[Tuple[str, str]] = None,
+                                into: Optional[FieldFindings] = None) -> FieldFindings:
         """The property values a publish would write that their type's fields refuse
         (``EntityRule.fields``; :func:`~.ontology.field_violations`), judged against each node's
         value on ``main`` before the publish, so only what it changes is judged. Read for the nodes
         of a type that has field rules only: nothing when none has. ``source``: as
         :meth:`_unique_violations` takes it — the ``(graph, branch)`` whose values ``written``
-        holds only as identity columns, read in full here."""
+        holds only as identity columns, read in full here.
+
+        ``FIELD_CHECK_PAGE`` nodes at a time, judged off the event loop, kept in ``into`` (else
+        a new :class:`~.ontology.FieldFindings`): a hundred examples and the counts, never every
+        violation, and never every value at once."""
+        found = into if into is not None else FieldFindings()
         if ontology_rules is None or not any(r.fields for r in ontology_rules.entity_types.values()):
-            return []
+            return found
 
         def governed(v: Optional[dict]) -> bool:
             if not v or _is_edge_payload(v):
@@ -13316,16 +13329,17 @@ class GraphVersioningService:
             return bool(rule and rule.fields)
 
         ids = [eid for eid, v in written.items() if governed(v)]
-        if not ids:
-            return []
-        after = dict(written)
-        if source is not None:
-            need = [eid for eid in ids if "properties" not in written[eid]]
-            if need:
-                full = await self._current_values(s, source[0], source[1], need)
-                after.update({e: full[e] for e in need if full.get(e) is not None})
-        before = await self._current_values(s, graph_id, main_id, ids)
-        return field_violations([(eid, after[eid], before.get(eid)) for eid in ids], ontology_rules)
+        for page in _chunks(ids, config.FIELD_CHECK_PAGE):
+            after = {eid: written[eid] for eid in page}
+            if source is not None:
+                need = [eid for eid in page if "properties" not in written[eid]]
+                if need:
+                    full = await self._current_values(s, source[0], source[1], need)
+                    after.update({e: full[e] for e in need if full.get(e) is not None})
+            before = await self._current_values(s, graph_id, main_id, page)
+            found.add(await asyncio.to_thread(
+                field_violations, [(eid, after[eid], before.get(eid)) for eid in page], ontology_rules))
+        return found
 
     async def identities_taken(self, *, graph_id: str, branch_id: str,
                                names: Collection[str]) -> Tuple[set, Dict[str, str]]:
