@@ -330,6 +330,27 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Nothing is deleted — the activity log keeps every run",
         ),
     ),
+    "aiAssistantEnabled": FeatureWiring(
+        key="aiAssistantEnabled",
+        # Fail closed: when the switch cannot be read, nothing is sent to a model.
+        posture="security",
+        stage="experimental",
+        server_gates=(
+            "Every /api/v1/ai route — chat, query drafting, conversations, AI administration and "
+            "the knowledge MCP endpoint",
+            "Read-only delegations to the AI service (api_key_auth), so tokens in flight stop too",
+        ),
+        ui_surfaces=(
+            "The assistant panel and its launchers: the top bar, the command palettes and the "
+            "canvas's Ask about this",
+            "Ask AI in the search panel and Draft with AI in the Cypher tab",
+            "Administration → AI",
+        ),
+        still_allowed=(
+            "Searching, tracing and the rule-based Ask in plain words",
+            "Nothing is deleted — conversations and AI settings are kept",
+        ),
+    ),
     "traceEnabled": FeatureWiring(
         key="traceEnabled",
         posture="capability",

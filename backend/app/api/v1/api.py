@@ -405,6 +405,11 @@ api_router.include_router(
 api_router.include_router(
     branding.admin_router, prefix="/admin/branding", tags=["admin:branding"],
 )
+# The AI service's edge: /api/v1/ai/... — authenticated and gated here, then
+# forwarded to the AI service with a read-only delegation (ADR-031, ADR-032).
+from backend.app.api.v1.endpoints import ai as _ai_endpoints  # noqa: E402
+api_router.include_router(_ai_endpoints.router, prefix="/ai", tags=["ai"])
+
 # Aggregation service: /api/v1/admin/...
 # Phase 19: per-endpoint workspace-scoped gates inside the router
 # (see ``aggregation.py: _require_ds_perm``). The router-level

@@ -2914,6 +2914,11 @@ class _TimeoutMiddleware:
     _SSE_PATHS: tuple[re.Pattern, ...] = (
         # An aggregation job's progress (``aggregation.stream_job_events``).
         re.compile(r"^/api/v1/admin/data-sources/[^/]+/aggregation-jobs/[^/]+/events$"),
+        # An assistant's answer, streamed as it is made (``ai.chat_stream``). The
+        # AI service bounds a turn itself (``AI_TURN_TIMEOUT_SECONDS``).
+        re.compile(r"^/api/v1/ai/chat/stream$"),
+        # The knowledge MCP endpoint answers over streamable HTTP.
+        re.compile(r"^/api/v1/ai/mcp/knowledge/?$"),
     )
     _SSE_EXACT_PATHS: frozenset[str] = frozenset()
     # Downloads streamed while they are produced (a whole data source can be gigabytes), and a
@@ -2991,6 +2996,9 @@ class _TimeoutMiddleware:
             # proxy_read_timeout (180s) for the same reason as versioning.
             ("/api/v1/views/transfer/", float(os.getenv("HTTP_TIMEOUT_VIEW_TRANSFER_SECS", "120"))),
             ("/api/v1/admin/data-source-transfers/", move_secs),
+            # The AI service: drafting a query or testing a connection waits on a model.
+            # Below nginx's proxy_read_timeout (180s) for the same reason as versioning.
+            ("/api/v1/ai/",           float(os.getenv("HTTP_TIMEOUT_AI_SECS", "150"))),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 

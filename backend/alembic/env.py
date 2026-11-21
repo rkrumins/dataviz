@@ -38,6 +38,7 @@ for path in (REPO_ROOT, BACKEND_DIR):
 from backend.app.db.engine import Base  # noqa: E402  — Base is the metadata target
 from backend.app.db import models as _management_models  # noqa: E402,F401
 from backend.app.services.aggregation import models as _aggregation_models  # noqa: E402,F401
+from backend.ai_service import models as _ai_models  # noqa: E402,F401
 
 target_metadata = Base.metadata
 

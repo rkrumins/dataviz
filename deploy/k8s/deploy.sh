@@ -210,6 +210,7 @@ cmd_setup() {
     # ── Generate Secrets ───────────────────────────────────────────
     step "Generating Secrets"
     local POSTGRES_PASSWORD JWT_SECRET_KEY CREDENTIAL_ENCRYPTION_KEY ADMIN_PASSWORD AGGREGATION_INTERNAL_TOKEN
+    local AI_INTERNAL_TOKEN AI_VECTOR_DB_PASSWORD
 
     POSTGRES_PASSWORD="$(rand_string 32)"
     JWT_SECRET_KEY="$(rand_string 64)"
@@ -218,6 +219,10 @@ cmd_setup() {
     # WS2.3: shared secret for control-plane internal auth. Generated ON by
     # default so the destructive :8091 API is authenticated in production.
     AGGREGATION_INTERNAL_TOKEN="$(rand_string 48)"
+    # The AI service's internal token (viz-service <-> ai-service) and the
+    # in-cluster vector store's password.
+    AI_INTERNAL_TOKEN="$(rand_string 48)"
+    AI_VECTOR_DB_PASSWORD="$(rand_string 32)"
 
     ok "Generated cryptographically random secrets"
 
@@ -246,6 +251,9 @@ CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
 ADMIN_EMAIL=${ADMIN_EMAIL}
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
 AGGREGATION_INTERNAL_TOKEN=${AGGREGATION_INTERNAL_TOKEN}
+AI_INTERNAL_TOKEN=${AI_INTERNAL_TOKEN}
+AI_VECTOR_DB_PASSWORD=${AI_VECTOR_DB_PASSWORD}
+AI_VECTOR_DB_URL=postgresql://vectors:${AI_VECTOR_DB_PASSWORD}@vectordb:5432/vectors
 
 # Managed data tier — PRODUCTION overlay only (Cloud SQL + Memorystore private
 # IPs). Leave as-is for dev/staging (they use the in-cluster stores). See
@@ -323,6 +331,10 @@ cmd_deploy() {
         --from-literal=ADMIN_EMAIL="${ADMIN_EMAIL}" \
         --from-literal=ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
         --from-literal=AGGREGATION_INTERNAL_TOKEN="${AGGREGATION_INTERNAL_TOKEN:-}" \
+        --from-literal=AI_INTERNAL_TOKEN="${AI_INTERNAL_TOKEN:-}" \
+        --from-literal=AI_VECTOR_DB_PASSWORD="${AI_VECTOR_DB_PASSWORD:-}" \
+        --from-literal=AI_VECTOR_DB_URL="${AI_VECTOR_DB_URL:-}" \
+        --from-literal=AI_INDEXER_API_KEY="${AI_INDEXER_API_KEY:-}" \
         --dry-run=client -o yaml | kubectl apply -f -
     ok "Secrets injected"
 

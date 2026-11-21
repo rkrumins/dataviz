@@ -654,6 +654,36 @@
       ]
     },
     {
+      "key": "importInMemoryReconcile",
+      "name": "Reconcile imports in memory",
+      "description": "An import compares its file with the graph in memory, a batch at a time, and writes into Postgres only the rows that change something. Needs Version control.",
+      "category": "lineage",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/docs/versioning-import-export#3f-reconciling-in-memory",
+      "adminHint": "Turn this on where imports send whole snapshots that change little each time. The import workers need the memory for it: about 12 bits per name the file holds (about 250 MB for a 4 GB file), with 8 GiB per worker pod. Results are the same either way; only what is written to get there differs.",
+      "impactWhenOff": "Every row of an import's file is staged in Postgres before it is compared with the graph, as before. An import already under way keeps the way it started.",
+      "impactWhenOn": "A file sent again with a few rows changed \u2014 a full snapshot \u2014 stages only those rows whole: the rest are recorded in a few bytes each, so the import writes a fraction of the staged rows and WAL, and finishes sooner. The file is read twice, nodes then edges. Imports into an empty graph, and into types matched by team keys, run as before. Applies to imports that start after it is turned on.",
+      "sortOrder": 4,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Whether a new import job decides its unchanged rows in memory, a batch at a time, and stages them slim \u2014 reading the file twice, nodes then edges \u2014 or stages every row whole"
+      ],
+      "uiSurfaces": [],
+      "stillAllowed": [
+        "Every import, with the same result: only how much it writes into Postgres differs",
+        "An import already under way finishes the way it started"
+      ],
+      "dependsOn": [
+        "versioningEnabled"
+      ]
+    },
+    {
       "key": "traceEnabled",
       "name": "Lineage trace",
       "description": "Follow a node's lineage upstream and downstream across the graph, from the graph and context views.",
@@ -705,11 +735,13 @@
         "GET /graph/export/plan and /stream \u2014 the same for a data source without version control",
         "POST /graphs/{id}/exports \u2014 start an export job",
         "GET /graphs/{id}/exports/{job}/download \u2014 take the file",
-        "POST /graph/search/exports and GET /graph/search/exports/{id}/download \u2014 write, then take, every match of a search"
+        "POST /graph/search/exports and GET /graph/search/exports/{id}/download \u2014 write, then take, every match of a search",
+        "POST /graph/member-sets, GET /graph/member-sets/{id}/members and /download \u2014 resolve in full, list, then take everything a set of seeds reaches"
       ],
       "uiSurfaces": [
         "Export controls on the canvas and the context-view menu",
-        "Export on a search's matches"
+        "Export on a search's matches",
+        "Everything it reaches\u2026 on the trace dock, and a search's matches with their sources & consumers"
       ],
       "stillAllowed": [
         "Reading, filtering and tracing every graph in the product",
@@ -745,6 +777,39 @@
       "stillAllowed": [
         "Searching, and the compiled Cypher the Cypher tab shows and copies",
         "Nothing is deleted \u2014 the activity log keeps every run"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "aiAssistantEnabled",
+      "name": "AI assistant",
+      "description": "Let people ask questions about their data, lineage and this product in plain language, have searches written for them, and let other teams' agents read the product's knowledge over MCP. Answers are made by the AI service an administrator connects under Administration \u2192 AI.",
+      "category": "governance",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turning this on sends people's questions, and the names, descriptions and property values the answers need, to the AI connection set under Administration \u2192 AI. What may be sent is set there. The assistant only ever reads, as the person asking; who may use it is the 'ai:assistant:use' permission.",
+      "impactWhenOff": "The assistant, Ask AI in the search panel and the knowledge MCP endpoint disappear, and the server refuses every AI request, including delegations already in flight. Searching, tracing and the rule-based Ask in plain words are unaffected.",
+      "impactWhenOn": null,
+      "sortOrder": 2,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "Every /api/v1/ai route \u2014 chat, query drafting, conversations, AI administration and the knowledge MCP endpoint",
+        "Read-only delegations to the AI service (api_key_auth), so tokens in flight stop too"
+      ],
+      "uiSurfaces": [
+        "The assistant panel and its launchers: the top bar, the command palettes and the canvas's Ask about this",
+        "Ask AI in the search panel and Draft with AI in the Cypher tab",
+        "Administration \u2192 AI"
+      ],
+      "stillAllowed": [
+        "Searching, tracing and the rule-based Ask in plain words",
+        "Nothing is deleted \u2014 conversations and AI settings are kept"
       ],
       "dependsOn": []
     },
@@ -1302,6 +1367,107 @@
         "Search's Layer filter places by the shared rule either way"
       ],
       "dependsOn": []
+    },
+    {
+      "key": "viewMembershipEnabled",
+      "name": "Narrow: chosen entities and what they reach",
+      "description": "Narrow a Context View to the entities you choose and what they reach \u2014 what is inside them, their sources and consumers one step out or the whole way \u2014 worked out on the server, so it is the same answer for everyone and for any script. Save as view keeps a narrowing as a view of its own: a list of its members, auto-updating or a snapshot.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/guide/exploring-graph#show-only-some-entities-and-what-they-reach",
+      "adminHint": "Sources and consumers also need Lineage trace on. Each narrowing is one resolution, cached and shared by everyone who asks the same question, and paced by the trace's fair-share bucket when fair share is on.",
+      "impactWhenOff": "Narrow and Save as view (as a list) are not offered, and POST /graph/members, /graph/members/plan, /views/from-members and a list view's membership routes are refused. Views already made as lists keep the members they last had and stop updating; an auto-updating one says its updates are paused, and catches up when it is opened with this on again. Other views, searches, Isolate and traces work exactly as before. This is a preview; it ships off until you switch it on.",
+      "impactWhenOn": null,
+      "sortOrder": 4,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /graph/members \u2014 resolves a scope: seeds, what is inside them, their sources and consumers",
+        "POST /graph/members/plan \u2014 previews what a list view would hold",
+        "POST /views/from-members \u2014 makes a list view of a narrowing",
+        "GET/PUT /views/{id}/membership, POST /views/{id}/membership/members and /views/{id}/membership/refresh \u2014 a list view's members and its updates",
+        "GET /views/{id}/subsets \u2014 with searchViewsEnabled, either lists a view's subsets (a list view that follows it is one)"
+      ],
+      "uiSurfaces": [
+        "Context View: Narrow\u2026 on a selection, Narrow to this in an entity's right-click menu, Narrow\u2026 on Advanced Search's matches, and the Narrowed chip",
+        "Save as view\u2026 as a list, from the Narrowed chip, Narrow and search results",
+        "A list view's Auto-updating / Snapshot chip, which reads Updates paused while this is off"
+      ],
+      "stillAllowed": [
+        "Other views, searches, Isolate and traces work as before. Views already made as lists keep the members they last had (POST /graph/view-members still pages them), and stop updating until this is on again"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "searchViewsEnabled",
+      "name": "Subset views: a search's matches as a view",
+      "description": "Save an Advanced Search's matches inside a view as a view of their own \u2014 always current, any size, created at once \u2014 laid out like the view it came from and shared like any other view.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/guide/managing-views#subset-views-a-searchs-matches-as-a-view",
+      "adminHint": "Turn it on once the web app that ships with it is deployed. Each layer of a subset view is one search, shared by every view and viewer asking the same question, served from its last complete answer for a few minutes after the data changes (DEEP_SEARCH_VIEW_FEED_REUSE), and scanned in a lane of its own (DEEP_SEARCH_VIEW_FEED_LANE) paced by the view-feed fair-share bucket.",
+      "impactWhenOff": "Save as view is not offered on search results, subset views can't be made or edited, and their layers say the preview is off instead of listing matches. Nothing saved changes, and every other view works as before. This is a preview; it ships off until you switch it on.",
+      "impactWhenOn": null,
+      "sortOrder": 5,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /graph/search/view-feed \u2014 a page of one layer of a subset view",
+        "POST /views/from-search and PUT /views/{id}/search \u2014 making and editing subset views",
+        "GET /views/{id}/subsets \u2014 with viewMembershipEnabled, either lists a view's subsets"
+      ],
+      "uiSurfaces": [
+        "Advanced Search: Save as view\u2026 on a search's matches",
+        "Context View: a subset view's layers and its Subset of chip"
+      ],
+      "stillAllowed": [
+        "Every other view, search and export works as before; subset views already saved keep their definition, and say the preview is off instead of listing matches"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "revisionViewerEnabled",
+      "name": "Revision history viewer: the graph as it was",
+      "description": "Open a data source's published graph as it was at any past revision, or at the end of a past month, read-only, with what changed since \u2014 and compare any two revisions. Needs Version control.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn it on once the web app that ships with it is deployed. A past revision is the published graph with everything changed since put back: it costs what changed since, never the whole graph \u2014 about 1.2 KB of memory per changed entity in each API process while it is open \u2014 and one more than GRAPHVER_REVISION_REWIND_MAX changes back (100,000 by default) can be compared and exported but not opened.",
+      "impactWhenOff": "The graph opens only as it is now: a view's History shows each revision's changes, but no past revision can be opened on the canvas or compared with another. Nothing is changed or deleted. This is a preview; it ships off until you switch it on.",
+      "impactWhenOn": null,
+      "sortOrder": 6,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Every /graph read that names a past revision (?asOfSeq=) \u2014 the canvas, its nodes, edges, children and rollups as they were then"
+      ],
+      "uiSurfaces": [
+        "Reviews \u2192 History: Open on canvas, Compare with now, Compare with\u2026 and Copy link on a revision, the month picker, and two revisions compared",
+        "The canvas: the past-revision banner, its ?rev= link, and a comparison highlighted"
+      ],
+      "stillAllowed": [
+        "Every read of the graph as it is now, and every draft",
+        "History: each revision's changes, and Undo and Restore for the people who can publish",
+        "The change lists of drafts, revisions and reviews"
+      ],
+      "dependsOn": [
+        "versioningEnabled"
+      ]
     }
   ],
   "categories": [
@@ -1470,9 +1636,11 @@
     "versioningEnabled": true,
     "forksEnabled": false,
     "residencyEnabled": false,
+    "importInMemoryReconcile": false,
     "traceEnabled": true,
     "graphExportEnabled": true,
     "nativeQueryEnabled": true,
+    "aiAssistantEnabled": false,
     "enterpriseViewPolicy": "workspaces",
     "blankModelsEnabled": true,
     "viewPortabilityEnabled": false,
@@ -1489,7 +1657,10 @@
     "toursEnabled": false,
     "canvasLayerFoldEnabled": false,
     "canvasLineageRollupEnabled": false,
-    "placementContractEnabled": false
+    "placementContractEnabled": false,
+    "viewMembershipEnabled": false,
+    "searchViewsEnabled": false,
+    "revisionViewerEnabled": false
   },
   "experimentalNotice": {
     "title": "Early access",

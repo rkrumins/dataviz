@@ -33,6 +33,7 @@ viz-service	backend/Dockerfile.viz
 aggregation-controlplane	backend/Dockerfile.controlplane
 aggregation-worker	backend/Dockerfile.aggregation
 stats-service	backend/Dockerfile.insights
+ai-service	backend/Dockerfile.ai
 frontend	frontend/Dockerfile
 synodic-upgrade	backend/Dockerfile.upgrade
 seed	backend/Dockerfile.seed

@@ -7,6 +7,8 @@ data:
   SYNODIC_ROLE: "web"
   AGGREGATION_PROXY_ENABLED: "true"
   AGGREGATION_SERVICE_URL: "http://aggregation-controlplane:8091"
+  # Where the web tier forwards /api/v1/ai/* (AI_INTERNAL_TOKEN comes from app-secrets).
+  AI_SERVICE_URL: "http://ai-service:8093"
   AUTH_COOKIE_SECURE: "true"
   AUTH_COOKIE_SAMESITE: "lax"
   FALKORDB_SOCKET_TIMEOUT: "10"

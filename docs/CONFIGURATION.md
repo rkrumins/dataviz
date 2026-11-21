@@ -138,10 +138,11 @@ The API server: what it accepts and serves, and which part of the backend each p
 |---|---|---|---|
 | `API_DOCS_ENABLED` | (empty) | Serve the interactive API docs and schema (`/docs`, `/redoc`, `/openapi.json`) even with `ENV=production`: `true`, `1` or `yes`. Outside production they are always served. | `backend/app/main.py` |
 | `CORS_ALLOWED_ORIGINS` | (empty) | Browser origins allowed to call the API with credentials, comma-separated, for example `https://lineage.example.com`. The CSRF check trusts the same list. Unset, only `http://localhost:3000` and `http://localhost:5173` are allowed. | `backend/app/main.py`, `backend/auth_service/csrf.py` |
-| `ENV` | `dev` | Deployment type. `production` (or `prod`) turns on the safeguards listed under [Must set in production](#must-set-in-production); any other value relaxes them for local work. | `backend/app/auth/dependencies.py`, `backend/app/db/repositories/connection_repo.py`, `backend/app/main.py` +4 more |
+| `ENV` | `dev` | Deployment type. `production` (or `prod`) turns on the safeguards listed under [Must set in production](#must-set-in-production); any other value relaxes them for local work. | `backend/ai_service/internal_auth.py`, `backend/ai_service/llm/egress.py`, `backend/app/auth/dependencies.py` +6 more |
+| `HTTP_TIMEOUT_AI_SECS` | `150` | the request deadline for /api/v1/ai/\* (streams are exempt) | `backend/app/main.py` |
 | `IMPORT_UPLOAD_CONCURRENCY` | `8` | Import files one API process takes in at once — sent whole, or as an upload's parts. Each holds little memory, but writes to the object store as fast as it arrives, and one sent whole holds its slot until it is in. One beyond waits up to 30 s for a slot, then is told to retry (`429`, `Retry-After: 15`) before any of it is read. The fleet takes up to this × processes at once: size it to what the object store (the database, when `OBJECT_STORE_BACKEND=database`) can write, not up with the number of uploaders. | `backend/app/api/v1/endpoints/versioning.py` |
 | `MAX_IMPORT_BODY_BYTES` | `104857600` | The body-size cap on the other routes that take large bodies (the rest of `/versioning/`, `/graph/save`, the view-file routes). An import's file is held to `IMPORT_MAX_BYTES` instead. | `backend/app/main.py` |
-| `SYNODIC_ROLE` | (empty) / `dev` / — *(differs by call site)* | What this process runs: `web` (the API), `worker` (aggregation jobs), `controlplane` (scheduling and recovery) or `dev` (everything in one process, the default). Any role other than `dev` also makes the API write JSON logs. | `backend/app/jobs/metrics_prometheus.py`, `backend/app/middleware/logging.py`, `backend/app/runtime/role.py` |
+| `SYNODIC_ROLE` | (empty) / `ai` / `dev` / — *(differs by call site)* | What this process runs: `web` (the API), `worker` (aggregation jobs), `controlplane` (scheduling and recovery) or `dev` (everything in one process, the default). Any role other than `dev` also makes the API write JSON logs. | `backend/ai_service/__main__.py`, `backend/app/jobs/metrics_prometheus.py`, `backend/app/middleware/logging.py` +1 more |
 
 ### Internal tuning
 
@@ -162,7 +163,6 @@ The Postgres database that holds users, workspaces, views and settings. Per-role
 
 | Variable | Default | Description | Read in |
 |---|---|---|---|
-| `CREDENTIAL_ENCRYPTION_KEY` | — (secret, set your own) | Fernet key that encrypts the credentials stored for data sources and identity providers. Unset, credentials are stored unencrypted, except with `ENV=production`, where saving one fails instead. | `backend/app/db/repositories/connection_repo.py` |
 | `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:***@localhost:5432/synodic` / required / — *(differs by call site)* | Address of the management database: a Postgres URL starting with `postgresql+asyncpg://`. Unset, processes fall back to the local development database. | `backend/alembic/env.py`, `backend/app/db/engine.py`, `backend/app/services/system_status/probes.py` +5 more |
 
 ### Internal tuning
@@ -606,6 +606,33 @@ The statistics service, analytics and the counts history.
 | `STATS_SWEEP_CONCURRENCY` | `2` | `backend/insights_service/config.py` |
 | `STATS_WORKER_CONCURRENCY` | `4` | `backend/insights_service/config.py` |
 
+## AI assistant
+
+The AI service: where it listens, the platform API it reads through, the network it may reach, the vector store, and the web tier's edge in front of it. Which model answers, and what may be sent to it, is set in the app under Administration → AI.
+
+| Variable | Default | Description | Read in |
+|---|---|---|---|
+| `AI_DELEGATION_SIGNING_KEY` | — (secret, set your own) | signs the AI service's read-only delegations (>= 32 chars); unset: derived from JWT_SECRET_KEY | `backend/app/auth/delegation.py` |
+| `AI_DELEGATION_TTL_SECONDS` | `240` | how long one delegation lives (at most 600); one turn's length | `backend/app/api/v1/endpoints/ai.py` |
+| `AI_DOCS_CORPUS_PATH` | — | the docs corpus file; unset: the one built into the image | `backend/ai_service/knowledge/corpus.py` |
+| `AI_EGRESS_ALLOWED_HOSTS` | (empty) | private host:port destinations the AI service may call (an internal LLM gateway, token or MCP endpoint), comma-separated; loopback and link-local are always refused | `backend/ai_service/config.py` |
+| `AI_EMBED_BATCH_SIZE` | `64` | texts per embedding call (1-512) | `backend/ai_service/config.py` |
+| `AI_INDEXER_API_KEY` | — (secret, set your own) | a read-only service account's key (nxsat\_…) the views sync lists views with; unset: views are found by keyword only | `backend/ai_service/config.py` |
+| `AI_INDEXER_ENABLED` | `true` | run the docs and views embedding syncs in this process | `backend/ai_service/config.py` |
+| `AI_INTERNAL_TOKEN` | — (secret, set your own) | shared secret between the web tier and the AI service; required with ENV=production | `backend/ai_service/internal_auth.py` |
+| `AI_LLM_TIMEOUT_SECONDS` | `60` | one call to a model or an MCP server (5-300) | `backend/ai_service/config.py` |
+| `AI_OUTBOUND_TLS_CA_CERTS` | (empty) | a PEM bundle trusted for model, token and MCP endpoints, in addition to the public roots | `backend/ai_service/llm/egress.py` |
+| `AI_PLATFORM_API_URL` | `http://viz-service:8000` | the platform API every read goes back through, as the person asking | `backend/ai_service/config.py` |
+| `AI_PLATFORM_TIMEOUT_SECONDS` | `60` | one platform read (5-150) | `backend/ai_service/config.py` |
+| `AI_PROXY_TIMEOUT_SECONDS` | `170` | how long the web tier waits on the AI service (below nginx's 180s) | `backend/app/api/v1/endpoints/ai.py` |
+| `AI_RATE_LIMIT` | `30/minute` | questions and query drafts per person | `backend/app/api/v1/endpoints/ai.py` |
+| `AI_SERVICE_HOST` | `0.0.0.0` | the address the AI service binds | `backend/ai_service/__main__.py` |
+| `AI_SERVICE_PORT` | `8093` | where the AI service listens | `backend/ai_service/config.py` |
+| `AI_SERVICE_URL` | `http://ai-service:8093` | where the web tier forwards /api/v1/ai/\* | `backend/app/api/v1/endpoints/ai.py` |
+| `AI_TURN_TIMEOUT_SECONDS` | `90` | one whole answer: every model and tool call in it (10-170) | `backend/ai_service/config.py` |
+| `AI_VECTOR_DB_URL` | (empty) | the pgvector database for embeddings (postgresql://…); unset: retrieval is lexical only | `backend/ai_service/config.py` |
+| `AI_VIEWS_SYNC_INTERVAL_SECONDS` | `300` | how often changed views are re-embedded (30-86400) | `backend/ai_service/config.py` |
+
 ## Versioning
 
 Drafts and commits, projection into the graph store, and import and export.
@@ -844,7 +871,7 @@ Logs, metrics, health probes and the system status checks.
 
 | Variable | Default | Description | Read in |
 |---|---|---|---|
-| `LOG_LEVEL` | (empty) / `INFO` / `info` *(differs by call site)* | Log level for every backend service: `DEBUG`, `INFO`, `WARNING` or `ERROR`. | `backend/app/middleware/logging.py`, `backend/app/services/aggregation/__main__.py`, `backend/app/services/aggregation/controlplane.py` +2 more |
+| `LOG_LEVEL` | (empty) / `INFO` / `info` *(differs by call site)* | Log level for every backend service: `DEBUG`, `INFO`, `WARNING` or `ERROR`. | `backend/ai_service/__main__.py`, `backend/app/middleware/logging.py`, `backend/app/services/aggregation/__main__.py` +3 more |
 | `METRICS_ENABLED` | — | Serve Prometheus metrics: `true`, `1`, `yes` or `on`. The API serves them at `/api/v1/metrics`, the control plane at `/metrics` on its port 8091, and the aggregation and versioning workers at `/metrics` on `METRICS_PORT`. Also needs `METRICS_TOKEN`: without one the endpoint answers 404. | `backend/app/api/v1/endpoints/metrics.py` |
 | `METRICS_PORT` | `9100` | the aggregation and versioning workers' own scrape port | `backend/app/services/aggregation/__main__.py`, `backend/app/services/versioning/__main__.py` |
 | `METRICS_TOKEN` | — (secret, set your own) | Bearer token a scraper must present to read the metrics. | `backend/app/api/v1/endpoints/metrics.py` |
@@ -905,6 +932,14 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | `SYNODIC_UPGRADE_RECOVER` | — | `backend/scripts/upgrade.py` |
 | `SYNODIC_USER` | `admin@synodic.local` | `backend/scripts/bench_versioning.py` |
 | `WORKSPACE_ID` | `dev` | `backend/scripts/check_trace_query_plans.py` |
+
+## Other
+
+Settings outside the subsystems above.
+
+| Variable | Default | Description | Read in |
+|---|---|---|---|
+| `CREDENTIAL_ENCRYPTION_KEY` | — (secret, set your own) | Fernet key that encrypts the credentials stored for data sources and identity providers. Unset, credentials are stored unencrypted, except with `ENV=production`, where saving one fails instead. | `backend/common/credential_crypto.py` |
 
 ## Name patterns
 

@@ -24,6 +24,7 @@ data:
   AGGREGATION_DISPATCH_MODE: "redis"
   AGGREGATION_PROXY_ENABLED: "true"
   AGGREGATION_SERVICE_URL: "http://aggregation-controlplane:8091"
+  AI_SERVICE_URL: "http://ai-service:8093"
   AGGREGATION_API_PORT: "8091"
   WORKER_CONCURRENCY: {{ .Values.config.aggregation.workerConcurrency | quote }}
   AGGREGATION_JOB_TIMEOUT_SECS: {{ .Values.config.aggregation.jobTimeoutSecs | quote }}

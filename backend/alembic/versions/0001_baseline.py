@@ -26,6 +26,7 @@ import sqlalchemy as sa
 from backend.app.db.engine import Base
 from backend.app.db import models as _management_models  # noqa: F401
 from backend.app.services.aggregation import models as _aggregation_models  # noqa: F401
+from backend.ai_service import models as _ai_models  # noqa: F401
 
 
 revision: str = "0001_baseline"

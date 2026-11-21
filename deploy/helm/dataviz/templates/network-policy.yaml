@@ -83,8 +83,53 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: frontend
+        # The AI service reads the platform as the person it answers.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ai-service
       ports:
         - { protocol: TCP, port: 8000 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingress-ai-service
+  labels:
+    {{- include "dataviz.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ai-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: viz-service
+      ports:
+        - { protocol: TCP, port: 8093 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-ai-service
+  labels:
+    {{- include "dataviz.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ai-service
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        {{- range .Values.networkPolicy.aiEgressCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: 443 }
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

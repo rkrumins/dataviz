@@ -384,6 +384,10 @@ services:
       # control plane. UNSET -> no header sent (and the CP has auth disabled
       # too), so dev works. Must match the control plane's value.
       AGGREGATION_INTERNAL_TOKEN: ${AGGREGATION_INTERNAL_TOKEN:-}
+      # The AI service's edge (/api/v1/ai/*): where to forward, and the token the
+      # AI service requires (must match its value).
+      AI_SERVICE_URL: http://ai-service:8093
+      AI_INTERNAL_TOKEN: ${AI_INTERNAL_TOKEN:-}
       # Not the warmer (that is controlplane-only) — this is the grid every
       # analytics window ends on. It has to be the SAME value the controlplane
       # warms with, or readers ask for epochs the warmer never wrote.
@@ -712,6 +716,68 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # ── AI service (Port 8093) ────────────────────────────────────────
+  # The assistant, natural-language querying and the knowledge MCP server
+  # (docs/services/AI.md). Reached only through viz-service, which gates
+  # /api/v1/ai/* and forwards a read-only delegation; every data read goes
+  # back through viz-service as the person asking. Off until an administrator
+  # turns on the AI assistant and connects a model under Administration → AI.
+  ai-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.ai
+    ports:
+      # Internal service: its only caller is viz-service.
+      - "${AI_SERVICE_BIND:-127.0.0.1}:${AI_SERVICE_PORT:-8093}:8093"
+    environment:
+      MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      # Model and token endpoint credentials are stored encrypted with the same key.
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      AI_INTERNAL_TOKEN: ${AI_INTERNAL_TOKEN:-}
+      AI_PLATFORM_API_URL: http://viz-service:8000
+      AI_VECTOR_DB_URL: postgresql://${AI_VECTOR_DB_USER:-vectors}:${AI_VECTOR_DB_PASSWORD:-vectors}@vectordb:5432/${AI_VECTOR_DB_NAME:-vectors}
+      AI_EGRESS_ALLOWED_HOSTS: ${AI_EGRESS_ALLOWED_HOSTS:-}
+      AI_OUTBOUND_TLS_CA_CERTS: ${AI_OUTBOUND_TLS_CA_CERTS:-}
+      AI_INDEXER_API_KEY: ${AI_INDEXER_API_KEY:-}
+      AI_TURN_TIMEOUT_SECONDS: ${AI_TURN_TIMEOUT_SECONDS:-90}
+      SYNODIC_ROLE: ai
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vectordb:
+        condition: service_healthy
+      upgrade:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8093/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Vector store (pgvector) ───────────────────────────────────────
+  # Embeddings for semantic matching (ADR-033): its own Postgres instance, so
+  # index builds and their memory never touch the management database. Holds
+  # derived data only — the AI service rebuilds it from its sources.
+  vectordb:
+    image: pgvector/pgvector:0.8.0-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${AI_VECTOR_DB_USER:-vectors}
+      POSTGRES_PASSWORD: ${AI_VECTOR_DB_PASSWORD:-vectors}
+      POSTGRES_DB: ${AI_VECTOR_DB_NAME:-vectors}
+    ports:
+      - "${AI_VECTOR_DB_BIND:-127.0.0.1}:${AI_VECTOR_DB_PORT:-5433}:5432"
+    volumes:
+      - vectordb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AI_VECTOR_DB_USER:-vectors} -d ${AI_VECTOR_DB_NAME:-vectors}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # ── Frontend (Nginx + React SPA) ──────────────────────────────────
   # Serves the built React app and reverse-proxies /api/* to viz-service.
   # (The former graph-service was retired — provider connection-testing lives
@@ -822,4 +888,5 @@ volumes:
   falkordb_data:
   redis_data:
   postgres_data:
+  vectordb_data:
   minio_data:

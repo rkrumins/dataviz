@@ -40,9 +40,53 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: frontend
+        # The AI service reads the platform as the person it answers.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ai-service
       ports:
         - protocol: TCP
           port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-viz-to-ai-service
+  namespace: synodic
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ai-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: viz-service
+      ports:
+        - protocol: TCP
+          port: 8093
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ai-to-vectordb
+  namespace: synodic
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vectordb
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ai-service
+      ports:
+        - protocol: TCP
+          port: 5432
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -85,6 +129,7 @@ spec:
                   - api
                   - controlplane
                   - worker
+                  - ai
       ports:
         - protocol: TCP
           port: 5432

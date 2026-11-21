@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-config
+  namespace: synodic
+data:
+  SYNODIC_ROLE: "ai"
+  AI_SERVICE_PORT: "8093"
+  # Every data read goes back through the web tier, as the person asking.
+  AI_PLATFORM_API_URL: "http://viz-service:8000"
+  AI_TURN_TIMEOUT_SECONDS: "90"
+  # Private host:port destinations the AI service may call (an internal LLM
+  # gateway, a token endpoint, an MCP server). Public hosts need no entry;
+  # loopback and link-local (cloud metadata) are refused whatever this says.
+  AI_EGRESS_ALLOWED_HOSTS: ""

@@ -37,6 +37,8 @@ jobs:
             dockerfile: backend/Dockerfile.aggregation
           - name: stats-service
             dockerfile: backend/Dockerfile.insights
+          - name: ai-service
+            dockerfile: backend/Dockerfile.ai
           - name: frontend
             dockerfile: frontend/Dockerfile
           - name: seed

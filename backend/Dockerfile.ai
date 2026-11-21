@@ -1,0 +1,57 @@
+# ── Synodic AI service ─────────────────────────────────────────────────
+# The assistant, natural-language querying and the knowledge MCP server
+# (backend/ai_service; docs/services/AI.md, ADR-031). Reached only through
+# the web tier, which authenticates every request and hands this service a
+# read-only delegation; every data read goes back through the platform API.
+#
+# Stage 1 builds the docs corpus the Help persona answers from, with the
+# same heading anchors as the in-app reader (frontend/scripts/
+# gen-ai-docs-corpus.mjs). Stage 2 is the Python service, as the other
+# backend images are built.
+# ───────────────────────────────────────────────────────────────────────
+FROM node:22-alpine AS corpus
+
+WORKDIR /src
+RUN mkdir -p frontend && cd frontend && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent github-slugger@2.0.0
+COPY docs/ /src/docs/
+COPY backend/app/db/DOMAIN_OWNERSHIP.md /src/backend/app/db/DOMAIN_OWNERSHIP.md
+COPY deploy/k8s/overlays/production-cluster/README.md /src/deploy/k8s/overlays/production-cluster/README.md
+COPY frontend/src/components/docs/docsConfig.ts /src/frontend/src/components/docs/docsConfig.ts
+COPY frontend/src/components/guide/guideConfig.ts /src/frontend/src/components/guide/guideConfig.ts
+COPY frontend/scripts/gen-ai-docs-corpus.mjs /src/frontend/scripts/gen-ai-docs-corpus.mjs
+RUN mkdir -p /src/backend/ai_service/knowledge \
+    && node /src/frontend/scripts/gen-ai-docs-corpus.mjs
+
+FROM python:3.15-slim AS base
+
+WORKDIR /app
+
+# Runtime libs for pre-built wheels (no compiler needed)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libffi-dev libpq-dev curl \
+        libxml2-dev libxmlsec1-dev libxmlsec1-openssl xmlsec1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies (same requirements.txt — no extra deps)
+COPY backend/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code, then the corpus built above — outside backend/, so the
+# dev overlay's bind mount of ./backend does not hide it.
+COPY backend/ /app/backend/
+COPY --from=corpus /src/backend/ai_service/knowledge/docs_corpus.generated.json \
+     /app/knowledge/docs_corpus.generated.json
+ENV AI_DOCS_CORPUS_PATH=/app/knowledge/docs_corpus.generated.json
+
+# Non-root user
+RUN addgroup --system synodic && adduser --system --ingroup synodic synodic
+USER synodic
+
+ENV SYNODIC_ROLE=ai
+EXPOSE 8093
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
+  CMD curl -sf http://localhost:8093/health || exit 1
+
+CMD ["python", "-m", "backend.ai_service"]

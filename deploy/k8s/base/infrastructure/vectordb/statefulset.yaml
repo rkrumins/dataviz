@@ -1,0 +1,82 @@
+# The vector store (pgvector): embeddings for semantic matching (ADR-033).
+# Derived data only — the AI service rebuilds every collection from its
+# sources — so it may be replaced by a managed Postgres with pgvector
+# (point AI_VECTOR_DB_URL at it and delete this StatefulSet).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vectordb
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: vectordb
+    app.kubernetes.io/component: database
+spec:
+  serviceName: vectordb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vectordb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vectordb
+        app.kubernetes.io/component: database
+    spec:
+      serviceAccountName: synodic-infra
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: vectordb
+          image: pgvector/pgvector:0.8.0-pg16
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_DB
+              value: vectors
+            - name: POSTGRES_USER
+              value: vectors
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: AI_VECTOR_DB_PASSWORD
+                  optional: true
+          args:
+            - postgres
+            - -c
+            - shared_buffers=256MB
+            - -c
+            - maintenance_work_mem=512MB
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "vectors", "-d", "vectors"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "vectors"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: vectordb-data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: vectordb-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard-rwo
+        resources:
+          requests:
+            storage: 10Gi

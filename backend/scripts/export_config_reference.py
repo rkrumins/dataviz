@@ -602,7 +602,7 @@ PINNED = {
 }
 
 #: The same, by name prefix, for families defined in the central ``config/resilience.py``.
-PINNED_PREFIXES = (("PROFILING_", "insights"), ("INSIGHTS_", "insights"), ("STATS_", "insights"))
+PINNED_PREFIXES = (("AI_", "ai"), ("PROFILING_", "insights"), ("INSIGHTS_", "insights"), ("STATS_", "insights"))
 
 #: Names that match the secret pattern but are not secrets, so their defaults print.
 NOT_SECRET = frozenset({
@@ -638,6 +638,10 @@ SECTIONS = {
                     "Rollup rebuilds, the job bus, and automatic reconciliation of stale rollups."),
     "insights": ("Insights and statistics",
                  "The statistics service, analytics and the counts history."),
+    "ai": ("AI assistant",
+           "The AI service: where it listens, the platform API it reads through, the network it may "
+           "reach, the vector store, and the web tier's edge in front of it. Which model answers, and "
+           "what may be sent to it, is set in the app under Administration → AI."),
     "versioning": ("Versioning",
                    "Drafts and commits, projection into the graph store, and import and export."),
     "resilience": ("Resilience and limits",
@@ -684,6 +688,9 @@ RULES = (
     ("backend/app/providers/shard_capacity.py", "aggregation"),
     ("backend/app/jobs/", "aggregation"),
     ("backend/app/api/v1/endpoints/aggregation.py", "aggregation"),
+    ("backend/ai_service/", "ai"),
+    ("backend/app/api/v1/endpoints/ai.py", "ai"),
+    ("backend/app/auth/delegation.py", "ai"),
     ("backend/insights_service/", "insights"),
     ("backend/app/services/analytics_cache.py", "insights"),
     ("backend/app/services/product_event_gc.py", "insights"),
@@ -705,7 +712,7 @@ RULES = (
 #: A variable read in several sections is listed under the first of them here. The
 #: API entry point (``http``) reads a little of everything, so it comes late: a
 #: variable it shares with a subsystem belongs to that subsystem.
-PRIORITY = ("auth", "db", "redis", "graph", "aggregation", "insights", "versioning",
+PRIORITY = ("auth", "db", "redis", "graph", "aggregation", "insights", "ai", "versioning",
             "resilience", "branding", "observability", "http", "scripts", "other")
 
 # --------------------------------------------------------------------------- #

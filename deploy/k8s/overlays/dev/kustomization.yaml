@@ -33,6 +33,9 @@ images:
   - name: REGISTRY/aggregation-controlplane
     newName: gcr.io/PROJECT_ID/aggregation-controlplane
     newTag: dev-latest
+  - name: REGISTRY/ai-service
+    newName: gcr.io/PROJECT_ID/ai-service
+    newTag: dev-latest
   - name: REGISTRY/aggregation-worker
     newName: gcr.io/PROJECT_ID/aggregation-worker
     newTag: dev-latest

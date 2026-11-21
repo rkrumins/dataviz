@@ -704,6 +704,24 @@ def _summary_native_query(p: dict) -> str:
     return f"A native query on {_subject(p)} was not answered ({str(outcome).replace('_', ' ')})"
 
 
+def _summary_ai_question(p: dict) -> str:
+    persona = _detail(p, "persona")
+    where = _subject(p)
+    if persona == "help":
+        return "Asked the assistant for help"
+    return f"Asked the assistant about {where}" if where else "Asked the assistant a question"
+
+
+def _summary_ai_admin(noun: str):
+    def _summary(p: dict) -> str:
+        action = _detail(p, "action") or "changed"
+        name = _detail(p, "name")
+        verb = {"created": "Added", "updated": "Changed", "deleted": "Removed",
+                "tested": "Tested"}.get(str(action), "Changed")
+        return f"{verb} the AI {noun} {name}" if name else f"{verb} an AI {noun}"
+    return _summary
+
+
 _WHO_MAY_CREATE = {
     "granters": "Anyone who lets people into a workspace",
     "everyone": "Anyone",
@@ -826,6 +844,7 @@ _EVENT_META.update({
     "workspace.data_source.primary_set": ("info", _envelope_summary("Made {} the primary data source")),
     "workspace.data_source.projection_changed": ("info", _envelope_summary("Changed where {} keeps its rollups")),
     "workspace.data_source.native_query_run": ("info", _summary_native_query),
+    "workspace.ai.question_asked": ("info", _summary_ai_question),
     "workspace.data_source.moved": ("info", _transfer_summary(
         "Moved data source {s} to {ws}", "Moved data source {s} in from {ws}")),
     "workspace.data_source.move_undone": ("info", _transfer_summary(
@@ -867,6 +886,9 @@ _EVENT_META.update({
     "provider.connection.deleted": ("warning", _envelope_summary("Deleted provider {}")),
     # ── platform
     "platform.feature_flag.changed": ("info", _summary_flag),
+    "platform.ai.connection_changed": ("warning", _summary_ai_admin("connection")),
+    "platform.ai.settings_changed": ("warning", lambda p: "Changed the AI assistant's settings"),
+    "platform.ai.knowledge_source_changed": ("info", _summary_ai_admin("knowledge source")),
     "platform.profiling_policy.updated": ("info", lambda p: "Changed profiling retention and alerting"),
     "platform.service_account_policy.updated": ("info", _summary_sa_policy),
     "platform.node_identity.updated": ("info", lambda p: "Changed the platform's node-identity default"),
@@ -945,6 +967,10 @@ LABELS: dict[str, str] = {
     "workspace.data_source.primary_set": "Set the primary data source",
     "workspace.data_source.projection_changed": "Changed rollup placement",
     "workspace.data_source.native_query_run": "Ran a native query",
+    "workspace.ai.question_asked": "Asked the AI assistant",
+    "platform.ai.connection_changed": "Changed an AI connection",
+    "platform.ai.settings_changed": "Changed AI settings",
+    "platform.ai.knowledge_source_changed": "Changed an AI knowledge source",
     "workspace.data_source.moved": "Moved a data source",
     "workspace.data_source.move_undone": "Undid a data source move",
     "workspace.data_source.transfer_requested": "Requested a data source transfer",
@@ -1147,6 +1173,8 @@ _WORKSPACE_PREFIXES: tuple[str, ...] = (
     "aggregation.job.",
     "aggregation.source.",
     "workspace.data_source.",
+    # Who asked the assistant about this workspace's data (never what they asked).
+    "workspace.ai.",
     "workspace.datasource.moved",
     "workspace.versioning.",
 )

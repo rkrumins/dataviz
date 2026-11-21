@@ -1,0 +1,88 @@
+{{- if .Values.services.ai.enabled }}
+# The AI service (docs/services/AI.md): reached only through viz-service, which
+# gates /api/v1/ai/* and forwards a read-only delegation. Answers nothing until
+# an administrator turns the assistant on and connects a model in the app.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-service
+  labels:
+    {{- include "dataviz.labels" . | nindent 4 }}
+    app.kubernetes.io/name: ai-service
+spec:
+  replicas: {{ .Values.services.ai.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-service
+        app.kubernetes.io/part-of: dataviz
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Turns stream for up to AI_TURN_TIMEOUT_SECONDS; let them finish.
+      terminationGracePeriodSeconds: 100
+      {{- if not .Values.services.ai.skipSchemaCheck }}
+      initContainers:
+        {{- include "dataviz.schemaCheckInitContainer" (dict "ctx" $) | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ai-service
+          image: {{ include "dataviz.image" (dict "ctx" $ "name" "ai-service") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8093
+          envFrom:
+            - configMapRef:
+                name: dataviz-config
+            - secretRef:
+                name: {{ include "dataviz.secretName" . }}
+          env:
+            - name: SYNODIC_ROLE
+              value: "ai"
+            - name: AI_PLATFORM_API_URL
+              value: "http://viz-service:8000"
+            - name: AI_EGRESS_ALLOWED_HOSTS
+              value: {{ .Values.services.ai.egressAllowedHosts | quote }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8093
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8093
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8093
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.services.ai.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-service
+  labels:
+    {{- include "dataviz.labels" . | nindent 4 }}
+    app.kubernetes.io/name: ai-service
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ai-service
+  ports:
+    - name: http
+      port: 8093
+      targetPort: 8093
+{{- end }}

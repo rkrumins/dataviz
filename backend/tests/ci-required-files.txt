@@ -39,6 +39,9 @@ tests/test_aggregation_overrides.py
 tests/test_aggregation_run_record.py
 tests/test_aggregation_scan_shrink.py
 tests/test_aggregation_settings.py
+tests/test_ai_agent.py
+tests/test_ai_delegation.py
+tests/test_ai_llm.py
 tests/test_alembic_revision_lengths.py
 tests/test_analytics_cache_claim.py
 tests/test_analytics_warmer.py

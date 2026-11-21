@@ -125,6 +125,15 @@ services:
     # No --reload (headless process, not a uvicorn app). Pick up
     # code changes with:  ./dev.sh restart stats-service
 
+  ai-service:
+    volumes:
+      - ./backend:/app/backend
+    # Headless entry point (uvicorn started by `python -m backend.ai_service`),
+    # so no --reload. Pick up code changes with:  ./dev.sh restart ai-service
+
+  vectordb:
+    container_name: synodic-vectordb-dev
+
   frontend:
     build:
       target: development
@@ -168,5 +177,7 @@ volumes:
     name: synodic-redis-dev-data
   falkordb_data:
     name: synodic-falkordb-dev-data
+  vectordb_data:
+    name: synodic-vectordb-dev-data
   frontend_node_modules:
     name: synodic-frontend-dev-node-modules

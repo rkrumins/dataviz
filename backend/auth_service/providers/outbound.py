@@ -36,6 +36,7 @@ from urllib.parse import urljoin, urlsplit
 import certifi
 import httpx
 
+from backend.common import netguard
 from backend.common.adapters.redis_tls import _normalize_cert_path
 
 logger = logging.getLogger(__name__)
@@ -168,74 +169,15 @@ def resolve_outbound_verify(
     return _bundle_context(configured) or True
 
 
-def _unwrap(ip: ipaddress._BaseAddress) -> ipaddress._BaseAddress:
-    """Resolve an IPv4-mapped IPv6 address to its IPv4 form.
-
-    ``::ffff:169.254.169.254`` is the same destination as
-    ``169.254.169.254``, and a check that reads only the properties of
-    the outer form misses it.
-    """
-    mapped = getattr(ip, "ipv4_mapped", None)
-    return mapped if mapped is not None else ip
-
-
-def _address_is_never_reachable(ip: ipaddress._BaseAddress) -> bool:
-    """True for addresses no allowlist may ever unlock.
-
-    ``assert_fetchable`` can be told to permit a private address, because
-    an internal IdP gateway legitimately lives on one. These are the
-    addresses where that argument does not apply:
-
-    * **link-local** — ``169.254.169.254`` is the cloud metadata service.
-      This is the entry that matters. Reaching it turns a
-      request-forgery into instance-credential theft, and no identity
-      provider is ever hosted there.
-    * **loopback** — the process's own admin surfaces: Redis, debug
-      ports, the app's internal endpoints.
-    * multicast, reserved, unspecified — not a destination at all.
-
-    Kept as a property check rather than a CIDR list so the IPv6 forms
-    come along for free.
-    """
-    ip = _unwrap(ip)
-    return (
-        ip.is_loopback
-        or ip.is_link_local    # 169.254.0.0/16 — cloud metadata
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
-
-
-def _address_is_reachable(ip: ipaddress._BaseAddress) -> bool:
-    """False for anything that is not a public internet address.
-
-    Deliberately a denylist of address *properties* rather than of
-    literals: ``is_private`` alone misses link-local (cloud metadata),
-    and a hand-written list of CIDRs misses IPv6 forms of the same
-    ranges — ``::ffff:169.254.169.254`` being the obvious one, which is
-    why mapped addresses are unwrapped first.
-    """
-    ip = _unwrap(ip)
-    return not (
-        ip.is_private          # RFC1918, ULA
-        or _address_is_never_reachable(ip)
-    )
-
-
-def host_port_key(url: str) -> str:
-    """The ``host:port`` an allowlist entry has to match, exactly.
-
-    Normalised so ``GW.Corp.Internal.`` and ``gw.corp.internal:443``
-    are one entry rather than three. The port is always explicit: an
-    operator permitting ``gw.corp.internal`` for https must not thereby
-    permit ``gw.corp.internal:6379``, which is a different service
-    entirely on the same box.
-    """
-    parts = urlsplit(url)
-    host = (parts.hostname or "").strip().lower().rstrip(".")
-    port = parts.port or (443 if (parts.scheme or "").lower() == "https" else 80)
-    return f"{host}:{port}"
+# The address classifier lives in ``backend.common.netguard`` so every
+# outbound path — these SSO fetches and the AI service's completion and
+# token endpoints — shares one rule (``docs/TECHNICAL_DEBT.md`` §1.2). The
+# private names stay as aliases: they are what this module's callers and
+# tests have always used.
+_unwrap = netguard.unwrap
+_address_is_never_reachable = netguard.is_never_reachable
+_address_is_reachable = netguard.is_public
+host_port_key = netguard.host_port_key
 
 
 async def _assert_fetchable_off_loop(

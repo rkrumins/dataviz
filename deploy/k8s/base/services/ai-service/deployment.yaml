@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-service
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/component: ai
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-service
+        app.kubernetes.io/component: ai
+    spec:
+      serviceAccountName: synodic-backend
+      # Turns stream for up to AI_TURN_TIMEOUT_SECONDS; let them finish.
+      terminationGracePeriodSeconds: 100
+      containers:
+        - name: ai-service
+          image: REGISTRY/ai-service:latest
+          ports:
+            - containerPort: 8093
+              name: http
+          envFrom:
+            - configMapRef:
+                name: common-config
+            - configMapRef:
+                name: ai-config
+          env:
+            - name: MANAGEMENT_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: MANAGEMENT_DB_URL
+            # Decrypts the stored model and knowledge-source credentials.
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: CREDENTIAL_ENCRYPTION_KEY
+                  optional: true
+            # Required with ENV=production: the service refuses to start without it.
+            - name: AI_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: AI_INTERNAL_TOKEN
+                  optional: true
+            - name: AI_VECTOR_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: AI_VECTOR_DB_URL
+                  optional: true
+            # A read-only service account's key, for the views embedding sync.
+            - name: AI_INDEXER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: AI_INDEXER_API_KEY
+                  optional: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8093
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8093
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8093
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3

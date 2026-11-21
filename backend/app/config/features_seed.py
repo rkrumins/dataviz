@@ -82,6 +82,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "nativeQueryEnabled":
         "Running your own queries on a data source is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "aiAssistantEnabled":
+        "The AI assistant is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
     "editModeEnabled":
         "Editing is turned off for this deployment, so views are read-only. "
         "An administrator can enable it under Admin → Features.",
@@ -816,6 +819,36 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "it from some people, remove the permission from their role instead."
         ),
         "sort_order": 1,
+        "deprecated": False,
+    },
+    {
+        "key": "aiAssistantEnabled",
+        "name": "AI assistant",
+        "description": (
+            "Let people ask questions about their data, lineage and this product in plain "
+            "language, have searches written for them, and let other teams' agents read the "
+            "product's knowledge over MCP. Answers are made by the AI service an administrator "
+            "connects under Administration → AI."
+        ),
+        "impact_when_off": (
+            "The assistant, Ask AI in the search panel and the knowledge MCP endpoint disappear, "
+            "and the server refuses every AI request, including delegations already in flight. "
+            "Searching, tracing and the rule-based Ask in plain words are unaffected."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        # OFF by default: answering means sending a question and the metadata it needs to a
+        # model the deployment chooses, which an administrator decides to allow.
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turning this on sends people's questions, and the names, descriptions and property "
+            "values the answers need, to the AI connection set under Administration → AI. What "
+            "may be sent is set there. The assistant only ever reads, as the person asking; who "
+            "may use it is the 'ai:assistant:use' permission."
+        ),
+        "sort_order": 2,
         "deprecated": False,
     },
     {

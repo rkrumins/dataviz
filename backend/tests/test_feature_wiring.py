@@ -237,6 +237,10 @@ def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
       * ``workspaceDirectoryEnabled`` — ON shows every listed workspace's name, purpose and
         approvers to everyone who can sign in. Where workspace names are themselves
         sensitive that is a disclosure, so the operator turns it on knowingly.
+      * ``aiAssistantEnabled`` — ON sends people's questions, and the metadata their answers
+        need, to a model the deployment connects. Whether lineage metadata may leave the
+        product for that model is the operator's decision; with no connection set there is
+        nothing to answer with either.
     """
     # A single-select ladder has no "off" rung to ship on, so the boolean
     # question this test asks does not apply to it.
@@ -247,7 +251,7 @@ def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
     # Sorted, so the assertion tracks membership rather than the order somebody
     # happened to declare the flags in.
     assert off_by_default == [
-        "analyticsPublicEnabled", "analyticsShowEmailAddresses",
+        "aiAssistantEnabled", "analyticsPublicEnabled", "analyticsShowEmailAddresses",
         "analyticsWorkspaceVisibility", "apiKeySsoRoundTripStepUp", "signupEnabled",
         "workspaceDirectoryEnabled",
     ], (

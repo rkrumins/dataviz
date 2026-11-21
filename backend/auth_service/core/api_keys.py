@@ -54,6 +54,11 @@ _PREFIX_BY_KIND = {
 _KIND_BY_PREFIX = {prefix: kind for kind, prefix in _PREFIX_BY_KIND.items()}
 _PREFIX_LEN = 6
 
+#: A delegation token's prefix — not a stored key, never minted here; it
+#: mirrors ``backend.app.auth.delegation.PREFIX``, which this package may
+#: not import.
+DELEGATION_PREFIX = "nxdlg_"
+
 _ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _ALPHABET_SET = frozenset(_ALPHABET)
 _RANDOM_LEN = 32
@@ -148,7 +153,12 @@ def bearer_api_key(headers: Mapping[str, str]) -> Optional[str]:
     if len(parts) != 2 or parts[0].lower() != "bearer":
         return None
     candidate = parts[1].strip()
-    return candidate if kind_of(candidate) is not None else None
+    if kind_of(candidate) is not None:
+        return candidate
+    # The AI service's read-only delegation (``backend/app/auth/delegation``)
+    # takes the key path too — cookies dropped, no CSRF, the key surface —
+    # and is told apart from a stored key there.
+    return candidate if candidate.startswith(DELEGATION_PREFIX) else None
 
 
 # ── Whether a stored key may act ────────────────────────────────────

@@ -55,6 +55,7 @@ from backend.app.db.engine import (
     get_readonly_db_session,
 )
 from backend.app.db import models as _models  # noqa: F401 — register ORM models
+from backend.ai_service import models as _ai_models  # noqa: F401 — the AI domain's tables
 from backend.app.db.repositories import user_repo as _user_repo
 from backend.app.db.repositories.refresh_token_repo import make_refresh_store
 from backend.app.db.seed_feature_registry import SEED_FLAGS_CONFIG

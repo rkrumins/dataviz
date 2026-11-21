@@ -12,6 +12,7 @@ resources:
   - configmaps/viz-config.yaml
   - configmaps/controlplane-config.yaml
   - configmaps/worker-config.yaml
+  - configmaps/ai-config.yaml
 
   # Secrets (templates — envsubst'd at deploy time)
   - secrets/db-credentials.yaml
@@ -24,6 +25,8 @@ resources:
   - infrastructure/redis/service.yaml
   - infrastructure/falkordb/statefulset.yaml
   - infrastructure/falkordb/service.yaml
+  - infrastructure/vectordb/statefulset.yaml
+  - infrastructure/vectordb/service.yaml
 
   # Application services
   - services/viz-service/deployment.yaml
@@ -43,6 +46,9 @@ resources:
   - services/versioning-worker/bootstrap.yaml
   - services/versioning-worker/hpa.yaml
   - services/stats-service/deployment.yaml
+  - services/ai-service/deployment.yaml
+  - services/ai-service/service.yaml
+  - services/ai-service/pdb.yaml
   - services/frontend/deployment.yaml
   - services/frontend/service.yaml
   - services/frontend/hpa.yaml

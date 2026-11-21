@@ -12,6 +12,7 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import GraphConnectionORM
+from backend.common import credential_crypto
 from backend.common.models.management import (
     ConnectionCreateRequest,
     ConnectionUpdateRequest,
@@ -25,63 +26,15 @@ logger = logging.getLogger(__name__)
 # Credential encryption (Fernet symmetric)                             #
 # ------------------------------------------------------------------ #
 
-_PROD_ENV_VALUES = {"prod", "production"}
-
-
-class CredentialEncryptionError(RuntimeError):
-    """Raised when secrets would be persisted as plaintext in production."""
-
-
-def require_encryption_or_plaintext_ok() -> None:
-    """Fail closed in production.
-
-    Both credential stores (``graph_connections`` and ``idp_providers``)
-    fall back to plaintext JSON when ``CREDENTIAL_ENCRYPTION_KEY`` is unset.
-    That fallback is acceptable for dev/test but must never run in
-    production, where it would silently write secrets in the clear. Call
-    this on the write path before persisting plaintext.
-    """
-    if os.getenv("ENV", "dev").strip().lower() in _PROD_ENV_VALUES:
-        raise CredentialEncryptionError(
-            "CREDENTIAL_ENCRYPTION_KEY is unset but ENV is production — "
-            "refusing to store credentials as plaintext. Configure a "
-            "Fernet key (CREDENTIAL_ENCRYPTION_KEY) before persisting "
-            "secrets."
-        )
-
-
-def _get_fernet():
-    """Return a Fernet instance or None if key not configured."""
-    key = os.getenv("CREDENTIAL_ENCRYPTION_KEY")
-    if not key:
-        return None
-    try:
-        from cryptography.fernet import Fernet
-        return Fernet(key.encode() if isinstance(key, str) else key)
-    except Exception as e:
-        logger.warning("Credential encryption unavailable: %s", e)
-        return None
-
-
-def _encrypt(data: dict) -> str:
-    fernet = _get_fernet()
-    raw = json.dumps(data)
-    if fernet:
-        return fernet.encrypt(raw.encode()).decode()
-    require_encryption_or_plaintext_ok()  # fail closed in prod
-    return raw  # plaintext fallback (dev only)
-
-
-def _decrypt(blob: Optional[str]) -> dict:
-    if not blob:
-        return {}
-    fernet = _get_fernet()
-    try:
-        if fernet:
-            return json.loads(fernet.decrypt(blob.encode()))
-        return json.loads(blob)
-    except Exception:
-        return {}
+# The implementation lives in ``backend.common.credential_crypto`` so the AI
+# service shares it without importing the ORM; these are the names this
+# module's importers have always used.
+_PROD_ENV_VALUES = credential_crypto._PROD_ENV_VALUES
+CredentialEncryptionError = credential_crypto.CredentialEncryptionError
+require_encryption_or_plaintext_ok = credential_crypto.require_encryption_or_plaintext_ok
+_get_fernet = credential_crypto.get_fernet
+_encrypt = credential_crypto.encrypt
+_decrypt = credential_crypto.decrypt
 
 
 # ------------------------------------------------------------------ #

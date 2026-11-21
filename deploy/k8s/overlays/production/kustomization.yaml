@@ -65,6 +65,9 @@ images:
   - name: REGISTRY/aggregation-controlplane
     newName: us-docker.pkg.dev/PROJECT_ID/synodic/aggregation-controlplane
     newTag: prod-latest
+  - name: REGISTRY/ai-service
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/ai-service
+    newTag: prod-latest
   - name: REGISTRY/aggregation-worker
     newName: us-docker.pkg.dev/PROJECT_ID/synodic/aggregation-worker
     newTag: prod-latest

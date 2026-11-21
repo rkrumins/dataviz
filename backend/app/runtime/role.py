@@ -7,6 +7,8 @@ Controls which subsystems start in the FastAPI lifespan:
 * ``WORKER`` — Aggregation execution, heavy provider I/O (future: Redis Stream consumer).
 * ``CONTROLPLANE`` — Scheduler, outbox relay, crash recovery. Singleton.
 * ``DEV`` — All-in-one for local development (current default behaviour).
+* ``AI`` — The AI service (``python -m backend.ai_service``): its own process and
+  entry point, which starts none of the web tier's role-gated subsystems.
 
 Set via the ``SYNODIC_ROLE`` environment variable. Defaults to ``dev``.
 """
@@ -23,6 +25,7 @@ class SynodicRole(str, Enum):
     WORKER = "worker"
     CONTROLPLANE = "controlplane"
     DEV = "dev"
+    AI = "ai"
 
 
 _current_role: SynodicRole | None = None

@@ -90,6 +90,9 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     // Fail CLOSED, as the server does: offering Edit and run only for the
     // server to refuse it is worse than a button that appears a moment late.
     nativeQueryEnabled: false,
+    // Fail CLOSED, as the server does: the assistant sends questions to a model the
+    // deployment chose, so it appears only once the switch is known to be on.
+    aiAssistantEnabled: false,
     toursEnabled: false,                  // experimental preview — ships OFF
     canvasLayerFoldEnabled: false,        // experimental preview — ships OFF
     placementContractEnabled: false,      // experimental preview — ships OFF

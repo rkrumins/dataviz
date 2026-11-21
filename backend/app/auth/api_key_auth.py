@@ -38,7 +38,7 @@ from typing import Optional
 from fastapi import HTTPException, Request, status
 from sqlalchemy import select
 
-from backend.app.auth import api_key_errors, api_key_surface
+from backend.app.auth import api_key_errors, api_key_surface, delegation
 from backend.app.common import activity_context
 from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.db import engine as db_engine
@@ -143,6 +143,11 @@ class ApiKeyContext:
     reads: bool
     #: ``active``, or — on a self route only — why it would be refused.
     status: str = "active"
+    #: A read-only delegation to the AI service (``auth.delegation``), not a
+    #: stored key; ``parent_key_id`` is the key the delegated request came
+    #: with, when it came with one.
+    delegated: bool = False
+    parent_key_id: Optional[str] = None
 
     @property
     def active(self) -> bool:
@@ -173,17 +178,31 @@ async def authenticate(request: Request) -> Optional[ApiKeyContext]:
         return cached
     request.state.auth_method = "api_key"
     try:
-        context = await _authenticate(request, token)
+        if delegation.looks_like(token):
+            context = await _authenticate_delegation(request, token)
+        else:
+            context = await _authenticate(request, token)
     except HTTPException as exc:
         request.state.api_key = exc
         _count(exc)
         raise
     _count(None)
     request.state.api_key = context
-    request.state.api_key_id = context.key_id
+    # A delegation is not a stored key: usage and the access log count the
+    # key it came through, if any (``request.state.ai_delegation_id`` names
+    # the delegation itself).
+    request.state.api_key_id = context.parent_key_id if context.delegated else context.key_id
+    if context.delegated:
+        request.state.ai_delegation_id = context.key_id
     request.state.user_id = context.user.id
     request.state.api_key_expires_at = context.expires_at
-    activity_context.bind_actor(context.user.id, api_key_id=context.key_id)
+    activity_context.bind_actor(
+        context.user.id,
+        # A delegated request names the key it came through, if any — the
+        # MCP surface; one from a browser session names none. Its own id is
+        # not an API key and never goes into the ledger as one.
+        api_key_id=context.parent_key_id if context.delegated else context.key_id,
+    )
     return context
 
 
@@ -388,6 +407,91 @@ async def _authenticate(request: Request, token: str) -> ApiKeyContext:
         expires_at=identity.expires_at,
         rule=rule,
         reads=reads,
+    )
+
+
+#: The switch the AI service runs under. A delegation is honoured only while
+#: it is on, so turning the assistant off stops tokens already in flight.
+AI_FLAG = "aiAssistantEnabled"
+
+
+async def _authenticate_delegation(request: Request, token: str) -> ApiKeyContext:
+    """A read-only delegation to the AI service, held exactly as a key is.
+
+    In order: the assistant is switched on and authorization enforcement is
+    intact; the token verifies; the session it came from is not revoked; its
+    person still exists and is active; and then the same surface, read-only
+    check and resource fence as an API key, over claims built from that
+    person's live authority narrowed to the token's read-only scope.
+    """
+    from backend.app.auth.dependencies import _identity_service, _tombstoned, rbac_flag
+    from backend.app.services.permission_service import KeyScope, resolve_for_api_key
+
+    if not (rbac_flag("RBAC_ENFORCE_VIEWS") and rbac_flag("RBAC_ENFORCE_WORKSPACES")):
+        raise _unavailable(
+            "The assistant is unavailable while authorization enforcement is switched off.",
+        )
+    try:
+        enabled = await feature_flags.is_enabled_self_session(
+            AI_FLAG, default=fail_safe_default(AI_FLAG),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("AI assistant switch unreadable: %s", exc)
+        raise _unavailable("The assistant's switch cannot be read right now.")
+    if not enabled:
+        raise api_key_errors.invalid_key(
+            "ai_assistant_disabled", "The AI assistant is turned off for this deployment.",
+        )
+    try:
+        grant = delegation.verify(token)
+    except delegation.DelegationInvalid as exc:
+        raise api_key_errors.invalid_key("delegation_invalid", str(exc))
+    if grant.session_id and await _tombstoned(
+        grant.session_id, grant.user_id, where="delegation",
+    ):
+        raise api_key_errors.invalid_key(
+            "delegation_revoked", "The session this delegation came from has ended.",
+        )
+    user = await _identity_service(request).get_user(grant.user_id)
+    if user is None or (user.status or "").lower() not in ("active", ""):
+        raise api_key_errors.invalid_key(
+            "delegation_owner_inactive", "The person this delegation acts for cannot act.",
+        )
+
+    key_id = f"dlg_{grant.token_id}"
+    scope = KeyScope(
+        key_id=key_id, kind="delegation",
+        views=grant.scope.views, data=grant.scope.data, publish=False,
+        all_resources=grant.scope.all_resources,
+        workspaces=grant.scope.workspaces, view_ids=grant.scope.view_ids,
+        data_source_ids=grant.scope.data_source_ids,
+    )
+    async with db_engine.get_async_session() as session:
+        claims = await resolve_for_api_key(session, grant.user_id, scope)
+    resolved = getattr(claims, "key_scope", None)
+    if resolved is None or not resolved.read_only:
+        # Never act on a delegation that is not read-only, whatever built it.
+        logger.error("Delegation %s resolved without a read-only scope; refusing", key_id)
+        raise _unavailable("The assistant cannot be checked right now. Try again shortly.")
+
+    rule = api_key_surface.rule_for(request)
+    if rule is None or rule.level == api_key_surface.SELF:
+        raise api_key_errors.key_forbidden(
+            "delegation_not_allowed",
+            "The assistant cannot call this endpoint.",
+        )
+    reads = api_key_surface.is_read(request, rule)
+    if not reads:
+        raise api_key_errors.key_forbidden(
+            "delegation_read_only",
+            "The assistant can only read; this request would change something.",
+        )
+    await _fence(request, rule, resolved, reads=reads)
+    request.state.ai_conversation_id = grant.conversation_id or None
+    return ApiKeyContext(
+        key_id=key_id, user=user, claims=claims,
+        expires_at=str(grant.expires_at), rule=rule, reads=True,
+        delegated=True, parent_key_id=grant.parent_key_id,
     )
 
 

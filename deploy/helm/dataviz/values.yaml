@@ -177,6 +177,13 @@ secrets:
   # backend clients both read them from the secret.
   falkordbPassword: ""
   redisPassword: ""
+  # The AI service: the shared token between viz-service and ai-service
+  # (required with ENV=production), a pgvector DSN for embeddings (empty:
+  # lexical retrieval only), and a read-only service account's key for the
+  # views embedding sync (empty: views are found by keyword only).
+  aiInternalToken: ""
+  aiVectorDbUrl: ""
+  aiIndexerApiKey: ""
   # Admin libpq DSN for the db-init Job (CREATE ROLE/DATABASE needs privileges).
   dbInitDsn: "postgresql://postgres:REPLACE_ME@REPLACE_ME_PG_HOST:5432/postgres"
   # Only used when stores.postgres.enabled (in-cluster Postgres). Keep in
@@ -366,6 +373,10 @@ networkPolicy:
   ingressNamespace: ingress-nginx
   externalStoreCidrs:
     - 0.0.0.0/0
+  # Where the AI service may open HTTPS (443) connections: the model, token and
+  # MCP endpoints an administrator connects. Narrow to your gateway's range.
+  aiEgressCidrs:
+    - 0.0.0.0/0
 
 # ── Per-workload settings ─────────────────────────────────────────────
 # skipSchemaCheck: false (default) attaches the wait-for-schema
@@ -401,6 +412,19 @@ services:
     resources:
       requests: { cpu: 100m, memory: 256Mi }
       limits: { cpu: 500m, memory: 512Mi }
+  # The AI service (templates/ai-service.yaml). Off in the product until an
+  # administrator turns on the AI assistant; deployed so turning it on works.
+  ai:
+    enabled: true
+    replicas: 1
+    skipSchemaCheck: false
+    # Private host:port destinations it may call (an internal LLM gateway, a
+    # token or MCP endpoint). Public hosts need none; loopback and link-local
+    # are always refused. Model endpoints also need networkPolicy.aiEgressCidrs.
+    egressAllowedHosts: ""
+    resources:
+      requests: { cpu: 200m, memory: 384Mi }
+      limits: { cpu: "1", memory: 1Gi }
   # Versioning worker lanes (templates/versioning-worker.yaml): one Deployment
   # per lane of `python -m backend.app.services.versioning`. viz-service only
   # QUEUES import, export, publish and "Enable version control" jobs, so

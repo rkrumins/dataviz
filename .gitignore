@@ -255,3 +255,6 @@ backend/.venv/
 # the suffixed ones people make when the system Python has distro-managed
 # packages that `pip install -r` refuses to touch.
 .venv-*/
+
+# The AI service's docs corpus, built from docs/ (frontend/scripts/gen-ai-docs-corpus.mjs)
+backend/ai_service/knowledge/docs_corpus.generated.json

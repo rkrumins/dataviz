@@ -257,6 +257,14 @@ SURFACE: dict[tuple[str, str], Rule] = {
     ),
     **_entries("catalog", FILTERED, "list_catalog_items", "get_catalog_item"),
 
+    # ── The AI service's knowledge, over MCP ────────────────────────
+    # Other teams' agents read the product's docs and the views they may see.
+    # Not here: chat and query drafting (a person in the app), the person's
+    # conversations, and AI administration. The MCP route forwards a read-only
+    # delegation narrowed to the key's own scope; a view the key cannot read is
+    # filtered out of every answer, as it is for a session.
+    **_entries("ai", FILTERED, "mcp_knowledge", reads_only=True),
+
     # ── The key itself ──────────────────────────────────────────────
     **_entries("api_keys", SELF, "describe_this_key", "revoke_this_key"),
 }
