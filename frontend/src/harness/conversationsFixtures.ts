@@ -98,6 +98,45 @@ export const THREADS: Record<string, ThreadDetail> = {
     th_closed: detail({ id: 'th_closed', askedBy: 'usr_cy', messages: [q6, r6a], status: 'closed', access: { ...ACCESS, canAnswer: false } }),
 }
 
+// ── A data source's Questions tab ─────────────────────────────────────
+export const SOURCE: SubjectRef = {
+    type: 'data_source', id: 'ds_gl', name: 'General Ledger', workspaceId: 'ws_fin', workspaceName: 'Finance Risk',
+    link: '/workspaces/ws_fin?tab=data&section=sources&ds=ds_gl',
+}
+const dataRole = (authorId: string): Message['roles'] => (authorId === 'usr_ana' ? ['data_owner'] : authorId === 'usr_bo' ? ['data_steward'] : [])
+const sq1 = msg('usr_cy', 'How often is the General Ledger refreshed? The October close figures look a day behind.', 60 * 7, { kind: 'question', roles: ['asker'] })
+const sr1 = msg('usr_bo', 'Nightly at 02:00 UTC. During the close the hard-close load lands a day later, so a one-day lag is expected until the 5th.', 60 * 6, { roles: dataRole('usr_bo') })
+const sq2 = msg('usr_me', 'Is cost_centre_code safe to join on, or does it change when a centre is re-parented?', 60 * 24 * 3, { kind: 'question', roles: ['asker'] })
+const sr2 = msg('usr_ana', 'It is stable: re-parenting changes parent_code only. Join on cost_centre_code.', 60 * 24 * 2, { roles: dataRole('usr_ana') })
+const sq3 = msg('usr_eli', 'Can we get the APAC entities added to this source?', 60 * 30, { kind: 'question', roles: ['asker'] })
+
+export const SOURCE_THREADS: Record<string, ThreadDetail> = {
+    th_ds_refresh: detail({ id: 'th_ds_refresh', subject: SOURCE, askedBy: 'usr_cy', messages: [sq1, sr1], unread: true }),
+    th_ds_join: detail({
+        id: 'th_ds_join', subject: SOURCE, askedBy: 'usr_me', messages: [sq2, sr2], status: 'answered', answerMessageId: sr2.id,
+        resolvedBy: 'usr_me', resolvedAt: ago(60 * 24 * 2 - 20),
+    }),
+    th_ds_apac: detail({ id: 'th_ds_apac', subject: SOURCE, askedBy: 'usr_eli', messages: [sq3], visibility: 'private',
+        privateAudience: ['usr_eli', 'usr_ana', 'usr_bo', 'usr_me'] }),
+}
+
+export const SOURCE_SUMMARY: SubjectSummary = { open: 2, answered: 1, closed: 0, total: 3, unread: 1, watching: true, latest: ago(60 * 6), byEntity: {} }
+
+export const SOURCE_PEOPLE: SubjectPeople = {
+    viewOwners: [],
+    dataContacts: {
+        owner: { personId: 'usr_ana', via: 'named_owner', groupId: null, groupName: null, canRead: true },
+        stewards: [
+            { personId: 'usr_bo', via: 'named_steward', groupId: null, groupName: null, canRead: true },
+            { personId: 'usr_eli', via: 'named_steward', groupId: 'grp_fin', groupName: 'Finance data team', canRead: true },
+        ],
+        provenance: 'named',
+    },
+    fallback: [{ personId: 'usr_dee', via: 'workspace_admin', groupId: null, groupName: null, canRead: true }],
+    truncated: 0,
+    people: PEOPLE,
+}
+
 export const STATE_THREAD: Record<string, string> = {
     open: 'th_open', answered: 'th_answered', private: 'th_private', anchored: 'th_anchored', deleted: 'th_deleted', closed: 'th_closed',
 }
