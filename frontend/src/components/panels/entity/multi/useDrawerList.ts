@@ -4,7 +4,8 @@
  * screen. Short lists are drawn whole: below `VIRTUAL_ABOVE` rows, a virtualiser costs more than
  * it saves and makes the list harder to read in a test.
  */
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useReducer, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useDrawerScrollElement } from '../../shell/drawerScroll'
 
@@ -26,6 +27,12 @@ export function useDrawerList(count: number, estimate: number, getKey: (index: n
     for (const child of Array.from(scrollEl.children)) observer.observe(child)
     return () => observer.disconnect()
   }, [virtual, scrollEl])
+  // A row measured above what is read moves the scroll position and asks to be drawn at once. The
+  // virtualizer would draw the list once for each such row — a scroll past a dozen rows not
+  // measured yet drew it a dozen times in one task. They are drawn once, together, when the browser
+  // has reported them all: still before the frame is painted.
+  const [, redraw] = useReducer((n: number) => n + 1, 0)
+  const drawing = useRef(false)
   const virtualizer = useVirtualizer({
     count: virtual ? count : 0,
     getScrollElement: () => scrollEl,
@@ -33,6 +40,15 @@ export function useDrawerList(count: number, estimate: number, getKey: (index: n
     scrollMargin: margin,
     overscan: 8,
     getItemKey: getKey,
+    useFlushSync: false,
+    onChange: (_, sync) => {
+      if (!sync || drawing.current) return
+      drawing.current = true
+      queueMicrotask(() => {
+        drawing.current = false
+        flushSync(redraw)
+      })
+    },
   })
   return { listRef, virtual, virtualizer }
 }
