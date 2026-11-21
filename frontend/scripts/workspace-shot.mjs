@@ -5,7 +5,7 @@
  *
  *   node scripts/workspace-shot.mjs [shot ...]
  *
- * A shot is `as:fixture:tab[:section][:dark|:technical|:390][:key=value…]`, e.g.
+ * A shot is `as:fixture:tab[:section][:dark|:technical|:390|:tall][:key=value…]`, e.g.
  * `admin:failing:data:processing`, `viewer:populated:overview:dark`, or
  * `admin:populated:data:ds=ds_ledger:click=Edit details:390` — a `key=value` is passed to
  * the harness as it is (`ds`, `dstab`, `click`, `steward`, `details`…).
@@ -84,13 +84,14 @@ try {
     const parts = shot.split(':')
     const [as, fixture, tab] = parts
     const extra = parts.slice(3)
-    const section = extra.find(x => !['dark', 'technical', '390'].includes(x) && !x.includes('='))
+    const section = extra.find(x => !['dark', 'technical', '390', 'tall'].includes(x) && !x.includes('='))
     const query = new URLSearchParams({ as, fixture, tab })
     if (section) query.set('section', section)
     if (extra.includes('dark')) query.set('theme', 'dark')
     if (extra.includes('technical')) query.set('mode', 'technical')
     for (const kv of extra.filter(x => x.includes('='))) query.set(kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1))
-    const size = extra.includes('390') ? '390,1100' : '1440,1500'
+    // `tall`: a page that runs past one screen, whole.
+    const size = extra.includes('390') ? (extra.includes('tall') ? '390,2600' : '390,1100') : (extra.includes('tall') ? '1440,2400' : '1440,1500')
     const out = join(OUT, `workspace-${shot.replace(/[:=]/g, '-').replace(/\s+/g, '_')}.png`)
     await run(chromium, [
       '--headless', '--no-sandbox', '--disable-gpu', '--hide-scrollbars',

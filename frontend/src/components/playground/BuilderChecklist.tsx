@@ -206,8 +206,11 @@ function ProgressRing({ done, total }: { done: number; total: number }) {
                     </linearGradient>
                 </defs>
                 <circle cx="18" cy="18" r={r} fill="none" strokeWidth="3.5" className="stroke-black/[0.07] dark:stroke-white/[0.1]" />
-                <circle cx="18" cy="18" r={r} fill="none" strokeWidth="3.5" strokeLinecap="round" stroke="url(#first-steps-ring)"
-                    strokeDasharray={`${c * pct} ${c}`} className="transition-[stroke-dasharray] duration-500" />
+                {/* Nothing done draws nothing: a round cap on an empty arc is a stray dot. */}
+                {done > 0 && (
+                    <circle cx="18" cy="18" r={r} fill="none" strokeWidth="3.5" strokeLinecap="round" stroke="url(#first-steps-ring)"
+                        strokeDasharray={`${c * pct} ${c}`} className="transition-[stroke-dasharray] duration-500" />
+                )}
             </svg>
             <span className="text-[11px] font-bold tabular-nums text-ink">{done}/{total}</span>
         </span>

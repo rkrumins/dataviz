@@ -433,9 +433,10 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                 label={`${view.createdBy === me ? 'Your experiment' : 'An experiment'} — nothing here is production data`}
                                 detail="It lives in the Playground, apart from every team’s workspace"
                             >
-                                <span className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-gradient-to-r from-violet-500/10 to-fuchsia-500/10 px-2 py-0.5 text-[10px] font-semibold text-violet-600 dark:text-violet-300 shrink-0">
+                                {/* A phone keeps the name's room: the flask alone, still read out. */}
+                                <span className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-gradient-to-r from-violet-500/10 to-fuchsia-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-violet-600 dark:text-violet-300 shrink-0 sm:px-2">
                                     <FlaskConical className="w-3 h-3" aria-hidden />
-                                    Playground
+                                    <span className="sr-only sm:not-sr-only">Playground</span>
                                 </span>
                             </HoverTip>
                         )}

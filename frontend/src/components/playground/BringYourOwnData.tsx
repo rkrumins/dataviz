@@ -31,6 +31,8 @@ import {
 const MAX_BYTES = 20 * 1024 * 1024
 /** Rows to fix shown at once; the rest are counted. */
 const SHOWN = 8
+/** A field that stands out from the dialog it sits on, in either theme. */
+const FIELD = 'input bg-canvas border-black/10 dark:border-white/10'
 
 const TEMPLATES: { file: keyof typeof TEMPLATE_FILES; what: string; type: string }[] = [
     { file: 'things.csv', what: 'Things', type: 'text/csv' },
@@ -280,7 +282,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
                                 onDrop={onDrop}
                                 className={cn(
                                     'flex flex-col items-center gap-2 rounded-2xl border-2 border-dashed px-4 py-6 text-center transition',
-                                    dragging ? 'border-violet-500 bg-violet-500/[0.06]' : 'border-glass-border bg-canvas/40',
+                                    dragging ? 'border-violet-500 bg-violet-500/[0.06]' : 'border-black/15 dark:border-white/15 bg-canvas/40',
                                 )}
                             >
                                 <UploadCloud className={cn('w-7 h-7', dragging ? 'text-violet-500' : 'text-ink-muted')} aria-hidden />
@@ -339,7 +341,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
                             <Step n={3} title="Match your columns" hint="Guessed from the headers — change any that’s wrong.">
                                 <div className="grid gap-3 sm:grid-cols-2">
                                     {thingsCsv && (
-                                        <fieldset className="rounded-2xl border border-glass-border bg-canvas/60 p-3">
+                                        <fieldset className="rounded-2xl border border-black/[0.07] bg-canvas/60 p-3 dark:border-white/10">
                                             <legend className="px-1 text-xs font-semibold text-ink">Things <span className="font-normal text-ink-muted">· {thingsCsv.fileName}</span></legend>
                                             <div className="grid grid-cols-2 gap-2">
                                                 {THING_FIELDS.map(f => (
@@ -356,7 +358,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
                                         </fieldset>
                                     )}
                                     {connectionsCsv && (
-                                        <fieldset className="rounded-2xl border border-glass-border bg-canvas/60 p-3">
+                                        <fieldset className="rounded-2xl border border-black/[0.07] bg-canvas/60 p-3 dark:border-white/10">
                                             <legend className="px-1 text-xs font-semibold text-ink">Connections <span className="font-normal text-ink-muted">· {connectionsCsv.fileName}</span></legend>
                                             <div className="grid grid-cols-2 gap-2">
                                                 {CONNECTION_FIELDS.map(f => (
@@ -420,13 +422,13 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
                                     <span className="text-xs font-semibold text-ink-secondary">Name</span>
                                     <input id={ids.name} value={name} maxLength={OWN_DATA_LIMITS.name} required
                                         onChange={(e) => { setName(e.target.value); setNameEdited(true) }}
-                                        placeholder="e.g. Coffee shop sales" className="input mt-1" />
+                                        placeholder="e.g. Coffee shop sales" className={cn(FIELD, 'mt-1')} />
                                 </label>
                                 <label htmlFor={ids.description} className="block">
                                     <span className="text-xs font-semibold text-ink-secondary">Description <span className="font-normal text-ink-muted">· optional</span></span>
                                     <textarea id={ids.description} value={description} maxLength={OWN_DATA_LIMITS.description} rows={2}
                                         onChange={(e) => setDescription(e.target.value)}
-                                        placeholder="What it shows, and where the data comes from" className="input mt-1 resize-none" />
+                                        placeholder="What it shows, and where the data comes from" className={cn(FIELD, 'mt-1 resize-none')} />
                                 </label>
                             </div>
                         </Step>
@@ -439,7 +441,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
                     </div>
 
                     <div className="flex flex-wrap items-center justify-end gap-2 border-t border-glass-border px-5 py-4 sm:px-6">
-                        <p className="mr-auto text-[11px] text-ink-muted">
+                        <p className="mr-auto w-full text-[11px] text-ink-muted sm:w-auto">
                             Counts as one of your graphs{quotaLeft !== undefined && quotaLeft > 0 ? ` · ${quotaLeft} left` : ''}
                         </p>
                         <button type="button" onClick={onClose}
@@ -494,7 +496,7 @@ function ColumnSelect({ label, aria, required, headers, value, onChange }: {
                 {label}{required && <span className="text-rose-500"> *</span>}
             </span>
             <select aria-label={aria} aria-required={required || undefined} value={value ?? ''} onChange={(e) => onChange(e.target.value || null)}
-                className="input mt-0.5 py-1.5 text-xs">
+                className={cn(FIELD, 'mt-0.5 py-1.5 text-xs')}>
                 <option value="">{required ? 'Choose a column…' : 'None'}</option>
                 {headers.filter(Boolean).map(h => <option key={h} value={h}>{h}</option>)}
             </select>
@@ -504,7 +506,7 @@ function ColumnSelect({ label, aria, required, headers, value, onChange }: {
 
 function Stat({ value, label }: { value: number; label: string }) {
     return (
-        <p className="rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2">
+        <p className="rounded-xl border border-black/[0.07] bg-canvas-elevated px-3 py-2 dark:border-white/10">
             <span className="block text-lg font-bold tabular-nums leading-tight text-ink">{n(value)}</span>{' '}
             <span className="block text-[11px] text-ink-muted">{label}</span>
         </p>

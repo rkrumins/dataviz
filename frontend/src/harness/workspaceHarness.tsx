@@ -32,6 +32,13 @@
  *            starts the first Playground sample, and it stays starting)
  *   fresh    1 — fixture=playground before the reader's first graph (their graphs and views gone)
  *   full     1 — fixture=playground with every graph of the reader's used
+ *   sample   done — starting a sample answers (its Context View opens, with the notification)
+ *            instead of staying on "Starting…"; &tours=1 offers the canvas tour in it
+ *   byod     ok | errors — after &click=Bring your own data, the template files (errors: with a
+ *            connection naming a key no thing has) are dropped on the dialog
+ *   page=view     a sample's Context View: its header (the Playground chip), on the Playground
+ *   page=publish  publishing a draft of one's own Playground graph as its maker (&as=member:
+ *                 no publish permission — the server's canPublish says yes; &maker=0 says no)
  *
  * `npm run harness:workspace` drives Chromium over the main combinations and
  * writes PNGs to .harness/.
@@ -63,6 +70,12 @@ import { AskForDataWizard, AskForDataWizardHost } from '../components/data-reque
 import { DataRequestsPanel } from '../components/data-requests/DataRequestsPanel'
 import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { useWorkspacesStore } from '../store/workspaces'
+import { NotificationStack } from '../components/ui/notifications'
+import { ViewPageHeader } from '../components/views/ViewPageHeader'
+import { CommitDialog } from '../features/versioning/components/CommitDialog'
+import { useActiveDraftAccess } from '../features/versioning/hooks/useActiveDraftAccess'
+import { buildChangeSet } from '../features/versioning/model/changeModel'
+import { TEMPLATE_FILES } from '../components/playground/ownData'
 import {
     ONTOLOGIES, STATS, contactsOf, metadataOf, readinessOf, sourceActivityOf, viewsOf, workspaceOf, type WorkspaceFixtureName,
 } from './workspaceFixtures'
@@ -80,6 +93,8 @@ const steward = params.get('steward') === '1'
 const click = params.get('click')
 const fresh = params.get('fresh') === '1'
 const full = params.get('full') === '1'
+const sampleDone = params.get('sample') === 'done'
+const byod = params.get('byod')
 /** Without the reader's own rows, before their first graph (`&fresh=1`). */
 const notMine = <T,>(rows: readonly T[]): T[] => rows.filter(r => !fresh || (r as { createdBy?: string }).createdBy !== 'usr_me')
 const graphsUsed = full ? 5 : fresh ? 0 : 2
@@ -194,8 +209,36 @@ const PERMS: Record<typeof as, string[]> = {
         'workspace:ontology:*', 'workspace:catalog:*', 'workspace:provider:*'],
 }
 
+// A sample started, as POST /playground/samples/{id} answers: its Context View opens first.
+const STARTED_SAMPLE = {
+    dataSourceId: 'ds_pg_retail', viewId: 'v_pg_ctx', viewIds: { context: 'v_pg_ctx', graph: 'v_pg_graph', hierarchy: 'v_pg_tree' },
+    draftId: 'br_example', reviewId: 'pr_example',
+}
+const SAMPLE_VIEW = {
+    id: 'v_pg_ctx', name: 'Retail data pipeline', viewType: 'context', layoutType: 'context', workspaceId: 'ws_fin', workspaceName: 'Playground',
+    dataSourceId: 'ds_pg_retail', dataSourceName: 'Retail data pipeline', visibility: 'workspace', sourceKind: 'versioned',
+    description: 'Sales from the store, tills and payments, through the warehouse to the dashboards — one layer per kind of thing.',
+    config: { icon: 'ShoppingCart', content: { visibleEntityTypes: ['Source system', 'Ingestion job', 'Warehouse table', 'Transformation', 'Dashboard', 'Metric'] } },
+    createdBy: 'usr_me', createdByName: 'Sam Reader', isPinned: false, favouriteCount: 0, isFavourited: false, tags: ['sample'],
+    createdAt: new Date(Date.now() - 120_000).toISOString(), updatedAt: new Date(Date.now() - 120_000).toISOString(),
+    access: { canEdit: true, canManageGrants: true, canChangeVisibility: true, canPublish: false, canRequestPublish: false, accessVia: 'owner', dataAccess: 'full' },
+}
+// The example draft of a sample, as its maker reads it: theirs to publish (`canPublish`).
+const EXAMPLE_FRESHNESS = {
+    behind: false, behindBy: 0, mainHeadCommitSeq: 1, baseCommitSeq: 1, status: 'open', headCommitSeq: 2, visibility: 'private',
+    access: { canRead: true, canWrite: true, canManage: true, canPublish: params.get('maker') !== '0' },
+}
+const DRAFTS_POLICY = {
+    overrides: {}, workspace: {},
+    effective: { defaultVisibility: 'private', levels: {}, selfApproval: true, selfMerge: true, requiredApprovals: 1, threadsHold: false, sources: {} },
+}
+const EXAMPLE_CHANGES = buildChangeSet([
+    { entityId: 'urn:finance-dashboard', kind: 'node', status: 'added', label: 'Finance dashboard', origin: { source: 'committed' } },
+    { entityId: 'urn:powers', kind: 'edge', status: 'added', label: 'POWERS', origin: { source: 'committed' } },
+] as never)
+
 // ── fetch, answered from the fixtures ─────────────────────────────────
-const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 const realFetch = window.fetch.bind(window)
 window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, window.location.origin)
@@ -260,8 +303,19 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         })
     }
     if (p === '/api/v1/playground/samples') return json({ quotaLeft: 5 - graphsUsed, samples: PLAYGROUND_SAMPLES })
-    // Starting one stays starting: the card's spinner, for a screenshot.
-    if (p.startsWith('/api/v1/playground/samples/')) return new Promise<Response>(() => {})
+    // Starting one stays starting — the card's spinner, for a screenshot — unless &sample=done:
+    // then it answers as a sample does now, its Context View first, with an example review.
+    if (p.startsWith('/api/v1/playground/samples/')) {
+        return sampleDone ? json(STARTED_SAMPLE) : new Promise<Response>(() => {})
+    }
+    if (p === '/api/v1/playground/imports') {
+        return json({ dataSourceId: 'ds_pg_coffee', viewId: 'v_pg_ctx', viewIds: { context: 'v_pg_ctx', graph: 'v_pg_graph' } }, 201)
+    }
+    // A sample's Context View, and publishing a draft of it as its maker.
+    if (p === `/api/v1/views/${SAMPLE_VIEW.id}`) return json(SAMPLE_VIEW)
+    if (p.endsWith('/branches/br_example/freshness')) return json(EXAMPLE_FRESHNESS)
+    if (p.endsWith('/branches/br_example/view-changes')) return json({ branchId: 'br_example', views: [], hidden: 0 })
+    if (p.endsWith('/drafts-policy')) return json(DRAFTS_POLICY)
     if (p === '/api/v1/admin/workspaces/summary') {
         const row = { id: ws.id, name: ws.name, isDefault: false, dataSources: ws.dataSources.length, activeDataSources: ws.dataSources.length,
             pendingDataSources: 0, nodes: 64_610, edges: 160_655, entityTypes: ['Table', 'Column', 'Report'], views: views.length, sources: {} }
@@ -323,6 +377,17 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const rows = REVIEWS.filter(r => r.workspaceId === wsId)
         return json({ ...centerCounts(rows), queue: url.searchParams.get('queue') ?? 'needs_review', items: rows, total: rows.length })
     }
+    // The reader's own reviews and drafts, for the Playground's first steps: none before their first
+    // graph; after it, a draft of their own (a review not yet).
+    if (p.endsWith('/review-inbox')) {
+        return json({ ...centerCounts([]), queue: url.searchParams.get('queue') ?? 'needs_review', items: [], total: 0 })
+    }
+    if (p === '/api/v1/views/me/drafts') {
+        return json(fresh || fixture !== 'playground' ? [] : [{
+            draftId: 'br_mine', graphId: 'g_pg_crm', viewId: 'v_pg_crm', viewName: 'Where leads go', viewType: 'graph', workspaceId: 'ws_fin',
+            name: null, createdAt: ago(1), updatedAt: ago(0.5),
+        }])
+    }
     if (p.endsWith('/review-inbox/counts')) {
         return json({ counts: { needs_review: as === 'viewer' ? 0 : 2, waiting: 1, sent_back: 0, ready: 0, open: 3, done: 12 }, unread: {}, capped: false })
     }
@@ -355,7 +420,7 @@ useAuthStore.setState({
     permissions: { sid: 'harness', global: platform ? ['system:admin'] : page === 'workspace-requests' || page === 'data-requests' || params.get('creator') === '1' ? ['system:workspaces:create'] : [], ws: { ws_fin: PERMS[as] } },
 } as never)
 usePersonaStore.setState({ mode })
-useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, workspaceRequestsEnabled: true, dataRequestsEnabled: true, toursEnabled: !!tour,
+useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, workspaceRequestsEnabled: true, dataRequestsEnabled: true, toursEnabled: !!tour || params.get('tours') === '1',
     dataSourceMetadataEnabled: params.get('details') !== '0' } })
 if (page === 'dashboard') {
     useProviderStatusStore.setState({ statuses: {
@@ -386,9 +451,29 @@ function Harness() {
     useEffect(() => {
         if (!click) return
         const t = window.setTimeout(() => {
-            const hit = [...document.querySelectorAll('button')].find(b => b.textContent?.trim() === click)
+            // Its text, or the name it is given (a card named by its title: "Bring your own data").
+            const named = (b: HTMLButtonElement) => b.getAttribute('aria-label')
+                ?? document.getElementById(b.getAttribute('aria-labelledby') ?? '')?.textContent?.trim()
+            const hit = [...document.querySelectorAll('button')].find(b => b.textContent?.trim() === click || named(b) === click)
             hit?.click()
         }, 1200)
+        return () => window.clearTimeout(t)
+    }, [])
+    // Bring your own data: the templates dropped on the dialog once it is open (&byod=ok|errors).
+    useEffect(() => {
+        if (!byod) return
+        const t = window.setTimeout(() => {
+            const input = document.querySelector<HTMLInputElement>('input[type="file"][aria-label="Choose files"]')
+            if (!input) return
+            const connections = byod === 'errors'
+                ? `${TEMPLATE_FILES['connections.csv']}daily_sales,FEEDS,finance_forecast\nloyalty_report,,customers\n`
+                : TEMPLATE_FILES['connections.csv']
+            const files = new DataTransfer()
+            files.items.add(new File([TEMPLATE_FILES['things.csv']], 'coffee-shop-things.csv', { type: 'text/csv' }))
+            files.items.add(new File([connections], 'coffee-shop-connections.csv', { type: 'text/csv' }))
+            input.files = files.files
+            input.dispatchEvent(new Event('change', { bubbles: true }))
+        }, 1700)
         return () => window.clearTimeout(t)
     }, [])
     // A tour, at a step, once the page has had time to load what it spotlights.
@@ -405,7 +490,8 @@ function Harness() {
     for (const k of ['tab', 'section', 'ds', 'dstab']) { const v = params.get(k); if (v) address.set(k, v) }
     const at = page === 'workspaces' ? `/workspaces${params.get('tab') ? `?tab=${params.get('tab')}` : ''}`
         : page === 'dashboard' ? '/dashboard'
-        : ['playground-card', 'request-wizard', 'workspace-requests', 'request-card', 'groups', 'data-requests', 'data-request-wizard'].includes(page) ? `/${page}` : page === 'reviews'
+        : page === 'view' ? `/views/${SAMPLE_VIEW.id}`
+        : ['playground-card', 'request-wizard', 'workspace-requests', 'request-card', 'groups', 'data-requests', 'data-request-wizard', 'publish'].includes(page) ? `/${page}` : page === 'reviews'
         ? `/reviews${params.get('workspace') ? `?workspace=${params.get('workspace')}` : ''}`
         : `/workspaces/ws_fin${address.toString() ? `?${address}` : ''}`
 
@@ -438,6 +524,8 @@ function Harness() {
                             } />
                             <Route path="/data-request-wizard" element={<AskForDataWizard workspace={{ id: 'ws_fin', name: 'Finance Risk' }} onClose={() => {}} />} />
                             <Route path="/request-card" element={<div className="mx-auto max-w-5xl p-8"><WorkspaceRequestPrompt /></div>} />
+                            <Route path="/views/:viewId" element={<SampleViewPage />} />
+                            <Route path="/publish" element={<MakerPublish />} />
                             <Route path="/playground-card" element={
                                 <div className="mx-auto max-w-5xl space-y-6 p-8">
                                     <PlaygroundCard />
@@ -447,11 +535,33 @@ function Harness() {
                         </Routes>
                         {/* Ask for data, from the workspace page (the app shell mounts it). */}
                         <AskForDataWizardHost />
+                        <NotificationStack />
+                        {/* Headless Chromium's virtual time doesn't run the cards' entrance: show them as they settle. */}
+                        <style>{'[data-testid="notification-stack"] > * { opacity: 1 !important; transform: none !important; }'}</style>
                         {tour && <TourOverlay />}
                     </div>
                 </MemoryRouter>
             </ViewEditorContext.Provider>
         </QueryClientProvider>
+    )
+}
+
+/** A view page in the Playground: its header over the canvas's place (the canvas has harnesses of its own). */
+function SampleViewPage() {
+    return (
+        <div className="flex h-screen flex-col">
+            <ViewPageHeader viewId={SAMPLE_VIEW.id} workspaceName="Playground" />
+            <div className="relative flex-1 bg-canvas" style={{ backgroundImage: 'radial-gradient(circle, var(--nx-border-glass, rgba(100,116,139,.25)) 1px, transparent 1px)', backgroundSize: '22px 22px' }} />
+        </div>
+    )
+}
+
+/** Publishing the example draft of a sample, as its maker: what may be done is the server's word. */
+function MakerPublish() {
+    const access = useActiveDraftAccess('ws_fin', 'g_pg_retail', null, 'br_example')
+    return (
+        <CommitDialog workspaceId="ws_fin" graphId="g_pg_retail" branchId="br_example" dataSourceId="ds_pg_retail"
+            changeSet={EXAMPLE_CHANGES} onClose={() => {}} canPublishDraft={access.canManage} canPublish={access.canPublish} />
     )
 }
 

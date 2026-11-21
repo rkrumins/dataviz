@@ -353,12 +353,13 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
 
       {/* Two ways on don't fit beside the message: they get a row of their own under it. */}
       {notification.action && notification.secondaryAction && (
-        <div className="-mt-1.5 flex flex-wrap gap-1.5 pb-3 pl-11 pr-4">
+        // Each label lines up with the message above it (the button's own padding sits left of it).
+        <div className="-mt-1.5 flex flex-wrap gap-1 pb-3 pl-[38px] pr-3">
           {[notification.action, notification.secondaryAction].map(a => (
             <button
               key={a.label}
               onClick={() => { a.onClick(); onDismiss() }}
-              className="pointer-events-auto px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50/70 dark:bg-indigo-950/30 hover:bg-indigo-100 dark:hover:bg-indigo-950/50 transition-colors"
+              className="pointer-events-auto px-2 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
             >
               {a.label}
             </button>
