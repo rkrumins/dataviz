@@ -92,12 +92,13 @@ async def _assemble(app_state) -> dict:
         probes.probe_overview(app_state),
         probes.probe_graph_providers(app_state),
         probes.probe_bootstrap_jobs(),
+        probes.probe_ai_service(),
         return_exceptions=True,
     )
     (viz, mgmt_db, gv_db, bus_redis, cache_redis, falkordb,
      controlplane, worker, stats_svc, graph_svc,
      streams, projection, agg_jobs, stats_polling, reconciliation, outbox,
-     overview, graph_providers, bootstrap_jobs) = results
+     overview, graph_providers, bootstrap_jobs, ai_svc) = results
 
     services = [
         _coerce_service(viz, "vizService", "Viz Service"),
@@ -111,6 +112,9 @@ async def _assemble(app_state) -> dict:
         _coerce_service(stats_svc, "statsService", "Stats Service"),
         _coerce_service(graph_svc, "graphService", "Graph Service"),
     ]
+    # Shown only while the AI assistant is on (the probe answers None otherwise).
+    if ai_svc is not None:
+        services.append(_coerce_service(ai_svc, "aiService", "AI Service"))
     streams = _coerce_data(streams)
     projection = _coerce_data(projection)
     agg_jobs = _coerce_data(agg_jobs)

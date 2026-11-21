@@ -963,6 +963,34 @@ async def probe_stats_service() -> dict:
         return _svc("statsService", "Stats Service", "down", error=_err(exc))
 
 
+async def probe_ai_service() -> Optional[dict]:
+    """The AI service's health — only while the AI assistant is switched on,
+    so a deployment that does not use it is not shown a service that is down
+    on purpose."""
+    from backend.app.services.feature_flags import feature_flags
+
+    try:
+        enabled = await feature_flags.is_enabled_self_session("aiAssistantEnabled", default=False)
+    except Exception:  # noqa: BLE001 — unreadable switch: the assistant is off (fail closed)
+        enabled = False
+    if not enabled:
+        return None
+    started = time.monotonic()
+    url = os.getenv("AI_SERVICE_URL", "http://ai-service:8093").rstrip("/")
+    try:
+        async with asyncio.timeout(_BUDGET_HTTP):
+            resp = await _http().get(f"{url}/health")
+        latency_ms = (time.monotonic() - started) * 1000
+        if resp.status_code != 200:
+            return _svc("aiService", "AI Service", "down", latency_ms=latency_ms,
+                        error=f"HTTP {resp.status_code}")
+        body = resp.json()
+        detail = {k: body.get(k) for k in ("knowledge", "vectorStore") if k in body}
+        return _svc("aiService", "AI Service", "healthy", latency_ms=latency_ms, detail=detail)
+    except Exception as exc:
+        return _svc("aiService", "AI Service", "down", error=_err(exc))
+
+
 async def probe_graph_service() -> dict:
     started = time.monotonic()
     try:

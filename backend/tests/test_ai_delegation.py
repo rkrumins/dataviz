@@ -206,3 +206,27 @@ async def test_an_api_key_reaches_only_the_knowledge_mcp(client, db_session):
     chat = await client.post("/api/v1/ai/chat/stream", headers=key.headers, json={"message": "hi"})
     assert chat.status_code == 403
     assert error(chat) == "api_key_not_allowed"
+
+
+# ── Infrastructure status ───────────────────────────────────────────────
+
+
+async def test_the_status_tile_appears_only_while_the_assistant_is_on(monkeypatch):
+    from backend.app.services.feature_flags import feature_flags
+    from backend.app.services.system_status import probes
+
+    state = {"on": False}
+
+    async def switch(key, default=False):
+        return state["on"] if key == "aiAssistantEnabled" else default
+
+    monkeypatch.setattr(feature_flags, "is_enabled_self_session", switch)
+    assert await probes.probe_ai_service() is None
+
+    state["on"] = True
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={"status": "healthy", "knowledge": "ready",
+                                            "vectorStore": "pgvector"})))
+    monkeypatch.setattr(probes, "_http", lambda: client)
+    tile = await probes.probe_ai_service()
+    assert (tile["key"], tile["status"], tile["detail"]["vectorStore"]) == ("aiService", "healthy", "pgvector")
