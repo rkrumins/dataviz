@@ -19,6 +19,7 @@
 import { useState } from 'react'
 import {
     ArrowRightLeft,
+    AtSign,
     Bell,
     Building2,
     CalendarClock,
@@ -29,6 +30,7 @@ import {
     Database,
     GitMerge,
     GitPullRequestArrow,
+    Globe,
     Hand,
     KeyRound,
     KeySquare,
@@ -37,6 +39,7 @@ import {
     Megaphone,
     MessageSquare,
     Share2,
+    Reply,
     RotateCcw,
     ShieldAlert,
     Sparkles,
@@ -359,6 +362,35 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: XCircle,
         icon: 'text-slate-500',
         tile: 'bg-slate-500/10',
+    },
+    // A review's discussion: you were mentioned, someone replied in a thread
+    // you are in, or commented on a review you are part of.
+    'review.mention': {
+        Icon: AtSign,
+        icon: 'text-violet-500',
+        tile: 'bg-violet-500/10',
+    },
+    'review.reply': {
+        Icon: Reply,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'review.comment': {
+        Icon: MessageSquare,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    // Part of a draft you worked on was published; the rest stays on it.
+    'draft.returned': {
+        Icon: GitMerge,
+        icon: 'text-teal-500',
+        tile: 'bg-teal-500/10',
+    },
+    // A view in your workspace was published to everyone signed in.
+    'view.published': {
+        Icon: Globe,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
     },
     'reconcile.suspended': {
         Icon: ShieldAlert,

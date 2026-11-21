@@ -14,7 +14,7 @@ import { UserAvatar } from '@/components/ui/UserAvatar'
 import { useAuthStore } from '@/store/auth'
 import type { ReviewComment, ReviewThread, ReviewThreadFilter } from '@/services/versioningApiService'
 import { CommentComposer } from './CommentComposer'
-import { useReviewCommentActions, useReviewThreads } from './useReviewComments'
+import { useReviewCommentActions, useReviewMentionSource, useReviewThreads } from './useReviewComments'
 import { splitMentions } from './mentions'
 
 export interface DiscussionAccess {
@@ -45,6 +45,7 @@ function CommentItem({ wsId, prId, comment, names, access, reply }: {
 }) {
   const me = useAuthStore((s) => s.user?.id)
   const { edit, remove } = useReviewCommentActions(wsId, prId)
+  const mentionSource = useReviewMentionSource(wsId, prId)
   const [editing, setEditing] = useState(false)
   const [menu, setMenu] = useState(false)
   const [confirming, setConfirming] = useState(false)
@@ -63,7 +64,7 @@ function CommentItem({ wsId, prId, comment, names, access, reply }: {
         </p>
         {editing ? (
           <CommentComposer
-            wsId={wsId} prId={prId} autoFocus className="mt-1"
+            mentionSource={mentionSource} autoFocus className="mt-1"
             initial={{ body: comment.body, mentions: Object.fromEntries(comment.mentions.map((id) => [id, nameOf(id, names)])) }}
             onCancel={() => setEditing(false)}
             onSubmit={async (body) => { await edit.mutateAsync({ id: comment.id, body }); setEditing(false) }}
@@ -114,6 +115,7 @@ export function ThreadView({ wsId, prId, thread, names, access, target, focused 
   focused?: boolean
 }) {
   const { post, resolve } = useReviewCommentActions(wsId, prId)
+  const mentionSource = useReviewMentionSource(wsId, prId)
   const resolved = !!thread.resolvedAt
   const [open, setOpen] = useState(!resolved || !!focused)
   const [replying, setReplying] = useState(false)
@@ -163,7 +165,7 @@ export function ThreadView({ wsId, prId, thread, names, access, target, focused 
             </div>
           )}
           {replying ? (
-            <CommentComposer wsId={wsId} prId={prId} autoFocus placeholder="Reply…" submitLabel="Reply" className="ml-3"
+            <CommentComposer mentionSource={mentionSource} autoFocus placeholder="Reply…" submitLabel="Reply" className="ml-3"
               onCancel={() => setReplying(false)}
               onSubmit={(body, mentions) => post.mutateAsync({ body, mentions, threadId: thread.id })} />
           ) : (
@@ -214,6 +216,7 @@ export function ReviewThreads({
 }: ReviewThreadsProps) {
   const q = useReviewThreads(wsId, prId, filter)
   const { post } = useReviewCommentActions(wsId, prId)
+  const mentionSource = useReviewMentionSource(wsId, prId)
   const pages = q.data?.pages ?? []
   const loaded = pages.flatMap((p) => p.threads)
   const threads = exclude ? loaded.filter((t) => t.id !== exclude) : loaded
@@ -251,7 +254,7 @@ export function ReviewThreads({
           )}
           <CommentComposer
             key={compose.path ?? ''}
-            wsId={wsId} prId={prId} placeholder={compose.placeholder} autoFocus={!!compose.path}
+            mentionSource={mentionSource} placeholder={compose.placeholder} autoFocus={!!compose.path}
             onSubmit={async (body, mentions) => {
               await post.mutateAsync({ body, mentions, entityId: compose.entityId ?? null, path: compose.path ?? null })
               onClearPath?.()

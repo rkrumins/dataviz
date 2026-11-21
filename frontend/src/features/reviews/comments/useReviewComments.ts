@@ -3,11 +3,14 @@
  * per change, who can be mentioned — each refreshed while on screen (focus, and every 30 s), so
  * a reply someone else wrote shows up without a reload. Every write refreshes them all.
  */
+import { useMemo } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   deleteReviewComment, editReviewComment, getReviewCommentCounts, listReviewCommentPeople, listReviewThreads,
   postReviewComment, setReviewThreadResolved, type ReviewThreadFilter,
 } from '@/services/versioningApiService'
+import type { MentionSource } from './CommentComposer'
+import { matchMentionCandidates } from './mentions'
 
 /** How often a discussion on screen is read again. */
 const POLL_MS = 30_000
@@ -42,14 +45,23 @@ export function useReviewCommentCounts(wsId: string, prId: string | null | undef
   })
 }
 
-/** Who can be mentioned — asked for once someone starts to mention. */
-export function useReviewCommentPeople(wsId: string, prId: string, enabled: boolean) {
-  return useQuery({
-    queryKey: COMMENT_KEYS.people(wsId, prId),
-    queryFn: () => listReviewCommentPeople(wsId, prId),
-    enabled,
-    staleTime: 5 * 60_000,
-  })
+/** Who can be mentioned, for the composer — the review's people, asked for once someone starts
+ *  to mention and then matched here as the name is typed. */
+export function useReviewMentionSource(wsId: string, prId: string): MentionSource {
+  const qc = useQueryClient()
+  return useMemo(() => ({
+    queryKey: [...COMMENT_KEYS.people(wsId, prId), 'matching'],
+    load: async (q: string) => {
+      const people = await qc.fetchQuery({
+        queryKey: COMMENT_KEYS.people(wsId, prId),
+        queryFn: () => listReviewCommentPeople(wsId, prId),
+        staleTime: 5 * 60_000,
+      })
+      return matchMentionCandidates(people.map((p) => ({
+        id: p.userId, name: p.displayName || p.email || p.userId, email: p.email,
+      })), q)
+    },
+  }), [qc, wsId, prId])
 }
 
 /** Post, edit, delete, resolve — each refreshes every read of this discussion. */
