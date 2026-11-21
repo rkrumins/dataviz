@@ -356,6 +356,7 @@ export function ThreadView({ threadId, focusMessageId, onBack, onShowOnCanvas, o
                         mentionSource={mentionSource}
                         placeholder={isAsker ? 'Add to your question…' : 'Write a reply…'}
                         submitLabel="Reply"
+                        suggestionsPlacement="above"
                         onSubmit={async (body, mentions, clientKey) => {
                             try {
                                 await actions.reply.mutateAsync({ threadId: thread.id, body, mentions, clientKey })

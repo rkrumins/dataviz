@@ -46,11 +46,14 @@ export interface CommentComposerProps {
    *  same on every Retry of one comment. */
   onSubmit: (body: string, mentions: string[], clientKey: string) => Promise<unknown>
   onCancel?: () => void
+  /** Where the `@` list opens: `above` for a box held to the foot of a pane. */
+  suggestionsPlacement?: 'below' | 'above'
   className?: string
 }
 
 export function CommentComposer({
-  mentionSource, placeholder = 'Leave a comment…', submitLabel = 'Comment', autoFocus, initial, onSubmit, onCancel, className,
+  mentionSource, placeholder = 'Leave a comment…', submitLabel = 'Comment', autoFocus, initial, onSubmit, onCancel,
+  suggestionsPlacement = 'below', className,
 }: CommentComposerProps) {
   const editing = !!initial
   const me = useAuthStore((s) => s.user)
@@ -224,7 +227,8 @@ export function CommentComposer({
         </div>
         {open && (
           <ul id={listId} role="listbox" aria-label="People to mention"
-            className="absolute left-0 top-full mt-1 z-20 w-72 max-w-full rounded-xl border border-glass-border bg-canvas-elevated shadow-glass-lg py-1">
+            className={cn('absolute left-0 z-20 w-72 max-w-full rounded-xl border border-glass-border bg-canvas-elevated shadow-glass-lg py-1',
+              suggestionsPlacement === 'above' ? 'bottom-full mb-1' : 'top-full mt-1')}>
             {suggestions.length === 0 ? (
               <li className="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-muted"><Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />Finding people…</li>
             ) : suggestions.map((p, i) => (

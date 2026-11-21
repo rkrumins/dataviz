@@ -155,7 +155,9 @@ export function AskComposer({ subject, entity, onClearEntity, initialRecipients,
     const reachesNobody = !loading && uniq(routed).filter((r) => r.canRead).length === 0 && recipients.length === 0
     const noun = subjectNoun(subject)
     const recipientName = (r: MentionCandidate) => (r.name === r.id ? nameOf(r.id, people) : r.name)
-    const exclude = useMemo(() => new Set([...recipients.map((r) => r.id), ...(me ? [me] : [])]), [recipients, me])
+    // Add people offers only whoever isn't asked already: not the reader, not those added, not
+    // those a route on reaches.
+    const exclude = new Set([...recipients.map((r) => r.id), ...(me ? [me] : []), ...routed.filter((r) => r.canRead).map((r) => r.personId)])
 
     const submit = async (body: string, mentions: string[], clientKey: string) => {
         const res = await ask.mutateAsync({
