@@ -111,7 +111,7 @@ export function WorkspaceHeroHeader({
             <div aria-hidden className={cn('pointer-events-none absolute -top-32 -right-24 h-80 w-80 rounded-full blur-3xl opacity-70', color.glow)} />
             <div aria-hidden className={cn('relative h-1 w-full bg-gradient-to-r', color.gradient)} />
             {isPlayground && (
-                <p className="relative flex items-center gap-2 border-b border-violet-500/15 bg-gradient-to-r from-violet-500/[0.12] via-fuchsia-500/[0.06] to-transparent px-5 sm:px-8 py-2 text-xs font-medium text-violet-800 dark:text-violet-200">
+                <p data-tour="playground-ribbon" className="relative flex items-center gap-2 border-b border-violet-500/15 bg-gradient-to-r from-violet-500/[0.12] via-fuchsia-500/[0.06] to-transparent px-5 sm:px-8 py-2 text-xs font-medium text-violet-800 dark:text-violet-200">
                     <FlaskConical className="w-3.5 h-3.5 shrink-0" aria-hidden />
                     <span><strong className="font-semibold">Playground</strong> · for experiments — nothing here is production data, and nothing here changes it.</span>
                 </p>
@@ -280,7 +280,7 @@ export function WorkspaceHeroHeader({
                                     </DropdownMenu.Portal>
                                 </DropdownMenu.Root>
                             )}
-                            <TourLaunchButton tourId="workspace-detail" />
+                            <TourLaunchButton tourId={isPlayground ? 'playground' : 'workspace-detail'} />
                         </div>
                     )}
                 </div>

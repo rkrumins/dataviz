@@ -121,5 +121,5 @@ export const STATS: Record<string, { nodeCount: number; edgeCount: number }> = {
 }
 
 export const ONTOLOGIES = [
-    { id: 'ont_fin', name: 'Finance Lineage', version: 4, isPublished: true, entityTypeDefinitions: {}, relationshipTypeDefinitions: {} },
+    { id: 'ont_fin', name: 'Finance Lineage', version: 4, isPublished: true, entityTypeDefinitions: {}, relationshipTypeDefinitions: {}, createdAt: ago(2000) },
 ]

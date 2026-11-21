@@ -25,6 +25,7 @@ export function PlaygroundCard({ className, compact = false }: { className?: str
     return (
         <section
             aria-labelledby="playground-card-title"
+            data-tour="playground-card"
             className={cn(
                 'relative overflow-hidden rounded-3xl border border-violet-500/25 bg-canvas-elevated',
                 compact ? 'p-5' : 'p-6 sm:p-7', className,

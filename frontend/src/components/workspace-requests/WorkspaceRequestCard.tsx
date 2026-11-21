@@ -53,7 +53,7 @@ export function WorkspaceRequestStatus({ request, className }: { request: Worksp
     const waited = days(request.updatedAt ?? request.createdAt)
 
     return (
-        <section aria-label={`Workspace request: ${request.name}`}
+        <section aria-label={`Workspace request: ${request.name}`} data-tour="workspace-request"
             className={cn('relative overflow-hidden rounded-3xl border bg-canvas-elevated p-5',
                 request.status === 'approved' ? 'border-emerald-500/30' : asked ? 'border-amber-500/30'
                     : request.status === 'declined' ? 'border-glass-border' : 'border-violet-500/25', className)}>
@@ -147,7 +147,7 @@ export function WorkspaceRequestPrompt({ preselectedSourceIds, className }: { pr
     const latest = latestRequest(mine.data)
     if (latest) return <WorkspaceRequestStatus request={latest} className={className} />
     return (
-        <section aria-labelledby="ws-request-prompt-title"
+        <section aria-labelledby="ws-request-prompt-title" data-tour="workspace-request"
             className={cn('relative overflow-hidden rounded-3xl border border-violet-500/25 bg-canvas-elevated p-5', className)}>
             <div aria-hidden className="pointer-events-none absolute inset-0 bg-gradient-to-r from-violet-600/[0.10] via-fuchsia-500/[0.06] to-amber-400/[0.06]" />
             <div aria-hidden className="pointer-events-none absolute -right-10 -top-16 h-44 w-44 rounded-full bg-fuchsia-500/20 blur-3xl" />

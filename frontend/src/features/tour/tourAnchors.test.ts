@@ -39,6 +39,20 @@ describe('tour anchors', () => {
     }
   })
 
+  it('references the self-service landmarks: the Playground, asking for a workspace, answering', () => {
+    for (const n of [
+      'playground-ribbon', 'playground-experiments', 'playground-new-graph', 'playground-everyone', 'overview-layout',
+      'workspace-request', 'workspaces-request', 'playground-card', 'workspace-requests-queue', 'workspace-request-review',
+    ]) {
+      expect(targetNames).toContain(n)
+    }
+  })
+
+  it('every contextual anchor resolves too', () => {
+    const anchors = TOURS.map((t) => t.contextAnchor?.match(/\[data-tour="([^"]+)"\]/)?.[1]).filter((n): n is string => Boolean(n))
+    expect(anchors.filter((n) => !anchorExists(n))).toEqual([])
+  })
+
   it('every tour target resolves to a data-tour anchor in the source', () => {
     expect(targetNames.filter((n) => !anchorExists(n))).toEqual([])
   })

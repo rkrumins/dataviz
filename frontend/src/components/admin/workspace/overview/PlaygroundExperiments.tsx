@@ -58,6 +58,7 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
     return (
         <section
             aria-labelledby="experiments-title"
+            data-tour="playground-experiments"
             className="relative overflow-hidden rounded-3xl border border-violet-500/20 bg-canvas-elevated p-5 sm:p-6"
         >
             <div aria-hidden className="pointer-events-none absolute inset-0 bg-gradient-to-br from-violet-500/[0.07] via-transparent to-fuchsia-500/[0.05]" />
@@ -77,6 +78,7 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                     {onNewGraph && (
                         <button
                             type="button"
+                            data-tour="playground-new-graph"
                             onClick={start}
                             disabled={!start}
                             title={full ? 'You’ve used all your graphs — delete one you’re done with to start another.' : undefined}

@@ -87,6 +87,14 @@ export function GettingStarted({ onNavigate }: GettingStartedProps = {}) {
     onNavigate?.()
   }
 
+  // A step whose page has a tour of its own: "Show me" takes the reader there with it.
+  const onStepTour = (step: OnboardingStep) => {
+    if (!step.tourId) return
+    if (step.manual) completeStep(step.id)
+    useTourStore.getState().start(step.tourId)
+    onNavigate?.()
+  }
+
   return (
     <motion.section
       initial={{ opacity: 0, y: 8 }}
@@ -153,6 +161,7 @@ export function GettingStarted({ onNavigate }: GettingStartedProps = {}) {
               nextStepId={nextStepId}
               isLoading={isLoading}
               onStepAction={onStepAction}
+              onStepTour={toursEnabled ? onStepTour : undefined}
             />
           ))}
         </div>
@@ -198,9 +207,11 @@ interface TrackSectionProps {
   nextStepId: string | null
   isLoading: boolean
   onStepAction: (step: OnboardingStep) => void
+  /** Set while tours are on. */
+  onStepTour?: (step: OnboardingStep) => void
 }
 
-function TrackSection({ track, index, nextStepId, isLoading, onStepAction }: TrackSectionProps) {
+function TrackSection({ track, index, nextStepId, isLoading, onStepAction, onStepTour }: TrackSectionProps) {
   const a = ACCENT[track.accent]
   const TrackIcon = track.icon
   const tpct = track.total > 0 ? (track.completedCount / track.total) * 100 : 0
@@ -244,6 +255,7 @@ function TrackSection({ track, index, nextStepId, isLoading, onStepAction }: Tra
             isNext={step.id === nextStepId}
             isLoading={isLoading}
             onAction={() => onStepAction(step)}
+            onTour={onStepTour && step.tourId ? () => onStepTour(step) : undefined}
           />
         ))}
       </ol>
@@ -258,9 +270,11 @@ interface StepRowProps {
   isNext: boolean
   isLoading: boolean
   onAction: () => void
+  /** The step's own tour, when it has one and tours are on. */
+  onTour?: () => void
 }
 
-function StepRow({ step, accent, isNext, isLoading, onAction }: StepRowProps) {
+function StepRow({ step, accent, isNext, isLoading, onAction, onTour }: StepRowProps) {
   const a = ACCENT[accent]
   const StepIcon = step.icon
 
@@ -290,9 +304,19 @@ function StepRow({ step, accent, isNext, isLoading, onAction }: StepRowProps) {
           {step.done && <span className="sr-only"> (completed)</span>}
         </p>
         <p className="mt-0.5 text-xs text-ink-muted">{step.description}</p>
-        {step.guideSlug && !step.done && (
-          <div className="mt-2">
-            <DocsLink slug={step.guideSlug} className="text-xs" />
+        {(step.guideSlug || onTour) && !step.done && (
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+            {step.guideSlug && <DocsLink slug={step.guideSlug} className="text-xs" />}
+            {onTour && (
+              <button
+                type="button"
+                onClick={onTour}
+                className="inline-flex items-center gap-1 rounded text-xs font-medium text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+              >
+                <PlayCircle className="h-3.5 w-3.5" aria-hidden />
+                Show me
+              </button>
+            )}
           </div>
         )}
       </div>

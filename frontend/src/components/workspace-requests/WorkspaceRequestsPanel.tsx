@@ -32,7 +32,7 @@ export function WorkspaceRequestsPanel({ hideWhenEmpty = false }: { hideWhenEmpt
     if (hideWhenEmpty && !isLoading && rows.length === 0 && filter === 'open') return null
 
     return (
-        <section aria-labelledby="ws-requests-title" className="overflow-hidden rounded-2xl border border-glass-border bg-canvas-elevated">
+        <section aria-labelledby="ws-requests-title" data-tour="workspace-requests-queue" className="overflow-hidden rounded-2xl border border-glass-border bg-canvas-elevated">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-glass-border px-5 py-3">
                 <h2 id="ws-requests-title" className="flex items-center gap-2 text-sm font-bold text-ink">
                     <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white">
@@ -89,7 +89,7 @@ export function WorkspaceRequestsPanel({ hideWhenEmpty = false }: { hideWhenEmpt
                                         <Clock className="h-2.5 w-2.5" aria-hidden /> Waiting {plural(waited, 'day')}
                                     </span>
                                 )}
-                                <button type="button" onClick={() => setReviewing(r)}
+                                <button type="button" data-tour="workspace-request-review" onClick={() => setReviewing(r)}
                                     className="shrink-0 rounded-xl border border-glass-border px-3 py-1.5 text-xs font-semibold text-ink hover:border-violet-500/40 hover:bg-violet-500/[0.05]">
                                     Review
                                 </button>

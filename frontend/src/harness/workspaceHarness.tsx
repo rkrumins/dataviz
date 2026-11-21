@@ -13,12 +13,15 @@
  *   mode     business | technical               (default business)
  *   theme    light | dark
  *   tab / section / ds — passed to the page's own address
- *   page     workspace | reviews | playground-card | request-wizard | workspace-requests
+ *   page     workspace | reviews | playground-card | request-wizard | workspace-requests | groups | workspaces | dashboard
  *            (reviews: the Review Center at /reviews; playground-card: the Playground card,
  *            &joined=0 before joining; request-wizard: asking for a workspace; workspace-requests:
  *            the platform team's queue, and &status=pending|changes_requested|approved|declined on
  *            page=workspace the reader's own request card); groups: the People tab's Groups
- *            panel (&platform=1 as a platform administrator, with the links waiting to confirm)
+ *            panel (&platform=1 as a platform administrator, with the links waiting to confirm);
+ *            workspaces: the Workspaces page, &tab=requests its queue; dashboard: the Dashboard, led by &mode
+ *   creator  1 — the reader may create workspaces (and so answers requests for them)
+ *   tour / step — start that tour at that step (0-based) once the page has loaded
  *
  * `npm run harness:workspace` drives Chromium over the main combinations and
  * writes PNGs to .harness/.
@@ -41,6 +44,11 @@ import { WorkspaceRequestsPanel } from '../components/workspace-requests/Workspa
 import { WorkspaceRequestPrompt } from '../components/workspace-requests/WorkspaceRequestCard'
 import { WorkspaceGroupsPanel } from '../components/workspaces/WorkspaceGroupsPanel'
 import { IdpLinkRequestsPanel } from '../components/workspaces/IdpLinkRequestsPanel'
+import { WorkspacesPage } from '../pages/WorkspacesPage'
+import { Dashboard } from '../components/dashboard/Dashboard'
+import { TourOverlay } from '../features/tour/TourOverlay'
+import { useTourStore } from '../features/tour/tourStore'
+import { useProviderStatusStore } from '../store/providerStatus'
 import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { useWorkspacesStore } from '../store/workspaces'
 import {
@@ -53,6 +61,8 @@ const fixture = (params.get('fixture') ?? 'populated') as WorkspaceFixtureName
 const dark = params.get('theme') === 'dark'
 const mode = (params.get('mode') ?? 'business') as 'business' | 'technical'
 const page = params.get('page') ?? 'workspace'
+const tour = params.get('tour')
+const tourStep = Number(params.get('step') ?? 0)
 const platform = params.get('platform') === '1'
 
 // The People tab's groups: two of the workspace's own, one following the directory and one
@@ -172,6 +182,18 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
             graphQuota: 5, graphsUsed: 2, canSetUp: as === 'admin', sandboxProviderId: 'prov_sandbox',
         })
     }
+    if (p === '/api/v1/admin/workspaces/summary') {
+        const row = { id: ws.id, name: ws.name, isDefault: false, dataSources: ws.dataSources.length, activeDataSources: ws.dataSources.length,
+            pendingDataSources: 0, nodes: 64_610, edges: 160_655, entityTypes: ['Table', 'Column', 'Report'], views: views.length, sources: {} }
+        return json({ coverage: 'granted', totals: { workspaces: 1, dataSources: ws.dataSources.length, activeDataSources: ws.dataSources.length,
+            pendingDataSources: 0, nodes: 64_610, edges: 160_655, entityTypes: ['Table', 'Column', 'Report'], views: views.length, sharedGraphs: 0 }, workspaces: [row] })
+    }
+    if (p === '/api/v1/admin/workspaces/summary/trend') return json({ days: [], workspaces: [], dataSources: [], views: [], nodes: [], edges: [] })
+    if ((m = p.match(/^\/api\/v1\/admin\/data-sources\/([^/]+)\/projection-health$/))) {
+        // In the failing workspace, Regulatory Reporting is also behind its published changes.
+        const behind = fixture === 'failing' && m[1] === 'ds_reg'
+        return json({ dataSourceId: m[1], projectorCurrent: behind ? false : true, projectionCommitsBehind: behind ? 3 : 0 })
+    }
     if ((m = p.match(/^\/api\/v1\/admin\/workspaces\/([^/]+)$/))) return json(ws)
     if (p === '/api/v1/admin/workspaces' || p === '/api/v1/admin/workspaces/') {
         return json(page === 'reviews' ? REVIEW_WS.map(w => ({ ...w, dataSources: [], isDefault: false, isActive: true, createdAt: '', updatedAt: '' })) : [ws])
@@ -224,10 +246,12 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (p.endsWith('/review-inbox/counts')) {
         return json({ counts: { needs_review: as === 'viewer' ? 0 : 2, waiting: 1, sent_back: 0, ready: 0, open: 3, done: 12 }, unread: {}, capped: false })
     }
-    if (p.includes('/access-requests') || p.includes('/to-answer')) return json(as === 'admin' ? [{ id: 'ar1' }, { id: 'ar2' }, { id: 'ar3' }] : [])
+    // Counted on the workspace page; the Workspaces page would list them in full, so none there.
+    if (p.includes('/access-requests') || p.includes('/to-answer')) return json(as === 'admin' && page !== 'workspaces' ? [{ id: 'ar1' }, { id: 'ar2' }, { id: 'ar3' }] : [])
     if (p.includes('/drafts/owner-left')) return json([])
     if (p.includes('transfer')) return json([])
-    if (p.includes('/activity')) {
+    if (p === '/api/v1/layout-templates') return json({ items: [], total: 0 })
+    if (p.includes('/activity') || p === '/api/v1/views/me/feed') {
         if (fixture === 'empty') return json([])
         const row = (i: number, action: string, viewName: string, actorName: string, summary: string, h: number) => ({
             id: `act${i}`, viewId: `v${i}`, action, actor: `usr_${i}`, actorName, actorEmail: null, summary, changes: null,
@@ -248,10 +272,17 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 useAuthStore.setState({
     status: 'authenticated', isAuthenticated: true, permissionsStatus: 'ready',
     user: { id: 'usr_me', firstName: 'Sam', lastName: 'Reader', email: 'sam@example.com' },
-    permissions: { sid: 'harness', global: platform ? ['system:admin'] : page === 'workspace-requests' ? ['system:workspaces:create'] : [], ws: { ws_fin: PERMS[as] } },
+    permissions: { sid: 'harness', global: platform ? ['system:admin'] : page === 'workspace-requests' || params.get('creator') === '1' ? ['system:workspaces:create'] : [], ws: { ws_fin: PERMS[as] } },
 } as never)
 usePersonaStore.setState({ mode })
-useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, workspaceRequestsEnabled: true } })
+useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, playgroundEnabled: true, workspaceRequestsEnabled: true, toursEnabled: !!tour } })
+if (page === 'dashboard') {
+    useProviderStatusStore.setState({ statuses: {
+        prov_fdb: { id: 'prov_fdb', name: 'FalkorDB · finance', status: 'ready', lastCheckedAt: null },
+        prov_neo: { id: 'prov_neo', name: 'Neo4j · risk models', status: fixture === 'failing' ? 'unavailable' : 'ready', lastCheckedAt: null, error: 'Connection refused' },
+        prov_dh: { id: 'prov_dh', name: 'DataHub', status: 'ready', lastCheckedAt: null },
+    } })
+}
 if (page === 'request-wizard') useWorkspacesStore.setState({ workspaces: [workspaceOf('playground')] } as never)
 if (page === 'groups') useWorkspacesStore.setState({ workspaces: [{ id: 'ws_fin', name: 'Finance Risk' }] } as never)
 if (page === 'reviews') useWorkspacesStore.setState({ workspaces: REVIEW_WS.map(w => ({ ...w, dataSources: [] })) } as never)
@@ -264,10 +295,21 @@ function Harness() {
         document.documentElement.classList.toggle('dark', dark)
         document.body.style.background = getComputedStyle(document.documentElement).getPropertyValue('--nx-bg-canvas').trim() || '#fff'
     }, [setTheme])
+    // A tour, at a step, once the page has had time to load what it spotlights.
+    useEffect(() => {
+        if (!tour) return
+        const t = window.setTimeout(() => {
+            useTourStore.getState().start(tour)
+            useTourStore.getState().goTo(tourStep)
+        }, 1200)
+        return () => window.clearTimeout(t)
+    }, [])
 
     const address = new URLSearchParams()
     for (const k of ['tab', 'section', 'ds', 'dstab']) { const v = params.get(k); if (v) address.set(k, v) }
-    const at = ['playground-card', 'request-wizard', 'workspace-requests', 'request-card', 'groups'].includes(page) ? `/${page}` : page === 'reviews'
+    const at = page === 'workspaces' ? `/workspaces${params.get('tab') ? `?tab=${params.get('tab')}` : ''}`
+        : page === 'dashboard' ? '/dashboard'
+        : ['playground-card', 'request-wizard', 'workspace-requests', 'request-card', 'groups'].includes(page) ? `/${page}` : page === 'reviews'
         ? `/reviews${params.get('workspace') ? `?workspace=${params.get('workspace')}` : ''}`
         : `/workspaces/ws_fin${address.toString() ? `?${address}` : ''}`
 
@@ -277,6 +319,8 @@ function Harness() {
                 <MemoryRouter initialEntries={[at]}>
                     <div className="relative min-h-screen bg-canvas">
                         <Routes>
+                            <Route path="/workspaces" element={<WorkspacesPage />} />
+                            <Route path="/dashboard" element={<Dashboard />} />
                             <Route path="/workspaces/:wsId" element={<WorkspaceDetailPage />} />
                             <Route path="/reviews" element={<ReviewCenterPage />} />
                             <Route path="/request-wizard" element={<RequestWorkspaceWizard onClose={() => {}} />} />
@@ -299,6 +343,7 @@ function Harness() {
                                 </div>
                             } />
                         </Routes>
+                        {tour && <TourOverlay />}
                     </div>
                 </MemoryRouter>
             </ViewEditorContext.Provider>

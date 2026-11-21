@@ -248,7 +248,7 @@ export function WorkspaceOverview({
                         <Shelf
                             title="Jump back in" subtitle="Views you opened or favourited here" onSeeAll={() => onGoTo('views')}
                             icon={History} tone="text-indigo-500 bg-indigo-500/10"
-                            extra={<Segmented label="Show views as" options={LAYOUTS} value={layout} onChange={setLayout} />}
+                            extra={<span data-tour="overview-layout" className="inline-flex"><Segmented label="Show views as" options={LAYOUTS} value={layout} onChange={setLayout} /></span>}
                         >
                             {jumpBackIn.length === 0 ? (
                                 <p className="rounded-2xl border border-dashed border-glass-border px-4 py-6 text-center text-sm text-ink-muted">
@@ -261,6 +261,7 @@ export function WorkspaceOverview({
 
                         {isPlayground ? (
                             <Shelf
+                                data-tour="playground-everyone"
                                 title="Everyone’s experiments"
                                 subtitle="The latest from people in the Playground — open one for ideas"
                                 onSeeAll={() => onGoTo('views')} icon={Users} tone="text-fuchsia-500 bg-fuchsia-500/10"
@@ -319,7 +320,7 @@ export function WorkspaceOverview({
     )
 }
 
-function Shelf({ title, subtitle, onSeeAll, icon, tone, extra, children }: {
+function Shelf({ title, subtitle, onSeeAll, icon, tone, extra, children, 'data-tour': tour }: {
     title: string
     subtitle: string
     onSeeAll: () => void
@@ -328,9 +329,10 @@ function Shelf({ title, subtitle, onSeeAll, icon, tone, extra, children }: {
     icon: ComponentType<{ className?: string }>
     tone: string
     children: React.ReactNode
+    'data-tour'?: string
 }) {
     return (
-        <section aria-label={title}>
+        <section aria-label={title} data-tour={tour}>
             <SectionTitle
                 icon={icon} tone={tone} title={title} subtitle={subtitle} className="mb-3"
                 action={

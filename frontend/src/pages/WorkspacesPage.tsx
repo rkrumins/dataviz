@@ -446,7 +446,8 @@ export function WorkspacesPage() {
     // Data sources waiting to move into a workspace the reader runs wait here too.
     const { transfers: incoming } = useIncomingTransfers('open', { enabled: canAnswer })
     // And requests for new workspaces, for the people who create them.
-    const newWorkspaces = useWorkspaceRequestsToAnswer('open').data?.filter(r => r.status === 'pending')
+    const toAnswer = useWorkspaceRequestsToAnswer('open').data
+    const newWorkspaces = toAnswer?.filter(r => r.status === 'pending')
     // And, for platform administrators, groups waiting to be linked to the identity provider.
     const idpLinks = useIdpLinkRequests('pending').data
     const waitingCount = waiting || incoming || newWorkspaces || idpLinks
@@ -512,9 +513,12 @@ export function WorkspacesPage() {
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
-                    <TourLaunchButton tourId="workspaces" />
+                    {/* The tour for what is on screen: answering requests for workspaces while they
+                        wait on Requests; for someone who can't create workspaces, asking for one. */}
+                    <TourLaunchButton tourId={tab === 'requests' && !!toAnswer?.length ? 'workspace-approver'
+                        : !canCreateWorkspace && requestsOn ? 'request-workspace' : 'workspaces'} />
                     {!canCreateWorkspace && requestsOn && (
-                        <button type="button" onClick={() => openRequestWizard()} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-sm font-semibold shadow-lg shadow-violet-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
+                        <button type="button" data-tour="workspaces-request" onClick={() => openRequestWizard()} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-sm font-semibold shadow-lg shadow-violet-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
                             <Plus className="w-4 h-4" /> Request a workspace
                         </button>
                     )}

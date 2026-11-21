@@ -91,6 +91,25 @@ describe('GettingStarted — tracks + tour access', () => {
     expect(screen.queryByText('Product tour')).not.toBeInTheDocument()
   })
 
+  it('offers a step’s own tour beside it, and starts it', async () => {
+    setTracks([track('explore', 'Explore your data', Compass, [
+      { ...step('request-workspace', false), tourId: 'request-workspace' } as TStep, step('create-view', false),
+    ])])
+    renderHub()
+    expect(screen.getAllByRole('button', { name: /show me/i })).toHaveLength(1)
+    await userEvent.click(screen.getByRole('button', { name: /show me/i }))
+    expect(useTourStore.getState().activeTourId).toBe('request-workspace')
+  })
+
+  it('offers no step tour while tours are off', () => {
+    toursOn = false
+    setTracks([track('explore', 'Explore your data', Compass, [
+      { ...step('request-workspace', false), tourId: 'request-workspace' } as TStep,
+    ])])
+    renderHub()
+    expect(screen.queryByRole('button', { name: /show me/i })).not.toBeInTheDocument()
+  })
+
   it('toggles the sidebar launcher visibility from the hub', async () => {
     renderHub()
     expect(usePreferencesStore.getState().gettingStartedHidden).toBe(false)

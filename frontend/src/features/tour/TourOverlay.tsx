@@ -199,16 +199,17 @@ export function TourOverlay() {
           </>
         )}
 
-        {/* Coach-mark card */}
+        {/* Coach-mark card. Placed by a plain wrapper: the card's own motion
+            transform (its small rise) would replace a `transform` in its style,
+            and with it the shift that puts a card above its target or centres it. */}
         <AnimatePresence mode="wait">
+          <div key={stepIndex} className="absolute w-[360px] max-w-[calc(100vw-2rem)]" style={cardStyle}>
           <motion.div
-            key={stepIndex}
             initial={{ opacity: 0, y: 6, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.98 }}
             transition={{ duration: 0.18, ease: 'easeOut' }}
-            className="glass-panel pointer-events-auto absolute w-[360px] max-w-[calc(100vw-2rem)] rounded-2xl border border-glass-border p-5 shadow-2xl"
-            style={cardStyle}
+            className="glass-panel pointer-events-auto relative rounded-2xl border border-glass-border p-5 shadow-2xl"
           >
             {caret && <Caret placement={caret} />}
 
@@ -269,6 +270,7 @@ export function TourOverlay() {
               </div>
             </div>
           </motion.div>
+          </div>
         </AnimatePresence>
       </div>
     </>,
