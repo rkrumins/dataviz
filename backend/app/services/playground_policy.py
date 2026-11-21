@@ -34,6 +34,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
 from backend.app.services.permission_service import PermissionClaims, has_permission
 
+#: The switch that opens the Playground.
+PLAYGROUND_FLAG = "playgroundEnabled"
+
 PLAYGROUND_KIND = "playground"
 PLAYGROUND_ROLE = "workspace_playground_member"
 DEFAULT_GRAPH_QUOTA = 5
@@ -132,10 +135,18 @@ async def graphs_made_by(session: AsyncSession, ws_id: str, user_id: str) -> int
 
 async def assert_blank_graph(session: AsyncSession, ws_id: str, provider_id: Optional[str],
                              user_id: Optional[str]) -> None:
-    """A new blank graph in the playground: on its sandbox provider, within the person's quota."""
+    """A new blank graph in the playground: while it is on, on its sandbox provider, within the
+    person's quota. Off, what people made stays, but nothing new starts there."""
     ws = await playground_of(session, ws_id)
     if ws is None:
         return
+    from backend.app.config.feature_wiring import fail_safe_default
+    from backend.app.services.feature_flags import feature_flags
+    if not await feature_flags.is_enabled(PLAYGROUND_FLAG, session, default=fail_safe_default(PLAYGROUND_FLAG)):
+        raise _refuse(
+            status.HTTP_403_FORBIDDEN, "feature_disabled",
+            "The Playground is turned off for this deployment, so no new graph can start in it.",
+        )
     settings = settings_of(ws)
     if not settings.sandbox_provider_id or provider_id != settings.sandbox_provider_id:
         raise _refuse(

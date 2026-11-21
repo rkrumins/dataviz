@@ -46,6 +46,7 @@ export function WorkspaceInsightsPanel({
     const theme = useChartTheme()
     const { data, isLoading, isFetching, error } = useWorkspaceAnalyticsDetail(workspaceId, range)
     const conversations = useFeature('conversationsEnabled')
+    const sourceDetailsOn = useFeature('dataSourceMetadataEnabled')
     const closeRef = useRef<HTMLButtonElement>(null)
 
     useEffect(() => {
@@ -328,7 +329,9 @@ export function WorkspaceInsightsPanel({
                                 </dl>
                             </ChartFrame>
 
-                            {data.sourceDetails && data.sourceDetails.sources > 0 && (
+                            {data.sourceDetails && data.sourceDetails.sources > 0
+                                && (sourceDetailsOn || data.sourceDetails.described + data.sourceDetails.tagged
+                                    + data.sourceDetails.withContacts > 0) && (
                                 <ChartFrame
                                     title="How its sources are described"
                                     subtitle="Descriptions, tags, named contacts and trust"

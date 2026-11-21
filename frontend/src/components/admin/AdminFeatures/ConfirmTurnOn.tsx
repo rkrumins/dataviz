@@ -15,11 +15,14 @@ import type { FeatureDefinition } from '@/services/featuresService'
 
 export function ConfirmTurnOn({
     feature,
+    alsoTurnsOn = [],
     onCancel,
     onConfirm,
 }: {
     /** null closes it. */
     feature: FeatureDefinition | null
+    /** What it needs that is off — turned on with it. */
+    alsoTurnsOn?: FeatureDefinition[]
     onCancel: () => void
     onConfirm: () => void | Promise<void>
 }) {
@@ -83,6 +86,13 @@ export function ConfirmTurnOn({
                                         {feature.impactWhenOn}
                                     </p>
                                 </div>
+                                {alsoTurnsOn.length > 0 && (
+                                    <p className="text-xs text-ink-secondary leading-relaxed">
+                                        It needs {alsoTurnsOn.map(dep => dep.name).join(' and ')}, which{' '}
+                                        {alsoTurnsOn.length === 1 ? 'is' : 'are'} off — turning it on turns{' '}
+                                        {alsoTurnsOn.length === 1 ? 'that' : 'those'} on too.
+                                    </p>
+                                )}
                                 {feature.helpUrl && (
                                     <a
                                         href={feature.helpUrl}

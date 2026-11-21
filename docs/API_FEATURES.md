@@ -150,7 +150,7 @@ what `lastChanges` and `/{key}/history` read.
 
 ## Add, change and retire definitions
 
-The 35 built-in switches ship with the code. These routes add switches of your own and adjust
+The 47 built-in switches ship with the code. These routes add switches of your own and adjust
 definitions; they answer the same shape as the read, without `lastChanges`.
 
 **Add** — `POST /api/v1/admin/features/definitions`:
@@ -233,9 +233,9 @@ feature open to anyone who knows the URL.
 | Accept a fresh sign-in round trip for API keys | `apiKeySsoRoundTripStepUp` | `false` | Off: `POST /me/api-keys` and `/me/api-keys/{id}/rotate` from a portal session are refused `403 step_up_unavailable`. OIDC and SAML sessions need a sign-in the provider dated within 15 minutes (`auth_time_proven`); Enterprise gateway sessions need the gateway's confirmation — asked on the request when this server can reach it (`503 gateway_unreachable` if it does not answer), else a sign-in through it within 15 minutes. On: a portal sign-in within 15 minutes is accepted too | Security: unreadable means off. Password sessions are not affected |
 | Keep a service account's keys working after its last manager goes | `serviceAccountUnmanagedGrace` | `14` | A ladder (`0`, `7`, `14`, `30` days): a service account's key is refused `401 api_key_unmanaged` once the account has had no manager in good standing for longer than this | Security: unreadable means refused. Personal keys are not affected |
 | Find a workspace | `workspaceDirectoryEnabled` | `false` | `GET /workspace-directory` is refused. Access requests still work from a shared link; while it is off, a requester sees a workspace's name in `POST /access-requests` and `GET /me/access-requests` only if they can open it (on: also if it is listed) | Security: unreadable means off |
-| Playground | `playgroundEnabled` | `false` | `POST /playground/join`, `GET /playground/samples` and `POST /playground/samples/{sample_id}` are refused. `GET /playground` answers `enabled: false` and, to anyone not already in it, names nothing; members keep their access, and `PUT /playground` (platform administrators) still works | Security: unreadable means off |
-| Workspace requests | `workspaceRequestsEnabled` | `false` | `POST /workspace-requests` and `PUT /me/workspace-requests/{id}` (resubmitting) are refused `403 feature_disabled`. Reading and withdrawing requests (`/me/workspace-requests`), and answering them under `/admin/workspace-requests` (`system:workspaces:create`), still work | Preview. Unreadable means off |
-| Data requests | `dataRequestsEnabled` | `false` | `POST /admin/workspaces/{ws_id}/data-requests` is refused `403 feature_disabled`. Reading a workspace's requests (`GET` on the same path), your own (`/me/data-requests`) and withdrawing them, and answering under `/admin/data-requests` (`system:workspaces:create`; start and connect also `workspace:admin` in the request's workspace, and connect a named Owner or Steward of the source it names; never the requester — `403 own_request`), still work; reminders and escalations of requests left waiting pause | Preview. Unreadable means off |
+| Playground | `playgroundEnabled` | `false` | `POST /playground/join`, `GET /playground/samples`, `POST /playground/samples/{sample_id}` and starting a graph in the Playground (`POST /{ws_id}/versioning/blank-graphs`) are refused. `GET /playground` answers `enabled: false` and, to anyone not already in it, names nothing; members keep their access, and `PUT /playground` (platform administrators) still works | Security: unreadable means off. Needs `versioningEnabled` and `blankModelsEnabled` (turning it on in Admin → Features turns them on too) |
+| Workspace requests | `workspaceRequestsEnabled` | `false` | `POST /workspace-requests` and `PUT /me/workspace-requests/{id}` (resubmitting) are refused `403 feature_disabled`. Reading and withdrawing requests (`/me/workspace-requests`), and answering them under `/admin/workspace-requests` (`system:workspaces:create`), still work; reminders and escalations of requests left waiting pause. The screens hide existing requests while off | Preview. Unreadable means off |
+| Data requests | `dataRequestsEnabled` | `false` | `POST /admin/workspaces/{ws_id}/data-requests` is refused `403 feature_disabled`. Reading a workspace's requests (`GET` on the same path), your own (`/me/data-requests`) and withdrawing them, and answering under `/admin/data-requests` (`system:workspaces:create`; start and connect also `workspace:admin` in the request's workspace, and connect a named Owner or Steward of the source it names; never the requester — `403 own_request`), still work; reminders and escalations of requests left waiting pause. The screens hide existing requests while off | Preview. Unreadable means off |
 
 ### Lineage
 
@@ -282,7 +282,7 @@ feature open to anyone who knows the URL.
 | Switch | Key | Default | When it is off | Notes |
 |---|---|---|---|---|
 | Announcements | `announcementsEnabled` | On | Not refused: `GET /announcements` answers an empty list | Announcements are hidden, not deactivated |
-| Questions and conversations | `conversationsEnabled` | `false` | `POST /discussions/subjects/{type}/{id}` (ask), `POST /discussions/{id}/messages` (reply), `PATCH /discussions/{id}/messages/{mid}` (edit), `PUT /discussions/subjects/{type}/{id}/watch`, `PUT /discussions/{id}/me` with `following: true`, and `PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts` (unless `dataSourceMetadataEnabled` is on) are refused `403 feature_disabled`; watcher notices and reminders pause. Reading, `POST /discussions/{id}/read`, muting, unfollowing, unwatching, closing, reopening, accepting answers and deleting still work | Preview. Unreadable means off |
+| Questions and conversations | `conversationsEnabled` | `false` | `POST /discussions/subjects/{type}/{id}` (ask), `POST /discussions/{id}/messages` (reply), `PATCH /discussions/{id}/messages/{mid}` (edit), `PUT /discussions/subjects/{type}/{id}/watch`, `PUT /discussions/{id}/me` with `following: true`, and `PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts` (unless `dataSourceMetadataEnabled` is on) are refused `403 feature_disabled`; watcher notices and reminders pause (retention still blanks deleted messages). Reading, `POST /discussions/{id}/read`, muting, unfollowing, unwatching, closing, reopening, accepting answers, deleting, `GET /discussions/summaries` and `GET /people/{id}` still work; the screens hide them while off | Preview. Unreadable means off |
 
 ### Experimental
 
@@ -318,7 +318,7 @@ which keeps it for 30 seconds, and falls back by posture (`fail_safe_default` in
 
 | What | Where | Owned by |
 |---|---|---|
-| Definitions | `feature_definitions` table | The code: the 35 built-in definitions are seeded, and their text and structure rewritten, each time the API service starts |
+| Definitions | `feature_definitions` table | The code: the 47 built-in definitions are seeded, and their text and structure rewritten, each time the API service starts |
 | Categories | `feature_categories` table | The code: seeded the same way |
 | Values and version | `feature_flags` table, one row | Administrators: seeded once with the defaults, never reset by a deployment |
 | Change log | `feature_flag_changes` table | Written by every save |

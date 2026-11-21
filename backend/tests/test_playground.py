@@ -193,7 +193,7 @@ async def test_its_doors_stay_as_they_are(test_client: AsyncClient, estate):
 
 
 @pytest.mark.asyncio
-async def test_blank_graphs_go_on_its_sandbox_provider_within_the_quota(db_session, estate):
+async def test_blank_graphs_go_on_its_sandbox_provider_within_the_quota(db_session, estate, flag_on):
     with pytest.raises(HTTPException) as wrong:
         await playground_policy.assert_blank_graph(db_session, PG, "prov_prod", BEN.id)
     assert wrong.value.detail["type"] == "playground_provider"
@@ -204,6 +204,15 @@ async def test_blank_graphs_go_on_its_sandbox_provider_within_the_quota(db_sessi
     with pytest.raises(HTTPException) as full:
         await playground_policy.assert_blank_graph(db_session, PG, "prov_sandbox", ADA.id)
     assert full.value.status_code == 409 and full.value.detail["type"] == "playground_quota"
+
+
+@pytest.mark.asyncio
+async def test_no_new_graph_starts_there_while_it_is_off(db_session, estate):
+    # Off, the Playground keeps what people made, but nothing new starts in it.
+    with pytest.raises(HTTPException) as off:
+        await playground_policy.assert_blank_graph(db_session, PG, "prov_sandbox", ADA.id)
+    assert off.value.status_code == 403 and off.value.detail["type"] == "feature_disabled"
+    await playground_policy.assert_blank_graph(db_session, STD, "prov_prod", BEN.id)   # elsewhere, as before
 
 
 @pytest.mark.asyncio

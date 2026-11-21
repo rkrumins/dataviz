@@ -9,6 +9,72 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — A place to start, people to ask, and data you can trust
+
+Before this, someone without a workspace had nowhere to try anything; a workspace was asked for by
+email; nobody could ask the people behind a view or a data source a question in the app; and a data
+source said what it was called and nothing else. Now there is a Playground to build in, a guided way
+to ask for a workspace or for data, questions and answers on views and data sources with people's
+profiles, and data sources that say what they are, who looks after them and whether to trust them.
+Every new capability ships behind its own switch, off by default.
+
+### Added
+
+- **Playground** (`playgroundEnabled`): one shared sandbox workspace anyone who can sign in may join,
+  on its own sandbox provider, with a per-person graph quota. Start from a sample (a retail
+  pipeline, a customer 360, an ML feature pipeline) with a ready-made view, or from blank; move an
+  experiment into a workspace you run, or ask to.
+- **Workspace requests** (`workspaceRequestsEnabled`): a wizard to ask for a workspace — its purpose,
+  teammates, groups linked to the identity provider, the Playground graphs to bring, the data it
+  needs — that Org and Super Admins approve, send back or decline; reminders after 3 days,
+  escalation after 7.
+- **Workspace groups** on a workspace's People tab, with links to identity-provider groups that a
+  platform administrator confirms (a queue under Workspaces → Requests), suggestions and a preview
+  of who would get access.
+- **Data requests** (`dataRequestsEnabled`): ask for data to be connected to a workspace; workspace
+  admins, the platform team and the source's named Owner or Stewards connect it, never the person
+  who asked. Reminders and escalation by urgency.
+- **Questions and conversations** (`conversationsEnabled`): ask a view's owners and its data's
+  contacts about it, openly or privately, about one node or the whole view; @mentions, accepted
+  answers, watching, Inbox notices, question marks on the canvas, question counts on cards, people's
+  profiles with your own conversations, reminders after 3 days and escalation after 7.
+- **Data source details** (`dataSourceMetadataEnabled`): a description, links and tags; sensitivity
+  and Certified / In review / Deprecated status, set by the source's named Owner and Stewards or
+  workspace admins, shown on the source, its card and every view built on it; how it was onboarded;
+  an Activity tab members can read; a Sources filter.
+- **Analytics → Collaboration**: questions asked and answered, time to a first reply and to an
+  accepted answer, the most discussed views and data sources, and the questions waiting longest;
+  on the Data tab, how well sources are described and how requests are answered.
+- **Guided tours**, a persona-aware Dashboard and command-palette actions for the new flows.
+
+### Changed
+
+- **Turning a switch on in Admin → Features turns on what it needs** (`depends_on`) in the same save,
+  and says so. The Playground needs Version control and Build lineage from scratch.
+- The Explorer keeps a selection to its list; the Review Center reads one workspace or all.
+
+### Upgrading
+
+- **Migrations** `20261120_1000_playground` through `20261126_1000_disc_analytics`, joined with
+  main's line by `20261127_1000_merge_bulk_recipes` (nothing to run). They add the Playground role
+  (`workspace_playground_member`), the requests, groups, contacts and conversations tables, and
+  nullable columns on existing tables.
+- **`20261124_1100_aal_ds_type` builds an index on the activity ledger** (`auth_audit_log`), with a
+  bounded lock wait. On a large ledger, run the upgrade off-peak.
+- **`20260727_1400_invite_tokenver` was edited** to check for its column with the inspector instead
+  of Postgres-only `IF [NOT] EXISTS`; databases that ran it are unaffected.
+- All five new switches ship **off**. Turn them on under Admin → Features; set up the Playground
+  (its sandbox provider) before turning it on.
+
+### Known limitations
+
+- There is no email or chat delivery: notices are in the Inbox only.
+- A Playground graph's view canvas and an engineer's own-data import are covered by tests against
+  stand-ins for the graph store, not a live FalkorDB.
+- Analytics charts overflow their cards at phone width (as the Content tab already did).
+
+---
+
 ## [Unreleased] — Traces you can hand on, take away and keep, and views of a quarter of a million members
 
 A trace of twenty selected tables could be read in the dock and nothing else: no link (a link

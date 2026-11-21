@@ -216,6 +216,22 @@ async def test_what_a_deleted_message_said_is_blanked_after_thirty_days(world, d
 
 
 @pytest.mark.asyncio
+async def test_retention_and_archiving_still_run_while_the_switch_is_off(world, db_session, factory):
+    # Turning questions off must not keep what a deleted message said, nor threads about nothing.
+    _thread(db_session, "dis_r")
+    _thread(db_session, "dis_gone", subject=("view", "view_purged"))
+    await db_session.flush()
+    db_session.add(DiscussionMessageORM(id="dmsg_old", discussion_id="dis_r", kind="reply", author_id=w.BEN,
+                                        body="Secret", mentions="[]", created_at=NOW.isoformat(),
+                                        deleted_at=(NOW - timedelta(days=31)).isoformat()))
+    await db_session.commit()
+    w.switch(False)
+    out = await hk.run_pass(factory, now=NOW)
+    assert out["paused"] is True and (out["blanked"], out["archived"]) == (1, 1)
+    assert (await db_session.get(DiscussionMessageORM, "dmsg_old", populate_existing=True)).body == ""
+
+
+@pytest.mark.asyncio
 async def test_a_thread_whose_subject_is_gone_is_archived(world, db_session, factory, test_client):
     _thread(db_session, "dis_gone", subject=("view", "view_purged"))
     _thread(db_session, "dis_ds_gone", subject=("data_source", "ds_purged"))

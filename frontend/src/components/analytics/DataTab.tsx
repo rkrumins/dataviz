@@ -41,6 +41,7 @@ import { useChartTheme } from './charts/chartTheme'
 import { classificationLabel, classificationSlot, providerSlot, trustLabel, trustSlot } from './slots'
 import { WorkspaceLink } from './EntityLink'
 import { comparisonLabel, rangePhrase } from './RangePicker'
+import { useFeature } from '@/store/features'
 
 /** `+1,204`, `−30` — a true minus, which a hyphen only resembles. */
 function signed(n: number): string {
@@ -55,6 +56,10 @@ export function DataTab({
     isStale: boolean
 }) {
     const theme = useChartTheme()
+    const detailsOn = useFeature('dataSourceMetadataEnabled')
+    const dataRequestsOn = useFeature('dataRequestsEnabled')
+    const workspaceRequestsOn = useFeature('workspaceRequestsEnabled')
+    const requestsOn = dataRequestsOn || workspaceRequestsOn
     const { growth, onboarding, versionControl, coverage } = data
     const phrase = rangePhrase(range)
     const dates = growth.buckets.map((b) => shortDate(b, true))
@@ -306,9 +311,12 @@ export function DataTab({
                 )}
             </section>
 
-            {/* Both absent from a document built before they existed. */}
-            {data.details && <SourceDetails details={data.details} isStale={isStale} />}
-            {data.requests ? (
+            {/* Both absent from a document built before they existed. Each waits for its switch,
+                unless something was recorded while it was on (then the figures stay, as history). */}
+            {data.details && (detailsOn || describedAny(data.details)) && (
+                <SourceDetails details={data.details} isStale={isStale} />
+            )}
+            {data.requests && !(requestsOn || askedAny(data.requests)) ? null : data.requests ? (
                 <Requests requests={data.requests} range={range} />
             ) : data.redaction?.applied && (
                 <section aria-labelledby="data-requests" className="space-y-4">
@@ -322,6 +330,18 @@ export function DataTab({
             )}
         </div>
     )
+}
+
+/** Whether any source carries a detail people wrote: a description, tags, named contacts, a status. */
+function describedAny(d: NonNullable<AnalyticsDataDoc['details']>): boolean {
+    return d.described + d.tagged + d.withContacts > 0
+        || d.trust.some((t) => t.key !== 'none' && t.count > 0)
+        || d.classification.some((c) => c.key !== 'none' && c.count > 0)
+}
+
+/** Whether any data or workspace request was ever made. */
+function askedAny(r: NonNullable<AnalyticsDataDoc['requests']>): boolean {
+    return r.data.asked.total + r.workspaces.submitted.total > 0
 }
 
 /** A share, or `null` when there is nothing to divide. */

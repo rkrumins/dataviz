@@ -4,7 +4,8 @@
  */
 import { render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 
 import { DataTab } from '../DataTab'
 import { DATA_LOCKED, DATA_PRIVILEGED } from '@/harness/analyticsFixtures'
@@ -93,5 +94,44 @@ describe('DataTab · details and requests', () => {
         expect(screen.queryByRole('heading', { name: 'How sources are described' })).toBeNull()
         expect(screen.queryByRole('heading', { name: 'Requests' })).toBeNull()
         expect(screen.queryByText('Requests are hidden')).toBeNull()
+    })
+
+    describe('while their switches are off', () => {
+        afterEach(() => useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } }))
+        const empty = (d: AnalyticsDataDoc): AnalyticsDataDoc => ({
+            ...d,
+            details: d.details && {
+                ...d.details, described: 0, tagged: 0, withContacts: 0, topTags: [],
+                trust: d.details.trust.map((t) => ({ ...t, count: t.key === 'none' ? d.details!.sources : 0 })),
+                classification: d.details.classification.map((c) => ({ ...c, count: c.key === 'none' ? d.details!.sources : 0 })),
+            },
+            requests: d.requests && {
+                ...d.requests,
+                data: { ...d.requests.data, asked: { ...d.requests.data.asked, total: 0, current: 0 } },
+                workspaces: { ...d.requests.workspaces, submitted: { ...d.requests.workspaces.submitted, total: 0, current: 0 } },
+            },
+        })
+
+        it('says nothing about details or requests nobody could have made', () => {
+            useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } })
+            renderTab(empty(DATA_PRIVILEGED))
+            expect(screen.queryByRole('heading', { name: 'How sources are described' })).toBeNull()
+            expect(screen.queryByRole('heading', { name: 'Requests' })).toBeNull()
+        })
+
+        it('keeps what was recorded while they were on, and shows empty sections once they are on', () => {
+            renderTab(DATA_PRIVILEGED)
+            expect(screen.getByRole('heading', { name: 'How sources are described' })).toBeInTheDocument()
+            expect(screen.getByRole('heading', { name: 'Requests' })).toBeInTheDocument()
+        })
+
+        it('shows the empty sections with the switches on', () => {
+            useFeaturesStore.setState({ values: {
+                ...DEFAULT_FEATURES, dataSourceMetadataEnabled: true, dataRequestsEnabled: true,
+            } })
+            renderTab(empty(DATA_PRIVILEGED))
+            expect(screen.getByRole('heading', { name: 'How sources are described' })).toBeInTheDocument()
+            expect(screen.getByRole('heading', { name: 'Requests' })).toBeInTheDocument()
+        })
     })
 })

@@ -68,6 +68,7 @@ DATA_REQUEST_WAITS = {
 }
 _NEEDED = {"this_week": "needed this week", "this_month": "needed this month", "no_rush": "no rush"}
 DATA_REQUESTS_FLAG = "dataRequestsEnabled"
+WORKSPACE_REQUESTS_FLAG = "workspaceRequestsEnabled"
 _QUEUE_LINK = "/workspaces?tab=requests"
 _BATCH = 500
 # The shortest lead is two days, so an hour's resolution is plenty.
@@ -285,7 +286,11 @@ async def nudge_waiting_workspace_requests(
     """Bring up workspace requests nobody has answered: to the people who create
     workspaces after :data:`REMIND_AFTER`, to the platform administrators after
     :data:`ESCALATE_AFTER` — counted from when the request was last sent. A request
-    sent back waits on its requester, not on them. Returns ``(reminded, escalated)``."""
+    sent back waits on its requester, not on them. Nothing while ``workspaceRequestsEnabled``
+    is off: the requests screens are hidden then, so a reminder would point at nothing.
+    Returns ``(reminded, escalated)``."""
+    if not await feature_flags.is_enabled(WORKSPACE_REQUESTS_FLAG, session, default=False):
+        return 0, 0
     now = now or _now()
     rows = (await session.execute(
         select(WorkspaceRequestORM).where(

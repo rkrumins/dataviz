@@ -222,6 +222,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         server_gates=(
             "versioning_gate.py — every /graph write (drafts, commits, merges, reverts)",
             "versioned_write_provider.py — backstop on the write-through path",
+            "GET /playground/samples, POST /playground/samples/{sample_id} — starting from a sample",
         ),
         ui_surfaces=(
             "Canvas edit mode, drafts, reviews and history",
@@ -534,6 +535,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /playground/join — refused while off",
             "GET /playground — says the Playground is off, and offers nothing",
             "GET /playground/samples, POST /playground/samples/{sample_id} — refused while off",
+            "POST /{ws_id}/versioning/blank-graphs in the Playground — starting a new graph there is refused",
         ),
         ui_surfaces=(
             "Playground — in the sidebar, and on the Dashboard and Workspaces, opening it for anyone",
@@ -543,7 +545,10 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         still_allowed=(
             "People already in the Playground keep their graphs and views; nothing is deleted",
             "Leaving the Playground",
+            "Moving an experiment out into a workspace, or asking to",
         ),
+        # A Playground graph is a blank, versioned graph: without these it can make nothing.
+        depends_on=("versioningEnabled", "blankModelsEnabled"),
     ),
     # Preview: the screens are still being built, so it ships OFF, and the gates pass
     # default=False — a definition not seeded yet means off, as on a fresh deployment.
@@ -554,14 +559,15 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         server_gates=(
             "POST /workspace-requests — refused while off",
             "PUT /me/workspace-requests/{id} (resubmitting one sent back) — refused while off",
+            "Reminders and escalations of requests left waiting pause",
         ),
         ui_surfaces=(
             "Request a workspace — the wizard, from the Playground, Dashboard and Workspaces",
-            "Workspace requests — Workspaces → Requests, for platform and org admins",
+            "Workspace requests — your own, and Workspaces → Requests for platform and org admins",
         ),
         still_allowed=(
-            "Reading and withdrawing requests already sent",
-            "Answering requests already sent: approving, sending back and declining",
+            "Requests already sent are kept, and shown again when it is turned back on",
+            "Through the API: reading, withdrawing and answering requests already sent",
             "Workspaces made from a request keep everything; nothing is deleted",
         ),
     ),
@@ -579,8 +585,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Data requests — a workspace's Data → Sources, and Workspaces → Requests for platform and org admins",
         ),
         still_allowed=(
-            "Reading and withdrawing requests already sent",
-            "Answering requests already sent: starting, connecting and declining",
+            "Requests already sent are kept, and shown again when it is turned back on",
+            "Through the API: reading, withdrawing and answering requests already sent",
             "Data sources connected for a request are kept; nothing is deleted",
         ),
     ),
@@ -607,18 +613,23 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "PUT /discussions/subjects/{type}/{id}/watch, PUT /discussions/{id}/me (following) — watching",
             "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts — naming data contacts "
             "(open while this or dataSourceMetadataEnabled is on)",
-            "Watcher notices and reminders pause",
+            "Watcher notices, reminders and escalations pause (deleted messages are still blanked after 30 days)",
         ),
         ui_surfaces=(
-            "Questions — the view header, the Explorer preview, a data source's Questions tab",
-            "Ask about this — a canvas node's menu",
+            "Questions — the view header, the Explorer preview, a data source's Questions tab and Watch",
+            "Ask about this — a canvas node's menu; question marks on canvas rows",
+            "Question counts on view and data source cards",
             "Who to ask and Data contacts — a view's About sheet, a data source's Overview",
-            "Conversations and Watching — your profile",
+            "Profiles — /me/profile and /people/{id}, links from people's names, the menu under your avatar, "
+            "your account settings, the command palette",
+            "Conversations and Watching — your profile; the Inbox's All conversations",
+            "Analytics — the Collaboration tab's figures, and its findings on the Overview",
         ),
         still_allowed=(
-            "Reading every conversation already started",
-            "Marking read, muting, unfollowing, unwatching, closing and deleting",
-            "Data contacts already named are kept and shown; nothing is deleted",
+            "Conversations already started are kept, and shown again when it is turned back on",
+            "Through the API: reading them, marking read, muting, unfollowing, unwatching, closing and deleting",
+            "GET /people/{id} — a person's profile, through the API",
+            "Data contacts already named are kept; nothing is deleted",
         ),
     ),
     # ── Data governance ────────────────────────────────────────────────────────

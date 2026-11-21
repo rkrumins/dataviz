@@ -6,6 +6,7 @@
  * Everything deeper lives in its own tab; this one is the summary a business
  * reader can take in without scrolling twice.
  */
+import { useMemo } from 'react'
 import {
     Activity, ArrowRight, Boxes, Database, Eye, LayoutGrid, LayoutTemplate, MousePointerClick, TrendingUp, Users,
 } from 'lucide-react'
@@ -32,6 +33,10 @@ import { BarSeriesChart } from './charts/BarSeriesChart'
 import { comparisonLabel, previousLabel, rangeLabel, rangePhrase } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 import { shortDate } from '@/lib/formatMetric'
+import { useFeature } from '@/store/features'
+
+/** Overview findings drawn from questions and conversations. */
+const QUESTION_FINDINGS: ReadonlySet<string> = new Set(['questions-waiting', 'most-discussed'])
 
 interface Props {
     data: AnalyticsSummary
@@ -46,6 +51,13 @@ export function OverviewTab({
     data, range, isStale, onWorkspaceClick, onNavigateTab,
 }: Props) {
     const theme = useChartTheme()
+    const conversations = useFeature('conversationsEnabled')
+    // Findings about questions wait for questions to be on: the document is cached for every
+    // reader, so the switch is applied here rather than where it is built.
+    const insights = useMemo(
+        () => conversations ? data.insights : data.insights.filter((i) => !QUESTION_FINDINGS.has(i.key)),
+        [conversations, data.insights],
+    )
     const { totals, series, engagement, leaderboards, graph } = data
     // Whether OTHER people may be named. Not `redaction.applied` — that is
     // true for every non-privileged reader, including at the privacy levels
@@ -59,7 +71,7 @@ export function OverviewTab({
                 has ten seconds should still leave with the finding. Renders
                 nothing at all when there is nothing worth saying. */}
             <InsightStrip
-                insights={data.insights}
+                insights={insights}
                 rangeLabel={rangeLabel(range)}
                 onNavigate={onNavigateTab}
             />

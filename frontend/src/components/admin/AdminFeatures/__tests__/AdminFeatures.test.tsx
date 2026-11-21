@@ -374,3 +374,25 @@ describe('Undo', () => {
         expect(raised()[0].action).toBeUndefined()
     })
 })
+
+describe('A switch that needs others', () => {
+    const PLAYGROUND: FeatureDefinition = {
+        ...SIGNUP, key: 'playgroundEnabled', name: 'Playground', dependsOn: ['versioningEnabled'],
+        impactWhenOn: undefined,
+    } as FeatureDefinition
+    const VERSIONING: FeatureDefinition = {
+        ...SIGNUP, key: 'versioningEnabled', name: 'Version control', dependsOn: [],
+    } as FeatureDefinition
+    beforeEach(() => { hookState.extra = [PLAYGROUND, VERSIONING] })
+    afterEach(() => { hookState.extra = [] })
+
+    it('turns on what it needs in the same save, and says so', async () => {
+        const user = userEvent.setup()
+        render(<><AdminFeatures /><NotificationStack /></>)
+        await user.click(switchesFor(/Turn Playground on/i)[0])
+        expect(handleChange).toHaveBeenCalledWith('playgroundEnabled', true, { versioningEnabled: true })
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].message).toBe('Playground — updated. Also turned on: Version control')
+    })
+})
+

@@ -19,7 +19,9 @@
 
 Runs on the CONTROLPLANE/DEV role, like the other sweepers, every 15 seconds (retention
 and archiving hourly); each transaction claims an advisory lock so two processes never
-do the same work. It all pauses while ``conversationsEnabled`` is off. Imports
+do the same work. Watcher notices, reminders and escalations pause while
+``conversationsEnabled`` is off; retention and archiving never do — turning questions off
+must not keep what a deleted message said. Imports
 repositories only: the control plane starts without the web tier.
 """
 from __future__ import annotations
@@ -255,12 +257,14 @@ async def archive(session: AsyncSession, *, now: Optional[datetime] = None) -> i
 
 async def run_pass(session_factory, *, now: Optional[datetime] = None, slow: bool = True) -> dict:
     """One pass: watcher batches (each its own transaction), then reminders — and, when
-    ``slow``, retention and archiving. Nothing while the switch is off."""
+    ``slow``, retention and archiving. While the switch is off only retention and archiving
+    run (``paused`` in the result)."""
     out = {"fanned": 0, "reminded": 0, "escalated": 0, "blanked": 0, "archived": 0}
-    if not await feature_flags.is_enabled_self_session(FLAG, default=False):
-        return {**out, "paused": True}
+    on = await feature_flags.is_enabled_self_session(FLAG, default=False)
+    if not on:
+        out["paused"] = True
     now = now or _now()
-    for _ in range(BATCHES_PER_PASS):
+    for _ in range(BATCHES_PER_PASS if on else 0):
         async with session_factory() as session:
             if not await claim_this_pass(session, LOCK):
                 return out
@@ -271,7 +275,8 @@ async def run_pass(session_factory, *, now: Optional[datetime] = None, slow: boo
         out["fanned"] += 1
     async with session_factory() as session:
         if await claim_this_pass(session, LOCK):
-            out["reminded"], out["escalated"] = await remind(session, now=now)
+            if on:
+                out["reminded"], out["escalated"] = await remind(session, now=now)
             if slow:
                 out["blanked"] = await retain(session, now=now)
                 out["archived"] = await archive(session, now=now)
@@ -288,7 +293,7 @@ async def run_sweeper(session_factory, shutdown: asyncio.Event, *, interval: flo
             now = _now()
             slow = last_slow is None or now - last_slow >= _SLOW_EVERY
             out = await run_pass(session_factory, now=now, slow=slow)
-            if slow and not out.get("paused"):
+            if slow:
                 last_slow = now
             if any(v for k, v in out.items() if k != "paused"):
                 logger.info("Discussions housekeeping: %s", " ".join(f"{k}={v}" for k, v in out.items()))

@@ -598,6 +598,15 @@ async def test_a_request_left_waiting_is_brought_up_then_taken_further_once_each
     assert (await _kinds(db_session, ROOT.id))["workspace_request.escalated"] == "/workspaces?tab=requests"
     assert await nudge_waiting_workspace_requests(db_session, now=sent + timedelta(days=30)) == (0, 0)
 
+    # While the switch is off nobody is brought up again; on again, the waiting picks up.
+    feature_flags._cache["workspaceRequestsEnabled"] = False
+    row = await db_session.get(WorkspaceRequestORM, req["id"])
+    row.reminded_at = row.escalated_at = None
+    await db_session.commit()
+    assert await nudge_waiting_workspace_requests(db_session, now=sent + timedelta(days=8)) == (0, 0)
+    feature_flags._cache["workspaceRequestsEnabled"] = True
+    assert await nudge_waiting_workspace_requests(db_session, now=sent + timedelta(days=8)) == (1, 1)
+
     # Sent back and answered: the waiting starts afresh.
     with _as(OLGA, APPROVER):
         await test_client.post(f"/api/v1/admin/workspace-requests/{req['id']}/send-back", json={"question": "Why?"})

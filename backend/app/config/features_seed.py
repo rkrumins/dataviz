@@ -97,13 +97,13 @@ REFUSAL_MESSAGES: dict[str, str] = {
         "The Playground is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
     "workspaceRequestsEnabled":
-        "Requesting a workspace is turned off for this deployment. "
+        "Requesting a workspace is turned off for this deployment. Requests already sent are kept. "
         "An administrator can enable it under Admin → Features.",
     "dataRequestsEnabled":
-        "Asking for data is turned off for this deployment. "
+        "Asking for data is turned off for this deployment. Requests already sent are kept. "
         "An administrator can enable it under Admin → Features.",
     "conversationsEnabled":
-        "Questions and conversations are turned off for this deployment, so they are read-only. "
+        "Questions and conversations are turned off for this deployment; those already started are kept. "
         "An administrator can enable them under Admin → Features.",
     "dataSourceMetadataEnabled":
         "Data source details are turned off for this deployment, so they can't be changed. "
@@ -635,8 +635,9 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "or its data."
         ),
         "impact_when_off": (
-            "Try the Playground disappears and the server refuses joining it. People already in "
-            "it keep their graphs and views, which stay in the workspace; nothing is deleted."
+            "Try the Playground disappears and the server refuses joining it and starting new "
+            "graphs in it. People already in it keep their graphs and views, which stay in the "
+            "workspace; nothing is deleted."
         ),
         "category_id": "auth",
         "type": "boolean",
@@ -646,7 +647,8 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "admin_hint": (
             "On, everyone who can sign in may join the Playground and create graphs on its "
             "sandbox provider, up to the quota you set. Give it a provider of its own, kept apart "
-            "from production, before turning this on."
+            "from production, before turning this on. It needs Version control and Build lineage "
+            "from scratch, which turning it on here turns on too."
         ),
         "sort_order": 8,
         "deprecated": False,
@@ -660,9 +662,10 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "Super Admins to approve, send back with a question, or decline."
         ),
         "impact_when_off": (
-            "Request a workspace disappears and the server refuses new and resubmitted requests. "
-            "Requests already sent can still be read, withdrawn and answered, and workspaces made "
-            "from them keep everything. Nothing is deleted."
+            "Request a workspace and the requests screens disappear, the server refuses new and "
+            "resubmitted requests, and nobody is reminded of waiting ones. Requests already sent "
+            "are kept and come back when it is turned on again (the API still reads, withdraws "
+            "and answers them); workspaces made from them keep everything. Nothing is deleted."
         ),
         "category_id": "auth",
         "type": "boolean",
@@ -686,9 +689,10 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "who knows it — for the platform team to take on, connect, or decline."
         ),
         "impact_when_off": (
-            "Ask for data disappears and the server refuses new requests. Requests already sent "
-            "can still be read, withdrawn and answered, but nobody is reminded of them, and data "
-            "sources connected for them are kept. Nothing is deleted."
+            "Ask for data and the data requests screens disappear, the server refuses new "
+            "requests, and nobody is reminded of waiting ones. Requests already sent are kept and "
+            "come back when it is turned on again (the API still reads, withdraws and answers "
+            "them); data sources connected for them are kept. Nothing is deleted."
         ),
         "category_id": "auth",
         "type": "boolean",
@@ -1285,9 +1289,11 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "source for new questions. Workspace admins name each source's Owner and Stewards."
         ),
         "impact_when_off": (
-            "Conversations become read-only: nobody can ask, reply, edit, watch or change a "
-            "source's data contacts, and reminders and watcher notices stop. Everything already "
-            "said can still be read, marked read, muted, closed or deleted. Nothing is deleted."
+            "Questions, profiles and question counts disappear, and nobody can ask, reply, edit, "
+            "watch or (unless Data source details is on) change a source's data contacts; "
+            "reminders and watcher notices stop. Everything already said is kept and comes back "
+            "when it is turned on again (the API still reads, closes and deletes it), and deleted "
+            "messages are still blanked after 30 days. Nothing else is deleted."
         ),
         "category_id": "notifications",
         "type": "boolean",

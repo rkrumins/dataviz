@@ -48,7 +48,7 @@ import { FeatureList } from './FeatureList'
 import { FeatureSpec } from './FeatureSpec'
 import { ResetConfirmModal, EffectFocusCancel } from './ResetConfirmModal'
 import { SkeletonCards } from './SkeletonCards'
-import { isOn } from './featureState'
+import { blockedBy, isOn } from './featureState'
 
 /**
  * How long the "what you just changed" notification lives.
@@ -140,8 +140,13 @@ export function AdminFeatures() {
   const isUsingDefaults = !data?.updatedAt && !defaultsHintDismissed
 
   /** Save, then say so — in the app's one notification stack, never a second pop-up of its own. */
-  const save = async (key: string, value: unknown, message: string, undo?: () => void) => {
-    if (!(await handleChange(key, value))) return
+  const save = async (
+    key: string, value: unknown, message: string, undo?: () => void, alongside?: Record<string, unknown>,
+  ) => {
+    const saved = alongside && Object.keys(alongside).length
+      ? await handleChange(key, value, alongside)
+      : await handleChange(key, value)
+    if (!saved) return
     notify('success', message, undo && { label: 'Undo', onClick: undo }, undo && UNDO_LIFETIME_MS)
   }
 
@@ -153,13 +158,20 @@ export function AdminFeatures() {
    */
   const applyChange = (feature: FeatureDefinition, next: unknown) => {
     const from = values[feature.key] ?? feature.default
+    // Turning a switch on turns on what it needs, in the same save — a Playground with version
+    // control off would offer nothing. Turning one off never turns anything else off.
+    const needed = next === true ? blockedBy(feature, live, values) : []
+    const alongside = Object.fromEntries(needed.map(dep => [dep.key, true]))
+    const also = needed.length ? `. Also turned on: ${needed.map(dep => dep.name).join(', ')}` : ''
     return save(
       feature.key,
       next,
-      `${feature.name} — ${next === false ? 'turned off' : 'updated'}`,
-      // Put it back exactly as it was. Not a fresh decision — a reversal, so it asks nothing, and
-      // it does not offer to undo the undo.
-      () => void save(feature.key, from, 'Saved'),
+      `${feature.name} — ${next === false ? 'turned off' : 'updated'}${also}`,
+      // Put it back exactly as it was — what it needed too. Not a fresh decision — a reversal, so
+      // it asks nothing, and it does not offer to undo the undo.
+      () => void save(feature.key, from, 'Saved', undefined,
+        Object.fromEntries(needed.map(dep => [dep.key, values[dep.key] ?? dep.default]))),
+      alongside,
     )
   }
 
@@ -357,6 +369,7 @@ export function AdminFeatures() {
 
       <ConfirmTurnOn
         feature={pendingOn}
+        alsoTurnsOn={pendingOn ? blockedBy(pendingOn, live, values) : []}
         onCancel={() => setPendingOn(null)}
         onConfirm={confirmTurnOn}
       />
