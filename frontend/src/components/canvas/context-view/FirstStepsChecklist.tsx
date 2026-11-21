@@ -65,8 +65,9 @@ export function FirstStepsChecklist({ graphId, mainHeadSeq }: FirstStepsChecklis
   }
 
   return (
-    // Above the canvas dock and the assistant's bubble, which share this corner.
-    <div className="absolute bottom-[calc(1rem_+_var(--canvas-dock-height,0px)_+_var(--assistant-launcher-height,0px))] right-4 z-40 w-[248px] rounded-2xl border border-glass-border bg-canvas-elevated/95 backdrop-blur-xl shadow-lg overflow-hidden">
+    // Above the canvas dock and the assistant's bubble, which share this corner — on the same
+    // 1.5rem inset they stack from, so it clears the bubble rather than resting on it.
+    <div className="absolute bottom-[calc(1.5rem_+_var(--canvas-dock-height,0px)_+_var(--assistant-launcher-height,0px))] right-4 z-40 w-[248px] rounded-2xl border border-glass-border bg-canvas-elevated/95 backdrop-blur-xl shadow-lg overflow-hidden">
       <div className="flex items-center gap-2 px-3.5 py-2.5 border-b border-glass-border">
         <span className="flex items-center justify-center w-6 h-6 rounded-lg bg-accent-lineage/10">
           <ListChecks className="w-3.5 h-3.5 text-accent-lineage" />

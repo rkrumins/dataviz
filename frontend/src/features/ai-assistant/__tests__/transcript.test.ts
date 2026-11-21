@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 
+import type { ContextBrief } from '../api/types'
 import { linkCitations } from '../lib/citations'
 import type { SseFrame } from '../lib/sseStream'
 import { answerAsText, applyFrame, emptyAssistantTurn, endTurn, markClarified, turnsFromConversation } from '../lib/transcript'
@@ -87,6 +88,24 @@ describe('a stored conversation', () => {
         })
         expect(turns[0]).toEqual({ role: 'user', id: 'm1', text: 'Which tables hold PII?' })
         expect(turns[1]).toMatchObject({ role: 'assistant', messageId: 'm2', text: 'These.', feedback: 1, finished: true, status: 'ok' })
+    })
+
+    it('keeps a stored “what I know” card as it was', () => {
+        const brief: ContextBrief = {
+            kind: 'view', about: { name: 'Supply chain', workspace: 'Operations' },
+            layers: [{ name: 'Sources', types: ['dataset'] }], hierarchy: { chains: [['container', 'dataset']] },
+            caveats: [{ code: 'no_lineage', text: 'No lineage here.' }], notes: [],
+        }
+        const block = { id: 'b1', type: 'context' as const, data: brief }
+        const [, answer] = turnsFromConversation({
+            id: 'c1', title: 'Context', persona: 'data', messages: [
+                { id: 'm1', role: 'user', content: 'What do you know about this view?' },
+                { id: 'm2', role: 'assistant', content: 'This.', blocks: [block], status: 'ok' },
+            ],
+        })
+        expect(answer).toMatchObject({ blocks: [block] })
+        // And live, from the stream.
+        expect(applyFrame(emptyAssistantTurn(), f('block', block)).blocks).toEqual([block])
     })
 })
 

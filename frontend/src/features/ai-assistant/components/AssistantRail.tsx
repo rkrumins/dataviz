@@ -62,7 +62,7 @@ export function AssistantRail() {
 
     // A page that prefers a persona (the guide: Help) gets it when the rail opens on it — unless a
     // conversation is already under way, which keeps the persona it was asked in.
-    const preferred = useAssistantStore((s) => (s.page?.path === page.context.route ? s.page.persona : undefined))
+    const preferred = useAssistantStore((s) => (s.page && s.page.path === page.context.route ? s.page.persona : undefined))
     useEffect(() => {
         if (!open || !preferred) return
         const s = useAssistantStore.getState()

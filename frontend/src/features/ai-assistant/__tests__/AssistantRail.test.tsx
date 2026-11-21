@@ -14,10 +14,14 @@ import { KEYBOARD_SCOPE_ATTR } from '@/lib/keyboardScope'
 import { queryClient } from '@/lib/queryClient'
 import { useAuthStore } from '@/store/auth'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
+import { VIEW_BRIEF } from '@/harness/aiFixtures'
+import { useSchemaStore } from '@/store/schema'
+import type { WorkspaceSchema } from '@/types/schema'
 
 import type { AiStatus } from '../api/types'
 import { AssistantRail } from '../components/AssistantRail'
-import { stopStreaming } from '../lib/chatController'
+import { sendMessage, stopStreaming } from '../lib/chatController'
+import { useAssistantPage, type AssistantPageRegistration } from '../lib/useAssistantPage'
 import { useAssistantStore } from '../store/assistantStore'
 
 const CONFIGURED: AiStatus = { configured: true, personas: { data: true, help: true }, connectionName: 'Corp gateway' }
@@ -46,6 +50,7 @@ const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => 
     if (url.endsWith('/api/v1/ai/status')) return json(status)
     if (url.endsWith('/api/v1/ai/chat/stream')) return chat(JSON.parse(String(init?.body)))
     if (url.includes('/api/v1/ai/conversations')) return json({ items: [] })
+    if (url.includes('/api/v1/ai/context')) return json(VIEW_BRIEF)
     return json({}, 404)
 })
 
@@ -59,16 +64,24 @@ beforeEach(() => {
     status = CONFIGURED
     useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, aiAssistantEnabled: true } })
     useAssistantStore.setState({ ...initialStore, open: true }, true)
+    useSchemaStore.setState({ schema: null } as never)
 })
 afterEach(() => {
     stopStreaming()
     globalThis.fetch = realFetch
 })
 
-function renderRail(path = '/dashboard') {
+/** A page that says what it is, as the guide and the workspace pages do. */
+function Page({ page }: { page: AssistantPageRegistration }) {
+    useAssistantPage(page)
+    return null
+}
+
+function renderRail(path = '/dashboard', page?: AssistantPageRegistration) {
     return render(
         <MemoryRouter initialEntries={[path]}>
             <QueryClientProvider client={queryClient}>
+                {page && <Page page={page} />}
                 <div className="flex">
                     <main />
                     <AssistantRail />
@@ -222,6 +235,47 @@ describe('AssistantRail', () => {
         // The question asks no more, and says what was chosen.
         expect(screen.queryByRole('radio', { name: /Tag “pii”/ })).not.toBeInTheDocument()
         expect(screen.getAllByText('Tag “pii”').length).toBeGreaterThan(0)
+    })
+
+    it('on a view, says what it knows about it, and opens the full card from the welcome', async () => {
+        useSchemaStore.setState({ schema: {
+            entityTypes: [], relationshipTypes: [], views: [{ id: 'harness-view', name: 'Supply chain', workspaceId: 'ws', dataSourceId: 'ds' }],
+        } as unknown as WorkspaceSchema } as never)
+        renderRail('/views/harness-view')
+        expect(await screen.findByText('1,773 entities · 9 types · 4 layers')).toBeInTheDocument()
+        const asked = fetchMock.mock.calls.find(([u]) => String(u).includes('/api/v1/ai/context'))!
+        expect(String(asked[0])).toContain('viewId=harness-view')
+        expect(String(asked[0])).toContain('pageKind=view')
+        expect(screen.getByRole('button', { name: /How does data flow from Sources to Reports\?/ })).toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: 'What I know' }))
+        expect(useAssistantStore.getState().contextOpen).toBe(true)
+        expect(await screen.findByRole('dialog', { name: 'What I know' })).toBeInTheDocument()
+    })
+
+    it('on a guide page, opens on Help — but leaves a conversation under way in its persona', async () => {
+        const doc: AssistantPageRegistration = { kind: 'doc', id: '/guide/ai-assistant', title: 'The AI assistant', persona: 'help' }
+        const { unmount } = renderRail('/guide/ai-assistant', doc)
+        expect(await screen.findByRole('button', { name: /Summarise this page/ })).toBeInTheDocument()
+        expect(useAssistantStore.getState().persona).toBe('help')
+        expect(composer()).toHaveAttribute('placeholder', 'Ask about this page…')
+        unmount()
+
+        useAssistantStore.setState({ ...initialStore, open: true, conversationId: 'conv_1', turns: [{ role: 'user', id: 'q1', text: 'Hi' }] }, true)
+        renderRail('/guide/ai-assistant', doc)
+        await screen.findByText('Hi')
+        expect(useAssistantStore.getState().persona).toBe('data')
+    })
+
+    it('an answer that finishes while the rail is folded away is marked unread for the launcher', async () => {
+        chat = () => sseResponse([frame('text', { delta: 'Done.' }), frame('done', { status: 'ok' })])
+        useAssistantStore.setState({ open: false })
+        await sendMessage({ message: 'Anything new?', persona: 'data', context: {} })
+        expect(useAssistantStore.getState().unread).toBe(true)
+        act(() => useAssistantStore.getState().openAssistant())
+        expect(useAssistantStore.getState().unread).toBe(false)
+        // Read with the rail open, it is not news.
+        await sendMessage({ message: 'And now?', persona: 'data', context: {} })
+        expect(useAssistantStore.getState().unread).toBe(false)
     })
 
     it('Esc closes it', async () => {

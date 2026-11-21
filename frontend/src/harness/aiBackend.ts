@@ -1,8 +1,8 @@
 /**
  * The AI harness's in-memory service: it takes the place of `window.fetch` for `/api/v1/ai/*`
- * and answers from a fixture — the status, the conversations, and the chat as a real stream of
- * server-sent events, a frame at a time, so the rail renders exactly as it would against the
- * service. Anything else under `/api` is a 404: the harness has no backend.
+ * and answers from a fixture — the status, what it knows about the page, the conversations, and
+ * the chat as a real stream of server-sent events, a frame at a time, so the rail renders exactly
+ * as it would against the service. Anything else under `/api` is a 404: the harness has no backend.
  */
 import { AI_FIXTURES, DEFAULT_STATUS, type AiFixture, type ScriptFrame } from './aiFixtures'
 
@@ -58,6 +58,9 @@ export function installAiBackend(fixture: AiFixture, { frameDelayMs = 40 } = {})
         const method = (init?.method ?? 'GET').toUpperCase()
 
         if (path === '/api/v1/ai/status') return json(fixture.status ?? DEFAULT_STATUS)
+        if (path === '/api/v1/ai/context') {
+            return fixture.brief ? json(fixture.brief) : json({ detail: { error: 'not_found' } }, 404)
+        }
         if (path === '/api/v1/ai/chat/stream' && method === 'POST') {
             const body = JSON.parse(String(init?.body ?? '{}')) as { clarification?: unknown }
             asked += 1

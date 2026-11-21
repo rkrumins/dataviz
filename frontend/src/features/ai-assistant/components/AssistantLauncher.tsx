@@ -49,6 +49,7 @@ function Bubble() {
     return (
         <div ref={ref} className="fixed right-6 z-40" style={{ bottom: BOTTOM }}>
             <HoverTip
+                className="flex"
                 label={unread ? 'A new answer is ready' : streaming ? 'Still writing your answer' : 'Opens beside the page, so nothing is covered'}
                 detail="It knows where you are, and reads only what you can see"
             >

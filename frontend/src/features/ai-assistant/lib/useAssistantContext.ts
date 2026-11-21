@@ -132,8 +132,7 @@ export function useAssistantContext(): AssistantPageContext {
             detached,
             label: routeViewId ? viewName ?? 'This view' : registered?.title ?? pageName(pathname),
         }
-        // selectedNodeIds / drawerNodeId: the canvas's context changes with them.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        // selectedNodeIds / drawerNodeId: the canvas's context changes with them, bridged or not.
     }, [bridge, routeViewId, pathname, viewConfig, activeViewId, activeWorkspaceId, activeDataSourceId, pending, detachedFrom,
         registered, draft, personaMode, selectedNodeIds, drawerNodeId])
 }

@@ -26,6 +26,15 @@ const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'pii', 'pii:dark', 'results:top', 'results:dark:top', 'results:w360:top',
   'help', 'help:dark', 'views', 'query:top', 'query:dark:top', 'error',
   'thinking', 'streaming', 'streaming:dark',
+  // What it knows about the page: the card over the chip, as an answer's card, on a generic
+  // schema, the type confirmation, a workspace and a guide page.
+  'contextCard', 'contextCard:dark', 'contextCard:business', 'contextCard:w360',
+  'contextBlock:top', 'contextBlock:dark:top', 'contextBlock:w360:top',
+  'genericWelcome', 'genericWelcome:dark', 'genericCard', 'genericCard:dark',
+  'typeConfirm', 'typeConfirm:dark', 'workspaceWelcome', 'workspaceWelcome:dark', 'docHelp', 'docHelp:dark',
+  // The launcher, and the bottom-right corner it shares.
+  'launcher', 'launcher:dark', 'launcherPill', 'launcherPill:dark', 'launcherUnread', 'launcherUnread:dark',
+  'launcherStreaming', 'launcherDock', 'launcherDock:dark', 'launcherChecklist',
 ]
 
 function findChromium() {

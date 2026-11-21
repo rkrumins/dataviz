@@ -150,8 +150,10 @@ function WhatIKnow({ brief, onAsk, children }: {
             </Popover.Trigger>
             <Popover.Portal>
                 <Popover.Content align="start" sideOffset={6} collisionPadding={12} aria-label="What I know"
-                                 data-floating-layer="" {...keyboardScopeProps('ai-chat')}
-                                 className="z-[70] flex max-h-[min(36rem,75vh)] w-[min(26rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-glass-border bg-canvas-elevated shadow-2xl shadow-black/25">
+                                 data-floating-layer="" {...keyboardScopeProps('ai-chat')} tabIndex={-1}
+                                 // Focus the card itself, not its first link: it is read before anything in it is used.
+                                 onOpenAutoFocus={(e) => { e.preventDefault(); (e.currentTarget as HTMLElement | null)?.focus() }}
+                                 className="z-[70] flex max-h-[min(36rem,75vh)] w-[min(26rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-glass-border bg-canvas-elevated shadow-2xl shadow-black/25 focus:outline-none">
                     {brief.data ? (
                         <ContextCard variant="popover" brief={brief.data} onAsk={(q) => { setOpen(false); onAsk(q) }} />
                     ) : brief.isError ? (

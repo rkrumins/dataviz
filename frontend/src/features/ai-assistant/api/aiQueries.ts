@@ -73,13 +73,14 @@ export function briefAvailable(persona: AssistantPersona, page: AssistantPageCon
 }
 
 /**
- * What the assistant knows about the page. Asked only while the rail is open and a card is
- * available here (`briefAvailable`): the brief reads the catalogue, which a folded rail, or Help,
- * has no use for.
+ * What the assistant knows about the page. Asked only while the rail is open, the assistant can
+ * answer, and a card is available here (`briefAvailable`): the brief reads the catalogue, which a
+ * folded rail, or Help, has no use for.
  */
 export function useContextBrief(page: AssistantPageContext) {
     const open = useAssistantStore((s) => s.open)
     const persona = useAssistantStore((s) => s.persona)
+    const available = useAiAvailable('data')
     const p = page.context.page
     const { workspaceId, dataSourceId, viewId } = page.context
     return useQuery({
@@ -87,7 +88,7 @@ export function useContextBrief(page: AssistantPageContext) {
         queryFn: () => aiService.getContext({
             viewId, workspaceId, dataSourceId, pageKind: p?.kind, pageId: p?.id, pageTitle: p?.title,
         }),
-        enabled: open && briefAvailable(persona, page),
+        enabled: open && available && briefAvailable(persona, page),
         staleTime: 5 * 60_000,
         retry: false,
     }, queryClient)

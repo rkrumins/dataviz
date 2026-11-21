@@ -10,7 +10,7 @@
  */
 import { useState, type ComponentType } from 'react'
 import {
-    AlertTriangle, BookOpen, Check, ChevronRight, Compass, Database, Eye, FolderKanban, Info, Network,
+    AlertTriangle, BookOpen, Check, ChevronRight, Compass, CornerDownRight, Database, Eye, FolderKanban, Info, Network,
     ShieldCheck, Sparkles, X,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/Badge'
@@ -179,7 +179,8 @@ function About({ brief }: { brief: ContextBrief }) {
                     <span className={cn(!more && long && 'line-clamp-3')}>{description}</span>
                     {long && (
                         <button type="button" onClick={() => setMore((m) => !m)}
-                                className="ml-1 font-medium text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+                                className={cn('font-medium text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                                    more && 'ml-1')}>
                             {more ? 'less' : 'more'}
                         </button>
                     )}
@@ -232,7 +233,7 @@ function HeadsUp({ brief, onAsk, disabled }: { brief: ContextBrief; onAsk?: (q: 
 function Kinds({ brief }: { brief: ContextBrief }) {
     const tp = brief.typeProperty
     const { mono } = useNames(brief)
-    if (!tp || tp.values.length === 0) return null
+    if (!tp || !tp.values?.length) return null
     return (
         <section aria-label="Kinds of thing">
             <SectionLabel aside={tp.status === 'confirmed'
@@ -266,16 +267,16 @@ function Layers({ brief }: { brief: ContextBrief }) {
             <ol className="flex flex-wrap items-center gap-1">
                 {layers.map((l, i) => (
                     <li key={`${i}-${l.name}`} className="flex items-center gap-1">
-                        {i > 0 && <ChevronRight className="h-3 w-3 text-ink-muted/70" aria-hidden />}
                         <HoverTip
                             label={l.name}
-                            detail={[l.description, l.types.length ? `Holds ${l.types.map(typeText).join(', ')}` : null].filter(Boolean).join(' — ') || undefined}
+                            detail={[l.description, l.types?.length ? `Holds ${l.types.map(typeText).join(', ')}` : null].filter(Boolean).join(' — ') || undefined}
                         >
                             <span className="inline-flex items-center gap-1.5 rounded-full border border-glass-border bg-canvas py-0.5 pl-0.5 pr-2.5 text-xs text-ink">
                                 <span className="flex h-[18px] w-[18px] items-center justify-center rounded-full bg-accent-lineage/10 text-[10px] font-semibold tabular-nums text-accent-lineage">{i + 1}</span>
                                 {l.name}
                             </span>
                         </HoverTip>
+                        {i < layers.length - 1 && <ChevronRight className="h-3 w-3 text-ink-muted/70" aria-hidden />}
                     </li>
                 ))}
             </ol>
@@ -287,30 +288,31 @@ function Hierarchy({ brief }: { brief: ContextBrief }) {
     const { types, typeText, mono } = useNames(brief)
     const chains = (brief.hierarchy?.chains ?? []).filter((c) => c.length > 0)
     if (chains.length === 0) return null
+    const counted = chains.some((c) => c.some((id) => types.get(id)?.inView != null))
     return (
         <section aria-label="Hierarchy">
-            <SectionLabel>Hierarchy</SectionLabel>
-            <div className="space-y-1.5">
+            <SectionLabel aside={counted ? <span className="text-[11px] text-ink-muted">in view / in all</span> : undefined}>Hierarchy</SectionLabel>
+            <div className="space-y-2">
                 {chains.map((chain) => (
-                    <ol key={chain.join('>')} className="flex flex-wrap items-center gap-1">
+                    <ol key={chain.join('>')} className="space-y-1">
                         {chain.map((id, i) => {
                             const t = types.get(id)
                             const inView = t?.inView
                             const inSource = t?.inSource
                             return (
-                                <li key={id} className="flex items-center gap-1">
-                                    {i > 0 && <span aria-hidden className="text-xs text-ink-muted/70">›</span>}
-                                    <HoverTip
-                                        label={inView != null ? `${exact(inView)} in this view` : t?.name ?? id}
-                                        detail={inSource != null ? `${exact(inSource)} in the whole data source` : undefined}
-                                    >
-                                        <span className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border bg-canvas px-2 py-1 text-xs">
-                                            <TypeGlyph type={id} />
-                                            <span className={cn('font-medium text-ink', mono)}>{typeText(id)}</span>
-                                            {inView != null && <span className="font-semibold tabular-nums text-ink-secondary">{compact(inView)}</span>}
-                                            {inSource != null && inSource !== inView && <span className="tabular-nums text-ink-muted">/ {compact(inSource)}</span>}
-                                        </span>
-                                    </HoverTip>
+                                <li key={id} className="flex items-center gap-1.5 text-xs" style={{ paddingLeft: i * 14 }}>
+                                    {i > 0 && <CornerDownRight className="h-3 w-3 shrink-0 text-ink-muted/60" aria-hidden />}
+                                    <TypeGlyph type={id} />
+                                    <span className={cn('min-w-0 truncate font-medium text-ink', mono)}>{typeText(id)}</span>
+                                    {inView != null && (
+                                        <HoverTip className="ml-auto shrink-0" label={`${exact(inView)} in this view`}
+                                                  detail={inSource != null ? `${exact(inSource)} in the whole data source` : undefined}>
+                                            <span className="tabular-nums">
+                                                <span className="font-semibold text-ink-secondary">{compact(inView)}</span>
+                                                {inSource != null && <span className="text-ink-muted"> / {compact(inSource)}</span>}
+                                            </span>
+                                        </HoverTip>
+                                    )}
                                 </li>
                             )
                         })}
@@ -330,8 +332,11 @@ function Types({ brief }: { brief: ContextBrief }) {
         <section aria-label="Types">
             <SectionLabel aside={<span className="text-[11px] text-ink-muted">{plural(all.length, 'type')}</span>}>Types</SectionLabel>
             {counted.length > 0 ? (
-                <TypeBars limit={TYPES_SHOWN} mono={technical}
-                          rows={counted.map((t) => ({ type: t.id, label: typeText(t.id), count: t.inView ?? 0 }))} />
+                <>
+                    <TypeBars limit={TYPES_SHOWN} mono={technical}
+                              rows={counted.slice(0, TYPES_SHOWN).map((t) => ({ type: t.id, label: typeText(t.id), count: t.inView ?? 0 }))} />
+                    {all.length > TYPES_SHOWN && <p className="mt-2 text-[11px] text-ink-muted">and {plural(all.length - TYPES_SHOWN, 'more type')}</p>}
+                </>
             ) : (
                 <ul className="flex flex-wrap gap-1">
                     {all.slice(0, TYPES_SHOWN * 2).map((t) => (
@@ -353,7 +358,7 @@ function Connections({ brief }: { brief: ContextBrief }) {
     const { technical, typeText, mono } = useNames(brief)
     const all = brief.connections ?? []
     if (all.length === 0) return null
-    const ends = (ids: string[]) => (ids.length ? ids.map(typeText).join(', ') : 'anything')
+    const ends = (ids: string[] | undefined) => (ids?.length ? ids.map(typeText).join(', ') : 'anything')
     return (
         <section aria-label="Connections">
             <SectionLabel>Connections</SectionLabel>
@@ -370,7 +375,7 @@ function Connections({ brief }: { brief: ContextBrief }) {
                                         <HoverTip label={c.name} detail={c.description ?? undefined}>
                                             <span className={cn('font-semibold text-ink', technical ? mono : undefined)}>{technical ? c.id : c.name}</span>
                                         </HoverTip>
-                                        <span className="truncate text-ink-muted">
+                                        <span className="min-w-0 break-words leading-snug text-ink-muted">
                                             <span className={mono}>{ends(c.from)}</span> → <span className={mono}>{ends(c.to)}</span>
                                         </span>
                                         <span className="tabular-nums text-ink-secondary">{c.count != null ? `· ${compact(c.count)}` : ''}</span>
@@ -388,9 +393,10 @@ function Connections({ brief }: { brief: ContextBrief }) {
 function Contents({ brief }: { brief: ContextBrief }) {
     const c = brief.contents
     if (!c) return null
-    const props = c.properties.slice(0, PROPERTIES_SHOWN)
-    const moreProps = c.properties.length - props.length + (c.propertiesNotShown ?? 0)
-    const tags = c.tags.slice(0, TAGS_SHOWN)
+    const allProps = c.properties ?? []
+    const props = allProps.slice(0, PROPERTIES_SHOWN)
+    const moreProps = allProps.length - props.length + (c.propertiesNotShown ?? 0)
+    const tags = (c.tags ?? []).slice(0, TAGS_SHOWN)
     if (c.entities == null && props.length === 0 && tags.length === 0) return null
     return (
         <section aria-label="What’s in it">
@@ -526,7 +532,8 @@ function Summary({ brief, onOpen }: { brief: ContextBrief; onOpen?: () => void }
         brief.layers?.length ? plural(brief.layers.length, 'layer') : null,
         brief.dataSources?.length ? plural(brief.dataSources.length, 'data source') : null,
     ].filter(Boolean) as string[]
-    const chain = brief.hierarchy?.chains.find((c) => c.length > 1)
+    const chain = brief.hierarchy?.chains?.find((c) => c.length > 1)
+    const kinds = brief.typeProperty?.values?.map((v) => v.value)
     const warnings = brief.caveats?.length ?? 0
     return (
         <section aria-label={`What I know about ${brief.about.name}`}
@@ -538,23 +545,24 @@ function Summary({ brief, onOpen }: { brief: ContextBrief; onOpen?: () => void }
                 <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-semibold text-ink">{brief.about.name}</p>
                     {stats.length > 0 && <p className="text-xs text-ink-muted">{stats.join(' · ')}</p>}
-                    {chain && <p className="mt-1 truncate text-xs text-ink-secondary">{chain.map(typeText).join(' › ')}</p>}
                 </div>
-            </div>
-            <div className="mt-2.5 flex items-center gap-2 border-t border-glass-border pt-2">
-                {warnings > 0 && (
-                    <span className="flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">
-                        <AlertTriangle className="h-3 w-3" aria-hidden /> {warnings === 1 ? '1 heads-up' : `${warnings} heads-ups`}
-                    </span>
-                )}
                 {onOpen && (
                     <button type="button" onClick={onOpen}
-                            className="ml-auto inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-semibold text-accent-lineage transition-colors hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+                            className="-mr-1 inline-flex shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-semibold text-accent-lineage transition-colors hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
                         What I know <ChevronRight className="h-3.5 w-3.5" aria-hidden />
                     </button>
                 )}
             </div>
+            {(chain || kinds?.length) && (
+                <p className="mt-2 truncate pl-[2.625rem] text-xs text-ink-secondary">
+                    {chain ? chain.map(typeText).join(' › ') : <>Kinds: {kinds!.join(', ')}</>}
+                </p>
+            )}
+            {warnings > 0 && (
+                <p className="mt-1.5 flex items-center gap-1 pl-[2.625rem] text-[11px] font-medium text-amber-700 dark:text-amber-300">
+                    <AlertTriangle className="h-3 w-3" aria-hidden /> {warnings === 1 ? '1 heads-up' : `${warnings} heads-ups`} — see what I know
+                </p>
+            )}
         </section>
     )
 }
-

@@ -4,7 +4,8 @@
  * contract's order (meta, steps, text, blocks, follow-ups, done); `holdAfter` leaves the stream
  * open part-way, to look at an answer still being worked out.
  */
-import type { AiStatus, Block, Clarification, Entity } from '../features/ai-assistant/api/types'
+import type { AiStatus, Block, Clarification, ContextBrief, Entity } from '../features/ai-assistant/api/types'
+import type { AssistantPageRegistration } from '../features/ai-assistant/lib/useAssistantPage'
 
 export const HARNESS_VIEW_ID = 'harness-view'
 export const HARNESS_VIEW_NAME = 'Supply chain'
@@ -27,6 +28,28 @@ export interface AiFixture {
     holdAfter?: number
     /** What answering a clarification streams. */
     afterClarify?: ScriptFrame[]
+    /** What `GET /context` answers (none: a 404). */
+    brief?: ContextBrief
+    /** The harness view's name, when the fixture's view is another one. */
+    viewName?: string
+    /** The route the harness opens on (default: the harness view). */
+    route?: string
+    /** What a non-view page registers itself as (`useAssistantPage`). */
+    page?: AssistantPageRegistration
+    /** Start with the rail folded away — the launcher on show. With a `question`, it folds once asked. */
+    railClosed?: boolean
+    /** An answer finished while the rail was closed. */
+    unread?: boolean
+    /** Open the "What I know" popover. */
+    openContext?: boolean
+    /** A stand-in canvas dock (320px) in the bottom-right corner, reserving `--canvas-dock-height`. */
+    dock?: boolean
+    /** A notification on screen, to see the corner's stacking. */
+    notify?: string
+    /** The real First steps checklist, in the canvas's corner. */
+    checklist?: boolean
+    /** Focus the launcher, so it opens into its pill. */
+    focusLauncher?: boolean
 }
 
 export const ENTITY_TYPES = [
@@ -41,7 +64,7 @@ export const ENTITY_TYPES = [
 
 const CONFIGURED: AiStatus = {
     configured: true, personas: { data: true, help: true }, connectionName: 'Corp gateway',
-    knowledge: { docs: 'ready', views: 'ready' }, dataPolicy: { sendDescriptions: true, sendPropertyValues: false },
+    knowledge: { docs: 'ready', views: 'ready' }, dataPolicy: { sendDescriptions: true, sendPropertyValues: false, sendSampleValues: false },
     limits: { maxStepsPerTurn: 8 },
 }
 
@@ -143,6 +166,136 @@ const RESULTS_FRAMES: ScriptFrame[] = [
     { event: 'followups', data: ['Do any of those feed a dashboard?', 'Who owns these tables?'] },
     done(),
 ]
+
+const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
+const HOUR = 3600_000
+
+/** What the assistant knows about the harness view: four layers, a four-step hierarchy, five kinds of connection. */
+export const VIEW_BRIEF: ContextBrief = {
+    kind: 'view',
+    about: {
+        name: HARNESS_VIEW_NAME,
+        description: 'Where shipments, suppliers and stock levels come from: the ERP and carrier feeds as they land, '
+            + 'through staging and the operations marts, to the dashboards the Monday ops review reads. '
+            + 'Certified by data platform; columns tagged pii are masked outside the marts.',
+        workspace: 'Operations', dataSource: 'Snowflake prod', semanticLayer: 'Supply chain v3',
+        template: 'Layered lineage', layout: 'layered-lineage', tags: ['supply-chain', 'certified'],
+        owner: 'Ana Ruiz', updatedAt: ago(2 * 24 * HOUR), dataUpdatedAt: ago(4 * HOUR), visibility: 'workspace',
+        viewId: HARNESS_VIEW_ID, workspaceId: 'ws', dataSourceId: 'ds',
+    },
+    scope: { entityScope: 'all', visibleTypes: [], maxDepth: null, roots: null },
+    layers: [
+        { name: 'Sources', description: 'Raw feeds as they land', types: ['dataPlatform', 'container'] },
+        { name: 'Staging', description: 'Cleaned and typed, one table per feed', types: ['dataset', 'dataJob'] },
+        { name: 'Marts', description: 'Modelled for the business', types: ['dataset', 'schemaField'] },
+        { name: 'Reports', description: 'What people read', types: ['dashboard', 'chart'] },
+    ],
+    types: [
+        { id: 'schemaField', name: 'Column', plural: 'Columns', level: 3, inView: 1420, inSource: 5210, contains: [], containedBy: ['dataset'], root: false },
+        { id: 'dataset', name: 'Table', plural: 'Tables', level: 2, inView: 184, inSource: 612, contains: ['schemaField'], containedBy: ['container'], root: false,
+            description: 'A table or view in the warehouse' },
+        { id: 'chart', name: 'Chart', plural: 'Charts', level: null, inView: 64, inSource: 210, contains: [], containedBy: ['dashboard'], root: false },
+        { id: 'dataJob', name: 'Job', plural: 'Jobs', level: null, inView: 41, inSource: 96, contains: [], containedBy: [], root: false },
+        { id: 'tag', name: 'Tag', plural: 'Tags', level: null, inView: 22, inSource: 22, contains: [], containedBy: [], root: false },
+        { id: 'dashboard', name: 'Dashboard', plural: 'Dashboards', level: null, inView: 18, inSource: 44, contains: ['chart'], containedBy: [], root: false },
+        { id: 'container', name: 'Schema', plural: 'Schemas', level: 1, inView: 12, inSource: 38, contains: ['dataset'], containedBy: ['dataPlatform'], root: false },
+        { id: 'dataFlow', name: 'Pipeline', plural: 'Pipelines', level: null, inView: 9, inSource: 21, contains: [], containedBy: [], root: false },
+        { id: 'dataPlatform', name: 'Platform', plural: 'Platforms', level: 0, inView: 3, inSource: 5, contains: ['container'], containedBy: [], root: true },
+    ],
+    hierarchy: { chains: [['dataPlatform', 'container', 'dataset', 'schemaField']] },
+    connections: [
+        { id: 'TRANSFORMS', name: 'Transforms', class: 'lineage', category: 'flow', description: 'One column or table is computed from another',
+            from: ['schemaField', 'dataset'], to: ['schemaField', 'dataset'], count: 2380 },
+        { id: 'CONTAINS', name: 'Contains', class: 'containment', category: 'structural', description: 'A platform holds schemas, a schema tables, a table columns',
+            from: ['dataPlatform', 'container', 'dataset'], to: ['container', 'dataset', 'schemaField'], count: 1619 },
+        { id: 'TAGGED_WITH', name: 'Tagged with', class: 'other', category: 'metadata', description: 'A glossary tag on an asset',
+            from: ['dataset', 'schemaField'], to: ['tag'], count: 318 },
+        { id: 'PRODUCES', name: 'Produces', class: 'lineage', category: 'flow', description: 'A job writes a table', from: ['dataJob'], to: ['dataset'], count: 212 },
+        { id: 'CONSUMES', name: 'Consumes', class: 'lineage', category: 'flow', description: 'A dashboard or chart reads a table',
+            from: ['dataset'], to: ['chart', 'dashboard'], count: 148 },
+    ],
+    contents: {
+        entities: 1773, complete: true,
+        properties: [
+            { key: 'owner', count: 1631, coverage: 0.92, kinds: ['string'] },
+            { key: 'description', count: 1418, coverage: 0.8, kinds: ['string'] },
+            { key: 'lastModified', count: 1241, coverage: 0.7, kinds: ['datetime'] },
+            { key: 'classification', count: 887, coverage: 0.5, kinds: ['string'] },
+            { key: 'rowCount', count: 184, coverage: 0.1, kinds: ['number'] },
+            { key: 'schedule', count: 41, coverage: 0.02, kinds: ['string'] },
+            { key: 'sla_hours', count: 30, coverage: 0.02, kinds: ['number'] },
+        ],
+        propertiesNotShown: 14,
+        tags: [{ tag: 'pii', count: 214 }, { tag: 'certified', count: 96 }, { tag: 'deprecated', count: 12 }],
+    },
+    typeProperty: null,
+    caveats: [],
+    notes: ['Counts in the view are exact; whole-source counts are from the last profile, 4 hours ago.'],
+}
+
+/** A FalkorDB source with one label and no semantic layer: everything is a Node; `kind` says what. */
+export const GENERIC_BRIEF: ContextBrief = {
+    kind: 'view',
+    about: {
+        name: 'Estate graph', description: 'Everything the crawler found in the estate, as one graph.',
+        workspace: 'Platform', dataSource: 'FalkorDB estate', semanticLayer: null, layout: 'graph', tags: [],
+        owner: 'Sam Lee', updatedAt: ago(6 * 24 * HOUR), dataUpdatedAt: ago(HOUR), visibility: 'workspace',
+        viewId: HARNESS_VIEW_ID, workspaceId: 'ws', dataSourceId: 'ds',
+    },
+    layers: [],
+    types: [{ id: 'Node', name: 'Node', plural: 'Nodes', level: 0, inView: 500, inSource: 500, contains: [], containedBy: [], root: true }],
+    hierarchy: { chains: [] },
+    connections: [{ id: 'RELATED', name: 'RELATED', class: 'lineage', category: null, description: null, from: ['Node'], to: ['Node'], count: 1240 }],
+    contents: {
+        entities: 500, complete: true,
+        properties: [
+            { key: 'name', count: 500, coverage: 1, kinds: ['string'] },
+            { key: 'kind', count: 500, coverage: 1, kinds: ['string'] },
+            { key: 'owner_team', count: 430, coverage: 0.86, kinds: ['string'] },
+            { key: 'cron', count: 20, coverage: 0.04, kinds: ['string'] },
+        ],
+        propertiesNotShown: 0, tags: [],
+    },
+    typeProperty: {
+        status: 'suggested', on: 'Node', key: 'kind',
+        values: [{ value: 'table', count: 300 }, { value: 'column', count: 150 }, { value: 'dashboard', count: 30 }, { value: 'job', count: 20 }],
+        alternatives: [{ key: 'owner_team', coverage: 0.86, distinct: 6 }],
+    },
+    caveats: [
+        { code: 'few_types', action: 'confirm_type',
+            text: 'Everything here is a ‘Node’ (500). What kind each one is looks like it’s in kind: table 300 · column 150 · dashboard 30 · job 20.' },
+        { code: 'no_containment', text: 'Nothing here sits inside anything else, so there is no hierarchy to browse or roll up.' },
+        { code: 'lineage_by_default', text: 'No semantic layer is assigned, so every connection is read as lineage. An administrator can assign one under Semantic layers.' },
+    ],
+    notes: [],
+}
+
+export const WORKSPACE_BRIEF: ContextBrief = {
+    kind: 'workspace',
+    about: {
+        name: 'Operations', description: 'Supply chain, logistics and inventory — the ops team’s data and the views they run the week on.',
+        owner: 'Ana Ruiz', updatedAt: ago(26 * HOUR), tags: ['ops'], workspaceId: 'ws',
+    },
+    dataSources: [
+        { id: 'ds', name: 'Snowflake prod', semanticLayer: 'Supply chain v3' },
+        { id: 'ds2', name: 'Carrier events (Kafka)', semanticLayer: null },
+        { id: 'ds3', name: 'dbt Cloud', semanticLayer: 'Analytics core' },
+    ],
+    caveats: [],
+    notes: ['14 views in this workspace; the most used is Supply chain.'],
+}
+
+const TYPE_CLARIFY: Clarification = {
+    id: 'clr_type',
+    question: 'Everything here is a ‘Node’. Which property says what kind of thing each one is?',
+    concept: 'entity type',
+    options: [
+        { id: 'opt_kind', label: 'kind', description: 'table 300 · column 150 · dashboard 30 · job 20', count: 500 },
+        { id: 'opt_owner', label: 'owner_team', description: '6 values: data-platform, sales-analytics, finance…', count: 430 },
+    ],
+    allowRemember: true,
+    allowOther: true,
+}
 
 export const AI_FIXTURES: Record<string, AiFixture> = {
     empty: { note: 'the welcome, on a view with two entities selected', selected: ['urn:col:first_name', 'urn:tbl:customers'] },
@@ -298,6 +451,66 @@ export const AI_FIXTURES: Record<string, AiFixture> = {
         frames: [meta(), step('s1', 'Finding first_name', 'done', '1 column'), step('s2', 'Walking its downstream lineage', 'running')],
         holdAfter: 3,
     },
+
+    contextCard: { note: 'the “What I know” card, open over the context chip', brief: VIEW_BRIEF, openContext: true },
+    contextBlock: {
+        note: 'what it knows, as a card in an answer',
+        brief: VIEW_BRIEF,
+        question: 'What do you know about this view?',
+        frames: [
+            meta(),
+            step('s1', 'Reading what I know about Supply chain', 'done', '9 types · 4 layers · 5 kinds of connection'),
+            ...words('**Supply chain** follows data from the **Sources** layer to **Reports**: platforms hold schemas, schemas hold '
+                + 'tables and tables hold columns, and 1,773 entities are on it. Lineage runs mostly column to column (2,380 links); '
+                + 'jobs write the tables, and dashboards and charts read them.'),
+            block({ id: 'blk_ctx', type: 'context', data: VIEW_BRIEF }),
+            { event: 'followups', data: ['How does data flow from Sources to Reports?', 'Which columns hold PII?'] },
+            done(),
+        ],
+    },
+    genericWelcome: { note: 'the welcome on a generic schema: one Node type, kinds in a property', brief: GENERIC_BRIEF, viewName: 'Estate graph' },
+    genericCard: {
+        note: 'the card on a generic schema, with its heads-up and the kinds it guessed',
+        brief: GENERIC_BRIEF, viewName: 'Estate graph', openContext: true,
+    },
+    typeConfirm: {
+        note: 'confirming the property that says what kind of thing each one is',
+        brief: GENERIC_BRIEF, viewName: 'Estate graph',
+        question: 'Which property says what kind of thing each one is?',
+        frames: [
+            meta(),
+            step('s1', 'Looking for what kind each Node is', 'running'),
+            step('s1', 'Looking for what kind each Node is', 'done', '2 properties could say'),
+            { event: 'clarify', data: TYPE_CLARIFY },
+            done('clarify'),
+        ],
+        afterClarify: [
+            ...words('Got it — from now on a **table** here is a Node whose `kind` is table, and the same for column, dashboard and job.'),
+            done(),
+        ],
+    },
+    workspaceWelcome: {
+        note: 'the welcome on a workspace page',
+        route: '/workspaces/ws', page: { kind: 'workspace', id: 'ws', title: 'Operations' }, brief: WORKSPACE_BRIEF,
+    },
+    docHelp: {
+        note: 'a guide page: Help, about the page being read',
+        route: '/guide/ai-assistant', page: { kind: 'doc', id: '/guide/ai-assistant', title: 'The AI assistant', persona: 'help' },
+    },
+    launcher: { note: 'the launcher, rail folded away', railClosed: true },
+    launcherPill: { note: 'the launcher focused: its pill and tip', railClosed: true, focusLauncher: true },
+    launcherUnread: { note: 'the launcher with an answer waiting', railClosed: true, unread: true },
+    launcherStreaming: {
+        note: 'the launcher while an answer is still being written',
+        railClosed: true, question: 'What breaks if first_name is dropped?',
+        frames: [meta(), step('s1', 'Finding first_name', 'done', '1 column'), step('s2', 'Walking its downstream lineage', 'running')],
+        holdAfter: 3,
+    },
+    launcherDock: {
+        note: 'the corner’s stacking: canvas dock, then the launcher, then a notification',
+        railClosed: true, dock: true, notify: 'Opened “Supply chain” · 1,773 entities',
+    },
+    launcherChecklist: { note: 'the corner on a blank model: dock, launcher, First steps', railClosed: true, dock: true, checklist: true },
 
     streaming: {
         note: 'words arriving: the typing caret',

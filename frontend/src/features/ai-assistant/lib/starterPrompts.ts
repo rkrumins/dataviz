@@ -1,4 +1,4 @@
-import type { AssistantPageKind, AssistantPersona, ContextBrief } from '../api/types'
+import type { AssistantPage, AssistantPersona, ContextBrief } from '../api/types'
 
 /** Where the person is, as far as the first questions to offer go. */
 export interface StarterSituation {
@@ -6,7 +6,7 @@ export interface StarterSituation {
     selectedCount: number
     focused: boolean
     /** The page, when it says what it is (a view, or a page that registered itself). */
-    page?: { kind: AssistantPageKind; title?: string } | null
+    page?: AssistantPage | null
 }
 
 const ANYWHERE = [
@@ -35,9 +35,9 @@ function viewPrompts(b: ContextBrief): string[] {
 
     const layers = b.layers ?? []
     const lineage = (b.connections ?? []).filter((c) => c.class === 'lineage')
-    const feeding = new Set(lineage.flatMap((c) => c.from))
-    const ends = lineage.flatMap((c) => c.to).filter((t) => !feeding.has(t))
-    const chain = b.hierarchy?.chains.find((c) => c.length > 1)
+    const feeding = new Set(lineage.flatMap((c) => c.from ?? []))
+    const ends = lineage.flatMap((c) => c.to ?? []).filter((t) => !feeding.has(t))
+    const chain = b.hierarchy?.chains?.find((c) => c.length > 1)
     if (layers.length >= 2) out.push(`How does data flow from ${layers[0].name} to ${layers[layers.length - 1].name}?`)
     else if (ends.length) out.push(`What feeds the ${plural(ends[0])}?`)
     else if (chain) out.push(`What’s inside the biggest ${name(chain[0])}?`)
@@ -45,10 +45,13 @@ function viewPrompts(b: ContextBrief): string[] {
     const top = b.types?.[0]
     const properties = b.contents?.properties ?? []
     const kinds = b.typeProperty?.status === 'suggested'
+    // On a generic schema everything is a "Node": name the commonest kind of thing instead.
+    const kind = b.typeProperty?.values?.[0]?.value
+    const noun = kind ? midSentence(kind.endsWith('s') ? kind : `${kind}s`) : top ? plural(top.id) : null
     if ((b.contents?.tags ?? []).some((t) => PII.test(t.tag)) || properties.some((p) => PII.test(p.key))) {
-        out.push(top ? `Which ${plural(top.id)} hold PII?` : 'What here holds PII?')
-    } else if (top && properties.some((p) => OWNER.test(p.key))) {
-        out.push(`Who owns the ${plural(top.id)}?`)
+        out.push(noun ? `Which ${noun} hold PII?` : 'What here holds PII?')
+    } else if (noun && properties.some((p) => OWNER.test(p.key))) {
+        out.push(`Who owns the ${noun}?`)
     } else if (kinds) {
         out.push(KINDS)
     }
