@@ -33,6 +33,7 @@ export const DOC_TYPES: Record<string, DocType> = {
   'services-overview': 'explanation',
   'services-insights': 'explanation',
   'services-search': 'explanation',
+  'services-ai': 'explanation',
   'services-context-engine': 'explanation',
   'services-assignments': 'explanation',
   'sso-integration': 'explanation',

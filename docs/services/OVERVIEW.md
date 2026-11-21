@@ -29,6 +29,7 @@ The services documented in this section:
 | Service | Page | Responsibility |
 |---------|------|----------------|
 | Insights service | [Insights](/docs/services-insights) | Background collection of per–data-source stats, schema profiling, and pre-registration asset discovery. |
+| AI service | [AI Service](/docs/services-ai) | The assistant, natural-language querying and the knowledge MCP server; reads the platform as the person asking, through a read-only delegation. |
 | Search | [Search](/docs/services-search) | Deep Search (provider-agnostic contract) and Advanced Search (structured, view-scoped predicate queries) over the graph. |
 | Context Engine | [Context Engine](/docs/services-context-engine) | Query orchestration that binds a workspace's provider and ontology; the layer behind reads, lineage, and the Lineage Lens. |
 | Assignment Engine | [Assignments](/docs/services-assignments) | Computes per-view layer assignments for rendered entities, plus foreign-schema (ontology) mapping. |

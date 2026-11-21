@@ -232,6 +232,14 @@ export const guideEntries: GuideEntry[] = [
     importFn: () => import('@docs/guide/ADVANCED_SEARCH.md?raw'),
   },
   {
+    slug: 'ai-assistant',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'AI Assistant',
+    description: 'Ask about your data and lineage in plain language, have searches written for you, and get help using {brand}',
+    importFn: () => import('@docs/guide/AI_ASSISTANT.md?raw'),
+  },
+  {
     slug: 'finding-connections',
     section: 'viewer',
     persona: 'viewer',

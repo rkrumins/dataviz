@@ -148,7 +148,17 @@ question never adds to a connection: in Connections it replaces it. Over an
 answer, with the builder folded away, the same bar sits above the results.
 
 > **Note:** Ask is rule-based. It reads your View's own types, tags, properties
-> and layers; nothing you type is sent to an AI service.
+> and layers; nothing you type is sent to an AI service — unless you choose
+> **Ask AI**, below.
+
+**Ask AI.** Where the AI assistant is on, a question Ask can't place can be
+written by the assistant instead: choose **Ask AI** (or press `⌘↵` /
+`Ctrl+Enter`). It reads back the search it wrote and how many it finds, marked
+*AI-drafted*, with any assumptions it made; when a word could mean more than
+one thing here — *PII*, *owner* — it offers the readings, with their counts,
+to pick from. **Enter** applies it as an ordinary search. Your question and the
+View's vocabulary are sent to the model your administrator connected. See
+[AI Assistant](/guide/ai-assistant#in-advanced-search).
 
 ### Building a query
 

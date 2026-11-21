@@ -9,6 +9,65 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — An assistant that reads your lineage as you do, and asks before it guesses
+
+People can now ask about their data in plain language — what feeds what, what breaks if a column
+is dropped and who to tell, which tables hold personal data, which views cover a subject — and
+about using the product, with answers cited from the docs. It reads only what the person can read,
+never changes anything, shows how it got each answer, and asks which reading of a word like "PII"
+is meant rather than guessing. Off until an administrator turns it on and connects a model.
+
+**Full detail:** `docs/RELEASE_NOTES_2026-11-21_ai-assistant.md`.
+
+### Added
+
+- **AI assistant** (`aiAssistantEnabled`, off by default): a panel beside every page with two
+  personas — **Ask about data** and **Help** — streamed answers, a live "How I got this", result,
+  impact, query, view and citation cards, clarifications with counts, follow-ups that compose
+  with earlier results, feedback, and conversation history.
+- **Impact and provenance reports**: affected assets by type and container, the consumers at the
+  end, owners to tell, the paths with each step's transformation, and the job schedules on the
+  way; physical lineage first, rolled-up lineage and exact counts when a walk is cut short.
+- **Ask AI** in Advanced Search and **Draft with AI** in the Cypher tab: searches validated and
+  counted before they apply; Cypher checked read-only, for the person to run.
+- **Administration → AI**: connections to any OpenAI-compatible endpoint with API key, bearer,
+  basic, OAuth client-credentials or token-mint sign-in; data-sharing policy, limits and
+  retention; knowledge collections; external MCP knowledge sources; business vocabulary; usage
+  and feedback.
+- **Knowledge MCP endpoint** `POST /api/v1/ai/mcp/knowledge` for other teams' agents, with API keys.
+- **Semantic matching** for views and docs on a pgvector store, with versioned collections that
+  re-embed only what changed; lexical when no embedding model is set.
+- Permission `workspace:ai:use`; new services `ai-service` and `vectordb`.
+
+### Changed
+
+- The outbound address classifier moved to `backend/common/netguard.py`, and the credential
+  encryption helpers to `backend/common/credential_crypto.py`; their old names still work.
+
+### Security
+
+- The AI service reads through a short-lived, read-only delegation held by the API-key surface and
+  resource fence, refused on every write, on native queries, after its session ends and when the
+  switch is off. Every outbound call is held to the network guard; private endpoints need an
+  operator's `AI_EGRESS_ALLOWED_HOSTS`. The activity log records that a question was asked, never
+  its text.
+
+### Upgrading
+
+- Migration `20261121_1000_ai_assistant` adds the `ai_*` tables and grants `workspace:ai:use` to
+  every role that reads data sources.
+- Deploy `ai-service` (and `vectordb`, or point `AI_VECTOR_DB_URL` at a managed Postgres with
+  pgvector). Set `AI_INTERNAL_TOKEN` on viz-service and ai-service — required with `ENV=production`.
+- For view matching by meaning, set `AI_INDEXER_API_KEY` to a read-only service account's key.
+
+### Known limitations
+
+- The first provider kind is OpenAI-compatible; Anthropic, Bedrock and Vertex adapters follow.
+- Searches and closure walks need FalkorDB: Neo4j and Spanner sources get partial answers.
+- One data source per question; entity-level semantic matching is not built yet.
+
+---
+
 ## [Unreleased] — Traces you can hand on, take away and keep, and views of a quarter of a million members
 
 A trace of twenty selected tables could be read in the dock and nothing else: no link (a link

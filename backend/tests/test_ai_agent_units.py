@@ -1,0 +1,195 @@
+"""The assistant's building blocks, one at a time."""
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from backend.ai_service import connections, settings_store
+from backend.ai_service.agent import concepts as C
+from backend.ai_service.agent import predicates as P
+from backend.ai_service.agent.impact import humanize_cron
+from backend.ai_service.agent.loop import ChatRequest, choose_persona
+from backend.ai_service.agent.policy import DataPolicy
+from backend.ai_service.agent.state import ConversationState
+from backend.common.credential_crypto import REDACTION_MARKER
+
+
+# ── Predicates ──────────────────────────────────────────────────────────
+
+
+def _expand(node, results=None, concepts=None):
+    return P.expand(node, result_set=lambda r: (results or {}).get(r),
+                    concept=lambda n, _a: (concepts or {}).get(n.lower()))
+
+
+def test_result_sets_and_concepts_expand_into_real_predicates():
+    tag = {"kind": "tag", "op": "has", "values": ["pii"]}
+    node = {"kind": "group", "op": "and", "children": [
+        {"kind": "resultSet", "ref": "@r1"}, {"kind": "concept", "name": "PII"}]}
+    out = _expand(node, results={"r1": {"kind": "entityType", "op": "in", "values": ["dataset"]}},
+                  concepts={"pii": tag})
+    assert out["children"] == [{"kind": "entityType", "op": "in", "values": ["dataset"]}, tag]
+    assert P.validate(out)["kind"] == "group"
+
+
+def test_an_unconfirmed_concept_stops_the_search():
+    with pytest.raises(P.ConceptNeeded) as info:
+        _expand({"kind": "concept", "name": "owner"})
+    assert info.value.name == "owner"
+
+
+def test_unknown_fields_and_kinds_are_errors_not_silently_dropped():
+    with pytest.raises(P.PredicateInvalid, match="maxHop"):
+        P.validate({"kind": "related", "axis": "downstream", "maxHop": 3,
+                    "where": {"kind": "entityType", "values": ["dashboard"]}})
+    with pytest.raises(P.PredicateInvalid, match="unknown kind"):
+        P.validate({"kind": "fulltextMagic", "value": "x"})
+    with pytest.raises(P.PredicateInvalid, match="no earlier result"):
+        _expand({"kind": "resultSet", "ref": "r9"})
+
+
+def test_validation_keeps_wire_names():
+    out = P.validate(P.downstream_of(["urn:a"], max_hops=40))
+    assert out["axis"] == "upstream" and out["maxHops"] == 10
+    assert out["where"]["refs"] == [{"urn": "urn:a", "caseSensitive": True}]
+
+
+# ── Data policy ─────────────────────────────────────────────────────────
+
+
+def test_policy_withholds_what_the_administrator_withheld():
+    policy = DataPolicy.from_settings({
+        "sendDescriptions": False, "sendPropertyValues": False, "sendSampleValues": False,
+        "maxResultRows": 2, "redactPatterns": [r"[\w.]+@[\w.]+"],
+    })
+    shaped = policy.apply({
+        "name": "orders", "description": "secret plan", "properties": {"owner": "bob@corp.com"},
+        "values": [1, 2], "items": [1, 2, 3, 4], "note": "mail ann@corp.com",
+    })
+    assert "description" not in shaped and "values" not in shaped
+    assert shaped["properties"] == ["owner"]
+    assert shaped["items"] == [1, 2, "… 2 more not shown"]
+    assert shaped["note"] == "mail [redacted]"
+
+
+# ── Concepts ────────────────────────────────────────────────────────────
+
+
+def _grounding(properties, tags):
+    return SimpleNamespace(properties=lambda: properties, tags=lambda: tags)
+
+
+def test_concept_candidates_come_from_tags_properties_and_values():
+    g = _grounding(
+        properties=[
+            {"key": "personal_data", "kinds": ["Boolean"], "values": [{"value": True}, {"value": False}]},
+            {"key": "classification", "kinds": ["String"], "values": [{"value": "PII"}, {"value": "Public"}]},
+            {"key": "rowCount", "kinds": ["Integer"]},
+        ],
+        tags=[{"tag": "pii"}, {"tag": "GDPR-Regulated"}, {"tag": "certified"}],
+    )
+    found = C.candidates_from(g, "PII")
+    labels = [c.label for c in found]
+    assert labels[0] == "Tag “pii”" and found[0].exact
+    assert "personal_data is true" in labels
+    assert "classification is “PII”" in labels
+    assert "Tag “GDPR-Regulated”" in labels
+    assert not any("rowCount" in l for l in labels)
+    assert len({c.id for c in found}) == len(found) and found[0].id == C.option_id(found[0].predicate)
+
+
+def test_attribute_terms_read_as_property_keys():
+    g = _grounding(properties=[{"key": "updated_at", "kinds": ["String"]},
+                               {"key": "last_modified", "kinds": ["String"]}], tags=[])
+    keys = [c.property_key for c in C.candidates_from(g, "updated", want="property")]
+    assert set(keys) == {"updated_at", "last_modified"}
+
+
+def test_clarification_ids_are_stable():
+    assert C.clarification_id("PII", "ds_1") == C.clarification_id("pii", "ds_1")
+    assert C.clarification_id("PII", "ds_1") != C.clarification_id("PII", "ds_2")
+
+
+# ── The rest ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("expr,words", [
+    ("0 4 * * *", "daily at 04:00 UTC"), ("30 6 * * 1-5", "weekdays at 06:30 UTC"),
+    ("0 2 1 * *", "monthly on day 1 at 02:00 UTC"), ("15 * * * *", "hourly at :15"),
+    ("*/10 * * * *", "every 10 minutes"), ("@daily", None),
+])
+def test_schedules_read_in_plain_words(expr, words):
+    assert humanize_cron(expr) == words
+
+
+def test_persona_follows_the_question():
+    def persona(message, **ctx):
+        return choose_persona(ChatRequest(message=message, context=ctx), {"data": True, "help": True})
+
+    assert persona("How do I share a view?") == "help"
+    assert persona("How do I find the downstream dashboards of orders?", viewId="v") == "data"
+    assert persona("What breaks if orders is dropped?") == "data"
+    assert choose_persona(ChatRequest(message="How do I share?"), {"data": True, "help": False}) == "data"
+
+
+def test_conversation_state_round_trips():
+    state = ConversationState()
+    ref = state.add_result(label="PII", predicate={"kind": "all"}, workspace_id="w",
+                           data_source_id="d", view_id="v", total=3)
+    state.confirm_concept("PII", "d", label="Tag pii", predicate={"kind": "tag", "values": ["pii"]})
+    back = ConversationState.loads(state.dumps())
+    assert back.result(ref.id).total == 3 and back.confirmed("pii", "d")["label"] == "Tag pii"
+    assert back.next_ref == 2
+
+
+def test_settings_reject_what_they_cannot_honour():
+    with pytest.raises(settings_store.SettingsInvalid):
+        settings_store._validate_patch({"dataPolicy": {"redactPatterns": ["("]}})
+    with pytest.raises(settings_store.SettingsInvalid):
+        settings_store._validate_patch({"personas": {"wizard": True}})
+    clean = settings_store._validate_patch({"limits": {"maxStepsPerTurn": 99}, "retentionDays": 0})
+    assert clean == {"limits": {"maxStepsPerTurn": 16}, "retentionDays": 1}
+
+
+def _row(**kw):
+    defaults = dict(name="gw", kind="openai_compatible", base_url="https://gw.example/v1",
+                    auth_type="api_key", auth_config="{}", secrets_encrypted=None,
+                    extra_headers="{}", options="{}", models='{"chat": "m"}', enabled=True)
+    defaults.update(kw)
+    return SimpleNamespace(**defaults)
+
+
+def test_secrets_are_write_only_and_merge():
+    from backend.common import credential_crypto
+
+    row = _row(secrets_encrypted=credential_crypto.encrypt({"apiKey": "sk-1"}))
+    merged = connections._merge(row, connections.ConnectionInput(models={"chat": "m2"}))
+    assert merged["secrets"] == {"apiKey": "sk-1"}
+    with pytest.raises(connections.ConnectionInvalid, match="redaction marker"):
+        connections._merge(row, connections.ConnectionInput(secrets={"apiKey": REDACTION_MARKER}))
+    cleared = connections._merge(row, connections.ConnectionInput(secretsClear=["apiKey"]))
+    assert cleared["secrets"] == {}
+    switched = connections._merge(row, connections.ConnectionInput(authType="basic"))
+    assert switched["secrets"] == {}
+    public = connections.public(SimpleNamespace(**{**row.__dict__, "id": "llm_1", "capabilities": "{}",
+                                                   "last_test_at": None, "created_by": None,
+                                                   "created_at": "", "updated_by": None, "updated_at": ""}))
+    assert public["secrets"] == {"apiKey": {"configured": True}} and "sk-1" not in json.dumps(public)
+
+
+def test_connections_refuse_what_would_misroute_credentials():
+    def check(**body):
+        connections._validate(connections._merge(None, connections.ConnectionInput(
+            name="x", baseUrl="https://gw.example/v1", models={"chat": "m"}, **body)))
+
+    with pytest.raises(connections.ConnectionInvalid, match="extraHeaders"):
+        check(extraHeaders={"Authorization": "Bearer x"})
+    with pytest.raises(connections.ConnectionInvalid, match="does not take"):
+        check(authType="api_key", authConfig={"tokenUrl": "https://x"})
+    with pytest.raises(connections.ConnectionInvalid, match="credentials"):
+        connections._validate(connections._merge(None, connections.ConnectionInput(
+            name="x", baseUrl="https://user:pw@gw.example/v1", models={"chat": "m"})))
+    check(authType="token_mint", authConfig={"tokenUrl": "https://gw.example/token", "username": "svc"},
+          secrets={"password": "p"})

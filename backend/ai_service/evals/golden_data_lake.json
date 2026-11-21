@@ -1,0 +1,53 @@
+{
+  "description": "Questions over the data-lake seed (backend/scripts/seed_data_lake.py).",
+  "cases": [
+    {
+      "id": "impact-column-drop",
+      "question": "If first_name in customers is dropped, who is impacted, why and when?",
+      "expect": {"blocks": ["impact"], "impactConsumersInclude": ["Customer 360 Dashboard"],
+                 "impactHasPaths": true}
+    },
+    {
+      "id": "downstream-consumers",
+      "question": "What are the downstream consumers of the orders table?",
+      "expect": {"blocks": ["impact"], "impactConsumersInclude": ["Revenue & Orders Dashboard"]}
+    },
+    {
+      "id": "provenance",
+      "question": "Where does rpt_customer_360 come from?",
+      "expect": {"blocks": ["impact"], "impactDirection": "upstream"}
+    },
+    {
+      "id": "pii-asks-or-confirms",
+      "question": "Which columns hold PII?",
+      "expect": {"clarifyOrNotice": true}
+    },
+    {
+      "id": "pii-tables-updated",
+      "question": "Tell me all the tables that contain PII and were updated in the past week",
+      "expect": {"clarifyOrBlocks": ["results"]}
+    },
+    {
+      "id": "views-by-topic",
+      "question": "Do we have any views about customers?",
+      "expect": {"blocks": ["views"]}
+    },
+    {
+      "id": "write-a-search",
+      "question": "Write me the search for datasets that feed a dashboard",
+      "expect": {"blocks": ["query"]}
+    },
+    {
+      "id": "help-share",
+      "persona": "help",
+      "question": "How do I share a view with a colleague?",
+      "expect": {"blocks": ["citations"], "textIncludesAny": ["Share"]}
+    },
+    {
+      "id": "help-unknown",
+      "persona": "help",
+      "question": "How do I configure the flux capacitor?",
+      "expect": {"textIncludesAny": ["not", "doesn't", "no "]}
+    }
+  ]
+}

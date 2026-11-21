@@ -93,16 +93,16 @@ Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each 
 
 | Role | Count | Permissions granted |
 |---|---|---|
-| `super_admin` | 28 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:service-accounts:manage`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
-| `org_admin` | 22 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:service-accounts:manage`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `super_admin` | 29 | `system:admin`, `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:service-accounts:manage`, `system:sso:hosts:manage`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:ai:use`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `org_admin` | 23 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:service-accounts:manage`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:ai:use`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
 | `org_auditor` | 4 | `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:org-viewer` |
 | `org_reader` | 1 | `system:org-viewer` |
 | `workspace_admin` | 1 | `workspace:admin` |
-| `workspace_data_engineer` | 13 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_member` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_publisher` | 11 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_steward` | 11 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_viewer` | 6 | `workspace:catalog:read`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:read` |
+| `workspace_data_engineer` | 14 | `workspace:ai:use`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_member` | 11 | `workspace:ai:use`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_publisher` | 12 | `workspace:ai:use`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_steward` | 12 | `workspace:ai:use`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_viewer` | 7 | `workspace:ai:use`, `workspace:catalog:read`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:read` |
 
 What a role can actually do differs from its stored grants in four places, all covered in
 [Resolver behaviour](#resolver-behaviour):
@@ -138,6 +138,7 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `system:users:manage` | system | Create, approve, suspend, and change roles for users. | `super_admin` |
 | `system:workspaces:create` | system | Create new workspaces. | `super_admin`, `org_admin` |
 | `workspace:admin` | workspace | Manage workspace settings, members, and deletion. | `super_admin`, `org_admin`, `workspace_admin` |
+| `workspace:ai:use` | workspace | Ask the AI assistant about a workspace's data, and have it write searches. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 | `workspace:catalog:manage` | workspace | Promote / edit / delete catalog items the workspace owns. | `super_admin`, `org_admin`, `workspace_data_engineer` |
 | `workspace:catalog:read` | workspace | Read catalog items (curated data assets) available to the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 | `workspace:datasource:manage` | workspace | Connect, edit, and delete data sources in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward` |
@@ -421,6 +422,32 @@ who, and the move records them.
 Access is given back the usual way — a role or group in the destination, or an identity-provider
 mapping where the provider decides — never by copying it, which would outlive the provider removing
 someone. A pending publication request is put to the destination's publishers.
+
+### The AI assistant
+
+`workspace:ai:use` lets a person ask the AI assistant about a workspace's views,
+lineage and data, have Advanced Search write searches and Cypher for them, and use
+the knowledge MCP endpoint (`POST /api/v1/ai/mcp/knowledge`). It changes nothing
+about what they can read — the assistant reads as them:
+
+* **Who has it.** Every built-in role that reads data sources stores it, and
+  `workspace:admin` implies it. Migration `20261121_1000_ai_assistant` gave it to
+  every custom role that held `workspace:datasource:read`. Nothing happens until an
+  administrator turns on **AI assistant** (`aiAssistantEnabled`, off by default) and
+  connects a model under **Administration → AI**.
+* **Where it is checked.** On every `/api/v1/ai/*` route, in the workspace the
+  request names (`context.workspaceId` or `?workspaceId=`), or in any workspace when
+  it names none — the Help persona answers from the product docs, which are public.
+  **Administration → AI** (`/api/v1/ai/admin/*`) needs `system:admin` instead.
+* **What the assistant can reach.** For each request the web tier mints a
+  short-lived, read-only delegation (`nxdlg_…`, ADR-032) that the AI service presents
+  on every read. It is held by the API key surface and resource fence, with claims
+  built from the person's live access narrowed to views `read` and data `read` — and,
+  for a request made with an API key, to that key's own scope. It is refused on every
+  route that writes, on native queries, after the session it came from ends and when
+  the switch is turned off. So the assistant can never see more than the person, and
+  can never change anything, whatever a question or a document asks it to do.
+* **Taking it away.** Remove it from a role in **Administration → Permissions**.
 
 ### Native queries
 

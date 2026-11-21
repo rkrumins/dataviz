@@ -144,6 +144,12 @@ would not" is not an access control.
 trade-off of retiring the graph service; this register still counts it as a
 risk.
 
+**Progress (2026-11-21):** step 1 below is done. The classifier now lives in
+`backend/common/netguard.py` (`assert_connectable`, `assert_url_connectable`);
+`outbound.py` keeps its names as aliases, and the AI service checks every model,
+token and MCP endpoint with it. The provider connection tester still does not call
+it — steps 2 and 3 remain.
+
 **Recommendation — reuse the classifier, do not write a second one.**
 `outbound.py` already classifies addresses by *property* rather than by CIDR
 list (loopback, link-local, multicast, reserved, unspecified) and unwraps

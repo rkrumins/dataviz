@@ -70,10 +70,12 @@ export const filenameMap: Record<string, string> = {
   'services/OVERVIEW.md': 'services-overview',
   'services/INSIGHTS.md': 'services-insights',
   'services/SEARCH.md': 'services-search',
+  'services/AI.md': 'services-ai',
   'services/CONTEXT_ENGINE.md': 'services-context-engine',
   'services/ASSIGNMENTS.md': 'services-assignments',
   'INSIGHTS.md': 'services-insights',
   'SEARCH.md': 'services-search',
+  'AI.md': 'services-ai',
   'CONTEXT_ENGINE.md': 'services-context-engine',
   'ASSIGNMENTS.md': 'services-assignments',
   // Feature docs (subfolder; the two link each other by basename)

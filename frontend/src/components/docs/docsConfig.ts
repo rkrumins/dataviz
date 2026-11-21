@@ -456,6 +456,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/services/SEARCH.md?raw'),
   },
   {
+    slug: 'services-ai',
+    section: 'services',
+    title: 'AI Service',
+    description: 'The assistant, natural-language querying and the knowledge MCP server: how it reads as the person, what it answers reliably',
+    importFn: () => import('@docs/services/AI.md?raw'),
+  },
+  {
     slug: 'services-context-engine',
     section: 'services',
     title: 'Context Engine',

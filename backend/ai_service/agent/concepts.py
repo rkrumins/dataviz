@@ -227,38 +227,41 @@ def candidates_from(grounding, name: str, *, synonyms: Optional[list[str]] = Non
         key = prop.get("key")
         if not key:
             continue
-        if matches(key):
-            if want == "property":
+        if want == "property":
+            if matches(key):
                 found.append(Candidate(
                     id="", label=f"The property “{key}”",
                     description=f"{', '.join(prop.get('kinds') or []) or 'values'}",
                     kind="property", property_key=key,
                     predicate={"kind": "hasProperty", "key": key}, exact=norm(key) == exact_key,
                 ))
-            elif _looks_boolean(prop):
-                value = _truthy_value(prop)
-                found.append(Candidate(
-                    id="", label=f"{key} is {str(value).lower()}",
-                    description=f"property {key}", kind="property", property_key=key,
-                    predicate={"kind": "property", "key": key, "op": "eq", "value": value},
-                    exact=norm(key) in (exact_key, f"is{exact_key}", f"has{exact_key}"),
-                ))
-            else:
-                found.append(Candidate(
-                    id="", label=f"Has a “{key}” value",
-                    description=f"property {key}", kind="property", property_key=key,
-                    predicate={"kind": "hasProperty", "key": key}, exact=False,
-                ))
-        if want == "predicate":
-            for v in prop.get("values") or []:
-                raw = v.get("value")
-                if isinstance(raw, str) and matches(raw) and not matches(key):
-                    found.append(Candidate(
-                        id="", label=f"{key} is “{raw}”",
-                        description=f"property {key}", kind="value", property_key=key,
-                        predicate={"kind": "property", "key": key, "op": "eq", "value": raw},
-                        exact=norm(raw) == exact_key,
-                    ))
+            continue
+        if matches(key) and _looks_boolean(prop):
+            value = _truthy_value(prop)
+            found.append(Candidate(
+                id="", label=f"{key} is {str(value).lower()}",
+                description=f"property {key}", kind="property", property_key=key,
+                predicate={"kind": "property", "key": key, "op": "eq", "value": value},
+                exact=norm(key) in (exact_key, f"is{exact_key}", f"has{exact_key}"),
+            ))
+            continue
+        # A value that names the word ("classification is PII") is a sharper
+        # reading than "has any classification at all".
+        value_hits = [v.get("value") for v in prop.get("values") or []
+                      if isinstance(v.get("value"), str) and matches(v.get("value"))]
+        for raw in value_hits:
+            found.append(Candidate(
+                id="", label=f"{key} is “{raw}”",
+                description=f"property {key}", kind="value", property_key=key,
+                predicate={"kind": "property", "key": key, "op": "eq", "value": raw},
+                exact=norm(raw) == exact_key,
+            ))
+        if matches(key) and not value_hits:
+            found.append(Candidate(
+                id="", label=f"Has a “{key}” value",
+                description=f"property {key}", kind="property", property_key=key,
+                predicate={"kind": "hasProperty", "key": key}, exact=False,
+            ))
     for c in found:
         c.id = option_id(c.predicate)
     found.sort(key=lambda c: (not c.exact, {"tag": 0, "property": 1, "value": 2, "entity": 3}[c.kind]))

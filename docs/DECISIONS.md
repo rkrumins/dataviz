@@ -937,6 +937,87 @@ Details: [Service Accounts](/guide/service-accounts#reading-every-workspace).
 
 ---
 
+## ADR-031: The AI service is a separate process behind the web tier
+
+**Status:** Accepted
+**Date:** 2026-11-21
+**Context:** People wanted to ask about their lineage in plain language — "what breaks if `first_name` is dropped", "which tables hold PII", "how do I share a view" — and other teams wanted their agents to read the product's knowledge. Answering needs a model the deployment chooses, reached over the network with the enterprise's own sign-in, and turns that stream for a minute or more. [ADR-018](#adr-018-retire-the-graph-service) retired a separate service that was not worth its operating cost, and [ADR-019](#adr-019-internal-service-auth-on-the-aggregation-control-plane) declined to split the control plane's loops for the same reason, so a new process has to earn its place.
+
+**Decision:**
+- **A separate service, `ai-service`** (`backend/ai_service`, `python -m backend.ai_service`, port 8093, `SYNODIC_ROLE=ai`), with its own image (`backend/Dockerfile.ai`).
+- **The web tier stays the only edge.** viz-service serves `/api/v1/ai/*` (`endpoints/ai.py`): it authenticates the person, checks **AI assistant** (`aiAssistantEnabled`, a security switch that ships off) and `workspace:ai:use` (or `system:admin` for administration), rate-limits turns per person, records the question in the activity log (never its text), and forwards — streams included — with a shared token (`AI_INTERNAL_TOKEN`, required in production, as ADR-019's is).
+- **No data access of its own.** Every read of views, schema, search and lineage goes back through the platform API with a read-only delegation (ADR-032). The service owns only its `ai_*` tables (connections, settings, conversations, concept mappings, usage, knowledge sources) and the vector store (ADR-033).
+- **Structured over free-form.** The model answers through the platform's validated `SearchQuery` predicates and bounded trace reads, plus deterministic playbooks (impact, provenance, view discovery, concept resolution). Model-written Cypher is checked by the native-query guard and handed to the person to run; the service never runs it.
+- **Providers are data.** A connection is a kind, a base URL, a sign-in method (none, API key, bearer, basic, OAuth client credentials, or a token minted from a username and password) and models per role. The first kind is OpenAI-compatible, which covers OpenAI, Azure OpenAI, vLLM, Ollama, LiteLLM and most gateways. Every outbound call goes through the shared network guard (`backend/common/netguard.py`): private hosts only through `AI_EGRESS_ALLOWED_HOSTS`, never loopback or link-local, https in production, no redirects.
+
+**Reasoning:** Four things are different about this work. It holds a connection open for a minute while a model answers. It calls endpoints on the internet or a corporate gateway, which nothing else in the product does, so egress can be opened for this pod alone (the Helm chart denies egress by default). It holds credentials for those endpoints. And when a model is slow or down, nothing else should notice. A separate process gives each of those its own boundary. Keeping the web tier as the edge means authentication, RBAC, CSRF and the audit trail stay in one place, and sending every read back through the platform means there is no second implementation of "what may this person see" to drift.
+
+**Trade-offs:**
+- (+) Model outages, slow streams and egress are contained in one pod; the canvas never waits on them.
+- (+) The assistant can see exactly what the person can, by construction, and nothing it is told can make it write.
+- (+) A new provider is a new adapter beside `openai_compatible`; a new tool reads a platform route that already exists.
+- (-) One more image, Deployment and shared secret to operate.
+- (-) Every answer costs extra HTTP hops to the platform API.
+- (-) The MCP server implements the protocol's tools subset itself rather than through the SDK, whose current major version is still settling; adopting the SDK later is a contained change.
+
+**Alternatives considered:**
+- Running the assistant inside viz-service — rejected: long streams and outbound calls on the web tier, credentials for model endpoints in every web pod, and a model outage felt by everyone.
+- Giving the AI service its own database and graph access — rejected: a second authorisation model, guaranteed to drift from the first.
+- Letting the model write and run Cypher — rejected: native queries read the whole data source, past every view's boundary, and are a person's own act ([Native queries](/docs/native-queries)).
+
+Details: [AI Service](/docs/services-ai), [AI Assistant](/guide/ai-assistant).
+
+---
+
+## ADR-032: Read-only delegations for the AI service
+
+**Status:** Accepted — extends [ADR-027](#adr-027-personal-api-keys-scoped-per-resource).
+**Date:** 2026-11-21
+**Context:** The AI service reads the platform on a person's behalf (ADR-031), but no on-behalf-of credential existed: the control plane trusts its caller and checks nothing itself, and forwarding the person's cookies would hand the AI service everything the session can do — writes included.
+
+**Decision:**
+- **A delegation token per request.** viz-service mints `nxdlg_<JWT>` (HS256 under `AI_DELEGATION_SIGNING_KEY`, or a key derived from `JWT_SECRET_KEY` with a fixed label; its own audience and type, so neither kind of token passes for the other). It carries the person, the session it came from, the conversation, and a **read-only scope**: views `read`, data `read`, and the workspaces, views and data sources the request is narrowed to. It lives one turn (240 s by default, never more than 600).
+- **Held as an API key is.** `api_key_auth` takes the same path for it: the endpoint surface (`api_key_surface`, deny by default), the resource fence, and claims built by `resolve_for_api_key` from the person's live access, narrowed to the scope. It is refused on any request that would change something, on routes off the surface (native queries among them), on the AI routes themselves, once its session is revoked, and whenever **AI assistant** is off — so switching it off stops tokens already in flight.
+- **Never wider than the key it came with.** A request made with an API key (the knowledge MCP endpoint) gets a delegation intersected with that key's scope.
+- **Attribution.** What a delegated request does is the person's; the activity context names the API key a request came through, if any. A delegation's own id is never recorded as a key, and never counted as key usage.
+
+**Reasoning:** Reusing the key machinery gives the delegation every control keys already have, with their tests, instead of a second set. A per-request, short-lived token bounds what a leaked one is worth to minutes, and read-only by construction means a prompt injection hidden in a dataset description can ask for anything and receive, at most, an answer.
+
+**Trade-offs:**
+- (+) No new authorisation model; the surface snapshot shows exactly what the assistant can call.
+- (+) Revocation, suspension and role changes reach the assistant as they reach the person.
+- (-) Claims are resolved per delegated request (cached per key elsewhere; delegations are short-lived and not cached).
+- (-) A route the assistant needs must be on the key surface — a reviewed change, as for keys.
+
+Details: [RBAC](/docs/rbac#the-ai-assistant), [AI Service](/docs/services-ai#identity-and-access).
+
+---
+
+## ADR-033: Semantic matching on pgvector, behind a store port, as derived data
+
+**Status:** Accepted
+**Date:** 2026-11-21
+**Context:** "Do we have views about supply-chain failures?" and "how do I share a view?" need matching by meaning, not by keyword, and the product's Help persona needs retrieval over its own documentation. Entity-level semantic search over million-node graphs follows later. The choice of store had to be extensible, scalable, resilient and fast.
+
+**Decision:**
+- **pgvector on its own instance** (`vectordb`, `AI_VECTOR_DB_URL`), behind a `VectorStore` port (`backend/ai_service/knowledge/store.py`). Evaluated against pgvector in the management database (couples index builds and memory to it), FalkorDB's vector index (lost on every projection rebuild under ADR-023, FalkorDB-only, competes with traversal for memory) and a dedicated engine (one more stateful system to run). A dedicated engine becomes a second adapter if the entity index passes about 50M vectors.
+- **Derived data, owned by the AI service.** Every collection is rebuilt from its source, so the store is a cache, like FalkorDB under ADR-023. The AI service creates its schema idempotently at start; the upgrade job (ADR-025) owns the management database, not this one.
+- **Versioned collections, blue/green.** A collection version is tied to an embedding model, dimension and chunker; each version has its own partial HNSW index over `halfvec`. Syncs reuse the active version and re-embed only chunks whose content hash changed; a new model builds a new version beside the old and switches in one statement.
+- **Hybrid retrieval, verified as the person.** Dense and lexical results are fused by reciprocal rank; lexical BM25 alone when the store or the embedding model is unavailable. A view the store suggests is opened as the person before it is shown — the store is never an access path.
+- **Phase 1 collections:** `docs` (the documentation and user guide, built from `docs/` with the in-app reader's anchors) and `views` (every non-private view a read-only service account lists, re-synced every five minutes and reconciled daily). Entity embeddings come next and are selective: documentable types (datasets, dashboards, jobs, domains, glossary terms) by default, columns reached through containment from table hits, more types opted in per data source with the cost shown first.
+- **Knowledge over MCP, both ways.** The product's knowledge is served by the AI service's knowledge MCP server, which the Help persona reads through as an external agent would; administrators can add MCP servers other teams host as further sources, labelled and treated as untrusted.
+
+**Trade-offs:**
+- (+) Standard Postgres operations; managed offerings with pgvector exist on every cloud.
+- (+) A model change never leaves queries on a half-built index.
+- (+) Losing the store loses quality, not answers: retrieval falls back to lexical.
+- (-) Another stateful service in the deployment (or a managed database to provision).
+- (-) Private views are found by keyword only — they are never embedded.
+
+Details: [AI Service](/docs/services-ai#semantic-matching-and-knowledge).
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
@@ -971,6 +1052,9 @@ Details: [Service Accounts](/guide/service-accounts#reading-every-workspace).
 | 028 | Service accounts answer to their managers | Accepted (extended by ADR-029 and ADR-030) | Medium (team membership is part of an account's security) |
 | 029 | Who may create a service account is a policy, shipped closed | Accepted | Low |
 | 030 | A service account may read every workspace, and do nothing else across them | Accepted | Medium (reach across every workspace) |
+| 031 | The AI service is a separate process behind the web tier | Accepted | Medium (a new service and egress) |
+| 032 | Read-only delegations for the AI service | Accepted | Low (key machinery reused) |
+| 033 | Semantic matching on pgvector, behind a store port, as derived data | Accepted | Low (rebuildable) |
 
 ---
 

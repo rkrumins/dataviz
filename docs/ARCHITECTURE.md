@@ -36,6 +36,8 @@ flowchart LR
     API --> FDB[("FalkorDB")]
     API --> EXT[("Neo4j, Spanner, DataHub (optional)")]
     API -->|"aggregation endpoints"| CP["Aggregation control plane"]
+    API -->|"/api/v1/ai/*"| AI["AI service"]
+    AI -->|"reads as the person"| API
 ```
 
 ### What runs in the background
@@ -68,7 +70,9 @@ As deployed by `docker-compose.yml`. The Kubernetes manifests in `deploy/k8s/bas
 | `versioning-worker` | `python -m backend.app.services.versioning` (`GRAPHVER_WORKER_LANES=projection`) | `worker` | — | Projects each version-controlled graph's `main` into FalkorDB; sweeps idle drafts and old import/export files | Horizontally |
 | `versioning-jobs` | The same command (`GRAPHVER_WORKER_LANES=transfer,bootstrap`) | `worker` | — | Runs the import, export and publish jobs and the "enable version control" and purge jobs the API queues; the API never runs them | Horizontally; replicas share the queue |
 | `stats-service` | `python -m backend.insights_service` (`backend/Dockerfile.insights`) | `stats` | 8092 (health) | Polls every data source for counts and schema so the API serves cached stats; also runs asset discovery, purges and the profiling sweeps | Horizontally; a per-source claim in Redis keeps at most one pending poll per source |
+| `ai-service` | `python -m backend.ai_service` (`backend/Dockerfile.ai`) | `ai` | 8093 | The AI assistant, natural-language querying and the knowledge MCP server. Reached only through viz-service (`/api/v1/ai/*`), which forwards a read-only delegation; every data read goes back through the platform API as the person asking. Calls the model endpoints an administrator connects | Horizontally; holds no session state |
 | `postgres` | PostgreSQL 16 | — | 5432 | The management database, the `aggregation` schema and the `graphver` version store (which `GRAPHVER_DB_URL` can move to its own instance) | — |
+| `vectordb` | PostgreSQL 16 with pgvector | — | 5432 (5433 on the Compose host) | Embeddings for the AI service's semantic matching: derived data it rebuilds from its sources | — |
 | `redis` | Redis 7 | — | 6379 (6380 on the Compose host) | The `STREAMS` role (job and event streams, locks, session store) and the `CACHE` role (response and provider caches) | Compose shares one instance between the roles (DB 0 and DB 1); production uses two |
 | `falkordb` | FalkorDB | — | 6379 | The lineage graph, and dedicated-mode `{graph}_proj` projection graphs. Nothing else | Standalone, Sentinel or a sharded cluster |
 
