@@ -20,6 +20,7 @@ const OUT = process.env.HARNESS_OUT || '.harness'
 const PAGES = [
   'view-drawer', 'thread:open', 'thread:answered', 'thread:private', 'thread:anchored', 'thread:deleted', 'thread:closed',
   'ask', 'ask:entity', 'rows', 'inbox',
+  'profile:overview', 'profile:conversations', 'profile:thread', 'profile:watching', 'profile-other', 'contacts:named', 'contacts:derived',
 ]
 const SHOTS = process.argv.slice(2).length ? process.argv.slice(2)
   : PAGES.flatMap(p => [p, `${p}:dark`, `${p}:390`, `${p}:dark:390`])

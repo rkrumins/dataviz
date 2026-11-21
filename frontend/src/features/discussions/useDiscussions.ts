@@ -27,7 +27,7 @@ import {
     setThreadMe, unacceptAnswer, unwatchSubject, watchSubject,
     type AskInput, type DiscussionStatus, type MentionablePerson, type MessageResult, type MyBox,
     type SubjectKey, type SubjectSummary, type ThreadDetail, type ThreadFilter, type ThreadList,
-    type ThreadSummary,
+    type ThreadChange, type ThreadSummary,
 } from '@/services/discussionsService'
 import { useAnchorStore } from './anchorStore'
 
@@ -306,8 +306,8 @@ export function useDiscussionActions() {
         putThread(threadId, (t) => applyMessage(t, res))
         refreshAround(qc, res.thread.subject)
     }
-    const onThread = (threadId: string) => (res: { thread: ThreadSummary }) => {
-        putThread(threadId, (t) => ({ ...t, ...res.thread }))
+    const onThread = (threadId: string) => (res: ThreadChange) => {
+        putThread(threadId, (t) => ({ ...t, ...res.thread, people: { ...t.people, ...res.people } }))
         patchRows(qc, threadId, res.thread)
         refreshAround(qc, res.thread.subject)
     }

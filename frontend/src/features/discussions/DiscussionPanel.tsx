@@ -10,7 +10,7 @@
  * Reusable: the drawer shows it for a view; a data source's Questions tab can show it too.
  */
 import { useRef, useState, type KeyboardEvent } from 'react'
-import { ChevronDown, Lock, MapPin, MessageCircleQuestion, MessageSquare, RefreshCw, X } from 'lucide-react'
+import { ChevronDown, Database, LayoutGrid, Lock, MapPin, MessageCircleQuestion, MessageSquare, RefreshCw, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { AvatarStack } from '@/components/ui/AvatarStack'
 import { DateTime } from '@/components/ui/DateTime'
@@ -29,28 +29,40 @@ import { nameOf, stackPerson, subjectNoun } from './discussionText'
 
 type Filter = 'open' | 'answered' | 'all' | 'mine'
 
-export function ThreadCard({ thread, people, onOpen, showAnchor = true }: {
+export function ThreadCard({ thread, people, onOpen, showAnchor = true, showSubject = false, selected = false }: {
     thread: ThreadSummary
     people: PeopleMap
     onOpen: () => void
     /** The node chip — off when the list is already about that node. */
     showAnchor?: boolean
+    /** Which view or data source it is about — for lists across many (your own conversations). */
+    showSubject?: boolean
+    /** The one open beside the list. */
+    selected?: boolean
 }) {
+    const SubjectIcon = thread.subject.type === 'view' ? LayoutGrid : Database
     const replies = Math.max(0, thread.messageCount - 1)
     const asker = nameOf(thread.askedBy, people)
     const others = thread.participantIds.filter((id) => id !== thread.askedBy).map((id) => stackPerson(id, people))
     return (
-        <button type="button" data-thread-row onClick={onOpen}
-            aria-label={`${thread.unread ? 'Unread. ' : ''}${asker} asked: ${thread.excerpt}`}
+        <button type="button" data-thread-row onClick={onOpen} aria-current={selected || undefined}
+            aria-label={`${thread.unread ? 'Unread. ' : ''}${asker} asked${showSubject ? ` about ${thread.subject.name}` : ''}: ${thread.excerpt}`}
             className={cn('group w-full text-left rounded-2xl border px-3.5 py-3 transition-[background-color,border-color,box-shadow] duration-150',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                thread.unread
+                selected ? 'border-accent-lineage/40 bg-accent-lineage/[0.07] shadow-sm' : thread.unread
                     ? 'border-accent-lineage/25 bg-accent-lineage/[0.035] hover:bg-accent-lineage/[0.06]'
                     : 'border-glass-border/70 bg-canvas hover:bg-black/[0.02] dark:hover:bg-white/[0.03] hover:border-ink-muted/25')}>
             <div className="flex items-start gap-3">
                 <UserAvatar userId={thread.askedBy} name={asker} avatarId={people[thread.askedBy]?.avatarId} hasImage={people[thread.askedBy]?.hasImage}
                     className={cn('w-8 h-8 text-[10px] font-bold mt-0.5', people[thread.askedBy]?.deleted && 'grayscale opacity-70')} />
                 <div className="min-w-0 flex-1">
+                    {showSubject && (
+                        <p className="mb-0.5 flex items-center gap-1 min-w-0 text-[11px] font-semibold text-accent-lineage">
+                            <SubjectIcon className="w-3 h-3 shrink-0" aria-hidden />
+                            <span className="truncate">{thread.subject.name}</span>
+                            {thread.subject.workspaceName && <span className="truncate font-normal text-ink-muted">· {thread.subject.workspaceName}</span>}
+                        </p>
+                    )}
                     <p className="flex items-center gap-1.5 text-[11px] text-ink-muted">
                         <span className="truncate font-semibold text-ink-secondary">{asker}</span>
                         <span aria-hidden className="text-ink-muted/60">·</span>

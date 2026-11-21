@@ -6,10 +6,12 @@
  * or the data they look after.
  */
 import { useMemo, type ReactNode } from 'react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
-    Building2, Database, ExternalLink, LayoutGrid, Mail, PencilLine, ShieldCheck, Sparkles, UserRound, Users,
+    Building2, ChevronDown, Database, ExternalLink, Eye, LayoutGrid, Mail, MessageCircleQuestion, MessagesSquare, PencilLine,
+    ShieldCheck, Sparkles, UserRound, Users,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -23,8 +25,12 @@ import { listViews, type View } from '@/services/viewApiService'
 import { peopleService, type PersonDataContact, type PersonProfile } from '@/services/peopleService'
 import { personHref } from '@/components/ui/PersonChip'
 import { workspaceColor } from '@/lib/workspaceColor'
+import { useFeature } from '@/store/features'
+import { useMySummary } from '@/features/discussions/useDiscussions'
+import { useDiscussionsDrawer } from '@/features/discussions/drawerStore'
+import { ConversationsTab, WaitingOnYouCard, WatchingTab } from '@/features/discussions/MyConversations'
 
-const TABS = ['overview', 'views', 'data'] as const
+const TABS = ['overview', 'views', 'data', 'conversations', 'watching'] as const
 type Tab = (typeof TABS)[number]
 
 const sourceLink = (c: PersonDataContact) =>
@@ -52,40 +58,54 @@ function Profile({ id }: { id: string }) {
         staleTime: 60_000,
     })
     const p = profile.data
+    const conversations = useFeature('conversationsEnabled')
+    // Your conversations and what you watch are yours alone: the tabs exist on your own profile.
+    const mine = conversations && !!p?.isMe
+    const unread = useMySummary().data?.totalUnread ?? 0
     useDocumentTitle(p ? (p.isMe ? 'Your profile' : p.person.displayName) : 'Profile')
 
     const rawTab = params.get('tab')
-    const tab: Tab = TABS.includes(rawTab as Tab) ? (rawTab as Tab) : 'overview'
+    const asked: Tab = TABS.includes(rawTab as Tab) ? (rawTab as Tab) : 'overview'
+    // Until the profile says whose it is, a link to ?tab=conversations waits on it rather than bouncing.
+    const tab: Tab = (asked === 'conversations' || asked === 'watching') && p && !mine ? 'overview' : asked
     const setTab = (t: string) => setParams(prev => {
-        const next = new URLSearchParams(prev)
-        if (t === 'overview') next.delete('tab'); else next.set('tab', t)
+        const next = new URLSearchParams()
+        // Leaving the conversations drops which box and thread were open.
+        if (t !== 'overview') next.set('tab', t)
+        if (t === 'conversations') for (const k of ['box', 'status', 'thread', 'message']) { const v = prev.get(k); if (v) next.set(k, v) }
         return next
     }, { replace: true })
 
     if (profile.isError) {
         return (
-            <PageContainer className="py-10">
-                <EmptyState icon={UserRound} title="We couldn’t find that person"
-                    description="They may have left, or the link may be wrong."
-                    action={{ label: 'Back', onClick: () => navigate(-1) }} />
-            </PageContainer>
+            <div className="absolute inset-0 overflow-y-auto bg-canvas">
+                <PageContainer className="py-10">
+                    <EmptyState icon={UserRound} title="We couldn’t find that person"
+                        description="They may have left, or the link may be wrong."
+                        action={{ label: 'Back', onClick: () => navigate(-1) }} />
+                </PageContainer>
+            </div>
         )
     }
 
     const viewList = views.data?.items ?? []
     return (
-        <PageContainer className="space-y-6 py-8">
-            {p ? <Header profile={p} viewCount={views.data?.total ?? null} canAdmin={canAdmin} /> : <HeaderSkeleton />}
+        <div className="absolute inset-0 overflow-y-auto bg-canvas">
+        <PageContainer className="space-y-6 py-8 pb-24">
+            {p ? <Header profile={p} views={viewList} viewCount={views.data?.total ?? null} canAdmin={canAdmin} /> : <HeaderSkeleton />}
 
             <Tabs value={tab} onValueChange={setTab}>
-                <TabsList look="underline" aria-label="Profile sections">
+                <TabsList look="underline" aria-label="Profile sections" className="gap-1 sm:gap-2 overflow-x-auto overflow-y-hidden custom-scrollbar">
                     <TabsTrigger value="overview" icon={Sparkles}>Overview</TabsTrigger>
-                    <TabsTrigger value="views" icon={LayoutGrid} badge={views.data?.total || undefined}>Views</TabsTrigger>
-                    <TabsTrigger value="data" icon={Database} badge={p?.dataContacts.length || undefined}>Data</TabsTrigger>
+                    <TabsTrigger value="views" icon={LayoutGrid} badge={<Count n={views.data?.total} />}>Views</TabsTrigger>
+                    <TabsTrigger value="data" icon={Database} badge={<Count n={p?.dataContacts.length} />}>Data</TabsTrigger>
+                    {mine && <TabsTrigger value="conversations" icon={MessagesSquare} badge={<Count n={unread} label="unread" accent />}>Conversations</TabsTrigger>}
+                    {mine && <TabsTrigger value="watching" icon={Eye}>Watching</TabsTrigger>}
                 </TabsList>
 
                 <TabsContent value="overview" className="pt-5">
-                    {p && <Overview profile={p} views={viewList} onTab={setTab} />}
+                    {p && <Overview profile={p} views={viewList} onTab={setTab}
+                        waiting={mine ? <WaitingOnYouCard onOpen={id => setParams(id ? { tab: 'conversations', thread: id } : { tab: 'conversations' }, { replace: true })} /> : null} />}
                 </TabsContent>
                 <TabsContent value="views" className="pt-5">
                     <ViewsTab loading={views.isLoading} views={viewList} isMe={!!p?.isMe} name={p?.person.displayName ?? ''} />
@@ -93,12 +113,30 @@ function Profile({ id }: { id: string }) {
                 <TabsContent value="data" className="pt-5">
                     {p && <DataTab profile={p} />}
                 </TabsContent>
+                {mine && (
+                    <>
+                        <TabsContent value="conversations" className="pt-5"><ConversationsTab /></TabsContent>
+                        <TabsContent value="watching" className="pt-5"><WatchingTab /></TabsContent>
+                    </>
+                )}
             </Tabs>
         </PageContainer>
+        </div>
     )
 }
 
-function Header({ profile: p, viewCount, canAdmin }: { profile: PersonProfile; viewCount: number | null; canAdmin: boolean }) {
+/** A tab's count: how many, or (accent) how many unread. Nothing for none. */
+function Count({ n, label, accent = false }: { n: number | undefined; label?: string; accent?: boolean }) {
+    if (!n) return null
+    return (
+        <span className={cn('min-w-[1.25rem] rounded-full px-1.5 text-center text-[11px] font-semibold leading-5 tabular-nums',
+            accent ? 'bg-accent-lineage text-white' : 'bg-black/[0.05] text-ink-muted dark:bg-white/[0.08]')}>
+            {n > 99 ? '99+' : n}{label && <span className="sr-only"> {label}</span>}
+        </span>
+    )
+}
+
+function Header({ profile: p, views, viewCount, canAdmin }: { profile: PersonProfile; views: View[]; viewCount: number | null; canAdmin: boolean }) {
     const person = p.person
     const facts = [
         viewCount != null && `${viewCount} view${viewCount === 1 ? '' : 's'}`,
@@ -139,6 +177,7 @@ function Header({ profile: p, viewCount, canAdmin }: { profile: PersonProfile; v
                     )}
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    {!p.isMe && !person.deleted && <AskThem profile={p} views={views} />}
                     {p.isMe && (
                         <Link to="/me/account"
                             className="inline-flex h-9 items-center gap-2 rounded-xl border border-glass-border bg-canvas px-3.5 text-sm font-semibold text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
@@ -181,7 +220,7 @@ function Card({ title, icon: Icon, action, children }: { title: string; icon: ty
     )
 }
 
-function Overview({ profile: p, views, onTab }: { profile: PersonProfile; views: View[]; onTab: (t: Tab) => void }) {
+function Overview({ profile: p, views, onTab, waiting }: { profile: PersonProfile; views: View[]; onTab: (t: Tab) => void; waiting: ReactNode }) {
     const recent = views.slice(0, 6)
     const wsId = recent[0]?.workspaceId ?? ''
     return (
@@ -197,6 +236,7 @@ function Overview({ profile: p, views, onTab }: { profile: PersonProfile; views:
                 </Card>
             </div>
             <div className="space-y-5">
+                {waiting}
                 <Card title={p.isMe ? 'Data you look after' : 'Data they look after'} icon={Database}
                     action={p.dataContacts.length > 4 ? <button type="button" onClick={() => onTab('data')} className="text-xs font-semibold text-violet-700 hover:underline dark:text-violet-300">All</button> : undefined}>
                     {p.dataContacts.length === 0 ? (
@@ -248,4 +288,48 @@ function DataTab({ profile: p }: { profile: PersonProfile }) {
             description={p.isMe ? 'When you’re named as a data source’s Owner or Steward, it shows up here — and questions about it reach you.' : 'They aren’t named as a contact for any data you can see.'} />
     }
     return <ul className="grid gap-2 md:grid-cols-2">{p.dataContacts.map(c => <DataRow key={c.dataSourceId} contact={c} />)}</ul>
+}
+
+/**
+ * Asking someone a question is always about something of theirs: one of their views, or data
+ * they look after. The menu lists those you can see; choosing one opens the questions drawer
+ * with them among the people asked.
+ */
+function AskThem({ profile: p, views }: { profile: PersonProfile; views: View[] }) {
+    const on = useFeature('conversationsEnabled')
+    const open = useDiscussionsDrawer(s => s.open)
+    if (!on || (views.length === 0 && p.dataContacts.length === 0)) return null
+    const ask = (subject: { type: 'view' | 'data_source'; id: string; name: string }) =>
+        open({ subject, compose: true, recipients: [p.person.id] })
+    const item = 'flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-ink outline-none data-[highlighted]:bg-black/[0.05] dark:data-[highlighted]:bg-white/[0.07]'
+    return (
+        <DropdownMenu.Root modal={false}>
+            <DropdownMenu.Trigger asChild>
+                <button type="button"
+                    className="inline-flex h-9 items-center gap-2 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 px-3.5 text-sm font-semibold text-white shadow-sm hover:brightness-110">
+                    <MessageCircleQuestion className="h-4 w-4" aria-hidden /> Ask a question <ChevronDown className="h-3.5 w-3.5 opacity-80" aria-hidden />
+                </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+                <DropdownMenu.Content align="end" sideOffset={6}
+                    className="z-[9999] max-h-80 w-72 overflow-y-auto rounded-xl border border-glass-border bg-canvas p-1 shadow-xl">
+                    <p className="px-2.5 pb-1 pt-1.5 text-[11px] text-ink-muted">What is it about?</p>
+                    {views.length > 0 && <DropdownMenu.Label className="px-2.5 pt-1.5 text-[10.5px] font-bold uppercase tracking-wider text-ink-muted">Their views</DropdownMenu.Label>}
+                    {views.slice(0, 8).map(v => (
+                        <DropdownMenu.Item key={v.id} className={item} onSelect={() => ask({ type: 'view', id: v.id, name: v.name })}>
+                            <LayoutGrid className="h-4 w-4 shrink-0 text-ink-muted" aria-hidden /><span className="truncate">{v.name}</span>
+                        </DropdownMenu.Item>
+                    ))}
+                    {p.dataContacts.length > 0 && <DropdownMenu.Label className="px-2.5 pt-2 text-[10.5px] font-bold uppercase tracking-wider text-ink-muted">Data they look after</DropdownMenu.Label>}
+                    {p.dataContacts.slice(0, 8).map(c => (
+                        <DropdownMenu.Item key={c.dataSourceId} className={item} onSelect={() => ask({ type: 'data_source', id: c.dataSourceId, name: c.dataSourceName })}>
+                            <Database className="h-4 w-4 shrink-0 text-ink-muted" aria-hidden />
+                            <span className="min-w-0 flex-1 truncate">{c.dataSourceName}</span>
+                            <span className="shrink-0 text-[11px] text-ink-muted">{c.workspaceName}</span>
+                        </DropdownMenu.Item>
+                    ))}
+                </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+        </DropdownMenu.Root>
+    )
 }

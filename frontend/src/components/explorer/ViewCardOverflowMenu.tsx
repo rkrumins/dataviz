@@ -6,6 +6,7 @@
 import { useState, useRef, useEffect, useCallback, useContext } from 'react'
 import {
   MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2, FileDown, FileUp, Milestone, LayoutTemplate,
+  MessageCircleQuestion,
 } from 'lucide-react'
 import {
   buildVisibilityOptions, visibilityDescription, VISIBILITY_ACCENT,
@@ -23,6 +24,8 @@ import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import type { ViewLayerConfig } from '@/types/schema'
+import { useFeature } from '@/store/features'
+import { useDiscussionsDrawer } from '@/features/discussions/drawerStore'
 
 interface ViewCardOverflowMenuProps {
   viewId: string
@@ -67,6 +70,8 @@ export function ViewCardOverflowMenu({
   const [versionsOpen, setVersionsOpen] = useState(false)
   const [savingAsTemplate, setSavingAsTemplate] = useState(false)
   const templatesOn = useLayoutTemplatesEnabled()
+  const conversations = useFeature('conversationsEnabled')
+  const openQuestions = useDiscussionsDrawer((s) => s.open)
   const portability = useViewPortability()
   const exportEnabled = portability.canExport
   // Updating a view from a file runs in the wizard, which only exists inside the app layout.
@@ -233,6 +238,16 @@ export function ViewCardOverflowMenu({
                 <History className="w-3.5 h-3.5" />
                 Activity
               </button>
+              {conversations && (
+                <button
+                  onClick={() => { setIsOpen(false); openQuestions({ subject: { type: 'view', id: viewId, name: viewName }, compose: true }) }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                  style={{ width: 'calc(100% - 4px)' }}
+                >
+                  <MessageCircleQuestion className="w-3.5 h-3.5" />
+                  Ask a question
+                </button>
+              )}
               {portability.versions && (
                 <button
                   onClick={() => { setVersionsOpen(true); setIsOpen(false) }}

@@ -18,6 +18,7 @@
  */
 import { useState } from 'react'
 import {
+    Activity,
     ArrowRightLeft,
     AtSign,
     Bell,
@@ -289,6 +290,12 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: XCircle,
         icon: 'text-slate-500',
         tile: 'bg-slate-500/10',
+    },
+    // A source's counts jumped or fell far more than usual at its last refresh.
+    'insights.counts_anomaly': {
+        Icon: Activity,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
     },
     'data_source.moved': {
         Icon: ArrowRightLeft,

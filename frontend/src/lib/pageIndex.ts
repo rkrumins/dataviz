@@ -333,6 +333,26 @@ export const PAGE_INDEX: PageEntry[] = [
         path: '/me/preferences',
         gate: { kind: 'always' },
     },
+    {
+        id: 'profile',
+        category: 'Setting',
+        title: 'Your profile',
+        description: 'What you made and look after, as others see it — with your conversations',
+        keywords: ['profile', 'me', 'my views', 'people', 'contact'],
+        path: '/me/profile',
+        gate: { kind: 'always' },
+        feature: 'conversationsEnabled',
+    },
+    {
+        id: 'conversations',
+        category: 'Page',
+        title: 'Conversations',
+        description: 'Questions asked of you, the ones you asked, and where you were mentioned',
+        keywords: ['questions', 'messages', 'discussions', 'ask', 'mentions', 'inbox', 'watching', 'answers'],
+        path: '/conversations',
+        gate: { kind: 'always' },
+        feature: 'conversationsEnabled',
+    },
 
     // Admin sections. Titles mirror the nav catalogue's labels
     // (`backend/app/services/nav_catalogue.py`) so a search for what the

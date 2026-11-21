@@ -95,6 +95,52 @@ are still open — a grey one once they're all answered or closed. Click the **?
 questions about that thing alone, and ask another. In a question about a node, **Show on
 canvas** closes the drawer and selects the node, bringing it into view.
 
+You can also ask from the Explorer: a view's preview shows **Who to ask** under who made it
+and a **Questions** button with the open count, and the **…** on a view's card offers **Ask a
+question**.
+
+## Ask about the data
+
+Questions about the data itself — where it comes from, how fresh it is, what a field means —
+belong to the data source. Open it from the workspace's **Data → Sources**:
+
+* **Who to ask about this data** on its Overview names its **Owner** and **Stewards**, people
+  or teams. While nobody is named, it shows who it worked out instead — whoever connected
+  it, the people named on the data request it came from, else the workspace's admins — and
+  says so. **Ask a question** there opens the ask box.
+* the **Questions** tab, with the open count, lists what was asked about it; a question opens
+  right there, and the link in a notification lands on it.
+* **Watch** in the source's header tells you about every new open question on it.
+
+Anyone who manages the source can name its Stewards (**Edit**, or **Name them**), up to ten,
+each a person or a team of up to 50. The Owner is the workspace admins' to change, or the
+current Owner's — handing it on.
+
+## Your conversations
+
+Your profile — **Your profile** in the menu under your avatar, top right — has a
+**Conversations** tab with how many are unread. **Conversations** in the same menu goes
+straight there.
+
+* **To me** — questions asked of you, as a view's owner or the data's.
+* **Mine** — the ones you asked.
+* **Mentions** — where someone @mentioned you.
+* **Watching** — new questions on the views and data you watch.
+
+Pick one to read it beside the list (on a phone it opens on its own, with **Back**); **Open
+the view** or **Open the data source** takes you to it. **Status** narrows the list to open,
+answered or closed questions. The **Watching** tab lists what you watch, with how many open
+questions each has, and stops watching one. Your profile's Overview leads with **Waiting on
+you**: the open questions asked of you that nobody has answered yet.
+
+## People's profiles
+
+Hover a person's name — on a question, in **Who to ask**, on a view's card — and choose **View
+profile**, or click an @mention. Their profile shows the workspaces they run, the views they made and
+the data they look after, each as far as you can see it. **Ask a question** on it lists their
+views and data; choose one and the ask box opens with them among the people asked. A
+question is always about something — there are no direct messages.
+
 ## Where to next
 
 - [Browsing Views](/guide/browsing-views) — when you're looking for the view to ask about.

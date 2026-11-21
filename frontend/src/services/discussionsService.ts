@@ -187,6 +187,12 @@ export interface AskResult {
     usedFallback: boolean
 }
 
+/** An accept, un-accept, close or reopen: the thread as it is now, and whoever it names. */
+export interface ThreadChange {
+    thread: ThreadSummary
+    people?: PeopleMap
+}
+
 export interface MessageResult {
     message: Message
     thread: ThreadSummary
@@ -290,19 +296,19 @@ export function deleteMessage(id: string, messageId: string): Promise<MessageRes
     return authFetch<MessageResult>(`${threadBase(id)}/messages/${encodeURIComponent(messageId)}`, json('DELETE'))
 }
 
-export function acceptAnswer(id: string, messageId: string, expectedVersion: number): Promise<{ thread: ThreadSummary }> {
+export function acceptAnswer(id: string, messageId: string, expectedVersion: number): Promise<ThreadChange> {
     return authFetch(`${threadBase(id)}/answer`, json('POST', { messageId, expectedVersion }))
 }
 
-export function unacceptAnswer(id: string, expectedVersion: number): Promise<{ thread: ThreadSummary }> {
+export function unacceptAnswer(id: string, expectedVersion: number): Promise<ThreadChange> {
     return authFetch(`${threadBase(id)}/answer`, json('DELETE', { expectedVersion }))
 }
 
-export function closeThread(id: string, expectedVersion: number): Promise<{ thread: ThreadSummary }> {
+export function closeThread(id: string, expectedVersion: number): Promise<ThreadChange> {
     return authFetch(`${threadBase(id)}/close`, json('POST', { expectedVersion }))
 }
 
-export function reopenThread(id: string, expectedVersion: number): Promise<{ thread: ThreadSummary }> {
+export function reopenThread(id: string, expectedVersion: number): Promise<ThreadChange> {
     return authFetch(`${threadBase(id)}/reopen`, json('POST', { expectedVersion }))
 }
 

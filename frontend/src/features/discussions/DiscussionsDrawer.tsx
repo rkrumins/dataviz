@@ -25,10 +25,12 @@ import { useAnchorStore } from './anchorStore'
 import { DiscussionPanel } from './DiscussionPanel'
 import { ThreadView } from './ThreadView'
 import { subjectNoun } from './discussionText'
+import type { SubjectKey } from '@/services/discussionsService'
 
-function WatchButton({ target }: { target: DrawerTarget }) {
-    const { watching, ready, toggle, isPending } = useWatch(target.subject)
-    const noun = subjectNoun(target.subject)
+/** Watch a subject: hear about each new open question on it. Also on a data source's drawer. */
+export function WatchButton({ subject }: { subject: SubjectKey }) {
+    const { watching, ready, toggle, isPending } = useWatch(subject)
+    const noun = subjectNoun(subject)
     return (
         <HoverTip className="inline-flex" label={watching ? `You hear about each new open question on ${noun}` : `Hear about each new open question on ${noun}`}
             detail={watching ? 'Click to stop' : 'In your Inbox, as they are asked'}>
@@ -81,7 +83,7 @@ export function DiscussionsDrawer({ target }: { target: DrawerTarget | null }) {
                             <h2 id="discussions-drawer-title" className="text-sm font-bold text-ink truncate">Questions</h2>
                             {name && <p className="text-xs text-ink-muted truncate">{name}</p>}
                         </div>
-                        <WatchButton target={target} />
+                        <WatchButton subject={target.subject} />
                         <button type="button" onClick={close} aria-label="Close questions"
                             className="w-8 h-8 rounded-lg flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
                             <X className="w-4 h-4" aria-hidden />

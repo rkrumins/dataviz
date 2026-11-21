@@ -25,6 +25,21 @@ function DataSourceHistoryRedirect() {
   return <Navigate to={`/datasources/${catalogId}?tab=profiling`} replace />
 }
 
+// Your conversations live on your profile; /conversations is the short way there, its query kept
+// (?box=&thread=) so an "All conversations" link lands on the same box.
+function ConversationsRedirect() {
+  const [params] = useSearchParams()
+  const next = new URLSearchParams(params)
+  next.set('tab', 'conversations')
+  return <Navigate to={`/me/profile?${next}`} replace />
+}
+
+const PROFILES_OFF = {
+  title: 'Profiles and conversations are turned off',
+  message: 'People’s profiles come with questions and conversations about views and data, which an administrator hasn’t turned on for this deployment.',
+  guideSlug: 'asking-questions',
+}
+
 // A service account's keys page became the account's own page, its managers'
 // and its administrators' alike. Redirect old links, notices included.
 function ServiceAccountKeysRedirect() {
@@ -79,6 +94,7 @@ const MyApiKeysPage = lazyWithRetry(() => import('@/pages/MyApiKeysPage').then(m
 const ServiceAccountPage = lazyWithRetry(() => import('@/pages/ServiceAccountPage').then(m => ({ default: m.ServiceAccountPage })))
 const AccountSettingsPage = lazyWithRetry(() => import('@/pages/AccountSettingsPage').then(m => ({ default: m.AccountSettingsPage })))
 const PreferencesPage = lazyWithRetry(() => import('@/pages/PreferencesPage').then(m => ({ default: m.PreferencesPage })))
+const PersonProfilePage = lazyWithRetry(() => import('@/pages/PersonProfilePage').then(m => ({ default: m.PersonProfilePage })))
 const PasswordChangeRequired = lazyWithRetry(() => import('@/pages/PasswordChangeRequired').then(m => ({ default: m.PasswordChangeRequired })))
 
 // Auth pages (unauthenticated)
@@ -252,6 +268,11 @@ export const router = createBrowserRouter([
       { path: 'me/service-accounts/:accountId', element: <ServiceAccountKeysRedirect /> },
       // How the app works for you — kept in this browser, ungated like its siblings.
       { path: 'me/preferences', element: <Lazy><PreferencesPage /></Lazy> },
+      // Profiles — yours with your conversations and what you watch, and anyone else's: what
+      // they made and look after, as far as you can see it. They come with conversations.
+      { path: 'me/profile', element: <RequireFeature feature="conversationsEnabled" explain {...PROFILES_OFF}><Lazy><PersonProfilePage /></Lazy></RequireFeature> },
+      { path: 'people/:userId', element: <RequireFeature feature="conversationsEnabled" explain {...PROFILES_OFF}><Lazy><PersonProfilePage /></Lazy></RequireFeature> },
+      { path: 'conversations', element: <RequireFeature feature="conversationsEnabled" explain {...PROFILES_OFF}><ConversationsRedirect /></RequireFeature> },
 
       // Schema/Semantic Layer pages — independent of workspace context.
       // They manage global ontology resources and read data source context

@@ -22,7 +22,7 @@
  * sign in at all".
  */
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
-import { NavLink } from 'react-router-dom'
+import { Link, NavLink } from 'react-router-dom'
 import {
     AlertCircle, ChevronRight, Fingerprint, KeyRound, KeySquare, Link2, Mail,
     PencilLine, ShieldCheck, SlidersHorizontal, UserCog,
@@ -36,6 +36,7 @@ import { cn } from '@/lib/utils'
 import { accountService } from '@/services/accountService'
 import { authService, type UserIdentity } from '@/services/authService'
 import { useAuthStore, SYSTEM_ROLE_LABELS, type SystemRole } from '@/store/auth'
+import { useFeature } from '@/store/features'
 import { usePreferencesStore } from '@/store/preferences'
 
 interface AccountIdentityState {
@@ -74,6 +75,7 @@ export function AccountShell({
     children: React.ReactNode
 }) {
     const user = useAuthStore((s) => s.user)
+    const conversations = useFeature('conversationsEnabled')
     const applyProfile = useAuthStore((s) => s.applyProfile)
     const avatarId = usePreferencesStore((s) => s.avatarId)
     const [avatarOpen, setAvatarOpen] = useState(false)
@@ -184,6 +186,13 @@ export function AccountShell({
                                             <span className="mt-2.5 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-accent-lineage/10 text-accent-lineage border border-accent-lineage/20">
                                                 {roleLabel}
                                             </span>
+                                        )}
+                                        {/* Settings are how you sign in; the profile is what others see of you. */}
+                                        {conversations && (
+                                            <Link to="/me/profile"
+                                                className="mt-3 inline-flex items-center gap-0.5 text-xs font-semibold text-accent-lineage hover:underline">
+                                                View your profile <ChevronRight className="w-3.5 h-3.5" aria-hidden />
+                                            </Link>
                                         )}
                                     </div>
 

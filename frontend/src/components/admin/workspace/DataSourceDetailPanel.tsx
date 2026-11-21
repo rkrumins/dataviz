@@ -11,7 +11,7 @@ import { MOTION } from '@/lib/motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
     BarChart3, AlertTriangle, Loader2,
-    GitBranch, Star, Clock, Compass, Save, RotateCcw, LineChart,
+    GitBranch, Star, Clock, Compass, Save, RotateCcw, LineChart, MessageCircleQuestion,
 } from 'lucide-react'
 import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { cn } from '@/lib/utils'
@@ -24,7 +24,7 @@ import type { View } from '@/services/viewApiService'
 
 /** Tab ids, in the order they appear. Hoisted so the URL parser and the
  *  buttons cannot drift apart. */
-const DATA_SOURCE_TABS = ['insights', 'profiling', 'aggregation', 'views', 'versioning'] as const
+const DATA_SOURCE_TABS = ['insights', 'profiling', 'aggregation', 'views', 'questions', 'versioning'] as const
 type DataSourceTab = (typeof DATA_SOURCE_TABS)[number]
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceReadinessResponse } from '@/services/aggregationService'
@@ -41,6 +41,10 @@ import { DataSourceLifecycle, MovedFromChip } from '@/features/data-source-trans
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
 import { DataContactsCard } from './DataContactsCard'
+import { DiscussionPanel } from '@/features/discussions/DiscussionPanel'
+import { ThreadView } from '@/features/discussions/ThreadView'
+import { WatchButton } from '@/features/discussions/DiscussionsDrawer'
+import { useSubjectSummary } from '@/features/discussions/useDiscussions'
 
 // ─────────────────────────────────────────────────────────────────────
 // Props
@@ -170,8 +174,9 @@ export function DataSourceDetailPanel({
      * a page whose back button could then only ever guess where you came from.
      */
     const [searchParams, setSearchParams] = useSearchParams()
+    const conversations = useFeature('conversationsEnabled')
     const rawTab = searchParams.get('dstab')
-    const activeTab: DataSourceTab = DATA_SOURCE_TABS.includes(rawTab as DataSourceTab)
+    const activeTab: DataSourceTab = DATA_SOURCE_TABS.includes(rawTab as DataSourceTab) && (rawTab !== 'questions' || conversations)
         ? (rawTab as DataSourceTab)
         : 'insights'
     const setActiveTab = (next: DataSourceTab) => {
@@ -180,6 +185,20 @@ export function DataSourceDetailPanel({
         // stays clean and a stale param cannot outlive the drawer.
         if (next === 'insights') merged.delete('dstab')
         else merged.set('dstab', next)
+        // The open question belongs to the Questions tab (a notification links to it there).
+        if (next !== 'questions') { merged.delete('discussion'); merged.delete('message') }
+        setSearchParams(merged, { replace: true })
+    }
+    // Questions about this data: a thread opens in the tab itself, kept in the URL.
+    const dsSubject = ds ? { type: 'data_source' as const, id: ds.id, name: ds.label || ds.graphName || ds.catalogItemId } : null
+    const questions = useSubjectSummary(conversations ? dsSubject : null).data
+    const openThreadId = activeTab === 'questions' ? searchParams.get('discussion') : null
+    const [askOpen, setAskOpen] = useState(false)
+    const showThread = (id: string | null) => {
+        const merged = new URLSearchParams(searchParams)
+        merged.set('dstab', 'questions')
+        if (id) merged.set('discussion', id); else merged.delete('discussion')
+        merged.delete('message')
         setSearchParams(merged, { replace: true })
     }
     const versioningEnabled = useFeature('versioningEnabled')
@@ -390,6 +409,7 @@ export function DataSourceDetailPanel({
                                         <ExternalLink className="w-3 h-3" /> Edit data model
                                     </Link>
                                 )}
+                                {conversations && dsSubject && <WatchButton subject={dsSubject} />}
                                 <DataSourceActions
                                     wsId={wsId}
                                     onEdit={startEditing}
@@ -417,6 +437,9 @@ export function DataSourceDetailPanel({
                             <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Processing" onClick={() => setActiveTab('aggregation')} />
                             <TabBtn active={activeTab === 'profiling'} icon={LineChart} label="Trends" onClick={() => setActiveTab('profiling')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
+                            {conversations && (
+                                <TabBtn active={activeTab === 'questions'} icon={MessageCircleQuestion} label="Questions" count={questions?.open} onClick={() => setActiveTab('questions')} />
+                            )}
                             {versioningEnabled && (
                                 <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
                             )}
@@ -460,7 +483,7 @@ export function DataSourceDetailPanel({
                             ) : (<>
                             {/* ─── Insights Tab ─────────────────────────── */}
                             {activeTab === 'insights' && (<div className="space-y-5">
-                                <DataContactsCard wsId={wsId} dsId={ds.id} />
+                                <DataContactsCard wsId={wsId} dsId={ds.id} onAsk={() => { setAskOpen(true); showThread(null) }} />
                                 {ds.catalogItemId ? (
                                     <DataSourceProfile
                                         catalogId={ds.catalogItemId}
@@ -472,6 +495,17 @@ export function DataSourceDetailPanel({
                                     <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>
                                 )}
                             </div>)}
+
+                            {/* ─── Questions Tab ────────────────────────── */}
+                            {activeTab === 'questions' && dsSubject && (
+                                openThreadId ? (
+                                    <ThreadView key={openThreadId} threadId={openThreadId} focusMessageId={searchParams.get('message')}
+                                        onBack={() => showThread(null)} onDeleted={() => showThread(null)} className="-mx-6 -my-5" />
+                                ) : (
+                                    <DiscussionPanel subject={dsSubject} onOpenThread={showThread}
+                                        compose={askOpen} onComposeChange={setAskOpen} />
+                                )
+                            )}
 
                             {/* ─── Profiling Tab ────────────────────────── */}
                             {activeTab === 'profiling' && (

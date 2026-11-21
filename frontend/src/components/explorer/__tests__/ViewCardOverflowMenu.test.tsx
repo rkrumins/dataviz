@@ -37,6 +37,7 @@ import { updateViewVisibility } from '@/services/viewApiService'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { ViewCardOverflowMenu } from '../ViewCardOverflowMenu'
+import { useDiscussionsDrawer } from '@/features/discussions/drawerStore'
 
 const mockSetVisibility = vi.mocked(updateViewVisibility)
 
@@ -199,5 +200,29 @@ describe('versions, export and import: a preview behind one admin switch', () =>
         expect(screen.getByText('Versions')).toBeTruthy()
         expect(screen.queryByText('Export…')).toBeNull()
         expect(screen.getByText('Update from file…')).toBeTruthy()
+    })
+})
+
+describe('asking a question follows the conversations switch', () => {
+    const openMenu = () => {
+        render(<ViewCardOverflowMenu viewId="view_1" viewName="Quarterly lineage" visibility="workspace" onDelete={vi.fn()} onShare={vi.fn()} />)
+        fireEvent.click(screen.getByRole('button'))
+    }
+    const set = (values: Record<string, unknown>) =>
+        useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, ...values } })
+    afterEach(() => { set({}); useDiscussionsDrawer.setState({ target: null }) })
+
+    it('offers nothing while conversations are off', () => {
+        openMenu()
+        expect(screen.queryByText('Ask a question')).toBeNull()
+    })
+
+    it('opens the questions drawer on the view, with the ask box open', () => {
+        set({ conversationsEnabled: true })
+        openMenu()
+        fireEvent.click(screen.getByText('Ask a question'))
+        expect(useDiscussionsDrawer.getState().target).toMatchObject({
+            subject: { type: 'view', id: 'view_1', name: 'Quarterly lineage' }, compose: true,
+        })
     })
 })

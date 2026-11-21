@@ -7,11 +7,13 @@
  *   npx vite --port 5377 --strictPort
  *   open http://localhost:5377/conversations-harness.html?page=thread&state=answered&theme=dark
  *
- *   page   view-drawer | thread | ask | rows | inbox      (default view-drawer)
+ *   page   view-drawer | thread | ask | rows | inbox | profile | profile-other | contacts   (default view-drawer)
  *          view-drawer: a view's questions in the drawer; thread: one conversation in it;
  *          ask: the ask box (&entity=1 about a node on the canvas); rows: the panel inline, with
  *          Who to ask and the Questions button; inbox: the bell, open, with conversation messages
  *   state  open | answered | private | anchored | deleted | closed   (page=thread; default open)
+ *          overview | conversations | thread | watching   (page=profile: your own; default overview)
+ *          named | derived   (page=contacts: a data source's Who to ask card; default named)
  *   theme  light | dark
  *
  * `npm run harness:conversations` drives Chromium over every page at 1280px and 390px, light
@@ -19,7 +21,7 @@
  */
 import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MessageCircleQuestion } from 'lucide-react'
 
@@ -36,6 +38,8 @@ import { WhoToAsk } from '../features/discussions/WhoToAsk'
 import { QuestionRowMark } from '../features/discussions/QuestionRowMark'
 import { useDiscussionsDrawer } from '../features/discussions/drawerStore'
 import { useAnchorStore } from '../features/discussions/anchorStore'
+import { PersonProfilePage } from '../pages/PersonProfilePage'
+import { DataContactsCard } from '../components/admin/workspace/DataContactsCard'
 import type { Message, ThreadDetail } from '../services/discussionsService'
 import {
     INBOX, MENTIONABLE, PEOPLE, STATE_THREAD, SUBJECT_PEOPLE, SUMMARY, THREADS, VIEW, summaryOf,
@@ -110,6 +114,33 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         }
         return json(t)
     }
+    // Profiles, your own conversations, and a data source's contacts.
+    if ((m = p.match(/^\/api\/v1\/people\/([^/]+)$/))) {
+        const id = m[1]
+        return json({
+            person: { ...PEOPLE[id], isServiceAccount: false }, isMe: id === 'usr_me',
+            workspacesTheyRun: id === 'usr_me' ? [] : [{ id: 'ws_fin', name: 'Finance Risk' }, { id: 'ws_ops', name: 'Operations' }],
+            dataContacts: [
+                { dataSourceId: 'ds_gl', dataSourceName: 'General Ledger', workspaceId: 'ws_fin', workspaceName: 'Finance Risk', role: 'owner', via: 'direct' },
+                { dataSourceId: 'ds_crm', dataSourceName: 'CRM accounts', workspaceId: 'ws_fin', workspaceName: 'Finance Risk', role: 'steward', via: 'group' },
+            ],
+        })
+    }
+    if (p === '/api/v1/views/' || p === '/api/v1/views') return json({ items: [], total: 0, hasMore: false })
+    if (p === '/api/v1/me/discussions') {
+        const box = url.searchParams.get('box') ?? 'to-me'
+        const rows = Object.values(THREADS).map(summaryOf)
+            .filter((t) => box !== 'mine' || t.askedBy === 'usr_me')
+            .map((t, i) => (i === 1 ? { ...t, subject: SOURCE } : t))
+        return json({ threads: rows, nextCursor: null, people: PEOPLE })
+    }
+    if (p === '/api/v1/me/watches') {
+        return json({ items: [
+            { subject: VIEW, createdAt: '2026-11-02T09:00:00Z', open: 3 },
+            { subject: SOURCE, createdAt: '2026-10-14T09:00:00Z', open: 1 },
+        ], nextCursor: null })
+    }
+    if (p === '/api/v1/admin/workspaces/ws_fin/data-sources/ds_gl/contacts') return json(CONTACTS[state === 'derived' ? 'derived' : 'named'])
     if (p === '/api/v1/me/notifications') return json({ items: INBOX, unread: INBOX.filter((i) => !i.readAt).length })
     if (p === '/api/v1/me/discussions/summary') return json({ toMe: { unread: 2, waiting: 1 }, mine: { unread: 1, open: 2 }, mentions: { unread: 1 }, watching: { unread: 0 }, totalUnread: 4 })
     if (p.match(/^\/api\/v1\/users\/[^/]+\/avatar$/)) return new Response(null, { status: 404 })
@@ -128,6 +159,28 @@ useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, conversationsEnabled:
 useAnchorStore.getState().set(VIEW.id, SUMMARY.byEntity)
 
 const subject = { type: 'view' as const, id: VIEW.id, name: VIEW.name }
+const SOURCE = { type: 'data_source' as const, id: 'ds_gl', name: 'General Ledger', workspaceId: 'ws_fin', workspaceName: 'Finance Risk',
+    link: '/workspaces/ws_fin?tab=data&section=sources&ds=ds_gl' }
+const CONTACTS = {
+    named: {
+        owner: { subjectType: 'user', subjectId: 'usr_ana', name: 'Ana Silva', memberCount: null, via: 'named_owner' },
+        stewards: [
+            { subjectType: 'user', subjectId: 'usr_bo', name: 'Bo Chen', memberCount: null, via: 'named_steward' },
+            { subjectType: 'group', subjectId: 'grp_fin', name: 'Finance data team', memberCount: 7, via: 'named_steward' },
+        ],
+        provenance: 'named', updatedAt: '2026-11-10T10:00:00Z', canEdit: true, canEditOwner: false, people: PEOPLE,
+    },
+    derived: {
+        owner: { subjectType: 'user', subjectId: 'usr_eli', name: 'Eli Novak', memberCount: null, via: 'created_source' },
+        stewards: [{ subjectType: 'user', subjectId: 'usr_dee', name: 'Dee Okafor', memberCount: null, via: 'data_request' }],
+        provenance: 'derived', updatedAt: null, canEdit: true, canEditOwner: true, people: PEOPLE,
+    },
+}
+const PROFILE_URL: Record<string, string> = {
+    overview: '/me/profile', conversations: '/me/profile?tab=conversations',
+    thread: '/me/profile?tab=conversations&thread=th_answered', watching: '/me/profile?tab=watching',
+}
+const startAt = page === 'profile' ? PROFILE_URL[state] ?? '/me/profile' : page === 'profile-other' ? '/people/usr_ana' : `/views/${VIEW.id}`
 
 function FauxViewPage({ children }: { children?: React.ReactNode }) {
     return (
@@ -167,8 +220,19 @@ function Harness() {
 
     return (
         <QueryClientProvider client={qc}>
-            <MemoryRouter initialEntries={[`/views/${VIEW.id}`]}>
-                {page === 'rows' ? (
+            <MemoryRouter initialEntries={[startAt]}>
+                {page === 'profile' || page === 'profile-other' ? (
+                    <div className="relative h-screen bg-canvas">
+                        <Routes>
+                            <Route path="/me/profile" element={<PersonProfilePage />} />
+                            <Route path="/people/:userId" element={<PersonProfilePage />} />
+                        </Routes>
+                    </div>
+                ) : page === 'contacts' ? (
+                    <div className="min-h-screen bg-canvas p-4 sm:p-8">
+                        <div className="mx-auto max-w-xl"><DataContactsCard wsId="ws_fin" dsId="ds_gl" onAsk={() => {}} /></div>
+                    </div>
+                ) : page === 'rows' ? (
                     <div className="min-h-screen bg-canvas p-4 sm:p-8">
                         <div className="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[1fr_20rem]">
                             <div className="rounded-2xl border border-glass-border/70 bg-canvas-elevated p-4 sm:p-5">
