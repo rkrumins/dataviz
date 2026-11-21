@@ -8,16 +8,18 @@
  *   open http://localhost:5377/conversations-harness.html?page=thread&state=answered&theme=dark
  *
  *   page   view-drawer | thread | ask | rows | inbox | profile | profile-other | contacts | source-tab | hovercard
- *          (default view-drawer)
+ *          | cards   (default view-drawer)
  *          view-drawer: a view's questions in the drawer; thread: one conversation in it;
  *          ask: the ask box (&entity=1 about a node on the canvas); rows: the panel inline, with
  *          Who to ask and the Questions button; inbox: the bell, open, with conversation messages;
  *          source-tab: a data source's Questions tab; hovercard: a person's card, open, with
- *          View profile and Ask a question
+ *          View profile and Ask a question; cards: Explorer view cards and rows, and data source cards,
+ *          with their question counts (open, unread, all settled but unread, none)
  *   state  open | answered | private | anchored | deleted | closed   (page=thread; default open)
  *          overview | conversations | thread | watching   (page=profile: your own; default overview)
  *          named | derived | edit   (page=contacts: a data source's Who to ask card; edit: its
  *          editor, opened; default named)
+ *          views | sources | rows   (page=cards: just that part, for a phone's screen; default all)
  *   theme  light | dark
  *
  * `npm run harness:conversations` drives Chromium over every page at 1280px and 390px, light
@@ -47,7 +49,14 @@ import { PersonProfilePage } from '../pages/PersonProfilePage'
 import { DataContactsCard } from '../components/admin/workspace/DataContactsCard'
 import { PersonHoverCard } from '../components/explorer/PersonHoverCard'
 import { UserAvatar } from '../components/ui/UserAvatar'
-import type { Message, ThreadDetail } from '../services/discussionsService'
+import { ExplorerViewCard } from '../components/explorer/ExplorerViewCard'
+import { ExplorerListRow } from '../components/explorer/ExplorerListRow'
+import { ExplorerListHeader } from '../components/explorer/ExplorerListHeader'
+import { DataSourceGridCard } from '../components/admin/workspace/DataSourceGridCard'
+import { useSubjectCounts } from '../features/discussions/useDiscussions'
+import type { DataSourceResponse } from '../services/workspaceService'
+import type { View } from '../services/viewApiService'
+import type { Message, SubjectCount, ThreadDetail } from '../services/discussionsService'
 import {
     INBOX, MENTIONABLE, PEOPLE, SOURCE, SOURCE_PEOPLE, SOURCE_SUMMARY, SOURCE_THREADS, STATE_THREAD, SUBJECT_PEOPLE, SUMMARY,
     THREADS, VIEW, summaryOf,
@@ -78,6 +87,10 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (p === `${subjectBase}/summary`) return json(SUMMARY)
     if (p === `${subjectBase}/people`) return json(SUBJECT_PEOPLE)
     if (p === `${sourceBase}/summary`) return json(SOURCE_SUMMARY)
+    if (p === '/api/v1/discussions/summaries') {
+        const ids = url.searchParams.getAll('ids')
+        return json({ summaries: Object.fromEntries(ids.filter((id) => CARD_COUNTS[id]).map((id) => [id, CARD_COUNTS[id]])) })
+    }
     if (p === `${sourceBase}/people`) return json(SOURCE_PEOPLE)
     if (p === `${subjectBase}/mentionable` || p === `${sourceBase}/mentionable`) {
         const q = (url.searchParams.get('q') ?? '').toLowerCase()
@@ -278,6 +291,73 @@ function PersonCardPage() {
     )
 }
 
+// ── page=cards: lists of cards with their question counts ────────────
+const CARD_COUNTS: Record<string, SubjectCount> = {
+    view_rev: { open: 3, answered: 4, total: 8, unread: 1 },
+    view_churn: { open: 2, answered: 0, total: 2, unread: 0 },
+    view_ar: { open: 0, answered: 2, total: 2, unread: 1 },
+    ds_gl: { open: 4, answered: 1, total: 5, unread: 2 },
+    ds_crm: { open: 1, answered: 0, total: 1, unread: 0 },
+}
+const cardView = (id: string, name: string, viewType: string, description: string, favouriteCount: number): View => ({
+    id, name, viewType, description, favouriteCount, workspaceId: 'ws_fin', workspaceName: 'Finance Risk', dataSourceId: 'ds_gl',
+    dataSourceName: 'General Ledger', visibility: 'workspace', config: {}, isPinned: false, isFavourited: favouriteCount > 2,
+    tags: ['finance', 'month-end'], createdBy: 'usr_ana', createdByName: 'Ana Silva', createdAt: '2026-10-03T09:00:00Z',
+    updatedAt: '2026-11-20T09:00:00Z',
+}) as View
+const CARD_VIEWS = [
+    cardView('view_rev', 'Revenue lineage — FY26', 'graph', 'Where reported revenue comes from, table by table.', 12),
+    cardView('view_churn', 'Customer churn drivers', 'reference', 'The signals behind churn, by segment.', 4),
+    cardView('view_ar', 'Receivables ageing', 'hierarchy', 'Open invoices by age bucket.', 2),
+    cardView('view_fx', 'FX exposure', 'graph', 'Currency positions across entities.', 0),
+]
+const cardSource = (id: string, label: string, isPrimary: boolean): DataSourceResponse => ({
+    id, label, isPrimary, workspaceId: 'ws_fin', accessLevel: 'read', isActive: true, aggregationStatus: 'ready',
+    aggregationEdgeCount: 0, createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-11-18T00:00:00Z',
+}) as DataSourceResponse
+const CARD_SOURCES = [cardSource('ds_gl', 'General Ledger', true), cardSource('ds_crm', 'CRM accounts', false), cardSource('ds_ops', 'Ops graph', false)]
+const noop = () => {}
+
+function CardsPage() {
+    const views = useSubjectCounts('view', CARD_VIEWS.map((v) => v.id))
+    const sources = useSubjectCounts('data_source', CARD_SOURCES.map((d) => d.id))
+    const openView = (v: View) => useDiscussionsDrawer.getState().open({ subject: { type: 'view', id: v.id, name: v.name } })
+    const heading = 'text-[10.5px] font-bold uppercase tracking-[0.12em] text-ink-muted'
+    return (
+        <div className="min-h-screen bg-canvas p-4 sm:p-8">
+            <div className="mx-auto max-w-6xl space-y-6">
+                {(state === 'open' || state === 'views') && (<>
+                    <p className={heading}>Explorer</p>
+                    <div className="grid items-start grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        {CARD_VIEWS.map((v) => (
+                            <ExplorerViewCard key={v.id} view={v} questions={views[v.id]} onToggleFavourite={noop} onShare={noop}
+                                onPreview={() => openView(v)} />
+                        ))}
+                    </div>
+                </>)}
+                {(state === 'open' || state === 'sources') && (<>
+                    <p className={heading}>Data sources</p>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+                        {CARD_SOURCES.map((d) => (
+                            <DataSourceGridCard key={d.id} ds={d} viewCount={d.id === 'ds_gl' ? 4 : 1} isSelected={false} onSelect={noop}
+                                stats={{ nodeCount: 12_400, edgeCount: 31_000, entityTypes: [] }}
+                                questions={sources[d.id]} onOpenQuestions={noop} />
+                        ))}
+                    </div>
+                </>)}
+                {(state === 'open' || state === 'rows') && (
+                    <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-x-auto custom-scrollbar">
+                        <div className="min-w-[760px]">
+                            <ExplorerListHeader sort="most-opened" onSortChange={noop} withCheckbox={false} />
+                            {CARD_VIEWS.map((v) => <ExplorerListRow key={v.id} view={v} questions={views[v.id]} onToggleFavourite={noop} onShare={noop} />)}
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    )
+}
+
 function Harness() {
     const setTheme = usePreferencesStore((s) => s.setTheme)
     const [qc] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
@@ -326,6 +406,8 @@ function Harness() {
                     <FauxSourceDrawer />
                 ) : page === 'hovercard' ? (
                     <PersonCardPage />
+                ) : page === 'cards' ? (
+                    <CardsPage />
                 ) : page === 'rows' ? (
                     <div className="min-h-screen bg-canvas p-4 sm:p-8">
                         <div className="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[1fr_20rem]">
