@@ -1,9 +1,10 @@
 /**
  * propertyInsights — the reads the bulk-property dialog makes about the
  * entities an operation would touch: how many a target set holds, how many
- * of them already carry a key, which values a key holds, and a sample of
- * the entities themselves. (The Properties tab reads the view's exact
- * property catalog instead — ``services/propertyCatalog``.)
+ * of them already carry a key, and which values a key holds. (The Properties
+ * tab reads the view's exact property catalog instead —
+ * ``services/propertyCatalog``; the dialog's sample of the entities, before
+ * and after, is the server's — ``previewPropertyJobSample``.)
  *
  * It is purely a READ — writes (bulk property apply) are deferred; only
  * persistence is gated, reads work against the live backend today.
@@ -114,44 +115,6 @@ export async function getValueDistribution(
         .map((b) => ({ value: String(b.ancestorDisplayName ?? ''), count: b.matchCount ?? 0 }))
         .filter((v) => v.count > 0)
     return { values, truncated: buckets.length >= limit }
-}
-
-
-// ---------------------------------------------------------------------------
-// Affected-entity sample — preview which entities a bulk op will touch
-// ---------------------------------------------------------------------------
-
-export interface AffectedEntity { urn: string; displayName: string; entityType: string }
-export interface AffectedSample { entities: AffectedEntity[]; truncated: boolean }
-
-const EMPTY_SAMPLE: AffectedSample = { entities: [], truncated: false }
-
-/**
- * A small sample of entities matched by ``predicate`` (the target set of a
- * bulk property op), for the dialog preview. Requests hit rows directly.
- */
-export async function getAffectedSample(
-    provider: GraphDataProvider,
-    viewId: string,
-    predicate: Predicate,
-    limit = 8,
-    signal?: AbortSignal,
-): Promise<AffectedSample> {
-    if (!(provider instanceof RemoteGraphProvider) || !viewId) return EMPTY_SAMPLE
-    const query = buildViewScopedQuery(viewId, predicate, {
-        results: 'hits',
-        pageSize: limit + 1,
-        includeAncestorPath: false,
-    })
-    const result = await provider.searchAdvanced(query)
-    if (signal?.aborted) return EMPTY_SAMPLE
-    const hits = result.hits ?? []
-    const entities = hits.slice(0, limit).map((h) => ({
-        urn: h.node?.urn ?? '',
-        displayName: h.node?.displayName || h.node?.urn || '(unnamed)',
-        entityType: h.node?.entityType ?? '',
-    }))
-    return { entities, truncated: hits.length > limit }
 }
 
 

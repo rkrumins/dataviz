@@ -8,7 +8,7 @@ vi.mock('../fetchWithTimeout', () => ({ fetchWithTimeout: vi.fn() }))
 
 import { fetchWithTimeout } from '../fetchWithTimeout'
 import {
-  JobActiveError, PropertyJobRefusedError, PropertyJobUndoRefusedError, createPropertyJob, undoPropertyJob,
+  JobActiveError, PropertyJobRefusedError, PropertyJobUndoRefusedError, createPropertyJob, previewPropertyJobSample, undoPropertyJob,
 } from '../versioningApiService'
 
 const answer = (status: number, body: unknown) =>
@@ -75,5 +75,22 @@ describe('undoing a bulk property change', () => {
     const err = await undo()
     expect(err).toBeInstanceOf(JobActiveError)
     expect(err.jobId).toBe('vjob_1')
+  })
+})
+
+describe('a change’s sample', () => {
+  it('asks for a few of the entities it reaches, before and after — a value none is held of left out', async () => {
+    answer(200, { rows: [
+      { id: 'N1', urn: 'urn:n1', name: 'orders', type: 'Table', before: 'bo', after: 'ana', outcome: 'change' },
+      { id: 'urn:nope', name: 'urn:nope', type: null, outcome: 'skip', reason: 'missing' },
+    ], truncated: true })
+    const op = { kind: 'set' as const, key: 'owner', value: 'ana' }
+    const sample = await previewPropertyJobSample('ws1', 'g1', 'd1', op, { ids: ['urn:n1', 'urn:nope'] })
+    const [url, init] = vi.mocked(fetchWithTimeout).mock.calls[0]
+    expect(url).toBe('/api/v1/ws1/versioning/graphs/g1/branches/d1/property-jobs/preview/sample')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(String(init?.body))).toEqual({ op, target: { ids: ['urn:n1', 'urn:nope'] } })
+    expect(sample.truncated).toBe(true)
+    expect(sample.rows.map((r) => [r.outcome, r.reason, 'before' in r])).toEqual([['change', undefined, true], ['skip', 'missing', false]])
   })
 })

@@ -2175,6 +2175,45 @@ export function previewPropertyJob(
   })
 }
 
+/** One entity a change reaches, before and after it, as the job would write it. A value is left out
+ *  (`undefined`) where the key holds none. */
+export interface PropertyJobSampleRow {
+  /** Its entity id — or, for an id that names nothing in the draft, that id. */
+  id: string
+  urn?: string | null
+  /** An entity's name; a relationship's ends, by their names. */
+  name: string
+  /** Its entity type, or a relationship's type; null for one not in the draft. */
+  type: string | null
+  /** What its key holds now. */
+  before?: unknown
+  /** A rename or a copy: what the new key holds now. */
+  to?: unknown
+  /** What the key the change writes holds after it — the new key, for a rename or a copy. */
+  after?: unknown
+  outcome: 'change' | 'unchanged' | 'skip'
+  /** Why it is left as it is: the new key held already, a value that won't convert, a search's
+   *  match the draft changed out of it, not in the draft, or a roll-up. */
+  reason?: 'conflict' | 'unconvertible' | 'no_longer_matches' | 'missing' | 'derived'
+}
+
+/** A few of the entities a change reaches — its first ids, or a search's first page — and whether
+ *  it reaches more. */
+export interface PropertyJobSample {
+  rows: PropertyJobSampleRow[]
+  truncated: boolean
+}
+
+/** A few of the entities applying `op` to `target` on the draft reaches, each before and after it,
+ *  nothing written. Asked apart from the preview, so the check never waits on it. */
+export function previewPropertyJobSample(
+  wsId: string, graphId: string, branchId: string, op: PropertyJobOp, target: PropertyJobTarget, signal?: AbortSignal,
+): Promise<PropertyJobSample> {
+  return vfetch<PropertyJobSample>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/property-jobs/preview/sample`, {
+    method: 'POST', body: JSON.stringify({ op, target }), signal,
+  })
+}
+
 /** Start applying `op` to `target` on the draft. The same key answers with the same job, so a
  *  retried request never applies it twice. */
 export function createPropertyJob(

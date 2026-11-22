@@ -221,6 +221,49 @@ def test_a_window_plans_each_entity_once_and_counts_what_it_skips():
                         "detail": "It already has steward."}]
 
 
+# ── a preview's sample: one entity before and after ──────────────────────────
+def test_a_sample_row_shows_the_value_before_and_after_as_the_job_writes_it():
+    assert pj.sample_row(_op("set", value="ana"), {"owner": "bo", "x": 1}) == {
+        "before": "bo", "after": "ana", "outcome": "change"}
+    assert pj.sample_row(_op("set", value="ana"), {"owner": "ana"}) == {
+        "before": "ana", "after": "ana", "outcome": "unchanged"}
+    # A key it holds none of: no value before; after a removal, none after.
+    assert pj.sample_row(_op("fillEmpty", value="ana"), {}) == {"after": "ana", "outcome": "change"}
+    assert pj.sample_row(_op("remove"), {"owner": "bo"}) == {"before": "bo", "outcome": "change"}
+    assert pj.sample_row(_op("remove"), {}) == {"outcome": "unchanged"}
+    # Planned as the job plans it: a date in the one form it is stored in.
+    assert pj.sample_row(_op("set", value="2026-01-06 12:00+02:00"), {}) == {
+        "after": "2026-01-06T10:00:00Z", "outcome": "change"}
+
+
+def test_a_sample_row_of_a_rename_or_copy_shows_both_keys_and_a_conflict_skipped():
+    rename = _op("rename", to="steward")
+    assert pj.sample_row(rename, {"owner": "ana"}) == {"before": "ana", "after": "ana", "outcome": "change"}
+    assert pj.sample_row(rename, {"owner": "ana", "steward": "bo"}) == {
+        "before": "ana", "to": "bo", "after": "bo", "outcome": "skip", "reason": "conflict"}
+    assert pj.sample_row({**rename, "onConflict": "overwrite"}, {"owner": "ana", "steward": "bo"}) == {
+        "before": "ana", "to": "bo", "after": "ana", "outcome": "change"}
+    assert pj.sample_row(_op("copy", to="steward"), {}) == {"outcome": "unchanged"}
+
+
+def test_a_sample_row_of_a_clean_up_uses_its_rewriter_and_skips_what_wont_convert():
+    convert = _op("convert", key="k", toKind="Integer")
+    rewrite = pj.rewriter(convert)
+    assert pj.sample_row(convert, {"k": "42"}, rewrite) == {"before": "42", "after": 42, "outcome": "change"}
+    assert pj.sample_row(convert, {"k": "x"}, rewrite) == {
+        "before": "x", "after": "x", "outcome": "skip", "reason": "unconvertible"}
+    assert pj.sample_row({**convert, "onFail": "remove"}, {"k": "x"}) == {"before": "x", "outcome": "change"}
+    assert pj.sample_row(_op("normalize", key="d", case="lower"), {"d": " Fin "}) == {
+        "before": " Fin ", "after": "fin", "outcome": "change"}
+
+
+def test_a_sample_row_skipped_by_its_read_is_left_as_it_is():
+    for reason in ("no_longer_matches", "derived", "missing"):
+        assert pj.sample_row(_op("set", value="ana"), {"owner": "bo"}, skip=reason) == {
+            "before": "bo", "after": "bo", "outcome": "skip", "reason": reason}
+    assert pj.sample_row(_op("remove"), {}, skip="missing") == {"outcome": "skip", "reason": "missing"}
+
+
 # ── a search target's matches, checked again on the draft's values ───────────
 def test_a_search_answered_by_an_entitys_own_values_is_checked_again():
     gold = {"kind": "property", "key": "tier", "op": "eq", "value": "gold"}

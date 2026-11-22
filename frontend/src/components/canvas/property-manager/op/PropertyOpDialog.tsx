@@ -30,16 +30,15 @@ import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
-import { useAffectedSample } from '@/hooks/usePropertyInsights'
 import {
-  JobActiveError, PropertyJobRefusedError, createPropertyJob, getPropertyJob, previewPropertyJob,
-  type PropertyJob, type PropertyJobPreview,
+  JobActiveError, PropertyJobRefusedError, createPropertyJob, getPropertyJob, previewPropertyJob, previewPropertyJobSample,
+  type PropertyJob, type PropertyJobOp, type PropertyJobPreview, type PropertyJobSample,
 } from '@/services/versioningApiService'
 import type { SearchCatalogProperty } from '@/types/search'
 import { useDiscovery } from '../../search/builder/useDiscovery'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
-import { usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
+import { jobEnded, useDraftPropertyJobs, usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
 import {
   EDGE_RESERVED_KEYS, applyLabel, impactOf, isCleanup, isEdgeTarget, jobOp, needsTypedConfirm, needsValue, opProblem, predicateOf,
   propertyJobLabel, reviewCounts, scopeFixedToView, scopedTargetLabel, sentence, targetOf, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset,
@@ -83,11 +82,13 @@ export function PropertyOpDialog({
     kind: seed.kind ?? 'set', key: seed.key ?? '', to: '', value: '', onConflict: 'skip',
     ...(seed.map ? { map: seed.map } : {}), ...(seed.toKind ? { toKind: seed.toKind } : {}), ...seed.op,
   }))
-  const [preset, setPreset] = useState<TargetPreset>(() => seed.target ?? (seed.key ? { kind: 'hasKey', key: seed.key } : { kind: 'view' }))
+  // The target chosen — the one it was opened with, or one picked on Where — kept apart from the
+  // default, which is worked out afresh as the property and the catalog change (below).
+  const [chosen, setChosen] = useState<TargetPreset | null>(() => seed.target ?? null)
   const [scopeMode, setScopeMode] = useState<ScopeMode>(() => (seed.target?.kind === 'search' || seed.target?.kind === 'connections' ? seed.target.scopeMode : seed.scopeMode ?? 'view'))
   const [sourceConfirmed, setSourceConfirmed] = useState(false)
-  // Relationships, not entities (`EdgeWhatStep`).
-  const edges = isEdgeTarget(preset)
+  // Relationships, not entities (`EdgeWhatStep`): only ever the target it was opened with.
+  const edges = !!chosen && isEdgeTarget(chosen)
   // A change whose What is already whole (Remove from a row) opens on Where; a clean-up opens on
   // What, where its before → after is shown.
   const [step, setStep] = useState(() => (isCleanup(op.kind) || opProblem(op, !!seed.target && isEdgeTarget(seed.target)) ? 0 : 1))
@@ -103,6 +104,14 @@ export function PropertyOpDialog({
   // yet (Property Manager's New). Until the catalog answers, a named property counts as held.
   const key = op.key.trim()
   const held = !!key && (edges ? edgeProperties.some((p) => p.key === key) : !catalog || properties.some((p) => p.key === key))
+  // Unless one is chosen, a change reaches every entity in the view when nothing holds its property
+  // yet — the catalog read to the end, and no change on this draft still adding it — and otherwise
+  // every entity with it. A target that names the property follows it as it is renamed on What.
+  const adding = useDraftPropertyJobs(graphWrite.graphId, graphWrite.branchId)
+    .some((t) => !jobEnded(t) && t.entityKind !== 'edge' && writesKey(t.op, key))
+  const nothingHolds = !key || (catalog?.status === 'complete' && !properties.some((p) => p.key === key) && !adding)
+  const preset: TargetPreset = chosen?.kind === 'hasKey' ? { kind: 'hasKey', key }
+    : chosen ?? (nothingHolds ? { kind: 'view' } : { kind: 'hasKey', key })
   const title = cleanup ? 'Clean up a property' : needsValue(op.kind) && !held ? 'Add a property' : 'Change a property'
   // Opened with its property named (a fill from a refused publish, a catalog row): What focuses
   // what is still to give. And the target it was opened with, said on What when it has a name.
@@ -113,7 +122,6 @@ export function PropertyOpDialog({
   const unchangedReusable = !!seed.reusable && JSON.stringify([jobOp(op), preset, scopeMode]) === openedAs
 
   // ── Where ──
-  // A preset that named the old property follows a new one.
   const target = targetOf(preset, viewId, scopeMode)
   const predicate = predicateOf(preset)
   const effectiveScope: ScopeMode = scopeFixedToView(preset) ? 'view' : scopeMode
@@ -130,7 +138,6 @@ export function PropertyOpDialog({
   const retry = () => setAttempt((n) => n + 1)
   const countItems = useMemo(() => (reviewing && predicate ? reviewCounts(op, predicate) : null), [reviewing, predicate, op])
   const counts = useReviewCounts(viewId, countItems, effectiveScope, attempt)
-  const sample = useAffectedSample(viewId, reviewing && predicate && !edges && effectiveScope === 'view' ? predicate : null, reviewing && !!predicate && !edges)
   // The server's check, kept with the request it answers: a newer request reads as checking.
   const changeKey = reviewing && target ? JSON.stringify({ op: jobOp(op), target }) : ''
   const requestKey = changeKey && `${changeKey}#${attempt}`
@@ -148,6 +155,23 @@ export function PropertyOpDialog({
   }, [requestKey, graphWrite.wsId, graphWrite.graphId, graphWrite.branchId])
   const answered = checked.key === requestKey
   const preview = { data: answered ? checked.data : null, error: answered ? checked.error : null, loading: !!requestKey && !answered }
+  // A few of the entities it reaches, before and after: asked apart from the check, so Apply never
+  // waits on it — again with each request, and alone by its own Try again.
+  const [sampleAttempt, setSampleAttempt] = useState(0)
+  const sampleKey = requestKey && `${requestKey}~${sampleAttempt}`
+  const [sampled, setSampled] = useState<{ key: string; data: PropertyJobSample | null; error: string | null }>({ key: '', data: null, error: null })
+  useEffect(() => {
+    if (!sampleKey || !target) return
+    const controller = new AbortController()
+    previewPropertyJobSample(graphWrite.wsId, graphWrite.graphId, graphWrite.branchId, jobOp(op), target, controller.signal)
+      .then((data) => { if (!controller.signal.aborted) setSampled({ key: sampleKey, data, error: null }) })
+      .catch((e: unknown) => {
+        if (!controller.signal.aborted) setSampled({ key: sampleKey, data: null, error: (e as Error).message || 'the server didn’t answer' })
+      })
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sampleKey, graphWrite.wsId, graphWrite.graphId, graphWrite.branchId])
+  const sampleAnswered = sampled.key === sampleKey
 
   const ids = preset.kind === 'selection' || preset.kind === 'relationships'
   const tally = ids
@@ -353,7 +377,7 @@ export function PropertyOpDialog({
                       entityTypes={entityTypesOf(preset) ?? knownEntityTypes} keySeeded={keySeeded} />)}
                   {step === 1 && (
                     <WhereStep
-                      viewId={viewId} preset={preset} onPreset={setPreset} scopeMode={scopeMode} onScope={setScopeMode}
+                      viewId={viewId} preset={preset} onPreset={setChosen} scopeMode={scopeMode} onScope={setScopeMode}
                       sourceConfirmed={sourceConfirmed} onConfirmSource={setSourceConfirmed} op={op}
                       selectionIds={selectionIds} layers={layers} seed={seed.target} knownEntityTypes={knownEntityTypes}
                     />
@@ -362,7 +386,8 @@ export function PropertyOpDialog({
                     <ReviewStep
                       op={op} preset={preset} scopeMode={effectiveScope} counts={ids ? null : counts} impact={impact} exact={exact}
                       preview={preview.data} previewLoading={preview.loading} previewError={preview.error} onRetry={retry}
-                      sample={sample.data} sampleLoading={sample.loading}
+                      sample={sampleAnswered ? sampled.data : null} sampleLoading={!!sampleKey && !sampleAnswered}
+                      sampleError={sampleAnswered ? sampled.error : null} onRetrySample={() => setSampleAttempt((n) => n + 1)}
                       stagedCount={stagedCount} draftChanges={draftChanges} reason={reason} onReason={setReason} edges={edges}
                       onFollow={(jobId) => void follow(jobId)} onChangeTarget={() => go(1)} offerSave={!unchangedReusable}
                     />
@@ -447,6 +472,11 @@ function edgePropertiesOf(keysByEdgeType: Record<string, string[]>): SearchCatal
     .map(([key, count]): SearchCatalogProperty => ({
       key, count, distinct: 0, distinctExact: false, values: [], byEntityType: {}, kinds: {}, residual: 0,
     }))
+}
+
+/** Whether a change gives entities `key`: set or filled, or renamed or copied onto it. */
+function writesKey(op: PropertyJobOp, key: string): boolean {
+  return op.kind === 'set' || op.kind === 'fillEmpty' ? op.key === key : (op.kind === 'rename' || op.kind === 'copy') && op.to === key
 }
 
 /** What a change started elsewhere was started on, in words. */

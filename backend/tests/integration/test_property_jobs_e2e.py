@@ -903,6 +903,146 @@ def test_the_edge_routes_preview_create_and_read_several_relationships():
     asyncio.run(_edge_routes())
 
 
+# ── the preview's sample: a few entities, before and after ────────────────────
+def _sample_search(monkeypatch, *, hits=(), edges=(), refuse=None):
+    """``…/preview/sample``'s search over a stub engine (the search engine needs FalkorDB): one page
+    of ``hits`` (urns), or of a Connections search's ``edges`` (ids) — the view readable. Returns
+    the queries it was asked."""
+    from types import SimpleNamespace
+    from backend.app.api.v1.endpoints import graph as graph_ep, versioning as versioning_ep
+    from backend.app.services import advanced_search_service
+    from backend.app.services.view_transfer import sources
+
+    asked = []
+
+    class Search:
+        def __init__(self, engine, **kw):
+            self.can_read = kw["can_read_view"]
+
+        async def search(self, query, run_context=None):
+            if refuse:
+                raise advanced_search_service.ValidationError(refuse)
+            asked.append(query)
+            return SimpleNamespace(hits=[SimpleNamespace(node=SimpleNamespace(urn=u)) for u in hits],
+                                   edges=[SimpleNamespace(id=e) for e in edges]), None
+
+    async def engine_for(*_a, **_kw):
+        return SimpleNamespace(provider=SimpleNamespace())
+
+    async def readable(*_a, **_kw):
+        return True
+
+    async def data_version(_engine):
+        return "dv1"
+
+    monkeypatch.setattr(advanced_search_service, "AdvancedSearchService", Search)
+    monkeypatch.setattr(sources, "engine_for", engine_for)
+    monkeypatch.setattr(versioning_ep, "_property_job_view_readable", readable)
+    monkeypatch.setattr(graph_ep, "_search_data_version", data_version)
+    monkeypatch.setattr(graph_ep, "_statement_admission", lambda _engine: None)
+    return asked
+
+
+async def _sample(monkeypatch) -> None:
+    """A few entities before and after, read on the draft as a window reads them — named by id
+    (new in the draft too), or a search's first page checked again on the draft's values — and
+    each planned as the job plans it: changed, unchanged, or skipped and why."""
+    from httpx import ASGITransport, AsyncClient
+    from .test_versioning_main_write_publish import MIA, PAT, V1, _app
+
+    svc, ds, gid, draft = await _draft(owner="pat", nodes=[
+        _node(0, tier="gold", owner="o0"), _node(1, tier="gold", owner="o1", steward="s1"),
+        _node(2, tier="gold"), _node(3, tier="gold", owner="o3"), _node(4, tier="gold", owner="o4")])
+    await svc.apply_ops(graph_id=gid, branch_id=draft, actor="pat", message="draft edits", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "N4", "payload": {"properties": {"tier": "silver"}}},
+        {"op": "delete", "entity_kind": "node", "entity_id": "N3"}, _node(9, "Table", tier="gold", owner="o9")])
+    main = await svc.main_branch_id(gid)
+    app, _G = _app()
+    sample = f"{V1}/graphs/{gid}/branches/{draft}/property-jobs/preview/sample"
+    ids = ["urn:n0", "gv:N1", "urn:n2", "urn:n3", "urn:nope", "gv:N9", "gv:N0"]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(sample, json={"op": RENAME, "target": {"ids": ids}}, headers=PAT)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"truncated": False, "rows": [
+            {"id": "N0", "urn": "urn:n0", "name": "N0", "type": "Dataset", "before": "o0", "after": "o0",
+             "outcome": "change"},
+            {"id": "N1", "urn": "urn:n1", "name": "N1", "type": "Dataset", "before": "o1", "to": "s1",
+             "after": "s1", "outcome": "skip", "reason": "conflict"},
+            {"id": "N2", "urn": "urn:n2", "name": "N2", "type": "Dataset", "outcome": "unchanged"},
+            {"id": "urn:n3", "name": "urn:n3", "type": None, "outcome": "skip", "reason": "missing"},
+            {"id": "urn:nope", "name": "urn:nope", "type": None, "outcome": "skip", "reason": "missing"},
+            {"id": "N9", "urn": "urn:n9", "name": "N9", "type": "Table", "before": "o9", "after": "o9",
+             "outcome": "change"}]}                                   # gv:N0 is N0 again: one row
+        many = {"op": RENAME, "target": {"ids": [f"urn:x{i}" for i in range(9)]}}
+        r = await c.post(sample, json=many, headers=PAT)
+        assert (len(r.json()["rows"]), r.json()["truncated"]) == (8, True), r.text
+
+        # A search's first page, on the draft: N4 matched as published, and the draft made it silver.
+        asked = _sample_search(monkeypatch, hits=["urn:n0", "urn:n4", "urn:n2"])
+        gold = {"viewId": "v1", "scopeMode": "view",
+                "predicate": {"kind": "property", "key": "tier", "op": "eq", "value": "gold"}}
+        r = await c.post(sample, json={"op": RENAME, "target": gold}, headers=PAT)
+        assert r.status_code == 200, r.text
+        assert [(row["id"], row["outcome"], row.get("reason")) for row in r.json()["rows"]] == [
+            ("N0", "change", None), ("N4", "skip", "no_longer_matches"), ("N2", "unchanged", None)]
+        assert r.json()["rows"][1]["before"] == "o4" and r.json()["truncated"] is False
+        query = asked[0]
+        assert (query.scope.view_id, query.scope.scope_mode, query.options.results, query.options.page_size) == (
+            "v1", "view", "hits", 9)
+
+        _sample_search(monkeypatch, refuse="view_not_found: view 'v1' not found")
+        r = await c.post(sample, json={"op": RENAME, "target": gold}, headers=PAT)
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "search_refused", r.text
+        r = await c.post(f"{V1}/graphs/{gid}/branches/{main}/property-jobs/preview/sample",
+                         json={"op": RENAME, "target": {"ids": ids}}, headers=PAT)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "main_write_forbidden", r.text
+        # Someone who can't read pat's private draft can't read its entities this way either.
+        assert (await c.post(sample, json={"op": RENAME, "target": {"ids": ids}}, headers=MIA)).status_code == 404
+    await db.dispose_engine()
+
+
+def test_the_sample_shows_entities_before_and_after_by_id_and_by_search(monkeypatch):
+    asyncio.run(_sample(monkeypatch))
+
+
+async def _edge_sample(monkeypatch) -> None:
+    from httpx import ASGITransport, AsyncClient
+    from .test_versioning_main_write_publish import PAT, V1, _app
+
+    svc, ds, gid, draft = await _edge_draft(owner="pat")
+    app, _G = _app()
+    sample = f"{V1}/graphs/{gid}/branches/{draft}/property-jobs/preview/sample"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(sample, json={"op": RENAME, "target": {"edgeIds": EDGE_KEYS}}, headers=PAT)
+        assert r.status_code == 200, r.text
+        missing = {"type": None, "outcome": "skip", "reason": "missing"}
+        assert r.json() == {"truncated": False, "rows": [
+            {"id": "E1", "name": "N0 → N1", "type": "FLOWS_TO", "before": "a", "after": "a", "outcome": "change"},
+            {"id": "E2", "name": "N1 → N2", "type": "FLOWS_TO", "before": "b", "to": "x", "after": "x",
+             "outcome": "skip", "reason": "conflict"},
+            {"id": "edge:E3", "name": "N2 → N3", "type": "FLOWS_TO", "before": "c", "after": "c", "outcome": "change"},
+            {"id": "E4", "name": "N0 → N2", "type": "FEEDS", "outcome": "unchanged"},
+            {"id": "E5", "name": "E5", **missing},                     # deleted in the draft
+            {"id": "R1", "name": "N0 → N3", "type": "AGGREGATED", "before": "r", "outcome": "skip",
+             "reason": "derived"},
+            {"id": "nope", "name": "nope", **missing},
+            {"id": "urn:n0|NOPE|urn:n1", "name": "urn:n0|NOPE|urn:n1", **missing}]}
+
+        # A Connections search: its first page of edges, by their ids.
+        asked = _sample_search(monkeypatch, edges=["E1", "R1"])
+        search = {"viewId": "v1", "scopeMode": "view", "predicate": {"kind": "edges", "edgeTypes": ["FLOWS_TO"]}}
+        r = await c.post(sample, json={"op": RENAME, "target": search}, headers=PAT)
+        assert r.status_code == 200, r.text
+        assert [(row["id"], row["outcome"]) for row in r.json()["rows"]] == [("E1", "change"), ("R1", "skip")]
+        # A page of edges: the search fills in its own result shape.
+        assert asked[0].options.page_size == 9 and "results" not in asked[0].options.model_fields_set
+    await db.dispose_engine()
+
+
+def test_the_sample_shows_relationships_before_and_after_never_a_roll_up_changed(monkeypatch):
+    asyncio.run(_edge_sample(monkeypatch))
+
+
 # ── undo a bulk job, from the draft's history ─────────────────────────────────
 async def _undo(ie, ds, gid, job_id, key="key-undo-00001", actor="alice"):
     return (await ie.create_undo_job(workspace_id="ws1", data_source_id=ds, graph_id=gid, job_id=job_id,
