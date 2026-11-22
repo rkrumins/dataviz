@@ -29,7 +29,7 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 _TABLE = "ontologies"
-_FK = "fk_ontologies_owner_workspace"
+_FK = "ontologies_owner_workspace_id_fkey"   # the name create_all gives it, so both paths match
 _INDEX = "idx_ontologies_owner_workspace"
 
 
