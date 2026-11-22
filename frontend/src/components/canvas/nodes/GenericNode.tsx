@@ -142,11 +142,13 @@ export const GenericNode = memo(function GenericNode({
   // promises. Cards from `md` up already have room for a second `text-2xs`
   // line, so they show both; `sm` has room for one, so there — and only
   // there — the technical identity substitutes. With the IDs hidden (Display
-  // settings, or the Graph's Canvas Controls) a card shows neither.
+  // settings) a card shows neither.
   const description = typeof entityFields['description'] === 'string'
     ? entityFields['description']
     : undefined
   const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
+  // Display's "Show entity type badge", as on Context View rows.
+  const showTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
   const technical = showEntityIds
     ? technicalIdentity(entityFields, persona, { identityProperty, name: primaryLabel })
     : undefined
@@ -432,12 +434,14 @@ export const GenericNode = memo(function GenericNode({
           {/* Content */}
           <div className="flex-1 min-w-0">
             {/* Type Badge */}
-            <span
-              className="text-2xs font-medium uppercase tracking-wider"
-              style={{ color: visual.color }}
-            >
-              {entityType.name}
-            </span>
+            {showTypeBadge && (
+              <span
+                className="text-2xs font-medium uppercase tracking-wider"
+                style={{ color: visual.color }}
+              >
+                {entityType.name}
+              </span>
+            )}
 
             {/* Primary Label + W2.1 search match badge */}
             <div className="flex items-center gap-1.5 min-w-0">
