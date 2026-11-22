@@ -320,7 +320,8 @@ class ProjectionWorker:
     async def _job_reap_loop(self) -> None:
         """Fail the transfer jobs nothing will ever run (see ``runner.JobReaper``), then hand back
         the drafts held ``publishing`` by a publish job that ended without landing, and the fork
-        reviews held ``merging`` by such a merge job."""
+        reviews held ``merging`` by such a merge job; and tell the people whose bulk property jobs
+        have ended what became of them (``import_export.job_notices``)."""
         while not self._stop.is_set():
             try:
                 await self._job_reaper.run_once()
@@ -337,6 +338,11 @@ class ProjectionWorker:
                                 len(handed_back))
             except Exception:
                 logger.exception("publishing release error")
+            try:
+                from .import_export.job_notices import JobNotices
+                await JobNotices().run_once()
+            except Exception:
+                logger.exception("job notices error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=_JOB_REAP_SECS)
             except asyncio.TimeoutError:

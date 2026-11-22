@@ -23,6 +23,7 @@ import type { TraceMeta } from '@/services/traceApi'
 import { lookupRetryDelayMs } from '@/config/polling'
 import { mapWithConcurrency } from '@/lib/concurrency'
 import { useCanvasStore } from '@/store/canvas'
+import { usePreferencesStore } from '@/store/preferences'
 import { recordEvent } from '@/services/telemetryService'
 
 // ============================================
@@ -260,11 +261,12 @@ export const DEFAULT_TRACE_DEPTH = 25
 export const MAX_TRACE_DEPTH = 100
 
 const DEFAULT_CONFIG: TraceConfig = {
-    // 25/25 covers a deep end-to-end pipeline by default. Users can raise
-    // this to 100 via the Trace Depth header chip (visible only in trace
-    // mode), or drop to 0 on one side via the dock direction arrows.
-    // Materialized AGGREGATED edges at the focus level keep hub-node
-    // traces tractable even at the upper bound.
+    // A trace starts at the reader's default depth (defaultTraceConfig, below);
+    // 25/25, a deep end-to-end pipeline, is the depth without one. Users can
+    // raise it via the Trace Depth header chip (visible only in trace mode),
+    // or drop to 0 on one side via the dock direction arrows. Materialized
+    // AGGREGATED edges at the focus level keep hub-node traces tractable even
+    // at the upper bound.
     upstreamDepth: DEFAULT_TRACE_DEPTH,
     downstreamDepth: DEFAULT_TRACE_DEPTH,
     includeColumnLineage: true,
@@ -287,6 +289,12 @@ const DEFAULT_CONFIG: TraceConfig = {
     granularity: 'column', // legacy /trace path only — superseded by `level` for v2
 }
 
+/** The config a trace starts from: the reader's default depth (preferences), the rest as above. */
+function defaultTraceConfig(): TraceConfig {
+    const depth = usePreferencesStore.getState().defaultTraceDepth
+    return depth ? { ...DEFAULT_CONFIG, upstreamDepth: depth.up, downstreamDepth: depth.down } : DEFAULT_CONFIG
+}
+
 // ============================================
 // Zustand Store
 // ============================================
@@ -304,7 +312,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
     error: null,
     focusId: null,
     result: null,
-    config: DEFAULT_CONFIG,
+    config: defaultTraceConfig(),
     showUpstream: true,
     showDownstream: true,
     drilldowns: new Map(),
@@ -622,7 +630,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             error: null,
             focusId: null,
             result: null,
-            config: DEFAULT_CONFIG,
+            config: defaultTraceConfig(),
             showUpstream: true,
             showDownstream: true,
             drilldowns: new Map(),

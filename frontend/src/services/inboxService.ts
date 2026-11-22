@@ -41,6 +41,11 @@ export const KNOWN_INBOX_KINDS = [
     'view.publish_requested',
     'view.publish_approved',
     'view.publish_denied',
+    // A bulk property job you started: finished after a minute or more,
+    // failed, or stopped by someone else. Each links to its draft.
+    'property_job_completed',
+    'property_job_failed',
+    'property_job_cancelled',
 ] as const
 
 /** Both endpoints answer with this same shape, so marking read needs no

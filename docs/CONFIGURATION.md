@@ -684,6 +684,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_DB_URL` | — | `backend/alembic/versions/20261116_1100_settings_import.py`, `backend/app/services/system_status/probes.py`, `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DEFAULT_AUDIT_TIER` | `commit_only` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DIFF_TREE_MAX_CHANGES` | `20000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_DRAFT_SEARCH_MAX_DELTA` | `200000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DRAIN_SECS` | `40` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EPHEMERAL_MAX_GRAPHS` | `32` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EPHEMERAL_TTL_SECS` | `900` | `backend/app/services/versioning/config.py` |
@@ -738,6 +739,8 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES` | `500000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS` | `300` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_WAIT_MS` | `2000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROPERTY_JOB_MAX_TARGETS` | `5000000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROPERTY_JOB_WINDOW` | `10000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PURGE_WINDOW` | `25000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_REAP_POLL_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_REBUILD_LOCK_TTL` | `120` | `backend/app/services/versioning/config.py` |

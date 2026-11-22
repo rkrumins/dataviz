@@ -2,7 +2,8 @@
  * DisplayMenu — RTL tests for the header's consolidated Canvas + Lineage
  * appearance popover: it opens on trigger click, both sections' controls
  * fire their callbacks, the Lineage-appearance section renders muted/inert
- * when Lineage is off, and Reset fires onReset.
+ * when Lineage is off, Reset fires onReset, and Line weight — in either
+ * view — stores the weight lines are drawn at.
  */
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -90,9 +91,30 @@ describe('DisplayMenu', () => {
     const reset = screen.getByRole('button', { name: 'Reset' })
     fireEvent.focus(reset)
     expect(await screen.findByText(
-      'Put zoom, density, icons, badges, tree lines and the memory gauge back to their defaults',
+      'Put zoom, density, icons, IDs, badges, tree lines and the memory gauge back to their defaults',
     )).toBeInTheDocument()
     usePreferencesStore.setState({ showMemoryUsage: false })
+  })
+
+  it('Show entity IDs is on by default, says where the ID sits, and hides them', () => {
+    usePreferencesStore.setState({ showCanvasEntityIds: true })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const ids = screen.getByRole('switch', { name: /Show entity IDs/ })
+    expect(ids).toHaveAttribute('aria-checked', 'true')
+    expect(ids).toHaveTextContent('Each entity’s ID under its name — beside it at the minimal density.')
+    // On by default, so it is counted among the options that are on, and offers no Reset.
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('3 on')
+    expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument()
+
+    fireEvent.click(ids)
+    expect(usePreferencesStore.getState().showCanvasEntityIds).toBe(false)
+    expect(ids).toHaveAttribute('aria-checked', 'false')
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('2 on')
+    // Hidden IDs are a change from the defaults: Reset offers itself.
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument()
+    usePreferencesStore.setState({ showCanvasEntityIds: true })
   })
 
   it('On Hover shows the per-entity cap, and the slider sets it', () => {
@@ -189,6 +211,17 @@ describe('DisplayMenu — Business view', () => {
     expect(screen.queryByRole('radiogroup', { name: 'Marker sides' })).not.toBeInTheDocument()
     expect(screen.queryByText('Advanced')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Orphaned entities/ })).not.toBeInTheDocument()
+  })
+
+  it('has no entity IDs switch — the Business view shows no IDs — and offers no Reset for IDs hidden in Technical', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    usePreferencesStore.setState({ showCanvasEntityIds: false })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.queryByRole('switch', { name: /Show entity IDs/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument()
+    usePreferencesStore.setState({ showCanvasEntityIds: true })
   })
 
   it('offers lines that point back in either view, off until turned on, with an alert colour', () => {
@@ -294,5 +327,21 @@ describe('DisplayMenu — Minimal density', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Display' }))
 
     expect(screen.getByText('Not shown on Minimal rows')).toBeInTheDocument()
+  })
+})
+
+describe('DisplayMenu — Line weight', () => {
+  it.each(['technical', 'business'] as const)('offers Thin, Regular and Thick in the %s view, and stores the choice', (mode) => {
+    usePersonaStore.setState({ mode })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const group = screen.getByRole('radiogroup', { name: 'Line weight' })
+    expect(within(group).getAllByRole('radio').map((o) => o.textContent)).toEqual(['Thin', 'Regular', 'Thick'])
+    expect(within(group).getByRole('radio', { name: 'Regular' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(group).getByRole('radio', { name: 'Thick' }))
+    expect(usePreferencesStore.getState().lineWeight).toBe('thick')
+    usePreferencesStore.setState({ lineWeight: 'regular' })
+    usePersonaStore.setState({ mode: 'technical' })
   })
 })

@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import {
-    countMatches, countPropertyUsageWithinTarget,
-    getAffectedSample, getValueDistribution,
+    countMatches, countPropertyUsageWithinTarget, getValueDistribution,
 } from '../propertyInsights'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useCanvasStore } from '@/store/canvas'
@@ -97,22 +96,6 @@ describe('propertyInsights', () => {
             { value: 'prod', count: 42 },
             { value: 'staging', count: 12 },
         ])
-    })
-
-    it('getAffectedSample maps hit nodes to {urn, displayName, entityType}', async () => {
-        const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
-        vi.spyOn(provider, 'searchAdvanced').mockResolvedValue(makeResult({
-            hits: [
-                { node: { urn: 'urn:a', displayName: 'Table A', entityType: 'dataset' } } as never,
-                { node: { urn: 'urn:b', displayName: 'Report B', entityType: 'report' } } as never,
-            ],
-        }))
-        const s = await getAffectedSample(provider, 'view-1', { kind: 'tag', op: 'hasAny', values: ['PII'] } as Predicate, 8)
-        expect(s.entities).toEqual([
-            { urn: 'urn:a', displayName: 'Table A', entityType: 'dataset' },
-            { urn: 'urn:b', displayName: 'Report B', entityType: 'report' },
-        ])
-        expect(s.truncated).toBe(false)
     })
 
     it('uses the exact totalCount over the capped facet buckets', async () => {

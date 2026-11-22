@@ -11,8 +11,9 @@ vi.mock('../apiClient', () => ({ authFetch }))
 import type { DisplayRuleConfig } from '@/types/schema'
 
 import {
-    LIBRARY_PACK_FORMAT, deleteViewQuery, getViewLibrary, importViewLibrary, orderViewRules, putViewRule,
-    type LibraryPack,
+    LIBRARY_PACK_FORMAT, deleteReusableChange, deleteViewQuery, getViewLibrary, importViewLibrary,
+    listReusableChangesFromOtherViews, orderViewRules, putReusableChange, putViewRule, type LibraryPack,
+    type ReusableChangeInput,
 } from '../viewLibraryService'
 
 
@@ -48,6 +49,22 @@ describe('viewLibraryService', () => {
         expect(authFetch.mock.calls).toEqual([
             ['/api/v1/views/v1/library/rules', { method: 'PUT', body: '{"ids":["b","a"]}' }],
             ['/api/v1/views/v1/library/queries/q1', { method: 'DELETE' }],
+        ])
+    })
+
+    it('keeps a reusable change under its own (encoded) id, removes it, and lists other views\'', async () => {
+        const change: ReusableChangeInput = {
+            name: 'Own them', op: { kind: 'set', key: 'owner', value: 'data-team' },
+            target: { kind: 'layer', layerName: 'Gold', scopeMode: 'view' },
+        }
+        const signal = new AbortController().signal
+        await putReusableChange('v1', 'change/1', change)
+        await deleteReusableChange('v1', 'change/1')
+        await listReusableChangesFromOtherViews('v1', signal)
+        expect(authFetch.mock.calls).toEqual([
+            ['/api/v1/views/v1/library/reusable-changes/change%2F1', { method: 'PUT', body: JSON.stringify(change) }],
+            ['/api/v1/views/v1/library/reusable-changes/change%2F1', { method: 'DELETE' }],
+            ['/api/v1/views/v1/library/reusable-changes/from-other-views', { signal }],
         ])
     })
 

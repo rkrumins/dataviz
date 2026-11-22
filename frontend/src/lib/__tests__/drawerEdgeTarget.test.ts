@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { lineForTarget, targetFromLine, targetFromEdge, type DrawnLine } from '../drawerEdgeTarget'
+import { lineForTarget, memberFromEdge, targetFromLine, targetFromEdge, targetFromMembers, type DrawnLine } from '../drawerEdgeTarget'
 import type { LineageEdge } from '@/store/canvas'
 
 const storeEdge = (id: string, source: string, target: string, edgeType = 'FLOWS_TO'): LineageEdge =>
@@ -128,5 +128,27 @@ describe('lineForTarget — the line an open drawer stands on, as drawn now', ()
 
   it('is null when nothing it stands for is drawn', () => {
     expect(lineForTarget({ kind: 'relationship', id: 'e9', source: 'q', target: 'r', edgeType: 'FLOWS_TO' }, lines)).toBeNull()
+  })
+
+  it('several relationships keep only the line they were opened from lit', () => {
+    const several = targetFromMembers([{ id: 'e1', source: 'a', target: 'b', edgeType: 'FLOWS_TO', rollup: false }], lines[0]!.id)
+    expect(lineForTarget(several, lines)).toBe(lines[0])
+    expect(lineForTarget(targetFromMembers([{ id: 'e1', source: 'a', target: 'b', edgeType: 'FLOWS_TO', rollup: false }]), lines)).toBeNull()
+  })
+})
+
+describe('several relationships', () => {
+  const m = (id: string) => ({ id, source: 'a', target: 'b', edgeType: 'FLOWS_TO', rollup: false })
+
+  it('stand for exactly those, in any order: the same ones again are the same drawer entry', () => {
+    const one = targetFromMembers([m('e1'), m('e2'), m('e1')], 'bundle-a->b')
+    expect(one).toMatchObject({ kind: 'relationships', lineId: 'bundle-a->b', members: [m('e1'), m('e2')] })
+    expect(targetFromMembers([m('e2'), m('e1')]).id).toBe(one.id)
+    expect(targetFromMembers([m('e1'), m('e3')]).id).not.toBe(one.id)
+  })
+
+  it('a store edge is one of them, a roll-up marked as one', () => {
+    expect(memberFromEdge(storeEdge('e1', 'a', 'b'))).toEqual(m('e1'))
+    expect(memberFromEdge(storeEdge('r1', 'a', 'b', 'AGGREGATED')).rollup).toBe(true)
   })
 })

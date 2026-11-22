@@ -66,6 +66,12 @@ export function targetFromEdge(edge: LineageEdge, lineId?: string): DrawerEdgeTa
   }
 }
 
+/** A store edge as one of several relationships (the Edge Explorer's selection). */
+export function memberFromEdge(edge: LineageEdge): EdgeMemberRef {
+  const edgeType = edge.data?.edgeType || edge.data?.relationship || ''
+  return { id: edge.id, source: edge.source, target: edge.target, edgeType, rollup: isRollupType(edgeType) }
+}
+
 /** A relationship from one member of a connection. */
 export function targetFromMember(m: EdgeMemberRef, lineId?: string): DrawerEdgeTarget {
   return {
@@ -74,6 +80,23 @@ export function targetFromMember(m: EdgeMemberRef, lineId?: string): DrawerEdgeT
     source: m.source,
     target: m.target,
     edgeType: m.edgeType,
+    ...(lineId ? { lineId } : {}),
+  }
+}
+
+/** Several relationships, compared and edited as one. Its id stands for exactly these (in any
+ *  order), so opening the drawer on the same ones again is not a move of the drawer. */
+export function targetFromMembers(members: readonly EdgeMemberRef[], lineId?: string): DrawerEdgeTarget {
+  const unique = [...new Map(members.map((m) => [m.id, m])).values()]
+  let h = 5381
+  for (const id of unique.map((m) => m.id).sort()) {
+    for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) | 0
+    h = ((h << 5) + h + 10) | 0
+  }
+  return {
+    kind: 'relationships',
+    id: `relationships:${unique.length}:${(h >>> 0).toString(36)}`,
+    members: unique,
     ...(lineId ? { lineId } : {}),
   }
 }
@@ -124,6 +147,8 @@ export function lineForTarget<L extends DrawnLine>(target: DrawerEdgeTarget, lin
   const lineId = target.kind === 'connection' ? target.id : target.lineId
   const byId = lineId ? lines.find((l) => l.id === lineId) : undefined
   if (byId) return byId
+  // Several relationships light no one line of their own: only the one they were opened from.
+  if (target.kind === 'relationships') return null
   const ids = new Set(target.kind === 'connection' ? target.members.map((m) => m.id) : [target.id])
   const carrying = lines.find((l) => l.data?.members?.some((m) => !!m.id && ids.has(m.id)))
   if (carrying) return carrying

@@ -1,15 +1,14 @@
-import { useState, useMemo } from 'react'
-import { Reorder } from 'framer-motion'
+import { useMemo, useState } from 'react'
 import * as LucideIcons from 'lucide-react'
-import type { EntityTypeSchema, EntityVisualConfig, EntityFieldDefinition } from '@/types/schema'
+import type { EntityTypeSchema, EntityVisualConfig } from '@/types/schema'
 import { cn } from '@/lib/utils'
-import { generateId } from '@/lib/utils'
 import { toEntityTypeId, findCaseInsensitiveCollision } from '@/features/ontology/lib/typeIds'
 import { caseFold } from '@/features/ontology/lib/caseFold'
 import { IconPicker } from '@/components/ui/IconPicker'
 import { NodePreview } from '@/components/schema/NodePreview'
 import { ColorInput } from '@/components/ui/ColorInput'
-import { HoverTip } from '@/components/ui/HoverTip'
+import { peerPropertyStats } from '@/components/panels/entity/peerPropertyStats'
+import { FieldsTab, fieldKeyProblems, useFieldRows } from './FieldsTab'
 
 // Curated icons surfaced as the "Suggested" row of the full-catalog picker.
 const COMMON_ICONS = [
@@ -26,19 +25,6 @@ const TAB_DEFS = [
   { id: 'visual' as const, label: 'Appearance', icon: LucideIcons.Palette },
   { id: 'fields' as const, label: 'Fields', icon: LucideIcons.List },
   { id: 'hierarchy' as const, label: 'Hierarchy', icon: LucideIcons.FolderTree },
-]
-
-const FIELD_TYPE_OPTIONS: Array<{ value: EntityFieldDefinition['type']; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { value: 'string', label: 'String', icon: LucideIcons.Type },
-  { value: 'number', label: 'Number', icon: LucideIcons.Hash },
-  { value: 'boolean', label: 'Boolean', icon: LucideIcons.ToggleLeft },
-  { value: 'date', label: 'Date', icon: LucideIcons.Calendar },
-  { value: 'urn', label: 'URN', icon: LucideIcons.Link },
-  { value: 'tags', label: 'Tags', icon: LucideIcons.Tags },
-  { value: 'badge', label: 'Badge', icon: LucideIcons.Award },
-  { value: 'progress', label: 'Progress', icon: LucideIcons.BarChart3 },
-  { value: 'status', label: 'Status', icon: LucideIcons.CircleDot },
-  { value: 'user', label: 'User', icon: LucideIcons.User },
 ]
 
 interface EntityTypeEditorProps {
@@ -92,7 +78,12 @@ export function EntityTypeEditor({ entityType, availableEntityTypes = [], readOn
   // resolvable from this dialog. Only a NEW type's id can collide in a way renaming would fix — so
   // the collision only blocks new types, never a pure edit of an existing one.
   const collision = isNew ? findCaseInsensitiveCollision(form.id, otherIds) : null
-  const canSave = !!form.name.trim() && !!form.id.trim() && !collision
+  // Every field is a property, by its key: a new one needs one no other field of the type has.
+  const fieldRows = useFieldRows()
+  const keyProblems = fieldKeyProblems(form.fields, fieldRows.isNew)
+  const canSave = !!form.name.trim() && !!form.id.trim() && !collision && keyProblems.every((p) => p === null)
+  // Property keys entities of this type carry on the canvas — offered as a new field's key.
+  const propertyKeys = useMemo(() => peerPropertyStats('', entityType?.id ?? '').map((p) => p.key), [entityType?.id])
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -145,7 +136,8 @@ export function EntityTypeEditor({ entityType, availableEntityTypes = [], readOn
               <VisualTab form={form} updateVisual={updateVisual} />
             )}
             {activeTab === 'fields' && (
-              <FieldsTab form={form} setForm={setForm} readOnly={readOnly} />
+              <FieldsTab fields={form.fields} setFields={(update) => setForm((p) => ({ ...p, fields: update(p.fields) }))}
+                readOnly={readOnly} propertyKeys={propertyKeys} rows={fieldRows} problems={keyProblems} />
             )}
             {activeTab === 'hierarchy' && (
               <HierarchyTab form={form} updateForm={updateForm} availableEntityTypes={availableEntityTypes} />
@@ -425,162 +417,6 @@ function VisualTab({ form, updateVisual }: {
 // Entity Preview
 // ---------------------------------------------------------------------------
 
-
-// ---------------------------------------------------------------------------
-// Fields Tab
-// ---------------------------------------------------------------------------
-
-function FieldsTab({ form, setForm, readOnly }: {
-  form: EntityTypeSchema
-  setForm: React.Dispatch<React.SetStateAction<EntityTypeSchema>>
-  readOnly?: boolean
-}) {
-  const addField = () => {
-    const newField: EntityFieldDefinition = {
-      id: generateId('field'),
-      name: '',
-      type: 'string',
-      required: false,
-      showInNode: false,
-      showInPanel: true,
-      showInTooltip: false,
-      displayOrder: form.fields.length,
-    }
-    setForm((prev) => ({ ...prev, fields: [...prev.fields, newField] }))
-  }
-
-  const removeField = (fieldId: string) => {
-    setForm((prev) => ({ ...prev, fields: prev.fields.filter((f) => f.id !== fieldId) }))
-  }
-
-  const updateField = (fieldId: string, updates: Partial<EntityFieldDefinition>) => {
-    setForm((prev) => ({
-      ...prev,
-      fields: prev.fields.map((f) => f.id === fieldId ? { ...f, ...updates } : f),
-    }))
-  }
-
-  // Drag-reorder: rewrite displayOrder sequentially so persisted order matches.
-  const reorderFields = (ordered: EntityFieldDefinition[]) => {
-    setForm((prev) => ({
-      ...prev,
-      fields: ordered.map((f, i) => ({ ...f, displayOrder: i })),
-    }))
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Fields</h3>
-          <p className="text-[10px] text-ink-muted/70 mt-0.5">{form.fields.length} field{form.fields.length !== 1 ? 's' : ''} defined</p>
-        </div>
-        {!readOnly && (
-          <button
-            onClick={addField}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/50 hover:bg-indigo-100 dark:hover:bg-indigo-950/50 transition-all"
-          >
-            <LucideIcons.Plus className="w-3.5 h-3.5" />
-            Add Field
-          </button>
-        )}
-      </div>
-
-      {form.fields.length === 0 ? (
-        <div className="text-center py-8 rounded-xl border-2 border-dashed border-glass-border">
-          <LucideIcons.List className="w-6 h-6 mx-auto mb-2 text-ink-muted/30" />
-          <p className="text-xs text-ink-muted">No fields defined yet</p>
-        </div>
-      ) : (
-        <Reorder.Group axis="y" values={form.fields} onReorder={reorderFields} className="space-y-2">
-          {form.fields.map((field) => (
-            <Reorder.Item
-              key={field.id}
-              value={field}
-              drag={readOnly ? false : 'y'}
-              className="rounded-xl border border-glass-border bg-canvas hover:border-glass-border-hover transition-colors overflow-hidden"
-            >
-              {/* Field header row */}
-              <div className="flex items-center gap-2 px-3 py-2.5">
-                <LucideIcons.GripVertical className={cn('w-3.5 h-3.5 text-ink-muted/40 flex-shrink-0', readOnly ? 'opacity-30' : 'cursor-grab active:cursor-grabbing')} />
-
-                <input
-                  type="text"
-                  value={field.name}
-                  onChange={(e) => updateField(field.id, { name: e.target.value })}
-                  className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-transparent border border-transparent hover:border-glass-border focus:border-indigo-500/30 focus:bg-black/[0.02] dark:focus:bg-white/[0.02] text-sm font-medium text-ink placeholder:text-ink-muted/50 focus:outline-none transition-all"
-                  placeholder="Field name"
-                  disabled={readOnly}
-                />
-
-                <select
-                  value={field.type}
-                  onChange={(e) => updateField(field.id, { type: e.target.value as EntityFieldDefinition['type'] })}
-                  className="px-2 py-1.5 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-xs text-ink-secondary font-medium focus:outline-none focus:ring-1 focus:ring-indigo-500/30 cursor-pointer"
-                  disabled={readOnly}
-                >
-                  {FIELD_TYPE_OPTIONS.map(opt => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
-
-                {!readOnly && (
-                  <button
-                    onClick={() => removeField(field.id)}
-                    className="p-1 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 text-ink-muted/40 hover:text-red-500 transition-colors flex-shrink-0"
-                  >
-                    <LucideIcons.Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-
-              {/* Field options row */}
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5 bg-black/[0.015] dark:bg-white/[0.015] border-t border-glass-border/50">
-                {([
-                  { key: 'showInNode' as const, label: 'Node' },
-                  { key: 'showInPanel' as const, label: 'Panel' },
-                  { key: 'showInTooltip' as const, label: 'Tooltip' },
-                  { key: 'required' as const, label: 'Required' },
-                ] as const).map(({ key, label }) => (
-                  <label key={key} className="flex items-center gap-1 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={field[key]}
-                      onChange={(e) => updateField(field.id, { [key]: e.target.checked })}
-                      className="w-3 h-3 rounded accent-indigo-500"
-                      disabled={readOnly}
-                    />
-                    <span className="text-[10px] text-ink-muted font-medium">{label}</span>
-                  </label>
-                ))}
-                {/* What an import and a publish do with the field — said where it is set. */}
-                {([
-                  { key: 'reconciliationKey' as const, label: 'Match imports by this',
-                    tip: 'An import updates the entity with the same value here, instead of adding another' },
-                  { key: 'unique' as const, label: 'Must be unique',
-                    tip: 'No two entities of this type can share a value here — a draft that does can’t be published' },
-                ] as const).map(({ key, label, tip }) => (
-                  <HoverTip key={key} label={tip}>
-                    <label className="flex items-center gap-1 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={field[key] ?? false}
-                        onChange={(e) => updateField(field.id, { [key]: e.target.checked })}
-                        className="w-3 h-3 rounded accent-indigo-500"
-                        disabled={readOnly}
-                      />
-                      <span className="text-[10px] text-ink-muted font-medium">{label}</span>
-                    </label>
-                  </HoverTip>
-                ))}
-              </div>
-            </Reorder.Item>
-          ))}
-        </Reorder.Group>
-      )}
-    </div>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Hierarchy Tab

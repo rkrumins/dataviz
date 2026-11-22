@@ -14,13 +14,16 @@
  *   - How many entities does each rule match in the whole view?
  *     (``POST /search/counts``, followed to an exact total.)
  *
- * Both are re-asked when a rule's criteria, the enabled set or the view's
- * layers change — never for a rename or a new colour. The server resolves
- * the view's scope for both; an entity outside it is never tagged.
+ * Both are re-asked when a rule's criteria, the enabled set, the view's
+ * layers or the open draft change (``useDraftDataKey``: a save, a bulk change
+ * window by window) — never for a rename or a new colour. The server resolves
+ * the view's scope for both, and answers a draft as it stands; an entity
+ * outside the scope is never tagged.
  */
 import { useEffect, useMemo, useRef } from 'react'
 
 import { readableSearchError } from '@/components/canvas/search/panel/errorPaths'
+import { useDraftDataKey } from '@/features/versioning/hooks/useDraftDataKey'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { rideOut } from '@/services/rideOut'
@@ -53,6 +56,7 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
     const setCounts = useDisplayRuleMatchStore((s) => s.setCounts)
     const setMembershipError = useDisplayRuleMatchStore((s) => s.setMembershipError)
     const setCountsError = useDisplayRuleMatchStore((s) => s.setCountsError)
+    const setMembershipNote = useDisplayRuleMatchStore((s) => s.setMembershipNote)
     const retryToken = useDisplayRuleMatchStore((s) => s.retryToken)
     const clear = useDisplayRuleMatchStore((s) => s.clear)
 
@@ -67,10 +71,13 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
     const enabled = useMemo(() => rules.filter((r) => r.enabled), [rules])
     const askable = useMemo(() => enabled.filter(canAsk), [enabled])
     // What the answers depend on: which rules, with which criteria, in which
-    // view (and its layers) — not a rule's name, colour or icon.
+    // view (and its layers) and on which state of the draft open — not a
+    // rule's name, colour or icon. A draft's chips and counts are its own, so
+    // they are asked again as it changes (a save, a bulk change window by window).
+    const draftKey = useDraftDataKey()
     const signature = useMemo(
-        () => JSON.stringify([viewId, enabled.map((r) => [r.id, r.predicate]), layers]),
-        [viewId, enabled, layers],
+        () => JSON.stringify([viewId, enabled.map((r) => [r.id, r.predicate]), layers, draftKey]),
+        [viewId, enabled, layers, draftKey],
     )
 
     // The entities already answered for the current signature.
@@ -83,6 +90,7 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
         if (!viewId || !(provider instanceof RemoteGraphProvider) || askable.length === 0) return
         if (answered.current.signature !== signature) {
             answered.current = { signature, urns: new Set() }
+            setMembershipNote(null)
         }
         const done = answered.current.urns
         const pending = [...new Set(nodes.map((n) => n.id).filter((u) => u && !done.has(u)))]
@@ -104,6 +112,8 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
                             }, { signal: controller.signal }), controller.signal)
                             if (controller.signal.aborted) return
                             applyMembership(group.map((r) => r.id), batch, answer.matches)
+                            // On a draft, why some tags on what it changed are Published's.
+                            if (answer.notes?.length) setMembershipNote(answer.notes[0])
                         } catch (err) {
                             if (controller.signal.aborted) return
                             // The batch keeps its previous chips and is asked
@@ -122,7 +132,8 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
             controller.abort()
             clearTimeout(timer)
         }
-    }, [viewId, provider, signature, askable, nodes, applyMembership, setMembershipError, retryToken])
+    }, [viewId, provider, signature, askable, nodes, applyMembership, setMembershipError,
+        setMembershipNote, retryToken])
 
     // Counts: each rule's exact total in the view. A rule that can't be asked
     // about reads as one that can't be counted, and why.

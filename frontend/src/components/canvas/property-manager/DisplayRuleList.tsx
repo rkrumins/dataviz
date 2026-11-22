@@ -12,10 +12,11 @@
  */
 import { motion } from 'framer-motion'
 import {
-    AlertTriangle, ArrowDown, ArrowUp, Crosshair, Pencil, Plus, Tags, Trash2,
+    AlertTriangle, ArrowDown, ArrowUp, Crosshair, Info, Pencil, Plus, Tags, Trash2,
 } from 'lucide-react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { cn } from '@/lib/utils'
 import type { DisplayRuleConfig } from '@/types/schema'
 import { useDisplayRuleMatchStore, useRuleCount } from '@/store/displayRuleMatchStore'
@@ -55,6 +56,20 @@ function CheckFailure() {
             >
                 Retry
             </button>
+        </div>
+    )
+}
+
+
+/** On a draft, why some rules' tags on what the draft changed are the
+ *  published graph's — so a missing tag reads as that, not as no match. */
+function DraftNote() {
+    const note = useDisplayRuleMatchStore((s) => s.membershipNote)
+    if (!note) return null
+    return (
+        <div className="flex items-start gap-2 rounded-xl border border-glass-border/70 bg-glass/20 px-3 py-2">
+            <Info className="w-3.5 h-3.5 mt-0.5 shrink-0 text-ink-muted" />
+            <p className="flex-1 min-w-0 text-[11.5px] leading-snug text-ink-muted">{note}</p>
         </div>
     )
 }
@@ -144,6 +159,7 @@ export function DisplayRuleList({
             )}
 
             <CheckFailure />
+            <DraftNote />
 
             <div className="flex flex-col gap-2">
                 {rules.map((rule, index) => (
@@ -176,18 +192,35 @@ function RuleCountLine({ enabled, count }: {
     if (!enabled) return <>Disabled</>
     if (!count) return <>Counting…</>
     if (count.error && count.complete) {
-        return <span className="text-rose-400" title={count.error}>Can't be counted</span>
+        return (
+            <HoverTip label={count.error} className="inline-flex">
+                <span className="text-rose-400">Can't be counted</span>
+            </HoverTip>
+        )
     }
     const n = <span className="text-ink font-semibold">{count.count.toLocaleString()}</span>
     if (count.error) {
-        return <span title={count.error}>At least {n} · <span className="text-rose-400">count stopped</span></span>
+        return (
+            <HoverTip label={count.error} className="inline-flex">
+                <span>At least {n} · <span className="text-rose-400">count stopped</span></span>
+            </HoverTip>
+        )
     }
     if (!count.complete) return <>{n} so far · counting {count.percent}%</>
+    if (count.approximate) {
+        return (
+            <HoverTip label="Counted on the published graph"
+                detail={count.note ?? 'Your draft’s changes aren’t in this count'}
+                className="inline-flex">
+                <span>About {n} {count.count === 1 ? 'match' : 'matches'} in this view</span>
+            </HoverTip>
+        )
+    }
     if (count.lowerBound) {
         return (
-            <span title="Part of the view couldn’t be checked in time and was left out">
-                At least {n} {count.count === 1 ? 'match' : 'matches'} in this view
-            </span>
+            <HoverTip label="Part of the view couldn’t be checked in time and was left out" className="inline-flex">
+                <span>At least {n} {count.count === 1 ? 'match' : 'matches'} in this view</span>
+            </HoverTip>
         )
     }
     return <>{n} {count.count === 1 ? 'match' : 'matches'} in this view</>
@@ -236,59 +269,68 @@ function RuleCard({
                 {/* Reorder handles */}
                 {!readOnly && (
                 <div className="flex flex-col -my-1 shrink-0">
-                    <button
-                        type="button"
-                        onClick={onMoveUp}
-                        disabled={isFirst}
-                        title="Move up"
-                        className={cn('p-0.5 rounded text-ink-muted/60 transition-colors',
-                            isFirst ? 'opacity-25 cursor-not-allowed' : 'hover:text-ink hover:bg-glass/40')}
-                    >
-                        <ArrowUp className="w-3 h-3" />
-                    </button>
-                    <button
-                        type="button"
-                        onClick={onMoveDown}
-                        disabled={isLast}
-                        title="Move down"
-                        className={cn('p-0.5 rounded text-ink-muted/60 transition-colors',
-                            isLast ? 'opacity-25 cursor-not-allowed' : 'hover:text-ink hover:bg-glass/40')}
-                    >
-                        <ArrowDown className="w-3 h-3" />
-                    </button>
+                    <HoverTip label="Move this rule up" detail="Chips stack on the canvas in the order of this list" className="flex">
+                        <button
+                            type="button"
+                            onClick={onMoveUp}
+                            disabled={isFirst}
+                            aria-label="Move up"
+                            className={cn('p-0.5 rounded text-ink-muted/60 transition-colors',
+                                isFirst ? 'opacity-25 cursor-not-allowed' : 'hover:text-ink hover:bg-glass/40')}
+                        >
+                            <ArrowUp className="w-3 h-3" />
+                        </button>
+                    </HoverTip>
+                    <HoverTip label="Move this rule down" detail="Chips stack on the canvas in the order of this list" className="flex">
+                        <button
+                            type="button"
+                            onClick={onMoveDown}
+                            disabled={isLast}
+                            aria-label="Move down"
+                            className={cn('p-0.5 rounded text-ink-muted/60 transition-colors',
+                                isLast ? 'opacity-25 cursor-not-allowed' : 'hover:text-ink hover:bg-glass/40')}
+                        >
+                            <ArrowDown className="w-3 h-3" />
+                        </button>
+                    </HoverTip>
                 </div>
                 )}
 
                 {/* Enable toggle */}
-                <button
-                    type="button"
-                    onClick={onToggle}
-                    role="switch"
-                    aria-checked={rule.enabled}
-                    disabled={readOnly}
-                    title={readOnly ? (rule.enabled ? 'On' : 'Off')
-                        : rule.enabled ? 'Disable rule' : 'Enable rule'}
-                    className={cn(
-                        'relative w-9 h-5 rounded-full transition-colors shrink-0',
-                        rule.enabled ? 'bg-accent-lineage/80' : 'bg-glass/60',
-                        readOnly && 'cursor-default opacity-70',
-                    )}
+                <HoverTip
+                    label={readOnly ? (rule.enabled ? 'This rule is on' : 'This rule is off')
+                        : rule.enabled ? 'Turn this rule off' : 'Turn this rule on'}
+                    detail={readOnly ? 'Only people who can edit this view can change it' : undefined}
+                    className="inline-flex shrink-0"
                 >
-                    <span className={cn(
-                        'absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all',
-                        rule.enabled ? 'left-[18px]' : 'left-0.5',
-                    )} />
-                </button>
+                    <button
+                        type="button"
+                        onClick={onToggle}
+                        role="switch"
+                        aria-checked={rule.enabled}
+                        aria-label="Use this rule"
+                        disabled={readOnly}
+                        className={cn(
+                            'relative w-9 h-5 rounded-full transition-colors shrink-0',
+                            rule.enabled ? 'bg-accent-lineage/80' : 'bg-glass/60',
+                            readOnly && 'cursor-default opacity-70',
+                        )}
+                    >
+                        <span className={cn(
+                            'absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all',
+                            rule.enabled ? 'left-[18px]' : 'left-0.5',
+                        )} />
+                    </button>
+                </HoverTip>
 
                 {/* Tag chip + match count */}
                 <div className="min-w-0 flex-1">
                     <span
                         className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium max-w-full align-middle"
                         style={{ backgroundColor: `${rule.color}26`, color: rule.color }}
-                        title={rule.name}
                     >
                         {rule.icon && <DynamicIcon name={rule.icon} className="w-3 h-3 shrink-0" />}
-                        <span className="truncate">{rule.name}</span>
+                        <span className="truncate" title={rule.name}>{rule.name}</span>
                     </span>
                     {rule.style && (rule.style.fill || rule.style.frame || rule.style.chip === false) && (
                         <span className="ml-1.5 inline-flex items-center gap-1 align-middle text-[10.5px] text-ink-muted">
@@ -310,35 +352,45 @@ function RuleCard({
 
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0">
-                    <button
-                        type="button"
-                        onClick={onReveal}
-                        title="Show every match in search"
-                        disabled={nothingToReveal}
-                        className={cn('p-1.5 rounded-lg transition-colors',
-                            nothingToReveal
-                                ? 'text-ink-muted/30 cursor-not-allowed'
-                                : 'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10')}
+                    <HoverTip
+                        label="Show every match in search"
+                        detail={!rule.enabled ? 'Turn the rule on first' : nothingToReveal ? 'Nothing in this view matches it' : 'Runs its criteria in Advanced Search'}
+                        className="inline-flex"
                     >
-                        <Crosshair className="w-3.5 h-3.5" />
-                    </button>
+                        <button
+                            type="button"
+                            onClick={onReveal}
+                            aria-label="Show every match in search"
+                            disabled={nothingToReveal}
+                            className={cn('p-1.5 rounded-lg transition-colors',
+                                nothingToReveal
+                                    ? 'text-ink-muted/30 cursor-not-allowed'
+                                    : 'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10')}
+                        >
+                            <Crosshair className="w-3.5 h-3.5" />
+                        </button>
+                    </HoverTip>
                     {!readOnly && (<>
-                    <button
-                        type="button"
-                        onClick={onEdit}
-                        title="Edit rule"
-                        className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-glass/40 transition-colors"
-                    >
-                        <Pencil className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                        type="button"
-                        onClick={onDelete}
-                        title="Delete rule"
-                        className="p-1.5 rounded-lg text-ink-muted hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                    >
-                        <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    <HoverTip label="Edit rule" detail="Its criteria, tag and look" className="inline-flex">
+                        <button
+                            type="button"
+                            onClick={onEdit}
+                            aria-label="Edit rule"
+                            className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-glass/40 transition-colors"
+                        >
+                            <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                    </HoverTip>
+                    <HoverTip label="Delete rule" detail="Takes it off this view, and its tag off the canvas" className="inline-flex">
+                        <button
+                            type="button"
+                            onClick={onDelete}
+                            aria-label="Delete rule"
+                            className="p-1.5 rounded-lg text-ink-muted hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                        >
+                            <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                    </HoverTip>
                     </>)}
                 </div>
             </div>

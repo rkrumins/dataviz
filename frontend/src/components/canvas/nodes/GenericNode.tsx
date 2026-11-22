@@ -6,6 +6,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useViewEntityType, useViewEntityVisual } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
 import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
@@ -75,6 +76,9 @@ export const GenericNode = memo(function GenericNode({
   // Where a click doesn't open an entity's details, the selected card's
   // toolbar offers them.
   const offerDetails = !useOpensDetailsOnSelect() && !!selected
+  // The toolbar is one card's: several selected are acted on together from the selection bar, and
+  // a toolbar over each of them would bury the canvas.
+  const soleSelection = useCanvasStore((s) => !!selected && s.selectedNodeIds.length < 2)
   // Handle both nested (data.data) and flat (data) structures
   const rawData = (data as Record<string, unknown>)
   const entityData: GenericNodeData = rawData.data
@@ -137,11 +141,17 @@ export const GenericNode = memo(function GenericNode({
   // `perf-load-test-solidatus`), which is the opposite of what the toggle
   // promises. Cards from `md` up already have room for a second `text-2xs`
   // line, so they show both; `sm` has room for one, so there — and only
-  // there — the technical identity substitutes.
+  // there — the technical identity substitutes. With the IDs hidden (Display
+  // settings) a card shows neither.
   const description = typeof entityFields['description'] === 'string'
     ? entityFields['description']
     : undefined
-  const technical = technicalIdentity(entityFields, persona, { identityProperty, name: primaryLabel })
+  const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
+  // Display's "Show entity type badge", as on Context View rows.
+  const showTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
+  const technical = showEntityIds
+    ? technicalIdentity(entityFields, persona, { identityProperty, name: primaryLabel })
+    : undefined
   const technicalLine = technical?.value
   const showsBothLines = visual.size !== 'xs' && visual.size !== 'sm'
   const secondaryLabel: string | undefined = showsBothLines
@@ -238,7 +248,7 @@ export const GenericNode = memo(function GenericNode({
           editing, and opens the Hierarchy Builder scoped to this node. */}
       {(canTrace || offerAddInside || offerDetails) && (
         <NodeToolbar
-          isVisible={!!selected}
+          isVisible={soleSelection}
           position={Position.Top}
           className="flex items-center gap-1 glass-panel-subtle rounded-lg p-1"
         >
@@ -341,7 +351,13 @@ export const GenericNode = memo(function GenericNode({
           shapeClasses[visual.shape],
           borderClasses[visual.borderStyle],
           "bg-canvas-elevated",
-          !!selected && !isTraced && "ring-2 ring-offset-2",
+          // Every ring and glow below is a class: Tailwind draws a ring as a box-shadow and composes
+          // it with the glow, where an inline box-shadow would paint over the ring. A ring's offset
+          // is the canvas, not white.
+          "ring-offset-canvas",
+          !!selected && !isTraced && "ring-2 ring-offset-2 ring-[color:var(--ring-color)] shadow-[0_0_20px_var(--ring-glow)]",
+          !selected && !isFocus && !isUpstream && !isDownstream && !isTraced && !changeDeco && !search.isDirectMatch
+            && "shadow-[0_4px_12px_rgba(0,0,0,0.1)]",
           !!dragging && "opacity-80 cursor-grabbing",
           isGhost && "opacity-60",
           // W2.1 — advanced-search direct-match glow (reuses the
@@ -373,23 +389,8 @@ export const GenericNode = memo(function GenericNode({
         style={{
           borderColor: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
           borderLeftWidth: visual.borderStyle !== 'none' ? '4px' : undefined,
-          boxShadow: isFocus
-            ? '0 0 30px rgba(251,191,36,0.5)'
-            : isUpstream 
-              ? '0 0 20px rgba(96,165,250,0.4)'
-              : isDownstream
-                ? '0 0 20px rgba(74,222,128,0.4)'
-                : isTraced
-                  ? '0 0 20px rgba(192,132,252,0.4)'
-                  : selected
-                    ? `0 0 20px ${visual.color}40`
-                    : changeDeco
-                      // Decorated + default state: defer to the Tailwind ring+glow from
-                      // nodeDecorationClass (an inline boxShadow would override the box-shadow-based
-                      // ring, hiding the committed/staged colour highlight on the graph).
-                      ? undefined
-                      : '0 4px 12px rgba(0,0,0,0.1)',
           ['--ring-color' as string]: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
+          ['--ring-glow' as string]: `${visual.color}40`,
           ...(ruleLook.fillColor && {
             backgroundColor: `color-mix(in srgb, ${ruleLook.fillColor} 14%, var(--nx-bg-elevated))`,
           }),
@@ -433,12 +434,14 @@ export const GenericNode = memo(function GenericNode({
           {/* Content */}
           <div className="flex-1 min-w-0">
             {/* Type Badge */}
-            <span
-              className="text-2xs font-medium uppercase tracking-wider"
-              style={{ color: visual.color }}
-            >
-              {entityType.name}
-            </span>
+            {showTypeBadge && (
+              <span
+                className="text-2xs font-medium uppercase tracking-wider"
+                style={{ color: visual.color }}
+              >
+                {entityType.name}
+              </span>
+            )}
 
             {/* Primary Label + W2.1 search match badge */}
             <div className="flex items-center gap-1.5 min-w-0">
@@ -541,7 +544,7 @@ export const GenericNode = memo(function GenericNode({
         )}
 
         {/* Child Count for collapsed nodes */}
-        {entityData.childCount && !entityData.isExpanded && (
+        {!!entityData.childCount && !entityData.isExpanded && (
           <div className="mt-2 text-2xs text-ink-muted">
             {entityData.childCount} {entityData.childCount === 1 ? 'child' : 'children'}
           </div>

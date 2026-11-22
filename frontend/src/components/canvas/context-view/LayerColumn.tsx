@@ -1137,9 +1137,11 @@ export const LayerColumn = React.memo(function LayerColumn({
   // has never mounted contributes to `getTotalSize()` and to every
   // `scrollToIndex` offset. The chrome rows below (search box, search hit,
   // skeleton, load-more, error) render no technical line and keep their size.
-  // Minimal sets the identifier on the name's line, so its rows do not grow.
+  // Minimal sets the identifier on the name's line, so its rows do not grow,
+  // and with the IDs hidden in Display settings there is no line at all.
   const personaMode = usePersonaMode()
-  const technicalExtra = personaMode === 'technical' && density !== 'minimal' ? TECHNICAL_LINE_HEIGHT : 0
+  const showEntityIds = usePreferencesStore(s => s.showCanvasEntityIds) ?? true
+  const technicalExtra = personaMode === 'technical' && showEntityIds && density !== 'minimal' ? TECHNICAL_LINE_HEIGHT : 0
   const virtualizer = useVirtualizer({
     count: flatTree.length,
     getScrollElement: () => scrollContainerRef.current,
@@ -1156,14 +1158,14 @@ export const LayerColumn = React.memo(function LayerColumn({
     getItemKey: (index) => getItemKey(flatTree[index], index),
   })
 
-  // Re-measure all virtualized rows when density or the persona flips so the
-  // cached measurements from the previous mode don't leave the row stack
-  // pinned to stale heights. `itemSizeCache` survives unmount and is read
-  // ahead of `estimateSize`, so without this a row first measured in Business
-  // mode keeps its shorter height for the rest of the session.
+  // Re-measure all virtualized rows when density, the persona or the IDs
+  // switch flips so the cached measurements from the previous mode don't leave
+  // the row stack pinned to stale heights. `itemSizeCache` survives unmount and
+  // is read ahead of `estimateSize`, so without this a row first measured in
+  // Business mode keeps its shorter height for the rest of the session.
   useEffect(() => {
     virtualizer.measure()
-  }, [density, personaMode, virtualizer])
+  }, [density, personaMode, showEntityIds, virtualizer])
 
   // Auto-scroll keyboard-focused row into view via virtualizer
   const focusedNodeId = navigableItems[focusIndex]?.node.id ?? null
@@ -1337,6 +1339,17 @@ export const LayerColumn = React.memo(function LayerColumn({
         return
       }
     }
+    // Cmd/Ctrl+A selects every entity the column shows, in one write — the
+    // selection bar then offers to compare and edit them. Only on the column itself.
+    if ((e.key === 'a' || e.key === 'A') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.target === e.currentTarget) {
+      const ids = navigableItems.filter((item) => !item.node.isLogical).map((item) => item.node.id)
+      if (ids.length > 0) {
+        e.preventDefault()
+        e.stopPropagation()
+        onSelectRange(ids)
+      }
+      return
+    }
     // Space or Cmd/Ctrl+Enter toggles the focused row in the selection — the
     // keyboard's Cmd-click. Only on the column itself: typed into a row's
     // search box or rename field, or on a focused button, the key is theirs.
@@ -1394,7 +1407,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         setFocusIndex(count - 1)
         break
     }
-  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, selectedNodeId, reorderEnabled, onReorderNudge])
+  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, onSelectRange, selectedNodeId, reorderEnabled, onReorderNudge])
 
   // After a keyboard reorder, re-point focus at the moved node's new row
   // (its index shifts by the displaced neighbor's visible subtree size).

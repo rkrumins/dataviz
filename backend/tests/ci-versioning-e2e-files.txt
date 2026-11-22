@@ -35,6 +35,7 @@ tests/integration/test_draft_overlay_ids_not_urns.py
 tests/integration/test_draft_overlay_large.py
 tests/integration/test_draft_prune.py
 tests/integration/test_draft_read_cache_scope.py
+tests/integration/test_draft_search_e2e.py
 tests/integration/test_draft_transfer.py
 tests/integration/test_entity_summary_and_history.py
 tests/integration/test_export_roundtrip.py
@@ -110,7 +111,10 @@ tests/integration/test_projection_pending_retries_wedge.py
 tests/integration/test_projection_reconcile_live.py
 tests/integration/test_projection_serves_while_updating.py
 tests/integration/test_property_delete_every_path.py
+tests/integration/test_property_job_notices_e2e.py
+tests/integration/test_property_jobs_e2e.py
 tests/integration/test_provider_versioned_graphs_live.py
+tests/integration/test_publish_fields.py
 tests/integration/test_publish_narrow_squash.py
 tests/integration/test_publish_unique.py
 tests/integration/test_pull_paged.py

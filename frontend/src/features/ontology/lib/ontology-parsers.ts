@@ -20,18 +20,7 @@ export function entityDefToSchema(id: string, def: Record<string, unknown>): Ent
       borderStyle: ((visual.border_style as string) ?? 'solid') as EntityTypeSchema['visual']['borderStyle'],
       showInMinimap: (visual.show_in_minimap as boolean) ?? true,
     },
-    fields: fields.map(f => ({
-      id: f.id as string,
-      name: f.name as string,
-      type: ((f.type as string) ?? 'string') as EntityTypeSchema['fields'][number]['type'],
-      required: (f.required as boolean) ?? false,
-      showInNode: (f.show_in_node as boolean) ?? false,
-      showInPanel: (f.show_in_panel as boolean) ?? true,
-      showInTooltip: (f.show_in_tooltip as boolean) ?? false,
-      displayOrder: (f.display_order as number) ?? 0,
-      reconciliationKey: ((f.reconciliation_key ?? f.reconciliationKey) as boolean) ?? false,
-      unique: (f.unique as boolean) ?? false,
-    })),
+    fields: fields.map(fieldDefToSchema),
     hierarchy: {
       level: (hierarchy.level as number) ?? 0,
       canContain: (hierarchy.can_contain as string[]) ?? [],
@@ -50,12 +39,17 @@ export function entityDefToSchema(id: string, def: Record<string, unknown>): Ent
   }
 }
 
-export function entitySchemaToBackend(et: EntityTypeSchema): Record<string, unknown> {
+/** An entity type as the ontology stores it. `stored`: the definition it replaces — keys the editor
+ *  doesn't hold are kept as they were, at the top level and inside its visual, hierarchy and behavior. */
+export function entitySchemaToBackend(et: EntityTypeSchema, stored: Record<string, unknown> = {}): Record<string, unknown> {
+  const storedPart = (key: string) => (stored[key] as Record<string, unknown> | undefined) ?? {}
   return {
+    ...stored,
     name: et.name,
     plural_name: et.pluralName,
     description: et.description,
     visual: {
+      ...storedPart('visual'),
       icon: et.visual.icon,
       color: et.visual.color,
       shape: et.visual.shape,
@@ -64,6 +58,7 @@ export function entitySchemaToBackend(et: EntityTypeSchema): Record<string, unkn
       show_in_minimap: et.visual.showInMinimap,
     },
     hierarchy: {
+      ...storedPart('hierarchy'),
       level: et.hierarchy.level,
       can_contain: et.hierarchy.canContain,
       can_be_contained_by: et.hierarchy.canBeContainedBy,
@@ -71,6 +66,7 @@ export function entitySchemaToBackend(et: EntityTypeSchema): Record<string, unkn
       roll_up_fields: et.hierarchy.rollUpFields ?? [],
     },
     behavior: {
+      ...storedPart('behavior'),
       selectable: et.behavior.selectable,
       draggable: et.behavior.draggable,
       expandable: et.behavior.expandable,
@@ -79,24 +75,65 @@ export function entitySchemaToBackend(et: EntityTypeSchema): Record<string, unkn
       double_click_action: et.behavior.doubleClickAction,
     },
     // FIX: Convert field properties from camelCase to snake_case
-    fields: et.fields.map(f => ({
-      id: f.id,
-      name: f.name,
-      type: f.type,
-      required: f.required,
-      show_in_node: f.showInNode,
-      show_in_panel: f.showInPanel,
-      show_in_tooltip: f.showInTooltip,
-      display_order: f.displayOrder,
-      // Stored only when on (off is the default): a type saved unchanged must read as unchanged.
-      ...(f.reconciliationKey ? { reconciliation_key: true } : {}),
-      ...(f.unique ? { unique: true } : {}),
-    })),
+    fields: et.fields.map(fieldSchemaToBackend),
   }
+}
+
+type Field = EntityTypeSchema['fields'][number]
+
+/** A type's stored field (an entity type's or a relationship type's) as the editor holds it. */
+function fieldDefToSchema(f: Record<string, unknown>): Field {
+  return {
+    id: f.id as string,
+    name: f.name as string,
+    type: ((f.type as string) ?? 'string') as Field['type'],
+    required: (f.required as boolean) ?? false,
+    showInNode: (f.show_in_node as boolean) ?? false,
+    showInPanel: (f.show_in_panel as boolean) ?? true,
+    showInTooltip: (f.show_in_tooltip as boolean) ?? false,
+    displayOrder: (f.display_order as number) ?? 0,
+    reconciliationKey: ((f.reconciliation_key ?? f.reconciliationKey) as boolean) ?? false,
+    unique: (f.unique as boolean) ?? false,
+    ...(f.format ? { format: f.format as Field['format'] } : {}),
+    ...readAllowed(f),
+  }
+}
+
+/** A field as the ontology stores it. */
+function fieldSchemaToBackend(f: Field): Record<string, unknown> {
+  return {
+    id: f.id,
+    name: f.name,
+    type: f.type,
+    required: f.required,
+    show_in_node: f.showInNode,
+    show_in_panel: f.showInPanel,
+    show_in_tooltip: f.showInTooltip,
+    display_order: f.displayOrder,
+    // Stored only when on (off is the default): a type saved unchanged must read as unchanged.
+    ...(f.reconciliationKey ? { reconciliation_key: true } : {}),
+    ...(f.unique ? { unique: true } : {}),
+    ...(f.format ? { format: f.format } : {}),
+    ...(f.allowedValues?.length ? { allowed_values: f.allowedValues } : {}),
+    ...(f.allowedValues?.length && f.allowOther ? { allow_other: true } : {}),
+  }
+}
+
+/** A stored field's allowed values (`allowed_values`, each as its text) and whether others are
+ *  accepted too — set only when it has some, so a field without them reads as it always did. */
+function readAllowed(f: Record<string, unknown>): { allowedValues?: string[]; allowOther?: boolean } {
+  const raw = f.allowed_values ?? f.allowedValues
+  const values = Array.isArray(raw)
+    ? [...new Set(raw.filter((v) => v !== null && typeof v !== 'object').map((v) => String(v).trim()).filter(Boolean))]
+    : []
+  if (values.length === 0) return {}
+  return { allowedValues: values, ...((f.allow_other ?? f.allowOther) ? { allowOther: true } : {}) }
 }
 
 export function relDefToSchema(id: string, def: Record<string, unknown>): RelTypeWithClassifications {
   const visual = (def.visual as Record<string, unknown>) ?? {}
+  const fields = Array.isArray(def.fields) ? (def.fields as Array<Record<string, unknown>>) : []
+  const labelField = (def.label_field ?? def.labelField) as string | undefined
   return {
     id,
     name: (def.name as string) ?? humanizeId(id),
@@ -119,11 +156,18 @@ export function relDefToSchema(id: string, def: Record<string, unknown>): RelTyp
     category: (def.category as RelTypeWithClassifications['category']) ?? 'association',
     direction: (def.direction as RelTypeWithClassifications['direction']) ?? 'source-to-target',
     isSystem: (def.is_system as boolean) ?? (def.isSystem as boolean) ?? false,
+    ...(labelField ? { labelField } : {}),
+    ...(fields.length ? { fields: fields.map(fieldDefToSchema) } : {}),
   }
 }
 
-export function relSchemaToBackend(rt: RelTypeWithClassifications): Record<string, unknown> {
+/** A relationship type as the ontology stores it. `stored`: the definition it replaces — keys the
+ *  editor doesn't hold are kept as they were; its label field and fields are stored only when set. */
+export function relSchemaToBackend(rt: RelTypeWithClassifications, stored: Record<string, unknown> = {}): Record<string, unknown> {
+  const kept = { ...stored }
+  for (const key of ['label_field', 'labelField', 'fields']) delete kept[key]
   return {
+    ...kept,
     name: rt.name,
     description: rt.description,
     is_containment: rt.isContainment ?? false,
@@ -143,6 +187,8 @@ export function relSchemaToBackend(rt: RelTypeWithClassifications): Record<strin
     target_types: rt.targetTypes,
     bidirectional: rt.bidirectional,
     show_label: rt.showLabel,
+    ...(rt.labelField ? { label_field: rt.labelField } : {}),
+    ...(rt.fields?.length ? { fields: rt.fields.map(fieldSchemaToBackend) } : {}),
   }
 }
 

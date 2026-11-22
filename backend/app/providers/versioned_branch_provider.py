@@ -572,6 +572,32 @@ class VersionedBranchProvider:
         provider hands them here."""
         raise NotImplementedError(self._deep_search_gap)
 
+    # The uncapped engine's reads — the same gap. A draft overlaid on this provider hands them
+    # here too: without these, a draft over a lagging main read counts, rule membership and the
+    # property catalog as an ``AttributeError`` — a 500 — where the route has a 501 for it.
+    async def deep_search_session(self, query, *, context):
+        raise NotImplementedError(self._deep_search_gap)
+
+    async def deep_search_count(self, query, *, context, advance=True):
+        raise NotImplementedError(self._deep_search_gap)
+
+    async def deep_search_membership(self, scope, items, urns, *, context):
+        raise NotImplementedError(self._deep_search_gap)
+
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False):
+        raise NotImplementedError(self._deep_search_gap)
+
+    async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
+                                 session_id=None):
+        raise NotImplementedError(self._deep_search_gap)
+
+    async def deep_search_export_open(self, session_id, *, context):
+        raise NotImplementedError(self._deep_search_gap)
+
+    async def deep_search_ancestor_counts(self, session_id, urns, *, context):
+        raise NotImplementedError(self._deep_search_gap)
+
     # ---- stats: counts + schema summaries over the composed branch state - #
     async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:
         """Node/edge counts + per-type breakdowns from the composed branch state.

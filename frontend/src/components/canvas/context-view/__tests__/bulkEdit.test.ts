@@ -11,7 +11,7 @@ import { stageNodeEdit } from '@/features/versioning/model/stageNodeEdit'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 
-import { sharedFields, stageBulkEdit } from '../bulkEdit'
+import { missingNodeIds, patchFor, previewBulkEdit, sharedFields, stageBulkEdit } from '../bulkEdit'
 
 const node = (id: string, data: Record<string, unknown>): LineageNode =>
   ({ id, type: 'generic', position: { x: 0, y: 0 }, data: { urn: id, label: id, type: 'dataset', ...data } }) as unknown as LineageNode
@@ -40,6 +40,74 @@ describe('sharedFields', () => {
     expect(byKey.sla).toMatchObject({ state: 'mixed', has: 3, total: 3 })
     expect(byKey.tier).toMatchObject({ state: 'mixed', has: 1, total: 3 })
   })
+
+  it('says how they differ: same, differs, or held by only some — and which entities hold each value', () => {
+    const { properties } = sharedFields(nodes())
+    const byKey = Object.fromEntries(properties.map((p) => [p.key, p]))
+    expect(byKey.owner).toMatchObject({ kind: 'same', type: 'text' })
+    expect(byKey.sla.kind).toBe('differs')
+    // Most held first.
+    expect(byKey.sla.groups.map((g) => [g.value, g.nodeIds])).toEqual([['1h', ['orders', 'refunds']], ['4h', ['returns']]])
+    expect(byKey.tier.kind).toBe('partial')
+    expect(missingNodeIds(byKey.tier, ['orders', 'returns', 'refunds'])).toEqual(['returns', 'refunds'])
+    expect(missingNodeIds(byKey.owner, ['orders', 'returns', 'refunds'])).toEqual([])
+  })
+
+  it('tells a number from the same digits as text, and reads the type most of the values have', () => {
+    const fields = sharedFields([
+      node('a', { properties: { rows: 10 } }), node('b', { properties: { rows: '10' } }), node('c', { properties: { rows: 12 } }),
+    ]).properties[0]!
+    expect(fields.kind).toBe('differs')
+    expect(fields.groups).toHaveLength(3)
+    expect(fields.type).toBe('number')
+  })
+
+  it('compares 5,000 entities with 50 properties each within budget', () => {
+    const many = Array.from({ length: 5000 }, (_, i) => node(`n${i}`, {
+      properties: Object.fromEntries(Array.from({ length: 50 }, (_, k) => [`p${k}`, k % 3 === 0 ? 'same' : `${k}-${i % 7}`])),
+    }))
+    const t = performance.now()
+    const { properties } = sharedFields(many)
+    expect(performance.now() - t).toBeLessThan(250)
+    expect(properties).toHaveLength(50)
+    expect(properties.find((p) => p.key === 'p0')!.kind).toBe('same')
+    expect(properties.find((p) => p.key === 'p1')!.groups).toHaveLength(7)
+  })
+})
+
+describe('patchFor', () => {
+  const props = { owner: 'ana', sla: '1h', steward: 'ops' }
+
+  it('sets only what changes, and counts the values it replaces', () => {
+    expect(patchFor(props, { set: { owner: 'ana', sla: '2h' }, unset: [] })).toEqual({ set: { sla: '2h' }, unset: [], overwritten: 1, skipped: 0 })
+  })
+
+  it('fills only where there is no value', () => {
+    expect(patchFor(props, { set: {}, fill: { owner: 'bo', tier: 'gold' }, unset: [] }).set).toEqual({ tier: 'gold' })
+  })
+
+  it('renames — leaving alone an entity that already holds the new name, unless told to replace it', () => {
+    expect(patchFor(props, { set: {}, moves: [{ from: 'owner', to: 'lead' }], unset: [] })).toMatchObject({ set: { lead: 'ana' }, unset: ['owner'] })
+    expect(patchFor(props, { set: {}, moves: [{ from: 'owner', to: 'steward' }], unset: [] })).toEqual({ set: {}, unset: [], overwritten: 0, skipped: 1 })
+    expect(patchFor(props, { set: {}, moves: [{ from: 'owner', to: 'steward', overwrite: true }], unset: [] }))
+      .toEqual({ set: { steward: 'ana' }, unset: ['owner'], overwritten: 1, skipped: 0 })
+  })
+
+  it('copies, keeping the original; a property it does not hold moves nothing', () => {
+    expect(patchFor(props, { set: {}, moves: [{ from: 'owner', to: 'lead', keep: true }], unset: [] })).toMatchObject({ set: { lead: 'ana' }, unset: [] })
+    expect(patchFor(props, { set: {}, moves: [{ from: 'tier', to: 'level' }], unset: [] }).set).toEqual({})
+  })
+
+  it('removes only what it holds', () => {
+    expect(patchFor(props, { set: {}, unset: ['sla', 'tier'] }).unset).toEqual(['sla'])
+  })
+})
+
+describe('previewBulkEdit', () => {
+  it('says how many entities change, and how many values are replaced or left alone', () => {
+    expect(previewBulkEdit(nodes(), { set: { sla: '1h' }, moves: [{ from: 'tier', to: 'owner' }], unset: [] }))
+      .toEqual({ entities: 1, changes: 2, overwritten: 1, skipped: 1 })
+  })
 })
 
 describe('stageBulkEdit', () => {
@@ -56,6 +124,15 @@ describe('stageBulkEdit', () => {
     expect(orders.unsetProperties).toEqual(['tier'])
     // The canvas shows the edit at once.
     expect(nodes().find((n) => n.id === 'returns')!.data.properties).toMatchObject({ steward: 'finance', owner: 'ana' })
+  })
+
+  it('stages a fill and a rename as each entity\'s own edit', () => {
+    stageBulkEdit(nodes(), { set: {}, fill: { tier: 'silver' }, moves: [{ from: 'sla', to: 'target' }], unset: [] })
+    const ops = stagedChangesToOps(changes()) as unknown as Array<Record<string, unknown>>
+    const returns = ops.find((o) => o.id === 'returns')!
+    expect((returns.payload as Record<string, unknown>).properties).toEqual({ tier: 'silver', target: '4h' })
+    expect(returns.unsetProperties).toEqual(['sla'])
+    expect(((ops.find((o) => o.id === 'orders')!.payload as Record<string, unknown>).properties)).toEqual({ target: '1h' })
   })
 
   it('leaves alone an entity the edit doesn\'t change', () => {

@@ -15,7 +15,9 @@ plan's targets (§9) are written in:
   object store  bytes written and read, and ``open_stream`` calls
   publish lock  how long ``_lock_graph``'s advisory lock is waited for and held
   windows       each unit of work's duration, per kind; flagged when the last decile is more than
-                20% slower than the first (work that grows with what is already there)
+                20% slower than the first (work that grows with what is already there) — and, for
+                a bulk property job's windows, the SQL statements each one sent
+  field checks  how long a publish spent judging its values by their fields' rules, page by page
 
 Usage, from the repository root, with the backend's environment (MANAGEMENT_DB_URL, FALKORDB_HOST,
 FALKORDB_PORT; OBJECT_STORE_BACKEND picks the store, ``database`` by default)::
@@ -26,6 +28,13 @@ FALKORDB_PORT; OBJECT_STORE_BACKEND picks the store, ``database`` by default)::
   python -m backend.scripts.bench_versioning run publish --check
   python -m backend.scripts.bench_versioning run project --check
   python -m backend.scripts.bench_versioning run export --check
+  python -m backend.scripts.bench_versioning run project --full --keep --label rebuild
+  python -m backend.scripts.bench_versioning run property --check
+  python -m backend.scripts.bench_versioning run draft-search --check
+  python -m backend.scripts.bench_versioning run undo --check
+  python -m backend.scripts.bench_versioning run property --check
+  python -m backend.scripts.bench_versioning run publish --field-rules fail --check
+  python -m backend.scripts.bench_versioning run publish --field-rules hold --check
   python -m backend.scripts.bench_versioning gen-package --nodes 100000 --edges 100000 \\
       --offset 100000 --out /tmp/p100k_b.zip
   python -m backend.scripts.bench_versioning run import --package /tmp/p100k_b.zip --target published --check
@@ -42,6 +51,18 @@ state file (``--state``) for the next run to pick up, and appends its result the
 writes every result as one Markdown table. Run each job in its own process: peak RSS is per process.
 ``--check`` exits non-zero when a target is missed (the targets are the plan's, for 100k+100k).
 
+After the published graph: ``run property`` opens a new draft of it and gives every node a
+property there by a bulk property job (``--op set`` writes ``bench_owner``; ``--op rename`` moves
+``owner`` to it), and that draft is the state's draft from then on. ``run draft-search`` reads the
+draft's rule counts and property catalog as the draft-aware search answers them, over the FalkorDB
+key ``run project --keep`` left of the published graph. ``run undo`` undoes that job, a window
+per commit it wrote, and checks a sample of the draft's nodes holds what it held before; an undone
+draft reads as the published graph, so a draft to search or publish is another ``run property``'s.
+``run publish --field-rules hold`` publishes the draft with a required ``bench_owner`` field on
+every type, so every page's field check runs and passes; ``--field-rules fail`` makes the
+attributes' ``bench_owner`` a number field, which the job's text breaks, so the publish is refused
+(409) and must count every attribute.
+
 What is NOT the production path, and why:
 * ``run export`` builds the views' file from a bench view (there are no views in the management DB
   to seal); the bundle is a few KB of the job's work, the data is everything else.
@@ -50,6 +71,18 @@ What is NOT the production path, and why:
   touches that follow a publish there are left out (they are per-publish, not per-entity).
 * ``run seed``/``run bootstrap`` use the env FalkorDB instance (no provider registry) and no
   rollup rebuild (a bench graph has no rollups).
+* ``run property``'s targets hook streams every live node's urn of ``main`` from the versioned
+  store (``Snapshot.iter_live``), where the API's exports the job's search (``POST
+  /search/exports``) and reads its file back; and its windows, and ``run undo``'s, are written
+  with the ``--containment-types`` given here and no ontology rules, where the API reads the data
+  source's.
+* ``run draft-search`` calls the draft provider's search methods as ``AdvancedSearchService``'s
+  ``counts`` and ``catalog`` call them, over a ``FalkorDBProvider`` of the key (env instance, no
+  provider registry), in the whole data source's scope (no view to resolve). ``main``'s counts and
+  catalog are read to the end first, as ``main``'s own readers leave them (their requests are
+  reported apart), so the draft's requests are the draft's correction.
+* ``run publish --field-rules`` gives the publish its field rules here, where the API's hook reads
+  them from the data source's ontology; a refusal is the job's answer, as the API's hook gives it.
 * ``e2e`` does not kill or terminate lane workers (``--kill``/``--term`` in the plan): that needs
   the workers' processes, which a client of the HTTP API does not have.
 """
@@ -107,6 +140,23 @@ TARGETS: Dict[str, List[Tuple[str, str, Any, str]]] = {
     "readmodes": [("read_errors", "==", 0, "no read failed, in any mode"),
                   ("falkor_eq_pg", "==", True, "FalkorDB == Postgres after every mode"),
                   ("beside_exact", "==", True, "switch when ready: one whole version at a time")],
+    # Held at any size: a window is PROPERTY_JOB_WINDOW entities, a request a page of the draft's.
+    # A window sent 45 statements at 10k and at 100k: 100 leaves room for the lease's heartbeats.
+    "property": [("rss_peak_mb", "<=", 512, "RSS ≤512 MB"),
+                 ("window_max_s", "<=", 15, "no window >15 s"),
+                 ("window_statements_max", "<=", 100, "≤100 SQL statements a window"),
+                 ("changed_all", "==", True, "every node changed")],
+    # A window per commit the job wrote: as the commit wrote it, as it was before, as it is now.
+    "undo": [("rss_peak_mb", "<=", 512, "RSS ≤512 MB"),
+             ("window_max_s", "<=", 15, "no window >15 s"),
+             ("window_statements_max", "<=", 100, "≤100 SQL statements a window"),
+             ("changed_all", "==", True, "every node the job changed put back"),
+             ("restored_ok", "==", True, "a sample holds what it held before the job")],
+    "draft-search": [("requests", "<=", 60, "answered within 60 requests"),
+                     ("answered_ok", "==", True, "exact, or main's with the cutoff note past it"),
+                     ("rss_peak_mb", "<=", 512, "RSS ≤512 MB")],
+    "publish-fields": [("rss_peak_mb", "<=", 1024, "RSS ≤1 GB"),
+                       ("refusal_ok", "==", True, "refused only as the rules ask, counting all")],
     "bootstrap": [("pause_s", "<=", 10, "pauses ≤10 s"),
                   ("version_rows_at_pause", "==", 0, "0 version rows at the pause"),
                   ("after_decision_s", "<=", 120, "≤2 min after the decision"),
@@ -200,6 +250,8 @@ class Probes:
         self.phase = "start"
         self.marks: List[Tuple[str, float]] = [("start", self.started)]
         self.windows: Dict[str, List[float]] = {}
+        self.window_statements: Dict[str, List[int]] = {}
+        self.field_checks: List[float] = []
         self.statements: Dict[str, int] = {}
         self.falkor: Dict[str, List[float]] = {}
         self.lags: List[float] = []
@@ -250,6 +302,7 @@ class Probes:
 
         from backend.app.services.versioning.bootstrap_worker import BootstrapRunner
         from backend.app.services.versioning.import_export.import_worker import ImportWorker
+        from backend.app.services.versioning.import_export.property_job import PropertyJobWorker
         from backend.app.services.versioning.job_lease import Lease
         from backend.app.services.versioning.service import GraphVersioningService
 
@@ -318,6 +371,29 @@ class Probes:
                     probes.record_window(phase, time.monotonic() - t)
             return _run_phase
 
+        def property_window(original):
+            # One window: a chunk of the job's targets read from the draft — or, an undo's, one
+            # commit of the job it undoes — planned and written as one commit with the checkpoint.
+            async def _next_window(worker, job_id, job, context):
+                t, sent = time.monotonic(), sum(probes.statements.values())
+                more = await original(worker, job_id, job, context)
+                if more:
+                    label = "undo" if job["op"]["kind"] == "undo" else "property"
+                    probes.record_window(label, time.monotonic() - t)
+                    probes.window_statements.setdefault(label, []).append(sum(probes.statements.values()) - sent)
+                return more
+            return _next_window
+
+        def field_check(original):
+            # A publish's field check: once for a batch publish, once a page for a paged one.
+            async def _field_violations(svc, *args, **kwargs):
+                t = time.monotonic()
+                try:
+                    return await original(svc, *args, **kwargs)
+                finally:
+                    probes.field_checks.append(time.monotonic() - t)
+            return _field_violations
+
         def graph_lock(original):
             # Transaction-scoped: held from here until the transaction that took it ends.
             take = original.__func__
@@ -343,6 +419,8 @@ class Probes:
         self._patch(ImportWorker, "_flush", parse_batch)
         self._patch(ImportWorker, "_stage", import_stage)
         self._patch(BootstrapRunner, "_run_phase", bootstrap_unit)
+        self._patch(PropertyJobWorker, "_next_window", property_window)
+        self._patch(GraphVersioningService, "_field_violations", field_check)
         self._patch(GraphVersioningService, "_lock_graph", graph_lock)
         if self.store is not None:
             self.store.probes = self
@@ -413,6 +491,10 @@ class Probes:
                      "waitMaxSecs": round(max((w for w, _ in self.locks), default=0.0), 2),
                      "holdMaxSecs": round(max((h for _, h in self.locks), default=0.0), 2)}
             if self.locks else None,
+            "windowStatements": {label: {"n": len(ns), "p50": _pct(ns, 0.5), "max": max(ns)}
+                                 for label, ns in self.window_statements.items()},
+            "fieldChecks": {"n": len(self.field_checks), "secs": round(sum(self.field_checks), 2),
+                            "maxSecs": round(max(self.field_checks), 2)} if self.field_checks else None,
         }
 
 
@@ -455,6 +537,9 @@ def _metrics(summary: Dict[str, Any]) -> Dict[str, Any]:
         "decile_growth": max(growth) if growth else None,
         **({"lock_hold_s": summary["lock"]["holdMaxSecs"], "lock_wait_s": summary["lock"]["waitMaxSecs"]}
            if summary["lock"] else {}),
+        **({"window_statements_max": max(w["max"] for w in summary["windowStatements"].values())}
+           if summary["windowStatements"] else {}),
+        **({"field_check_s": summary["fieldChecks"]["secs"]} if summary["fieldChecks"] else {}),
     }
 
 
@@ -779,12 +864,12 @@ async def run_claimed(runner, job_id: str, types: Sequence[str], ready: str):
             keeper.stop()
 
 
-def _service(store, svc=None, publish_hook=None):
+def _service(store, svc=None, publish_hook=None, **hooks):
     from backend.app.services.versioning.import_export.service import ImportExportService
     from backend.app.services.versioning.service import GraphVersioningService
 
     return ImportExportService(versioning=svc or GraphVersioningService(), store=store,
-                               publish_hook=publish_hook)
+                               publish_hook=publish_hook, **hooks)
 
 
 def _result(run: str, probed: Dict[str, Any], extra: Dict[str, Any], **info) -> Dict[str, Any]:
@@ -846,7 +931,7 @@ async def run_inspect(*, package: str, store: CountingStore) -> Dict[str, Any]:
                    summary=job.get("summary"))
 
 
-async def _live_count(graph_id: str, branch_id: str) -> int:
+async def _live_count(graph_id: str, branch_id: str, kind: Optional[str] = None) -> int:
     from sqlalchemy import func, select
 
     from backend.app.services.versioning import db
@@ -855,7 +940,8 @@ async def _live_count(graph_id: str, branch_id: str) -> int:
     async with db.graphver_session() as s:
         return int((await s.execute(select(func.count()).select_from(EntityHeadORM).where(
             EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
-            EntityHeadORM.is_tombstone.is_(False)))).scalar_one())
+            EntityHeadORM.is_tombstone.is_(False),
+            *([EntityHeadORM.entity_kind == kind] if kind else [])))).scalar_one())
 
 
 async def run_import(*, upload_key: str, store: CountingStore, graph_id: Optional[str] = None) -> Dict[str, Any]:
@@ -898,28 +984,65 @@ async def run_import(*, upload_key: str, store: CountingStore, graph_id: Optiona
                    draft={"graphId": graph_id, "branchId": draft, "dataSourceId": ds})
 
 
+def bench_field_rules(mode: str):
+    """The field rules a ``--field-rules`` publish holds the draft to: ``hold`` — ``bench_owner``
+    required on every type (every node a field check judges, and passes); ``fail`` — the
+    attributes' ``bench_owner`` a number, which the job's text is not (every attribute refused)."""
+    from backend.app.services.versioning.ontology import EntityRule, FieldRule, OntologyRules
+
+    if mode == "hold":
+        owner = FieldRule(type="text", required=True, name="Bench owner")
+        return OntologyRules(entity_types={t: EntityRule(fields={"bench_owner": owner})
+                                           for t in ("layer", "object", "group", "attribute")})
+    number = FieldRule(type="number", name="Bench owner")
+    return OntologyRules(entity_types={"attribute": EntityRule(fields={"bench_owner": number})})
+
+
+async def _type_count(graph_id: str, branch_id: str, entity_type: str) -> int:
+    """The live nodes of ``entity_type`` the branch reads (a draft: main where it began, then its
+    own changes)."""
+    from backend.app.services.versioning.import_export.snapshot import open_snapshot
+
+    snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
+    n = 0
+    async for page in snap.iter_live("node"):
+        n += sum(w.entity_type == entity_type for w in page)
+    return n
+
+
 async def run_publish(*, graph_id: str, branch_id: str, store: CountingStore,
-                      containment: Sequence[str] = (CONTAINS,)) -> Dict[str, Any]:
+                      containment: Sequence[str] = (CONTAINS,),
+                      field_rules: Optional[str] = None) -> Dict[str, Any]:
     """Publish the draft by a publish job, as ``POST …/publish`` queues a large one. The hook is the
-    API's ``_publish_from_job`` publish, with the containment types given here."""
+    API's ``_publish_from_job`` publish, with the containment types given here — and, with
+    ``field_rules`` (``hold``/``fail``), the rules of :func:`bench_field_rules`, whose refusal is the
+    job's answer as the API's hook gives it (409 ``field_violation``: ``fail`` must be refused,
+    naming 100 and counting every attribute the draft holds)."""
     from backend.app.services.versioning import job_lease, models
+    from backend.app.services.versioning.errors import FieldViolation
     from backend.app.services.versioning.import_export.runner import TransferRunner
     from backend.app.services.versioning.service import GraphVersioningService
 
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
+    rules = bench_field_rules(field_rules) if field_rules else None
 
     async def publish(job: Dict[str, Any]) -> Dict[str, Any]:
         if job.get("mergedCommitId"):
             return {"commitId": job["mergedCommitId"]}
-        return {"commitId": await svc.publish(
-            graph_id=job["graphId"], branch_id=job["branchId"], actor=job["actor"],
-            message=job["message"], containment_edge_types=list(containment), queued=True)}
+        try:
+            return {"commitId": await svc.publish(
+                graph_id=job["graphId"], branch_id=job["branchId"], actor=job["actor"],
+                message=job["message"], containment_edge_types=list(containment), queued=True,
+                ontology_rules=rules)}
+        except FieldViolation as exc:              # as the API's _domain_errors answers it
+            return {"error": {"status": exc.status_code, "detail": exc.detail}}
 
     ie = _service(store, svc, publish_hook=publish)
     meta = await svc.get_graph(graph_id)
     main = await svc.main_branch_id(graph_id)
     before = await _live_count(graph_id, main)
+    expected = await _type_count(graph_id, branch_id, "attribute") if field_rules == "fail" else None
     created = await ie.create_publish_job(workspace_id=meta["workspace_id"], data_source_id=meta["data_source_id"],
                                           graph_id=graph_id, branch_id=branch_id, actor=ACTOR,
                                           message="bench publish")
@@ -929,10 +1052,145 @@ async def run_publish(*, graph_id: str, branch_id: str, store: CountingStore,
         await run_claimed(TransferRunner(lambda: ie), job_id, job_lease.TRANSFER_TYPES, job_lease.TRANSFER_READY)
     job = await ie.get_job(job_id)
     after = await _live_count(graph_id, main)
-    return _result("publish", probes.summary(), {"changes": after - before},
-                   status=job["status"], error=job.get("errorMessage"), jobId=job_id,
-                   published={"graphId": graph_id, "commitId": (job.get("summary") or {}).get("commitId"),
-                              "entities": after})
+    published = {"graphId": graph_id, "commitId": (job.get("summary") or {}).get("commitId"),
+                 "entities": after}
+    if not field_rules:
+        return _result("publish", probes.summary(), {"changes": after - before},
+                       status=job["status"], error=job.get("errorMessage"), jobId=job_id, published=published)
+    error = (job.get("summary") or {}).get("error") or {}
+    detail = error.get("detail") if isinstance(error.get("detail"), dict) else {}
+    refused = error.get("status") == 409 and detail.get("type") == "field_violation"
+    named = len(detail.get("violations") or [])
+    extra = {"changes": after - before, "refusal_total": detail.get("total"), "refusal_named": named,
+             "refusal_expected": expected,
+             # hold: published. fail: refused, naming the first 100 and counting every attribute.
+             "refusal_ok": (job["status"] == "completed") if field_rules == "hold" else (
+                 refused and detail.get("total") == expected and named == min(100, expected))}
+    return _result("publish-fields", probes.summary(), extra,
+                   status="refused" if refused else job["status"],
+                   expected="refused" if field_rules == "fail" else "completed",
+                   error=None if refused else job.get("errorMessage"), jobId=job_id, fieldRules=field_rules,
+                   byField=detail.get("byField"),
+                   **({"published": published} if job["status"] == "completed" else {}))
+
+
+#: The ops ``run property --op`` runs over every node: ``bench_owner`` written, or ``owner`` moved there.
+PROPERTY_OPS = {"set": {"kind": "set", "key": "bench_owner", "value": "bench"},
+                "rename": {"kind": "rename", "key": "owner", "to": "bench_owner"}}
+
+
+def _main_urns(containment: Sequence[str]):
+    """The bench's bulk property jobs' hooks: their targets — every live node of ``main``, by urn,
+    a page at a time from the versioned store (where the API's exports the job's search) — and
+    what their windows are written with (the containment types given here, no ontology rules)."""
+    from backend.app.services.versioning.import_export.snapshot import open_snapshot
+
+    async def targets(job: Dict[str, Any]) -> AsyncIterator[str]:
+        snap = await open_snapshot(graph_id=job["graphId"])
+        async for page in snap.iter_live("node"):
+            for w in page:
+                yield w.urn or f"gv:{w.entity_id}"
+
+    async def write_context(_job: Dict[str, Any]) -> Dict[str, Any]:
+        return {"ontology_rules": None, "containment": list(containment), "node_identity": None}
+
+    return {"property_targets": targets, "property_write_context": write_context}
+
+
+async def run_bulk_job(run: str, ie, job_id: str, store: CountingStore, *, expect_changed: int,
+                       **info) -> Dict[str, Any]:
+    """A queued bulk property job claimed and run on its lease by the transfer lane's runner,
+    measured, with what it did — ``changed`` (all of ``expect_changed``?), refused, commits — and
+    each window's time and statements in its probes. Any job the property worker runs, whatever
+    made it."""
+    from backend.app.services.versioning import job_lease
+    from backend.app.services.versioning.import_export.runner import TransferRunner
+
+    async with probing(store) as probes:
+        await run_claimed(TransferRunner(lambda: ie), job_id, job_lease.TRANSFER_TYPES, job_lease.TRANSFER_READY)
+    job = await ie.get_property_job(job_id)
+    summary = job.get("summary") or {}
+    probed = probes.summary()
+    # Held to its own windows' growth: its target files' writes are a few milliseconds each.
+    windows = probed["windows"].get("undo" if (job.get("op") or {}).get("kind") == "undo" else "property") or {}
+    extra = {"decile_growth": windows.get("decileGrowth"),
+             "changed": summary.get("changed"), "expected_changed": expect_changed,
+             "changed_all": summary.get("changed") == expect_changed,
+             "refused": (summary.get("refused") or {}).get("count"), "commits": summary.get("commits")}
+    return _result(run, probed, extra, status=job["status"],
+                   error=(job.get("error") or {}).get("message"), jobId=job_id, summary=summary, **info)
+
+
+async def run_property(*, graph_id: str, store: CountingStore, op: str = "set",
+                       containment: Sequence[str] = (CONTAINS,)) -> Dict[str, Any]:
+    """A new draft of the published graph, and a bulk property job on it as ``POST
+    …/property-jobs`` makes one: ``PROPERTY_OPS[op]`` over every entity a search of the whole data
+    source matches — every node of ``main`` (the targets hook: :func:`_main_urns`) — written a
+    window of ``PROPERTY_JOB_WINDOW`` at a time, each window one commit on the draft."""
+    from pydantic import TypeAdapter
+
+    from backend.app.services.versioning import models
+    from backend.app.services.versioning.service import GraphVersioningService
+    from backend.common.models.property_job import PropertyJobOp
+    from backend.common.models.search import Predicate
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    ie = _service(store, svc, **_main_urns(containment))
+    meta = await svc.get_graph(graph_id)
+    nodes = await _live_count(graph_id, await svc.main_branch_id(graph_id), kind="node")
+    draft = await svc.open_draft(graph_id=graph_id, owner=ACTOR, name="Bulk property: bench")
+    predicate = TypeAdapter(Predicate).validate_python({"kind": "hasProperty", "key": "owner"})
+    created = await ie.create_property_job(
+        workspace_id=meta["workspace_id"], data_source_id=meta["data_source_id"], graph_id=graph_id,
+        branch_id=draft, actor=ACTOR, op=PropertyJobOp.model_validate(PROPERTY_OPS[op]).wire(),
+        target={"viewId": "view_bench", "scopeMode": "data_source",
+                "predicate": predicate.model_dump(mode="json", by_alias=True)},
+        message=None, key=f"bench-property:{draft}")
+    return await run_bulk_job("property", ie, created["job_id"], store, expect_changed=nodes, op=op,
+                              draft={"graphId": graph_id, "branchId": draft,
+                                     "dataSourceId": meta["data_source_id"]})
+
+
+#: Entities ``run undo`` reads back after it, to check they hold what they held before the job.
+UNDO_SAMPLE = 500
+
+
+async def run_undo(*, graph_id: str, branch_id: str, job_id: str, changed: int, store: CountingStore,
+                   containment: Sequence[str] = (CONTAINS,)) -> Dict[str, Any]:
+    """An undo of bulk property job ``job_id`` (``run property``'s), as ``POST
+    …/property-jobs/{jobId}/undo`` makes one (``ImportExportService.create_undo_job``): a window
+    per commit the job wrote, newest first, each read as the commit wrote it, as it was just before
+    it and as the draft holds it now. After it, a sample of the draft's nodes (``UNDO_SAMPLE``) must
+    hold the properties ``main`` does, as they did before the job: its draft began at main's head."""
+    from sqlalchemy import func, select
+
+    from backend.app.services.versioning import db, models
+    from backend.app.services.versioning.models import EntityHeadORM
+    from backend.app.services.versioning.service import GraphVersioningService
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    ie = _service(store, svc, **_main_urns(containment))      # its windows written as the job's
+    meta = await svc.get_graph(graph_id)
+    created = await ie.create_undo_job(
+        workspace_id=meta["workspace_id"], data_source_id=meta["data_source_id"], graph_id=graph_id,
+        job_id=job_id, actor=ACTOR, key=f"bench-undo:{job_id}")
+    result = await run_bulk_job("undo", ie, created["job_id"], store, expect_changed=changed,
+                                sourceJobId=job_id)
+    async with db.graphver_session() as s:
+        sample = list((await s.execute(select(EntityHeadORM.entity_id).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+            EntityHeadORM.entity_kind == "node").order_by(func.random()).limit(UNDO_SAMPLE))).scalars())
+    differ = 0
+    for eid in sample:
+        now = await svc.entity_value(graph_id=graph_id, entity_id=eid, branch_id=branch_id)
+        was = await svc.entity_value(graph_id=graph_id, entity_id=eid)
+        differ += (now or {}).get("properties") != (was or {}).get("properties")
+    result["metrics"].update(restored_sample=len(sample), restored_differ=differ,
+                             restored_ok=bool(sample) and not differ)
+    result["checks"] = evaluate("undo", result["metrics"])
+    return result
 
 
 async def run_export(*, graph_id: str, store: CountingStore, out: Optional[str] = None) -> Dict[str, Any]:
@@ -1066,7 +1324,8 @@ async def run_project(*, graph_id: str, keep: bool = False, full: bool = False,
     """The projector's passes over the graph's last commit — the window a publish leaves it — into a
     new ``gvt_bench_*`` key (deleted after unless ``keep``): the graph is pinned there, owned and
     projected up to the commit before, so the passes write that one window and verify it. With
-    ``full``, projected from nothing instead: the full reconcile a first seed or a rebuild runs."""
+    ``full``, projected from nothing instead: the full reconcile a first seed or a rebuild runs. A
+    pass that stops at ``PROJECTION_PASS_MAX_SECS`` is followed by the next, as the lane runs it."""
     from backend.app.services.versioning import db, models
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
     from backend.app.services.versioning.projection import FalkorProjector, _write_marker
@@ -1088,24 +1347,204 @@ async def run_project(*, graph_id: str, keep: bool = False, full: bool = False,
         await _write_marker(client, head - 1, 0)   # the key as the pass before left it
     try:
         async with probing() as probes:
-            projector, passes = FalkorProjector(factory, on_rollups_stale=_noop), 1
-            out = await projector.project_graph(graph_id)
-            # A pass past its time (GRAPHVER_PROJECTION_PASS_MAX_SECS) stops at a page with its
-            # cursor written, and the worker runs the next at once, resuming there: so does this.
-            while out.get("partial"):
-                out = await projector.project_graph(graph_id)
-                passes += 1
+            projector = FalkorProjector(factory, on_rollups_stale=_noop)
+            out, passes = await projector.project_graph(graph_id), 1
+            while out.get("partial"):       # past PROJECTION_PASS_MAX_SECS: the lane's next pass resumes
+                out, passes = await projector.project_graph(graph_id), passes + 1
         pg, fc = await _counts(graph_id, client, owned=True)
     finally:
         if not keep:
             with contextlib.suppress(Exception):
                 await client.delete()
     done = out.get("projected") == head and not out.get("verify_error")
-    return _result("project", probes.summary(), {"falkor_eq_pg": pg == fc, "pg": list(pg), "falkor": list(fc),
-                                                 "passes": passes},
+    return _result("project", probes.summary(),
+                   {"falkor_eq_pg": pg == fc, "pg": list(pg), "falkor": list(fc), "passes": passes},
                    status="completed" if done else "failed", error=out.get("verify_error"),
                    projected={"graphId": graph_id, "seq": out.get("projected"),
                               "falkorGraph": name if keep else None})
+
+
+#: The rules ``run draft-search`` counts: one every node the job changed now matches (the key it
+#: wrote), one a level type and one a value the job leaves alone — or, renamed away, takes from
+#: every node that held it.
+SEARCH_RULES = {"benchOwner": {"kind": "hasProperty", "key": "bench_owner"},
+                "attributes": {"kind": "entityType", "op": "in", "values": ["attribute"]},
+                "team3": {"kind": "property", "key": "owner", "op": "eq", "value": "team3"}}
+#: The waits the client asks for: a counts request's first and later ones (``ruleCounts.ts``; the
+#: API moves counts on for 5 s at most), and a catalog request's (``propertyCatalog.ts``).
+COUNT_WAITS_MS = (1000, 5000)
+CATALOG_WAIT_MS = 800
+#: Requests after which a read is given up on (its target is 60).
+REQUESTS_MAX = 400
+
+
+async def _counts_request(overlay, scope, rules: Dict[str, Any], sessions: Dict[str, str], context,
+                          wait_ms: int) -> Dict[str, Dict[str, Any]]:
+    """One counts request, the draft provider's calls as ``AdvancedSearchService.counts`` makes
+    them: each rule's count on main read where it has got to, the draft's correction for every
+    rule at once (half the wait while main's counts move too), then main's unfinished counts moved
+    on. Each rule's main count, the draft's delta, the count shown, whether it is complete and its
+    note (approximate)."""
+    from backend.common.models.search import SearchOptions, SearchQuery
+
+    deadline = time.monotonic() + min(wait_ms / 1000.0, 5.0)
+
+    def query(rid: str, wait: int):
+        return SearchQuery(predicate=rules[rid], scope=scope,
+                           options=SearchOptions(results="hits", wait_ms=wait, session_id=sessions.get(rid)))
+
+    answers = {rid: await overlay.deep_search_count(query(rid, 0), context=context, advance=False)
+               for rid in rules}
+    pending = [rid for rid in rules if answers[rid]["status"] != "complete"]
+    drafted = await overlay.deep_search_count_deltas(
+        scope, list(rules.items()), context=context,
+        wait_ms=max(0, int((deadline - time.monotonic()) * 1000 * (0.5 if pending else 1.0))))
+    for n, rid in enumerate(pending):
+        left = max(0, int((deadline - time.monotonic()) * 1000))
+        if n and not left:
+            break
+        sessions[rid] = answers[rid]["sessionId"] or sessions.get(rid)
+        answers[rid] = await overlay.deep_search_count(query(rid, left), context=context)
+    drafted = drafted or {"deltas": {}, "approximate": {}, "status": "complete"}   # None: main's
+    out = {}
+    for rid, answer in answers.items():
+        sessions[rid] = answer["sessionId"] or sessions.get(rid)
+        delta = drafted["deltas"].get(rid, 0)
+        out[rid] = {"main": answer["count"], "delta": delta, "count": max(0, answer["count"] + delta),
+                    "complete": answer["status"] == drafted["status"] == "complete",
+                    "note": drafted["approximate"].get(rid)}
+    return out
+
+
+async def run_draft_search(*, graph_id: str, branch_id: str, falkor_graph: str, changed: int,
+                           op: str = "set") -> Dict[str, Any]:
+    """The draft's rule counts (:data:`SEARCH_RULES`) and property catalog, as the draft-aware
+    search answers them (``providers.draft_search``): the draft's provider over a FalkorDB provider
+    of ``falkor_graph`` (main, projected), each request as the client follows it (:data:`COUNT_WAITS_MS`,
+    :data:`CATALOG_WAIT_MS`) until it is complete. Main's counts and catalog are read to the end
+    first, unmeasured, as main's own readers leave them.
+
+    The draft changed ``changed`` nodes (``run property``'s ``op``). Within ``DRAFT_SEARCH_MAX_DELTA``
+    its answers must be exact: each count moved by what the job did, and the catalog holding
+    ``bench_owner`` on every node it changed. Past it, main's, every rule and the catalog with the
+    cutoff note (``draft_search.TOO_LARGE`` / ``TOO_LARGE_CATALOG``). Also measured: the cache Redis' memory (where the
+    sessions are kept) before and after the draft's requests."""
+    from falkordb.asyncio import FalkorDB
+    from pydantic import TypeAdapter
+
+    from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+    from backend.app.providers.draft_search import TOO_LARGE, TOO_LARGE_CATALOG
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.app.services.versioning import config as vconfig
+    from backend.app.services.versioning import models
+    from backend.app.services.versioning.service import GraphVersioningService
+    from backend.common.models.search import Predicate, SearchOptions, SearchQuery, SearchScope
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    host, port = os.getenv("FALKORDB_HOST", "localhost"), int(os.getenv("FALKORDB_PORT", "6379"))
+    # Its provider would make an empty key of a name that is gone (the integration suite's session
+    # end drops every gvt_* key of the FalkorDB it is pointed at).
+    if falkor_graph not in {k.decode() if isinstance(k, bytes) else k
+                            for k in await FalkorDB(host=host, port=port).list_graphs()}:
+        raise SystemExit(f"{falkor_graph} is not in FalkorDB any more: run project --full --keep again")
+    base = FalkorDBProvider(host=host, port=port, graph_name=falkor_graph)
+    await base._ensure_connected()
+    rules = {rid: TypeAdapter(Predicate).validate_python(p) for rid, p in SEARCH_RULES.items()}
+    scope = SearchScope(viewId="view_bench", scopeMode="data_source")
+    tag = uuid.uuid4().hex[:12]                  # its own sessions: nothing an earlier run left answers
+    context = SearchRunContext(data_version=f"{tag}.bench", scope_hash=f"bench-{tag}")
+
+    def overlay():
+        # One a request, as the API's engine makes one; the draft's patch set is shared by all.
+        p = DraftOverlayProvider(base, svc=svc, graph_id=graph_id, branch_id=branch_id)
+        p.set_containment_edge_types([CONTAINS])
+        return p
+
+    main_ctx = overlay()._main_context(context)
+    main_requests, main_counts = 0, {}
+    for rid in rules:
+        session = None
+        while True:
+            main_requests += 1
+            answer = await base.deep_search_count(SearchQuery(
+                predicate=rules[rid], scope=scope,
+                options=SearchOptions(results="hits", wait_ms=COUNT_WAITS_MS[1], session_id=session)),
+                context=main_ctx)
+            session = answer["sessionId"]
+            if answer["status"] == "complete":
+                main_counts[rid] = answer["count"]
+                break
+    session = None
+    while True:
+        main_requests += 1
+        main_catalog = await base.deep_search_catalog(scope, context=main_ctx, wait_ms=CATALOG_WAIT_MS,
+                                                      session_id=session)
+        session = main_catalog.get("sessionId")
+        if main_catalog.get("status") == "complete":
+            break
+
+    async def redis_mb() -> Optional[float]:
+        if base._redis is None:
+            return None
+        return round((await base._redis.info("memory"))["used_memory"] / 2 ** 20, 1)
+
+    redis_before = await redis_mb()
+    requests = {"counts": 0, "catalog": 0}
+    async with probing() as probes:
+        probes.mark("counts")
+        sessions: Dict[str, str] = {}
+        while requests["counts"] < REQUESTS_MAX:
+            t = time.monotonic()
+            counts = await _counts_request(overlay(), scope, rules, sessions, context,
+                                           COUNT_WAITS_MS[min(requests["counts"], 1)])
+            probes.record_window("counts", time.monotonic() - t)
+            requests["counts"] += 1
+            if all(c["complete"] for c in counts.values()):
+                break
+        probes.mark("catalog")
+        session = None
+        while requests["catalog"] < REQUESTS_MAX:
+            t = time.monotonic()
+            catalog = await overlay().deep_search_catalog(scope, context=context, wait_ms=CATALOG_WAIT_MS,
+                                                          session_id=session)
+            probes.record_window("catalog", time.monotonic() - t)
+            requests["catalog"] += 1
+            session = catalog.get("sessionId")
+            if catalog.get("status") == "complete":
+                break
+    redis_after = await redis_mb()
+
+    note = TOO_LARGE.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA)
+    past = changed > vconfig.DRAFT_SEARCH_MAX_DELTA
+    want = {"benchOwner": changed, "attributes": 0, "team3": -main_counts["team3"] if op == "rename" else 0}
+    done = all(c["complete"] for c in counts.values())
+    if done and all(c["note"] == note for c in counts.values()):
+        counts_answer = "cutoff"
+    elif done and all(c["note"] is None and c["delta"] == want[rid] for rid, c in counts.items()):
+        counts_answer = "exact"
+    else:
+        counts_answer = "wrong"
+    held = {p["key"]: p["count"] for p in catalog.get("properties") or []}
+    if catalog.get("status") != "complete":
+        catalog_answer = "wrong"
+    elif TOO_LARGE_CATALOG.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA) in (catalog.get("notes") or []):
+        catalog_answer = "cutoff"
+    else:
+        catalog_answer = "exact" if held.get("bench_owner") == changed else "wrong"
+    expected = "cutoff" if past else "exact"
+    extra = {"requests": max(requests.values()), "counts_requests": requests["counts"],
+             "catalog_requests": requests["catalog"], "main_requests": main_requests,
+             "counts_answer": counts_answer, "catalog_answer": catalog_answer, "draft_changed": changed,
+             "answered_ok": counts_answer == catalog_answer == expected,
+             "redis_delta_mb": None if redis_before is None else round(redis_after - redis_before, 1)}
+    return _result("draft-search", probes.summary(), extra, status="completed" if done else "running",
+                   counts=counts, expectedDeltas=want, mainCounts=main_counts,
+                   catalog={"status": catalog.get("status"), "entities": catalog.get("entities"),
+                            "benchOwner": held.get("bench_owner"), "notes": catalog.get("notes"),
+                            "progress": catalog.get("progress")},
+                   redisMb={"before": redis_before, "after": redis_after})
 
 
 async def run_bootstrap(*, graph: str, auto_decide: bool = True, factory=None) -> Dict[str, Any]:
@@ -1649,8 +2088,10 @@ def markdown(results: List[Dict[str, Any]]) -> str:
     lines = ["| run | target | actual | ok |", "|---|---|---|---|"]
     for r in results:
         name = r.get("label") or r["run"]
-        done = r.get("status") == "completed"
-        lines.append(f"| **{name}** | completes | {r.get('status')} | {'✅' if done else '❌'} |")
+        expected = r.get("expected") or "completed"            # a refusal asked for: refused
+        done = r.get("status") == expected
+        lines.append(f"| **{name}** | {'completes' if expected == 'completed' else 'is ' + expected} "
+                     f"| {r.get('status')} | {'✅' if done else '❌'} |")
         for c in r["checks"]:
             lines.append(f"| {name} | {c['label']} ({c['metric']} {c['target']}) | {_fmt(c['actual'])} "
                          f"| {'✅' if c['ok'] else '❌'} |")
@@ -1668,6 +2109,12 @@ def markdown(results: List[Dict[str, Any]]) -> str:
                 f"{k} n={w['n']} p50 {w['p50']} s max {w['max']} s"
                 + (f" decile growth {w['decileGrowth']:+.0%}" if w["decileGrowth"] is not None else "")
                 + (" ⚠" if w["flagged"] else "") for k, w in p["windows"].items()))
+        if p.get("windowStatements"):
+            lines.append("- statements a window: " + "; ".join(
+                f"{k} p50 {w['p50']} max {w['max']}" for k, w in p["windowStatements"].items()))
+        if p.get("fieldChecks"):
+            f = p["fieldChecks"]
+            lines.append(f"- field checks: {f['n']} in {f['secs']} s (longest {f['maxSecs']} s)")
         lines.append(f"- statements: {_fmt(p['statements']['total'])} "
                      f"({', '.join(f'{k} {_fmt(v)}' for k, v in p['statements'].items() if k != 'total')})")
         lines.append(f"- FalkorDB: {_fmt(p['falkor']['queries'])} queries, {_fmt(p['falkor']['secs'])} s")
@@ -1733,8 +2180,10 @@ def _emit(result: Dict[str, Any], args, state: Dict[str, Any]) -> int:
             f.write(text)
     print(text)
     missed = [c for c in result["checks"] if not c["ok"]]
-    if result.get("status") not in ("completed", "paused"):     # paused: a bootstrap not decided
-        print(f"!! {result['run']} did not complete: {result.get('status')} {result.get('error') or ''}")
+    # paused: a bootstrap not decided; refused: a publish asked to be (``--field-rules fail``)
+    if result.get("status") not in (result.get("expected") or "completed", "paused"):
+        print(f"!! {result['run']} ended {result.get('status')}, not {result.get('expected') or 'completed'}: "
+              f"{result.get('error') or ''}")
         return 1
     if args.check and missed:
         print("!! targets missed: " + "; ".join(f"{c['label']}: {_fmt(c['actual'])}" for c in missed))
@@ -1782,7 +2231,8 @@ async def _run(args) -> int:
             if not (graph_id and branch_id):
                 raise SystemExit("run publish needs a draft: run import first, or pass --graph-id and --branch-id")
             result = await run_publish(graph_id=graph_id, branch_id=branch_id, store=store,
-                                       containment=args.containment_types.split(","))
+                                       containment=args.containment_types.split(","),
+                                       field_rules=args.field_rules)
             if result["status"] == "completed":
                 state["published"] = result["published"]
         elif args.kind == "project":
@@ -1790,6 +2240,8 @@ async def _run(args) -> int:
             if not graph_id:
                 raise SystemExit("run project needs a published graph: run publish first, or pass --graph-id")
             result = await run_project(graph_id=graph_id, keep=args.keep, full=args.full)
+            if result["status"] == "completed" and args.keep:
+                state["projected"] = result["projected"]       # for run draft-search
         elif args.kind == "readmodes":
             graph_id = args.graph_id or (state.get("published") or {}).get("graphId")
             if not graph_id:
@@ -1801,6 +2253,37 @@ async def _run(args) -> int:
                 graph_id=graph_id, store=store, nodes=args.nodes, edges=args.edges,
                 modes=[m for m in args.modes.split(",") if m], changes=args.changes,
                 readers=args.readers, timeout_s=args.timeout, reader_procs=args.reader_procs)
+        elif args.kind == "property":
+            graph_id = args.graph_id or (state.get("published") or {}).get("graphId")
+            if not graph_id:
+                raise SystemExit("run property needs a published graph: run publish first, or pass --graph-id")
+            result = await run_property(graph_id=graph_id, store=store, op=args.op,
+                                        containment=args.containment_types.split(","))
+            if result["status"] == "completed":
+                # The draft every later run reads and publishes, and the job (an undo's source).
+                state["draft"] = result["draft"]
+                state["property"] = {"jobId": result["jobId"], "op": args.op, **result["draft"],
+                                     "changed": result["metrics"]["changed"]}
+        elif args.kind == "undo":
+            made = state.get("property") or {}
+            if not made:
+                raise SystemExit("run undo needs run property's job: run property first")
+            result = await run_undo(graph_id=made["graphId"], branch_id=made["branchId"], job_id=made["jobId"],
+                                    changed=made["changed"], store=store,
+                                    containment=args.containment_types.split(","))
+            if result["status"] == "completed":
+                made["undoneBy"] = result["jobId"]
+        elif args.kind == "draft-search":
+            made = state.get("property") or {}
+            projected = state.get("projected") or {}
+            if not made or made.get("undoneBy"):
+                raise SystemExit("run draft-search needs run property's draft, not undone: run property first")
+            if projected.get("graphId") != made["graphId"] or not projected.get("falkorGraph"):
+                raise SystemExit("run draft-search needs the published graph in FalkorDB: "
+                                 "run project --full --keep first")
+            result = await run_draft_search(graph_id=made["graphId"], branch_id=made["branchId"],
+                                            falkor_graph=projected["falkorGraph"], changed=made["changed"],
+                                            op=made["op"])
         elif args.kind == "export":
             graph_id = args.graph_id or (state.get("published") or {}).get("graphId")
             if not graph_id:
@@ -1983,17 +2466,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.add_argument("--json", help="also write the result(s) as JSON here")
         parser.add_argument("--md", help="also write the Markdown here (run: appended)")
     run.add_argument("kind", choices=("export", "inspect", "import", "project", "publish", "seed", "bootstrap",
-                                     "readmodes"))
+                                     "readmodes", "property", "undo", "draft-search"))
     run.add_argument("--package", help="a package to upload (and inspect) first")
     run.add_argument("--upload", help="an inspected upload's record key (default: the state's)")
     run.add_argument("--target", default="empty",
                      help="import into: empty (a new graph), published (the last published one), graph:<id>")
-    run.add_argument("--graph-id", help="publish/project/export: the graph (default: the state's)")
-    run.add_argument("--branch-id", help="publish: the draft (default: the last import's)")
-    run.add_argument("--containment-types", default=CONTAINS, help="publish: comma-separated")
+    run.add_argument("--graph-id", help="publish/project/export/property: the graph (default: the state's)")
+    run.add_argument("--branch-id", help="publish: the draft (default: the last import's or property run's)")
+    run.add_argument("--containment-types", default=CONTAINS, help="publish, property, undo: comma-separated")
+    run.add_argument("--field-rules", choices=("hold", "fail"),
+                     help="publish: with field rules every node holds, or every attribute breaks")
+    run.add_argument("--op", choices=tuple(PROPERTY_OPS), default="set",
+                     help="property: set bench_owner, or rename owner to it")
     run.add_argument("--graph", help="bootstrap: the FalkorDB source graph")
     run.add_argument("--auto-decide", action="store_true", help="bootstrap: collapse the duplicates it pauses on")
-    run.add_argument("--keep", action="store_true", help="seed, project: keep the new FalkorDB key")
+    run.add_argument("--keep", action="store_true",
+                     help="seed, project: keep the new FalkorDB key (a kept projection: draft-search's)")
     run.add_argument("--full", action="store_true",
                      help="project: from nothing (a first seed's or a rebuild's full reconcile)")
     run.add_argument("--out", help="export: save the package here")

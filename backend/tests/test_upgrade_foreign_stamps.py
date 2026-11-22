@@ -47,10 +47,10 @@ def _script():
     return ScriptDirectory.from_config(_alembic_config())
 
 
-def _parents(script, revision: str) -> tuple:
-    """A revision's parents, one or several (a merge revision's ``down_revision`` is a tuple)."""
-    down = script.get_revision(revision).down_revision
-    return (down,) if isinstance(down, str) else tuple(down or ())
+def _below(script, head):
+    """The revisions just below ``head``: its one parent, or a merge's several."""
+    down = script.get_revision(head).down_revision
+    return [down] if isinstance(down, str) else list(down)
 
 
 #: PR #670's line, off ``20261113_0900_gv_import_mentions``: all but its last revision are main's
@@ -292,7 +292,7 @@ def test_a_database_keeps_the_lineage_of_every_build_that_migrated_it(scratch_db
     assert f"its migration chain ends at ['{head}']" in out.stderr
     rows = dict(_sql(scratch_db, "SELECT revision, parents FROM alembic_lineage"))
     assert len(rows) == len(list(script.walk_revisions()))
-    assert rows[head] == ",".join(sorted(_parents(script, head)))
+    assert rows[head] == ",".join(sorted(_below(script, head)))
 
     # A build with a merge revision made by hand moved it on, and wrote its chain as it did:
     # no file or git ref has the revision, the database does.
@@ -406,9 +406,10 @@ def test_only_builds_from_main_migrate_a_shared_database(scratch_db):
     out = _job(scratch_db, "upgrade", env=branch)
     assert out.returncode == 0 and "nothing to run" in out.stderr, out.stderr[-2000:]
     # Behind its head, a build from main moves it on.
-    _sql(scratch_db, f"UPDATE alembic_version SET version_num = '{min(script.get_revision(head).down_revision)}'")
-    _sql(scratch_db, "INSERT INTO alembic_version SELECT '20261119_1300_merge_member_sets' "
-                     "WHERE NOT EXISTS (SELECT 1 FROM alembic_version WHERE version_num = '20261119_1300_merge_member_sets')")
+    below = _below(script, head)
+    _sql(scratch_db, f"UPDATE alembic_version SET version_num = '{below[0]}'")
+    for revision in below[1:]:
+        _sql(scratch_db, f"INSERT INTO alembic_version VALUES ('{revision}')")
     out = _job(scratch_db, "upgrade", env={**branch, "SYNODIC_BUILD_ON_MAIN": "true", "SYNODIC_BUILD_REF": "main"})
     assert out.returncode == 0, out.stderr[-2000:]
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]

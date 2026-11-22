@@ -1900,6 +1900,42 @@ class ViewSavedQueryORM(Base):
         return f"<ViewSavedQuery id={self.id!r} view_id={self.view_id!r}>"
 
 
+class ViewReusableChangeORM(Base):
+    """A bulk property change kept under a name in a view's library, to run
+    again — for everyone who can open the view. Reusable changes belong to
+    the view, not to a branch.
+
+    ``change`` is ``{op, target}`` (JSON): the operation as a job keeps it,
+    and which entities it reaches, named as the bulk dialog names them (the
+    view, a key, a layer, a predicate) — never by id. ``position`` orders
+    the library's list."""
+    __tablename__ = "view_reusable_changes"
+
+    id = Column(Text, primary_key=True)
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position = Column(Integer, nullable=False, default=0)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    change = Column(Text, nullable=False)                     # JSON
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    # Stamped by the service when the reusable change itself changes — not
+    # by a reorder, which moves every row's position.
+    updated_by = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_vrc_view", "view_id", "position"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewReusableChange id={self.id!r} view_id={self.view_id!r}>"
+
+
 # ------------------------------------------------------------------ #
 # data_source_stats (Graph Statistics Cache)                           #
 # ------------------------------------------------------------------ #

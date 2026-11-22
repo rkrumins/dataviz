@@ -103,6 +103,11 @@ fetches anything again.
   **Downstream** (Impact) sliders, or pick a preset: **Direct** (1), **Nearby**
   (5) or **All hops** (25). A side set to 0 is hidden. The dock's **Settings**
   tab has the same **Upstream depth** and **Downstream depth** sliders.
+- **The depth a trace opens at:** one hop each way (**Direct**) until you choose
+  your own. In **Trace settings**, **Make this my default** makes the depth on
+  screen the one every new trace opens at; **Preferences → Lineage trace**
+  (in your avatar menu) sets it too, each way, from 0 to 25. A shared link, a
+  saved trace or the trace history opens at its own depth.
 - **Detail:** open or close containers to move between columns, tables and
   bigger groupings; there is no separate level setting (see
   [Changing the level of detail](/guide/reading-lineage#changing-the-level-of-detail)).
@@ -386,6 +391,7 @@ the view itself.
 | --- | --- |
 | See lines without hovering | **Edge Density** to **Adaptive** (strongest flows stay visible) or **All Edges**. **On Hover** is the default |
 | Draw more or fewer lines on a busy view | The **Edge Budget** slider (**Lines per entity** in On Hover), from 100 to 2,000 |
+| Make lines thicker or thinner | **Line weight**: **Thin**, **Regular** (the default) or **Thick**. A trace draws its lines at the same weight, so a busy one stays readable |
 | Hide the arrowheads | **Direction → Arrow markers** off |
 | Spot dependencies that run against the layers | **Highlight lines that point back** on: a line whose source sits in a layer to the right of its target is drawn in an alert colour — **Red** (the default), **Amber** or **Magenta**. Its hover card says **Points back**, and **Flows** counts them (**←**) in the same colour |
 | Change the upstream and downstream colours | **Appearance → Lineage colours**: pick a preset, or set **Incoming** and **Outgoing** yourself |
@@ -397,7 +403,7 @@ The lineage settings work only while **Lineage** in the header is on; when it's
 off, the menu says *Turn on Lineage to adjust edge appearance*. A trace draws
 every line it walks, whatever **Edge Density** is set to. In the Business view,
 **Display** keeps the canvas settings, **How many lines** (Edge Density, in plain
-words: **On hover**, **Adaptive** or **All lines**), **Lineage colours**,
+words: **On hover**, **Adaptive** or **All lines**), **Line weight**, **Lineage colours**,
 **Missing-link alerts** and **Highlight lines that point back**; the rest are
 the Technical view's.
 

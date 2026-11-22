@@ -12,8 +12,10 @@
  *
  * Now an action shows its icon alone when there's no room for its words —
  * keeping its tooltip and its accessible name — in a fixed order, the
- * least-used first. When every label is folded and the actions still don't
- * fit beside a usable search box, they move to a line of their own under it.
+ * least-used first. Review & Save, the way out of an edit, keeps its words
+ * longest: the search box gives up room for them before they fold. When
+ * every label is folded and the actions still don't fit beside a usable
+ * search box, they move to a line of their own under it.
  *
  * Widths are read from the DOM, never guessed: a label is measured while it
  * shows and its width kept while it's folded, so it comes back the moment
@@ -22,8 +24,9 @@
 import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 
 
-/** Folded first to last. Done has no icon and never folds; Import / Export
- *  folds its words by itself below 2000px. */
+/** Folded first to last. Review folds only once the search box is at its
+ *  least. Done has no icon and never folds; Import / Export folds its words
+ *  by itself below 2000px. */
 export const FOLD_ORDER = [
     'undo', 'redo', 'select', 'connect', 'lens', 'properties', 'display', 'lineage', 'trace', 'edit', 'review',
 ] as const
@@ -56,8 +59,10 @@ const NONE: ToolbarFold = { folded: new Set(), stacked: false }
  * Which labels fold, and whether the actions move under the search box.
  * `labelled` is the actions' width with every label showing; `items` are
  * the actions present, in fold order, with what folding each one saves.
- * The search box keeps `SEARCH_ROOM` while a label can still fold; past
- * that it gives way to `SEARCH_MIN`, and past that the actions stack.
+ * The search box keeps `SEARCH_ROOM` while a label other than Review's can
+ * still fold. Past that it gives way to `SEARCH_MIN`, those labels staying
+ * folded, so Review keeps its words; then Review folds, and past that the
+ * actions stack.
  */
 export function foldToolbar({ row, lead, gap, labelled, items }: {
     row: number
@@ -69,20 +74,24 @@ export function foldToolbar({ row, lead, gap, labelled, items }: {
     items: readonly { id: string; saving: number }[]
 }): ToolbarFold {
     if (row <= 0 || labelled <= 0) return NONE
-    const fold = (room: number) => {
+    const fold = (room: number, list = items) => {
         const folded = new Set<string>()
         let width = labelled
-        for (const item of items) {
+        for (const item of list) {
             if (width <= room) break
             width -= item.saving
             folded.add(item.id)
         }
-        return { folded, fits: width <= room }
+        return { folded, width }
     }
     const beside = (search: number) => row - lead - search - 2 * gap
-    const roomy = fold(beside(SEARCH_ROOM))
-    if (roomy.fits) return { folded: roomy.folded, stacked: false }
-    if (fold(beside(SEARCH_MIN)).fits) return { folded: new Set(items.map((i) => i.id)), stacked: false }
+    const roomy = fold(beside(SEARCH_ROOM), items.filter((i) => i.id !== 'review'))
+    if (roomy.width <= beside(SEARCH_ROOM)) return { folded: roomy.folded, stacked: false }
+    // Every label but Review's is folded now, and stays so: narrower never
+    // brings a label back.
+    if (roomy.width <= beside(SEARCH_MIN)) return { folded: roomy.folded, stacked: false }
+    const review = items.find((i) => i.id === 'review')?.saving ?? 0
+    if (roomy.width - review <= beside(SEARCH_MIN)) return { folded: new Set(items.map((i) => i.id)), stacked: false }
     return { folded: fold(row).folded, stacked: true }
 }
 

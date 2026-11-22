@@ -284,6 +284,16 @@ class JobActive(_HttpMapped, RuntimeError):
         super().__init__(message, {"type": "job_active", "jobId": job_id})
 
 
+class UndoRefused(_HttpMapped, RuntimeError):
+    """A bulk property job that can't be undone, and why (``type``): it is published
+    (``job_published``, 409), undone already (``already_undone``, 409, the undo's ``jobId``), wrote
+    nothing (``nothing_to_undo``, 422), or is an undo itself (``undo_of_undo``, 422)."""
+
+    def __init__(self, code: str, message: str, status_code: int = 409, job_id: Optional[str] = None):
+        self.code, self.status_code = code, status_code
+        super().__init__(message, {"type": code, **({"jobId": job_id} if job_id else {})})
+
+
 class CurationAtRisk(_HttpMapped, RuntimeError):
     """A re-sync would treat people's edits on main as drift and undo them."""
 
@@ -522,6 +532,25 @@ class UniqueViolation(_HttpMapped, RuntimeError):
              "total": len(self.violations)})
 
 
+class FieldViolation(_HttpMapped, RuntimeError):
+    """A publish would give entities or relationships property values their type's fields refuse
+    — not of the field's type, not one of its allowed values — or leave a required field without
+    one: refused, naming each entity or relationship, field and value (the first 100), how many in
+    all (``total``), and per entity or relationship type (``entityKind``), field and rule how many
+    and which (``byField``: ``count``, and ``ids`` as a bulk property job names them, up to 20,000,
+    ``idsComplete`` when that is all). ``found``: the publish's :class:`~.ontology.FieldFindings`."""
+
+    def __init__(self, found):
+        self.violations = list(found.examples)
+        first = self.violations[0] if self.violations else {}
+        n = found.total
+        super().__init__(
+            f"{n} {'value breaks' if n == 1 else 'values break'} the fields their types define — "
+            f"{first.get('name') or first.get('entity_id')}: {first.get('reason')}",
+            {"type": "field_violation", "violations": self.violations[:100], "total": n,
+             "byField": found.by_field()})
+
+
 class EdgeEndsMissing(_HttpMapped, ValueError):
     """An edge create named no source or no target: stored, it would read as a node."""
 
@@ -679,12 +708,12 @@ class PartialMergeUnsupported(_HttpMapped, RuntimeError):
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
                LockBusy, ChangeListBusy, GraphReadBusy, RevisionUnsupported, RevisionTooFar, RevisionReadOnly,
-               JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
+               JobActive, UndoRefused, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionAlreadyAdopted,
                ProjectionPassInFlight, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
                IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate,
                CrossesUpdate, AmbiguousUrn, EntityExists, EdgeEndsMissing, UniqueViolation,
-               DraftPruned, DecisionConflict, ReviewIncomplete, ChangesRejected, NothingAccepted,
+               FieldViolation, DraftPruned, DecisionConflict, ReviewIncomplete, ChangesRejected, NothingAccepted,
                PartialMergeUnsupported, ChangesRequested)

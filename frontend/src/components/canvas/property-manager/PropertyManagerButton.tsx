@@ -22,6 +22,8 @@ import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { useCurrentBranchId, useGraphId } from '@/store/branchStore'
+import { jobEnded, useDraftPropertyJobs } from '@/store/propertyJobsStore'
 
 
 export const PROPERTY_MANAGER_SEEN_KEY = 'synodic.propertyManager.seen.v1'
@@ -83,6 +85,8 @@ export function PropertyManagerButton({ open, onToggle, className, folded = fals
     const anchor = rect ? { top: rect.bottom + 8, left: rect.left } : null
 
     const dismissHint = () => { setHintArmed(false); markSeen() }
+    // A bulk change being applied to the draft: the button says so while the manager is closed.
+    const running = useDraftPropertyJobs(useGraphId(), useCurrentBranchId()).filter((j) => !jobEnded(j)).length
 
     const handleClick = () => {
         if (hintVisible) dismissHint()
@@ -93,8 +97,9 @@ export function PropertyManagerButton({ open, onToggle, className, folded = fals
         <div className="relative">
             <HoverTip
                 className="inline-flex"
-                label="Browse the properties in use and tag the entities that match"
-                detail="Colours the canvas by a rule you write — the data is untouched"
+                label={running ? `${running === 1 ? 'A property change is' : `${running} property changes are`} being applied to your draft`
+                    : 'Browse the properties in use, change them in bulk, and tag the entities that match'}
+                detail={running ? 'Open to follow it — or stop it' : 'Display rules colour the canvas — the data is untouched'}
             >
             <button
                 ref={setTriggerEl}
@@ -120,6 +125,12 @@ export function PropertyManagerButton({ open, onToggle, className, folded = fals
                 )}
                 <SlidersHorizontal className="w-4 h-4" strokeWidth={2.2} />
                 <span data-toolbar-label className={folded ? 'sr-only' : undefined}>Properties</span>
+                {running > 0 && (
+                    <span aria-hidden className="absolute -top-1 -right-1 flex h-3 w-3">
+                        <span className="absolute inset-0 rounded-full bg-accent-lineage/60 animate-ping" />
+                        <span className="relative h-3 w-3 rounded-full bg-accent-lineage ring-2 ring-canvas-elevated" />
+                    </span>
+                )}
             </button>
             </HoverTip>
 

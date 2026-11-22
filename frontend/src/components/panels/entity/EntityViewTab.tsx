@@ -10,18 +10,17 @@
  * changed from Customize, which opens above the sections.
  */
 import { Fragment, useMemo, useState, type ReactNode } from 'react'
-import { Check, Copy, FileText, History, Info, Link, Sparkles, Tag } from 'lucide-react'
+import { Check, Copy, FileText, FolderTree, History, Info, Link, Sparkles, Tag } from 'lucide-react'
 import { useFeature } from '@/store/features'
-import { useCanvasStore } from '@/store/canvas'
-import { userProperties } from '@/lib/nodeFields'
-import { inferFieldType, type FieldType } from '../property/fieldTypes'
-import type { PropertySuggestion } from '../property/composerModel'
+import { peerPropertyStats } from './peerPropertyStats'
 import { usePersonaMode } from '@/store/persona'
 import { usePreferencesStore, type DrawerSectionId } from '@/store/preferences'
 import type { EntityFieldDefinition } from '@/types/schema'
+import { governedFields } from '@/lib/fieldRules'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
-import { IconButton } from '@/components/ui/Button'
+import { Button, IconButton } from '@/components/ui/Button'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Section } from '../DrawerSection'
 import { PropertyEditor } from '../PropertyEditor'
@@ -34,34 +33,6 @@ import { CustomizeDetails } from './CustomizeDetails'
 import { defaultFeatured, featurableKeys, propertyLabel, resolveFeatured, resolveLayout, shownSections } from './drawerLayout'
 
 type Data = Record<string, unknown>
-
-/** Entities read before the suggestions give up: enough to see what a type usually carries. */
-const SUGGEST_SCAN = 2000
-
-/** What other loaded entities of this type carry, property by property — how many, a couple of
- *  example values, and the type its values usually are — for those at least two carry, most common
- *  first. Read once from the canvas as it is when the drawer opens on the entity, never subscribed to. */
-function peerPropertyStats(nodeId: string, typeId: string): PropertySuggestion[] {
-  if (!typeId) return []
-  const stats = new Map<string, { count: number; examples: string[]; types: Map<FieldType, number> }>()
-  let scanned = 0
-  for (const n of useCanvasStore.getState().nodes) {
-    const d = n.data as Data
-    if (n.id === nodeId || d.type !== typeId) continue
-    if (++scanned > SUGGEST_SCAN) break
-    for (const [k, v] of Object.entries(userProperties(d.properties))) {
-      let st = stats.get(k)
-      if (!st) stats.set(k, (st = { count: 0, examples: [], types: new Map() }))
-      st.count++
-      const t = inferFieldType(v)
-      st.types.set(t, (st.types.get(t) ?? 0) + 1)
-      const ex = typeof v === 'string' || typeof v === 'number' ? String(v) : null
-      if (ex && ex.length <= 40 && st.examples.length < 2 && !st.examples.includes(ex)) st.examples.push(ex)
-    }
-  }
-  return [...stats].filter(([, st]) => st.count >= 2).sort((a, b) => b[1].count - a[1].count).slice(0, 24)
-    .map(([key, st]) => ({ key, count: st.count, examples: st.examples, type: [...st.types].sort((a, b) => b[1] - a[1])[0]?.[0] }))
-}
 
 const without = (o: Data, keys: readonly string[]): Data =>
   keys.length === 0 ? o : Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)))
@@ -94,7 +65,7 @@ export function EntityViewTab({
   nodeId, form, original, urn, childCount, tagColors, userProps, copiedUrn, onCopyUrn, canEdit,
   originalProps, publishedProps, digest, onCommitProperties,
   onFocusNode, onLocateMany, onRevealPath, history, typeId = '', typeName = '', fields, identity,
-  customizing = false, onDoneCustomizing, showHistory = false, onRestoreDeleted,
+  customizing = false, onDoneCustomizing, showHistory = false, onRestoreDeleted, onEditInside,
 }: {
   nodeId: string
   form: Data
@@ -134,6 +105,8 @@ export function EntityViewTab({
   showHistory?: boolean
   /** Bring it back, deleted in this draft — offered on its deletion in History. */
   onRestoreDeleted?: () => void
+  /** A container in a draft: change a property on everything inside it. */
+  onEditInside?: () => void
 }) {
   const versioningEnabled = useFeature('versioningEnabled')
   const mode = usePersonaMode()
@@ -149,6 +122,12 @@ export function EntityViewTab({
   const [addingFor, setAddingFor] = useState<string | null>(null)
   const adding = addingFor === nodeId
   const suggestions = useMemo(() => (editsProps ? peerPropertyStats(nodeId, typeId) : []), [editsProps, nodeId, typeId])
+  // The type's fields a publish judges: edited in place, their rows offer the allowed values and
+  // warn of a value publishing would refuse.
+  const governed = useMemo(() => {
+    const byKey = editsProps ? governedFields(fields) : new Map()
+    return byKey.size ? { fields: byKey, typeLabel: typeName || typeId } : null
+  }, [editsProps, fields, typeName, typeId])
   // A property removed is still listed (struck through, with Restore while editing).
   const removedSome = [originalProps, publishedProps].some((base) => !!base && Object.keys(base).some((k) => !(k in userProps)))
 
@@ -192,14 +171,20 @@ export function EntityViewTab({
     details: () => <DetailsList form={form} />,
     relationship: () => <PlacementSummary nodeId={nodeId} childCount={childCount} onFocusNode={onFocusNode} />,
     properties: () => (
-      <Section title="Properties" icon={FileText} flush={hasProps || removedSome || (editsProps && adding)}>
+      <Section title="Properties" icon={FileText} flush={hasProps || removedSome || (editsProps && adding)}
+        action={onEditInside && (
+          <HoverTip label="Change a property on everything inside it" detail="Its children, or every level down — however many, on your draft">
+            <Button size="sm" variant="ghost" leftIcon={FolderTree} className="h-6 px-2 text-2xs" onClick={onEditInside}>Change inside…</Button>
+          </HoverTip>
+        )}>
         {hasProps || removedSome || (editsProps && adding) ? (
           <PanelErrorBoundary resetKeys={[urn]}>
             {editsProps ? (
               <PropertyEditor key={nodeId} value={userProps} onChange={(next) => onCommitProperties!(next as Data)}
                 inline original={originalProps} published={publishedProps} startAdding={adding && !hasProps} suggestions={suggestions}
                 searchable groupByPath bare sectionsKey={typeId ? `entity:${typeId}` : undefined}
-                featuredKeys={featuredKeys} onToggleFeatured={glanceShown && typeId ? toggleFeatured : undefined} />
+                featuredKeys={featuredKeys} onToggleFeatured={glanceShown && typeId ? toggleFeatured : undefined}
+                governed={governed} />
             ) : Object.keys(listedProps).length > 0 || removedSome ? (
               <PropertyEditor value={listedProps} onChange={() => {}} readOnly published={listedPublished} searchable groupByPath bare
                 sectionsKey={typeId ? `entity:${typeId}` : undefined}

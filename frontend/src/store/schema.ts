@@ -16,6 +16,7 @@ import type {
   EntityTypeDefinition,
   RelationshipTypeDefinition,
   EdgeTypeMetadata,
+  FieldSchema,
 } from '@/providers/GraphDataProvider'
 import { generateId } from '@/lib/utils'
 
@@ -133,16 +134,7 @@ export function convertBackendEntityType(backendEntity: EntityTypeDefinition): E
       borderStyle: backendEntity.visual.borderStyle as EntityVisualConfig['borderStyle'],
       showInMinimap: backendEntity.visual.showInMinimap,
     },
-    fields: backendEntity.fields.map((f): EntityFieldDefinition => ({
-      id: f.id,
-      name: f.name,
-      type: f.type as EntityFieldDefinition['type'],
-      required: f.required,
-      showInNode: f.showInNode,
-      showInPanel: f.showInPanel,
-      showInTooltip: f.showInTooltip,
-      displayOrder: f.displayOrder,
-    })),
+    fields: backendEntity.fields.map(convertBackendField),
     hierarchy: {
       level: backendEntity.hierarchy.level,
       canContain: backendEntity.hierarchy.canContain,
@@ -182,6 +174,29 @@ export function convertBackendRelationshipType(backendRel: RelationshipTypeDefin
     isContainment: backendRel.isContainment ?? false,
     isLineage: backendRel.isLineage ?? false,
     category: (backendRel.category ?? 'association') as NonNullable<RelationshipTypeSchema['category']>,
+    // Set only when it has some, as a schema without them always read.
+    ...(backendRel.fields?.length ? { fields: backendRel.fields.map(convertBackendField) } : {}),
+  }
+}
+
+/** A type's field (an entity type's or a relationship type's) as the schema serves it. */
+function convertBackendField(f: FieldSchema): EntityFieldDefinition {
+  return {
+    id: f.id,
+    name: f.name,
+    type: f.type as EntityFieldDefinition['type'],
+    required: f.required,
+    showInNode: f.showInNode,
+    showInPanel: f.showInPanel,
+    showInTooltip: f.showInTooltip,
+    displayOrder: f.displayOrder,
+    // What a publish holds the field to, and how it reads (the multi-entity drawer's unique
+    // refusal, the drawers' allowed-values pickers and warnings).
+    ...(f.format ? { format: f.format } : {}),
+    ...(f.reconciliationKey ? { reconciliationKey: true } : {}),
+    ...(f.unique ? { unique: true } : {}),
+    ...(f.allowedValues?.length ? { allowedValues: [...f.allowedValues] } : {}),
+    ...(f.allowOther ? { allowOther: true } : {}),
   }
 }
 

@@ -233,6 +233,24 @@ describe('LayerColumn — the keyboard’s Cmd-click', () => {
         expect(onSelect).toHaveBeenLastCalledWith('A')
     })
 
+    it('Cmd/Ctrl+A selects every entity the column shows, in one write', () => {
+        const { onSelect, onSelectRange, scroller } = renderColumn()
+        expect(fireEvent.keyDown(scroller, { key: 'a', metaKey: true })).toBe(false)
+        expect(onSelectRange).toHaveBeenCalledTimes(1)
+        expect(onSelectRange).toHaveBeenCalledWith(['A', 'B', 'C', 'D'])
+        fireEvent.keyDown(scroller, { key: 'A', ctrlKey: true })
+        expect(onSelectRange).toHaveBeenCalledTimes(2)
+        expect(onSelect).not.toHaveBeenCalled()
+    })
+
+    it('leaves Cmd/Ctrl+A to a field inside the column', () => {
+        const { onSelectRange, scroller } = renderColumn()
+        const field = document.createElement('input')
+        scroller.appendChild(field)
+        expect(fireEvent.keyDown(field, { key: 'a', metaKey: true })).toBe(true)
+        expect(onSelectRange).not.toHaveBeenCalled()
+    })
+
     it('leaves Space to a field inside the column', () => {
         const { onSelect, scroller } = renderColumn()
         fireEvent.keyDown(scroller, { key: 'ArrowDown' })

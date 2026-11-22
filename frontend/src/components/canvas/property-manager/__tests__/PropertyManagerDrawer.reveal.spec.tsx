@@ -53,7 +53,7 @@ describe('PropertyManagerDrawer reveal', () => {
                 viewId="view-1" open onClose={vi.fn()} onSearchPredicate={onSearchPredicate}
             />,
         )
-        await userEvent.setup().click(screen.getByTitle('Show every match in search'))
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Show every match in search' }))
         expect(onSearchPredicate).toHaveBeenCalledWith(predicate)
         expect(notify).toHaveBeenCalledWith('info', 'Showing the matches for “One hash”')
     })

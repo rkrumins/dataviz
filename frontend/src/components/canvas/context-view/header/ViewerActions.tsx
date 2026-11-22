@@ -10,13 +10,17 @@
  * edit must never take understanding away — so both clusters render the
  * same component rather than maintaining two copies.
  *
+ * The Graph and Hierarchy canvases use the same tools (`CanvasTools`, with
+ * a Display menu of their own) and the same Edit entry (`EditEntry`), so
+ * their toolbar is this one too (see CanvasToolRow).
+ *
  * The Edit entry is the ONLY mutation affordance on Published, and only
  * for holders of `workspace:datasource:manage` (viewers see nothing —
  * confirmed product decision, not even a disabled hint). Clicking it
  * opens/resumes a draft; being on a draft IS edit mode.
  */
 
-import { useRef, useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -36,27 +40,15 @@ import type { SavedTracesSectionProps } from '@/components/canvas/trace/SavedTra
 import { useFolded } from './toolbarFold'
 import { HoverTip } from '@/components/ui/HoverTip'
 
-export interface ComprehensionToolsProps {
-  // Lineage flow
-  showLineageFlow: boolean
-  onToggleLineageFlow: () => void
+/** The row's tools on any canvas, with the Display menu the canvas brings. */
+export interface CanvasToolsProps {
+  // Lineage flow. Without `onToggleLineageFlow` there is no switch: a canvas
+  // that draws no lineage lines (the Hierarchy) has nothing for it to turn off.
+  showLineageFlow?: boolean
+  onToggleLineageFlow?: () => void
 
-  // Display menu — canvas zoom/density/badges + lineage appearance
-  canvasZoom: number
-  onSetCanvasZoom: (n: number) => void
-  canvasDensity: CanvasDensity
-  onSetCanvasDensity: (density: CanvasDensity) => void
-  showCanvasTypeBadge: boolean
-  onToggleCanvasTypeBadge: () => void
-  subtleCanvasTreeLines: boolean
-  onToggleSubtleCanvasTreeLines: () => void
-  onResetCanvasDisplaySettings: () => void
-  /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
-  onFitToWidth?: () => void
-  lineageRenderMode: LineageRenderMode
-  onSetLineageRenderMode: (mode: LineageRenderMode) => void
-  showEdgeDirection: boolean
-  onToggleEdgeDirection: () => void
+  /** The Display menu: the Context View's own (ComprehensionTools), or the canvas's. */
+  display: ReactNode
 
   // Trace — global toggle that mirrors the keyboard shortcut. Drawer's
   // per-node trace buttons remain for granular up/down/full control.
@@ -78,9 +70,13 @@ export interface ComprehensionToolsProps {
    *  lineage graph yet and the trace would return nothing. Surfaced as a
    *  distinct "loading" button state with a notification on attempted click. */
   lineageReady: boolean
-  traceUpstreamDepth: number
-  traceDownstreamDepth: number
-  onSetTraceDepth: (dir: 'upstream' | 'downstream', value: number) => void
+  /** The trace's depth, beside Trace while it runs. Absent on a canvas whose
+   *  trace toolbar already holds it. */
+  traceDepth?: {
+    upstream: number
+    downstream: number
+    onChange: (dir: 'upstream' | 'downstream', value: number) => void
+  }
   /** Trace trails in this view (newest first) — powers the "pick up
    *  where you left off" launcher under the Trace Lineage control.
    *  Optional: hosts that don't wire history keep the classic button. */
@@ -99,8 +95,6 @@ export interface ComprehensionToolsProps {
   /** Open the orphaned-entities panel (the Display menu's Advanced section).
    *  Optional — hosts that don't wire it show no such section. */
   onOpenOrphans?: () => void
-  /** Open the view's changes and history (the Business view's More). Optional. */
-  onOpenHistory?: () => void
   /** Open the drafts of this view (the Business view's More). Optional. */
   onOpenDrafts?: () => void
 
@@ -108,9 +102,9 @@ export interface ComprehensionToolsProps {
   onTogglePropertyManager?: () => void
   propertyManagerOpen?: boolean
 
-  // Import / Export — one combined dropdown in the Technical view, More's File group in the Business
-  // view; shown in BOTH modes (Export is always reachable). The Import item disables with an
-  // explainer when not editing (`isDraft` false), since import writes to the working draft.
+  // Import / Export — one combined dropdown, the same in both views and both modes (Export is
+  // always reachable). The Import item disables with an explainer when not editing (`isDraft`
+  // false), since import writes to the working draft.
   onImport?: () => void
   onExport?: () => void
   isDraft: boolean
@@ -119,12 +113,37 @@ export interface ComprehensionToolsProps {
   thisView?: ViewFileActions
 }
 
+export interface ComprehensionToolsProps extends Omit<CanvasToolsProps, 'display' | 'traceDepth'> {
+  // Lineage flow
+  showLineageFlow: boolean
+  onToggleLineageFlow: () => void
+
+  // Display menu — canvas zoom/density/badges + lineage appearance
+  canvasZoom: number
+  onSetCanvasZoom: (n: number) => void
+  canvasDensity: CanvasDensity
+  onSetCanvasDensity: (density: CanvasDensity) => void
+  showCanvasTypeBadge: boolean
+  onToggleCanvasTypeBadge: () => void
+  subtleCanvasTreeLines: boolean
+  onToggleSubtleCanvasTreeLines: () => void
+  onResetCanvasDisplaySettings: () => void
+  /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
+  onFitToWidth?: () => void
+  lineageRenderMode: LineageRenderMode
+  onSetLineageRenderMode: (mode: LineageRenderMode) => void
+  showEdgeDirection: boolean
+  onToggleEdgeDirection: () => void
+
+  traceUpstreamDepth: number
+  traceDownstreamDepth: number
+  onSetTraceDepth: (dir: 'upstream' | 'downstream', value: number) => void
+}
+
 /** Trace and the Focus Lens walk the published graph, drafts included (see ContextViewCanvas). */
 const DRAFT_WALK_NOTE = 'Shows the published graph. New items and links in this draft appear once it’s published.'
 
 export function ComprehensionTools({
-  showLineageFlow,
-  onToggleLineageFlow,
   canvasZoom,
   onSetCanvasZoom,
   canvasDensity,
@@ -139,6 +158,49 @@ export function ComprehensionTools({
   onSetLineageRenderMode,
   showEdgeDirection,
   onToggleEdgeDirection,
+  traceUpstreamDepth,
+  traceDownstreamDepth,
+  onSetTraceDepth,
+  ...tools
+}: ComprehensionToolsProps) {
+  return (
+    <CanvasTools
+      {...tools}
+      traceDepth={{ upstream: traceUpstreamDepth, downstream: traceDownstreamDepth, onChange: onSetTraceDepth }}
+      display={
+        /* Display menu — consolidates canvas display settings (zoom,
+           density, type-badge, subtle lines) and lineage appearance
+           (edge density, direction arrows) behind a single trigger.
+           Always visible: the Lineage-appearance section renders
+           muted/disabled (rather than being hidden) when Lineage is
+           off, so users can discover it exists. */
+        <DisplayMenu
+          canvasZoom={canvasZoom}
+          onSetCanvasZoom={onSetCanvasZoom}
+          canvasDensity={canvasDensity}
+          onSetCanvasDensity={onSetCanvasDensity}
+          showTypeBadge={showCanvasTypeBadge}
+          onToggleTypeBadge={onToggleCanvasTypeBadge}
+          subtleTreeLines={subtleCanvasTreeLines}
+          onToggleSubtleTreeLines={onToggleSubtleCanvasTreeLines}
+          onReset={onResetCanvasDisplaySettings}
+          onFitToWidth={onFitToWidth}
+          lineageRenderMode={lineageRenderMode}
+          onSetLineageRenderMode={onSetLineageRenderMode}
+          showEdgeDirection={showEdgeDirection}
+          onToggleEdgeDirection={onToggleEdgeDirection}
+          lineageEnabled={tools.showLineageFlow}
+          onOpenOrphans={tools.onOpenOrphans}
+        />
+      }
+    />
+  )
+}
+
+export function CanvasTools({
+  showLineageFlow = false,
+  onToggleLineageFlow,
+  display,
   traceActive,
   canTrace,
   traceSeedCount = 1,
@@ -148,9 +210,7 @@ export function ComprehensionTools({
   onStartTrace,
   onExitTrace,
   lineageReady,
-  traceUpstreamDepth,
-  traceDownstreamDepth,
-  onSetTraceDepth,
+  traceDepth,
   onTogglePropertyManager,
   propertyManagerOpen = false,
   onImport,
@@ -164,17 +224,17 @@ export function ComprehensionTools({
   savedTraces,
   onOpenLens,
   onOpenOrphans,
-  onOpenHistory,
   onOpenDrafts,
-}: ComprehensionToolsProps) {
+}: CanvasToolsProps) {
   const { notify } = useAppNotifications()
   const [traceHistoryOpen, setTraceHistoryOpen] = useState(false)
   const traceLauncherRef = useRef<HTMLDivElement>(null)
   // The Business view keeps the row to reading: Lineage, Display, the Focus
-  // Lens and Trace. Select, the Property Manager and Import / Export wait under
-  // More (MoreMenu), and Trace is one button rather than a split control.
-  // A tucked-away tool that is ON stays on the row, so nobody is left with a
-  // mode they cannot see to turn off.
+  // Lens and Trace, plus Properties and the same Import / Export menu as the
+  // Technical view. Select waits under More (MoreMenu), with the drafts and
+  // the entities with no parent, and Trace is one button rather than a split
+  // control. A tucked-away tool that is ON stays on the row, so nobody is left
+  // with a mode they cannot see to turn off.
   const technical = usePersonaMode() === 'technical'
   const hasTraceHistory = technical && !!onResumeTraceHistory
     && (traceHistory.length > 0 || (savedTraces?.items.length ?? 0) > 0)
@@ -211,6 +271,7 @@ export function ComprehensionTools({
       {/* Lineage Flow Toggle — single stable label. State is conveyed
           through the colored dot + active gradient. Trace state lives
           on its own button below; this label no longer encodes it. */}
+      {onToggleLineageFlow && (
       <HoverTip
         className="inline-flex"
         label={showLineageFlow
@@ -240,31 +301,9 @@ export function ComprehensionTools({
         )} />
       </button>
       </HoverTip>
+      )}
 
-      {/* Display menu — consolidates canvas display settings (zoom,
-          density, type-badge, subtle lines) and lineage appearance
-          (edge density, direction arrows) behind a single trigger.
-          Always visible: the Lineage-appearance section renders
-          muted/disabled (rather than being hidden) when Lineage is
-          off, so users can discover it exists. */}
-      <DisplayMenu
-        canvasZoom={canvasZoom}
-        onSetCanvasZoom={onSetCanvasZoom}
-        canvasDensity={canvasDensity}
-        onSetCanvasDensity={onSetCanvasDensity}
-        showTypeBadge={showCanvasTypeBadge}
-        onToggleTypeBadge={onToggleCanvasTypeBadge}
-        subtleTreeLines={subtleCanvasTreeLines}
-        onToggleSubtleTreeLines={onToggleSubtleCanvasTreeLines}
-        onReset={onResetCanvasDisplaySettings}
-        onFitToWidth={onFitToWidth}
-        lineageRenderMode={lineageRenderMode}
-        onSetLineageRenderMode={onSetLineageRenderMode}
-        showEdgeDirection={showEdgeDirection}
-        onToggleEdgeDirection={onToggleEdgeDirection}
-        lineageEnabled={showLineageFlow}
-        onOpenOrphans={onOpenOrphans}
-      />
+      {display}
 
       {/* Trace toggle — three visual states:
           1. `traceActive` → Exit Trace (rose, pulsing dot)
@@ -461,11 +500,11 @@ export function ComprehensionTools({
           next to the Trace toggle so the active scope (↑N upstream,
           ↓N downstream) is one glance away. Blue / green colors
           mirror EntityDrawer's Root Cause / Impact treatment. */}
-      {traceEnabled && traceActive && (
+      {traceEnabled && traceActive && traceDepth && (
         <TraceDepthControl
-          upstreamDepth={traceUpstreamDepth}
-          downstreamDepth={traceDownstreamDepth}
-          onChange={onSetTraceDepth}
+          upstreamDepth={traceDepth.upstream}
+          downstreamDepth={traceDepth.downstream}
+          onChange={traceDepth.onChange}
         />
       )}
 
@@ -473,7 +512,7 @@ export function ComprehensionTools({
           properties and roll out display-rule tags onto matched
           entities. Shared button carries the first-run coachmark so
           the affordance is consistent across all canvases. */}
-      {onTogglePropertyManager && (technical || propertyManagerOpen) && (
+      {onTogglePropertyManager && (
         <PropertyManagerButton
           open={propertyManagerOpen}
           onToggle={onTogglePropertyManager}
@@ -481,24 +520,17 @@ export function ComprehensionTools({
         />
       )}
 
-      {/* Import / Export — one dropdown in the Technical view, under More in the Business view; both
-          modes. Import is disabled with an explainer outside Edit mode; Export is always available
-          (published state is a valid, re-importable backup). */}
-      {technical ? (
-        <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} thisView={thisView} />
-      ) : (
+      {/* Import / Export — one dropdown, the same in both views and both modes. Import is disabled
+          with an explainer outside Edit mode; Export is always available (published state is a
+          valid, re-importable backup). */}
+      <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} thisView={thisView} />
+
+      {!technical && (
         <MoreMenu
           onToggleMultiSelect={!traceActive ? onToggleMultiSelect : undefined}
           multiSelectArmed={multiSelectArmed}
-          onTogglePropertyManager={onTogglePropertyManager}
-          propertyManagerOpen={propertyManagerOpen}
           onOpenOrphans={isDraft ? onOpenOrphans : undefined}
-          onOpenHistory={onOpenHistory}
           onOpenDrafts={onOpenDrafts}
-          onImport={onImport}
-          isDraft={isDraft}
-          onExport={onExport}
-          thisView={thisView}
         />
       )}
     </>
@@ -514,14 +546,23 @@ export interface ViewerActionsProps extends ComprehensionToolsProps {
 }
 
 export function ViewerActions({ canManage, canEnterEdit, onEnterEdit, ...tools }: ViewerActionsProps) {
+  return (
+    <>
+      <ComprehensionTools {...tools} />
+      <EditEntry canManage={canManage} canEnterEdit={canEnterEdit} onEnterEdit={onEnterEdit} />
+    </>
+  )
+}
+
+/** The way into a draft on Published, after a hairline: for holders of
+ *  `workspace:datasource:manage` only, with versioning on. */
+export function EditEntry({ canManage, canEnterEdit, onEnterEdit }: Pick<ViewerActionsProps, 'canManage' | 'canEnterEdit' | 'onEnterEdit'>) {
   // Editing IS versioning (edit mode = an open draft): when the admin turns
   // versioning off, the Edit entry disappears entirely — not disabled-with-hint.
   const versioningEnabled = useFeature('versioningEnabled')
   const editFolded = useFolded('edit')
   return (
     <>
-      <ComprehensionTools {...tools} />
-
       {/* Edit — accent-bordered but calm (deliberately NOT a filled
           primary: on Published, reading is the main activity and the
           header should stay quiet). Clicking opens/resumes a draft;

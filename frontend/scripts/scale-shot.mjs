@@ -2,10 +2,12 @@
  * Drive the scale harness through the real browser and hold it to its budgets.
  *
  * Each fixture of `src/harness/scaleHarness.tsx` (Review & Save on 50,000 staged changes, its
- * Map, a 100,000-change list, the canvas navigator) is opened in headless Chromium; the page times
- * itself — how long until it shows, every long task while it steps, scrolls, filters and draws —
- * into `window.__scale`, which this reads over the DevTools Protocol, checks against BUDGETS, and
- * screenshots to `.harness/`. Exits 1 past a budget, so a slowdown fails where it is introduced.
+ * Map, a 100,000-change list, the canvas navigator; and bulk editing: the drawer on 10,000 entities
+ * and on 1,000 relationships, a merge of 1,000 values, 60 jobs ticking) is opened in headless
+ * Chromium; the page times itself — how long until it shows, every long task while it steps,
+ * scrolls, filters and draws — into `window.__scale`, which this reads over the DevTools Protocol,
+ * checks against BUDGETS, and screenshots to `.harness/`. Exits 1 past a budget, so a slowdown
+ * fails where it is introduced.
  *
  *   node scripts/scale-shot.mjs [fixture[:dark] ...]
  *
@@ -21,7 +23,8 @@ const PORT = 5199
 const CDP_PORT = 9333
 const OUT = '.harness'
 
-/** How long a fixture may take to show, and the longest task any step may cause (ms). */
+/** How long a fixture may take to show, and the longest task any step may cause (ms). `steps`: a
+ *  step held to a budget of its own, for a task it does in one go on purpose. */
 const BUDGETS = {
   review: { openMs: 1000, longTaskMs: 200 },
   map: { openMs: 1000, longTaskMs: 300 },
@@ -29,10 +32,17 @@ const BUDGETS = {
   tree: { openMs: 1000, longTaskMs: 200 },
   'review-tree': { openMs: 1000, longTaskMs: 200 },
   navigator: { openMs: 1000, longTaskMs: 200 },
+  // Staging writes every entity's edit (9,166 here) as one Undo step, then reads the comparison of
+  // 10,000 × 50 values again: one task by design — some 450–700 ms on a busy 4-core machine.
+  'multi-entity': { openMs: 1500, longTaskMs: 200, steps: { stage: 800 } },
+  'cleanup-merge': { openMs: 1000, longTaskMs: 200 },
+  'multi-relationship': { openMs: 1000, longTaskMs: 200 },
+  'jobs-panel': { openMs: 1000, longTaskMs: 200 },
 }
 
 const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'review', 'review:dark', 'map', 'map:dark', 'changes', 'changes:dark', 'tree', 'tree:dark', 'review-tree', 'review-tree:dark', 'navigator', 'navigator:dark',
+  'multi-entity', 'multi-entity:dark', 'cleanup-merge', 'cleanup-merge:dark', 'multi-relationship', 'multi-relationship:dark', 'jobs-panel', 'jobs-panel:dark',
 ]
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -122,18 +132,23 @@ try {
         report = await browser.evaluate('window.__scale && JSON.parse(JSON.stringify(window.__scale))').catch(() => null)
       }
       const budget = BUDGETS[fixture]
-      const worst = Math.max(0, ...Object.values(report?.steps ?? {}).flat())
-      summary[shot] = { openMs: report?.openMs, worstStepTaskMs: worst, steps: report?.steps, error: report?.error }
+      const own = budget.steps ?? {}
+      const worst = Math.max(0, ...Object.entries(report?.steps ?? {}).filter(([s]) => !(s in own)).flatMap(([, tasks]) => tasks))
+      const ownWorst = Object.fromEntries(Object.keys(own).map((s) => [s, Math.max(0, ...(report?.steps?.[s] ?? []))]))
+      summary[shot] = { openMs: report?.openMs, worstStepTaskMs: worst, steps: report?.steps, checks: report?.checks, error: report?.error }
       if (!report?.done) failures.push(`${shot}: never finished`)
       else if (report.error) failures.push(`${shot}: ${report.error}`)
       else {
         if (report.openMs !== undefined && report.openMs > budget.openMs) failures.push(`${shot}: shown in ${report.openMs} ms (budget ${budget.openMs})`)
         if (worst > budget.longTaskMs) failures.push(`${shot}: a ${worst} ms task while in use (budget ${budget.longTaskMs})`)
+        for (const [s, ms] of Object.entries(ownWorst)) if (ms > own[s]) failures.push(`${shot}: a ${ms} ms task on ${s} (budget ${own[s]})`)
       }
       const { data } = await browser.cdp('Page.captureScreenshot', { format: 'png' })
       const out = join(OUT, `scale-${shot.replace(/:/g, '-')}.png`)
       writeFileSync(out, Buffer.from(data, 'base64'))
-      console.log(`  ${failures.some((f) => f.startsWith(`${shot}:`)) ? '✗' : '✓'} ${out}  shown ${report?.openMs ?? '–'} ms, worst task ${worst} ms`)
+      const checks = [...Object.entries(ownWorst).map(([s, ms]) => `, ${s} ${ms} ms`),
+        ...Object.entries(report?.checks ?? {}).map(([k, v]) => `, ${k} ${v}`)].join('')
+      console.log(`  ${failures.some((f) => f.startsWith(`${shot}:`)) ? '✗' : '✓'} ${out}  shown ${report?.openMs ?? '–'} ms, worst task ${worst} ms${checks}`)
     }
   } finally {
     browser.close()

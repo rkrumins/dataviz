@@ -51,8 +51,12 @@ def test_the_models_and_the_migration_require_the_same_types():
     assert set(migration._REQUIRED) <= set(JOB_TYPES)
     assert migration.down_revision == "20260930_1000_outbox_type_time"
     # The latest migration to widen it requires every type the code writes.
-    assert set(_migration(_FORK_SYNC)._REQUIRED) | {"save"} == set(JOB_TYPES)
-    assert set(_migration(_SAVE_JOBS)._REQUIRED) == set(JOB_TYPES)
+    assert set(_migration(_FORK_SYNC)._REQUIRED) | {"save", "property"} == set(JOB_TYPES)
+    assert set(_migration(_SAVE_JOBS)._REQUIRED) | {"property"} == set(JOB_TYPES)
+    property_jobs = _migration(_PROPERTY_JOBS)
+    assert set(property_jobs._REQUIRED) == set(JOB_TYPES)
+    assert property_jobs.revision == _PROPERTY_JOBS.stem and len(property_jobs.revision) <= 32
+    assert property_jobs.down_revision == "20261119_1500_merge_view_members"
 
 
 def test_the_preflight_table_and_the_import_rows_indexes_follow_on():
@@ -933,6 +937,7 @@ async def test_the_fork_bases_migration_round_trips(store):
 # ── sync_parent, merging and the fork jobs: Update from parent and a fork's merge (20261101_1000_gv_fork_sync) ──
 _FORK_SYNC = _VERSIONS / "20261101_1000_gv_fork_sync.py"
 _SAVE_JOBS = _VERSIONS / "20261117_1400_gv_save_jobs.py"
+_PROPERTY_JOBS = _VERSIONS / "20261121_1000_gv_property_jobs.py"
 
 
 def _check_of(model, name: str) -> str:

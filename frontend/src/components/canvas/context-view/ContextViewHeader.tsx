@@ -163,8 +163,6 @@ export interface ContextViewHeaderProps {
   onFitToWidth?: () => void
   /** Open the orphaned-entities panel (Display menu → Advanced). Optional. */
   onOpenOrphans?: () => void
-  /** Open the view's changes and history (the Business view's More). Optional. */
-  onOpenHistory?: () => void
 }
 
 export function ContextViewHeader({
@@ -226,7 +224,6 @@ export function ContextViewHeader({
   onResetCanvasDisplaySettings,
   onFitToWidth,
   onOpenOrphans,
-  onOpenHistory,
 }: ContextViewHeaderProps) {
   // The actions fold their words away, least-used first, when the row can't
   // hold them beside the search box — and move under it when even that
@@ -255,7 +252,6 @@ export function ContextViewHeader({
     onResetCanvasDisplaySettings,
     onFitToWidth,
     onOpenOrphans,
-    onOpenHistory,
     onOpenDrafts: branchWorkspaceId && canEnterEdit && !isDraft ? () => setDraftsOpen(true) : undefined,
     lineageRenderMode,
     onSetLineageRenderMode,
@@ -281,9 +277,8 @@ export function ContextViewHeader({
     onOpenLens,
     onTogglePropertyManager,
     propertyManagerOpen,
-    // Import / Export live in the shared cluster so they show in BOTH modes (one dropdown in the
-    // Technical view, under More in the Business view); the Import item self-disables when not
-    // editing (isDraft).
+    // Import / Export live in the shared cluster so they show in BOTH modes (one dropdown, the
+    // same in both views); the Import item self-disables when not editing (isDraft).
     onImport,
     onExport,
     isDraft,

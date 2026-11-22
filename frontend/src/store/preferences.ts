@@ -53,6 +53,8 @@ export type LineageRenderMode = 'stubs' | 'auto' | 'raw'
  * while the board is sparse; 'off': none.
  */
 export type LineageMotion = 'focus' | 'all' | 'off'
+/** How heavy lineage lines are drawn on the canvas, in a trace as elsewhere. */
+export type LineWeight = 'thin' | 'regular' | 'thick'
 
 /**
  * Which side of an entity card marks its lineage — see `lineagePorts.ts`.
@@ -139,6 +141,10 @@ interface PreferencesState {
   // sits there. Null until the reader drags it: the panel's own default.
   drawerWidth: number | null
   setDrawerWidth: (width: number | null) => void
+  // The Property Manager's width in px, kept apart from the details panel's:
+  // the two can be open side by side. Null until the reader drags it.
+  propertyManagerWidth: number | null
+  setPropertyManagerWidth: (width: number | null) => void
   // The entity drawer's sections — which show, in what order — per view.
   // Null is that view's default (panels/entity/drawerLayout.ts).
   drawerLayout: Record<PersonaMode, DrawerLayout | null>
@@ -209,6 +215,14 @@ interface PreferencesState {
    *  setting override it to 'off'. */
   lineageMotion: LineageMotion
   setLineageMotion: (motion: LineageMotion) => void
+  /** How heavy lineage lines are drawn — the same in a trace as elsewhere. Regular by default. */
+  lineWeight: LineWeight
+  setLineWeight: (weight: LineWeight) => void
+  /** The hops a new trace opens on, upstream and downstream (0 hides a side; the walk's ceiling,
+   *  25, is every hop). One each by default: what an entity feeds and what feeds it. A shared
+   *  link, a saved trace or the trace history opens on its own. */
+  defaultTraceDepth: { up: number; down: number }
+  setDefaultTraceDepth: (depth: { up: number; down: number }) => void
   /**
    * Entity cards on the canvas: solid by default, so a line passes cleanly
    * under a card — or frosted glass, where lines show softly through. Frosted
@@ -303,6 +317,11 @@ interface PreferencesState {
    *  name alone — the reader's choice for a quieter, text-first canvas. */
   showCanvasEntityIcons: boolean
   toggleCanvasEntityIcons: () => void
+  /** The Technical view's ID line under each entity's name (on Context View
+   *  rows, Graph cards and Hierarchy rows). On by default; off, a row is its
+   *  name alone, as in the Business view. */
+  showCanvasEntityIds: boolean
+  toggleCanvasEntityIds: () => void
   /** Keep the memory gauge on screen. It shows itself anyway once the tab's
    *  script heap passes 1 GB. */
   showMemoryUsage: boolean
@@ -451,6 +470,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       })),
       drawerWidth: null,
       setDrawerWidth: (drawerWidth) => set({ drawerWidth }),
+      propertyManagerWidth: null,
+      setPropertyManagerWidth: (propertyManagerWidth) => set({ propertyManagerWidth }),
       drawerLayout: { business: null, technical: null },
       setDrawerLayout: (mode, layout) => set((state) => ({
         drawerLayout: { ...state.drawerLayout, [mode]: layout },
@@ -498,6 +519,10 @@ export const usePreferencesStore = create<PreferencesState>()(
         set((state) => ({ showFlowRibbons: !state.showFlowRibbons })),
       lineageMotion: 'focus',
       setLineageMotion: (lineageMotion) => set({ lineageMotion }),
+      lineWeight: 'regular',
+      setLineWeight: (lineWeight) => set({ lineWeight }),
+      defaultTraceDepth: { up: 1, down: 1 },
+      setDefaultTraceDepth: (defaultTraceDepth) => set({ defaultTraceDepth }),
       frostedCards: false,
       toggleFrostedCards: () => set((state) => ({ frostedCards: !state.frostedCards })),
       showConnectedTrays: true,
@@ -585,6 +610,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       toggleCanvasTypeBadge: () => set((s) => ({ showCanvasTypeBadge: !s.showCanvasTypeBadge })),
       showCanvasEntityIcons: true,
       toggleCanvasEntityIcons: () => set((s) => ({ showCanvasEntityIcons: !(s.showCanvasEntityIcons ?? true) })),
+      showCanvasEntityIds: true,
+      toggleCanvasEntityIds: () => set((s) => ({ showCanvasEntityIds: !(s.showCanvasEntityIds ?? true) })),
       showMemoryUsage: false,
       toggleMemoryUsage: () => set((s) => ({ showMemoryUsage: !s.showMemoryUsage })),
       subtleCanvasTreeLines: false,
@@ -594,6 +621,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         canvasDensity: 'spacious',
         showCanvasTypeBadge: true,
         showCanvasEntityIcons: true,
+        showCanvasEntityIds: true,
         subtleCanvasTreeLines: false,
         showMemoryUsage: false,
       }),

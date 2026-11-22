@@ -61,6 +61,9 @@ interface DisplayRuleMatchState {
      *  they match — in words; null when it didn't. Shown with a Retry. */
     membershipError: string | null
     countsError: string | null
+    /** On a draft: why some rules' tags on what the draft changed are
+     *  Published's (the server's note); null when every tag is the draft's. */
+    membershipNote: string | null
     /** Bumped by ``retryChecks`` to ask both again. */
     retryToken: number
 
@@ -81,6 +84,7 @@ interface DisplayRuleMatchState {
     retainRules: (keepIds: Iterable<string>) => void
     setMembershipError: (error: string | null) => void
     setCountsError: (error: string | null) => void
+    setMembershipNote: (note: string | null) => void
     /** Ask again: every loaded entity, and every rule's count. */
     retryChecks: () => void
     /** Wipe everything (view switch / unmount). */
@@ -101,6 +105,7 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
     ruleMeta: EMPTY_META,
     membershipError: null,
     countsError: null,
+    membershipNote: null,
     retryToken: 0,
 
     applyMembership: (ruleIds, evaluated, matches) => {
@@ -148,13 +153,14 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
 
     setMembershipError: (error) => set({ membershipError: error }),
     setCountsError: (error) => set({ countsError: error }),
+    setMembershipNote: (note) => set({ membershipNote: note }),
     retryChecks: () => set((s) => ({
         membershipError: null, countsError: null, retryToken: s.retryToken + 1,
     })),
 
     clear: () => set({
         matchUrnsByRule: EMPTY_MATCHES, countsByRule: EMPTY_COUNTS, ruleMeta: EMPTY_META,
-        membershipError: null, countsError: null,
+        membershipError: null, countsError: null, membershipNote: null,
     }),
 }))
 

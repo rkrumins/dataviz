@@ -5,11 +5,12 @@
  * and, below them, how the numbers were come by: how far a read that is
  * still running has got, or when the catalog was read, with a refresh.
  */
-import { Boxes, Database, Layers, RefreshCw, Tag } from 'lucide-react'
+import { Boxes, Database, Info, Layers, RefreshCw, Tag } from 'lucide-react'
 import { type FC, type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 import { compactNum } from '@/components/dashboard/dashboard-constants'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { formatUtc, timeAgo } from '@/lib/timeAgo'
 import type { SearchCatalogResult } from '@/types/search'
@@ -78,6 +79,13 @@ export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
                         Couldn't read the view again — {error}
                     </p>
                 )}
+                {/* How the numbers were come by, where it matters: part of the view left
+                    out, or — on a draft — what of it is still the published graph's. */}
+                {(catalog.notes ?? []).map((note) => (
+                    <p key={note} className="mt-1 flex items-start gap-1 text-[10.5px] leading-snug text-ink-muted">
+                        <Info className="mt-px w-3 h-3 shrink-0" aria-hidden /> {note}
+                    </p>
+                ))}
             </div>
         </div>
     )
@@ -94,12 +102,11 @@ function StatTile({ icon, value, label, tone, atLeast = false }: {
             <span className={cn('inline-flex items-center justify-center w-6 h-6 rounded-lg bg-canvas-base', tone)}>
                 {icon}
             </span>
-            <span
-                className="text-[15px] font-bold tabular-nums leading-none text-ink"
-                title={`${atLeast ? 'at least ' : ''}${value.toLocaleString()}`}
-            >
-                {`${atLeast ? '≥' : ''}${compactNum(value)}`}
-            </span>
+            <HoverTip label={`${atLeast ? 'At least ' : ''}${value.toLocaleString()}`} className="inline-flex">
+                <span className="text-[15px] font-bold tabular-nums leading-none text-ink">
+                    {`${atLeast ? '≥' : ''}${compactNum(value)}`}
+                </span>
+            </HoverTip>
             <span className="text-[8.5px] font-semibold uppercase tracking-[0.12em] text-ink-muted">
                 {label}
             </span>
