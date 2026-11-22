@@ -335,7 +335,8 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                       </span>
                     )}
                   </div>
-                  <Segmented
+                  {/* The staged changes' own views — with nothing staged, the draft's list below has its own. */}
+                  {total > 0 && <Segmented
                     label="Show the changes as"
                     value={view === 'map' ? 'map' : layout}
                     onChange={(v) => { if (v === 'map') setView('map'); else { setView('list'); setLayout(v) } }}
@@ -344,15 +345,15 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                       { value: 'list', label: 'List', icon: List },
                       { value: 'map', label: 'Map', icon: MapIcon },
                     ]}
-                  />
-                  <UndoRedoCluster
+                  />}
+                  {(total > 0 || past.length > 0 || redoStack.length > 0) && <UndoRedoCluster
                     canUndo={(changes.length > 0 || past.length > 0) && applyStatus !== 'applying'}
                     canRedo={redoStack.length > 0 && applyStatus !== 'applying'}
                     onUndo={undo}
                     onRedo={redo}
                     undoShortcut={undoLabel}
                     redoShortcut={redoLabel}
-                  />
+                  />}
                 </div>
               )}
 

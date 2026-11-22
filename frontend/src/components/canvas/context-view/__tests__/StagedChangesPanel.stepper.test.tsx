@@ -132,6 +132,9 @@ describe('Review & Save — the guided flow', () => {
     expect(screen.getByText(/Nothing new to save/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Already saved on this draft/ })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText('saved list of br1')).toBeInTheDocument()
+    // Nothing staged: no second view switch beside the list's own, and nothing to undo or redo.
+    expect(screen.queryByRole('radiogroup', { name: 'Show the changes as' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Undo/ })).toBeNull()
     // Nothing to save, so the steps are the review, then publishing — next, not "later".
     const steps = () => within(screen.getByRole('list', { name: 'Steps' })).getAllByRole('listitem')
     expect(steps().map((li) => li.textContent)).toEqual(['1Review', '2Publish'])
