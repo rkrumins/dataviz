@@ -28,8 +28,8 @@ from backend.app.services import playground_layers, playground_starter
 from backend.app.services.permission_service import PermissionClaims
 from tests.common.transfer_world import fake_version_store
 from tests.test_ontology_ownership import (  # noqa: F401 — ``world`` is a fixture
-    ADA, ADMIN_PERMS, BEN, CY, EDITOR_PERMS, LAB, LAYERS, MEMBER, MEMBER_PERMS, ONT, PG, PG_ADMIN, TEAM,
-    TEAM_EDITOR, TYPES, acting, fresh, make_layer, org_layer, refusal, set_flags, world,
+    ADA, ADMIN_PERMS, BEN, CY, EDITOR_PERMS, LAB, LAYERS, MEMBER, MEMBER_PERMS, ONT, PG, TEAM,
+    TEAM_EDITOR, acting, fresh, make_layer, org_layer, refusal, set_flags, world,
 )
 
 MODELS = "/api/v1/playground/models"
