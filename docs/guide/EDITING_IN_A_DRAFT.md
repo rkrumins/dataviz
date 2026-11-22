@@ -144,7 +144,8 @@ to confirm.
 1. Select the entities: hold `⌘` (Mac) or `Ctrl` (Windows) and click each one,
    or Shift-click to add a range. With a layer column focused, `⌘A` / `Ctrl-A`
    selects every entity it shows.
-2. In the bar at the bottom of the canvas, choose **Edit N…**. The entity
+2. In the bar at the bottom of the canvas, choose **Compare & edit N**, the
+   first of its actions — on a Context View, a Graph or a Hierarchy. The entity
    drawer opens on all of them: how many you hold, of which types, who they are
    (**and N more** lists them — show one on the canvas, or open it), and for
    each property how they hold it:
@@ -197,7 +198,7 @@ drawer offers **Compare them**. Changes not yet staged hold any move of the
 drawer, like an edit to one entity does (**Unsaved changes**). Up to 10,000
 entities are edited here at once; more are compared.
 
-Outside a draft the same bar says **Details**: the drawer compares them,
+Outside a draft the same bar says **Compare N**: the drawer compares them,
 read-only, with **Edit in a draft**. Choosing one entity's own details turns
 the drawer to it — **Back** returns to the comparison.
 
