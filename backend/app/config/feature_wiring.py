@@ -538,6 +538,15 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "GET /playground/samples, POST /playground/samples/{sample_id} — refused while off",
             "POST /playground/imports (start a graph from your own data) — refused while off",
             "POST /{ws_id}/versioning/blank-graphs in the Playground — starting a new graph there is refused",
+            "GET /playground/models and /playground/models/{id}/template — the semantic layers a member "
+            "may build on, and their import templates — refused while off",
+            "POST /playground/models/match (with Suggest semantic layers) — scoring the layers on offer "
+            "against a file — refused while off",
+            "POST /playground/layers, /playground/layers/{id}/share and /playground/layers/{id}/types — "
+            "making, sharing and adding types to a semantic layer of your own — refused while off",
+            "Editing, publishing, deleting, importing into, exporting and reading the history of a "
+            "Playground maker's own semantic layer without the semantic-layer switches — while off, "
+            "the org's rules apply to it, and nobody but a platform admin changes it",
         ),
         ui_surfaces=(
             "Playground — in the sidebar, and on the Dashboard and Workspaces, opening it for anyone",
@@ -551,8 +560,9 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ),
         still_allowed=(
             "People already in the Playground keep their graphs and views; nothing is deleted",
+            "Semantic layers of their own are kept, and still read by them and the graphs built on them",
             "Leaving the Playground",
-            "Moving an experiment out into a workspace, or asking to",
+            "Moving an experiment out into a workspace, or asking to — its own semantic layer goes with it",
         ),
         # A Playground graph is a blank, versioned graph: without these it can make nothing.
         depends_on=("versioningEnabled", "blankModelsEnabled"),
@@ -798,12 +808,14 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /admin/ontologies/{id}/restore",
             "POST /admin/ontologies/{id}/new-version",
             "POST /admin/ontologies/import and /{id}/import — importing IS editing",
+            "POST /admin/ontologies/{id}/approve — approving a workspace's layer for everyone",
         ),
         ui_surfaces=(
             "Create / Edit / Delete controls on the semantic layer pages",
             "The layer editor is read-only",
         ),
-        still_allowed=("Publishing", "Cloning", "Exporting", "Reading every layer"),
+        still_allowed=("Publishing", "Cloning", "Exporting", "Reading every layer",
+                       "A Playground maker's own layers, which they edit whatever this says"),
     ),
     "semanticLayerImportEnabled": FeatureWiring(
         key="semanticLayerImportEnabled",
@@ -813,7 +825,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /admin/ontologies/{id}/import — import into an existing layer",
         ),
         ui_surfaces=("Import button on the semantic layer pages",),
-        still_allowed=("Editing layers in the UI editor", "Exporting"),
+        still_allowed=("Editing layers in the UI editor", "Exporting",
+                       "A Playground maker importing into their own layer, or starting one from a layer file"),
         # An import rewrites a layer's content, so it is a form of editing: it also answers to
         # the edit gate. Without this, "semantic layers are read-only" would be false the moment
         # someone uploaded a file — the exact hole these flags exist to close.
@@ -824,12 +837,14 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         posture="capability",
         server_gates=("GET /admin/ontologies/{id}/export — download the definition as JSON",),
         ui_surfaces=("Export button on the semantic layer pages",),
-        still_allowed=("Reading and editing layers in the UI",),
+        still_allowed=("Reading and editing layers in the UI",
+                       "A Playground maker exporting their own layers"),
     ),
     "semanticLayerAutoSuggest": FeatureWiring(
         key="semanticLayerAutoSuggest",
         posture="capability",
-        server_gates=("POST /admin/ontologies/suggest — score layers against a graph",),
+        server_gates=("POST /admin/ontologies/suggest — score layers against a graph",
+                      "POST /playground/models/match — score the Playground's layers against a file"),
         ui_surfaces=(
             "Suggest-from-graph step in the onboarding and data-source wizards",
             "Match percentages when choosing a layer",
@@ -847,6 +862,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         still_allowed=(
             "History is hidden, not deleted — every version is retained and returns when "
             "this is switched back on",
+            "A Playground maker reading the history of their own layers",
         ),
     ),
     "semanticLayerNonAdminEditing": FeatureWiring(
@@ -856,10 +872,11 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         posture="security",
         server_gates=(
             "Every semantic-layer write (create, update, delete, restore, new-version, "
-            "publish, clone, import) — a non-admin is refused unless this is on",
+            "publish, clone, import, approve) — a non-admin is refused unless this is on",
         ),
         ui_surfaces=("Edit controls are hidden from non-admins on the semantic layer pages",),
-        still_allowed=("Admins can always manage layers", "Everyone can read layers"),
+        still_allowed=("Admins can always manage layers", "Everyone can read layers",
+                       "A Playground maker manages their own layers whatever this says"),
         depends_on=("semanticLayerEditMode",),
     ),
     # ── Experimental ─────────────────────────────────────────────────────────────

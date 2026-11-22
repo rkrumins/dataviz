@@ -13,23 +13,34 @@ with the sample as its first version, its views, library, details and an example
 for review (``backend.app.services.playground_samples``). ``POST /playground/imports`` makes one
 from the person's own things and connections (``backend.app.services.playground_imports``). Both
 are starter graphs, made the same way (``backend.app.services.playground_starter``).
+
+``GET /playground/models`` lists the semantic layers a member may build on, and
+``GET /playground/models/{id}/template`` gives one's standard import template;
+``POST /playground/models/match`` scores them against a file's types. ``POST /playground/layers``
+makes a layer of the member's own, ``/layers/{id}/share`` shares it with the Playground and
+``/layers/{id}/types`` adds a file's types to it (``backend.app.services.playground_layers``).
 """
 from __future__ import annotations
 
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.v1.endpoints.ontologies import (
+    _invalidate_ontology_caches, get_ontology_impact, merged_variants_of, normalise_layer_body,
+    score_ontologies, with_access,
+)
 from backend.app.api.v1.endpoints.versioning import (
     CreateBlankGraphRequest, _live_containment_types, _node_identity_for_meta, _rules_for_meta,
-    create_blank_graph, get_versioning_service, project_now,
+    create_blank_graph, get_import_export_service, get_versioning_service, import_contract_of,
+    project_now,
 )
 from backend.app.api.v1.endpoints.views import _compute_ontology_digest, authorize_view_create
 from backend.app.api.v1.feature_gate import ensure_view_mode_allowed, require_feature
@@ -38,10 +49,11 @@ from backend.app.auth.dependencies import get_current_user, get_permission_claim
 from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import OntologyORM, ProviderORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM
-from backend.app.db.repositories import (binding_repo, user_repo, view_activity_repo, view_repo,
-                                         view_version_repo)
-from backend.app.services import (playground_imports, playground_policy, playground_samples,
-                                  playground_starter, view_library, workspace_access)
+from backend.app.db.repositories import (binding_repo, ontology_definition_repo, user_repo,
+                                         view_activity_repo, view_repo, view_version_repo)
+from backend.app.services import (playground_imports, playground_layers, playground_policy,
+                                  playground_samples, playground_starter, view_library,
+                                  workspace_access)
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.playground_imports import PlaygroundImport
 from backend.app.services.playground_starter import Example, Starter
@@ -50,13 +62,16 @@ from backend.common.models.view_library import DisplayRule, SavedQueryInput
 from backend.app.services.managed_sources import drop_managed_data_source
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.playground_policy import (
-    DEFAULT_GRAPH_QUOTA, PLAYGROUND_KIND, PLAYGROUND_ROLE, PlaygroundSettings, get_playground,
-    graphs_made_by, settings_of,
+    DEFAULT_GRAPH_QUOTA, DEFAULT_LAYER_QUOTA, PLAYGROUND_KIND, PLAYGROUND_ROLE, PlaygroundSettings,
+    get_playground, graphs_made_by, settings_of,
 )
 from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.auth_service.interface import User
-from backend.common.models.management import ViewCreateRequest
+from backend.common.models.graph import GraphSchemaStats
+from backend.common.models.management import (
+    OntologyDefinitionResponse, OntologySuggestResponse, OntologyUpdateRequest, ViewCreateRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +91,9 @@ class PlaygroundInfo(BaseModel):
     joined: bool = False
     graph_quota: int = Field(DEFAULT_GRAPH_QUOTA, alias="graphQuota")
     graphs_used: int = Field(0, alias="graphsUsed")
+    #: Semantic layers of their own a member may keep, and how many the reader has.
+    layer_quota: int = Field(DEFAULT_LAYER_QUOTA, alias="layerQuota")
+    layers_used: int = Field(0, alias="layersUsed")
     #: Set up and configure it — a platform administrator.
     can_set_up: bool = Field(False, alias="canSetUp")
     #: Where its blank graphs go — for its members (the wizard starts there) and its administrator.
@@ -92,6 +110,7 @@ class PlaygroundSetup(BaseModel):
     sandbox_provider_id: str = Field(alias="sandboxProviderId")
     starter_ontology_ids: List[str] = Field(default_factory=list, alias="starterOntologyIds")
     graph_quota: int = Field(DEFAULT_GRAPH_QUOTA, ge=1, le=100, alias="graphQuota")
+    layer_quota: int = Field(DEFAULT_LAYER_QUOTA, ge=1, le=200, alias="layerQuota")
 
 
 async def _info(session: AsyncSession, user: User, claims: PermissionClaims) -> PlaygroundInfo:
@@ -109,6 +128,8 @@ async def _info(session: AsyncSession, user: User, claims: PermissionClaims) -> 
         enabled=enabled, exists=True, workspace_id=ws.id, name=ws.name, description=ws.description,
         joined=joined, graph_quota=settings.graph_quota,
         graphs_used=await graphs_made_by(session, ws.id, user.id) if joined else 0,
+        layer_quota=settings.layer_quota,
+        layers_used=await playground_layers.layers_made_by(session, ws.id, user.id) if joined else 0,
         can_set_up=admin,
         sandbox_provider_id=settings.sandbox_provider_id if admin or joined else None,
         starter_ontology_ids=settings.starter_ontology_ids if admin else None,
@@ -152,6 +173,8 @@ async def join_playground(
     return PlaygroundInfo(
         enabled=True, exists=True, workspace_id=ws.id, name=ws.name, description=ws.description, joined=True,
         graph_quota=settings_of(ws).graph_quota, graphs_used=await graphs_made_by(session, ws.id, user.id),
+        layer_quota=settings_of(ws).layer_quota,
+        layers_used=await playground_layers.layers_made_by(session, ws.id, user.id),
         can_set_up=has_permission(claims, "system:admin"),
         sandbox_provider_id=settings_of(ws).sandbox_provider_id,
     )
@@ -183,7 +206,7 @@ async def set_up_playground(
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Create the Playground, or change its name, sandbox provider, starter data models and quota.
+    """Create the Playground, or change its name, sandbox provider, starter data models and quotas.
     Open to everyone to join, publishing only on request — and nothing of production attachable."""
     provider = await session.get(ProviderORM, body.sandbox_provider_id)
     if provider is None or (provider.provider_type or "").lower() != "falkordb":
@@ -206,6 +229,7 @@ async def set_up_playground(
         sandbox_provider_id=body.sandbox_provider_id,
         starter_ontology_ids=list(dict.fromkeys(body.starter_ontology_ids)),
         graph_quota=body.graph_quota,
+        layer_quota=body.layer_quota,
     )
     ws = await get_playground(session)
     if ws is None:
@@ -513,3 +537,243 @@ async def _discard(session: AsyncSession, ws_id: str, ds_id: str, graph_id: str,
     await drop_managed_data_source(session, ds_id)
     if ontology_id:
         await _drop_ontology(session, ontology_id)
+
+
+# ── Semantic layers ─────────────────────────────────────────────────────
+# What a member may build on, and layers of their own (``playground_layers``). Members only, while
+# the Playground is on.
+
+_LAYER_GATES = [Depends(require_feature(_FLAG))]
+
+
+class PlaygroundModel(BaseModel):
+    """A semantic layer a member may build on: its newest version on offer."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    name: str
+    description: Optional[str] = None
+    version: int
+    #: ``approved``, ``starter``, ``sample``, ``yours`` or ``shared``.
+    kind: str
+    is_published: bool = Field(alias="isPublished")
+    #: Shared with the Playground (a layer of one's own that others may build on).
+    shared: bool = False
+    entity_type_count: int = Field(alias="entityTypeCount")
+    relationship_type_count: int = Field(alias="relationshipTypeCount")
+    #: How many of the reader's live Playground graphs are built on any version of it.
+    used_by: int = Field(alias="usedBy")
+
+
+class NewLayer(BaseModel):
+    """A layer of one's own, from ``from``: ``{blank: true}``, ``{cloneOf: id}``, ``{layer: <a
+    Semantic Layers file>}`` or ``{infer: {thingTypes, connectionTypes}}``."""
+    model_config = ConfigDict(populate_by_name=True, str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=120)
+    description: Optional[str] = Field(None, max_length=4000)
+    source: Dict[str, Any] = Field(alias="from")
+
+
+class ShareLayer(BaseModel):
+    shared: bool
+
+
+class TypeToAdd(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=playground_layers.NAME_MAX)
+
+
+class RelationshipToAdd(TypeToAdd):
+    #: The type pairs its rows join: ``[from, to]``, each a type's id or name.
+    ends: List[Tuple[str, str]] = Field(default_factory=list, max_length=500)
+
+
+class LayerTypesToAdd(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    entity_types: List[TypeToAdd] = Field(default_factory=list, alias="entityTypes",
+                                          max_length=playground_layers.TYPES_MAX)
+    relationship_types: List[RelationshipToAdd] = Field(default_factory=list, alias="relationshipTypes",
+                                                        max_length=playground_layers.TYPES_MAX)
+
+
+class LayerTypesAdded(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    #: The layer version now in use: a new one when the layer was published.
+    ontology_id: str = Field(alias="ontologyId")
+    version: int
+    #: How many of the reader's graphs moved to it.
+    moved_graphs: int = Field(alias="movedGraphs")
+    entity_type_ids: Dict[str, str] = Field(alias="entityTypeIds")
+    relationship_type_ids: Dict[str, str] = Field(alias="relationshipTypeIds")
+
+
+async def _layer_response(session: AsyncSession, claims: PermissionClaims, user: User,
+                          ontology_id: str) -> OntologyDefinitionResponse:
+    layer = await ontology_definition_repo.get_ontology(session, ontology_id)
+    await with_access(session, claims, user.id, [layer])
+    return layer
+
+
+async def _own_layer(session: AsyncSession, claims: PermissionClaims, user: User, ontology_id: str) -> OntologyORM:
+    """A layer of the caller's own here — 404 ``unknown_ontology`` for one they can't see, 403
+    ``layer_not_yours`` for another's."""
+    from backend.app.services.workspace_visibility import ensure_ontology_visible
+    row = await session.get(OntologyORM, ontology_id)
+    if row is None or row.deleted_at:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={
+            "type": "unknown_ontology", "message": "There is no such semantic layer."})
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=user.id)
+    if not await playground_layers.owns_layer(session, claims, user.id, row):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={
+            "type": "layer_not_yours", "message": "Only the person who made this semantic layer can change it."})
+    return row
+
+
+@router.get("/models", response_model=List[PlaygroundModel], response_model_by_alias=True,
+            dependencies=_LAYER_GATES)
+async def list_models(
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The semantic layers a member may build a graph on: approved org-wide layers, the starters,
+    the samples', their own (drafts too) and those shared with the Playground — the newest version
+    of each, by kind and then name."""
+    await _members_playground(session, claims)
+    return [PlaygroundModel(**m) for m in await playground_layers.models(session, claims, user.id)]
+
+
+@router.post("/models/match", response_model=OntologySuggestResponse, response_model_by_alias=True,
+             dependencies=[*_LAYER_GATES, Depends(require_feature("semanticLayerAutoSuggest"))])
+async def match_models(
+    stats: GraphSchemaStats = Body(...),
+    min_score: float = Query(0.1, ge=0.0, le=1.0, description=(
+        "Leave out layers scoring below this overlap; 0 scores every layer on offer.")),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """How well each layer on offer fits a file's types, best first — scored as
+    ``POST /admin/ontologies/suggest`` scores every layer, without its draft (``suggested``). Every
+    layer on offer that scores is listed, not only the best five."""
+    await _members_playground(session, claims)
+    offered = [ontology_definition_repo._to_response(row)
+               for row in await playground_layers.newest_offered(session, claims, user.id)]
+    return OntologySuggestResponse(suggested=None, matchingOntologies=score_ontologies(stats, offered, min_score),
+                                   mergedVariants=merged_variants_of(stats))
+
+
+@router.get("/models/{ontology_id}/template", dependencies=_LAYER_GATES)
+async def model_template(
+    ontology_id: str,
+    format: str = Query("csv"),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+    ie=Depends(get_import_export_service),
+):
+    """The standard import template for a layer on offer (csv, ndjson or xlsx): what
+    ``GET …/graphs/{graph_id}/imports/template`` gives for a graph on it."""
+    from fastapi.responses import Response
+    from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+    from backend.app.ontology.resolver import resolve_ontology
+    from backend.app.services.versioning.import_export.formats import get_adapter
+    from backend.app.services.versioning.import_export.stream import MEDIA_TYPES
+    try:
+        get_adapter(format)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    format = format.lower()
+    await _members_playground(session, claims)
+    await playground_layers.assert_offered(session, claims, user.id, ontology_id)
+    layer = await SQLAlchemyOntologyRepository(session).get_by_id(ontology_id)
+    data = await ie.build_template(export_format=format,
+                                   ontology=import_contract_of(resolve_ontology(None, layer)))
+    return Response(content=data, media_type=MEDIA_TYPES.get(format, "application/octet-stream"),
+                    headers={"Content-Disposition": f'attachment; filename="import-template.{format}"'})
+
+
+@router.post("/layers", response_model=OntologyDefinitionResponse, response_model_by_alias=True,
+             status_code=status.HTTP_201_CREATED, dependencies=_LAYER_GATES)
+async def create_layer(
+    body: NewLayer,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A semantic layer of the member's own: blank, a copy of a layer they can see, a Semantic
+    Layers file, or a file's types (published at once). Private to them until they share it; one
+    of their ``layerQuota`` (409 ``layer_quota``)."""
+    ws = await _members_playground(session, claims)
+    row = await playground_layers.create_owned(
+        session, claims=claims, user_id=user.id, playground_id=ws.id, name=body.name,
+        description=body.description, source=body.source, publish=bool(body.source.get("infer")))
+    return await _layer_response(session, claims, user, row.id)
+
+
+@router.post("/layers/{ontology_id}/share", response_model=OntologyDefinitionResponse,
+             response_model_by_alias=True, dependencies=_LAYER_GATES)
+async def share_layer(
+    ontology_id: str,
+    body: ShareLayer,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Share a layer of one's own with the Playground — others build on it, read-only, once it is
+    published — or make it private again. Graphs others already built on it keep it."""
+    await _members_playground(session, claims)
+    row = await _own_layer(session, claims, user, ontology_id)
+    await playground_layers.share(session, row, body.shared, user.id)
+    await session.commit()
+    return await _layer_response(session, claims, user, ontology_id)
+
+
+@router.post("/layers/{ontology_id}/types", response_model=LayerTypesAdded, response_model_by_alias=True,
+             dependencies=_LAYER_GATES)
+async def add_layer_types(
+    ontology_id: str,
+    body: LayerTypesToAdd,
+    background: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Add a file's types to a layer of one's own: an entity type per name it lacks, and a lineage
+    relationship per relationship name it lacks, joining the types named at its ends. A draft
+    changes in place; a published layer gets its next version, published, and the member's graphs
+    on it move to that version. Names it has already are found, not added. Only the layer's newest
+    version takes types: 409 ``not_latest`` names it."""
+    ws = await _members_playground(session, claims)
+    row = await _own_layer(session, claims, user, ontology_id)
+    newest = (await session.execute(
+        select(OntologyORM).where(ontology_definition_repo.lineage_of(row), OntologyORM.deleted_at.is_(None))
+        .order_by(OntologyORM.version.desc()).limit(1))).scalar_one()
+    if newest.id != row.id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={
+            "type": "not_latest", "latestId": newest.id, "latestVersion": newest.version,
+            "message": f"Version {newest.version} of this layer is newer: add the types to it."})
+    entities, relationships, entity_ids, relationship_ids, changed = playground_layers.with_types(
+        row, [t.name for t in body.entity_types], [(r.name, r.ends) for r in body.relationship_types])
+    if not changed:
+        return LayerTypesAdded(ontology_id=row.id, version=row.version, moved_graphs=0,
+                               entity_type_ids=entity_ids, relationship_type_ids=relationship_ids)
+    req = OntologyUpdateRequest(entityTypeDefinitions=entities, relationshipTypeDefinitions=relationships)
+    normalise_layer_body(req)
+    made = await ontology_definition_repo.update_ontology(session, row.id, req, actor=user.id)
+    moved = 0
+    if made.id != row.id:                       # it was published: publish the new version, and move
+        impact = await get_ontology_impact(made.id, session, claims=None)
+        if not impact["allowed"]:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=impact["reason"])
+        await ontology_definition_repo.publish_ontology(session, made.id, actor=user.id)
+        moved = await playground_layers.move_graphs(session, ws_id=ws.id, user_id=user.id,
+                                                    from_id=row.id, to_id=made.id)
+        await _invalidate_ontology_caches(session, row.id, background)
+    await _invalidate_ontology_caches(session, made.id, background)
+    return LayerTypesAdded(ontology_id=made.id, version=made.version, moved_graphs=moved,
+                           entity_type_ids=entity_ids, relationship_type_ids=relationship_ids)

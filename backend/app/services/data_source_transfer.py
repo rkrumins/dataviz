@@ -13,7 +13,10 @@ can be put back:
   longer holds;
 * the versioned graph and every job run on it, in the version store, FIRST — that store can be
   a separate database, so if the rest fails the graph is put back (:func:`_execute`);
-* the aggregation state, so drift and reconciliation invalidate the right caches.
+* the aggregation state, so drift and reconciliation invalidate the right caches;
+* the semantic layer the source's workspace owns (a Playground maker's own): it becomes the
+  destination's layer — or, when other sources still use it, the destination gets its own copy
+  and the moved source is built on that (:func:`_layer_plan`).
 
 Access. Owners, and the people and groups a view is shared with, keep it wherever it lives, and
 published views stay published. Views shared with the whole workspace switch audience to the new
@@ -61,6 +64,7 @@ from backend.app.db.models import (
     GroupMemberORM,
     GroupORM,
     IdpGroupRoleMappingORM,
+    OntologyORM,
     ProviderORM,
     ResourceGrantORM,
     RoleBindingORM,
@@ -328,6 +332,9 @@ class Preflight:
     #: Everyone who stops reading moved views: people who lose them directly and the members of
     #: groups that do, less anyone who reads views in the destination or across the organization.
     affected: set = field(default_factory=set)
+    #: The source's own semantic layer, when its workspace owns it: ``{id, name, action}``, the
+    #: action ``move`` (it becomes the destination's) or ``copy`` (others still use it).
+    layer: Optional[dict] = None
 
     @property
     def has_views(self) -> bool:
@@ -869,7 +876,15 @@ async def preflight(
                 f"{source.name}. The views keep working, but people in {target.name} can't open "
                 f"{'that template' if len(local) == 1 else 'those templates'}.",
                 "warning", items=[ImpactedEntity(id=i, name=n, type="template") for i, n in local]))
-    if ds.ontology_id:
+    layer = await _layer_plan(session, ds, source)
+    if layer is not None:
+        notes.append(_issue(
+            "layer_moves",
+            f"Your layer “{layer['name']}” moves with it and becomes {target.name}'s layer; its data "
+            "engineers can edit it and approve it for everyone." if layer["action"] == "move" else
+            f"Your layer “{layer['name']}” is used by other graphs in {source.name} too, so {target.name} "
+            "gets its own copy of it; its data engineers can edit it and approve it for everyone."))
+    elif ds.ontology_id:
         others = await session.scalar(
             select(func.count()).select_from(WorkspaceDataSourceORM).where(
                 WorkspaceDataSourceORM.ontology_id == ds.ontology_id,
@@ -901,11 +916,92 @@ async def preflight(
         notes=notes, losers=losers, counts=counts, was_primary=was_primary,
         was_default=was_default, becomes_primary=becomes_primary,
         pin_destination_default=pin_dest, pin_destination_label=pin_label,
-        identity_pin=identity_pin, facts=facts, reach_b=reach_b, affected=affected,
+        identity_pin=identity_pin, facts=facts, reach_b=reach_b, affected=affected, layer=layer,
     )
     pre.token = _token(target.id, views, losers, was_default, becomes_primary, pin_dest, identity_pin,
                        restricted_open)
     return pre
+
+
+async def _layer_plan(session: AsyncSession, ds: WorkspaceDataSourceORM,
+                      source: WorkspaceORM) -> Optional[dict]:
+    """What a move does with the source's semantic layer: nothing, unless the source's workspace
+    owns it (a Playground maker's own layer). Then it ``move``s — every version becomes the
+    destination's — when no other live source uses any version of it; else the destination gets a
+    ``copy`` of the version the source is on. The source's forks move with it, so they don't
+    count."""
+    if not ds.ontology_id:
+        return None
+    row = await session.get(OntologyORM, ds.ontology_id)
+    if row is None or row.owner_workspace_id != source.id:
+        return None
+    from backend.app.db.repositories.ontology_definition_repo import lineage_of
+    moving = [ds.id, *await fork_sources.forks_of(session, ds.id)]
+    others = await session.scalar(
+        select(func.count()).select_from(WorkspaceDataSourceORM).where(
+            WorkspaceDataSourceORM.ontology_id.in_(select(OntologyORM.id).where(lineage_of(row))),
+            WorkspaceDataSourceORM.id.notin_(moving),
+            WorkspaceDataSourceORM.deleted_at.is_(None),
+        )) or 0
+    return {"id": row.id, "name": row.name, "action": "copy" if others else "move"}
+
+
+async def _carry_layer(session: AsyncSession, pre: Preflight, *, actor: str, now: str) -> Optional[dict]:
+    """Do :attr:`Preflight.layer`, in the move's transaction, before the forks take the source's
+    settings. Returns what undo needs: the layer, what was done, and its reach or its copy."""
+    plan, ds, target = pre.layer, pre.ds, pre.target
+    if plan is None:
+        return None
+    from backend.app.db.repositories.ontology_definition_repo import _record_audit, lineage_of
+    row = await session.get(OntologyORM, plan["id"])
+    done = {"id": row.id, "action": plan["action"], "visibility": row.owner_visibility}
+    if plan["action"] == "move":
+        await session.execute(
+            update(OntologyORM).where(lineage_of(row), OntologyORM.owner_workspace_id == pre.source.id)
+            .values(owner_workspace_id=target.id, owner_visibility=None, updated_by=actor, updated_at=now)
+            .execution_options(synchronize_session="fetch"))
+        await _record_audit(session, row, "updated", actor=actor,
+                            summary=f"Moved to {target.name} with {_label(ds)}")
+        return done
+    copy = OntologyORM(
+        name=row.name, description=row.description, version=1, evolution_policy=row.evolution_policy,
+        containment_edge_types=row.containment_edge_types, lineage_edge_types=row.lineage_edge_types,
+        edge_type_metadata=row.edge_type_metadata, entity_type_hierarchy=row.entity_type_hierarchy,
+        root_entity_types=row.root_entity_types, entity_type_definitions=row.entity_type_definitions,
+        relationship_type_definitions=row.relationship_type_definitions,
+        is_published=row.is_published, published_at=now if row.is_published else None,
+        published_by=actor if row.is_published else None, is_system=False, scope="workspace",
+        owner_workspace_id=target.id, owner_visibility=None, created_by=actor, updated_by=actor,
+    )
+    session.add(copy)
+    await session.flush()
+    copy.schema_id = copy.id
+    ds.ontology_id = copy.id
+    await session.flush()
+    await _record_audit(session, copy, "cloned", actor=actor,
+                        summary=f"Copied from \"{row.name}\" v{row.version} for {target.name}, with {_label(ds)}")
+    return {**done, "copyId": copy.id}
+
+
+async def _uncarry_layer(session: AsyncSession, ds: WorkspaceDataSourceORM, source: WorkspaceORM,
+                         target: WorkspaceORM, layer: Optional[dict]) -> None:
+    """Put back what :func:`_carry_layer` did: the layer is the source workspace's again (unless
+    the destination's editors approved it for everyone meanwhile), or the source is built on the
+    original again — its copy stays the destination's."""
+    if not layer:
+        return
+    from backend.app.db.repositories.ontology_definition_repo import lineage_of
+    row = await session.get(OntologyORM, layer["id"])
+    if row is None:
+        return
+    if layer["action"] == "move":
+        await session.execute(
+            update(OntologyORM).where(lineage_of(row), OntologyORM.owner_workspace_id == target.id)
+            .values(owner_workspace_id=source.id, owner_visibility=layer.get("visibility"))
+            .execution_options(synchronize_session="fetch"))
+    elif ds.ontology_id == layer.get("copyId"):
+        ds.ontology_id = row.id
+    await session.flush()
 
 
 async def _person_names(session: AsyncSession, user_ids: Iterable[str]) -> dict[str, str]:
@@ -1028,6 +1124,7 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str,
         setattr(ds, column, value)
     ds.updated_at = now
     await session.flush()
+    layer = await _carry_layer(session, pre, actor=actor, now=now)
     # Its forks' sources, trashed ones too, live where it does and are governed as it is.
     sources = await _carry_forks(session, ds, target.id, now)
 
@@ -1083,6 +1180,7 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str,
         # Who stopped reading the moved views, as it stood when the move ran.
         "lostAccess": _lost_counts(t for t, _ in pre.losers),
         "lost": [loser.recorded() for _, loser in sorted(pre.losers.items())],
+        "layer": layer,
     }
 
 
@@ -1612,6 +1710,7 @@ async def _apply_undo(session: AsyncSession, row: DataSourceTransferORM,
             setattr(ds, column, None)
     ds.updated_at = now
     await session.flush()
+    await _uncarry_layer(session, ds, source, target, manifest.get("layer"))
     sources = await _carry_forks(session, ds, source.id, now)
 
     pinned_default = manifest.get("pinnedDestinationDefault")

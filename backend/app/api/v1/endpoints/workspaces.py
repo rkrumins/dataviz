@@ -42,8 +42,8 @@ from backend.app.db.repositories import (
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services import (
-    data_source_transfer, fork_sources, playground_policy, profiling_series, template_access,
-    workspace_visibility,
+    data_source_transfer, fork_sources, playground_layers, playground_policy, profiling_series,
+    template_access, workspace_visibility,
 )
 from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
@@ -906,6 +906,10 @@ async def update_data_source(
     # Validate new ontology if changing
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
+    # In the Playground, a graph moves only onto a published layer its maker may build on there.
+    if (req.ontology_id and req.ontology_id != old_ds.ontology_id
+            and await playground_policy.playground_of(session, workspace_id)):
+        await playground_layers.assert_offered(session, claims, _user.id, req.ontology_id)
 
     # A change to either node-identity property makes the existing
     # materialization stale (edges were resolved under the old identity, and the
