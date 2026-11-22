@@ -667,9 +667,34 @@ class OntologyDefinitionResponse(BaseModel):
     deleted_at: Optional[str] = Field(None, alias="deletedAt")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+    #: The workspace that owns it (a Playground maker's own layer, or one that moved with a
+    #: graph); None for an org layer.
+    owner_workspace_id: Optional[str] = Field(None, alias="ownerWorkspaceId")
+    #: An owned layer's reach: ``private`` to its maker, or ``workspace``.
+    owner_visibility: Optional[str] = Field(None, alias="ownerVisibility")
+    #: What the reader may do with it, filled in by the routes that answer with it.
+    access: Optional["LayerAccess"] = None
 
     class Config:
         populate_by_name = True
+
+
+class LayerAccess(BaseModel):
+    """What the reader may do with one semantic layer: an org layer by the semantic-layer
+    permission and switches, a Playground layer of one's own by being its maker."""
+    can_edit: bool = Field(False, alias="canEdit")
+    can_publish: bool = Field(False, alias="canPublish")
+    can_delete: bool = Field(False, alias="canDelete")
+    can_clone: bool = Field(False, alias="canClone")
+    can_share: bool = Field(False, alias="canShare")
+    can_assign: bool = Field(False, alias="canAssign")
+    is_own: bool = Field(False, alias="isOwn")
+
+    class Config:
+        populate_by_name = True
+
+
+OntologyDefinitionResponse.model_rebuild()
 
 
 class OntologyAuditEntry(BaseModel):
@@ -811,7 +836,9 @@ class MergedTypeVariant(BaseModel):
 
 
 class OntologySuggestResponse(BaseModel):
-    suggested: OntologyCreateRequest
+    #: The draft layer made from the graph's types; None where nothing is drafted (the
+    #: Playground's scoring of the layers on offer).
+    suggested: Optional[OntologyCreateRequest] = None
     matching_ontologies: List[OntologyMatchResult] = Field(default_factory=list, alias="matchingOntologies")
     # Canonical suggested type id → the source spellings merged into it (Task E §1c).
     # Present only for types the source spelled >1 way; the suggest-review UI shows these

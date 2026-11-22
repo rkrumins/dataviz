@@ -563,6 +563,13 @@ class OntologyORM(Base):
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)             # soft delete timestamp
+    # The workspace that owns it: a Playground maker's own layer (with ``created_by`` its maker),
+    # or one that moved into a workspace with its graph. NULL: an org layer, as every layer was.
+    owner_workspace_id = Column(
+        Text, ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, default=None,
+    )
+    # An owned layer: ``private`` to its maker, or ``workspace`` — shared with its workspace.
+    owner_visibility = Column(Text, nullable=True, default=None)
 
     # Relationships
     data_sources = relationship(
@@ -571,6 +578,7 @@ class OntologyORM(Base):
 
     __table_args__ = (
         Index("idx_ontologies_name_version", "name", "version"),
+        Index("idx_ontologies_owner_workspace", "owner_workspace_id"),
         Index("idx_ontologies_is_system", "is_system"),
         Index("idx_ontologies_schema_id", "schema_id"),
         Index("idx_ontologies_deleted", "deleted_at"),

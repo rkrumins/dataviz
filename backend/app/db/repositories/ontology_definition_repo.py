@@ -245,7 +245,22 @@ def _to_response(row: OntologyORM) -> OntologyDefinitionResponse:
         deletedAt=getattr(row, "deleted_at", None),
         createdAt=row.created_at,
         updatedAt=row.updated_at,
+        ownerWorkspaceId=getattr(row, "owner_workspace_id", None),
+        ownerVisibility=getattr(row, "owner_visibility", None),
     )
+
+
+def _owner_of(original: OntologyORM, actor: Optional[str]) -> dict:
+    """What a new version of ``original`` keeps of its owner: the owning workspace and its reach,
+    and — for an owned layer — its maker, who owns every version of it (who made this version is
+    ``updated_by`` and the audit trail). An org layer's new version is made by ``actor``."""
+    owner = getattr(original, "owner_workspace_id", None)
+    return {
+        "owner_workspace_id": owner,
+        "owner_visibility": getattr(original, "owner_visibility", None),
+        "created_by": (original.created_by or actor) if owner else actor,
+        "updated_by": actor,
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -388,6 +403,8 @@ async def get_system_default_ontology(session: AsyncSession) -> Optional[Ontolog
 async def create_ontology(
     session: AsyncSession,
     req: OntologyCreateRequest,
+    *,
+    actor: Optional[str] = None,
 ) -> OntologyDefinitionResponse:
     _sync_classification(req)
     row = OntologyORM(
@@ -405,6 +422,8 @@ async def create_ontology(
         is_published=False,
         is_system=False,
         scope="universal",
+        created_by=actor,
+        updated_by=actor,
     )
     session.add(row)
     await session.flush()
@@ -414,7 +433,7 @@ async def create_ontology(
     entity_count = len(json.loads(row.entity_type_definitions or "{}"))
     rel_count = len(json.loads(row.relationship_type_definitions or "{}"))
     await _record_audit(
-        session, row, "created",
+        session, row, "created", actor=actor,
         summary=f"Created draft v1 with {entity_count} entity types, {rel_count} relationships",
     )
     return _to_response(row)
@@ -437,6 +456,8 @@ async def update_ontology(
     session: AsyncSession,
     ontology_id: str,
     req: OntologyUpdateRequest,
+    *,
+    actor: Optional[str] = None,
 ) -> Optional[OntologyDefinitionResponse]:
     """
     Update an ontology.
@@ -455,7 +476,7 @@ async def update_ontology(
     _sync_classification(req, row)
 
     if row.is_published and not _is_metadata_only(req):
-        return await _create_new_version(session, row, req)
+        return await _create_new_version(session, row, req, actor=actor)
 
     # Snapshot before-state for audit diff
     old_entities = set(json.loads(row.entity_type_definitions or "{}").keys())
@@ -484,6 +505,7 @@ async def update_ontology(
 
     row.revision = (getattr(row, 'revision', 0) or 0) + 1
     row.updated_at = datetime.now(timezone.utc).isoformat()
+    row.updated_by = actor
     await session.flush()
 
     # Compute change diff for audit
@@ -504,7 +526,8 @@ async def update_ontology(
             parts.append(f"Removed {len(changes['removedRelationshipTypes'])} relationship(s)")
         if not parts:
             parts.append("Updated type definitions")
-    await _record_audit(session, row, "updated", summary="; ".join(parts), changes=changes if not _is_metadata_only(req) else None)
+    await _record_audit(session, row, "updated", actor=actor, summary="; ".join(parts),
+                        changes=changes if not _is_metadata_only(req) else None)
 
     return _to_response(row)
 
@@ -513,6 +536,8 @@ async def _create_new_version(
     session: AsyncSession,
     original: OntologyORM,
     req: OntologyUpdateRequest,
+    *,
+    actor: Optional[str] = None,
 ) -> OntologyDefinitionResponse:
     """Create a new version of a published ontology with the requested changes."""
     schema_id = original.schema_id or original.id
@@ -571,18 +596,19 @@ async def _create_new_version(
         is_published=False,
         is_system=False,
         scope=original.scope or "universal",
+        **_owner_of(original, actor),
     )
     session.add(new_row)
     await session.flush()
     await _record_audit(
-        session, new_row, "cloned",
+        session, new_row, "cloned", actor=actor,
         summary=f"Created v{new_row.version} from published v{original.version}",
     )
     return _to_response(new_row)
 
 
 async def publish_ontology(
-    session: AsyncSession, ontology_id: str
+    session: AsyncSession, ontology_id: str, *, actor: Optional[str] = None,
 ) -> Optional[OntologyDefinitionResponse]:
     row = await get_ontology_orm(session, ontology_id)
     if not row:
@@ -590,15 +616,17 @@ async def publish_ontology(
     now = datetime.now(timezone.utc).isoformat()
     row.is_published = True
     row.published_at = now
+    row.published_by = actor
     row.updated_at = now
+    row.updated_by = actor
     await session.flush()
     # Audit trail
-    await _record_audit(session, row, "published", summary=f"Published v{row.version}")
+    await _record_audit(session, row, "published", actor=actor, summary=f"Published v{row.version}")
     return _to_response(row)
 
 
 async def delete_ontology(
-    session: AsyncSession, ontology_id: str
+    session: AsyncSession, ontology_id: str, *, actor: Optional[str] = None,
 ) -> bool:
     """Soft-delete an ontology by setting deleted_at timestamp."""
     row = await get_ontology_orm(session, ontology_id)
@@ -606,13 +634,15 @@ async def delete_ontology(
         return False
     now = datetime.now(timezone.utc).isoformat()
     row.deleted_at = now
+    row.deleted_by = actor
     await session.flush()
-    await _record_audit(session, row, "deleted", summary=f"Deleted \"{row.name}\" v{row.version}")
+    await _record_audit(session, row, "deleted", actor=actor,
+                        summary=f"Deleted \"{row.name}\" v{row.version}")
     return True
 
 
 async def restore_ontology(
-    session: AsyncSession, ontology_id: str
+    session: AsyncSession, ontology_id: str, *, actor: Optional[str] = None,
 ) -> Optional[OntologyDefinitionResponse]:
     """Restore a soft-deleted ontology by clearing deleted_at."""
     result = await session.execute(
@@ -625,8 +655,29 @@ async def restore_ontology(
         return None
     row.deleted_at = None
     row.deleted_by = None
+    row.updated_by = actor
     await session.flush()
-    await _record_audit(session, row, "restored", summary=f"Restored \"{row.name}\" v{row.version}")
+    await _record_audit(session, row, "restored", actor=actor,
+                        summary=f"Restored \"{row.name}\" v{row.version}")
+    return _to_response(row)
+
+
+def lineage_of(row: OntologyORM):
+    """Every version of ``row``'s layer: its ``schema_id``, or just itself where it has none."""
+    return OntologyORM.schema_id == row.schema_id if row.schema_id else OntologyORM.id == row.id
+
+
+async def approve_ontology(
+    session: AsyncSession, row: OntologyORM, *, actor: Optional[str] = None,
+) -> OntologyDefinitionResponse:
+    """Approve a workspace's layer for everyone: every version of it becomes an org layer
+    (``scope="universal"``, no owner)."""
+    await session.execute(
+        update(OntologyORM).where(lineage_of(row))
+        .values(scope="universal", owner_workspace_id=None, owner_visibility=None, updated_by=actor)
+        .execution_options(synchronize_session="fetch"))
+    await session.flush()
+    await _record_audit(session, row, "updated", actor=actor, summary=f"Approved v{row.version} for everyone")
     return _to_response(row)
 
 
@@ -656,7 +707,7 @@ async def get_draft_for_schema(
 
 
 async def create_new_version_from_source(
-    session: AsyncSession, source: OntologyORM
+    session: AsyncSession, source: OntologyORM, *, actor: Optional[str] = None,
 ) -> OntologyDefinitionResponse:
     """Create a new draft version from a published/system ontology under the same schema_id."""
     schema_id = source.schema_id or source.id
@@ -683,13 +734,14 @@ async def create_new_version_from_source(
         is_published=False,
         is_system=False,
         scope=source.scope or "universal",
+        **_owner_of(source, actor),
     )
     session.add(new_row)
     await session.flush()
     entity_count = len(json.loads(new_row.entity_type_definitions or "{}"))
     rel_count = len(json.loads(new_row.relationship_type_definitions or "{}"))
     await _record_audit(
-        session, new_row, "cloned",
+        session, new_row, "cloned", actor=actor,
         summary=f"Created draft v{new_row.version} from v{source.version} ({entity_count} entity types, {rel_count} relationships)",
     )
     return _to_response(new_row)
@@ -868,6 +920,8 @@ async def import_ontology(
     session: AsyncSession,
     req: OntologyImportRequest,
     target_id: Optional[str] = None,
+    *,
+    actor: Optional[str] = None,
 ) -> OntologyImportResponse:
     """
     Import a semantic layer from exported JSON.
@@ -893,12 +947,12 @@ async def import_ontology(
             entity_type_definitions=req.entity_type_definitions,
             relationship_type_definitions=req.relationship_type_definitions,
         )
-        created = await create_ontology(session, create_req)
+        created = await create_ontology(session, create_req, actor=actor)
         # Override the default "created" audit with a more specific "imported" entry
         await _record_audit(
             session,
             (await get_ontology_orm(session, created.id)),  # type: ignore[arg-type]
-            "imported",
+            "imported", actor=actor,
             summary=(
                 f"Imported as new draft with "
                 f"{len(req.entity_type_definitions)} entity types, "
@@ -969,10 +1023,11 @@ async def import_ontology(
         _apply_import_fields(row, req)
         row.revision = (getattr(row, "revision", 0) or 0) + 1
         row.updated_at = datetime.now(timezone.utc).isoformat()
+        row.updated_by = actor
         await session.flush()
 
         await _record_audit(
-            session, row, "imported",
+            session, row, "imported", actor=actor,
             summary=f"Imported into draft v{row.version}: {summary_text}",
             changes=diff["type_diff"],
         )
@@ -1008,12 +1063,13 @@ async def import_ontology(
         is_published=False,
         is_system=False,
         scope=row.scope or "universal",
+        **_owner_of(row, actor),
     )
     session.add(new_row)
     await session.flush()
 
     await _record_audit(
-        session, new_row, "imported",
+        session, new_row, "imported", actor=actor,
         summary=(
             f"Imported as new draft v{new_row.version} "
             f"(from published v{row.version}): {summary_text}"
