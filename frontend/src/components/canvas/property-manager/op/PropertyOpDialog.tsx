@@ -101,7 +101,9 @@ export function PropertyOpDialog({
   const { keysByEdgeType } = useDiscovery(edges ? viewId : null)
   const edgeProperties = useMemo(() => edgePropertiesOf(keysByEdgeType), [keysByEdgeType])
   // "Add a property" gives a value to a property nothing in the view holds yet, or to one not named
-  // yet (Property Manager's New). Until the catalog answers, a named property counts as held.
+  // yet from Property Manager's New. Opened on chosen entities (a container's children, a layer, a
+  // selection), a property not named yet reads as a change of them, as the menu that opened it
+  // said. Until the catalog answers, a named property counts as held.
   const key = op.key.trim()
   const held = !!key && (edges ? edgeProperties.some((p) => p.key === key) : !catalog || properties.some((p) => p.key === key))
   // Unless one is chosen, a change reaches every entity in the view when nothing holds its property
@@ -112,7 +114,8 @@ export function PropertyOpDialog({
   const nothingHolds = !key || (catalog?.status === 'complete' && !properties.some((p) => p.key === key) && !adding)
   const preset: TargetPreset = chosen?.kind === 'hasKey' ? { kind: 'hasKey', key }
     : chosen ?? (nothingHolds ? { kind: 'view' } : { kind: 'hasKey', key })
-  const title = cleanup ? 'Clean up a property' : needsValue(op.kind) && !held ? 'Add a property' : 'Change a property'
+  const title = cleanup ? 'Clean up a property'
+    : needsValue(op.kind) && (key ? !held : !seed.target) ? 'Add a property' : 'Change a property'
   // Opened with its property named (a fill from a refused publish, a catalog row): What focuses
   // what is still to give. And the target it was opened with, said on What when it has a name.
   const keySeeded = !!(seed.op?.key ?? seed.key)

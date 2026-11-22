@@ -563,6 +563,11 @@ describe('PropertyOpDialog — its title, its steps, and the focus', () => {
     expect(heading()).toHaveTextContent('Change a property')
   })
 
+  it('opened on chosen entities with no property named, changes them — as the menu said', () => {
+    open({ target: { kind: 'children', urns: ['urn:sales'], label: 'Sales' } })
+    expect(heading()).toHaveTextContent('Change a property')
+  })
+
   it('adds a property no entity in the view holds, and changes one they do', () => {
     open({ op: { kind: 'fillEmpty', key: 'tier', value: 'gold' }, target: { kind: 'view' } })
     expect(heading()).toHaveTextContent('Add a property')
@@ -581,7 +586,7 @@ describe('PropertyOpDialog — its title, its steps, and the focus', () => {
   it('a relationship’s property is added or changed as the view’s relationships carry it', async () => {
     const user = userEvent.setup()
     open({ target: { kind: 'relationships', ids: ['e1'] } })
-    expect(heading()).toHaveTextContent('Add a property')
+    expect(heading()).toHaveTextContent('Change a property')
     await user.type(screen.getByRole('combobox', { name: 'Property' }), 'owner')
     expect(heading()).toHaveTextContent('Change a property')
     await user.type(screen.getByRole('combobox', { name: 'Property' }), '2')
