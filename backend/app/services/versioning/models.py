@@ -607,6 +607,11 @@ class ProjectionStateORM(VersioningBase):
 _INGEST_ACTIVE = "job_type = 'ingest' AND status IN ('pending','running')"
 JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish", "purge",
              "package_inspect", "fork_update", "fork_merge", "save", "property")
+# A bulk property job that has ended and that the notices sweep hasn't looked at yet
+# (``ix_jobs_property_unnotified``; ``import_export.job_notices``). Written out, with no parameter,
+# so the planner can match the sweep's query to the index.
+JOBS_UNNOTIFIED = ("job_type = 'property' AND status IN ('completed', 'failed', 'cancelled') "
+                   "AND (summary ->> 'notifiedAt') IS NULL")
 
 
 class ProjectionQuarantineORM(VersioningBase):
@@ -797,6 +802,10 @@ class JobORM(VersioningBase):
             unique=True,
             postgresql_where=text(_INGEST_ACTIVE),
         ),
+        # The bulk property jobs that ended and haven't been looked at by the notices sweep, by
+        # when they ended: the sweep reads the oldest recent ones every minute. A job leaves the
+        # index once the sweep stamps it (20261122_1200_gv_job_notices).
+        Index("ix_jobs_property_unnotified", "completed_at", postgresql_where=text(JOBS_UNNOTIFIED)),
         CheckConstraint(
             "status IN ('pending','running','completed','failed','cancelled')",
             name="ck_jobs_status",
@@ -1261,6 +1270,10 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261111_1000_gv_draft_prune. Every draft request reads branches: short tries.
     _bounded_step(conn, "the closed drafts' prune columns were not added",
                   lambda: ensure_branch_prune_columns(conn), required=True, tries=10)
+    # 20261122_1200_gv_job_notices. Not required: the notices sweep finds the jobs without it, only
+    # more slowly.
+    _bounded_step(conn, "ix_jobs_property_unnotified was not built",
+                  lambda: ensure_jobs_unnotified_index(conn))
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
@@ -1643,6 +1656,19 @@ def ensure_review_records(conn) -> None:
         f"(m.changes_requested ->> 'headSeq')::bigint, coalesce(m.changes_requested ->> 'at', m.updated_at) "
         f"FROM {mr} m WHERE m.changes_requested ->> 'by' IS NOT NULL "
         f"ON CONFLICT (id) DO NOTHING"))
+
+
+def ensure_jobs_unnotified_index(conn) -> None:
+    """Build ``ix_jobs_property_unnotified`` (:data:`JOBS_UNNOTIFIED`), for a store alembic never
+    reaches; the migration builds it without locking the table. A plain build here, as the other
+    start-up indexes are. A no-op without the table, and once the index is there."""
+    if not sa_inspect(conn).has_table("jobs", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if conn.execute(text("SELECT to_regclass(:i)"),
+                    {"i": f'"{_SCHEMA}".ix_jobs_property_unnotified'}).scalar():
+        return
+    conn.execute(text(f'CREATE INDEX IF NOT EXISTS ix_jobs_property_unnotified ON "{_SCHEMA}"."jobs" '
+                      f"(completed_at) WHERE {JOBS_UNNOTIFIED}"))
 
 
 def ensure_mr_target_status_index(conn) -> None:
