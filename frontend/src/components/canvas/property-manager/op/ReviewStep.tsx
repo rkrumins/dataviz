@@ -306,8 +306,9 @@ export function ReviewStep({
         ) : (
           <span>
             Applied to your draft by the server — every matching entity, however many, a batch at a time — and
-            published from there. The entities are found as published; ones new in this draft aren’t matched (select
-            them on the canvas instead). Counts, rule tags and the catalog follow your draft, batch by batch.
+            published from there. Entities are matched on your draft as the change starts, ones new in it included (where
+            they can’t be, it says so when it ends); ones added while it runs aren’t. Counts, rule tags and the catalog
+            follow your draft, batch by batch.
           </span>
         )}
       </p>
