@@ -238,8 +238,8 @@ describe('GraphCanvas — several at once', () => {
     await settle()
     const region = bar()!
     expect(region.textContent).toContain('drag selects a box')
-    // Outside a draft, the drawer reads them: "Details", not an edit it could not keep.
-    fireEvent.click(within(region).getByRole('button', { name: 'Details' }))
+    // Outside a draft, the drawer compares them: "Compare 2", not an edit it could not keep.
+    fireEvent.click(within(region).getByRole('button', { name: 'Compare 2' }))
     expect(useCanvasStore.getState().drawerNodeIds).toEqual(['orders', 'customers'])
     fireEvent.click(within(region).getByRole('button', { name: /remove customers/i }))
     expect(selected()).toEqual(['orders'])
@@ -323,7 +323,7 @@ describe('GraphCanvas — several at once', () => {
     await mountGraph({ draft: true })
     act(() => { useCanvasStore.getState().setSelection(['orders', 'customers']) })
     await settle()
-    fireEvent.click(within(bar()!).getByRole('button', { name: 'Edit 2…' }))
+    fireEvent.click(within(bar()!).getByRole('button', { name: 'Compare & edit 2' }))
     expect(useCanvasStore.getState().drawerNodeIds).toEqual(['orders', 'customers'])
     // The drawer edits here — it stages for both, nothing yet changed.
     expect(await screen.findByRole('button', { name: 'Stage for 2' })).toBeDisabled()
@@ -338,8 +338,8 @@ describe('GraphCanvas — several at once', () => {
     useFeaturesStore.setState({ values: { ...useFeaturesStore.getState().values, editModeEnabled: false } } as never)
     act(() => { useCanvasStore.getState().setSelection(['orders', 'customers']) })
     await settle()
-    expect(within(bar()!).queryByRole('button', { name: 'Edit 2…' })).toBeNull()
-    fireEvent.click(within(bar()!).getByRole('button', { name: 'Details' }))
+    expect(within(bar()!).queryByRole('button', { name: 'Compare & edit 2' })).toBeNull()
+    fireEvent.click(within(bar()!).getByRole('button', { name: 'Compare 2' }))
     await settle()
     expect(screen.queryByRole('button', { name: 'Stage for 2' })).toBeNull()
   }, 20000)
@@ -371,7 +371,7 @@ describe('HierarchyCanvas — several at once', () => {
     expect(ringed('orders')).toBe(true)
     expect(ringed('returns')).toBe(true)
     expect(ringed('customers')).toBe(false)
-    fireEvent.click(within(bar()!).getByRole('button', { name: 'Details' }))
+    fireEvent.click(within(bar()!).getByRole('button', { name: 'Compare 2' }))
     expect(useCanvasStore.getState().drawerNodeIds).toEqual(['orders', 'returns'])
   }, 20000)
 
@@ -419,13 +419,13 @@ describe('HierarchyCanvas — several at once', () => {
     expect(useCanvasStore.getState().drawerNodeIds).toBeNull()
   }, 20000)
 
-  it('in a draft: "Edit N…" edits them in the drawer, and the canvas saves what was staged', async () => {
+  it('in a draft: "Compare & edit N" edits them in the drawer, and the canvas saves what was staged', async () => {
     await mountHierarchy({ draft: true })
     act(() => { useCanvasStore.getState().setSelection(['orders', 'returns']) })
     await settle()
     // Nothing staged yet: nothing to review.
     expect(screen.getByRole('button', { name: /review & save/i })).toBeDisabled()
-    fireEvent.click(within(bar()!).getByRole('button', { name: 'Edit 2…' }))
+    fireEvent.click(within(bar()!).getByRole('button', { name: 'Compare & edit 2' }))
     expect(await screen.findByRole('button', { name: 'Stage for 2' })).toBeInTheDocument()
     await saveOneFromTheCanvas()
     expect(requests.some((u) => u.includes('/graph/changes'))).toBe(true)

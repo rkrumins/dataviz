@@ -61,6 +61,12 @@ describe('GenericNode — rings', () => {
     expect(el.className).toContain('ring-blue-400')
   })
 
+  it('a card with no children says nothing about them — never a stray "0"', () => {
+    const el = card(false, { childCount: 0 })
+    expect(el.textContent).not.toMatch(/(^|\D)0(\D|$)/)
+    expect(card(false, { childCount: 3 }).textContent).toContain('3 children')
+  })
+
   it('a card at rest keeps its soft drop shadow', () => {
     const el = card(false)
     expect(el.style.boxShadow).toBe('')

@@ -156,6 +156,9 @@ export function targetLabel(preset: TargetPreset): string {
   }
 }
 
+/** A target's words as a title: "every Table missing Owner" → "Every Table missing Owner". */
+export const sentence = (label: string) => label.charAt(0).toUpperCase() + label.slice(1)
+
 /** The target with the scope it reaches in: the whole view across the whole data source is the data
  *  source; any other target there says so after its own words. Picked by id, or a layer (always in
  *  the view), the scope doesn't apply. */

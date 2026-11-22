@@ -12,7 +12,8 @@
  *
  * Raw lineage relationships — the ones a graph's owners author and keep — can
  * be edited (properties), reversed and deleted, in a draft, staged like every
- * other canvas edit. Roll-ups, hierarchy links and non-lineage types are shown
+ * other canvas edit; on the published graph, "Edit in a draft" sits in the
+ * drawer's top line. Roll-ups, hierarchy links and non-lineage types are shown
  * read-only, and say why.
  *
  * Details come from the drawer's own read (`useRelationshipRecord`), never the
@@ -48,7 +49,7 @@ import { PropertyEditor } from './PropertyEditor'
 import { PanelErrorBoundary } from './PanelErrorBoundary'
 import { useDrawerHistoryScope } from './useDrawerHistoryScope'
 import { DrawerBody, DrawerFooter, DrawerFrame, DrawerHeader, DrawerShell } from './shell/DrawerShell'
-import { DrawerTopBar, KindBadge } from './shell/DrawerTopBar'
+import { DrawerTopBar, EditInDraftButton, KindBadge } from './shell/DrawerTopBar'
 import { DrawerActivity } from './shell/DrawerActivity'
 import { CopyableId, EntityRef } from './shell/EntityRef'
 import { JsonView } from './shell/JsonView'
@@ -81,6 +82,10 @@ interface RelationshipDrawerProps {
 type RelationshipTarget = Extract<DrawerEdgeTarget, { kind: 'relationship' }>
 type ViewMode = 'view' | 'edit' | 'json'
 
+/** Why a relationship on the published graph is read-only: "Edit in a draft"'s tip — or a notice
+ *  where the canvas can't open one. */
+const PUBLISHED = 'Published — open a draft to change this relationship'
+
 const closeDrawer = () => useCanvasStore.getState().requestDrawerMove(() => {
   const s = useCanvasStore.getState()
   s.closeNodeDrawer()
@@ -100,7 +105,7 @@ export const RelationshipDrawer = memo(function RelationshipDrawer(props: Relati
 
   if (!target) return null
   return (
-    <DrawerFrame panel="relationship-drawer" label="Relationship details">
+    <DrawerFrame panel="relationship-drawer" label="Relationship details" comparing={target.kind === 'relationships'}>
       {target.kind === 'relationship' ? (
         <RelationshipPanel key={`r:${target.id}`} {...props} target={target} onClose={closeDrawer} />
       ) : target.kind === 'relationships' ? (
@@ -212,7 +217,7 @@ function RelationshipPanel({
   const editable = kind === 'lineage' && !unsaved && !writesLocked && versioningEnabled && editModeEnabled
     && canEdit && !!record && tracked && !pendingDelete
   const openReview = () => useStagedChangesStore.getState().openReviewPanel()
-  const readOnlyNotice = ((): { tone: 'info' | 'warn'; text: string; action?: { label: string; onClick: () => void } } | null => {
+  const readOnly = ((): { tone: 'info' | 'warn'; text: string; action?: { label: string; onClick: () => void }; draft?: boolean } | null => {
     if (kind !== 'lineage') return { tone: 'info', text: KIND_COPY[kind].readOnly! }
     if (unsaved) {
       return { tone: 'warn', text: 'Not saved yet — save your changes to add properties and see its history.', action: { label: 'Review & Save', onClick: openReview } }
@@ -222,18 +227,15 @@ function RelationshipPanel({
     }
     if (writesLocked) return { tone: 'info', text: 'Read-only while tracing.' }
     if (!versioningEnabled || !editModeEnabled) return null
-    if (!canEdit) {
-      return {
-        tone: 'info',
-        text: 'Published — open a draft to change this relationship.',
-        ...(onStartEditing ? { action: { label: 'Open a draft', onClick: onStartEditing } } : {}),
-      }
-    }
+    if (!canEdit) return { tone: 'info', text: `${PUBLISHED}.`, draft: true }
     if (recordLoading || (historyOn && summaryQ.isLoading)) return null
     if (!record) return { tone: 'warn', text: 'This relationship could not be found in the graph, so it can’t be edited here.' }
     if (historyOn && !tracked) return { tone: 'info', text: 'Not under version control yet, so it can’t be edited here.' }
     return null
   })()
+  // On the published graph, the way to a draft is in the top line, and its tip says why.
+  const offerDraft = !!readOnly?.draft && !!onStartEditing
+  const readOnlyNotice = offerDraft ? null : readOnly
 
   // ── View / edit state ──
   const [mode, setMode] = useState<ViewMode>('view')
@@ -342,6 +344,7 @@ function RelationshipPanel({
         <DrawerHeader style={{ background: `linear-gradient(135deg, ${color}10 0%, transparent 60%)` }}>
           <DrawerTopBar
             badge={<KindBadge label={copy.label} bg={`${color}1a`} fg={color} />}
+            action={offerDraft && onStartEditing ? <EditInDraftButton onClick={onStartEditing} reason={PUBLISHED} /> : undefined}
             closeLabel="Close relationship details"
             onClose={onClose}
             onFocusNode={onFocusNode}

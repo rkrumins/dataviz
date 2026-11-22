@@ -2,7 +2,8 @@
  * Review & Save is one guided flow: it says what each change does in words (never the node as
  * JSON), saves to the draft as often as you like, and — when you choose — goes on from the save to
  * publishing, in the same dialog, over the whole draft. With nothing staged but a draft that has
- * changes, it opens on Publish.
+ * changes, it opens on the draft's changes — the same list as Changes & Reviews — with publishing
+ * as the next step.
  */
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -119,15 +120,33 @@ describe('Review & Save — the guided flow', () => {
     expect(screen.getByRole('radio', { name: /Save & publish/ })).toHaveAttribute('aria-checked', 'true')
   })
 
-  it('with nothing staged but changes on the draft, it opens on Publish', () => {
+  it('with nothing staged but changes on the draft, it opens on the draft’s changes, with Publish this draft… next', () => {
     useStagedChangesStore.setState({ changes: [] })
     useBranchStore.setState({
       activeChangeSet: buildChangeSet([{ entityId: 'e1', kind: 'node', status: 'added', label: 'New', origin: { source: 'branch', branchId: 'br1' } }]),
     } as never)
     renderPanel()
     act(() => state().openReviewPanel())
-    expect(screen.getByRole('button', { name: /Publish now/ })).toBeInTheDocument()
+    // The review, not the last step: what the draft holds, listed and open.
+    expect(screen.queryByRole('button', { name: /Publish now/ })).not.toBeInTheDocument()
     expect(screen.getByText(/Nothing new to save/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Already saved on this draft/ })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('saved list of br1')).toBeInTheDocument()
+    // Nothing staged: no second view switch beside the list's own, and nothing to undo or redo.
+    expect(screen.queryByRole('radiogroup', { name: 'Show the changes as' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Undo/ })).toBeNull()
+    // Nothing to save, so the steps are the review, then publishing — next, not "later".
+    const steps = () => within(screen.getByRole('list', { name: 'Steps' })).getAllByRole('listitem')
+    expect(steps().map((li) => li.textContent)).toEqual(['1Review', '2Publish'])
+    expect(steps()[0]).toHaveAttribute('aria-current', 'step')
+
+    // Publishing is the next step, and its Back returns to the list.
+    fireEvent.click(screen.getByRole('button', { name: /Publish this draft…/ }))
+    expect(screen.getByRole('button', { name: /Publish now/ })).toBeInTheDocument()
+    expect(steps()[1]).toHaveAttribute('aria-current', 'step')
+    fireEvent.click(screen.getByRole('button', { name: 'Back to review' }))
+    expect(screen.queryByRole('button', { name: /Publish now/ })).not.toBeInTheDocument()
+    expect(screen.getByText('saved list of br1')).toBeInTheDocument()
   })
 
   it('a click on the Review & Save button (its event) never opens it for publishing', () => {

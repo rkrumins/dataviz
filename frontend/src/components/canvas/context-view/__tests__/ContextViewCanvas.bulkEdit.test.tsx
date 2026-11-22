@@ -1,6 +1,6 @@
 /**
  * Several entities held on the canvas: the selection bar opens what they share
- * (outside a draft, Details — read-only) in the entity drawer, which compares
+ * (outside a draft, Compare N — read-only) in the entity drawer, which compares
  * them. Opening one entity's details turns the same drawer to that entity.
  */
 import { describe, it, expect } from 'vitest'
@@ -11,7 +11,7 @@ import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { useCanvasStore } from '@/store/canvas'
 
 describe('several entities, read as one', () => {
-  it('Details opens what they share, and an entity\'s own details take the rail back', async () => {
+  it('Compare 2 opens what they share, and an entity\'s own details take the rail back', async () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
     act(() => {
       useCanvasStore.getState().selectNode('INTERMEDIATE_T2')
@@ -19,7 +19,7 @@ describe('several entities, read as one', () => {
     })
     await h.settle()
 
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Details' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Compare 2' })) })
     await h.settle()
     expect(screen.getByRole('heading', { name: '2 entities' })).toBeInTheDocument()
     expect(useCanvasStore.getState().drawerNodeId).toBeNull()

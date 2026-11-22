@@ -93,7 +93,7 @@ export const EntityDrawer = memo(function EntityDrawer({ resolveNode, ...props }
   const node = storeNode ?? (drawerNodeId ? resolveNode?.(drawerNodeId) ?? null : null)
   if (!drawerNodeIds && !node) return null
   return (
-    <DrawerFrame panel="entity-drawer" label="Entity details">
+    <DrawerFrame panel="entity-drawer" label="Entity details" comparing={!!drawerNodeIds}>
       {drawerNodeIds ? (
         <MultiEntityDrawer ids={drawerNodeIds} canEdit={props.canEdit} onStartEditing={props.onStartEditing}
           writesLocked={props.writesLocked} onFocusNode={props.onFocusNode} onLocateMany={props.onLocateMany} />

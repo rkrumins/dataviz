@@ -54,7 +54,7 @@ export function CleanupFields({ op, onChange, known, viewId }: {
 function ReplaceFields({ op, onChange, known }: { op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null }) {
   return (
     <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid gap-3 sm:grid-cols-2">
         <div>
           <label className={LABEL} htmlFor="op-find">Find</label>
           <input id="op-find" value={op.find ?? ''} onChange={(e) => onChange({ find: e.target.value })} placeholder="e.g. Fin."
@@ -104,6 +104,7 @@ function NormalizeFields({ op, onChange, known }: { op: OpDraft; onChange: (p: P
         <span className={LABEL}>Case</span>
         <Segmented<CaseChoice>
           label="Case"
+          size="md"
           value={op.case ?? 'keep'}
           onChange={(c) => onChange({ case: c === 'keep' ? null : c })}
           options={[
@@ -180,7 +181,7 @@ function MergeFields({ op, onChange, known, viewId }: {
         </Hint>
       ) : (
         <>
-          <p className="text-[11.5px] text-ink-muted">
+          <p className="text-[13px] text-ink-muted">
             {asked ? 'The values you chose, and others' : 'Values'} that read as one once case and spaces are set aside — pick the one to keep.
             {all.loading && ' Reading every value it holds…'}
           </p>
@@ -189,28 +190,28 @@ function MergeFields({ op, onChange, known, viewId }: {
               const total = g.members.reduce((n, m) => n + m.count, 0)
               return (
                 <div className={cn('rounded-lg border p-2', c !== null ? 'border-accent-lineage/30 bg-accent-lineage/[0.04]' : 'border-black/[0.07] dark:border-white/[0.08]')}>
-                  <label className="flex items-center gap-2 text-[12px] text-ink">
+                  <label className="flex items-center gap-2 text-[13px] text-ink">
                     <input type="checkbox" className="accent-indigo-500" checked={c !== null}
                       onChange={(e) => choose(g, e.target.checked ? g.canonical : null)} />
                     <span className="flex-1 min-w-0 truncate">
                       {g.members.length} values → <span className="font-mono">{quote(g.members[c ?? g.canonical]!.value)}</span>
                     </span>
-                    <span className="shrink-0 text-[10.5px] tabular-nums text-ink-muted">{total.toLocaleString()}</span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-ink-muted">{total.toLocaleString()}</span>
                   </label>
                   <div role="radiogroup" aria-label={`Keep which of ${g.members.length} values`} className="mt-1 pl-6 space-y-0.5">
                     {g.members.map((m, i) => (
-                      <label key={key(m)} className="flex items-center gap-2 text-[11.5px] text-ink-secondary">
+                      <label key={key(m)} className="flex items-center gap-2 text-[12.5px] text-ink-secondary">
                         <input type="radio" name={`keep-${g.key}`} className="accent-indigo-500" checked={(c ?? g.canonical) === i}
                           onChange={() => choose(g, i)} aria-label={`Keep ${quote(m.value)}`} />
                         <span className="flex-1 min-w-0 truncate font-mono whitespace-pre">{quote(m.value)}</span>
-                        <span className="shrink-0 text-[10.5px] tabular-nums text-ink-muted">{m.count.toLocaleString()}</span>
+                        <span className="shrink-0 text-[11px] tabular-nums text-ink-muted">{m.count.toLocaleString()}</span>
                       </label>
                     ))}
                   </div>
                 </div>
               )
             }} />
-          <p className="text-[11.5px] text-ink-secondary" aria-live="polite">
+          <p className="text-[13px] text-ink-secondary" aria-live="polite">
             {map.length === 0 ? 'Nothing chosen to merge.'
               : <>Merges <span className="font-semibold tabular-nums">{map.length.toLocaleString()}</span> value{map.length === 1 ? '' : 's'} into another — held by about <span className="tabular-nums">{entities.toLocaleString()}</span> entities in this view.</>}
           </p>
@@ -287,7 +288,7 @@ function ConvertFields({ op, onChange, known, viewId }: {
     <div className="space-y-3">
       <ReadFailed all={all} listed={values.length} />
       {kinds.length > 0 && (
-        <p className="text-[11.5px] text-ink-secondary">
+        <p className="text-[13px] text-ink-secondary">
           Stored as {kinds.map(([kind, n], i) => (
             <span key={kind}>
               {i > 0 && (i === kinds.length - 1 ? ' and ' : ', ')}
@@ -311,21 +312,21 @@ function ConvertFields({ op, onChange, known, viewId }: {
           <Preview op={{ ...op, onFail: 'skip' }} values={converts} distinct={known?.distinct} unlisted={unlisted(known)} title="Converts" />
           {fails.length > 0 ? (
             <fieldset className="rounded-lg border border-amber-500/30 bg-amber-500/[0.06] p-2.5">
-              <legend className="px-1 text-[11px] text-amber-700 dark:text-amber-300">
+              <legend className="px-1 text-xs text-amber-700 dark:text-amber-300">
                 {fails.length.toLocaleString()} value{fails.length === 1 ? '' : 's'} won’t convert to {VALUE_KIND_LABEL[op.toKind]} — held by{' '}
                 {fails.reduce((n, v) => n + v.count, 0).toLocaleString()} entities in this view:
               </legend>
               <ul className="mb-1.5 flex flex-wrap gap-1" aria-label="Values that won’t convert">
                 {fails.slice(0, 12).map((v) => (
-                  <li key={key(v)} className="inline-flex items-center gap-1 rounded-md bg-black/[0.04] px-1.5 py-0.5 font-mono text-[11px] text-ink-secondary dark:bg-white/[0.06]">
+                  <li key={key(v)} className="inline-flex items-center gap-1 rounded-md bg-black/[0.04] px-1.5 py-0.5 font-mono text-xs text-ink-secondary dark:bg-white/[0.06]">
                     <span className="whitespace-pre">{quote(v.value)}</span>
                     <span className="tabular-nums text-ink-muted">{v.count.toLocaleString()}</span>
                   </li>
                 ))}
-                {fails.length > 12 && <li className="self-center text-[11px] text-ink-muted">and {(fails.length - 12).toLocaleString()} more</li>}
+                {fails.length > 12 && <li className="self-center text-xs text-ink-muted">and {(fails.length - 12).toLocaleString()} more</li>}
               </ul>
               {(['skip', 'remove'] as const).map((choice) => (
-                <label key={choice} className="flex items-center gap-2 py-0.5 text-[12px] text-ink">
+                <label key={choice} className="flex items-center gap-2 py-0.5 text-[13px] text-ink">
                   <input type="radio" name="op-on-fail" checked={(op.onFail ?? 'skip') === choice} onChange={() => onChange({ onFail: choice })}
                     className="accent-indigo-500" />
                   {choice === 'skip' ? 'Leave them as they are (listed when it ends)' : `Remove ${op.key.trim()} from them`}
@@ -350,13 +351,13 @@ const unlisted = (known: SearchCatalogProperty | null) => !!known && !known.dist
 function ReadFailed({ all, listed }: { all: AllValues; listed: number }) {
   if (!all.error) return null
   return (
-    <div role="alert" className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-500/[0.06] p-2.5 text-[11.5px] leading-snug text-amber-800 dark:text-amber-200">
+    <div role="alert" className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-500/[0.06] p-3 text-[13px] leading-snug text-amber-800 dark:text-amber-200">
       <Info className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
       <span className="min-w-0 flex-1">
         Couldn’t read every value it holds: {all.error}.{' '}
         {listed === 0 ? 'None are shown.' : listed === 1 ? 'Only the one most held is shown.' : `Only the ${listed.toLocaleString()} most held are shown.`}
       </span>
-      <Button size="sm" variant="ghost" leftIcon={RotateCw} className="-my-1 h-6 shrink-0 px-2 text-2xs" onClick={all.retry}>Retry</Button>
+      <Button size="sm" variant="ghost" leftIcon={RotateCw} className="-my-1 h-7 shrink-0 px-2 text-xs" onClick={all.retry}>Retry</Button>
     </div>
   )
 }
@@ -380,22 +381,22 @@ function Preview({ op, values, distinct, unlisted: tooMany = false, title = 'Cha
     <div>
       <span className={LABEL}>{title}</span>
       {changed.length === 0 ? (
-        <p className="text-[11.5px] text-ink-muted">None of the values{of} would change.</p>
+        <p className="text-[13px] text-ink-muted">None of the values{of} would change.</p>
       ) : (
         <>
           <ul className="space-y-1" aria-label="Before and after">
             {changed.slice(0, SHOWN).map(({ v, out }) => (
-              <li key={key(v)} className="flex items-center gap-1.5 text-[11.5px]">
+              <li key={key(v)} className="flex items-center gap-1.5 text-[12.5px]">
                 <span className="min-w-0 truncate rounded bg-rose-500/[0.06] px-1.5 py-0.5 font-mono whitespace-pre text-ink-secondary">{quote(v.value)}</span>
                 <ArrowRight className="h-3 w-3 shrink-0 text-ink-muted" aria-hidden />
                 <span className="min-w-0 truncate rounded bg-emerald-500/[0.08] px-1.5 py-0.5 font-mono whitespace-pre text-ink">
                   {out.value === undefined ? <span className="italic font-sans">removed</span> : quote(out.value)}
                 </span>
-                <span className="ml-auto shrink-0 text-[10.5px] tabular-nums text-ink-muted">{v.count.toLocaleString()}</span>
+                <span className="ml-auto shrink-0 text-[11px] tabular-nums text-ink-muted">{v.count.toLocaleString()}</span>
               </li>
             ))}
           </ul>
-          <p className="mt-1 text-[11px] text-ink-muted">
+          <p className="mt-1.5 text-xs text-ink-muted">
             {changed.length.toLocaleString()} value{changed.length === 1 ? '' : 's'}{of} change — on{' '}
             <span className="tabular-nums">{entities.toLocaleString()}</span> entities in this view
             {changed.length > SHOWN && `; the first ${SHOWN} shown`}.
@@ -413,7 +414,7 @@ function quote(value: unknown): string {
 
 function Toggle({ label, checked, onChange, detail }: { label: string; checked: boolean; onChange: (on: boolean) => void; detail?: string }) {
   return (
-    <label className="inline-flex items-center gap-2 py-0.5 text-[12px] text-ink">
+    <label className="inline-flex items-center gap-2 py-0.5 text-[13px] text-ink">
       <input type="checkbox" className="accent-indigo-500" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       <span>{label}{detail && <span className="text-ink-muted"> — {detail}</span>}</span>
     </label>
@@ -422,7 +423,7 @@ function Toggle({ label, checked, onChange, detail }: { label: string; checked: 
 
 function Hint({ children, tone }: { children: ReactNode; tone?: 'warning' }) {
   return (
-    <p className={cn('flex items-start gap-1.5 text-[11px] leading-snug', tone === 'warning' ? 'text-amber-700 dark:text-amber-300' : 'text-ink-muted')}>
+    <p className={cn('flex items-start gap-1.5 text-xs leading-snug', tone === 'warning' ? 'text-amber-700 dark:text-amber-300' : 'text-ink-muted')}>
       <Info className="mt-px h-3 w-3 shrink-0" aria-hidden />
       <span>{children}</span>
     </p>

@@ -364,14 +364,16 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // twice. The row grows by one line when it does; LayerColumn measures every
   // row via `virtualizer.measureElement`, so the taller rows reflow without
   // scroll-jump. Minimal sets it beside the name, and the row keeps its height.
+  // Display settings' "Show entity IDs" hides it.
   const personaMode = usePersonaMode()
   const displayName = resolveEntityName(node.data, personaMode, node.name)
   const identityProperty = useCanvasIdentityProperty()
+  const showEntityIds = usePreferencesStore(s => s.showCanvasEntityIds) ?? true
   const leftPort = portView('left', ports, lineageTotals, lineageUnknown, lineageOutside)
   const rightPort = portView('right', ports, lineageTotals, lineageUnknown, lineageOutside)
-  const technical = technicalIdentity(node.data, personaMode, {
+  const technical = showEntityIds ? technicalIdentity(node.data, personaMode, {
     identityProperty, urn: node.isLogical ? undefined : node.urn, name: displayName,
-  })
+  }) : undefined
   const isRoot = depth === 0 && !isContext
   const sizing = densityRowTokens(density, isRoot)
   const minRowHeightPx = isRoot ? sizing.rootHeight : sizing.childHeight

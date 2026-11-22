@@ -313,6 +313,11 @@ interface PreferencesState {
    *  name alone — the reader's choice for a quieter, text-first canvas. */
   showCanvasEntityIcons: boolean
   toggleCanvasEntityIcons: () => void
+  /** The Technical view's ID line under each entity's name (on Context View
+   *  rows, Graph cards and Hierarchy rows). On by default; off, a row is its
+   *  name alone, as in the Business view. */
+  showCanvasEntityIds: boolean
+  toggleCanvasEntityIds: () => void
   /** Keep the memory gauge on screen. It shows itself anyway once the tab's
    *  script heap passes 1 GB. */
   showMemoryUsage: boolean
@@ -599,6 +604,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       toggleCanvasTypeBadge: () => set((s) => ({ showCanvasTypeBadge: !s.showCanvasTypeBadge })),
       showCanvasEntityIcons: true,
       toggleCanvasEntityIcons: () => set((s) => ({ showCanvasEntityIcons: !(s.showCanvasEntityIcons ?? true) })),
+      showCanvasEntityIds: true,
+      toggleCanvasEntityIds: () => set((s) => ({ showCanvasEntityIds: !(s.showCanvasEntityIds ?? true) })),
       showMemoryUsage: false,
       toggleMemoryUsage: () => set((s) => ({ showMemoryUsage: !s.showMemoryUsage })),
       subtleCanvasTreeLines: false,
@@ -608,6 +615,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         canvasDensity: 'spacious',
         showCanvasTypeBadge: true,
         showCanvasEntityIcons: true,
+        showCanvasEntityIds: true,
         subtleCanvasTreeLines: false,
         showMemoryUsage: false,
       }),

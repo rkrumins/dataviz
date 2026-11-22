@@ -12,7 +12,7 @@ import { Segmented } from '@/components/ui/Segmented'
 import type { Predicate } from '@/types/search'
 import { useDiscovery } from '../../search/builder/useDiscovery'
 import { VisualQueryBuilder } from '../../search/panel/VisualQueryBuilder'
-import { scopeFixedToView, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset } from './opModel'
+import { scopeFixedToView, sentence, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset } from './opModel'
 import { FIELD, LABEL } from './styles'
 
 export interface LayerOption { id: string; name: string }
@@ -107,46 +107,48 @@ export function WhereStep({
   // Too many to name by id: the other ways in, as they are titled here.
   const tooMany = tooManyIds(preset, choices.filter((c) => c.id !== 'selection').map((c) => c.title))
   return (
-    <div className="space-y-5">
-      <div role="radiogroup" aria-label="Which entities" className="grid gap-1.5">
+    <div className="space-y-6">
+      {/* Two columns on a wide screen; criteria, once chosen, take both so the builder has room. */}
+      <div role="radiogroup" aria-label="Which entities" className="grid gap-2 md:grid-cols-2">
         {choices.map((c) => {
           const on = preset.kind === c.id
           const Icon = c.icon
           return (
             <div key={c.id} className={cn('rounded-xl border transition-colors',
+              (choices.length === 1 || (on && c.id === 'custom')) && 'md:col-span-2',
               on ? 'border-accent-lineage/50 bg-accent-lineage/[0.05] shadow-sm' : 'border-black/[0.07] dark:border-white/[0.08] hover:border-black/[0.14] dark:hover:border-white/[0.16]')}>
               <button type="button" role="radio" aria-checked={on} onClick={() => onPreset(c.preset)}
-                className="w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
-                <span className={cn('mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg',
+                className="w-full flex items-start gap-3 px-3.5 py-3 text-left rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+                <span className={cn('inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
                   on ? 'bg-accent-lineage/15 text-accent-lineage' : 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted')}>
-                  <Icon className="h-3.5 w-3.5" aria-hidden />
+                  <Icon className="h-4 w-4" aria-hidden />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block text-[13px] font-semibold text-ink">{c.title}</span>
-                  <span className="block text-[11.5px] text-ink-muted">{c.detail}</span>
+                  <span className="block text-sm font-semibold text-ink">{c.title}</span>
+                  <span className="mt-0.5 block text-[12.5px] leading-snug text-ink-muted">{c.detail}</span>
                 </span>
               </button>
               {on && tooMany && (
-                <p className="flex items-start gap-1.5 px-3 pb-3 pl-[3.25rem] text-[11.5px] text-amber-800 dark:text-amber-200">
+                <p className="flex items-start gap-1.5 px-3.5 pb-3 pl-[3.625rem] text-[12.5px] text-amber-800 dark:text-amber-200">
                   <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden /> {tooMany}
                 </p>
               )}
               {on && c.id === 'layer' && preset.kind === 'layer' && (
-                <div className="px-3 pb-3 pl-[3.25rem]">
-                  <select aria-label="Layer" value={preset.layerId} className={cn(FIELD, 'h-8')}
+                <div className="px-3.5 pb-3 pl-[3.625rem]">
+                  <select aria-label="Layer" value={preset.layerId} className={cn(FIELD, 'h-9')}
                     onChange={(e) => onPreset({ kind: 'layer', layerId: e.target.value, name: layers.find((l) => l.id === e.target.value)?.name ?? e.target.value })}>
                     {layers.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
                   </select>
                 </div>
               )}
               {on && c.id === 'inside' && preset.kind === 'inside' && (
-                <label className="flex items-center gap-2 px-3 pb-3 pl-[3.25rem] text-[12px] text-ink">
+                <label className="flex items-center gap-2 px-3.5 pb-3 pl-[3.625rem] text-[13px] text-ink">
                   <input type="checkbox" checked={preset.includeSelf} onChange={(e) => onPreset({ ...preset, includeSelf: e.target.checked })} className="accent-indigo-500" />
                   And {preset.label} itself
                 </label>
               )}
               {on && c.id === 'custom' && preset.kind === 'custom' && (
-                <div className="px-3 pb-3" data-search-panel-content>
+                <div className="px-3.5 pb-3.5" data-search-panel-content>
                   <CustomCriteria viewId={viewId} predicate={preset.predicate} knownEntityTypes={knownEntityTypes} layers={layers}
                     onChange={(predicate) => onPreset({ kind: 'custom', predicate })} />
                 </div>
@@ -161,6 +163,7 @@ export function WhereStep({
           <span className={LABEL}>Search in</span>
           <Segmented<ScopeMode>
             label="Search in"
+            size="md"
             value={fixed ? 'view' : scopeMode}
             onChange={onScope}
             options={[
@@ -168,14 +171,14 @@ export function WhereStep({
               { value: 'data_source', label: 'The whole data source', disabled: fixed },
             ]}
           />
-          {fixed && <p className="mt-1.5 text-[11.5px] text-ink-muted">A layer belongs to the view, so it is searched there.</p>}
+          {fixed && <p className="mt-2 text-[13px] text-ink-muted">A layer belongs to the view, so it is searched there.</p>}
           {!fixed && scopeMode === 'data_source' && (
-            <div className="mt-2 rounded-lg border border-amber-500/35 bg-amber-500/[0.07] p-2.5">
-              <p className="flex items-start gap-1.5 text-[11.5px] text-amber-800 dark:text-amber-200">
-                <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
+            <div className="mt-3 rounded-lg border border-amber-500/35 bg-amber-500/[0.07] p-3">
+              <p className="flex items-start gap-1.5 text-[13px] text-amber-800 dark:text-amber-200">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
                 Entities outside this view are changed too — ones you can’t see from here.
               </p>
-              <label className="mt-1.5 flex items-center gap-2 text-[12px] text-ink">
+              <label className="mt-2 flex items-center gap-2 text-[13px] text-ink">
                 <input type="checkbox" checked={sourceConfirmed} onChange={(e) => onConfirmSource(e.target.checked)} className="accent-amber-500" />
                 I mean the whole data source
               </label>
@@ -186,9 +189,6 @@ export function WhereStep({
     </div>
   )
 }
-
-/** A target's words as a title: "every Table missing Owner" → "Every Table missing Owner". */
-const sentence = (label: string) => label.charAt(0).toUpperCase() + label.slice(1)
 
 function CustomCriteria({ viewId, predicate, onChange, knownEntityTypes, layers }: {
   viewId: string
