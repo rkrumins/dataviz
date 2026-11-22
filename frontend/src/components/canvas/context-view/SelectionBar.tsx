@@ -27,6 +27,7 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import { Kbd } from '@/components/ui/Kbd'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useBandReservation } from './useBandReservation'
 
 /** Entities named in full before the rest are summarised. Four fits the bar
@@ -63,7 +64,7 @@ export interface SelectionBarProps {
   /** Read — and, in a draft, edit — what several held entities share
    *  (the entity drawer, comparing them). Absent, not offered. */
   onOpenShared?: () => void
-  /** The shared panel edits: the action reads "Edit N…", otherwise "Details". */
+  /** The shared panel edits: the action reads "Compare & edit N", otherwise "Compare N". */
   sharedEditable?: boolean
   /** Download the held entities with everything inside them, to edit offline and import back.
    *  Absent — no version control, or no right to export — not offered. */
@@ -134,21 +135,27 @@ export function SelectionBar({
         <div
           className={cn(
             'pointer-events-auto max-w-full',
-            'flex items-center gap-4',
+            'flex flex-wrap items-center gap-x-4 gap-y-2',
             'pl-4 pr-3 py-2.5 rounded-2xl',
             'bg-canvas-elevated backdrop-blur-xl',
             'border border-accent-lineage/35',
             'shadow-xl shadow-black/10 dark:shadow-black/40',
           )}
         >
-          {/* What is held. The number is the one thing read at a glance. */}
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span className="flex items-baseline gap-1.5 shrink-0">
-              <span className="text-lg font-semibold text-accent-lineage tabular-nums leading-none">
-                {count}
-              </span>
-              <span className="text-xs text-ink-muted">{single ? 'entity' : 'entities'}</span>
+          {/* What is held. The number is the one thing read at a glance, so it
+              never gives way. */}
+          <span className="flex items-baseline gap-1.5 shrink-0">
+            <span className="text-lg font-semibold text-accent-lineage tabular-nums leading-none">
+              {count}
             </span>
+            <span className="text-xs text-ink-muted">{single ? 'entity' : 'entities'}</span>
+          </span>
+
+          {/* The rest of what is held takes only the room the actions leave
+              (no basis of its own), up to all of its names before the hint
+              gets any. So the names give way first, and the actions move to a
+              line of their own only when even the count leaves them too little. */}
+          <div className="flex items-center gap-2.5 min-w-0 basis-0 grow-[100] max-w-max -ml-1.5">
 
             {/* What they touch, together — in the colours the lines wear. */}
             {/* On a tight canvas (a panel open beside it) the pair gives way
@@ -234,8 +241,10 @@ export function SelectionBar({
             </span>
           </div>
 
-          {/* What will happen. */}
-          <div className="flex items-center gap-2 ml-auto shrink-0">
+          {/* What will happen. Too wide to sit beside the count, they take a
+              line of their own, and wrap within it on a canvas narrower still,
+              rather than running past the bar's edge or over the count. */}
+          <div className="flex flex-wrap items-center justify-end gap-2 ml-auto shrink-0 max-w-full">
             {single && onOpenDetails && (
               <button
                 type="button"
@@ -253,23 +262,33 @@ export function SelectionBar({
                 <Kbd shortcut="enter" className="ml-0.5" />
               </button>
             )}
+            {/* The way into the comparison, so it leads the group and wears the bar's primary
+                look, as Details does for one. */}
             {!single && onOpenShared && (
-              <button
-                type="button"
-                onClick={onOpenShared}
-                className={cn(
-                  'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
-                  'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
-                  'hover:border-accent-lineage/45 hover:text-accent-lineage',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                  'transition-colors duration-150',
-                )}
+              <HoverTip
+                className="inline-flex"
+                label={sharedEditable
+                  ? 'See these side by side in the details panel, and change them together'
+                  : 'See these side by side in the details panel'}
+                detail={sharedEditable
+                  ? 'What they share, and where they differ. Changes are staged for all of them'
+                  : 'What they share, and where they differ'}
               >
-                {sharedEditable
-                  ? <LucideIcons.PenLine className="w-3.5 h-3.5" strokeWidth={2.2} />
-                  : <LucideIcons.PanelRightOpen className="w-3.5 h-3.5" strokeWidth={2.2} />}
-                {sharedEditable ? `Edit ${count}…` : 'Details'}
-              </button>
+                <button
+                  type="button"
+                  onClick={onOpenShared}
+                  className={cn(
+                    'flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12.5px] font-medium whitespace-nowrap',
+                    'text-accent-lineage bg-accent-lineage/15 border border-accent-lineage/45',
+                    'hover:bg-accent-lineage/25 hover:border-accent-lineage/65',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
+                    'transition-colors duration-150',
+                  )}
+                >
+                  <LucideIcons.Columns3 className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+                  {sharedEditable ? `Compare & edit ${count}` : `Compare ${count}`}
+                </button>
+              </HoverTip>
             )}
             {!single && onLink && (
               <button

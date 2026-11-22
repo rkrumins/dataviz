@@ -32,7 +32,7 @@ describe('export from a trace', () => {
     const region = bar()!
     expect(within(region).getByText('ledger')).toBeTruthy()
     expect(within(region).getByRole('button', { name: 'Export…' })).toBeTruthy()
-    for (const name of [/Trace all/, /Focus all/, /Link/, /Narrow/, /Edit \d/, /Details/]) {
+    for (const name of [/Trace all/, /Focus all/, /Link/, /Narrow/, /Compare/, /Details/]) {
       expect(within(region).queryByRole('button', { name })).toBeNull()
     }
 

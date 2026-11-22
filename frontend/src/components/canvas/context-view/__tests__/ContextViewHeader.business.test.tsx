@@ -1,14 +1,17 @@
 /**
  * ContextViewHeader in the Business view — the row keeps what reading a view
- * needs and tucks the rest into More, which holds it rather than dropping it.
- * A draft keeps its Connect tool on the row too. The Technical view keeps
- * every tool on the row, exactly as before.
+ * needs, Properties and the Import / Export menu (the same one the Technical
+ * view has), and tucks the rest into More, which holds it rather than dropping
+ * it. More is not drawn when it has nothing to hold. A draft keeps its Connect
+ * tool on the row too. The Technical view keeps every tool on the row, exactly
+ * as before.
  */
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ViewSearchSessionContext } from '@/components/canvas/search/session/ViewSearchSessionContext'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { usePersonaStore } from '@/store/persona'
 import { stubSession } from '@/test/stubSearchSession'
 
@@ -81,20 +84,50 @@ function renderHeader(props: ContextViewHeaderProps) {
 describe('ContextViewHeader — Business view', () => {
   beforeEach(() => usePersonaStore.setState({ mode: 'business' }))
 
-  it('keeps what reading needs on the row', () => {
+  it('keeps what reading needs on the row, with Properties and Import / Export', () => {
     renderHeader(baseProps())
     expect(screen.getByRole('button', { name: 'Lineage' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Focus Lens/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Trace Lineage/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Properties' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Import / Export' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'More tools' })).toBeInTheDocument()
   })
 
-  it('tucks Select, Properties, Import / Export and trace history away', () => {
+  it('tucks Select and trace history away', () => {
     renderHeader(baseProps())
     expect(screen.queryByRole('button', { name: 'Select' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Properties' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Import / Export' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Trace history' })).not.toBeInTheDocument()
+  })
+
+  it('opens the Property Manager from the row', async () => {
+    const props = baseProps()
+    renderHeader(props)
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Properties' }))
+    expect(props.onTogglePropertyManager).toHaveBeenCalledTimes(1)
+  })
+
+  describe('the Import / Export menu, the same as the Technical view’s', () => {
+    beforeEach(() => useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, viewPortabilityEnabled: true } }))
+    afterEach(() => useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } }))
+
+    it('exports the data, the view, and the view with its data', async () => {
+      const thisView = { onExport: vi.fn(), onExportWithData: vi.fn() }
+      const props = baseProps({ onExport: vi.fn(), thisView })
+      renderHeader(props)
+      const user = userEvent.setup()
+      const openMenu = async () => {
+        await user.click(screen.getByRole('button', { name: 'Import / Export' }))
+        return screen.findByRole('menu', { name: 'Import and export' })
+      }
+
+      await user.click(within(await openMenu()).getByRole('menuitem', { name: /^Export…/ }))
+      expect(props.onExport).toHaveBeenCalledTimes(1)
+      await user.click(within(await openMenu()).getByRole('menuitem', { name: /^Export view…/ }))
+      expect(thisView.onExport).toHaveBeenCalledTimes(1)
+      await user.click(within(await openMenu()).getByRole('menuitem', { name: /^Export view \+ data…/ }))
+      expect(thisView.onExportWithData).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('shows the branch switcher on Published, as the Technical view does — open drafts are a click away', () => {
@@ -102,17 +135,24 @@ describe('ContextViewHeader — Business view', () => {
     expect(screen.getByTestId('branch-switcher')).toBeVisible()
   })
 
-  it('holds what it tucks away in More', async () => {
-    const props = baseProps()
+  it('holds what it tucks away in More, and nothing the row already has', async () => {
+    const props = baseProps({ onImport: vi.fn(), onExport: vi.fn() })
     renderHeader(props)
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'More tools' }))
-    await user.click(await screen.findByRole('menuitem', { name: /Select several/ }))
+    const menu = await screen.findByRole('menu')
+    expect(within(menu).queryByRole('menuitem', { name: /Properties & display rules/ })).not.toBeInTheDocument()
+    expect(within(menu).queryByRole('menuitem', { name: /^Import…/ })).not.toBeInTheDocument()
+    expect(within(menu).queryByRole('group', { name: 'File' })).not.toBeInTheDocument()
+    await user.click(within(menu).getByRole('menuitem', { name: /Select several/ }))
     expect(props.onToggleMultiSelect).toHaveBeenCalledTimes(1)
+  })
 
-    await user.click(screen.getByRole('button', { name: 'More tools' }))
-    await user.click(await screen.findByRole('menuitem', { name: /Properties & display rules/ }))
-    expect(props.onTogglePropertyManager).toHaveBeenCalledTimes(1)
+  it('draws no More when it has nothing to hold', () => {
+    // No Select (a host that does not wire it) and no drafts manager (no right to edit).
+    renderHeader(baseProps({ onToggleMultiSelect: undefined, canEnterEdit: false }))
+    expect(screen.queryByRole('button', { name: 'More tools' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Import / Export' })).toBeInTheDocument()
   })
 
   it('never hides a tool while it is on', () => {
@@ -126,14 +166,14 @@ describe('ContextViewHeader — Business view', () => {
     expect(screen.getByTestId('branch-switcher')).toBeVisible()
   })
 
-  it('in a draft, keeps Connect on the row and Import under More', async () => {
+  it('in a draft, keeps Connect on the row and Import in the Import / Export menu', async () => {
     const props = baseProps({ isDraft: true, onToggleConnectTool: vi.fn(), onImport: vi.fn() })
     renderHeader(props)
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Connect' }))
     expect(props.onToggleConnectTool).toHaveBeenCalledTimes(1)
 
-    await user.click(screen.getByRole('button', { name: 'More tools' }))
+    await user.click(screen.getByRole('button', { name: 'Import / Export' }))
     await user.click(await screen.findByRole('menuitem', { name: /^Import…/ }))
     expect(props.onImport).toHaveBeenCalledTimes(1)
   })
@@ -142,21 +182,22 @@ describe('ContextViewHeader — Business view', () => {
     const props = baseProps({ onImport: vi.fn() })
     renderHeader(props)
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'More tools' }))
-    expect(await screen.findByRole('menuitem', { name: /^Import…/ })).toHaveAttribute('aria-disabled', 'true')
+    await user.click(screen.getByRole('button', { name: 'Import / Export' }))
+    expect(await screen.findByRole('menuitem', { name: /^Import…/ })).toBeDisabled()
+    await user.keyboard('{Escape}')
 
     expect(screen.getByTestId('branch-switcher')).toHaveAttribute('data-manager-open', 'false')
-    await user.click(screen.getByRole('menuitem', { name: /^Your drafts…/ }))
+    await user.click(screen.getByRole('button', { name: 'More tools' }))
+    await user.click(await screen.findByRole('menuitem', { name: /^Your drafts…/ }))
     expect(screen.getByTestId('branch-switcher')).toHaveAttribute('data-manager-open', 'true')
   })
 
-  it('"Changes & history…" opens the versioning panel', async () => {
-    const props = baseProps({ onOpenHistory: vi.fn() })
-    renderHeader(props)
+  it('leaves the view’s changes and history to Reviews in the page header', async () => {
+    renderHeader(baseProps())
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'More tools' }))
-    await user.click(await screen.findByRole('menuitem', { name: /^Changes & history…/ }))
-    expect(props.onOpenHistory).toHaveBeenCalledTimes(1)
+    await screen.findByRole('menu')
+    expect(screen.queryByRole('menuitem', { name: /Changes & history/ })).not.toBeInTheDocument()
   })
 
   it('offers "Entities with no parent…" in a draft only', async () => {
