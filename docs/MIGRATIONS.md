@@ -397,6 +397,10 @@ revision (`graph_seen`, `graph_watches`: new tables only) came off `20261116_110
 and environments deployed from its branch ran it, so it keeps the parent it was pushed with (the
 lineage record lists it). The merge revision runs nothing.
 
+**`20261122_1400_merge_watch_rules` joins `20261119_1800_merge_graph_watch` to
+`20261122_1300_merge_rules_store`**, the settings line's head once `main`'s newer head merged in.
+Both were pushed with their parents, so a merge revision that runs nothing joins them.
+
 **Rolling back.** For one release, every save through the store writes the old storage too:
 New-version builds' JSON, the `platform_settings` columns, a workspace's and a data source's
 columns (a data source's forks' as well), and a graph's `projection_state.read_mode`. Each graph's

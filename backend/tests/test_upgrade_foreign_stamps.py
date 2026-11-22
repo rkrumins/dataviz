@@ -71,9 +71,14 @@ def test_where_the_chains_parted():
     # Older than everything of ours: nowhere to rewind to.
     assert upgrade._parting_point(script, ["0000_before_it_all"]) is None
     assert upgrade._foreign(script, [head]) == []
-    # A dev database's merge revision, made by hand while main had two heads: ours from the same
-    # minute (20261119_1200_gv_review_seen) may be newer, so it counts as not run.
-    assert upgrade._parting_point(script, ["20261119_1200_merge_members_set"]) == "20261119_1100_gv_change_sets"
+    # Ours from the same minute as the stamp (20261119_1800_merge_graph_watch) may be newer, so it
+    # counts as not run.
+    assert upgrade._parting_point(script, ["20261119_1800_from_elsewhere"]) == "20261119_1700_review_rules_store"
+    # A dev database's merge revision, made by hand while main had two heads. Walking down from the
+    # head, this chain meets this branch's watch line (20261116_1200_graph_watch, joined at
+    # 20261119_1800) before main's older one, so the guess lands there; the record places the stamp
+    # exactly instead (test_a_recorded_stamp_is_placed_exactly).
+    assert upgrade._parting_point(script, ["20261119_1200_merge_members_set"]) == "20261116_1200_graph_watch"
 
 
 def test_a_recorded_stamp_is_placed_exactly():
@@ -211,12 +216,15 @@ def test_a_branch_that_parted_earlier_than_the_guess_recovers(scratch_db):
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-2000:]
     # It parted at 20261117_1500 and never ran 20261118_1100_review_rules (one of its columns);
-    # its own revision is dated after that one, so the guess takes review_rules as run.
+    # its own revision is dated after this branch's 20261119_1800_merge_graph_watch, where the
+    # guess lands, which takes review_rules as run. Placed below it again, it keeps the other
+    # lines' tips the guess gave it.
     _sql(scratch_db, "ALTER TABLE workspaces DROP COLUMN review_threads_hold")
-    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261118_1200_elsewhere'")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261120_1200_elsewhere'")
     out = _job(scratch_db, "upgrade", "--recover")
     assert out.returncode == 0, out.stderr[-3000:]
-    assert "placing it at ['20261118_1000_gv_review_records'] and upgrading again" in out.stderr, out.stderr[-3000:]
+    assert ("placing it at ['20261116_1200_graph_watch', '20261118_1000_gv_review_records', "
+            "'20261118_1100_view_members'] and upgrading again") in out.stderr, out.stderr[-3000:]
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
     assert _job(scratch_db, "check").returncode == 0
     assert _sql(scratch_db, "SELECT count(*) FROM information_schema.columns "
@@ -224,7 +232,7 @@ def test_a_branch_that_parted_earlier_than_the_guess_recovers(scratch_db):
 
     # Named outright, the place is taken as given.
     _sql(scratch_db, "ALTER TABLE workspaces DROP COLUMN review_threads_hold")
-    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261118_1200_elsewhere'")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261120_1200_elsewhere'")
     out = _job(scratch_db, "upgrade", "--rewind-to", "20261117_1500_gv_mr_sendback")
     assert out.returncode == 0, out.stderr[-3000:]
     assert "as named (--rewind-to)" in out.stderr

@@ -909,6 +909,8 @@ integration's many small changes as a few commits.
 - **Migrations `20261116_1200_graph_watch` and `20261119_1800_merge_graph_watch`** add `graph_seen`
   (how far each person has looked at a versioned graph) and `graph_watches` (what they watch in it),
   new tables only, then join that revision to the settings line's head (the merge runs nothing).
+  `20261122_1400_merge_watch_rules` joins it to that line's newer head,
+  `20261122_1300_merge_rules_store`, and runs nothing too.
 - **Migrations `20261113_1000_gv_ps_served_fill`, `20261113_1100_build_policy`,
   `20261113_1200_gv_ps_window_rows`, `20261113_1300_gv_ps_read_mode` and
   `20261113_1400_gv_ps_candidate`** fill `projection_state.served_commit_seq` where a graph's key
