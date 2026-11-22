@@ -11,10 +11,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkspaceResponse } from '@/services/workspaceService'
+import type { View } from '@/services/viewApiService'
 
 const { get, samples } = vi.hoisted(() => ({ get: vi.fn(), samples: vi.fn() }))
 vi.mock('@/services/playgroundService', () => ({
-    playgroundService: { get, samples, startSample: vi.fn(), importOwnData: vi.fn() },
+    playgroundService: { get, samples, startSample: vi.fn(), listModels: vi.fn(async () => []) },
 }))
 // The checklist reads its own signals and has its own suite; here it only has a place.
 vi.mock('@/components/playground/BuilderChecklist', () => ({ BuilderChecklist: () => <div data-testid="first-steps" /> }))
@@ -39,12 +40,12 @@ function Address() {
 }
 
 const onNewGraph = vi.fn()
-function renderPanel({ at = '/workspaces/ws_play', workspace = playground(), canStart = true } = {}) {
+function renderPanel({ at = '/workspaces/ws_play', workspace = playground(), canStart = true, views = [] as View[] } = {}) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     return render(
         <QueryClientProvider client={qc}>
             <MemoryRouter initialEntries={[at]}>
-                <PlaygroundExperiments workspace={workspace} views={[]} onNewGraph={canStart ? onNewGraph : undefined} onOpenGraph={vi.fn()} />
+                <PlaygroundExperiments workspace={workspace} views={views} onNewGraph={canStart ? onNewGraph : undefined} onOpenGraph={vi.fn()} />
                 <Address />
             </MemoryRouter>
         </QueryClientProvider>,
@@ -89,10 +90,10 @@ describe('Your experiments: three ways to start', () => {
         expect(within(gallery).getByRole('heading', { name: 'Start from a sample' })).toHaveFocus()
     })
 
-    it('opens Bring your own data, and closes it again', async () => {
+    it('opens New data source from a file, and closes it again', async () => {
         renderPanel()
         await userEvent.click(await screen.findByRole('button', { name: 'Bring your own data' }))
-        const dialog = screen.getByRole('dialog', { name: 'Bring your own data' })
+        const dialog = screen.getByRole('dialog', { name: 'New data source from a file' })
         await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
         expect(screen.queryByRole('dialog')).toBeNull()
     })
@@ -120,12 +121,27 @@ describe('Your experiments: three ways to start', () => {
         const region = await screen.findByRole('region', { name: 'Start another graph' })
         expect(screen.getByRole('list', { name: 'Your graphs' }).compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     })
+
+    it('offers to add more data to a graph, on its Context View with the import open; none to one without', async () => {
+        const views = [
+            // Not the reader's own, so "Your views" stays out of it: the card goes by the graph's views.
+            { id: 'v_graph', dataSourceId: 'ds_mine', viewType: 'graph', createdBy: 'usr_ada' },
+            { id: 'v_ctx', dataSourceId: 'ds_mine', viewType: 'reference', createdBy: 'usr_ada' },
+        ] as View[]
+        renderPanel({ views, workspace: playground([
+            { id: 'ds_mine', label: 'Mine', createdBy: 'usr_me' },
+            { id: 'ds_bare', label: 'Bare', createdBy: 'usr_me' },
+        ]) })
+        const graphs = await screen.findByRole('list', { name: 'Your graphs' })
+        expect(within(graphs).getByRole('link', { name: 'Add more data to Mine' })).toHaveAttribute('href', '/views/v_ctx?import=1')
+        expect(within(graphs).queryByRole('link', { name: 'Add more data to Bare' })).toBeNull()
+    })
 })
 
 describe('sent here to start', () => {
-    it('?start=import opens Bring your own data, and forgets it', async () => {
+    it('?start=import opens New data source from a file, and forgets it', async () => {
         renderPanel({ at: '/workspaces/ws_play?tab=overview&start=import' })
-        expect(await screen.findByRole('dialog', { name: 'Bring your own data' })).toBeInTheDocument()
+        expect(await screen.findByRole('dialog', { name: 'New data source from a file' })).toBeInTheDocument()
         await waitFor(() => expect(screen.getByTestId('address')).toHaveTextContent('?tab=overview'))
     })
 

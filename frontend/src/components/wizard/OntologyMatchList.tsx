@@ -8,7 +8,7 @@
  * The scores come from {@link useOntologyMatches}. Until they're in (or when they
  * can't be had), the cards degrade to plain ones: the list is still a manual choice.
  */
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import { BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -19,14 +19,28 @@ import {
 import type { OntologyDefinitionResponse, OntologyMatchResult } from '@/services/ontologyDefinitionService'
 import { bestFitId, type OntologyMatchState } from './useOntologyMatches'
 
-export function OntologyMatchList({ ontologies, matching, selectedId, onPick, none }: {
-    ontologies: OntologyDefinitionResponse[]
+/** A layer as a card shows it: an ontology, or a layer as a list names it, with its type counts. */
+export type MatchListLayer = Pick<OntologyDefinitionResponse, 'id' | 'name' | 'description' | 'version' | 'isPublished'> & (
+    | Pick<OntologyDefinitionResponse, 'entityTypeDefinitions' | 'relationshipTypeDefinitions'>
+    | { entityTypeCount: number; relationshipTypeCount: number }
+)
+
+const countsOf = (o: MatchListLayer) => ('entityTypeCount' in o
+    ? { entities: o.entityTypeCount, rels: o.relationshipTypeCount }
+    : { entities: Object.keys(o.entityTypeDefinitions ?? {}).length, rels: Object.keys(o.relationshipTypeDefinitions ?? {}).length })
+
+export function OntologyMatchList({ ontologies, matching, selectedId, onPick, none, badgeOf, noneLast }: {
+    ontologies: MatchListLayer[]
     matching: Pick<OntologyMatchState, 'phase' | 'matches' | 'best'>
     /** The chosen layer's id; '' for the "none" card. */
     selectedId: string
     onPick: (ontologyId: string) => void
     /** The card that picks no layer at all ('' ). */
     none: { title: string; subtitle: string; meta: string }
+    /** A label beside a layer's name: where it comes from, say. */
+    badgeOf?: (ontologyId: string) => ReactNode
+    /** The "none" card goes after the layers, not before them. */
+    noneLast?: boolean
 }) {
     const scoreOf = useMemo(() => {
         const map = new Map<string, OntologyMatchResult>()
@@ -64,17 +78,21 @@ export function OntologyMatchList({ ontologies, matching, selectedId, onPick, no
 
     const bestId = bestFitId(matching)
 
+    const noneCard = (
+        <OntologyCard
+            selected={selectedId === ''}
+            onClick={() => onPick('')}
+            title={none.title}
+            subtitle={none.subtitle}
+            meta={none.meta}
+            dashed
+        />
+    )
+
     return (
         <>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <OntologyCard
-                    selected={selectedId === ''}
-                    onClick={() => onPick('')}
-                    title={none.title}
-                    subtitle={none.subtitle}
-                    meta={none.meta}
-                    dashed
-                />
+                {!noneLast && noneCard}
 
                 {topMatches.map(o => (
                     <OntologyCardFor
@@ -85,6 +103,7 @@ export function OntologyMatchList({ ontologies, matching, selectedId, onPick, no
                         isBest={bestId === o.id && matching.phase === 'ready'}
                         analysed={matching.phase === 'ready'}
                         onPick={() => onPick(o.id)}
+                        badge={badgeOf?.(o.id)}
                     />
                 ))}
 
@@ -99,6 +118,7 @@ export function OntologyMatchList({ ontologies, matching, selectedId, onPick, no
                             selected
                             analysed={matching.phase === 'ready'}
                             onPick={() => onPick(o.id)}
+                            badge={badgeOf?.(o.id)}
                         />
                     )
                 })()}
@@ -111,8 +131,11 @@ export function OntologyMatchList({ ontologies, matching, selectedId, onPick, no
                         selected={selectedId === o.id}
                         analysed={matching.phase === 'ready'}
                         onPick={() => onPick(o.id)}
+                        badge={badgeOf?.(o.id)}
                     />
                 ))}
+
+                {noneLast && noneCard}
             </div>
 
             {restMatches.length > 0 && (
@@ -165,22 +188,25 @@ export function OntologyMatchList({ ontologies, matching, selectedId, onPick, no
  * the point: a layer is only fairly rejected if you can see the same numbers and
  * warnings that got the winners to the top.
  */
-function OntologyCardFor({ ontology, match, selected, isBest, analysed, onPick }: {
-    ontology: OntologyDefinitionResponse
+function OntologyCardFor({ ontology, match, selected, isBest, analysed, onPick, badge }: {
+    ontology: MatchListLayer
     match?: OntologyMatchResult
     selected: boolean
     isBest?: boolean
     analysed: boolean
     onPick: () => void
+    badge?: ReactNode
 }) {
+    const counts = countsOf(ontology)
     return (
         <OntologyCard
             selected={selected}
             onClick={onPick}
             title={ontology.name}
             subtitle={ontology.description || `Version ${ontology.version}`}
-            meta={`${Object.keys(ontology.entityTypeDefinitions ?? {}).length} entity types · ${Object.keys(ontology.relationshipTypeDefinitions ?? {}).length} relationships`}
+            meta={`${counts.entities} entity types · ${counts.rels} relationships`}
             published={ontology.isPublished}
+            badge={badge}
             // A zero-overlap layer scores 0 and covers nothing: showing it an empty
             // ring and a "doesn't cover: <everything>" list is noise. It reads as
             // what it is.
@@ -191,7 +217,7 @@ function OntologyCardFor({ ontology, match, selected, isBest, analysed, onPick }
     )
 }
 
-function OntologyCard({ selected, onClick, title, subtitle, meta, published, dashed, match, isBest, noOverlap }: {
+function OntologyCard({ selected, onClick, title, subtitle, meta, published, dashed, match, isBest, noOverlap, badge }: {
     selected: boolean
     onClick: () => void
     title: string
@@ -199,6 +225,7 @@ function OntologyCard({ selected, onClick, title, subtitle, meta, published, das
     meta: string
     published?: boolean
     dashed?: boolean
+    badge?: ReactNode
     /** Absent until the graph has been profiled — the card degrades to plain. */
     match?: OntologyMatchResult
     isBest?: boolean
@@ -249,6 +276,7 @@ function OntologyCard({ selected, onClick, title, subtitle, meta, published, das
                             ? <Sparkles className="w-4 h-4 text-slate-400 shrink-0" />
                             : <BookOpen className="w-4 h-4 text-slate-400 shrink-0" />)}
                         <span className="text-sm font-semibold text-slate-900 dark:text-white truncate">{title}</span>
+                        {badge}
                         {isBest && (
                             <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400">
                                 BEST FIT

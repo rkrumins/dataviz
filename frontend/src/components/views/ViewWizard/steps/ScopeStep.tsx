@@ -46,6 +46,9 @@ import { TablePagination } from '@/components/ui/TablePagination'
 import { resolveSourceMode, type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
 import type { ProviderType } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
+import type { PlaygroundModel } from '@/services/playgroundService'
+import { usePlaygroundModels } from '@/hooks/usePlayground'
+import { ModelBadge } from '@/components/playground/ModelBadge'
 import type { SchemaAvailability } from '@/hooks/useWizardScope'
 import { useDataSourceStats, type DataSourceStats } from '@/hooks/useDataSourceStats'
 import { useWorkspacePage } from '@/hooks/useWorkspacePage'
@@ -863,10 +866,12 @@ function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeO
     )
 }
 
-/** Ontology card — semantic-layer tile, published badge, type counts, description. */
-function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDefinitionResponse; isSelected: boolean; onSelect: () => void }) {
-    const entityCount = Object.keys(ontology.entityTypeDefinitions ?? {}).length
-    const relCount = Object.keys(ontology.relationshipTypeDefinitions ?? {}).length
+/** Ontology card — semantic-layer tile, published badge, type counts, description. A data model
+ *  the Playground offers (`PlaygroundModel`) carries its counts, and where it comes from. */
+function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDefinitionResponse | PlaygroundModel; isSelected: boolean; onSelect: () => void }) {
+    const offered = 'kind' in ontology ? ontology : null
+    const entityCount = offered ? offered.entityTypeCount : Object.keys((ontology as OntologyDefinitionResponse).entityTypeDefinitions ?? {}).length
+    const relCount = offered ? offered.relationshipTypeCount : Object.keys((ontology as OntologyDefinitionResponse).relationshipTypeDefinitions ?? {}).length
     return (
         <button
             type="button"
@@ -892,7 +897,8 @@ function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDe
                 <div className="min-w-0 flex-1 pr-6">
                     <div className="flex items-center gap-1.5 flex-wrap">
                         <h4 className="min-w-0 text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{ontology.name}</h4>
-                        {ontology.isPublished && (
+                        {offered && <ModelBadge kind={offered.kind} />}
+                        {ontology.isPublished && !offered && (
                             <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                                 <Check className="w-2.5 h-2.5" /> Published
                             </span>
@@ -1042,7 +1048,8 @@ function BlankScopePickers({
     onSelectProvider: (id: string) => void
     onSelectOntology: (id: string) => void
     ontologySlot?: ReactNode
-    /** The Playground: its members start from a "starter data model", and without one, elsewhere. */
+    /** The Playground: its members start from the data models it offers them (approved, shared,
+     *  their own, starters and samples), and without one, elsewhere. */
     isPlayground?: boolean
 }) {
     const [typeFilter, setTypeFilter] = useState<'all' | string>('all')
@@ -1124,16 +1131,16 @@ function BlankScopePickers({
             </section>
 
             {/* Ontology picker */}
-            {ontologySlot ?? <section className="space-y-3">
+            {ontologySlot ?? (isPlayground ? (
+                <PlaygroundModelPicker selectedOntologyId={selectedOntologyId} onSelectOntology={onSelectOntology} />
+            ) : <section className="space-y-3">
                 <div className="flex items-center gap-2">
                     <Sparkles className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">{isPlayground ? 'Starter data model' : 'Published semantic layer'}</span>
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Published semantic layer</span>
                     <span className="text-xs text-slate-400 ml-auto">{ontologies.length}</span>
                 </div>
                 {loading ? (
                     <PickerSkeleton />
-                ) : ontologies.length === 0 && isPlayground ? (
-                    <PlaygroundNoModels />
                 ) : ontologies.length === 0 ? (
                     <BlankPickerEmpty
                         icon={<Sparkles className="w-6 h-6" />}
@@ -1154,8 +1161,44 @@ function BlankScopePickers({
                         ))}
                     </div>
                 )}
-            </section>}
+            </section>)}
         </div>
+    )
+}
+
+/** In the Playground, the data models it offers the member (`GET /playground/models`) — approved,
+ *  shared, their own, starters and samples — each saying which it is; with none, the starts that
+ *  make one. */
+function PlaygroundModelPicker({ selectedOntologyId, onSelectOntology }: {
+    selectedOntologyId: string | null
+    onSelectOntology: (id: string) => void
+}) {
+    const query = usePlaygroundModels()
+    const models = useMemo(() => (query.data ?? []).filter(m => m.isPublished), [query.data])
+    return (
+        <section className="space-y-3">
+            <div className="flex items-center gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Data model</span>
+                <span className="text-xs text-slate-400 ml-auto">{models.length}</span>
+            </div>
+            {query.isLoading ? (
+                <PickerSkeleton />
+            ) : models.length === 0 ? (
+                <PlaygroundNoModels />
+            ) : (
+                <div className="grid gap-3 sm:grid-cols-2 items-stretch">
+                    {models.map(m => (
+                        <OntologyCard
+                            key={m.id}
+                            ontology={m}
+                            isSelected={m.id === selectedOntologyId}
+                            onSelect={() => onSelectOntology(m.id)}
+                        />
+                    ))}
+                </div>
+            )}
+        </section>
     )
 }
 

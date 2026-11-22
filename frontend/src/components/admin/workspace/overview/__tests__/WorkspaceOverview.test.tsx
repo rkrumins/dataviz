@@ -24,7 +24,8 @@ vi.mock('@/hooks/usePlayground', () => ({
     usePlayground: () => ({ data: state.playground }),
     usePlaygroundSamples: () => ({ data: state.samples }),
     useStartSample: () => ({ mutate: vi.fn(), isPending: false }),
-    useImportOwnData: () => ({ mutate: vi.fn(), isPending: false }),
+    useCreateGraph: () => ({ mutateAsync: vi.fn(), isPending: false }),
+    usePlaygroundModels: () => ({ data: [], isLoading: false }),
 }))
 // The Playground's first steps read their own signals, and have their own suite.
 vi.mock('@/components/playground/BuilderChecklist', () => ({ BuilderChecklist: () => null }))

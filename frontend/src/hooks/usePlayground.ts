@@ -4,7 +4,7 @@
  * workspaces are read again so the Playground opens straight away.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { playgroundService, type OwnDataImport, type PlaygroundSetup } from '@/services/playgroundService'
+import { playgroundService, type NewPlaygroundGraph, type PlaygroundSetup } from '@/services/playgroundService'
 import { useFeature } from '@/store/features'
 import { useAuthStore } from '@/store/auth'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -72,12 +72,25 @@ export function useStartSample(workspaceId: string) {
     })
 }
 
-/** Make a graph from the reader's own files, parsed in the browser. */
-export function useImportOwnData(workspaceId: string) {
+/** Make a new graph of the reader's, with no rows yet: a file's rows come through the import. */
+export function useCreateGraph(workspaceId: string) {
     const made = useGraphMade(workspaceId)
     return useMutation({
-        mutationFn: (body: OwnDataImport) => playgroundService.importOwnData(body),
+        mutationFn: (body: NewPlaygroundGraph) => playgroundService.createGraph(body),
         onSuccess: made,
+    })
+}
+
+/** The semantic layers the reader may build on here. Under `['playground']`, so whatever reads
+ *  the Playground again (a graph made, a layer of their own changed) reads these again too. */
+export function usePlaygroundModels(enabled = true) {
+    const playground = useFeature(PLAYGROUND_FEATURE)
+    return useQuery({
+        queryKey: [...KEY, 'models'],
+        queryFn: () => playgroundService.listModels(),
+        enabled: playground && enabled,
+        staleTime: 30_000,
+        retry: false,
     })
 }
 

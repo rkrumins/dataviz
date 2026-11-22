@@ -4,7 +4,7 @@
  * administrator turns `playgroundEnabled` on and sets it up.
  */
 import { authFetch } from './apiClient'
-import type { OntologyDefinitionResponse } from './ontologyDefinitionService'
+import type { OntologyDefinitionResponse, OntologySuggestResponse } from './ontologyDefinitionService'
 
 export interface PlaygroundInfo {
     enabled: boolean
@@ -75,21 +75,6 @@ export interface OwnConnection {
     from: string
     type: string
     to: string
-}
-
-/** A graph made from the person's own files (`POST /playground/imports`): parsed in the browser. */
-export interface OwnDataImport {
-    name: string
-    description?: string
-    things: OwnThing[]
-    connections: OwnConnection[]
-}
-
-/** What an import made: a graph, its Context View (`viewId`, opened first) and a Graph view. */
-export interface ImportedGraph {
-    dataSourceId: string
-    viewId: string
-    viewIds: { context: string; graph: string }
 }
 
 /** A semantic layer a member may build on here (`GET /playground/models`): an approved org-wide
@@ -187,14 +172,15 @@ export const playgroundService = {
     samples: () => authFetch<PlaygroundSamples>(`${BASE}/samples`, { silent403: true }),
     startSample: (sampleId: string) => authFetch<StartedSample>(
         `${BASE}/samples/${encodeURIComponent(sampleId)}`, { method: 'POST' }),
-    importOwnData: (body: OwnDataImport) => authFetch<ImportedGraph>(`${BASE}/imports`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    }),
     /** The semantic layers the reader may build on here. */
     listModels: () => authFetch<PlaygroundModel[]>(`${BASE}/models`, { silent403: true }),
     /** The standard import template for a layer (csv | ndjson | xlsx), as a download URL. */
     modelTemplateUrl: (ontologyId: string, format: 'csv' | 'ndjson' | 'xlsx' = 'csv') =>
         `${BASE}/models/${encodeURIComponent(ontologyId)}/template?format=${format}`,
+    /** How well each layer the reader may build on here fits a graph's types: the body and answer
+     *  of `/admin/ontologies/suggest`, scoring only the layers on offer, for members. */
+    matchModels: (stats: Record<string, unknown>, minScore = 0) => authFetch<OntologySuggestResponse>(
+        `${BASE}/models/match?min_score=${minScore}`, post(stats)),
     createGraph: (body: NewPlaygroundGraph) => authFetch<PlaygroundGraphMade>(`${BASE}/graphs`, post(body)),
     createLayer: (body: NewPlaygroundLayer) => authFetch<OntologyDefinitionResponse>(`${BASE}/layers`, post(body)),
     shareLayer: (ontologyId: string, shared: boolean) => authFetch<OntologyDefinitionResponse>(

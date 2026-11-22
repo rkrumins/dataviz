@@ -13,9 +13,9 @@
  * data: where the View wizard's blank path sends someone with no data model to start from.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, ArrowRightLeft, Database, FlaskConical, Sparkles } from 'lucide-react'
+import { ArrowRight, ArrowRightLeft, Database, FilePlus, FlaskConical, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { View } from '@/services/viewApiService'
@@ -172,6 +172,17 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                                         </span>
                                         <ArrowRight className="w-4 h-4 text-ink-muted opacity-0 group-hover:opacity-100 transition" aria-hidden />
                                     </button>
+                                    {/* Add more data: its Context View, with the import open in a draft. */}
+                                    {(() => {
+                                        const context = views.find(v => v.dataSourceId === ds.id && v.viewType === 'reference')
+                                        return context && (
+                                            <Link to={`/views/${context.id}?import=1`} title="Add more data from a file, in a draft"
+                                                aria-label={`Add more data to ${ds.label || ds.graphName || 'this graph'}`}
+                                                className="shrink-0 rounded-lg p-2 text-ink-muted hover:bg-violet-500/10 hover:text-violet-700 dark:hover:text-violet-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40">
+                                                <FilePlus className="h-4 w-4" aria-hidden />
+                                            </Link>
+                                        )
+                                    })()}
                                     {onMoveGraph && (
                                         <button type="button" onClick={() => onMoveGraph(ds.id, ds.label || ds.graphName || 'Untitled graph')}
                                             title="Move it, with its views, into one of your workspaces"

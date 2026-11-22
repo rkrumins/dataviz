@@ -162,6 +162,39 @@ const PLAYGROUND_SAMPLES = [
         description: 'Raw events becoming features, the models they train, and where predictions go.',
         entityTypes: ['Data source', 'Dataset', 'Feature set', 'Model', 'Application'] },
 ].map(s => ({ ...s, viewType: 'reference' }))
+// The data models on offer in the Playground (GET /playground/models), an approved one first.
+const PLAYGROUND_MODELS = [
+    { id: 'ont_pipelines', name: 'Data pipelines', description: 'Systems, tables and what reads them — approved for everyone.', version: 3,
+        kind: 'approved', isPublished: true, entityTypeCount: 4, relationshipTypeCount: 1, usedBy: 0 },
+    { id: 'ont_finance', name: 'Finance reporting', description: 'Ledgers, reports and their controls.', version: 1,
+        kind: 'approved', isPublished: true, entityTypeCount: 6, relationshipTypeCount: 3, usedBy: 0 },
+    { id: 'ont_mine', name: 'My shop model', description: null, version: 2, kind: 'yours', isPublished: true,
+        entityTypeCount: 3, relationshipTypeCount: 1, usedBy: 1 },
+    { id: 'bp_retail', name: 'Retail data pipeline', description: 'The retail sample’s data model.', version: 1, kind: 'sample',
+        isPublished: true, entityTypeCount: 5, relationshipTypeCount: 4, usedBy: 0 },
+]
+const coverage = (id: string, name: string, score: number, covered: string[], uncovered: string[], rels: [string[], string[]]) => ({
+    ontologyId: id, ontologyName: name, version: 1, jaccardScore: score, coveredEntityTypes: covered, uncoveredEntityTypes: uncovered,
+    coveredRelationshipTypes: rels[0], uncoveredRelationshipTypes: rels[1], totalEntityTypes: covered.length + uncovered.length,
+    totalRelationshipTypes: rels[0].length + rels[1].length,
+})
+// How well each fits the coffee-shop template (POST /playground/models/match).
+const MODEL_MATCHES = {
+    suggested: { name: 'Suggested', entityTypeDefinitions: {}, relationshipTypeDefinitions: {} }, mergedVariants: {},
+    matchingOntologies: [
+        coverage('ont_pipelines', 'Data pipelines', 0.8, ['System', 'Table', 'Dashboard'], ['Report'], [['FEEDS'], []]),
+        coverage('ont_mine', 'My shop model', 0.5, ['Table'], ['System', 'Dashboard', 'Report'], [['FEEDS'], []]),
+        coverage('ont_finance', 'Finance reporting', 0.1, ['Report'], ['System', 'Table', 'Dashboard'], [[], ['FEEDS']]),
+    ],
+}
+const PIPELINES_LAYER = {
+    id: 'ont_pipelines', schemaId: 'pipelines', name: 'Data pipelines', description: null, version: 3, revision: 1, evolutionPolicy: 'additive',
+    containmentEdgeTypes: [], lineageEdgeTypes: ['FEEDS'], edgeTypeMetadata: {}, entityTypeHierarchy: {}, rootEntityTypes: [],
+    entityTypeDefinitions: { system: { name: 'System' }, table: { name: 'Table' }, dashboard: { name: 'Dashboard' }, dataset: { name: 'Dataset' } },
+    relationshipTypeDefinitions: { FEEDS: { name: 'Feeds', source_types: ['system', 'table'], target_types: ['table', 'dashboard'] } },
+    isPublished: true, isSystem: false, scope: 'universal', createdBy: null, updatedBy: null, publishedBy: null, publishedAt: null,
+    deletedBy: null, deletedAt: null, createdAt: '', updatedAt: '',
+}
 // A workspace request: Ada's proof of concept, with a teammate and a Playground graph.
 const WS_REQUEST = {
     id: 'wsr_1', requesterId: 'usr_ada', requesterName: 'Ada Okafor', name: 'ML platform lineage', purpose: 'poc',
@@ -308,8 +341,13 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (p.startsWith('/api/v1/playground/samples/')) {
         return sampleDone ? json(STARTED_SAMPLE) : new Promise<Response>(() => {})
     }
-    if (p === '/api/v1/playground/imports') {
-        return json({ dataSourceId: 'ds_pg_coffee', viewId: 'v_pg_ctx', viewIds: { context: 'v_pg_ctx', graph: 'v_pg_graph' } }, 201)
+    // The data models a member may build on, how well each fits a file, and a new graph on one.
+    if (p === '/api/v1/playground/models') return json(PLAYGROUND_MODELS)
+    if (p === '/api/v1/playground/models/match') return json(MODEL_MATCHES)
+    if (p === `/api/v1/admin/ontologies/${PIPELINES_LAYER.id}`) return json(PIPELINES_LAYER)
+    if (p === '/api/v1/playground/graphs') {
+        return json({ dataSourceId: 'ds_pg_coffee', graphId: 'g_pg_coffee', mainBranchId: 'br_pg_main', viewId: 'v_pg_ctx',
+            viewIds: { context: 'v_pg_ctx', graph: 'v_pg_graph' } }, 201)
     }
     // A sample's Context View, and publishing a draft of it as its maker.
     if (p === `/api/v1/views/${SAMPLE_VIEW.id}`) return json(SAMPLE_VIEW)

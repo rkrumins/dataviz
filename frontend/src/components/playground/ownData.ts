@@ -1,31 +1,33 @@
 /**
- * Bring your own data: files read in the browser, before anything is sent.
+ * The simple files, read in the browser: things — a key, a type, a name, and optionally a
+ * description, properties and tags — and connections between their keys, as two CSV files or one
+ * JSON file. People arrive with spreadsheets, so CSV is read here: quoted values may hold commas,
+ * doubled quotes and line breaks, and a file Excel saved with semicolons or tabs reads the same.
+ * Columns are matched to what a thing or a connection needs; every other column of things becomes
+ * a property. `features/import-export/fileRows.ts` turns them into the standard import's rows.
  *
- * The server takes JSON only (`POST /playground/imports`): things — a key, a type, a name, and
- * optionally a description, properties and tags — and connections between their keys. People
- * arrive with spreadsheets, so CSV is read here: quoted values may hold commas, doubled quotes and
- * line breaks, and a file Excel saved with semicolons or tabs reads the same. Columns are matched
- * to what a thing or a connection needs; every other column of things becomes a property.
- *
- * Every row the server would refuse is named here first, against the same limits, so a person
- * fixes their file before they wait on a request; the server's own `invalid_rows` come back in
- * the same shape and are shown the same way.
+ * Every row that would be refused is named here first, so a person fixes their file before they
+ * wait on an import.
  */
 
 import type { OwnConnection, OwnThing, PropertyValue } from '@/services/playgroundService'
 
 export type { OwnConnection, OwnThing, PropertyValue }
 
+/** `types`: the most kinds of thing (and of connection) a data model made from a file may have. */
 export const OWN_DATA_LIMITS = {
-    things: 5000, connections: 20000, types: 50, name: 80, description: 4000, key: 200, type: 60, thingName: 200,
+    types: 50, name: 80, description: 4000, key: 200, type: 60, thingName: 200,
 } as const
 
-/** One row the server would refuse — the server's `invalid_rows` entries have this shape. */
+/** One row that would be refused, and (when read from a file) where it is. */
 export interface RowError {
     section: 'things' | 'connections'
     index: number
     field: string
     message: string
+    file?: string
+    /** The line of a CSV file the row starts on. */
+    line?: number
 }
 
 // ── CSV ─────────────────────────────────────────────────────────────
@@ -246,16 +248,12 @@ export function parseOwnDataJson(text: string): OwnDataFile {
 
 // ── Checks ──────────────────────────────────────────────────────────
 
-const n = (count: number) => count.toLocaleString('en-US')
-
 /** What the server would refuse: `rows` named one by one, `issues` about the whole. */
 export function validateOwnData(things: OwnThing[], connections: OwnConnection[]): { rows: RowError[]; issues: string[] } {
     const L = OWN_DATA_LIMITS
     const rows: RowError[] = []
     const issues: string[] = []
     if (things.length === 0) issues.push('Add at least one thing.')
-    if (things.length > L.things) issues.push(`${n(things.length)} things — the Playground takes up to ${n(L.things)}.`)
-    if (connections.length > L.connections) issues.push(`${n(connections.length)} connections — the Playground takes up to ${n(L.connections)}.`)
 
     const keys = new Set<string>()
     things.forEach((t, index) => {
