@@ -23,7 +23,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-11-21",
+    "updated": "2026-11-22",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -381,7 +381,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/ASKING_QUESTIONS.md"
   },
   "playground": {
-    "updated": "2026-11-21",
+    "updated": "2026-11-22",
     "path": "docs/guide/PLAYGROUND.md"
   },
   "creating-views": {
@@ -405,7 +405,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/API_KEYS.md"
   },
   "versioning-change-control": {
-    "updated": "2026-11-21",
+    "updated": "2026-11-22",
     "path": "docs/guide/VERSIONING_CHANGE_CONTROL.md"
   },
   "editing-in-a-draft": {

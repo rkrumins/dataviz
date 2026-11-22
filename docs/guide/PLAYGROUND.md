@@ -37,7 +37,8 @@ Everything you do in a team workspace works here, on graphs of your own:
 | Drafts, history, reviews and publishing | You publish and merge your own graphs' changes yourself |
 | Saved searches, display rules, Cypher | You change only what you made; others' graphs are read-only to you |
 | Details: a description, links and tags | Certifying data is a workspace step, not offered here |
-| | A set number of graphs each, and nothing from production |
+| Data sources on the organization's approved semantic layers | You may also make semantic layers of your own, and edit them yourself |
+| | A set number of graphs and data models each, and nothing from production |
 
 Open it from **Playground** in the sidebar. You'll also find it on your
 **Dashboard** if you aren't in a team workspace yet, at the top of **Workspaces →
@@ -54,8 +55,13 @@ you built, how many more graphs you may start, and three ways to start the next.
 | Start from… | You get | Best when |
 | --- | --- | --- |
 | **A sample** | A realistic graph, its views, saved searches and an example change waiting for review | You've never built a graph, or want to see what one is for |
-| **Your own data** | A graph of your things and how they connect, from CSV or JSON files, with a Context View and a Graph view | You have a spreadsheet or an export of your own |
-| **A blank graph** | An empty graph on a starter data model, to draw on | You'd rather build it by hand |
+| **A file** | A versioned data source of your things and how they connect, on an approved semantic layer or one of your own, with a Context View and a Graph view | You have a spreadsheet, an export from a workspace, or an import file |
+| **A blank graph** | An empty graph on the data model you pick, to draw on | You'd rather build it by hand |
+
+Whatever you start from, you get the same thing a team workspace gives you: a
+data source under version control from its first version, held to its semantic
+layer's rules, changed through drafts and reviews — and it keeps its semantic
+layer when it moves into a workspace.
 
 ### Start from a sample
 
@@ -90,25 +96,51 @@ A sample is one of your graphs, and yours to change. Its data model — the kind
 of things it holds — is the same for everyone who starts that sample. You can
 start the same sample more than once; each time makes a new graph.
 
-### Bring your own data
+### Start from a file
 
-Bring a graph of your own in from files. They're read in your browser, and
-nothing is sent until you create the graph.
+Bring your own data in from files. They're read in your browser first, so
+anything that can't be used is shown before anything is made.
 
 1. Click **Bring your own data**.
-2. Start from a template: **things.csv**, **connections.csv**, or
-   **example.json** for both in one file. Together they're a small example — a
-   coffee shop's sales — so you can try them as they are. The same files are in
-   the repository, under `docs/examples/playground`.
-3. Put your own rows in, then drop the files on the dialog, or choose them.
-4. **Match your columns** — they're guessed from the headers; change any that's
-   wrong. Every other column of things becomes a property.
-5. Check **What you'll get**: how many things and connections, by type. Any row
-   that can't be used is listed under **Rows to fix**, with its file and line.
-6. Name the graph, describe it if you like, and click **Create graph**. Its
-   Context View opens.
+2. **Files.** Drop your files on the dialog, or choose them. Two kinds work, here
+   and in every workspace's **Import**:
+   * **The simple files**: **things.csv** and **connections.csv**, or
+     **example.json** for both in one file. The templates are a small example — a
+     coffee shop's sales — so you can try them as they are. The same files are in
+     the repository, under `docs/examples/playground`.
+   * **The standard import file** — the one **Export** makes and connectors send
+     (CSV, TSV, ndjson, JSON or Excel). Once you've picked a semantic layer you can
+     download its template, with a column for everything it holds. A file you
+     exported from a workspace comes in as it is.
+3. **Data model.** Pick what your data is: the cards are ranked by how much of your
+   file each semantic layer already describes, and the best approved one is
+   already picked.
+   * **Approved** — the organization's published semantic layers, the same ones
+     team workspaces use.
+   * **Yours** and **Shared** — semantic layers of your own, or that someone in the
+     Playground shared (see [Your own semantic layers](#your-own-semantic-layers)).
+   * **Starter** and **Sample** — the data models the administrator offers, and the
+     samples'.
+   * **Make one from my file** — a data model made from the types in your file,
+     yours to change afterwards.
+4. **Match your types.** Each type in your file is matched to one in the semantic
+   layer — by its name, where it can be. Change any that's wrong, or choose
+   **Leave these rows out**. A connection the semantic layer doesn't allow between
+   those two types is listed under **Rows to fix**. On a semantic layer of your own,
+   **Add these types to my data model** adds what's missing.
+5. **Name** the data source, and describe it if you like. **More options** chooses
+   how rows match things you already have, and can keep the first load in a draft
+   for you to review before publishing.
+6. Click **Create**. The data source and its views are made, then your rows load —
+   the same import every workspace uses, with its progress. When it's done you see
+   what was added and anything that couldn't be, with why; **Open it** opens the
+   Context View, and **Add more data** opens **Import** on it.
 
-| File | Columns |
+If the rows don't load — the connection drops, or too many are refused — **Try the
+import again** loads into the same data source: nothing is made twice. A data
+source with no rows yet says so on its card, with **Add data**.
+
+| Simple file | Columns |
 | --- | --- |
 | Things | `key` (unique, and how connections name the thing), `type`, `name` (the key, if empty), and optionally `description` and `tags` (separated by `;`). Any other column is a property: `owner`, `system`, `rows`… |
 | Connections | `from` and `to` (keys of things), and `type` — `FEEDS`, `READS`, `OWNS`, whatever your data says |
@@ -129,29 +161,31 @@ A JSON file holds both:
 }
 ```
 
-A graph takes up to 5,000 things, 20,000 connections, and 50 kinds of each. Its
-own data model, "*name* data model", is made from the types in your files. Values
-in quotes may hold commas and line breaks, and a file saved with semicolons or
-tabs reads the same.
+One import here may carry up to 200,000 rows, unless the administrator chose
+otherwise; a data model made from a file holds up to 50 kinds of things and 50 of
+connections. Values in quotes may hold commas and line breaks, and a file saved
+with semicolons or tabs reads the same.
 
 ### Start a blank graph
 
 1. Click **Start a blank graph**. The View wizard opens on a blank graph, already
    on the Playground's sandbox.
-2. Pick a **starter data model**: it decides what kinds of things your graph can
-   hold. The administrator chose which ones are offered. With none offered yet,
-   the wizard offers a sample or your own data instead — either makes a data
-   model for you.
+2. Pick a **data model**: it decides what kinds of things your graph can hold.
+   The same list as for a file: the organization's **Approved** semantic layers,
+   your own and **Shared** ones, the administrator's **Starter** data models and
+   the samples'. With none to pick, the wizard offers a sample or your own data
+   instead — either makes a data model for you.
 3. Name the graph and its first view, choose a layout, and create it.
 4. Add things and how they connect on the canvas.
 
-### How many graphs you may have
+### How many you may have
 
 Each person may have a set number of graphs (five unless the administrator chose
 otherwise). The meter under **Your experiments** shows how many you've used.
 Experiments never expire — the number is the only limit. When you've used them
 all, delete one you're done with to start another. A deleted graph waits in the
-trash as usual, and stops counting at once.
+trash as usual, and stops counting at once. Semantic layers of your own have a
+number of their own (20 unless the administrator chose otherwise).
 
 ## Build
 
@@ -172,8 +206,10 @@ what each change does and saves it to the draft. See
 
 ### Import more
 
-To bring more rows into a graph you already have, use **Import / Export →
-Import…** on its Context View: they land in a draft, like any edit. See
+To bring more rows into a graph you already have, click **Add more data** beside
+it under **Your experiments**, or use **Import / Export → Import…** on its Context
+View. They land in a draft, like any edit, and the same two kinds of file work —
+the simple ones and the standard import file. See
 [Import & Export](/guide/import-export).
 
 ## Find
@@ -207,6 +243,38 @@ Everyone else in the Playground sees your graphs but can't open, change or
 resolve drafts on them, and drafts in the Playground start private. See
 [Versioning & Change Control](/guide/versioning-change-control#who-can-do-what).
 
+## Your own semantic layers
+
+A semantic layer says what your graph can hold: the kinds of things, how they may
+connect, what contains what, and the fields each carries. Build on the
+organization's approved ones, or make your own and change them yourself — in the
+same **Semantic Layers** editor team workspaces use.
+
+**Your data models**, under **Your experiments**, lists yours and the ones shared
+with you. **New data model** starts one:
+
+| Start from | You get |
+| --- | --- |
+| **Blank** | An empty semantic layer to define by hand |
+| **Copy an approved layer** | Your own copy of an approved, starter, sample or shared one, to adjust |
+| **Import a layer file** | One exported from **Semantic Layers** — the one your workspace already uses, say |
+| **From a file** | Opens **Bring your own data**, and makes one from your file's types |
+
+* **Edit it** in the editor: kinds of things and connections, what contains what,
+  fields. You can edit and publish your own even where editing semantic layers is
+  switched off for the organization; the organization's own layers aren't yours to
+  change.
+* **Publish** a version to build on it. Changing a published one makes the next
+  version; **Move my graphs to this version** moves the data sources you built on
+  the old one.
+* **Share with the Playground** lets everyone there build on it, as it is — only
+  you change it. Stop sharing whenever you like: what others already built on it
+  keeps it.
+* **Moving a graph into a workspace** takes its semantic layer along: it becomes
+  that workspace's, and its data engineers can change it and approve it for the
+  whole organization. If your other graphs still use it, they keep yours and the
+  workspace gets its own copy.
+
 ## Describe your data
 
 Say what a graph holds and where it comes from: open it under **Data → Sources**
@@ -236,7 +304,9 @@ one** ticks it. Hide the list any time; it goes by itself once every step is don
 ## Graduate
 
 When a graph is ready for real work, take it out of the Playground. It moves
-with its views, saved searches, display rules, drafts, details and contacts.
+with its views, saved searches, display rules, drafts, details and contacts — and
+its semantic layer: an approved one stays as it is; one of your own goes along and
+becomes the workspace's.
 
 * **Into a workspace you run.** Click the move button beside it under **Your
   experiments** (or **Move** in its details). It moves at once.
@@ -292,7 +362,9 @@ of everyone else there — open one for ideas. A view in the Playground carries 
      Playground is added to them, so its members can use it;
    * the **starter data models** members may begin a blank graph from — published
      ones only. Members see these even though no data source of theirs uses them yet;
-   * **graphs per person**, from 1 to 100.
+   * **graphs per person**, from 1 to 100;
+   * **semantic layers per person** (20 unless you change it) and the **rows one
+     import may carry** (200,000 unless you change it).
 4. Save. People can join straight away.
 
 **Settings** on the same card changes any of these later. Lowering the number of
@@ -307,12 +379,17 @@ The server enforces each of these, whatever the screen shows:
   publishing to everyone.
 * No existing data source can be attached to the Playground, and none can be moved
   into it.
+* Members can see and build on the organization's published, organization-wide
+  semantic layers — their kinds of things and fields, not anyone's data. Layers
+  kept to one workspace, and system ones, stay hidden. A member's own semantic
+  layers are theirs alone unless they share them.
 * A blank graph is made only on the sandbox provider, within the person's quota.
   A graph from a sample or from someone's files is a blank graph too: the same
   provider, the same quota. Each sample's data model is made, published, the
   first time anyone starts it, and appears among the data models as
   "*sample name* (sample)"; a graph from files gets a data model of its own. If a
-  graph can't be loaded, it is removed and nothing counts against the quota.
+  graph's data model can't be made, nothing is kept; if its rows don't load, the
+data source stays, empty, for its maker to try again or delete.
 * A member changes, deletes, publishes and merges only the graphs and views they
   made; drafts on someone else's graph are closed to them. Workspace admins of
   the Playground and platform administrators can do anything there.
