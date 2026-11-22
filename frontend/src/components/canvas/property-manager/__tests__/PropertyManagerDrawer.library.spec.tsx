@@ -102,8 +102,8 @@ describe('PropertyManagerDrawer — the view\'s library', () => {
         expect(screen.getByText('PII')).toBeInTheDocument()
         expect(screen.getByText(/Only people who can edit this view can change them/)).toBeInTheDocument()
         expect(screen.queryByRole('button', { name: /New rule/ })).toBeNull()
-        expect(screen.queryByTitle('Edit rule')).toBeNull()
-        expect(screen.queryByTitle('Delete rule')).toBeNull()
+        expect(screen.queryByRole('button', { name: 'Edit rule' })).toBeNull()
+        expect(screen.queryByRole('button', { name: 'Delete rule' })).toBeNull()
         expect(screen.getByRole('switch')).toBeDisabled()
         expect(screen.queryByRole('button', { name: /Import/ })).toBeNull()
         expect(screen.getByRole('button', { name: /Export/ })).toBeInTheDocument()
@@ -116,7 +116,7 @@ describe('PropertyManagerDrawer — the view\'s library', () => {
         library({ saveRule })
         renderDrawer()
         const user = userEvent.setup()
-        await user.click(screen.getByTitle('Edit rule'))
+        await user.click(screen.getByRole('button', { name: 'Edit rule' }))
         await user.click(screen.getByRole('button', { name: /Save rule/ }))
 
         expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -125,7 +125,7 @@ describe('PropertyManagerDrawer — the view\'s library', () => {
 
         await user.click(screen.getByRole('button', { name: /Save rule/ }))
         expect(saveRule).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'pii', name: 'PII' }))
-        expect(await screen.findByTitle('Edit rule')).toBeInTheDocument()   // back on the list
+        expect(await screen.findByRole('button', { name: 'Edit rule' })).toBeInTheDocument()   // back on the list
         expect(notify).toHaveBeenCalledWith('success', expect.stringContaining('“PII” updated'))
     })
 

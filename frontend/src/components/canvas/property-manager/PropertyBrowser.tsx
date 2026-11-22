@@ -328,17 +328,22 @@ export function PropertyBrowser({
                     </h4>
                     <div className="flex flex-wrap gap-1.5">
                         {filteredTags.map(({ tag, count }) => (
-                            <button
+                            <HoverTip
                                 key={tag}
-                                type="button"
-                                onClick={() => onCreateRuleFromPredicate({ kind: 'tag', op: 'hasAny', values: [tag] }, tag)}
-                                title={`Create a display rule tagging the ${count.toLocaleString()} entities tagged "${tag}"`}
-                                className="group inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20 transition-colors"
+                                label="Create a display rule from this tag"
+                                detail={`It tags the ${count.toLocaleString()} entities tagged “${tag}”`}
+                                className="inline-flex"
                             >
-                                {tag}
-                                <span className="text-[10px] tabular-nums text-accent-lineage/70">{count.toLocaleString()}</span>
-                                <Plus className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
-                            </button>
+                                <button
+                                    type="button"
+                                    onClick={() => onCreateRuleFromPredicate({ kind: 'tag', op: 'hasAny', values: [tag] }, tag)}
+                                    className="group inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20 transition-colors"
+                                >
+                                    {tag}
+                                    <span className="text-[10px] tabular-nums text-accent-lineage/70">{count.toLocaleString()}</span>
+                                    <Plus className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                </button>
+                            </HoverTip>
                         ))}
                     </div>
                 </section>
@@ -370,19 +375,23 @@ function SortToggle({ sort, onChange }: { sort: SortMode; onChange: (s: SortMode
     return (
         <div className="shrink-0 inline-flex rounded-lg p-0.5 bg-canvas-base border border-glass-border">
             {(['usage', 'name'] as SortMode[]).map((s) => (
-                <button
+                <HoverTip
                     key={s}
-                    type="button"
-                    onClick={() => onChange(s)}
-                    title={s === 'name' ? 'Sort A–Z' : 'Sort by how many entities carry it'}
-                    aria-pressed={sort === s}
-                    className={cn(
-                        'inline-flex items-center gap-1 px-2 h-8 rounded-md text-[11px] font-medium transition-colors',
-                        sort === s ? 'bg-accent-lineage/20 text-accent-lineage' : 'text-ink-muted hover:text-ink',
-                    )}
+                    label={s === 'name' ? 'Sort the properties by name' : 'Sort the properties by how many entities carry each'}
+                    className="inline-flex"
                 >
-                    {s === 'name' ? 'A–Z' : <><ArrowDownWideNarrow className="w-3 h-3" /> Most used</>}
-                </button>
+                    <button
+                        type="button"
+                        onClick={() => onChange(s)}
+                        aria-pressed={sort === s}
+                        className={cn(
+                            'inline-flex items-center gap-1 px-2 h-8 rounded-md text-[11px] font-medium transition-colors',
+                            sort === s ? 'bg-accent-lineage/20 text-accent-lineage' : 'text-ink-muted hover:text-ink',
+                        )}
+                    >
+                        {s === 'name' ? 'A–Z' : <><ArrowDownWideNarrow className="w-3 h-3" /> Most used</>}
+                    </button>
+                </HoverTip>
             ))}
         </div>
     )
@@ -557,7 +566,7 @@ function PropertyRow({
                 tabIndex={0}
                 aria-expanded={expanded}
                 onClick={() => setExpanded((v) => !v)}
-                // The row's own keys only: Enter on one of its actions, or in its menu, is that action's.
+                // Only keys pressed on the row itself: Enter on one of its actions, or in its menu, belongs to that action.
                 onKeyDown={(e) => {
                     if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setExpanded((v) => !v) }
                 }}
