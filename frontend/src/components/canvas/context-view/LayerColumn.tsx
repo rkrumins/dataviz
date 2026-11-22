@@ -1137,9 +1137,11 @@ export const LayerColumn = React.memo(function LayerColumn({
   // has never mounted contributes to `getTotalSize()` and to every
   // `scrollToIndex` offset. The chrome rows below (search box, search hit,
   // skeleton, load-more, error) render no technical line and keep their size.
-  // Minimal sets the identifier on the name's line, so its rows do not grow.
+  // Minimal sets the identifier on the name's line, so its rows do not grow,
+  // and with the IDs hidden in Display settings there is no line at all.
   const personaMode = usePersonaMode()
-  const technicalExtra = personaMode === 'technical' && density !== 'minimal' ? TECHNICAL_LINE_HEIGHT : 0
+  const showEntityIds = usePreferencesStore(s => s.showCanvasEntityIds) ?? true
+  const technicalExtra = personaMode === 'technical' && showEntityIds && density !== 'minimal' ? TECHNICAL_LINE_HEIGHT : 0
   const virtualizer = useVirtualizer({
     count: flatTree.length,
     getScrollElement: () => scrollContainerRef.current,
@@ -1156,14 +1158,14 @@ export const LayerColumn = React.memo(function LayerColumn({
     getItemKey: (index) => getItemKey(flatTree[index], index),
   })
 
-  // Re-measure all virtualized rows when density or the persona flips so the
-  // cached measurements from the previous mode don't leave the row stack
-  // pinned to stale heights. `itemSizeCache` survives unmount and is read
-  // ahead of `estimateSize`, so without this a row first measured in Business
-  // mode keeps its shorter height for the rest of the session.
+  // Re-measure all virtualized rows when density, the persona or the IDs
+  // switch flips so the cached measurements from the previous mode don't leave
+  // the row stack pinned to stale heights. `itemSizeCache` survives unmount and
+  // is read ahead of `estimateSize`, so without this a row first measured in
+  // Business mode keeps its shorter height for the rest of the session.
   useEffect(() => {
     virtualizer.measure()
-  }, [density, personaMode, virtualizer])
+  }, [density, personaMode, showEntityIds, virtualizer])
 
   // Auto-scroll keyboard-focused row into view via virtualizer
   const focusedNodeId = navigableItems[focusIndex]?.node.id ?? null

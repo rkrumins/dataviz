@@ -1,6 +1,7 @@
 /**
  * Display › Canvas › Reset puts the whole Canvas section back — the memory
- * gauge sits in that section, so it is part of what Reset covers.
+ * gauge and the entity IDs sit in that section, so they are part of what
+ * Reset covers.
  */
 import { describe, expect, it } from 'vitest'
 
@@ -12,5 +13,11 @@ describe('preferences — resetCanvasDisplaySettings', () => {
     usePreferencesStore.getState().resetCanvasDisplaySettings()
     expect(usePreferencesStore.getState().showMemoryUsage).toBe(false)
     expect(usePreferencesStore.getState().canvasZoom).toBe(1)
+  })
+
+  it('shows hidden entity IDs again', () => {
+    usePreferencesStore.setState({ showCanvasEntityIds: false })
+    usePreferencesStore.getState().resetCanvasDisplaySettings()
+    expect(usePreferencesStore.getState().showCanvasEntityIds).toBe(true)
   })
 })

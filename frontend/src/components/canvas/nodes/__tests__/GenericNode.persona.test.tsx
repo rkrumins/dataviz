@@ -10,7 +10,8 @@
  * URN that differs from the name, so it was every card).
  *
  * This file pins the split: cards with room for two lines (`md` and up) show
- * both, and only `sm` — one line's worth of room — substitutes.
+ * both, and only `sm` — one line's worth of room — substitutes. With the IDs
+ * hidden in Display settings, a card is as it is in Business mode.
  */
 import { render, screen } from '@testing-library/react'
 import { ReactFlow, ReactFlowProvider, type Node } from '@xyflow/react'
@@ -19,6 +20,7 @@ import { beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest'
 import { GenericNode } from '../GenericNode'
 import { StaticViewSchemaProvider, type ResolvedViewSchema } from '@/providers/ViewExecutionContext'
 import { usePersonaStore } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 import { useWorkspacesStore } from '@/store/workspaces'
 import type { EntityTypeSchema, EntityVisualConfig } from '@/types/schema'
 
@@ -89,6 +91,7 @@ function renderCard(size: CardSize) {
 beforeEach(() => usePersonaStore.setState({ mode: 'business' }))
 afterEach(() => {
   usePersonaStore.setState({ mode: 'business' })
+  usePreferencesStore.setState({ showCanvasEntityIds: true })
   useWorkspacesStore.setState({ activeWorkspaceId: null, workspaces: [] } as never)
 })
 
@@ -135,5 +138,23 @@ describe('GenericNode, Technical mode', () => {
     renderCard('sm')
     expect(screen.getByText(URN)).toBeTruthy()
     expect(screen.queryByText(DESCRIPTION)).toBeNull()
+  })
+})
+
+describe('GenericNode, Technical mode with entity IDs hidden', () => {
+  it('shows no identifier under the description', () => {
+    usePersonaStore.setState({ mode: 'technical' })
+    usePreferencesStore.setState({ showCanvasEntityIds: false })
+    renderCard('md')
+    expect(screen.getByText(DESCRIPTION)).toBeTruthy()
+    expect(screen.queryByText(URN)).toBeNull()
+  })
+
+  it('keeps the description on a `sm` card instead of substituting the identifier', () => {
+    usePersonaStore.setState({ mode: 'technical' })
+    usePreferencesStore.setState({ showCanvasEntityIds: false })
+    renderCard('sm')
+    expect(screen.getByText(DESCRIPTION)).toBeTruthy()
+    expect(screen.queryByText(URN)).toBeNull()
   })
 })

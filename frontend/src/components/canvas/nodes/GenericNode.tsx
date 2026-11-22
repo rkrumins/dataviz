@@ -6,6 +6,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useViewEntityType, useViewEntityVisual } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
 import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
@@ -140,11 +141,15 @@ export const GenericNode = memo(function GenericNode({
   // `perf-load-test-solidatus`), which is the opposite of what the toggle
   // promises. Cards from `md` up already have room for a second `text-2xs`
   // line, so they show both; `sm` has room for one, so there — and only
-  // there — the technical identity substitutes.
+  // there — the technical identity substitutes. With the IDs hidden (Display
+  // settings, or the Graph's Canvas Controls) a card shows neither.
   const description = typeof entityFields['description'] === 'string'
     ? entityFields['description']
     : undefined
-  const technical = technicalIdentity(entityFields, persona, { identityProperty, name: primaryLabel })
+  const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
+  const technical = showEntityIds
+    ? technicalIdentity(entityFields, persona, { identityProperty, name: primaryLabel })
+    : undefined
   const technicalLine = technical?.value
   const showsBothLines = visual.size !== 'xs' && visual.size !== 'sm'
   const secondaryLabel: string | undefined = showsBothLines

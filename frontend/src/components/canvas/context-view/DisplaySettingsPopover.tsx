@@ -80,6 +80,8 @@ export function isDefaultState(props: {
   subtleTreeLines: boolean
   /** Absent reads as the default (shown). */
   showEntityIcons?: boolean
+  /** Absent reads as the default (shown). */
+  showEntityIds?: boolean
   /** Absent reads as the default (off). */
   showMemoryUsage?: boolean
 }): boolean {
@@ -89,6 +91,7 @@ export function isDefaultState(props: {
     props.showTypeBadge === true &&
     props.subtleTreeLines === false &&
     props.showEntityIcons !== false &&
+    props.showEntityIds !== false &&
     props.showMemoryUsage !== true
   )
 }
@@ -290,6 +293,9 @@ export function DisplaySettingsSections({
   // than threaded through the header's four layers of props.
   const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
   const toggleEntityIcons = usePreferencesStore((s) => s.toggleCanvasEntityIcons)
+  // The Technical view's ID line; the Business view shows no IDs, so it has no switch.
+  const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
+  const toggleEntityIds = usePreferencesStore((s) => s.toggleCanvasEntityIds)
   const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
   const toggleMemoryUsage = usePreferencesStore((s) => s.toggleMemoryUsage)
   // Only a view whose members the server places — a subset, or one made from a query —
@@ -297,7 +303,7 @@ export function DisplaySettingsSections({
   const subsetView = useSchemaStore((s) => { const v = s.getActiveView(); return !!v?.search || !!v?.membership })
   const showWhereTheySit = usePreferencesStore((s) => s.showWhereTheySit) ?? true
   const toggleWhereTheySit = usePreferencesStore((s) => s.toggleWhereTheySit)
-  const togglesOn = [showEntityIcons, showTypeBadge, subtleTreeLines, showMemoryUsage,
+  const togglesOn = [showEntityIcons, !simple && showEntityIds, showTypeBadge, subtleTreeLines, showMemoryUsage,
     subsetView && showWhereTheySit].filter(Boolean).length
 
   return (
@@ -427,6 +433,16 @@ export function DisplaySettingsSections({
           onClick={toggleEntityIcons}
           accent="cyan"
         />
+        {!simple && (
+          <ToggleRow
+            label="Show entity IDs"
+            description="Each entity’s ID under its name — beside it at the minimal density."
+            icon={showEntityIds ? Eye : EyeOff}
+            active={showEntityIds}
+            onClick={toggleEntityIds}
+            accent="cyan"
+          />
+        )}
         <ToggleRow
           label="Show entity type badge"
           description={canvasDensity === 'minimal' ? 'Not shown on Minimal rows' : showTypeBadge ? 'Type label shown under each row' : 'Type label hidden'}

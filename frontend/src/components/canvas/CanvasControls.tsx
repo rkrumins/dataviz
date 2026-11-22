@@ -4,7 +4,7 @@
  * Provides:
  * - View mode indicator (Business/Technical)
  * - LOD quick filters (Domains, Apps, Assets)
- * - Canvas options (Grid, Minimap, Snap)
+ * - Canvas options (Grid, Minimap, Snap, Entity IDs)
  * - Zoom controls
  */
 
@@ -18,6 +18,7 @@ import {
   Grid3X3,
   Map,
   Magnet,
+  Fingerprint,
   ChevronDown,
   ChevronUp,
   MousePointer2,
@@ -29,6 +30,9 @@ import { cn } from '@/lib/utils'
 export function CanvasControls() {
   const { fitView, zoomIn, zoomOut } = useReactFlow()
   const { showGrid, showMinimap, snapToGrid, toggleGrid, toggleMinimap, toggleSnapToGrid } = usePreferencesStore()
+  // The same switch as Display settings' "Show entity IDs", so the Graph can hide them in place.
+  const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
+  const toggleEntityIds = usePreferencesStore((s) => s.toggleCanvasEntityIds)
   const mode = usePersonaStore((s) => s.mode)
   const [isExpanded, setIsExpanded] = useState(true)
 
@@ -107,6 +111,13 @@ export function CanvasControls() {
                   active={snapToGrid}
                   onClick={toggleSnapToGrid}
                 />
+                <ControlButton
+                  icon={Fingerprint}
+                  label="Entity IDs"
+                  description="Under each name"
+                  active={showEntityIds}
+                  onClick={toggleEntityIds}
+                />
 
                 {/* Zoom Controls */}
                 <div className="h-px bg-glass-border my-2" />
@@ -162,6 +173,7 @@ function ControlButton({ icon: Icon, label, description, active, onClick }: Cont
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       className={cn(
         "w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg",
         "transition-all duration-150 text-left",
