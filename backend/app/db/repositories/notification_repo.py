@@ -59,12 +59,16 @@ async def notify(
     resource_type: Optional[str] = None,
     resource_id: Optional[str] = None,
     dedupe_unread: bool = False,
+    once: bool = False,
 ) -> int:
     """Queue one notification per recipient. Never notifies the actor
     about their own action — being told what you just did is noise.
 
     ``dedupe_unread`` skips anyone who already has an unread row of this
     ``kind`` + ``resource_id`` — a stuck source must not re-ring every hour.
+    ``once`` skips anyone who has a row of it at all, read or not: what
+    happens once (a job ending) is told once, however often the telling is
+    tried again.
 
     A service account has no inbox — nobody signs in as one — so what is said
     to one reaches the people who answer for it (``key_audience``). Their copy
@@ -92,15 +96,15 @@ async def notify(
                     for uid in audience.user_ids:
                         copies.setdefault((uid, said), audience.link)
             copies = {copy: where for copy, where in copies.items() if copy[0] != actor_id}
-            if dedupe_unread and resource_id and copies:
-                already = {row[0] for row in (await session.execute(
-                    select(NotificationORM.user_id).where(
-                        NotificationORM.user_id.in_(sorted({uid for uid, _ in copies})),
-                        NotificationORM.kind == kind,
-                        NotificationORM.resource_id == resource_id,
-                        NotificationORM.read_at.is_(None),
-                    )
-                )).all()}
+            if (dedupe_unread or once) and resource_id and copies:
+                told = select(NotificationORM.user_id).where(
+                    NotificationORM.user_id.in_(sorted({uid for uid, _ in copies})),
+                    NotificationORM.kind == kind,
+                    NotificationORM.resource_id == resource_id,
+                )
+                if not once:
+                    told = told.where(NotificationORM.read_at.is_(None))
+                already = {row[0] for row in (await session.execute(told)).all()}
                 copies = {copy: where for copy, where in copies.items() if copy[0] not in already}
             for (uid, said), where in copies.items():
                 session.add(NotificationORM(

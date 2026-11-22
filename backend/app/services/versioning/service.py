@@ -37,7 +37,7 @@ from typing import (Any, Awaitable, Callable, Collection, Dict, Iterable, List, 
                     Optional, Sequence, Set, Tuple)
 
 from sqlalchemy import (TIMESTAMP, Boolean, Text, TextClause, any_, bindparam, cast, insert, select, func,
-                        delete, null, literal, text, true, update, or_, tuple_, and_, case)
+                        delete, null, literal, text, true, update, or_, tuple_, and_, case, union)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -54,7 +54,7 @@ from .change_index import (ROOT, ChangeIndex, ChangeIndexBuilder, ChangeOrigin, 
                            review_requirements, stat_changes)
 from .errors import (ChangesRequested, DraftMoved, AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen, ChangeListBusy,
                      ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable, DraftPruned,
-                     EdgeEndsMissing, EntityExists, StagedChangesUnsaved, UniqueViolation,
+                     EdgeEndsMissing, EntityExists, FieldViolation, StagedChangesUnsaved, UniqueViolation,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, ForkNotUpToDate,
                      ForkUpdateConflicts, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
@@ -72,7 +72,7 @@ from . import main_activity, provenance, review_state
 from .review_state import ReviewRule
 from .provenance import commit_provenance
 from .ontology import (
-    Ontology, OntologyRules, canonicalize_payload_types,
+    FieldFindings, Ontology, OntologyRules, canonicalize_payload_types, field_violations,
     validate_entities, validate_entities_rich,
 )
 from .models import (
@@ -2101,6 +2101,10 @@ class GraphVersioningService:
             s, graph.id, main_id, {d.entity_id: d.payload for d in deltas}, ontology_rules)
         if unique:
             raise UniqueViolation(unique)
+        fields = await self._field_violations(
+            s, graph.id, main_id, {d.entity_id: d.payload for d in deltas}, ontology_rules)
+        if fields:
+            raise FieldViolation(fields)
         # Re-gated at merge time against CURRENT main, with rules resolved from the CURRENT
         # published ontology by the caller — the same gate as every other write path, on what the
         # publish writes: a draft opened before an ontology tightening cannot merge violating
@@ -2199,6 +2203,7 @@ class GraphVersioningService:
         draft.updated_at = graph.updated_at = _now()
         if squash is None:
             return ""
+        await self._note_property_jobs(s, graph.id, draft.id, squash, only=only)
         ps = await s.get(ProjectionStateORM, graph.id)
         if ps is not None:
             ps.target_commit_seq = squash.commit_seq
@@ -2217,11 +2222,83 @@ class GraphVersioningService:
         # unmergeable (`_require_open` rejects it) yet still rendered as actionable, with an empty
         # diff. Resolve them all here, in the shared body, so no squash path can skip it.
         await self._resolve_live_prs(s, draft.id, squash.id, actor, merged_via)
+        await self._note_property_jobs(s, graph.id, draft.id, squash)
 
         ps = await s.get(ProjectionStateORM, graph.id)
         if ps is not None:
             ps.target_commit_seq = new_seq
         return squash.id
+
+    async def _note_property_jobs(self, s, graph_id: str, draft_id: str, squash, *, only=None) -> None:
+        """The bulk property jobs a squash of ``draft_id`` takes to ``main``, listed in its commit —
+        ``stats.propertyJobs = {total, jobs: [...]}``, the first ``AUDIT_LISTED`` of them oldest first
+        (``property_job.audit_entry``), which its activity event carries — and each stamped with it
+        (``summary.publishedCommitId``), so no later squash lists it again. A job is one that ended
+        having written to the draft (``commits``) and no squash has stamped yet; none can be running
+        (``_require_no_import``, under the draft's lock, as this is).
+
+        ``only``: a review merged in part (:meth:`_landed_in_part`) — the entities that landed. A job
+        none of whose changes landed is not listed; one some of whose did is listed ``partial`` and
+        not stamped, so the squash that lands the rest lists it again — but the squash is added to its
+        ``summary.landedCommitIds``, so what reads the job (an undo) knows part of it is on ``main``;
+        one all of whose did is listed and stamped. What a job changed is what its window commits
+        wrote (found by their messages)."""
+        from .import_export import property_job
+        rows = (await s.execute(select(JobORM).where(
+            JobORM.graph_id == graph_id, JobORM.status.in_(("completed", "failed", "cancelled")),
+            JobORM.branch_id == draft_id, JobORM.job_type == "property",
+        ).order_by(JobORM.created_at, JobORM.id))).scalars().all()
+        entries: List[dict] = []
+        for row in rows:
+            summary = row.summary if isinstance(row.summary, dict) else {}
+            if int(summary.get("commits") or 0) <= 0 or summary.get("publishedCommitId"):
+                continue
+            partial = False
+            if only is not None:
+                wrote, landed = await self._property_job_entities(s, graph_id, draft_id, row, only)
+                if not landed:
+                    continue
+                partial = landed < wrote
+            entries.append(property_job.audit_entry(row, partial=partial))
+            if partial:
+                row.summary = {**summary, "landedCommitIds": [
+                    *(summary.get("landedCommitIds") or []), squash.id]}
+            else:
+                row.summary = {**summary, "publishedCommitId": squash.id}
+        if entries:
+            squash.stats = {**dict(squash.stats or {}), "propertyJobs": {
+                "total": len(entries), "jobs": entries[:property_job.AUDIT_LISTED]}}
+
+    @staticmethod
+    async def _property_job_entities(s, graph_id: str, draft_id: str, job,
+                                     landed: Collection[str]) -> Tuple[int, int]:
+        """How many entities a bulk property job's window commits wrote on its draft, and how many
+        of those are among ``landed`` — counted in SQL, never loaded: the version rows of the draft
+        within the job's seqs (its changeset index), of the job's commits."""
+        from .import_export import property_job
+        fields = job.field_scope if isinstance(job.field_scope, dict) else {}
+        summary = job.summary if isinstance(job.summary, dict) else {}
+        ends = [summary.get("firstCommitId"), summary.get("lastCommitId")]
+        seqs = dict((await s.execute(select(CommitORM.id, CommitORM.commit_seq).where(
+            CommitORM.graph_id == graph_id, CommitORM.id.in_([e for e in ends if e])))).all())
+        if not all(e in seqs for e in ends) or not isinstance(fields.get("op"), dict):
+            return 0, 0
+        lo, hi = seqs[ends[0]], seqs[ends[1]]
+        commits = select(CommitORM.id).where(
+            CommitORM.graph_id == graph_id, CommitORM.branch_id == draft_id,
+            CommitORM.commit_seq.between(lo, hi),
+            CommitORM.actor == fields.get("actor"),
+            CommitORM.message.in_(property_job.window_messages(
+                fields["op"], fields.get("message"), int(summary.get("chunks") or 0))))
+        wrote = union(*(select(table.entity_id).where(
+            table.graph_id == graph_id, table.branch_id == draft_id,
+            table.commit_seq.between(lo, hi), table.commit_id.in_(commits))
+            for table in (NodeVersionORM, EdgeVersionORM))).subquery()
+        row = (await s.execute(
+            select(func.count(), func.count().filter(
+                wrote.c.entity_id == any_(bindparam("landed", type_=ARRAY(Text))))).select_from(wrote),
+            {"landed": sorted(landed)})).one()
+        return int(row[0]), int(row[1])
 
     @staticmethod
     def _narrow_squash(graph, draft, resolutions) -> bool:
@@ -2369,6 +2446,10 @@ class GraphVersioningService:
                                                source=(gid, draft.id))
         if unique:
             raise UniqueViolation(unique)
+        fields = await self._field_violations(s, gid, main_id, written, ontology_rules,
+                                              source=(gid, draft.id))
+        if fields:
+            raise FieldViolation(fields)
         del written, prior, known, heads, main, live, ends, standing   # per change: not into the writes
 
         await self._copy_versions(s, gid, main_id, squash, copies, actor)
@@ -2397,7 +2478,13 @@ class GraphVersioningService:
         own view of them — ``main`` at its base, which is the head, where it left them alone — and
         whether a node is left outside every parent is asked last, of everything the squash wrote.
         Above ``BOOTSTRAP_MERKLE_INLINE_MAX`` changes the commit's Merkle root is left unset, as an
-        enable of that size leaves its own."""
+        enable of that size leaves its own.
+
+        A page whose values break their fields' rules stops the writing, but not the reading: the
+        pages after it, the nodes' and the edges', are judged by their fields alone (an edge's ends
+        still checked first), so the refusal counts every value to change (``FieldViolation``'s
+        total and per-field counts), not only the first page's — and, raised once every page is
+        judged, it lands nothing of the pages written before it, which share its transaction."""
         gid, base = graph.id, graph.main_head_commit_seq
         strict = graph.ontology_enforcement == "strict"
         ontology = Ontology.from_spec(graph.ontology_spec) if strict else None
@@ -2405,10 +2492,11 @@ class GraphVersioningService:
         stats = _delta_stats([])
         merkle: Optional[Dict[str, Optional[str]]] = {}
         squash: Optional[CommitORM] = None
+        fields = FieldFindings()                      # what the field rules refuse, every page's
 
         async def write(copies: List["_SquashRow"], deltas: List[Delta], kinds: Dict[str, str]):
             nonlocal squash, merkle
-            if not copies and not deltas:
+            if fields or (not copies and not deltas):  # refused: nothing more is written
                 return
             if squash is None:
                 squash = await self._squash_commit(s, graph, draft, main_id, actor, message)
@@ -2462,21 +2550,25 @@ class GraphVersioningService:
             written = await asyncio.to_thread(_written_values, copies, heads, deltas)
             if not written:
                 return
-            prior = await self._skeletons_at(s, gid, main_id, list(written), base)
-            if ontology is not None:
-                viol = validate_entities(
-                    [(eid, kinds.get(eid, "node"), v) for eid, v in written.items() if v is not None],
-                    ontology)
-                if viol:
-                    raise OntologyViolation(viol)
-            await self._enforce_written(
-                s, gid, main_id, written, prior, kinds, containment_edge_types=cset,
-                ontology_rules=ontology_rules, strict=strict, also_writing=draft.id,
-                parentless=False)
-            unique = await self._unique_violations(s, gid, main_id, written, ontology_rules,
-                                                   seen=unique_seen, source=(gid, draft.id))
-            if unique:
-                raise UniqueViolation(unique)
+            if not fields:
+                prior = await self._skeletons_at(s, gid, main_id, list(written), base)
+                if ontology is not None:
+                    viol = validate_entities(
+                        [(eid, kinds.get(eid, "node"), v) for eid, v in written.items() if v is not None],
+                        ontology)
+                    if viol:
+                        raise OntologyViolation(viol)
+                await self._enforce_written(
+                    s, gid, main_id, written, prior, kinds, containment_edge_types=cset,
+                    ontology_rules=ontology_rules, strict=strict, also_writing=draft.id,
+                    parentless=False)
+                unique = await self._unique_violations(s, gid, main_id, written, ontology_rules,
+                                                       seen=unique_seen, source=(gid, draft.id))
+                if unique:
+                    raise UniqueViolation(unique)
+            # Refused already, a page is judged by its fields alone: how many break them in all.
+            await self._field_violations(s, gid, main_id, written, ontology_rules,
+                                         source=(gid, draft.id), into=fields)
 
         # 1. What the draft deleted, and the edges on it that the draft left alone.
         async for heads in self._head_pages(s, gid, draft.id, live=False):
@@ -2508,7 +2600,9 @@ class GraphVersioningService:
             await write(copies, deltas, kinds)
 
         # 3 and 4. Its edges: re-pointed or changed ones (and those on a node it deleted, which go),
-        # then new ones — so a new edge is judged against where the changed ones now point.
+        # then new ones — so a new edge is judged against where the changed ones now point. Read
+        # and judged by their fields too once a page is refused (relationship types have fields),
+        # their ends still checked first, as the other squashes check them before any gate.
         for new in (False, True):
             async for heads in self._head_pages(s, gid, draft.id, live=True):
                 heads = {eid: h for eid, h in heads.items() if h.table == "edge"}
@@ -2539,6 +2633,8 @@ class GraphVersioningService:
                 kinds.update({eid: heads[eid].table for eid in slow})
                 await judge(heads, copies, deltas, kinds)
                 await write(copies, deltas, kinds)
+        if fields:                                    # every page judged, nodes' and edges'
+            raise FieldViolation(fields)
 
         if squash is None:
             return await self._merged_unchanged(s, graph, draft, actor, merged_via)
@@ -2769,6 +2865,10 @@ class GraphVersioningService:
                                                    source=(fork.id, fork_main))
             if unique:
                 raise UniqueViolation(unique)
+            fields = await self._field_violations(s, gid, parent_main, written, ontology_rules,
+                                                  source=(fork.id, fork_main))
+            if fields:
+                raise FieldViolation(fields)
 
         async def planned(heads, held, gone=()):
             rows, slow = await asyncio.to_thread(_plan_squash, heads, held, gone, reread)
@@ -8752,6 +8852,79 @@ class GraphVersioningService:
             return [_graphedge_dict(eid, v, urns) for eid, v in values.items() if v]
         return [_graphnode_dict(eid, v.get("urn") or f"gv:{eid}", v) for eid, v in values.items() if v]
 
+    async def draft_search_window(self, *, graph_id: str, branch_id: str,
+                                  commit_id: Optional[str], since_seq: Optional[int] = None,
+                                  limit: int = 0,
+                                  containment_types: Optional[Sequence[str]] = None) -> Dict[str, object]:
+        """What a draft's search answers fold in one step (``providers.draft_search``): the seq of
+        the draft's commit ``commit_id`` — its head, as :meth:`overlay_version` read it — and,
+        given ``since_seq``, the nodes the draft's commits after that seq wrote, by entity id
+        (``None`` past ``limit``), and whether those commits wrote an edge that may move a node
+        (``edges``): one of ``containment_types`` (any case), or one whose row names no type (a
+        delete) — any edge, without them. An edge of another type moves nothing a fold reads.
+        Index-backed, as :meth:`_changed_in_window` is: a commit writes rows only for what it
+        changed."""
+        out: Dict[str, object] = {"seq": None, "nodes": None, "edges": False}
+        async with self._session() as s:
+            if commit_id:
+                out["seq"] = await s.scalar(select(CommitORM.commit_seq).where(
+                    CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id,
+                    CommitORM.id == commit_id))
+            seq = out["seq"]
+            if seq is None or since_seq is None:
+                return out
+
+            def window(model):
+                return (model.graph_id == graph_id, model.branch_id == branch_id,
+                        model.commit_seq > since_seq, model.commit_seq <= seq)
+
+            nodes = (await s.execute(select(NodeVersionORM.entity_id).where(
+                *window(NodeVersionORM)).distinct().limit(limit + 1))).scalars().all()
+            moves = () if containment_types is None else (or_(
+                EdgeVersionORM.edge_type.is_(None),
+                func.upper(EdgeVersionORM.edge_type).in_([t.upper() for t in containment_types])),)
+            out["edges"] = await s.scalar(select(EdgeVersionORM.entity_id).where(
+                *window(EdgeVersionORM), *moves).limit(1)) is not None
+            out["nodes"] = sorted(nodes) if len(nodes) <= limit else None
+        return out
+
+    async def draft_nodes_as_of(self, *, graph_id: str, branch_id: str,
+                                entity_ids: Sequence[str], seq: int) -> Dict[str, dict]:
+        """Each of ``entity_ids`` the draft held apart from main as of its commit ``seq``: what the
+        draft had written of it by then, or — main changed it after the draft's branch point and
+        the draft had not — main's value at the branch point, which the draft reads instead.
+        ``{entity id: {"urn", "node": reader-shaped node, or None when not a live node}}``; an id
+        the draft read as main does is absent. What a draft's search answers subtract when they
+        fold the commits after ``seq`` in (``providers.draft_search``)."""
+        ids = list(dict.fromkeys(entity_ids))
+        if not ids:
+            return {}
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            base_seq = branch.base_commit_seq or 0
+            head_seq = graph.main_head_commit_seq if graph is not None else base_seq
+            values = await self._values_at(s, graph_id, branch_id, ids, seq)
+            rest = [i for i in ids if i not in values]
+            if rest and head_seq > base_seq:
+                advanced: set = set()
+                for chunk in _chunks(rest, _IN_LIST_MAX):
+                    advanced.update((await s.execute(select(NodeVersionORM.entity_id).where(
+                        NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id == main_id,
+                        NodeVersionORM.entity_id.in_(chunk), NodeVersionORM.commit_seq > base_seq,
+                        NodeVersionORM.commit_seq <= head_seq).distinct())).scalars().all())
+                if advanced:
+                    at_base = await self._values_at(s, graph_id, main_id, sorted(advanced), base_seq)
+                    values.update({i: at_base.get(i) for i in advanced})
+            urns = await self._current_urns(s, graph_id, branch_id, list(values))
+        out: Dict[str, dict] = {}
+        for eid, v in values.items():
+            urn = (v or {}).get("urn") or urns.get(eid) or f"gv:{eid}"
+            live = isinstance(v, dict) and bool(v) and not v.get("edgeType")
+            out[eid] = {"urn": urn, "node": _graphnode_dict(eid, urn, v) if live else None}
+        return out
+
     async def diff_branch_summary(
         self, *, graph_id: str, branch_id: str, containment_edge_types, limit: int = 200,
         viewer: Optional[Viewer] = None,
@@ -10622,19 +10795,26 @@ class GraphVersioningService:
             raise BranchNotOpen(branch.id, branch.status)
 
     @staticmethod
-    async def _require_no_import(s, branch_id: str) -> None:
-        """A draft is not published while an import is pending or running on it
-        (:class:`JobActive`): main would get the windows it has written so far, and the import
-        fail on the closed draft. Under the draft's lock, so no import window lands in between.
-        A pending one the transfer lane's reaper will fail (:func:`never_runs`) does not count."""
-        active = await s.scalar(select(JobORM.id).where(
-            JobORM.branch_id == branch_id, JobORM.job_type == "ingest",
+    async def _active_draft_job(s, branch_id: str):
+        """The import or bulk property job pending or running on draft ``branch_id``, as a row of
+        ``(id, job_type)``, or None. A pending one the transfer lane's reaper will fail
+        (:func:`never_runs`) does not count."""
+        return (await s.execute(select(JobORM.id, JobORM.job_type).where(
+            JobORM.branch_id == branch_id, JobORM.job_type.in_(("ingest", "property")),
             JobORM.status.in_(("pending", "running")),
             # IS NOT TRUE: a phase that is NULL makes the queued rule NULL, not false.
-            and_(JobORM.status == "pending", or_(*never_runs())).is_not(True)).limit(1))
+            and_(JobORM.status == "pending", or_(*never_runs())).is_not(True)).limit(1))).first()
+
+    @staticmethod
+    async def _require_no_import(s, branch_id: str) -> None:
+        """A draft is not published while an import or a bulk property job is pending or running
+        on it (:class:`JobActive`): main would get the windows it has written so far, and the job
+        fail on the closed draft. Under the draft's lock, so no window lands in between."""
+        active = await GraphVersioningService._active_draft_job(s, branch_id)
         if active is not None:
-            raise JobActive(active, f"An import is still running on this draft (job {active}). "
-                                    "Publish once it has finished.")
+            what = "A bulk property edit" if active.job_type == "property" else "An import"
+            raise JobActive(active.id, f"{what} is still running on this draft (job {active.id}). "
+                                       "Publish once it has finished.")
 
     async def _require_edit(self, s, branch: BranchORM, actor: str, groups: Sequence[str], *,
                             can_manage: bool = True) -> None:
@@ -12402,6 +12582,7 @@ class GraphVersioningService:
         allow_main: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
         from_client: bool = False,
+        exact_types: bool = False,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -12441,12 +12622,16 @@ class GraphVersioningService:
         restore); a urn several live nodes carry is refused (:class:`AmbiguousUrn`). A create
         never replaces a live entity (:class:`EntityExists`), and an edge create needs both ends
         (:class:`EdgeEndsMissing`). An import and the system's own writes leave it off.
+
+        ``exact_types``: each property an update sends is written as sent, kind and all, where a
+        save keeps a stored value sent back in a lossier form (``property_patch``) — a bulk
+        property job's writes, which the server computed and whose kind is the one asked for.
         """
         result = await self.apply_ops_detailed(
             graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
             containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
             on_commit=on_commit, allow_main=allow_main, node_identity=node_identity,
-            from_client=from_client)
+            from_client=from_client, exact_types=exact_types)
         return result.commit_id
 
     async def apply_ops_detailed(
@@ -12460,6 +12645,7 @@ class GraphVersioningService:
         aim_edges: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
         from_client: bool = False,
+        exact_types: bool = False,
     ) -> ApplyResult:
         """:meth:`apply_ops`, answering with every addressed entity's value after the batch.
 
@@ -12478,7 +12664,7 @@ class GraphVersioningService:
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
                 ontology_rules=ontology_rules, on_commit=on_commit, allow_main=allow_main,
                 idempotency_key=idempotency_key, aim_edges=aim_edges,
-                node_identity=node_identity, from_client=from_client),
+                node_identity=node_identity, from_client=from_client, exact_types=exact_types),
         )
 
     async def _apply_ops_once(
@@ -12492,6 +12678,7 @@ class GraphVersioningService:
         aim_edges: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
         from_client: bool = False,
+        exact_types: bool = False,
     ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
@@ -12571,7 +12758,8 @@ class GraphVersioningService:
             # second dropped the first's removal). Replacing instead stored a renamed new node
             # as {displayName} alone — no type, no urn — which then failed every read of the draft.
             fold = fold_batch_ops(
-                ops, is_edge_payload=_is_edge_payload, sanitize_node=_sanitize_node_properties)
+                ops, is_edge_payload=_is_edge_payload, sanitize_node=_sanitize_node_properties,
+                exact=exact_types)
             new_vals: Dict[str, Optional[dict]] = fold.new_vals
             kind_by_entity: Dict[str, str] = fold.kind_by_entity
             update_ids: set = fold.update_ids
@@ -12609,7 +12797,8 @@ class GraphVersioningService:
                 cur = cur_vals.get(eid)
                 base = base_payloads.get(eid)
                 if base is not None and cur is not None:
-                    out = three_way_merge(base, self._patch_payload(base, patch), cur, occ_set_fields)
+                    out = three_way_merge(base, self._patch_payload(base, patch, exact=exact_types),
+                                          cur, occ_set_fields)
                     new_vals[eid] = out.merged
                     for cf in out.conflicts:
                         occ_conflicts.append({
@@ -12617,7 +12806,7 @@ class GraphVersioningService:
                             "path": list(cf.path), "base": cf.base,
                             "ours": cf.ours, "theirs": cf.theirs, "kind": cf.kind})
                 else:
-                    new_vals[eid] = self._patch_payload(cur, patch)
+                    new_vals[eid] = self._patch_payload(cur, patch, exact=exact_types)
             if occ_conflicts:
                 # Each conflicting entity's CURRENT value rides along, so the client can rebase the
                 # user's edit onto it without another read.
@@ -12816,11 +13005,12 @@ class GraphVersioningService:
             ))
 
     @staticmethod
-    def _patch_payload(base: Optional[dict], patch: dict) -> dict:
+    def _patch_payload(base: Optional[dict], patch: dict, *, exact: bool = False) -> dict:
         """Apply a partial update `patch` onto `base` (see ``backend.common.property_patch``):
         top-level fields override, ``properties`` is merged key by key, and a property marked
-        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed."""
-        return apply_patch(base, patch)
+        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed.
+        ``exact``: each value is written as sent (``apply_ops``' ``exact_types``)."""
+        return apply_patch(base, patch, exact=exact)
 
     @staticmethod
     def _compose_patches(first: dict, second: dict) -> dict:
@@ -13694,6 +13884,31 @@ class GraphVersioningService:
             bid = branch_id or await self._main_branch_id(s, graph_id)
             return (await self._current_values(s, graph_id, bid, [entity_id])).get(entity_id)
 
+    async def values_before(self, graph_id: str, branch_id: str, ids, seq: int) -> Dict[str, Optional[dict]]:
+        """Each of ``ids`` as ``branch_id`` held it just before its commit ``seq`` — what undoing
+        that commit puts back. Deleted → ``None``; never held → omitted. A draft's own rows first
+        (:meth:`_values_at`), then ``main`` at the base the draft read then: a pull since moved the
+        base, so it is the ``to_seq`` of the last pull before ``seq``, else the ``from_seq`` of the
+        first one after it. A fork's ``main`` reads its parent's (:meth:`_layers`)."""
+        async with self._session() as s:
+            out = await self._values_at(s, graph_id, branch_id, ids, seq - 1)
+            rest = [i for i in dict.fromkeys(ids) if i not in out]
+            main_id = await self._main_branch_id(s, graph_id)
+            if not rest or branch_id == main_id:
+                return out
+            base = (await s.get(BranchORM, branch_id)).base_commit_seq or 0
+            pulls = (await s.execute(select(CommitORM.commit_seq, CommitORM.stats).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id, CommitORM.kind == "pull",
+            ).order_by(CommitORM.commit_seq))).all()
+            earlier = [p.stats for p in pulls if p.commit_seq < seq]
+            later = [p.stats for p in pulls if p.commit_seq >= seq]
+            if earlier and (earlier[-1] or {}).get("to_seq") is not None:
+                base = earlier[-1]["to_seq"]
+            elif later and (later[0] or {}).get("from_seq") is not None:
+                base = later[0]["from_seq"]
+            out.update(await self._values_at(s, graph_id, main_id, rest, base))
+            return out
+
     async def resolve_edges(
         self, *, graph_id: str, edge_ids: Collection[str], branch_id: Optional[str] = None,
     ) -> Dict[str, Optional[Tuple[str, dict]]]:
@@ -13874,6 +14089,50 @@ class GraphVersioningService:
                     holders[key].add(eid)
         return [{"type": t, "field": f, "value": val, "entities": sorted(ids)}
                 for (t, f, val), ids in sorted(holders.items()) if len(ids) > 1]
+
+    async def _field_violations(self, s, graph_id: str, main_id: str,
+                                written: Mapping[str, Optional[dict]],
+                                ontology_rules: Optional[OntologyRules],
+                                source: Optional[Tuple[str, str]] = None,
+                                into: Optional[FieldFindings] = None) -> FieldFindings:
+        """The property values a publish would write that their type's fields refuse
+        (``EntityRule.fields``, ``EdgeRule.fields``; :func:`~.ontology.field_violations`), judged
+        against each entity's value on ``main`` before the publish, so only what it changes is
+        judged. Read for the nodes and relationships of a type that has field rules only: nothing
+        when none has. ``source``: as :meth:`_unique_violations` takes it — the ``(graph, branch)``
+        whose values ``written`` holds only as identity columns, read in full here.
+
+        ``FIELD_CHECK_PAGE`` entities at a time, judged off the event loop, kept in ``into`` (else
+        a new :class:`~.ontology.FieldFindings`): a hundred examples and the counts, never every
+        violation, and never every value at once."""
+        found = into if into is not None else FieldFindings()
+        if ontology_rules is None or not any(
+                r.fields for r in (*ontology_rules.entity_types.values(), *ontology_rules.edge_types.values())):
+            return found
+
+        def governed(v: Optional[dict]) -> bool:
+            if not v:
+                return False
+            if _is_edge_payload(v):
+                canon = ontology_rules.canonical_edge_type(v.get("edgeType") or v.get("edge_type"))
+                rule = ontology_rules.edge_types.get(canon.upper()) if canon else None
+            else:
+                rule = ontology_rules.entity_types.get(
+                    ontology_rules.canonical_entity_type(v.get("entityType")) or "")
+            return bool(rule and rule.fields)
+
+        ids = [eid for eid, v in written.items() if governed(v)]
+        for page in _chunks(ids, config.FIELD_CHECK_PAGE):
+            after = {eid: written[eid] for eid in page}
+            if source is not None:
+                need = [eid for eid in page if "properties" not in written[eid]]
+                if need:
+                    full = await self._current_values(s, source[0], source[1], need)
+                    after.update({e: full[e] for e in need if full.get(e) is not None})
+            before = await self._current_values(s, graph_id, main_id, page)
+            found.add(await asyncio.to_thread(
+                field_violations, [(eid, after[eid], before.get(eid)) for eid in page], ontology_rules))
+        return found
 
     async def identities_taken(self, *, graph_id: str, branch_id: str,
                                names: Collection[str]) -> Tuple[set, Dict[str, str]]:

@@ -45,6 +45,9 @@ export interface ExportDialogProps {
   branchId?: string   // present when the user is on a working draft branch → offer to include it
   /** Published as it was at this revision: what is exported, in place of Published as it is. */
   asOfSeq?: number | null
+  /** Entities chosen on the canvas (their canvas ids): only they are exported, with everything
+   *  inside them, to edit offline and import back. A data source with version control only. */
+  selected?: string[]
   onClose: () => void
 }
 
@@ -71,14 +74,17 @@ function fileStem(parts: Array<string | undefined>): string {
 const count = (n: number) => n.toLocaleString()
 
 export function ExportDialog({
-  wsId, dataSourceId, graphId, dataSourceName, viewId, viewName, branchId: draftId, asOfSeq = null, onClose,
+  wsId, dataSourceId, graphId, dataSourceName, viewId, viewName, branchId: draftId, asOfSeq = null,
+  selected, onClose,
 }: ExportDialogProps) {
   const live = !graphId
+  const picked = !live && selected?.length ? selected : null
   // At a past revision, that revision is what is exported: never a draft.
   const pastRevision = !live && asOfSeq != null ? asOfSeq : null
   const branchId = pastRevision != null ? undefined : draftId
-  // An export of this data source the server was preparing when the dialog last closed: it opens on that.
-  const [earlier] = useState(() => (graphId
+  // An export of this data source the server was preparing when the dialog last closed: it opens on
+  // that, unless this is an export of a selection.
+  const [earlier] = useState(() => (graphId && !picked
     ? findRunningExport((e) => e.kind === 'data' && e.wsId === wsId && e.graphId === graphId) : null))
   const [format, setFormat] = useState<ImportFormat>('csv')
   const [scope, setScope] = useState<'view' | 'all'>(viewId && !live ? 'view' : 'all')
@@ -94,7 +100,7 @@ export function ExportDialog({
   useShownExport(prepared?.jobId)
   const stage = prepared ? exportStage(prepared) : null
 
-  const inView = !live && scope === 'view' && !!viewId
+  const inView = !live && !picked && scope === 'view' && !!viewId
   const onDraft = !live && source === 'branch' && !!branchId
 
   async function run(fmt: ImportFormat = format) {
@@ -106,21 +112,22 @@ export function ExportDialog({
       viewId: inView ? viewId : undefined,
       branchId: onDraft ? branchId : undefined,
       asOfSeq: pastRevision ?? undefined,
+      ...(picked ? { ids: picked, withChildren: true } : {}),
     }
     try {
       const planned = await planExport(target, fmt)
       setPlan(planned)
       if (planned.empty) { setPhase('empty'); return }
       if (planned.formatLimit) { setPhase('limit'); return }
-      const stem = fileStem([dataSourceName, inView ? viewName : undefined, onDraft ? 'draft' : undefined,
-        pastRevision != null ? `revision-${pastRevision}` : undefined])
+      const stem = fileStem([dataSourceName, inView ? viewName : undefined, picked ? 'selection' : undefined,
+        onDraft ? 'draft' : undefined, pastRevision != null ? `revision-${pastRevision}` : undefined])
       const props = SPREADSHEETS.includes(fmt)
         ? newProps.split(',').map((s) => s.trim()).filter(Boolean) : []
       // Recorded when the export starts. Format and scope, never the property list: those
       // are the user's column names.
       recordEvent('graph.export', {
         format: fmt,
-        scope: inView ? 'view' : 'graph',
+        scope: picked ? 'selection' : inView ? 'view' : 'graph',
         source: live ? 'live' : onDraft ? 'branch' : 'published',
       })
       if (!graphId) {
@@ -133,7 +140,9 @@ export function ExportDialog({
       // The server's workers write the file, and the browser downloads it once it's ready, wherever
       // the person is in the app by then.
       const created = await createExport(target, fmt, { props, filename: stem })
-      const what = [...new Set([dataSourceName, inView ? viewName : undefined].filter(Boolean))].join(' · ')
+      const what = [...new Set([dataSourceName, inView ? viewName : undefined,
+        picked ? `${picked.length === 1 ? '1 entity' : `${count(picked.length)} entities`} and what is inside` : undefined,
+      ].filter(Boolean))].join(' · ')
       trackExport({
         jobId: created.jobId, kind: 'data', wsId, graphId, fileName: `${stem}.${fmt}`,
         label: `${what || 'Data source'}${onDraft ? ' (your draft)' : ''}${pastRevision != null ? ` (as at revision #${pastRevision})` : ''} · ${fmt.toUpperCase()}`,
@@ -178,6 +187,7 @@ export function ExportDialog({
               <h3 className="text-xl font-bold text-ink">Export data</h3>
               <p className="text-xs text-ink-muted mt-0.5">
                 {live ? 'Download the graph — a cold copy you can import again later'
+                  : picked ? 'Download what you selected, with everything inside it — edit it offline, then import it back'
                   : pastRevision != null ? `Download the graph as it was at revision #${pastRevision} — a complete, re-importable copy`
                   : 'Download the graph — a complete, re-importable backup'}
               </p>
@@ -194,7 +204,8 @@ export function ExportDialog({
         <div className="flex-1 overflow-y-auto">
           {view === 'choose' && (
             <ChooseStep format={format} setFormat={setFormat} scope={scope} setScope={setScope}
-              hasView={!!viewId && !live} source={source} setSource={setSource} hasBranch={!!branchId && !live}
+              hasView={!!viewId && !live && !picked} picked={picked?.length ?? 0}
+              source={source} setSource={setSource} hasBranch={!!branchId && !live}
               live={live} newProps={newProps} setNewProps={setNewProps} />
           )}
           {view === 'checking' && (
@@ -248,13 +259,15 @@ export function ExportDialog({
               <p className="mt-2">
                 {live
                   ? 'Import it into a data source with version control to restore it there: its rows are matched by URN.'
-                  : 'Re-import it any time to restore this data source, or into a new one to clone it — it round-trips losslessly.'}
+                  : picked
+                    ? 'Edit it, then use Import in Edit mode to bring your changes back: each row finds its entity again, and only the cells you changed are applied.'
+                    : 'Re-import it any time to restore this data source, or into a new one to clone it — it round-trips losslessly.'}
               </p>
             </Outcome>
           )}
           {view === 'empty' && (
             <Outcome tone="info" title="Nothing to export">
-              <p>{emptyReason(plan, { inView, onDraft })}</p>
+              <p>{emptyReason(plan, { inView, onDraft, picked: !!picked })}</p>
             </Outcome>
           )}
           {view === 'limit' && plan && (
@@ -332,8 +345,11 @@ export function ExportDialog({
 }
 
 /** Why an export holds nothing, in the terms the user chose it in. */
-function emptyReason(plan: ExportPlan | null, { inView, onDraft }: { inView: boolean; onDraft: boolean }): string {
+function emptyReason(plan: ExportPlan | null, { inView, onDraft, picked }: {
+  inView: boolean; onDraft: boolean; picked: boolean
+}): string {
   const where = onDraft ? 'your draft' : 'this data source'
+  if (picked) return `None of what you selected is in ${where}, so there is nothing to export.`
   if (inView && plan?.view && plan.view.placements > 0 && plan.view.found === 0) {
     const n = plan.view.placements
     return `None of the ${count(n)} ${n === 1 ? 'entity' : 'entities'} this view places ${n === 1 ? 'is' : 'are'} in ${where}, so there is nothing to export.`
@@ -363,9 +379,11 @@ function Outcome({ tone, title, children }: {
 }
 
 // ── choose (two columns: guide | scope + format) ─────────────────────────────
-function ChooseStep({ format, setFormat, scope, setScope, hasView, source, setSource, hasBranch, live, newProps, setNewProps }: {
+function ChooseStep({ format, setFormat, scope, setScope, hasView, picked, source, setSource, hasBranch, live, newProps, setNewProps }: {
   format: ImportFormat; setFormat: (f: ImportFormat) => void
   scope: 'view' | 'all'; setScope: (s: 'view' | 'all') => void; hasView: boolean
+  /** How many entities were chosen on the canvas; 0 when the export isn't of a selection. */
+  picked: number
   source: 'branch' | 'published'; setSource: (s: 'branch' | 'published') => void; hasBranch: boolean
   live: boolean
   newProps: string; setNewProps: (s: string) => void
@@ -379,7 +397,9 @@ function ChooseStep({ format, setFormat, scope, setScope, hasView, source, setSo
           <p className="text-[11px] text-ink-muted mt-0.5">A snapshot you can edit offline and re-import.</p>
         </div>
         <ul className="space-y-3">
-          <Feature icon={<Database className="w-4 h-4" />} title="Entities & relationships" body={hasView ? "Everything in your chosen scope, with full properties." : "All nodes and edges, with their full properties."} />
+          <Feature icon={<Database className="w-4 h-4" />} title="Entities & relationships" body={picked
+            ? 'What you selected and everything inside it, with full properties, and the relationships among them.'
+            : hasView ? "Everything in your chosen scope, with full properties." : "All nodes and edges, with their full properties."} />
           {live ? (
             <Feature icon={<Layers className="w-4 h-4" />} title="A cold copy" body="Each row carries its entity's URN, so importing the file into a data source with version control matches it there." />
           ) : (
@@ -418,6 +438,17 @@ function ChooseStep({ format, setFormat, scope, setScope, hasView, source, setSo
                 title="My working branch" desc="Includes your draft changes" />
               <ScopeCard active={source === 'published'} onClick={() => setSource('published')}
                 title="Published" desc="The committed main graph" />
+            </div>
+          </div>
+        )}
+        {picked > 0 && (
+          <div>
+            <label className="block text-xs font-medium text-ink-secondary mb-2">What to export</label>
+            <div className="rounded-xl border-2 border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 px-3 py-2.5">
+              <p className="text-xs font-semibold text-ink">
+                {picked === 1 ? 'The selected entity' : `${count(picked)} selected entities`}
+              </p>
+              <p className="text-[10px] text-ink-muted mt-0.5">With everything inside {picked === 1 ? 'it' : 'them'}, at every level</p>
             </div>
           </div>
         )}

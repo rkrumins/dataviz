@@ -1,7 +1,7 @@
 /**
  * viewLibraryStore — the open view's library as the server holds it: its
  * display rules (the published ones, or the open draft's own), its saved
- * queries, and whether the caller may change them.
+ * queries, its reusable changes, and whether the caller may change them.
  *
  * The rules themselves live in ``referenceModelStore.displayRules``, where
  * the canvas's rule engine and chips read them. This store loads them
@@ -17,8 +17,8 @@ import { create } from 'zustand'
 import { getQueryClient } from '@/lib/queryClient'
 import { generateId } from '@/lib/utils'
 import {
-    deleteViewQuery, deleteViewRule, getViewLibrary, orderViewRules, putViewQuery, putViewRule,
-    type SavedViewQuery, type SavedViewQueryInput, type ViewLibrary,
+    deleteReusableChange, deleteViewQuery, deleteViewRule, getViewLibrary, orderViewRules, putReusableChange, putViewQuery,
+    putViewRule, type ReusableChange, type ReusableChangeInput, type SavedViewQuery, type SavedViewQueryInput, type ViewLibrary,
 } from '@/services/viewLibraryService'
 import { VIEW_VERSION_STATUS_QUERY_KEY } from '@/services/viewVersionsApiService'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
@@ -37,6 +37,7 @@ export interface ViewLibraryState {
     /** Whether the caller may change the library (the server's own check). */
     canEdit: boolean
     savedQueries: SavedViewQuery[]
+    reusableChanges: ReusableChange[]
 
     /** Read the library of ``viewId`` on ``branchId``. A different view
      *  starts empty, so one view's rules never show on another. */
@@ -54,6 +55,9 @@ export interface ViewLibraryState {
     /** Save a query in the view's library — under a new id unless it has one. */
     saveQuery: (query: SavedViewQueryInput & { id?: string }) => Promise<SavedViewQuery>
     removeQuery: (id: string) => Promise<void>
+    /** Save a reusable change in the view's library — under a new id unless it has one. */
+    saveReusableChange: (change: ReusableChangeInput & { id?: string }) => Promise<ReusableChange>
+    removeReusableChange: (id: string) => Promise<void>
 }
 
 
@@ -112,6 +116,7 @@ export const useViewLibraryStore = create<ViewLibraryState>()((set, get) => {
         error: null,
         canEdit: false,
         savedQueries: [],
+        reusableChanges: [],
 
         load: async (viewId, branchId) => {
             const seq = ++loadSeq
@@ -119,7 +124,7 @@ export const useViewLibraryStore = create<ViewLibraryState>()((set, get) => {
                 if (get().viewId !== viewId) showRules([])
                 set({
                     viewId, branchId, status: viewId ? 'loading' : 'idle', error: null,
-                    ...(get().viewId !== viewId ? { canEdit: false, savedQueries: [] } : {}),
+                    ...(get().viewId !== viewId ? { canEdit: false, savedQueries: [], reusableChanges: [] } : {}),
                 })
             }
             if (!viewId) return
@@ -142,6 +147,7 @@ export const useViewLibraryStore = create<ViewLibraryState>()((set, get) => {
             set({
                 status: 'ready', error: null, canEdit: library.canEdit,
                 savedQueries: library.savedQueries ?? [],
+                reusableChanges: library.reusableChanges ?? [],
             })
         },
 
@@ -197,6 +203,32 @@ export const useViewLibraryStore = create<ViewLibraryState>()((set, get) => {
                 throw err
             }
         },
+
+        saveReusableChange: async ({ id, ...body }) => {
+            const { viewId, canEdit } = get()
+            if (!viewId || !canEdit) throw new Error(READ_ONLY)
+            const saved = await putReusableChange(viewId, id ?? generateId('change'), body)
+            if (get().viewId === viewId) {
+                set((s) => ({
+                    reusableChanges: s.reusableChanges.some((r) => r.id === saved.id)
+                        ? s.reusableChanges.map((r) => (r.id === saved.id ? saved : r))
+                        : [...s.reusableChanges, saved],
+                }))
+            }
+            return saved
+        },
+
+        removeReusableChange: async (id) => {
+            const { viewId, canEdit } = get()
+            if (!viewId || !canEdit) throw new Error(READ_ONLY)
+            set((s) => ({ reusableChanges: s.reusableChanges.filter((r) => r.id !== id) }))
+            try {
+                await deleteReusableChange(viewId, id)
+            } catch (err) {
+                if (get().viewId === viewId) void get().reload()
+                throw err
+            }
+        },
     }
 })
 
@@ -211,3 +243,4 @@ export function reloadViewLibrary(viewId: string): void {
 
 export const useLibraryCanEdit = () => useViewLibraryStore((s) => s.canEdit)
 export const useSavedViewQueries = () => useViewLibraryStore((s) => s.savedQueries)
+export const useReusableChanges = () => useViewLibraryStore((s) => s.reusableChanges)

@@ -2826,6 +2826,12 @@
           "description": "Least numeric value, exact.",
           "title": "Min"
         },
+        "rangeExact": {
+          "default": true,
+          "description": "False on a draft that changed a value at either end of the range: ``min`` and ``max`` still bound every value, but may be wider than they are.",
+          "title": "Rangeexact",
+          "type": "boolean"
+        },
         "residual": {
           "default": 0,
           "description": "Entities holding it in propertiesRaw, past the native-key budget.",
@@ -2874,6 +2880,21 @@
           ],
           "default": null,
           "title": "Sessionid"
+        },
+        "valuesFor": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A key whose every value the catalog keeps (up to 1,000) is listed, not only the 20 most held \u2014 for merging near-duplicate values.",
+          "title": "Valuesfor"
         },
         "waitMs": {
           "default": 800,
@@ -3768,6 +3789,14 @@
           "description": "Rule id \u2192 the requested urns it matches (in scope).",
           "title": "Matches",
           "type": "object"
+        },
+        "notes": {
+          "description": "On a draft: the rules whose matches among the entities the draft changed are the published graph's, and why.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
         }
       },
       "title": "SearchMembershipResult",
@@ -4417,6 +4446,12 @@
     },
     "SearchRuleCount": {
       "properties": {
+        "approximate": {
+          "default": false,
+          "description": "On a draft: the published graph's count, not corrected for what the draft changed \u2014 ``note`` says why.",
+          "title": "Approximate",
+          "type": "boolean"
+        },
         "count": {
           "description": "Matches found so far \u2014 exact once complete.",
           "title": "Count",
@@ -4439,6 +4474,19 @@
           "description": "Complete, but a floor: part of the view couldn't be read in time and was left out, so there may be more matches.",
           "title": "Lowerbound",
           "type": "boolean"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the count is approximate.",
+          "title": "Note"
         },
         "progress": {
           "anyOf": [

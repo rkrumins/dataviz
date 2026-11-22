@@ -366,6 +366,21 @@ async def read_stats_cache(
 
 # ── synthetic schema from ontology ──────────────────────────────────
 
+def _field_dicts(fields) -> list[dict]:
+    """A type's fields (an entity type's or a relationship type's) as the schema carries them."""
+    return [
+        {
+            "id": f.id, "name": f.name, "type": f.type,
+            "required": f.required,
+            "showInNode": f.show_in_node, "showInPanel": f.show_in_panel,
+            "showInTooltip": f.show_in_tooltip, "displayOrder": f.display_order,
+            "reconciliationKey": f.reconciliation_key, "unique": f.unique,
+            "format": f.format, "allowedValues": list(f.allowed_values), "allowOther": f.allow_other,
+        }
+        for f in fields
+    ]
+
+
 async def build_synthetic_schema(
     session: AsyncSession, ds_id: str,
 ) -> Optional[dict]:
@@ -424,16 +439,7 @@ async def build_synthetic_schema(
                 "borderStyle": ent_def.visual.border_style,
                 "showInMinimap": ent_def.visual.show_in_minimap,
             },
-            "fields": [
-                {
-                    "id": f.id, "name": f.name, "type": f.type,
-                    "required": f.required,
-                    "showInNode": f.show_in_node, "showInPanel": f.show_in_panel,
-                    "showInTooltip": f.show_in_tooltip, "displayOrder": f.display_order,
-                    "reconciliationKey": f.reconciliation_key, "unique": f.unique,
-                }
-                for f in ent_def.fields
-            ] or [
+            "fields": _field_dicts(ent_def.fields) or [
                 {
                     "id": "name", "name": "Name", "type": "string", "required": True,
                     "showInNode": True, "showInPanel": True, "showInTooltip": True, "displayOrder": 1,
@@ -483,6 +489,7 @@ async def build_synthetic_schema(
             "isContainment": rel_def.is_containment,
             "isLineage": rel_def.is_lineage,
             "category": rel_def.category,
+            "fields": _field_dicts(rel_def.fields),
         })
 
     logger.info(

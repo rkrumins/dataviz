@@ -1,9 +1,10 @@
-"""A view's library: its display rules and its saved queries — and the pack
-they travel in between views.
+"""A view's library: its display rules, its saved queries and its reusable
+changes — and the pack the rules and queries travel in between views.
 
 A rule tags on-screen entities that match its predicate; a saved query is a
-search kept under a name. Both belong to the view (a rule to the branch it
-was written on, as the view's layout does) and both are exported and
+search kept under a name; a reusable change is a bulk property change kept
+under a name, to run again. All belong to the view (a rule to the branch it was
+written on, as the view's layout does). Rules and queries are exported and
 imported together as a ``LibraryPack``.
 
 Predicates are validated as a search's are (``backend.common.models.search``)
@@ -14,12 +15,17 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from backend.common.models.property_job import PropertyJobOp
 
 LIBRARY_RULES_MAX = 200
 LIBRARY_QUERIES_MAX = 500
+LIBRARY_REUSABLE_CHANGES_MAX = 200
 #: The most queries listed from a workspace's other views at once.
 OTHER_VIEW_QUERIES_MAX = 500
+#: The most reusable changes listed from a workspace's other views at once.
+OTHER_VIEW_REUSABLE_CHANGES_MAX = 500
 
 PACK_FORMAT = "synodic.view-library"
 PACK_VERSION = 1
@@ -82,8 +88,84 @@ class OtherViewQuery(_Base):
     query: SavedQuery
 
 
+#: Where-step choices that name entities by id. Ids belong to one graph at one
+#: time, so a reusable change never keeps them.
+_BY_ID = ("selection", "relationships", "children", "inside")
+
+
+class ReusableChangeTarget(_Base):
+    """Which entities a reusable change reaches, as the bulk dialog's Where
+    step names them: the whole view, every entity holding ``key``, a layer by
+    its name, or a predicate (a search's, criteria built in the dialog, a
+    Connections search's). Never ids: a reusable change is run again, on other
+    entities, perhaps in another view. ``scopeMode`` is ``view`` for a layer, which is
+    searched where the view places it."""
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    kind: Literal["view", "hasKey", "layer", "search", "custom", "connections"]
+    key: Optional[str] = Field(None, min_length=1, max_length=128)
+    layer_name: Optional[str] = Field(None, alias="layerName", min_length=1, max_length=256)
+    predicate: Optional[Dict[str, Any]] = None
+    scope_mode: Literal["view", "data_source"] = Field("view", alias="scopeMode")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _never_ids(cls, data: Any) -> Any:
+        if isinstance(data, dict) and (data.get("kind") in _BY_ID or "ids" in data or "edgeIds" in data):
+            raise ValueError("A reusable change can't keep entities picked by id: the next time it "
+                             "runs they may not be the ones it should reach. Save it for the whole "
+                             "view, a key, a layer or criteria.")
+        return data
+
+    @model_validator(mode="after")
+    def _complete(self):
+        wants = {"hasKey": "key", "layer": "layerName", "search": "predicate",
+                 "custom": "predicate", "connections": "predicate"}.get(self.kind)
+        for name, value in (("key", self.key), ("layerName", self.layer_name), ("predicate", self.predicate)):
+            if (value is not None) != (name == wants):
+                raise ValueError(f"a {self.kind} target {'takes no' if value is not None else 'needs'} `{name}`")
+        if self.kind == "layer" and self.scope_mode != "view":
+            raise ValueError("a layer belongs to the view, so it is searched there: scopeMode view")
+        return self
+
+
+class ReusableChangeInput(_Base):
+    """What a client writes: a bulk property change and where it reaches."""
+    name: str = Field(min_length=1, max_length=120)
+    description: Optional[str] = Field(None, max_length=500)
+    op: PropertyJobOp
+    target: ReusableChangeTarget
+
+
+class ReusableChange(_Base):
+    """A bulk property change kept under a name, for everyone who can open
+    the view — to run again from the Property Manager. ``op`` is as a job
+    keeps it (``PropertyJobOp.wire``)."""
+    id: str = Field(min_length=1, max_length=128)
+    name: str
+    description: Optional[str] = None
+    op: Dict[str, Any]
+    target: Dict[str, Any]
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    updated_at: Optional[str] = Field(None, alias="updatedAt")
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
+
+
+class OtherViewReusableChange(_Base):
+    """A reusable change saved on another view of the workspace the caller
+    may open — to run in this one."""
+    view_id: str = Field(alias="viewId")
+    view_name: str = Field(alias="viewName")
+    same_source: bool = Field(
+        alias="sameSource",
+        description="The other view reads this one's data source, so the change's keys, "
+                    "types and layers mean what they meant there.")
+    change: ReusableChange
+
+
 class LibraryOrder(_Base):
-    """A new order for a view's rules or queries: their ids, first to last."""
+    """A new order for a view's rules, queries or reusable changes: their ids, first to last."""
     ids: List[str] = Field(max_length=LIBRARY_QUERIES_MAX)
 
 
@@ -92,6 +174,7 @@ class ViewLibrary(_Base):
     branch_id: Optional[str] = Field(None, alias="branchId")
     display_rules: List[Dict[str, Any]] = Field(default_factory=list, alias="displayRules")
     saved_queries: List[SavedQuery] = Field(default_factory=list, alias="savedQueries")
+    reusable_changes: List[ReusableChange] = Field(default_factory=list, alias="reusableChanges")
     can_edit: bool = Field(False, alias="canEdit")
 
 

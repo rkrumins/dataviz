@@ -196,3 +196,32 @@ describe('what happened to a review you are part of', () => {
         expect(navigate).toHaveBeenCalledWith('/workspaces/ws1/reviews/pr_1')
     })
 })
+
+describe('how a bulk property change you started ended', () => {
+    it('lists the three kinds among the ones in use', async () => {
+        const { KNOWN_INBOX_KINDS } = await vi.importActual<typeof import('@/services/inboxService')>(
+            '@/services/inboxService')
+        expect(KNOWN_INBOX_KINDS).toEqual(expect.arrayContaining(
+            ['property_job_completed', 'property_job_failed', 'property_job_cancelled']))
+    })
+
+    it.each([
+        ['property_job_completed', 'Set owner finished on 1,204 entities in your Sales draft', 'lucide-circle-check', 'bg-emerald-500/10'],
+        ['property_job_failed', 'Rename owner → steward failed: The draft was published', 'lucide-triangle-alert', 'bg-rose-500/10'],
+        ['property_job_cancelled', 'Set owner was stopped in your Sales draft', 'lucide-circle-slash', 'bg-slate-500/10'],
+    ])('shows %s with its own icon and tone, and opens the draft', async (kind, title, icon, tile) => {
+        mockList.mockResolvedValue({
+            items: [message({ kind, title, link: '/views/view_sales?branch=br_1', resourceType: 'property_job', resourceId: 'vjob_1' })],
+            unread: 1,
+        })
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        const row = (await screen.findByText(title)).closest('[role="button"]')!
+        expect(row.querySelector(`.${icon}`)).not.toBeNull()
+        expect(row.querySelector('.lucide-bell')).toBeNull()
+        expect(row.firstElementChild?.className).toContain(tile)
+        fireEvent.click(row)
+        await waitFor(() => expect(mockMarkRead).toHaveBeenCalledWith(['ntf_1']))
+        expect(navigate).toHaveBeenCalledWith('/views/view_sales?branch=br_1')
+    })
+})

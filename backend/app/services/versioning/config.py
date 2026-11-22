@@ -525,6 +525,20 @@ def object_store_s3() -> dict:
 # window is also what a resumed import redoes at most, and what the job's lease waits out before a
 # stopping worker hands the job back — so a few seconds of work, not minutes.
 IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "10000"))
+# A bulk property job (``import_export.property_job``): the entities one window — one commit —
+# edits, the most a job names by id, and the most a search target may match.
+PROPERTY_JOB_WINDOW: int = int(os.getenv("GRAPHVER_PROPERTY_JOB_WINDOW", "10000"))
+PROPERTY_JOB_MAX_IDS = 20_000
+PROPERTY_JOB_MAX_TARGETS: int = int(os.getenv("GRAPHVER_PROPERTY_JOB_MAX_TARGETS", "5000000"))
+# A draft's search counts and catalog (``providers.draft_search``) are main's corrected for each
+# entity the draft changed. A correction that would read more than this many changed entities
+# afresh answers with main's counts and catalog instead, said so; one that folds a later commit in
+# reads only what that commit wrote, at any size. A bulk property job's search target on a draft
+# past it reaches only main's matches, said so (``draft_search.draft_matches``).
+DRAFT_SEARCH_MAX_DELTA: int = int(os.getenv("GRAPHVER_DRAFT_SEARCH_MAX_DELTA", "200000"))
+# The nodes a publish judges by their fields at a time (``_field_violations``): the values it reads
+# for them, as written, as the draft holds them and as main does, are a page's.
+FIELD_CHECK_PAGE = 5000
 # What an import's rows find their entities by when neither the request nor its data source names
 # one (``identifier``): ``entity_id`` (an entity id of the graph, else the urn, the identifier
 # property, a field a type matches imports by, then a unique qualifiedName), ``urn`` (an entity id,

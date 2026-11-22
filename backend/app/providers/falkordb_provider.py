@@ -6829,13 +6829,15 @@ class FalkorDBProvider(GraphDataProvider):
 
     @_search_reads
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
-                                  refresh=False):
+                                  refresh=False, values_for=None):
         """Every property in ``scope``, exactly, in as many requests as the
-        scan takes. See ``falkordb_search/catalog.py``."""
+        scan takes — every value kept for ``values_for``. See
+        ``falkordb_search/catalog.py``."""
         from .falkordb_search.catalog import execute_catalog_session
         await self._ensure_connected()
         return await execute_catalog_session(self, scope, context=context, wait_ms=wait_ms,
-                                             session_id=session_id, refresh=refresh)
+                                             session_id=session_id, refresh=refresh,
+                                             values_for=values_for)
 
     @_search_reads
     async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,

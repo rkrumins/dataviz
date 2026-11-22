@@ -52,6 +52,10 @@ class FieldData:
     # key: sap_id, sys_id), and — ``unique`` — no two nodes of the type may share a value.
     reconciliation_key: bool = False
     unique: bool = False
+    # The values the field may hold (empty: any). ``allow_other``: they are suggestions, and any
+    # other value is accepted too. Checked when a draft is published, as ``unique`` is.
+    allowed_values: List[str] = field(default_factory=list)
+    allow_other: bool = False
 
 
 @dataclass
@@ -94,6 +98,8 @@ class RelationshipTypeDefEntry:
     bidirectional: bool = False
     show_label: bool = False
     label_field: Optional[str] = None
+    # The properties its relationships carry that a publish judges, as an entity type's fields.
+    fields: List[FieldData] = field(default_factory=list)
 
 
 @dataclass

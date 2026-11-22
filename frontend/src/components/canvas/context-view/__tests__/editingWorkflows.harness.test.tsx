@@ -263,7 +263,7 @@ describe('a draft edited end to end in the Business view', () => {
     })
   }, 30000)
 
-  it('More → Select several picks two, and "Edit 2…" opens what they share', async () => {
+  it('More → Select several picks two, and "Compare & edit 2" opens what they share', async () => {
     const h = await openBusiness()
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'More tools' }))
@@ -274,7 +274,7 @@ describe('a draft edited end to end in the Business view', () => {
     await h.settle()
     expect(useCanvasStore.getState().selectedNodeIds).toEqual(['INTERMEDIATE_T2', 'REPORTING'])
 
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Edit 2…' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Compare & edit 2' })) })
     await h.settle()
     expect(screen.getByRole('heading', { name: '2 entities' })).toBeInTheDocument()
   }, 30000)

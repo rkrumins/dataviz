@@ -14,7 +14,7 @@ const tick = () => new Promise<void>((r) => queueMicrotask(r))
 
 beforeEach(async () => {
   useCanvasStore.setState({
-    drawerNodeId: null, drawerEdge: null, drawerEdgeEditRequest: false,
+    drawerNodeId: null, drawerNodeIds: null, drawerEdge: null, drawerEdgeEditRequest: false,
     drawerHistory: { entries: [], cursor: -1 }, selectedNodeIds: [], selectedEdgeIds: [],
     drawerDirty: false, pendingDrawerMove: null,
   })
@@ -61,6 +61,18 @@ describe('a dirty drawer', () => {
     s().resolveDrawerMove('keep')
     s().selectEdge('e1')
     expect(s().drawerNodeId).toBe('a')
+  })
+
+  it('holds opening a comparison, and a move away from a comparison with unsaved edits', () => {
+    s().openNodesDrawer(['b', 'c'])
+    expect(s().drawerNodeIds).toBeNull()
+    expect(s().drawerNodeId).toBe('a')
+    s().resolveDrawerMove('proceed')
+    expect(s().drawerNodeIds).toEqual(['b', 'c'])
+    s().setDrawerDirty(true)
+    s().selectNode('d')
+    expect(s().drawerNodeIds).toEqual(['b', 'c'])
+    expect(s().pendingDrawerMove?.steps).toHaveLength(1)
   })
 
   it('"proceed" replays the whole move, in order, and the drawer is clean', () => {

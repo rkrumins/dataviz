@@ -27,10 +27,10 @@ def _script():
     return ScriptDirectory.from_config(_alembic_config())
 
 
-def _parents(script, revision: str) -> list:
-    """A revision's parents, one or several (a merge revision's ``down_revision`` is a tuple)."""
-    down = script.get_revision(revision).down_revision
-    return [down] if isinstance(down, str) else list(down or ())
+def _below(script, head):
+    """The revisions just below ``head``: its one parent, or a merge's several."""
+    down = script.get_revision(head).down_revision
+    return [down] if isinstance(down, str) else list(down)
 
 
 def _plan(stamped, **kw):
@@ -46,7 +46,7 @@ def test_the_plan_says_what_an_upgrade_would_do():
     assert _plan([head])["verdict"] == "up_to_date"
     assert _plan([], virgin=True)["verdict"] == "fresh_install"
 
-    behind = _plan(_parents(script, head))
+    behind = _plan(_below(script, head))
     assert behind["verdict"] == "upgrade" and behind["wouldRun"] == [head]
 
     # Dev's stamp: placed exactly, at what both ways it can have come about ran, then everything the
@@ -64,7 +64,7 @@ def test_the_plan_says_what_an_upgrade_would_do():
 
 def test_the_plan_holds_a_shared_database_to_main():
     script = _script()
-    behind = _parents(script, script.get_current_head())
+    behind = _below(script, script.get_current_head())
     branch = ("claude/x at abc", False)
     assert _plan(behind, shared=True, built=branch)["verdict"] == "refused"
     assert _plan([script.get_current_head()], shared=True, built=branch)["verdict"] == "up_to_date"
@@ -194,8 +194,10 @@ def test_a_backup_is_made_only_when_an_upgrade_would_change_something(scratch_db
     assert list(tmp_path.iterdir()) == []
 
     # Behind its head: dumped, readable, named for where the upgrade takes it.
-    _sql(scratch_db, f"UPDATE alembic_version SET version_num = '{min(script.get_revision(head).down_revision)}'")
-    _sql(scratch_db, "INSERT INTO alembic_version VALUES ('20261119_1300_merge_member_sets')")
+    below = _below(script, head)
+    _sql(scratch_db, f"UPDATE alembic_version SET version_num = '{below[0]}'")
+    for revision in below[1:]:
+        _sql(scratch_db, f"INSERT INTO alembic_version VALUES ('{revision}')")
     out = _job(scratch_db, "backup", "--dir", str(tmp_path), "--keep", "2")
     assert out.returncode == 0, out.stderr[-2000:]
     [dump] = list(tmp_path.glob("*.dump"))

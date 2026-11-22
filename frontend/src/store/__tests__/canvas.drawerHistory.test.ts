@@ -16,6 +16,7 @@ const rel = (id: string): DrawerEdgeTarget => ({ kind: 'relationship', id, sourc
 beforeEach(() => {
   useCanvasStore.setState({
     drawerNodeId: null,
+    drawerNodeIds: null,
     drawerEdge: null,
     drawerEdgeEditRequest: false,
     drawerHistory: { entries: [], cursor: -1 },
@@ -156,5 +157,55 @@ describe('drawer history', () => {
     expect(s().consumeDrawerEdgeEditRequest()).toBe(false)
     s().openEdgeDrawer(rel('e2'))
     expect(s().consumeDrawerEdgeEditRequest()).toBe(false)
+  })
+})
+
+describe('several entities in the drawer', () => {
+  it('opens on the set — logical groupings and repeats left out — as one step of the trail', () => {
+    s().openNodeDrawer('a')
+    s().openNodesDrawer(['b', 'c', 'b', 'logical:g'])
+    expect(s().drawerNodeIds).toEqual(['b', 'c'])
+    expect(s().drawerNodeId).toBeNull()
+    expect(s().drawerHistory.entries).toEqual([n('a'), { kind: 'nodes', ids: ['b', 'c'] }])
+  })
+
+  it('a set of one is the plain drawer on it', () => {
+    s().openNodesDrawer(['a', 'logical:g'])
+    expect(s().drawerNodeId).toBe('a')
+    expect(s().drawerNodeIds).toBeNull()
+  })
+
+  it('re-opening the same set is not a move', () => {
+    s().openNodesDrawer(['a', 'b'])
+    s().openNodesDrawer(['a', 'b'])
+    expect(s().drawerHistory.entries).toHaveLength(1)
+  })
+
+  it('Back from an entity opened out of the comparison returns to it', () => {
+    s().openNodesDrawer(['a', 'b'])
+    s().openNodeDrawer('a')
+    expect(s().drawerNodeIds).toBeNull()
+    s().drawerBack()
+    expect(s().drawerNodeIds).toEqual(['a', 'b'])
+    expect(s().drawerNodeId).toBeNull()
+  })
+
+  it('a click on an entity, a relationship or a close each leave the comparison', () => {
+    s().openNodesDrawer(['a', 'b'])
+    s().selectNode('c')
+    expect(s().drawerNodeId).toBe('c')
+    expect(s().drawerNodeIds).toBeNull()
+    s().openNodesDrawer(['a', 'b'])
+    s().openEdgeDrawer(rel('e1'))
+    expect(s().drawerNodeIds).toBeNull()
+    s().openNodesDrawer(['a', 'b'])
+    s().closeNodeDrawer()
+    expect(s().drawerNodeIds).toBeNull()
+  })
+
+  it('a multi-select click keeps the comparison as it was opened', () => {
+    s().openNodesDrawer(['a', 'b'])
+    s().selectNode('c', true)
+    expect(s().drawerNodeIds).toEqual(['a', 'b'])
   })
 })

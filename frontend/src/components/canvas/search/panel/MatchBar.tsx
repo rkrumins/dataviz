@@ -26,7 +26,7 @@
 import { motion } from 'framer-motion'
 import {
     AlertTriangle, ChevronLeft, ChevronRight,
-    BookmarkPlus, Crosshair, EyeOff, FileDown, Filter, Maximize2, ScanSearch, Sparkles, X,
+    BookmarkPlus, Crosshair, EyeOff, FileDown, Filter, Maximize2, PencilLine, ScanSearch, Sparkles, X,
 } from 'lucide-react'
 import {
     type FC, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState,
@@ -36,6 +36,7 @@ import { createPortal } from 'react-dom'
 import type { Halted } from '@/hooks/useAdvancedSearch'
 
 import { ProgressBar } from '@/components/ui/ProgressBar'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { cn } from '@/lib/utils'
 import { useConnectionVisibility, useConnectionVisibilityStore } from '@/store/connectionVisibility'
 import { usePersonaMode } from '@/store/persona'
@@ -95,6 +96,9 @@ export interface MatchBarProps {
     /** Narrow the canvas to the matches and what they reach (the Context
      *  View's Narrow). Absent where the canvas cannot. */
     onNarrow?: () => void
+    /** Change a property on every match — all of them, not only the ones
+     *  loaded — on the draft. Absent where the canvas cannot write. */
+    onEditProperties?: () => void
     /** Keep the matches as a view of their own — a subset view. Absent where
      *  the canvas cannot. */
     onSaveAsView?: () => void
@@ -119,7 +123,7 @@ export const MatchBar: FC<MatchBarProps> = ({
     count, elapsedMs, isRunning, errorMessage, truncated, countIsExact,
     deadlineExceeded, candidateCount, scanning, progress, startedAt, halted, onStop,
     onResume, countIsFloor, notes, onFrame,
-    onShowFocusedOnCanvas, onClear, onExport, onNarrow, onSaveAsView, saveAsViewLabel, saveAsViewBlocked,
+    onShowFocusedOnCanvas, onClear, onExport, onNarrow, onEditProperties, onSaveAsView, saveAsViewLabel, saveAsViewBlocked,
     unit = 'match', viewId,
 }) => {
     // What the stepper walks: the matches, or a Connections search's edges.
@@ -173,6 +177,7 @@ export const MatchBar: FC<MatchBarProps> = ({
                 onClear={onClear}
                 onExport={!isRunning && !isError && (count ?? 0) > 0 ? onExport : undefined}
                 onNarrow={!isRunning && !isError && (count ?? 0) > 0 && unit === 'match' ? onNarrow : undefined}
+                onEditProperties={!isRunning && !isError && (count ?? 0) > 0 && (unit === 'match' || unit === 'connection') ? onEditProperties : undefined}
                 onSaveAsView={!isRunning && !isError && (count ?? 0) > 0 && unit === 'match' ? onSaveAsView : undefined}
                 saveAsViewLabel={saveAsViewLabel}
                 saveAsViewBlocked={saveAsViewBlocked ?? null}
@@ -372,7 +377,7 @@ function FloorNote({ notes, unit }: { notes: string[]; unit: MatchUnit }) {
 
 function SummaryStrip({
     isRunning, isError, errorMessage, count, elapsedMs,
-    showPlus, scannedPercent: scanned, clock, floor, onClear, onExport, onNarrow, onSaveAsView,
+    showPlus, scannedPercent: scanned, clock, floor, onClear, onExport, onNarrow, onEditProperties, onSaveAsView,
     saveAsViewLabel, saveAsViewBlocked, onStop, unit,
 }: {
     isRunning: boolean
@@ -390,6 +395,7 @@ function SummaryStrip({
     onClear?: () => void
     onExport?: () => void
     onNarrow?: () => void
+    onEditProperties?: () => void
     onSaveAsView?: () => void
     saveAsViewLabel?: string
     saveAsViewBlocked: string | null
@@ -442,6 +448,23 @@ function SummaryStrip({
                         <ScanSearch className="w-3 h-3" />
                         Narrow…
                     </button>
+                )}
+                {onEditProperties && (
+                    <HoverTip label={unit === 'connection' ? 'Change a property on every relationship found' : 'Change a property on every match'}
+                        detail="All of them, on every page — set, fill, rename, copy or remove it, on your draft">
+                        <button
+                            type="button"
+                            onClick={onEditProperties}
+                            className={cn(
+                                'inline-flex items-center gap-1 px-2 h-7 rounded-md shrink-0',
+                                'text-[11px] font-medium text-ink-secondary transition-colors',
+                                'hover:text-accent-lineage hover:bg-accent-lineage/10',
+                            )}
+                        >
+                            <PencilLine className="w-3 h-3" aria-hidden />
+                            Edit properties…
+                        </button>
+                    </HoverTip>
                 )}
                 {onSaveAsView && (
                     <button

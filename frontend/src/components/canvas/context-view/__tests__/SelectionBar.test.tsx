@@ -52,15 +52,56 @@ describe('SelectionBar', () => {
     expect(onOpenDetails).toHaveBeenCalledTimes(1)
   })
 
-  it('offers to edit what several share in a draft — and to read it outside one', async () => {
+  it('shows for ONE entity where nothing else offers its actions (a trace)', () => {
+    renderBar(['a'], { onTrace: undefined, onOpenLens: undefined, onExport: vi.fn(), offerForOne: true })
+    const bar = screen.getByRole('region', { name: /selected entities/i })
+    expect(within(bar).getByText('orders')).toBeInTheDocument()
+    expect(within(bar).getByRole('button', { name: 'Export…' })).toBeInTheDocument()
+  })
+
+  it('offers to export what is held, with everything inside it, only where the canvas can', async () => {
+    const onExport = vi.fn()
+    const { unmount } = render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()}
+      onClear={vi.fn()} onExport={onExport} />)
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Export…' }))
+    expect(onExport).toHaveBeenCalledTimes(1)
+    unmount()
+    renderBar(['a', 'b'])
+    expect(screen.queryByRole('button', { name: 'Export…' })).not.toBeInTheDocument()
+  })
+
+  it('offers to compare and edit several in a draft — and to compare them outside one', async () => {
+    const user = userEvent.setup()
     const onOpenShared = vi.fn()
     const { unmount } = render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()} onClear={vi.fn()}
       onOpenShared={onOpenShared} sharedEditable />)
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Edit 2…' }))
+    await user.click(screen.getByRole('button', { name: 'Compare & edit 2' }))
     expect(onOpenShared).toHaveBeenCalledTimes(1)
     unmount()
     render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()} onClear={vi.fn()} onOpenShared={onOpenShared} />)
-    expect(screen.getByRole('button', { name: 'Details' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /edit/i })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Compare 2' }))
+    expect(onOpenShared).toHaveBeenCalledTimes(2)
+  })
+
+  it('puts Compare first among what it can do with several, as the main action', () => {
+    renderBar(['a', 'b'], { onOpenShared: vi.fn(), onLink: vi.fn(), onNarrow: vi.fn(), onExport: vi.fn() })
+    const bar = screen.getByRole('region', { name: /selected entities/i })
+    const actions = within(bar).getAllByRole('button')
+      .filter((b) => !b.getAttribute('aria-label')?.startsWith('Remove '))
+    expect(actions.map((b) => b.textContent)).toEqual(
+      ['Compare 2', 'Link…', 'Narrow…', 'Export…', 'Focus all 2', 'Trace all 2', 'Clear'],
+    )
+    // The bar's primary look, the one Details and Trace all wear.
+    expect(actions[0].className).toContain('bg-accent-lineage/15')
+  })
+
+  it('says what Compare opens in the app\'s own tooltip, not a native one', async () => {
+    renderBar(['a', 'b'], { onOpenShared: vi.fn() })
+    const compare = screen.getByRole('button', { name: 'Compare 2' })
+    expect(compare).not.toHaveAttribute('title')
+    await userEvent.setup().hover(compare)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/side by side/)
   })
 
   it('never offers Details for several', () => {
@@ -170,6 +211,34 @@ describe('SelectionBar', () => {
       const bar = screen.getByRole('region', { name: /selected entities/i })
       expect(within(bar).getByText('⌘').tagName).toBe('KBD')
       expect(within(bar).getByText('⇧').tagName).toBe('KBD')
+    })
+
+    it('says the gestures of the canvas it is on, where that canvas has its own', () => {
+      renderBar(['a', 'b'], { hint: <>⇧ drag selects a box</> })
+      const bar = screen.getByRole('region', { name: /selected entities/i })
+      expect(bar.textContent).toContain('drag selects a box')
+      expect(bar.textContent).not.toContain('click adds a range')
+    })
+  })
+
+  describe('where it sits', () => {
+    it('in the Context View\'s lane by default: above its trace dock and layer strip, short of its right-hand dock', () => {
+      renderBar(['a', 'b'])
+      const lane = screen.getByRole('region', { name: /selected entities/i })
+      expect(lane.className).toContain('left-4')
+      // 20rem + 1.75rem: the right-hand dock's width and gutter (jsdom folds the sum).
+      expect(lane.style.right).toBe('calc(21.75rem)')
+      expect(lane.style.bottom).toContain('var(--trace-dock-height, 0px)')
+      expect(lane.style.bottom).toContain('var(--layer-strip-height, 0px)')
+    })
+
+    it('where another canvas places it — none of the Context View\'s chrome to clear', () => {
+      renderBar(['a', 'b'], { placementClassName: 'left-16 right-16 bottom-24' })
+      const lane = screen.getByRole('region', { name: /selected entities/i })
+      expect(lane.className).toContain('left-16 right-16 bottom-24')
+      expect(lane.className).toContain('absolute')
+      expect(lane.style.right).toBe('')
+      expect(lane.style.bottom).toBe('')
     })
   })
 

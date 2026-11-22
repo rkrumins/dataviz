@@ -4,8 +4,8 @@
  * `DrawerFrame` is the rail itself — it slides in and out, and lives as long as the drawer is
  * open, whatever it shows:
  * - **Width.** Its left edge drags (or steps, from the keyboard) to the width the reader wants,
- *   kept for every drawer that opens here; until then, the panel's default. It never grows so
- *   wide that the canvas beside it drops below `CANVAS_MIN_WIDTH`.
+ *   kept for every drawer that opens here; until then, the panel's default — wider for a
+ *   comparison. It never grows so wide that the canvas beside it drops below `CANVAS_MIN_WIDTH`.
  * - **Keys.** It is a keyboard scope: the canvas's shortcuts never see keys typed here
  *   (Backspace is not "delete the selected node").
  * - **Focus.** When the drawer closes with focus inside, focus returns to where it came from.
@@ -41,11 +41,13 @@ const FrameContext = createContext<RefObject<HTMLElement | null> | null>(null)
 const isTextField = (el: EventTarget | null): el is HTMLElement =>
   el instanceof HTMLElement && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)
 
-export function DrawerFrame({ panel, label, children }: {
+export function DrawerFrame({ panel, label, comparing = false, children }: {
   /** `data-panel` of the aside (e.g. `entity-drawer`), and its keyboard scope's name. */
   panel: string
   /** Names the drawer for assistive tech ("Entity details"). */
   label: string
+  /** It compares several entities or relationships: the default width is wider. */
+  comparing?: boolean
   children: ReactNode
 }) {
   const asideRef = useRef<HTMLElement>(null)
@@ -75,7 +77,7 @@ export function DrawerFrame({ panel, label, children }: {
     : DRAWER_MAX_WIDTH
   const chosen = liveWidth ?? storedWidth
   const width = chosen === null ? null : Math.max(DRAWER_MIN_WIDTH, Math.min(maxWidth, chosen))
-  const widthCss = drawerWidthCss(width)
+  const widthCss = drawerWidthCss(width, comparing)
   const commitWidth = useCallback((w: number) => {
     setStoredWidth(w)
     setLiveWidth(null)
@@ -112,7 +114,7 @@ export function DrawerFrame({ panel, label, children }: {
       <ResizeHandle
         edge="left"
         label="Resize details panel"
-        width={width ?? Math.min(maxWidth, defaultDrawerPx())}
+        width={width ?? Math.min(maxWidth, defaultDrawerPx(comparing))}
         min={DRAWER_MIN_WIDTH}
         max={maxWidth}
         onResize={setLiveWidth}

@@ -35,12 +35,14 @@ from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Unio
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.raw_path_route import RawPathSegmentRoute
+from backend.common.models.property_job import PropertyJobOp
+from backend.common.models.search import Predicate
 from backend.common.property_patch import InvalidPatch, normalize_update
 from backend.common.service_accounts import is_service_account
 from backend.app.services.versioning.entity_audit import (
@@ -171,7 +173,9 @@ def get_import_export_service():
             layout_writer=_write_view_import_assignments,
             publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope,
             identity_resolver=_resolve_node_identity_for_import, fork_hook=_fork_from_job,
-            save_hook=_save_from_job)
+            save_hook=_save_from_job, property_targets=_property_targets_from_job,
+            property_write_context=_property_write_context,
+            property_draft_matches=_property_draft_matches_from_job)
     return _ie_service
 
 
@@ -5267,6 +5271,12 @@ class CreateExportResponse(_ApiModel):
     status: str
 
 
+class ExportSelectionBody(_ApiModel):
+    """The entities an export holds, sent in the body when there are too many for a URL: entity
+    ids, URNs, or ``gv:<entity id>`` (as the canvas names a node without a URN)."""
+    ids: List[str] = Field(default_factory=list, max_length=50_000)
+
+
 @router.post("/graphs/{graph_id}/exports", response_model=CreateExportResponse, status_code=202,
              dependencies=[Depends(_GATE_GRAPH_EXPORT)])
 async def create_export(
@@ -5278,10 +5288,13 @@ async def create_export(
     props: Optional[str] = Query(None, description="Comma-separated property names to add as empty columns to fill"),
     ids: Optional[str] = Query(None, description="Comma-separated entity_id/urn set — export only these entities"),
     types: Optional[str] = Query(None, description="Comma-separated entity types — export only these"),
+    with_children: bool = Query(False, alias="withChildren", description=(
+        "With ``ids``: every entity inside them (down containment edges) comes too")),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey", description=(
         "Makes the request safe to send again: the same key, from the same caller, answers "
         "with the job it started")),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
+    selection: Optional[ExportSelectionBody] = None,
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     viewer: Viewer = Depends(viewer_ctx),
@@ -5303,6 +5316,10 @@ async def create_export(
     _split = lambda v: [x.strip() for x in (v or "").split(",") if x.strip()]  # noqa: E731
     await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
                                user=user, claims=claims, session=session, svc=svc)
+    select_ids = _split(ids) + (selection.ids if selection else [])
+    # The containment the export follows from the selection, resolved now: the job walks it.
+    containment = (await _live_containment_map(session, ws_id, meta.get("data_source_id"))
+                   if with_children and select_ids else None)
     key = _callers_key(user, idempotency_key)
     job = await _job_for_key(ie, graph_id, key, "export")
     if job is None:
@@ -5312,8 +5329,8 @@ async def create_export(
                     workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                     actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
                     branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
-                    select_ids=_split(ids), select_types=_split(types), idempotency_key=key,
-                    file_name=download_name(filename, format) if filename else None)
+                    select_ids=select_ids, select_types=_split(types), select_children=containment,
+                    idempotency_key=key, file_name=download_name(filename, format) if filename else None)
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
             job = await _job_for_key(ie, graph_id, key, "export")
@@ -5364,13 +5381,14 @@ async def _check_export_access(
 
 async def _export_selection(
     ws_id: str, graph_id: str, meta: dict, *, branch_id: Optional[str], as_of_seq: Optional[int],
-    view_id: Optional[str], ids: Optional[str], types: Optional[str], viewer: Viewer, user: User,
+    view_id: Optional[str], ids: List[str], types: Optional[str], viewer: Viewer, user: User,
     claims: PermissionClaims, session: AsyncSession, svc: GraphVersioningService,
-    budget_s: Optional[float] = None,
+    budget_s: Optional[float] = None, with_children: bool = False,
 ):
     """The snapshot an export reads and the selection it keeps, with what the view contributed.
-    Given ``budget_s`` (a plan's), a view whose entities take longer than that to find leaves the
-    selection ``None``, and what the view holds unknown."""
+    ``with_children``: the entities inside ``ids`` (down containment edges) are kept too.
+    Given ``budget_s`` (a plan's), a view whose entities take longer than that to find, or a
+    selection whose children do, leaves the selection ``None``, and what it holds unknown."""
     from backend.app.services.versioning.import_export import stream
     from backend.app.services.versioning.import_export.snapshot import open_snapshot
 
@@ -5391,7 +5409,13 @@ async def _export_selection(
                 return snap, None, view
             keep = found["keep"]
             view.update(placements=found["placed"], found=found["found"], entities=len(keep))
-    selection = stream.Selection.of(keep=keep, ids=_split_list(ids), types=_split_list(types))
+    if with_children and ids:
+        containment = await _live_containment_map(session, ws_id, meta.get("data_source_id"))
+        expanded = await stream.with_children(snap, ids, containment, budget_s=budget_s)
+        if expanded is None:
+            return snap, None, view
+        ids = list(expanded)
+    selection = stream.Selection.of(keep=keep, ids=ids, types=_split_list(types))
     return snap, selection, view
 
 
@@ -5404,6 +5428,7 @@ async def plan_export(
     branch_id: Optional[str] = Query(None, alias="branchId"),
     ids: Optional[str] = Query(None),
     types: Optional[str] = Query(None),
+    with_children: bool = Query(False, alias="withChildren"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     viewer: Viewer = Depends(viewer_ctx),
@@ -5417,6 +5442,46 @@ async def plan_export(
     ``GRAPH_EXPORT_PLAN_BUDGET_SECS`` whatever the graph's size, history or shape (a fork, a draft,
     a past revision, a view): finding the view's entities and counting share it, and what isn't
     known by then is ``None``."""
+    return await _plan_export(
+        ws_id, graph_id, meta, format=format, as_of_seq=as_of_seq, view_id=view_id,
+        branch_id=branch_id, ids=_split_list(ids), types=types, with_children=with_children,
+        viewer=viewer, user=user, claims=claims, session=session, svc=svc)
+
+
+@router.post("/graphs/{graph_id}/exports/plan", dependencies=[Depends(_GATE_GRAPH_EXPORT)])
+async def plan_export_of_selection(
+    ws_id: str, graph_id: str,
+    selection: ExportSelectionBody,
+    format: str = Query("ndjson"),
+    as_of_seq: Optional[int] = Query(None, alias="asOfSeq"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    ids: Optional[str] = Query(None),
+    types: Optional[str] = Query(None),
+    with_children: bool = Query(False, alias="withChildren"),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """:func:`plan_export` for a selection sent in the body (``ids`` with those in the query):
+    one with more entities than a URL holds."""
+    return await _plan_export(
+        ws_id, graph_id, meta, format=format, as_of_seq=as_of_seq, view_id=view_id,
+        branch_id=branch_id, ids=_split_list(ids) + selection.ids, types=types,
+        with_children=with_children, viewer=viewer, user=user, claims=claims, session=session,
+        svc=svc)
+
+
+async def _plan_export(
+    ws_id: str, graph_id: str, meta: dict, *, format: str, as_of_seq: Optional[int],
+    view_id: Optional[str], branch_id: Optional[str], ids: List[str], types: Optional[str],
+    with_children: bool, viewer: Viewer, user: User, claims: PermissionClaims,
+    session: AsyncSession, svc: GraphVersioningService,
+) -> Dict[str, Any]:
+    """The answer of :func:`plan_export` and :func:`plan_export_of_selection`."""
     from backend.app.api.v1.endpoints.graph_export import excel_limit, export_format
     from backend.app.services.versioning.import_export import stream
     fmt = export_format(format)
@@ -5425,7 +5490,7 @@ async def plan_export(
     snap, selection, view = await _export_selection(
         ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
         types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc,
-        budget_s=stream.PLAN_BUDGET_S)
+        budget_s=stream.PLAN_BUDGET_S, with_children=with_children)
     counts = ({"nodes": None, "edges": None, "exact": False, "seen": 0} if selection is None
               else await stream.count(snap, selection, budget_s=until - clock()))
     if counts["exact"]:
@@ -5447,6 +5512,7 @@ async def stream_export(
     props: Optional[str] = Query(None, description="Comma-separated property names to add as empty columns to fill"),
     ids: Optional[str] = Query(None),
     types: Optional[str] = Query(None),
+    with_children: bool = Query(False, alias="withChildren"),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -5466,8 +5532,9 @@ async def stream_export(
     from backend.app.services.versioning.import_export import stream
     fmt = export_format(format)
     snap, selection, _view = await _export_selection(
-        ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
-        types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc)
+        ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id,
+        ids=_split_list(ids), types=types, viewer=viewer, user=user, claims=claims, session=session,
+        svc=svc, with_children=with_children)
     turn = await take_turn()
     try:
         columns = await xlsx_columns(stream.record_pages(snap, selection), fmt, _split_list(props))
@@ -7497,6 +7564,651 @@ async def get_save_job(
         raise HTTPException(status_code=404, detail="save not found")
     result = await ie.save_result(job_id) if row["status"] == "completed" else None
     return _save_job_view(row, result)
+
+
+# --------------------------------------------------------------------------- #
+# A bulk property edit of a draft: one operation over many entities, as a job #
+# on the transfer lane (import_export.property_job)                            #
+# --------------------------------------------------------------------------- #
+#: A property name within this many of FalkorDB's ceiling is refused: a graph that reaches it
+#: takes no new name ever again, and can only be recreated.
+_PROPERTY_NAME_MARGIN = 256
+
+
+async def _property_targets_from_job(job: dict):
+    """The urns a bulk property job's search target matches — for an edge job (a Connections
+    search) each edge's ``edgeId`` — an export of the search, run here as
+    ``POST /search/exports`` runs it (and not behind that route's ``graphExportEnabled``), read
+    back from its file. The view is held to the job's own — still in its workspace and data source
+    (a view gone or moved is not found, and the job fails) — and its scope is the search's own
+    resolver's, which never widens a view to the data source. The export's download token is
+    signed with a key of this run's own (a worker holds no API key), and read back here. Followed
+    a few seconds a request, so a search matching more than ``PROPERTY_JOB_MAX_TARGETS`` stops
+    the job (``too_many_targets``) once its export has written that many, not once it is whole."""
+    import secrets
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.db.engine import get_async_session
+    from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.app.services.search_downloads import read_download_token
+    from backend.app.services.versioning.import_export.property_job import (
+        PropertyJobStopped, too_many_targets,
+    )
+    from backend.app.services.view_transfer.sources import engine_for
+    from backend.common.models.search import SearchExportRequest
+
+    target, ws, ds, bid = job["target"], job["workspaceId"], job["dataSourceId"], job["branchId"]
+    actor, view_id, signing_key = job["actor"], target["viewId"], secrets.token_urlsafe(32)
+    field = "edgeId" if job.get("entityKind") == "edge" else "urn"
+    async with get_async_session() as session:
+        engine = await engine_for(session, ws, ds, branch_id=bid, actor=actor)
+
+        async def can_read(view) -> bool:
+            return (view.id == view_id and view.workspace_id == ws
+                    and view.data_source_id in (None, ds))
+
+        search = AdvancedSearchService(engine, session=session, workspace_id=ws, data_source_id=ds,
+                                       branch_id=bid, can_read_view=can_read)
+        request = SearchExportRequest.model_validate({
+            "scope": {"viewId": view_id, "scopeMode": target["scopeMode"]},
+            "predicate": target["predicate"], "format": "ndjson", "waitMs": 5000})
+        cap = vconfig.PROPERTY_JOB_MAX_TARGETS
+        try:
+            while True:
+                result = await search.export(request, principal=actor, signing_key=signing_key,
+                                             run_context=SearchRunContext(
+                                                 data_version=await graph_ep._search_data_version(engine),
+                                                 admit=graph_ep._statement_admission(engine)))
+                await session.commit()                  # no transaction held between requests
+                if result.rows > cap:
+                    raise too_many_targets(cap)
+                if result.status == "complete":
+                    break
+                request = request.model_copy(update={"session_id": result.session_id})
+        except (ValidationError, graph_ep.CompileError) as exc:
+            raise PropertyJobStopped(f"The search this job edits couldn't run: {exc}", "search_refused") from exc
+        if not result.session_id:                       # nothing in the view to search
+            return
+        vouched = read_download_token(result.download_token or "", actor, [signing_key])
+        opened = await search.open_export(result.session_id, vouched[1]) if vouched else None
+        if opened is None:
+            raise RuntimeError("the search's matches were gone before they could be read")
+        _answer, body = opened
+        buf = b""
+        async for chunk in body:
+            buf += chunk
+            *lines, buf = buf.split(b"\n")
+            for line in lines:
+                urn = json.loads(line).get(field) if line.strip() else None
+                if urn:
+                    yield urn
+        if buf.strip() and (urn := json.loads(buf).get(field)):
+            yield urn
+
+
+async def _property_draft_matches_from_job(job: dict) -> dict:
+    """The entities a bulk property job's draft created or changed that its search target matches
+    there (``draft_search.draft_matches``) — judged as the search's rule membership on the draft,
+    the view held to the job's own and its scope resolved as the job's export resolves it."""
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.db.engine import get_async_session
+    from backend.app.providers.draft_search import draft_matches
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.app.services.view_transfer.sources import engine_for
+
+    target, ws, ds, bid = job["target"], job["workspaceId"], job["dataSourceId"], job["branchId"]
+    async with get_async_session() as session:
+        engine = await engine_for(session, ws, ds, branch_id=bid, actor=job["actor"])
+
+        async def can_read(view) -> bool:
+            return (view.id == target["viewId"] and view.workspace_id == ws
+                    and view.data_source_id in (None, ds))
+
+        search = AdvancedSearchService(engine, session=session, workspace_id=ws, data_source_id=ds,
+                                       branch_id=bid, can_read_view=can_read)
+        context = SearchRunContext(data_version=await graph_ep._search_data_version(engine),
+                                   admit=graph_ep._statement_admission(engine))
+
+        async def judge(request):
+            try:
+                return await search.membership(request, run_context=context)
+            finally:
+                await session.commit()                  # no transaction held between requests
+
+        return await draft_matches(engine.provider,
+                                   {"viewId": target["viewId"], "scopeMode": target["scopeMode"]},
+                                   target["predicate"], judge)
+
+
+async def _property_write_context(job: dict) -> dict:
+    """What a bulk property job's windows are written with, as ``POST /graph/changes`` writes a
+    save (``_save_from_job``): the data source's live rules and containment types, and its node
+    identity."""
+    from backend.app.db.engine import get_async_session
+    meta = await get_versioning_service().get_graph(job["graphId"])
+    async with get_async_session() as session:
+        return {"ontology_rules": await _rules_for_meta(session, job["workspaceId"], meta),
+                "containment": await _live_containment_types(session, job["workspaceId"],
+                                                             (meta or {}).get("data_source_id")),
+                "node_identity": await _node_identity_for_meta(session, meta)}
+
+
+class PropertyJobTarget(_ApiModel):
+    """Entities named by id (urns, or ``gv:<entity id>``), relationships named by id (``edgeIds``:
+    an edge's own, or ``source|TYPE|target`` as a Connections search names one without), or every
+    entity a search predicate matches in a view (``scopeMode`` ``view``, or ``data_source`` for
+    the whole data source) — every relationship, for a Connections search."""
+    ids: Optional[List[Annotated[str, StringConstraints(min_length=1, max_length=2048)]]] = Field(
+        default=None, min_length=1)
+    edge_ids: Optional[List[Annotated[str, StringConstraints(min_length=1, max_length=4352)]]] = Field(
+        default=None, alias="edgeIds", min_length=1)
+    view_id: Optional[str] = Field(default=None, alias="viewId", min_length=1, max_length=128)
+    predicate: Optional[Predicate] = None
+    scope_mode: Literal["view", "data_source", "visible"] = Field(default="view", alias="scopeMode")
+
+    @model_validator(mode="after")
+    def _one(self):
+        if sum(x is not None for x in (self.ids, self.edge_ids, self.predicate)) != 1:
+            raise ValueError("a target is `ids`, `edgeIds`, or a `viewId` with a `predicate`")
+        if self.predicate is not None and not self.view_id:
+            raise ValueError("a predicate target needs `viewId`")
+        return self
+
+    @property
+    def named(self) -> Optional[List[str]]:
+        """The ids it names — entities' or relationships' — or None for a search."""
+        return self.ids if self.ids is not None else self.edge_ids
+
+    @property
+    def entity_kind(self) -> str:
+        """``edge`` for relationships — named by id, or a Connections search's — else ``node``."""
+        from backend.common.models.search import EdgesPredicate, unwrap_edges
+        if self.edge_ids is not None or isinstance(unwrap_edges(self.predicate), EdgesPredicate):
+            return "edge"
+        return "node"
+
+    def wire(self) -> Dict[str, Any]:
+        if self.named is not None:
+            return {"ids": self.named}
+        return {"viewId": self.view_id, "scopeMode": self.scope_mode,
+                "predicate": self.predicate.model_dump(mode="json", by_alias=True)}
+
+
+class PropertyJobRequest(_ApiModel):
+    op: PropertyJobOp
+    target: PropertyJobTarget
+    message: Optional[str] = Field(default=None, max_length=2000)
+
+
+def _check_property_job(op: PropertyJobOp, target: PropertyJobTarget, rules) -> Optional[tuple]:
+    """Why a bulk property job can't be made as asked — ``(status, code, message)`` — or None.
+    ``rules``: the data source's ``OntologyRules``, when it has them."""
+    from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
+    from backend.common.edge_properties import EDGE_NATIVE_KEYS
+    edges = target.entity_kind == "edge"
+    for name in (op.key, op.to if op.kind in ("rename", "copy") else None):
+        if name in (EDGE_NATIVE_KEYS if edges else _RESERVED_NODE_KEYS):
+            return 422, "reserved_key", (f"{name} is kept by the platform, not a property: it can't be "
+                                         "edited in bulk.")
+    if op.kind in ("rename", "copy") and op.to == op.key:
+        return 422, "same_key", f"A {op.kind} writes to another key than {op.key}."
+    if target.named is not None and len(target.named) > vconfig.PROPERTY_JOB_MAX_IDS:
+        return 422, "too_many_ids", (f"A job names up to {vconfig.PROPERTY_JOB_MAX_IDS:,} "
+                                     f"{'relationships' if edges else 'entities'} by id; "
+                                     "target the rest by a search instead.")
+    if target.predicate is not None:
+        if target.scope_mode == "visible":
+            return 422, "visible_scope", ("A job edits what a search matches in the view or the data "
+                                          "source, not only what is on the canvas: use scopeMode view.")
+    field = {"set": op.key, "fillEmpty": op.key, "copy": op.to}.get(op.kind)
+    many = target.predicate is not None or len(set(target.named or ())) > 1
+    # A unique field is an entity type's: a relationship's properties have none.
+    if field and many and not edges and rules is not None and any(
+            field in rule.unique_fields for rule in rules.entity_types.values()):
+        return 422, "unique_field", (f"{field} must be unique for its entity type, so it can't be given "
+                                     "one value on several entities at once.")
+    # A merge of two or more values into one on a unique field gives entities one value. (A normalize
+    # or a replace may too — what it collapses is only known from the data, and publishing the
+    # draft refuses the values that collide.)
+    if op.kind == "mapValues" and many and rules is not None and any(
+            op.key in rule.unique_fields for rule in rules.entity_types.values()):
+        into = [json.dumps([m["toKind"], m["to"]]) for m in (e.wire() for e in op.map or ())]
+        if len(set(into)) < len(into):
+            return 422, "unique_field", (f"{op.key} must be unique for its entity type, so different "
+                                         "values can't be merged into one.")
+    return None
+
+
+def _property_job_warnings(op: PropertyJobOp, rules, *, edges: bool = False) -> List[Dict[str, str]]:
+    """What a bulk property job would leave that publishing its draft refuses — a value its field
+    doesn't allow or isn't of its type, a required field removed — per entity type that defines
+    the key, or for a job over relationships (``edges``) per relationship type, named as the
+    ontology spells it: ``[{code, entityType, field, message}]``. Said before it runs, never
+    refused: the job writes the draft all the same, and the publish is the gate
+    (``FieldViolation``)."""
+    if rules is None:
+        return []
+    from backend.app.services.versioning.ontology import JUDGED_TYPES, allowed_phrase, field_value_problem
+    out: List[Dict[str, str]] = []
+
+    def warn(code: str, etype: str, key: str, message: str) -> None:
+        out.append({"code": code, "entityType": etype, "field": key, "message": message})
+
+    types = ([(rules.edge_type_canonical.get(t, t), r) for t, r in rules.edge_types.items()] if edges
+             else list(rules.entity_types.items()))
+    for etype, rule in sorted(types, key=lambda t: t[0]):
+        one = f"{etype} relationship" if edges else etype
+        f = rule.fields.get(op.key)
+        if f is not None and op.kind in ("set", "fillEmpty"):
+            problem = field_value_problem(f, op.value)
+            if problem:
+                warn(problem[0], etype, op.key, f"On {etype}: {problem[1]} A {one} given it can't be "
+                                                "published until it holds a value the field allows.")
+            elif f.required and op.value in (None, "", []):
+                warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {one} it is "
+                                                      "emptied on can't be published until it has one again.")
+        if f is not None and f.required and op.kind in ("remove", "rename"):
+            warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {one} it is "
+                                                  f"{'removed' if op.kind == 'remove' else 'renamed away'} from "
+                                                  "can't be published until it has one again.")
+        to = rule.fields.get(op.to) if op.kind in ("rename", "copy") and op.to else None
+        if to is not None and (to.allowed or to.type in JUDGED_TYPES):
+            held = f"one of {allowed_phrase(to.allowed)}" if to.allowed else f"of type {to.type}"
+            warn("field_checked", etype, op.to, f"{op.to} is a field of {etype} that must be {held}: a value "
+                                                f"{'renamed' if op.kind == 'rename' else 'copied'} into it that "
+                                                f"isn't stops that {'relationship' if edges else 'entity'} being "
+                                                "published until it is changed.")
+    return out
+
+
+async def _property_job_view_readable(session: AsyncSession, ws_id: str, meta: dict, view_id: str,
+                                      user: User, claims: PermissionClaims) -> bool:
+    """The view a search target names: in this workspace, on this graph's data source, not
+    deleted, and readable by the caller."""
+    from backend.app.db.models import ViewORM
+    from backend.app.services import view_access
+    view = await session.get(ViewORM, view_id)
+    if (view is None or view.workspace_id != ws_id or view.deleted_at is not None
+            or view.data_source_id not in (None, meta.get("data_source_id"))):
+        return False
+    viewer = await view_access.ViewerContext.build(session, user=user, claims=claims)
+    return await view_access.can_read_view(session, viewer, view)
+
+
+async def _property_refusal(session: AsyncSession, ws_id: str, meta: dict, body: PropertyJobRequest,
+                            user: User, claims: PermissionClaims) -> Optional[tuple]:
+    """:func:`_check_property_job`, then a search target's view (404 ``view_not_found``)."""
+    refusal = _check_property_job(body.op, body.target, await _rules_for_meta(session, ws_id, meta))
+    if refusal is None and body.target.view_id is not None and not await _property_job_view_readable(
+            session, ws_id, meta, body.target.view_id, user, claims):
+        refusal = 404, "view_not_found", "The view this search runs in isn't there, or you can't read it."
+    return refusal
+
+
+async def _property_name_budget(session: AsyncSession, ws_id: str, meta: dict, op: PropertyJobOp,
+                                edges: bool = False) -> dict:
+    """Whether the key the op writes fits the graph's property names. FalkorDB numbers each name a
+    graph ever held and never frees one: a new name past the native budget is stored raw (it
+    works, searched more slowly), and within ``_PROPERTY_NAME_MARGIN`` of the ceiling it is refused
+    — at the ceiling a graph takes no new name ever again. Unknown (``null``) on a store that won't
+    say, which never refuses. A draft's names register when it is published: this protects that.
+    ``edges``: a relationship keeps its properties in one JSON text, so a key costs no name (ok)."""
+    from backend.app.providers.falkordb_materialize import _ATTRIBUTE_NAME_LIMIT
+    name = {"set": op.key, "fillEmpty": op.key, "rename": op.to, "copy": op.to}.get(op.kind)
+    out = {"registered": None, "nativeBudget": None, "ceiling": _ATTRIBUTE_NAME_LIMIT,
+           "isNew": None if name and not edges else False, "verdict": "ok"}
+    if edges:
+        return out
+    try:
+        from backend.app.providers.falkordb_provider import _native_property_budget
+        from backend.app.services.view_transfer.sources import engine_for
+        provider = (await engine_for(session, ws_id, meta.get("data_source_id"))).provider
+        while getattr(provider, "_inner", None) is not None:          # a write-through wrapper
+            provider = provider._inner
+        if not hasattr(provider, "_registered_property_names"):
+            return out
+        out["nativeBudget"] = _native_property_budget()
+        out["registered"] = registered = await provider.property_key_count()
+        if name and registered is not None:
+            out["isNew"] = is_new = name not in await provider._registered_property_names(fresh=False)
+            if is_new and registered >= _ATTRIBUTE_NAME_LIMIT - _PROPERTY_NAME_MARGIN:
+                out["verdict"] = "refused"
+            elif is_new and registered >= out["nativeBudget"]:
+                out["verdict"] = "raw"
+    except Exception as exc:  # noqa: BLE001 — unknown, which never refuses
+        logger.warning("property name budget unavailable for a bulk property job: %s", type(exc).__name__)
+    return out
+
+
+def _property_ceiling(budget: dict) -> tuple:
+    return 409, "property_name_ceiling", (
+        f"This graph has {budget['registered']:,} of the {budget['ceiling']:,} property names it can "
+        "ever hold, too near the limit for a new one. Use a key it already has.")
+
+
+def _refusal_detail(refusal: tuple) -> Dict[str, str]:
+    _status, code, message = refusal
+    return {"type": code, "code": code, "message": message}
+
+
+@contextmanager
+def _property_job_errors():
+    """:func:`_domain_errors`, each refusal also naming its ``code`` (its ``type``, unless it has one)."""
+    try:
+        with _domain_errors():
+            yield
+    except HTTPException as exc:
+        if isinstance(exc.detail, dict) and "type" in exc.detail and "code" not in exc.detail:
+            exc.detail = {**exc.detail, "code": exc.detail["type"]}
+        raise
+
+
+async def _readable_property_job(svc: GraphVersioningService, ie, graph_id: str, job_id: str,
+                                 viewer: Viewer) -> dict:
+    """A bulk property job of this graph: its creator's, or anyone's who reads its draft."""
+    job = await ie.get_property_job(job_id)
+    if job is None or job["graphId"] != graph_id:
+        raise HTTPException(status_code=404, detail="property job not found")
+    if job["createdBy"] != viewer.actor:
+        try:
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=job["branchId"], viewer=viewer)
+        except (AccessDenied, ValueError):
+            raise HTTPException(status_code=404, detail="property job not found") from None
+    return job
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs/preview")
+async def preview_property_job(
+    ws_id: str, graph_id: str, branch_id: str, body: PropertyJobRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """What a bulk property job would meet, nothing written: why it would be refused
+    (``refusal``: ``{code, message}``, or null), whether its key fits the graph's property names
+    (``nameBudget``), the import or bulk property job already running on the draft
+    (``activeJobId``), for an id target what its ids find in the draft as it stands
+    (``counts``: ``matched``, ``haveKey``, ``haveTo``, ``missing``, exactly how many it would change,
+    ``wouldChange``, and for a ``convert`` how many hold a value that doesn't, ``unconvertible``;
+    for relationships also ``derived``, the roll-ups among them, which are never edited), and what
+    it would leave that publishing the draft refuses (``warnings``: ``[{code, entityType, field,
+    message}]`` — the fields' rules; never a refusal)."""
+    main = branch_id == "main"
+    if not main:
+        with _property_job_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+            main = branch_id == await svc.main_branch_id(graph_id)
+    refusal = ((409, "main_write_forbidden", "Bulk edits go to a draft; main changes only by publishing it.")
+               if main else await _property_refusal(session, ws_id, meta, body, user, claims))
+    edges = body.target.entity_kind == "edge"
+    budget = await _property_name_budget(session, ws_id, meta, body.op, edges=edges)
+    if refusal is None and budget["verdict"] == "refused":
+        refusal = _property_ceiling(budget)
+    counts = None
+    named = body.target.named
+    if named is not None and not main and len(named) <= vconfig.PROPERTY_JOB_MAX_IDS:
+        counts = await ie.preview_property_counts(graph_id=graph_id, branch_id=branch_id,
+                                                  op=body.op.wire(), ids=named,
+                                                  entity_kind=body.target.entity_kind)
+    # The fields' rules: the entity types', or for relationships the relationship types'.
+    warnings = ([] if main
+                else _property_job_warnings(body.op, await _rules_for_meta(session, ws_id, meta), edges=edges))
+    return {"refusal": {"code": refusal[1], "message": refusal[2]} if refusal else None,
+            "nameBudget": budget, "activeJobId": None if main else await ie.active_draft_job(branch_id),
+            "counts": counts, "warnings": warnings}
+
+
+async def _property_sample_matches(session: AsyncSession, ws_id: str, data_source_id: Optional[str],
+                                   branch_id: str, actor: str, target: PropertyJobTarget, limit: int) -> List[str]:
+    """The first ``limit`` matches of a search target — urns, or for a Connections search each
+    edge's ``id`` — one page of the search as ``POST /search/advanced`` runs it, on the draft's
+    engine, in the target's view (held to it, as a job's search is). 422 ``search_refused`` when
+    the search can't run as asked."""
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
+    from backend.app.services.deep_search import SearchRunContext, get_deep_search_settings
+    from backend.app.services.view_transfer.sources import engine_for
+    from backend.common.models.search import SearchQuery
+
+    edges = target.entity_kind == "edge"
+    engine = await engine_for(session, ws_id, data_source_id, branch_id=branch_id, actor=actor)
+
+    async def can_read(view) -> bool:
+        return (view.id == target.view_id and view.workspace_id == ws_id
+                and view.data_source_id in (None, data_source_id))
+
+    search = AdvancedSearchService(engine, session=session, workspace_id=ws_id, data_source_id=data_source_id,
+                                   branch_id=branch_id, can_read_view=can_read)
+    # A Connections search answers a page of edges; any other, a page of hits.
+    options = {"pageSize": limit} if edges else {
+        "results": "hits", "pageSize": limit, "includeAncestorPath": False, "highlights": False}
+    query = SearchQuery.model_validate({
+        "predicate": target.predicate.model_dump(mode="json", by_alias=True),
+        "scope": {"viewId": target.view_id, "scopeMode": target.scope_mode}, "options": options})
+    try:
+        if get_deep_search_settings().engine == "v2":
+            page, _scope = await search.search(query, run_context=SearchRunContext(
+                data_version=await graph_ep._search_data_version(engine),
+                admit=graph_ep._statement_admission(engine)))
+        else:
+            page, _scope = await graph_ep._bounded_compute(engine, lambda: search.search(query))()
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=_refusal_detail(
+            (422, "search_refused", f"The search couldn't run: {exc}"))) from exc
+    except NotImplementedError as exc:
+        raise graph_ep._map_not_implemented(engine, exc) from exc
+    if edges:
+        return [e.id for e in page.edges or []][:limit]
+    return [h.node.urn for h in page.hits or [] if h.node.urn][:limit]
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs/preview/sample")
+async def preview_property_job_sample(
+    ws_id: str, graph_id: str, branch_id: str, body: PropertyJobRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """A few of the entities a bulk property job would reach, each before and after it, nothing
+    written — apart from the preview, so a check never waits on it. ``rows``: at most
+    ``SAMPLE_ROWS`` (8), each ``{id, urn?, name, type, before?, to?, after?, outcome, reason?}``
+    (``property_job.sample_row``: a value left out where none is held; ``outcome`` ``change``,
+    ``unchanged`` or ``skip``, with its ``reason``); ``truncated``: it reaches more. For an id
+    target, its first ids, read on the draft; for a search, its first page of matches on the
+    draft's engine, each checked again on the draft's values as a window checks it. 409
+    ``main_write_forbidden`` on main; 404 ``view_not_found`` for a search's view the caller can't
+    read; 422 ``search_refused`` when the search can't run as asked (501 where the store has no
+    search)."""
+    from backend.app.services.versioning.import_export import property_job as pj
+
+    main = branch_id == "main"
+    if not main:
+        with _property_job_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+            main = branch_id == await svc.main_branch_id(graph_id)
+    if main:
+        raise HTTPException(status_code=409, detail=_refusal_detail(
+            (409, "main_write_forbidden", "Bulk edits go to a draft; main changes only by publishing it.")))
+    target, recheck = body.target, None
+    if target.named is not None:
+        keys = list(dict.fromkeys(target.named))
+    else:
+        if not await _property_job_view_readable(session, ws_id, meta, target.view_id, user, claims):
+            raise HTTPException(status_code=404, detail=_refusal_detail(
+                (404, "view_not_found", "The view this search runs in isn't there, or you can't read it.")))
+        keys = await _property_sample_matches(session, ws_id, meta.get("data_source_id"), branch_id, user.id,
+                                              target, pj.SAMPLE_ROWS + 1)
+        if target.entity_kind == "node":
+            recheck = pj.predicate_recheck(target.predicate.model_dump(mode="json", by_alias=True))
+    rows = await pj.read_sample(graph_id, branch_id, body.op.wire(), keys[:pj.SAMPLE_ROWS],
+                                entity_kind=target.entity_kind, recheck=recheck)
+    return {"rows": rows, "truncated": len(keys) > pj.SAMPLE_ROWS}
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs", status_code=202,
+             dependencies=[Depends(require_feature("editModeEnabled"))])
+async def create_property_job(
+    ws_id: str, graph_id: str, branch_id: str, body: PropertyJobRequest,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=128),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    ie=Depends(get_import_export_service),
+):
+    """Edit one property of many entities of a draft, as a job (202, with the job to follow at
+    ``…/property-jobs/{jobId}``): ``set``, ``fillEmpty``, ``remove``, ``rename`` or ``copy`` a key,
+    or clean up the values it holds (``replace``, ``normalize``, ``mapValues``, ``convert``),
+    over up to 20,000 entities named by id, or over everything a search matches in a view (or its
+    whole data source) — or the same over relationships (``edgeIds``, or a Connections search).
+    Written a window of 10,000 entities at a time, each window one commit on the draft, never on
+    main. The same Idempotency-Key answers with the same job. 409 ``job_active``
+    while an import or another bulk property job runs on the draft, ``property_name_ceiling``
+    when the graph can't take the key's name, ``main_write_forbidden`` for main; 422 for a job
+    that can't be made as asked (its ``code`` says why), 404 ``view_not_found``."""
+    if branch_id == "main":
+        raise HTTPException(status_code=409, detail=_refusal_detail(
+            (409, "main_write_forbidden", "Bulk edits go to a draft; main changes only by publishing it.")))
+    existing = await ie.find_property_job(graph_id=graph_id, branch_id=branch_id, actor=user.id,
+                                          key=idempotency_key)
+    if existing is None:
+        refusal = await _property_refusal(session, ws_id, meta, body, user, claims)
+        if refusal is None:
+            budget = await _property_name_budget(session, ws_id, meta, body.op,
+                                                 edges=body.target.entity_kind == "edge")
+            refusal = _property_ceiling(budget) if budget["verdict"] == "refused" else None
+        if refusal is not None:
+            raise HTTPException(status_code=refusal[0], detail=_refusal_detail(refusal))
+        with _property_job_errors():
+            existing = (await ie.create_property_job(
+                workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+                branch_id=branch_id, actor=user.id, op=body.op.wire(), target=body.target.wire(),
+                message=body.message, key=idempotency_key, entity_kind=body.target.entity_kind))["job_id"]
+    return await ie.get_property_job(existing)
+
+
+@router.get("/graphs/{graph_id}/property-jobs/{job_id}")
+async def get_property_job(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """A bulk property job: where it has got (``phase``, ``progress`` 0..1, ``processed`` of
+    ``total``), and what it did (``summary``) — or why it stopped (``error``)."""
+    return await _readable_property_job(svc, ie, graph_id, job_id, viewer)
+
+
+@router.post("/graphs/{graph_id}/property-jobs/{job_id}/cancel")
+async def cancel_property_job(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Stop a bulk property job that hasn't ended. A queued one never starts; a running one stops
+    after the window it is writing, and the windows it wrote stay on the draft (its summary says
+    so). One that already ended is left as it is. Answers with the job."""
+    await _readable_property_job(svc, ie, graph_id, job_id, viewer)
+    with _property_job_errors():
+        await ie.cancel_property_job(job_id, actor=viewer.actor)
+    return await ie.get_property_job(job_id)
+
+
+@router.post("/graphs/{graph_id}/property-jobs/{job_id}/undo", status_code=202,
+             dependencies=[Depends(require_feature("editModeEnabled"))])
+async def undo_property_job(
+    ws_id: str, graph_id: str, job_id: str,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=128),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Undo a bulk property job that has ended (202, with the undo — itself a job to follow at
+    ``…/property-jobs/{jobId}``): on its draft, each entity its windows wrote is put back as it was
+    before them, from the draft's history, where it still holds what the job wrote; one changed
+    since is left as it is and listed (``changed_since``). A cancelled or failed job's windows are
+    undone too. The same Idempotency-Key answers with the same undo. 409 ``job_active`` while an
+    import or a bulk property job (this one included) runs on the draft, ``branch_closed``,
+    ``job_published`` once a publish took any of it to main, ``already_undone`` (its ``jobId``:
+    the undo); 422 ``nothing_to_undo`` for a job that wrote nothing, ``undo_of_undo``."""
+    source = await _readable_property_job(svc, ie, graph_id, job_id, viewer)
+    with _property_job_errors():
+        created = await ie.create_undo_job(
+            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+            job_id=source["jobId"], actor=user.id, key=idempotency_key)
+    return await ie.get_property_job(created["job_id"])
+
+
+@router.get("/graphs/{graph_id}/property-jobs/{job_id}/refused")
+async def property_job_refused(
+    ws_id: str, graph_id: str, job_id: str,
+    format: Literal["csv"] = Query("csv"),
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Every entity a bulk property job did not write as asked, and why — ``missing``,
+    ``deleted_in_draft``, ``conflict``, ``unconvertible``, ``write_refused`` — as CSV: urn, entityId,
+    reason, detail."""
+    await _readable_property_job(svc, ie, graph_id, job_id, viewer)
+    return StreamingResponse(await ie.property_refused_rows(job_id), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="refused-{job_id}.csv"',
+                                      "Cache-Control": "no-store"})
+
+
+#: Relationships one read names: what the relationship drawer compares and edits at once.
+_EDGE_READ_MAX = 1000
+
+
+class EdgeReadRef(_ApiModel):
+    """A relationship by its id — and, for one the canvas names by another id (a trace's), its
+    ends (urns) and type."""
+    id: str = Field(min_length=1, max_length=4352)
+    source: Optional[str] = Field(default=None, max_length=2048)
+    target: Optional[str] = Field(default=None, max_length=2048)
+    edge_type: Optional[str] = Field(default=None, alias="edgeType", max_length=256)
+
+
+class EdgeReadRequest(_ApiModel):
+    refs: List[EdgeReadRef] = Field(min_length=1, max_length=_EDGE_READ_MAX)
+
+
+@router.post("/graphs/{graph_id}/edges/read")
+async def read_edges(
+    ws_id: str, graph_id: str, body: EdgeReadRequest,
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Up to 1,000 relationships as the line being read has them (a draft: main where it began,
+    then its own changes) — each one's entity id, type, ends, properties and token (``version``,
+    the ``baseVersion`` an edit of it is sent with) — and the refs that name none: ``deleted`` in
+    the draft, or ``missing``. What the relationship drawer compares several relationships by."""
+    branch_id = None if branch_id == "main" else branch_id
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
+    with _domain_errors():
+        return await ie.read_edges(graph_id=graph_id, branch_id=branch_id,
+                                   refs=[r.model_dump(by_alias=True) for r in body.refs])
 
 
 # --------------------------------------------------------------------------- #

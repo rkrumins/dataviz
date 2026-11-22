@@ -579,6 +579,12 @@ class FieldSchema(BaseModel):
     # no two nodes of the type share it (checked on import and at publish).
     reconciliation_key: bool = Field(default=False, alias="reconciliationKey")
     unique: bool = False
+    # How the value is shown (prefix, suffix, status colours …), as the ontology keeps it.
+    format: Optional[Dict[str, Any]] = None
+    # The values it may hold (empty: any) — any other is refused at publish, unless ``allowOther``
+    # makes them suggestions.
+    allowed_values: List[str] = Field(default_factory=list, alias="allowedValues")
+    allow_other: bool = Field(default=False, alias="allowOther")
 
     class Config:
         populate_by_name = True
@@ -651,6 +657,8 @@ class RelationshipTypeDefinition(BaseModel):
     is_containment: bool = Field(default=False, alias="isContainment")
     is_lineage: bool = Field(default=False, alias="isLineage")
     category: str = Field(default="association", alias="category")
+    # The properties its relationships carry that a publish judges, as an entity type's fields.
+    fields: List[FieldSchema] = Field(default_factory=list)
 
     class Config:
         populate_by_name = True

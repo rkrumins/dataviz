@@ -96,6 +96,7 @@ tests/test_draft_overlay_lazy.py
 tests/test_draft_overlay_paging.py
 tests/test_draft_overlay_revision.py
 tests/test_draft_retention.py
+tests/test_draft_search.py
 tests/test_drafts_policy.py
 tests/test_drift_probe_cost.py
 tests/test_edge_integrity_index.py
@@ -108,6 +109,7 @@ tests/test_export_cancel.py
 tests/test_export_downloads.py
 tests/test_export_native_lines.py
 tests/test_export_plan_budget.py
+tests/test_export_selection_route.py
 tests/test_export_view_scope.py
 tests/test_falkor_indexes.py
 tests/test_falkordb_edges_pair_binding.py
@@ -229,6 +231,8 @@ tests/test_projection_single_flight.py
 tests/test_projection_stalled_reconcile.py
 tests/test_projection_verify_unit.py
 tests/test_property_index.py
+tests/test_property_job_notices.py
+tests/test_property_job_plan.py
 tests/test_property_patch.py
 tests/test_provider_failover_pause.py
 tests/test_provider_fleet_admission.py

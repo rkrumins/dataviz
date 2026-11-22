@@ -717,17 +717,36 @@ describe('the Business view keeps the bar to what a reader needs', () => {
   })
   afterEach(() => useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } }))
 
-  it('tucks away Versions, Export, Reviews and the type count — and asks for no version status', async () => {
+  it('tucks away Versions and the type count — and asks for no version status', async () => {
     renderHeader(viewResponse({
       access: OWNER_ACCESS,
       config: { content: { visibleEntityTypes: ['table', 'column'] } },
     }))
     await screen.findByText('Test View')
     expect(screen.queryByRole('button', { name: /^Versions/ })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Export' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Reviews' })).toBeNull()
     expect(screen.queryByText('2 types')).toBeNull()
     expect(mockVersionStatus).not.toHaveBeenCalled()
+  })
+
+  // The page header sits above every canvas, so this is how a Business reader
+  // reaches them on a Graph or a Hierarchy, whose toolbars have no More.
+  it.each([
+    ['graph', 'Graph'],
+    ['hierarchy', 'Hierarchy'],
+    ['reference', 'Context View'],
+  ])('offers Export and Reviews on a %s view, as the Technical view does', async (viewType, kind) => {
+    renderHeader(viewResponse({ access: OWNER_ACCESS, viewType }))
+    expect(await screen.findByText(kind)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Export' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reviews' })).toBeInTheDocument()
+  })
+
+  it('keeps their gates: no Export with the preview off, no Reviews for a read-only session', async () => {
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, viewPortabilityEnabled: false } })
+    renderHeader(viewResponse({ access: VIEWER_ACCESS }))
+    await screen.findByText('Test View')
+    expect(screen.queryByRole('button', { name: 'Export' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reviews' })).toBeNull()
   })
 
   it('keeps Share, Details, Activity, the kind of view and what it is built on', async () => {

@@ -387,7 +387,12 @@ the columns the tables have, so on a database whose schema is short of what its 
 copies what is there, and runs again once `--recover` has made the rest. The downgrade forgets the
 marker.
 
-**`20261119_1800_merge_graph_watch` joins `20261116_1200_graph_watch` to that head.** The watch
+**`20261122_1300_merge_rules_store` joins that line to `main`'s newer head.** `main` went on from
+`20261119_1500_merge_view_members` to `20261122_1200_gv_job_notices` while this branch's two
+revisions above were pushed, so `20261119_1700_review_rules_store` keeps the parent it was pushed
+with and the merge revision joins the two. It runs nothing.
+
+**`20261119_1800_merge_graph_watch` joins `20261116_1200_graph_watch` to `20261119_1700_review_rules_store`.** The watch
 revision (`graph_seen`, `graph_watches`: new tables only) came off `20261116_1100_settings_import`,
 and environments deployed from its branch ran it, so it keeps the parent it was pushed with (the
 lineage record lists it). The merge revision runs nothing.

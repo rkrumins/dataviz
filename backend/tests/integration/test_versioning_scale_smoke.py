@@ -6,6 +6,11 @@ routes queue them and claimed on a lease — so CI exercises the harness as well
 * a package of 20k + 20k (a third of the edges containment) is uploaded, inspected, imported into
   a draft of a new graph — every row new, no Merkle row on the draft — and published through a
   publish job, landing every change on main;
+* once published, a bulk property job gives every node a property in a new draft, a window of
+  10,000 a commit, and its undo puts every one back; with FalkorDB, the draft's counts and catalog,
+  read as the draft-aware search answers them over the graph projected there, are exact; and a
+  draft's publish is refused by field rules its attributes break, counting every one, then
+  published under rules every node holds;
 * the same kind of package seeds a new data source: FalkorDB ends up holding what Postgres holds;
 * "enable version control" on a FalkorDB graph with 200 duplicated urns pauses before it copies
   anything, and once the collapse is decided completes with FalkorDB counted equal to Postgres
@@ -18,7 +23,7 @@ routes queue them and claimed on a lease — so CI exercises the harness as well
 The budgets are sanity bounds — several times a local run — not the plan's targets, which are for
 100k + 100k (``bench_versioning run … --check``); later phases tighten them.
 
-Needs Postgres (``GRAPHVER_E2E=1``); the seed and the bootstrap also FalkorDB:
+Needs Postgres (``GRAPHVER_E2E=1``); the draft's search, the seed and the bootstrap also FalkorDB:
   GRAPHVER_E2E=1 RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
     python -m pytest -q tests/integration/test_versioning_scale_smoke.py
 """
@@ -144,6 +149,52 @@ async def test_a_20k_package_imports_into_a_draft_and_publishes(tmp_path, store)
     assert published["status"] == "completed", published
     assert published["metrics"]["changes"] == 2 * N
     _within(published, total_s=90, lock_hold_s=60)
+
+
+async def _published(tmp_path, store) -> str:
+    """A 20k package imported and published: its graph."""
+    upload = await _package(tmp_path, store)
+    draft = (await bench.run_import(upload_key=upload, store=store))["draft"]
+    published = await bench.run_publish(graph_id=draft["graphId"], branch_id=draft["branchId"], store=store)
+    assert published["status"] == "completed", published
+    return draft["graphId"]
+
+
+async def _bulk_edited(gid, store):
+    """A bulk property job over every node of the graph, in a new draft: the job and its draft."""
+    edited = await bench.run_property(graph_id=gid, store=store)
+    assert edited["status"] == "completed" and edited["metrics"]["changed_all"], edited["metrics"]
+    assert edited["metrics"]["commits"] == 2                       # a window of 10,000 a commit
+    _within(edited, total_s=120, window_max_s=15)
+    return edited["jobId"], edited["draft"]["branchId"]
+
+
+async def test_a_bulk_property_job_over_20k_undone_then_a_publish_held_to_field_rules(tmp_path, store):
+    gid = await _published(tmp_path, store)
+    job_id, branch = await _bulk_edited(gid, store)
+    undone = await bench.run_undo(graph_id=gid, branch_id=branch, job_id=job_id, changed=N, store=store)
+    assert undone["status"] == "completed" and undone["metrics"]["changed_all"], undone["metrics"]
+    assert undone["metrics"]["restored_ok"], undone["metrics"]   # as main holds them: as before it
+    _within(undone, total_s=120, window_max_s=15)
+
+    _job, branch = await _bulk_edited(gid, store)
+    refused = await bench.run_publish(graph_id=gid, branch_id=branch, store=store, field_rules="fail")
+    assert refused["status"] == "refused" and refused["metrics"]["refusal_ok"], refused["metrics"]
+    assert refused["metrics"]["refusal_total"] > 100                # counted past the 100 it names
+    held = await bench.run_publish(graph_id=gid, branch_id=branch, store=store, field_rules="hold")
+    assert held["status"] == "completed" and held["metrics"]["field_check_s"] > 0, held["metrics"]
+
+
+@falkor_live
+async def test_the_search_of_a_draft_a_bulk_job_changed_20k_of_is_exact(tmp_path, store, falkor):
+    gid = await _published(tmp_path, store)
+    _job, branch = await _bulk_edited(gid, store)
+    projected = await bench.run_project(graph_id=gid, keep=True, full=True, factory=falkor)
+    searched = await bench.run_draft_search(graph_id=gid, branch_id=branch, changed=N,
+                                            falkor_graph=projected["projected"]["falkorGraph"])
+    assert searched["status"] == "completed" and searched["metrics"]["answered_ok"], searched["metrics"]
+    assert searched["counts"]["benchOwner"]["count"] == N and searched["catalog"]["benchOwner"] == N
+    _within(searched, requests=60)
 
 
 @falkor_live

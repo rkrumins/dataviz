@@ -117,6 +117,21 @@ async def data_version(scope: Optional[CacheScope], cache: Any = None) -> str:
     return f"{generation}.{published.graph_ns}"
 
 
+def published_data_version(data_version: str, provider: Any) -> str:
+    """``data_version`` as main's own reads have it: the same content
+    generation, over the physical graph behind ``provider`` (a draft's base)
+    rather than the draft's — which every commit to the draft moves. A
+    draft's reads of main's answers (its counts, its catalog) are keyed by
+    this, so they are main's own sessions: shared with main, and kept across
+    the draft's commits instead of read again for the same answer. Never
+    raises; "" when ``data_version`` is."""
+    if not data_version:
+        return ""
+    generation = data_version.split(".", 1)[0]
+    physical = resolve_physical_graph_id(provider)
+    return f"{generation}.{graph_ns_hash(physical) if physical else ''}"
+
+
 async def search_data_version(engine: Any) -> str:
     """``data_version`` of the engine's own scope."""
     return await data_version(cache_scope(engine))

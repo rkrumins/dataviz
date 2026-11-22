@@ -6,12 +6,17 @@
  * it joins (each a click away, on the same back/forward trail as the entity
  * drawer), when and by whom it was created and last changed, its properties,
  * and its full revision history. A line that stands for several shows the
- * connection and lists them.
+ * connection and lists them. Several relationships — a connection's, the Edge
+ * Explorer's selection, a Connections search's picked rows — are compared and
+ * edited as one (`MultiRelationshipView`).
  *
  * Raw lineage relationships — the ones a graph's owners author and keep — can
  * be edited (properties), reversed and deleted, in a draft, staged like every
- * other canvas edit. Roll-ups, hierarchy links and non-lineage types are shown
- * read-only, and say why.
+ * other canvas edit; on the published graph, "Edit in a draft" sits in the
+ * drawer's top line. Roll-ups, hierarchy links and non-lineage types are shown
+ * read-only, and say why. Edited, the fields its type defines are held up as an
+ * entity's are: their allowed values a click away, a value publishing would
+ * refuse said where it is, and a required one it has no value for a row to add.
  *
  * Details come from the drawer's own read (`useRelationshipRecord`), never the
  * canvas copy: canvas edges carry no properties and, from a trace, not even the
@@ -33,6 +38,10 @@ import { edgeKind } from '@/services/ontologyPreflightService'
 import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
 import { useEntityBaseline } from '@/features/versioning/hooks/useEntityBaseline'
 import { userProperties } from '@/lib/nodeFields'
+import { fieldWarning, governedFields, inputTypeOf } from '@/lib/fieldRules'
+import { cn } from '@/lib/utils'
+import type { EntityFieldDefinition } from '@/types/schema'
+import { stageEdgeEdits } from '@/features/versioning/model/stageEdgeEdit'
 import { EntityChangeDigest } from './entity/EntityChangeDigest'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { edgeIndexOf } from '@/lib/storeIndex'
@@ -42,15 +51,18 @@ import { SkeletonText } from '@/components/ui/Skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { Section } from './DrawerSection'
 import { PropertyEditor } from './PropertyEditor'
+import { AllowedValuePicker, FieldNote } from './property/FieldGovernance'
+import { InlineValue } from './property/InlineValue'
 import { PanelErrorBoundary } from './PanelErrorBoundary'
 import { useDrawerHistoryScope } from './useDrawerHistoryScope'
 import { DrawerBody, DrawerFooter, DrawerFrame, DrawerHeader, DrawerShell } from './shell/DrawerShell'
-import { DrawerTopBar, KindBadge } from './shell/DrawerTopBar'
+import { DrawerTopBar, EditInDraftButton, KindBadge } from './shell/DrawerTopBar'
 import { DrawerActivity } from './shell/DrawerActivity'
 import { CopyableId, EntityRef } from './shell/EntityRef'
 import { JsonView } from './shell/JsonView'
 import { StageBar } from './shell/StageBar'
 import { ConnectionView } from './relationship/ConnectionView'
+import { MultiRelationshipView } from './relationship/multi/MultiRelationshipView'
 import { Bridge, DetailRow, DetailList, Notice, TypeChip } from './relationship/RelationshipParts'
 import { useEndpoints, useOpenEndpoint } from './relationship/useEndpoints'
 import { KIND_COPY, openInEdgeExplorer, relationshipCopy } from './relationship/relationshipModel'
@@ -77,6 +89,10 @@ interface RelationshipDrawerProps {
 type RelationshipTarget = Extract<DrawerEdgeTarget, { kind: 'relationship' }>
 type ViewMode = 'view' | 'edit' | 'json'
 
+/** Why a relationship on the published graph is read-only: "Edit in a draft"'s tip — or a notice
+ *  where the canvas can't open one. */
+const PUBLISHED = 'Published — open a draft to change this relationship'
+
 const closeDrawer = () => useCanvasStore.getState().requestDrawerMove(() => {
   const s = useCanvasStore.getState()
   s.closeNodeDrawer()
@@ -96,9 +112,22 @@ export const RelationshipDrawer = memo(function RelationshipDrawer(props: Relati
 
   if (!target) return null
   return (
-    <DrawerFrame panel="relationship-drawer" label="Relationship details">
+    <DrawerFrame panel="relationship-drawer" label="Relationship details" comparing={target.kind === 'relationships'}>
       {target.kind === 'relationship' ? (
         <RelationshipPanel key={`r:${target.id}`} {...props} target={target} onClose={closeDrawer} />
+      ) : target.kind === 'relationships' ? (
+        // A comparison of many relationships that fails to draw leaves the drawer, and the canvas, standing.
+        <PanelErrorBoundary key={`m:${target.id}`} onClose={closeDrawer}>
+          <MultiRelationshipView
+            target={target}
+            onClose={closeDrawer}
+            canEdit={props.canEdit}
+            writesLocked={props.writesLocked}
+            resolveNode={props.resolveNode}
+            onLocateMany={props.onLocateMany}
+            onStartEditing={props.onStartEditing}
+          />
+        </PanelErrorBoundary>
       ) : (
         <ConnectionView
           key={`c:${target.id}`}
@@ -142,6 +171,15 @@ function RelationshipPanel({
   const kind = edgeKind(type, relationshipTypes, containmentTypes)
   const copy = relationshipCopy(type, relationshipTypes)
   const color = useEdgeVisual(type).strokeColor
+  // The fields of its type a publish judges: edited, their rows offer the allowed values and warn
+  // of a value publishing would refuse.
+  const typeFields = relationshipTypes.find((r) => r.id.toLowerCase() === type.toLowerCase())?.fields
+  const typeLabel = `${copy.label} relationships`
+  const governed = useMemo(() => {
+    const fields = governedFields(typeFields, true)
+    return fields.size ? { fields, typeLabel, edges: true } : null
+  }, [typeFields, typeLabel])
+  const required = useMemo(() => [...(governed?.fields.values() ?? [])].filter((f) => f.required), [governed])
   const confidence = record?.confidence ?? canvasEdge?.data?.confidence
 
   const ids = useMemo(() => [target.source, target.target], [target.source, target.target])
@@ -183,6 +221,11 @@ function RelationshipPanel({
   const baseline = useEntityBaseline(versioningEnabled ? scope : {}, unsaved ? null : entityId)
   const publishedProps = useMemo(
     () => (baseline ? userProperties(baseline.published.properties) : undefined), [baseline])
+  // The required fields it holds no key for — one removed is listed as removed, with Restore. New
+  // in the draft, publishing refuses it until each has a value.
+  const missingIn = (props: Record<string, unknown>) =>
+    required.filter((f) => !(f.id in props) && !(publishedProps && f.id in publishedProps))
+  const refusedNew = baseline?.status === 'added'
   const unsavedFields = useMemo(() => {
     if (!pendingEdit) return 0
     const b = ((pendingEdit.before as { properties?: Record<string, unknown> } | undefined)?.properties) ?? {}
@@ -195,28 +238,28 @@ function RelationshipPanel({
   const editable = kind === 'lineage' && !unsaved && !writesLocked && versioningEnabled && editModeEnabled
     && canEdit && !!record && tracked && !pendingDelete
   const openReview = () => useStagedChangesStore.getState().openReviewPanel()
-  const readOnlyNotice = ((): { tone: 'info' | 'warn'; text: string; action?: { label: string; onClick: () => void } } | null => {
+  const readOnly = ((): { tone: 'info' | 'warn'; text: string; action?: { label: string; onClick: () => void }; draft?: boolean } | null => {
     if (kind !== 'lineage') return { tone: 'info', text: KIND_COPY[kind].readOnly! }
     if (unsaved) {
-      return { tone: 'warn', text: 'Not saved yet — save your changes to add properties and see its history.', action: { label: 'Review & Save', onClick: openReview } }
+      // What it will need before it is published, said while it is made — as a new entity's fields are.
+      const needs = required.length > 0
+        ? ` ${typeLabel} need ${required.map((f) => f.name || f.id).join(', ')} before they can be published.` : ''
+      return { tone: 'warn', text: `Not saved yet — save your changes to add properties and see its history.${needs}`, action: { label: 'Review & Save', onClick: openReview } }
     }
     if (pendingDelete) {
       return { tone: 'warn', text: 'Deletion staged — it is removed when you save, or discard it in Review.', action: { label: 'Review', onClick: openReview } }
     }
     if (writesLocked) return { tone: 'info', text: 'Read-only while tracing.' }
     if (!versioningEnabled || !editModeEnabled) return null
-    if (!canEdit) {
-      return {
-        tone: 'info',
-        text: 'Published — open a draft to change this relationship.',
-        ...(onStartEditing ? { action: { label: 'Open a draft', onClick: onStartEditing } } : {}),
-      }
-    }
+    if (!canEdit) return { tone: 'info', text: `${PUBLISHED}.`, draft: true }
     if (recordLoading || (historyOn && summaryQ.isLoading)) return null
     if (!record) return { tone: 'warn', text: 'This relationship could not be found in the graph, so it can’t be edited here.' }
     if (historyOn && !tracked) return { tone: 'info', text: 'Not under version control yet, so it can’t be edited here.' }
     return null
   })()
+  // On the published graph, the way to a draft is in the top line, and its tip says why.
+  const offerDraft = !!readOnly?.draft && !!onStartEditing
+  const readOnlyNotice = offerDraft ? null : readOnly
 
   // ── View / edit state ──
   const [mode, setMode] = useState<ViewMode>('view')
@@ -253,20 +296,17 @@ function RelationshipPanel({
 
   const stagedTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => () => clearTimeout(stagedTimer.current), [])
+  // What was read, and its token — the diff base for the save and its concurrency check. A later
+  // re-stage keeps the first one (`stageEdgeEdits`).
+  const editOf = (after: Record<string, unknown>) => ({
+    edgeId: entityId!,
+    current: { properties: storedProps, ...(baseVersion ? { version: baseVersion } : {}) },
+    after,
+    summary: `Edit relationship '${source.name}' → '${dest.name}'`,
+  })
   const stage = () => {
     if (!record || !entityId || !hasChanges) return
-    useStagedChangesStore.getState().stageOrReplace(
-      (c) => c.type === 'edit_edge' && c.targetId === entityId,
-      {
-        type: 'edit_edge',
-        targetId: entityId,
-        // What was read, and its token — the diff base for the save and its concurrency check.
-        // A later re-stage keeps the first one.
-        before: { properties: storedProps, ...(baseVersion ? { version: baseVersion } : {}) },
-        after: { properties: draft },
-        summary: `Edit relationship '${source.name}' → '${dest.name}'`,
-      },
-    )
+    stageEdgeEdits([editOf(draft)])
     setHasChanges(false)
     setMode('view')
     setJustStaged(true)
@@ -279,20 +319,7 @@ function RelationshipPanel({
   const [addingInline, setAddingInline] = useState(false)
   const stageInline = (next: Record<string, unknown>) => {
     if (!record || !entityId) return
-    const store = useStagedChangesStore.getState()
-    const isThis = (c: { type: string; targetId?: string }) => c.type === 'edit_edge' && c.targetId === entityId
-    if (JSON.stringify(next) === JSON.stringify(storedProps)) {
-      const existing = store.changes.find(isThis)
-      if (existing) store.replace(existing, null)
-      return
-    }
-    store.stageOrReplace(isThis, {
-      type: 'edit_edge',
-      targetId: entityId,
-      before: { properties: storedProps, ...(baseVersion ? { version: baseVersion } : {}) },
-      after: { properties: next },
-      summary: `Edit relationship '${source.name}' → '${dest.name}'`,
-    })
+    stageEdgeEdits([editOf(next)])
   }
 
   const canDelete = !!onDeleteEdge && kind === 'lineage' && !writesLocked && !!canvasEdge
@@ -341,6 +368,7 @@ function RelationshipPanel({
         <DrawerHeader style={{ background: `linear-gradient(135deg, ${color}10 0%, transparent 60%)` }}>
           <DrawerTopBar
             badge={<KindBadge label={copy.label} bg={`${color}1a`} fg={color} />}
+            action={offerDraft && onStartEditing ? <EditInDraftButton onClick={onStartEditing} reason={PUBLISHED} /> : undefined}
             closeLabel="Close relationship details"
             onClose={onClose}
             onFocusNode={onFocusNode}
@@ -447,19 +475,29 @@ function RelationshipPanel({
                   </Notice>
                 ) : hasProps || removedSome || (editable && addingInline) ? (
                   <PanelErrorBoundary resetKeys={[entityId ?? target.id]}>
+                    {editable && (
+                      <MissingFields fields={missingIn(shownProps)} typeLabel={typeLabel} refused={refusedNew}
+                        onAdd={(key, value) => stageInline({ ...shownProps, [key]: value })} />
+                    )}
                     {editable ? (
                       <PropertyEditor key={entityId ?? target.id} value={shownProps} onChange={(next) => stageInline(next as Record<string, unknown>)}
                         inline original={storedProps} published={publishedProps} startAdding={addingInline && !hasProps}
-                        searchable groupByPath bare sectionsKey={sectionsKey} />
+                        searchable groupByPath bare sectionsKey={sectionsKey} governed={governed} />
                     ) : (
                       <PropertyEditor value={shownProps} onChange={() => {}} readOnly published={publishedProps}
                         searchable groupByPath bare sectionsKey={sectionsKey} />
                     )}
                   </PanelErrorBoundary>
                 ) : (
-                  <EmptyState compact icon={FileText} title="No properties yet"
-                    description={editable ? 'Record what this flow carries, how often, who owns it.' : undefined}
-                    action={editable ? { label: 'Add properties', onClick: () => setAddingInline(true) } : undefined} />
+                  <>
+                    {editable && (
+                      <MissingFields fields={missingIn(shownProps)} typeLabel={typeLabel} refused={refusedNew}
+                        onAdd={(key, value) => stageInline({ ...shownProps, [key]: value })} />
+                    )}
+                    <EmptyState compact icon={FileText} title="No properties yet"
+                      description={editable ? 'Record what this flow carries, how often, who owns it.' : undefined}
+                      action={editable ? { label: 'Add properties', onClick: () => setAddingInline(true) } : undefined} />
+                  </>
                 )}
               </Section>
 
@@ -484,6 +522,12 @@ function RelationshipPanel({
             <TabsContent value="edit">
               <Section title="Properties" icon={FileText} flush>
                 <PanelErrorBoundary resetKeys={[entityId ?? target.id]}>
+                  <MissingFields fields={missingIn(draft)} typeLabel={typeLabel} refused={refusedNew}
+                    onAdd={(key, value) => {
+                      setDraft({ ...draft, [key]: value })
+                      setHasChanges(true)
+                      setJustStaged(false)
+                    }} />
                   <PropertyEditor
                     value={draft}
                     onChange={(next) => {
@@ -497,6 +541,7 @@ function RelationshipPanel({
                     groupByPath
                     bare
                     sectionsKey={sectionsKey}
+                    governed={governed}
                   />
                 </PanelErrorBoundary>
               </Section>
@@ -525,5 +570,45 @@ function RelationshipPanel({
         </DrawerFooter>
       </Tabs>
     </DrawerShell>
+  )
+}
+
+/** The required fields of its type it holds no value for, each a row to add one in — typed as the
+ *  field is, its allowed values a click away. `refused`: it is new in the draft, so publishing
+ *  refuses it until each has one (said, never a block); one that predates the rule stays
+ *  publishable, and the rows only offer the value. */
+function MissingFields({ fields, typeLabel, refused, onAdd }: {
+  fields: readonly EntityFieldDefinition[]
+  /** Its type, as the warnings name it ("Owns relationships"). */
+  typeLabel: string
+  refused: boolean
+  onAdd: (key: string, value: unknown) => void
+}) {
+  if (fields.length === 0) return null
+  return (
+    <ul aria-label="Required fields without a value" className="mb-3 space-y-2">
+      {fields.map((f) => {
+        const label = f.name || f.id
+        const type = inputTypeOf(f.type)
+        const warning = refused ? fieldWarning(f, undefined, typeLabel, true) : null
+        return (
+          <li key={f.id} className={cn('rounded-lg border border-dashed px-3 py-2',
+            refused ? 'border-amber-500/40 bg-amber-500/[0.04]' : 'border-black/[0.10] dark:border-white/[0.12]')}>
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="min-w-0 truncate text-xs font-mono text-ink-secondary">{f.id}</span>
+              <span className="shrink-0 text-2xs text-ink-muted">Required</span>
+            </div>
+            <div className="mt-1">
+              <InlineValue value={undefined} fieldType={type} fieldLabel={label} onCommit={(v) => onAdd(f.id, v)}
+                readView={<span className="text-xs font-medium text-accent-lineage">Add {label}…</span>} />
+            </div>
+            {(f.allowedValues?.length ?? 0) > 0 && type !== 'boolean' && (
+              <AllowedValuePicker field={f} value={undefined} label={label} onPick={(v) => onAdd(f.id, v)} className="mt-1.5" />
+            )}
+            {warning && <FieldNote className="mt-1.5">{warning}</FieldNote>}
+          </li>
+        )
+      })}
+    </ul>
   )
 }

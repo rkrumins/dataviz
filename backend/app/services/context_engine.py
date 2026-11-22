@@ -67,6 +67,21 @@ def _real_lineage_types(edge_types: Iterable[str]) -> List[str]:
     ]
 
 
+def _field_schemas(fields) -> List[FieldSchema]:
+    """A type's fields (an entity type's or a relationship type's) as the schema carries them."""
+    return [
+        FieldSchema(
+            id=f.id, name=f.name, type=f.type,
+            required=f.required,
+            showInNode=f.show_in_node, showInPanel=f.show_in_panel,
+            showInTooltip=f.show_in_tooltip, displayOrder=f.display_order,
+            reconciliationKey=f.reconciliation_key, unique=f.unique,
+            format=f.format, allowedValues=list(f.allowed_values), allowOther=f.allow_other,
+        )
+        for f in fields
+    ]
+
+
 def _not_enabled():
     """What a write to a data source without version control raises. It is passed through, so
     the caller gets 409 ``versioning_not_enabled`` (main.py), not a 200 saying it failed."""
@@ -2229,16 +2244,7 @@ class ContextEngine:
                     borderStyle=ent_def.visual.border_style,
                     showInMinimap=ent_def.visual.show_in_minimap,
                 ),
-                fields=[
-                    FieldSchema(
-                        id=f.id, name=f.name, type=f.type,
-                        required=f.required,
-                        showInNode=f.show_in_node, showInPanel=f.show_in_panel,
-                        showInTooltip=f.show_in_tooltip, displayOrder=f.display_order,
-                        reconciliationKey=f.reconciliation_key, unique=f.unique,
-                    )
-                    for f in ent_def.fields
-                ] or [
+                fields=_field_schemas(ent_def.fields) or [
                     FieldSchema(id='name', name='Name', type='string', required=True,
                                 showInNode=True, showInPanel=True, showInTooltip=True, displayOrder=1),
                 ],
@@ -2301,6 +2307,7 @@ class ContextEngine:
                 isContainment=rel_def.is_containment,
                 isLineage=rel_def.is_lineage,
                 category=rel_def.category,
+                fields=_field_schemas(rel_def.fields),
             ))
 
         return result
@@ -2386,6 +2393,7 @@ class ContextEngine:
                 isContainment=is_containment,
                 isLineage=is_lineage,
                 category=rel_def.category if rel_def else ("structural" if is_containment else "flow" if is_lineage else "association"),
+                fields=_field_schemas(rel_def.fields) if rel_def else [],
             ))
         return result
 

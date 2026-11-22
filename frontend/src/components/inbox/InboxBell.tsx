@@ -18,12 +18,14 @@
  */
 import { useState } from 'react'
 import {
+    AlertTriangle,
     ArrowRightLeft,
     Bell,
     Building2,
     CalendarClock,
     CheckCheck,
     CheckCircle2,
+    CircleSlash,
     ClipboardCheck,
     Clock,
     Eye,
@@ -285,6 +287,24 @@ const KIND_VISUALS: Record<string, KindVisual> = {
     },
     'review.closed': {
         Icon: XCircle,
+        icon: 'text-slate-500',
+        tile: 'bg-slate-500/10',
+    },
+    // A bulk property change you started on a draft (an undo too): it
+    // finished after a minute or more, it failed, or someone else stopped it.
+    // The glyphs its row in the draft's Changes panel shows.
+    property_job_completed: {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    property_job_failed: {
+        Icon: AlertTriangle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    property_job_cancelled: {
+        Icon: CircleSlash,
         icon: 'text-slate-500',
         tile: 'bg-slate-500/10',
     },

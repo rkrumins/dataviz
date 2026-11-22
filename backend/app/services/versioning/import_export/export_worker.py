@@ -75,6 +75,8 @@ class ExportWorker:
         # Row-scoping: an explicit id/urn set and/or entity types to include.
         self._select_ids = options.get("ids") or []
         self._select_types = options.get("types") or []
+        # The selection's contents come too, down these containment types ({type: child is source}).
+        self._containment = (options.get("containment") or {}) if options.get("children") else None
 
     async def run(self, job_id: str, *, lease: Optional[Lease] = None) -> Dict[str, int]:
         """Write the export on ``lease`` — the transfer lane's; called without one, the job is
@@ -109,7 +111,10 @@ class ExportWorker:
         # export their in-progress branch, edit in Excel, and re-import onto the same branch.
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
         keep = (await stream.view_entities(snap, self._scope))["keep"] if self._scope else None
-        selection = stream.Selection.of(keep=keep, ids=self._select_ids, types=self._select_types)
+        ids = self._select_ids
+        if self._containment is not None and ids:
+            ids = await stream.with_children(snap, ids, self._containment)
+        selection = stream.Selection.of(keep=keep, ids=ids, types=self._select_types)
         # A spreadsheet makes every property its own column: existing ones + any the user asked to
         # add, so a brand-new property is an empty column ready to fill.
         tally = {"node": 0, "edge": 0}

@@ -25,6 +25,8 @@ const h = vi.hoisted(() => ({
   beneathCalls: [] as unknown[][],
   /** The draft's change-list entry for it: what is published, and what the draft saved. */
   entry: undefined as Record<string, unknown> | undefined,
+  /** The view's relationship types. */
+  relTypes: [] as unknown[],
 }))
 
 vi.mock('@/hooks/useRelationshipRecord', () => ({
@@ -36,6 +38,13 @@ vi.mock('@/hooks/useRelationshipRecord', () => ({
     isError: false,
     refetch: vi.fn(),
   }),
+}))
+vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/features/versioning/hooks/useEntityEditing')>()),
+  useEntityEditing: () => ({ offered: true, blocked: null }),
+}))
+vi.mock('@/hooks/useRelationshipRecords', () => ({
+  useRelationshipRecords: () => ({ records: new Map(), deleted: new Set(), missing: new Set(), versioned: true, isLoading: true, isError: false, refetch: vi.fn() }),
 }))
 vi.mock('@/hooks/useRelationshipsBeneath', () => ({
   useRelationshipsBeneath: (...args: unknown[]) => {
@@ -61,7 +70,7 @@ vi.mock('@/features/versioning/components/EntityHistory', () => ({
   EntityHistory: ({ entityId }: { entityId: string }) => <div data-testid="entity-history">{entityId}</div>,
 }))
 vi.mock('@/hooks/useViewSchema', () => ({
-  useViewRelationshipTypes: () => [],
+  useViewRelationshipTypes: () => h.relTypes,
   useViewContainmentEdgeTypes: () => ['CONTAINS'],
 }))
 
@@ -107,6 +116,7 @@ beforeEach(() => {
   h.beneath = { data: undefined, isLoading: false, isError: false }
   h.beneathCalls = []
   h.entry = undefined
+  h.relTypes = []
   useStagedChangesStore.setState({ changes: [], redoStack: [] })
   useFeaturesStore.setState({ values: { versioningEnabled: true, editModeEnabled: true } } as never)
 })
@@ -246,15 +256,27 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(screen.getByText(reason)).toBeInTheDocument()
   })
 
-  it('on the published graph, offers a draft instead of Edit', async () => {
+  it('on the published graph, offers a draft instead of Edit — in its top line, its tip saying why', async () => {
     const user = userEvent.setup()
     const onStartEditing = vi.fn()
     setup(rel('e1'))
     render(<RelationshipDrawer canEdit={false} onStartEditing={onStartEditing} onReverseEdge={vi.fn()} />)
     expect(screen.queryByRole('tab', { name: /^Edit/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reverse direction' })).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Open a draft' }))
+    const edit = screen.getByRole('button', { name: 'Edit in a draft' })
+    expect(edit.closest('div')).toContainElement(screen.getByRole('button', { name: 'Close relationship details' }))
+    expect(screen.queryByText(/^Published — open a draft/)).not.toBeInTheDocument()
+    await user.hover(edit)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Published — open a draft to change this relationship')
+    await user.click(edit)
     expect(onStartEditing).toHaveBeenCalled()
+  })
+
+  it('on the published graph with no draft to open here, says so in a notice', () => {
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit={false} />)
+    expect(screen.getByText('Published — open a draft to change this relationship.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit in a draft' })).not.toBeInTheDocument()
   })
 
   it('a relationship with no recorded history is not edited here', () => {
@@ -315,6 +337,16 @@ describe('RelationshipDrawer — a connection', () => {
     await user.click(rows[1])
     const s = useCanvasStore.getState()
     expect(s.drawerEdge).toMatchObject({ kind: 'relationship', id: 'e2', lineId: 'bundle-a->b' })
+    expect(s.drawerHistory.entries).toHaveLength(2)
+  })
+
+  it('compares and edits its relationships as one, on the trail', async () => {
+    const user = userEvent.setup()
+    setup(connection)
+    render(<RelationshipDrawer canEdit />)
+    await user.click(screen.getByRole('button', { name: 'Compare & edit 2' }))
+    const s = useCanvasStore.getState()
+    expect(s.drawerEdge).toMatchObject({ kind: 'relationships', lineId: 'bundle-a->b', members: connection.kind === 'connection' ? connection.members : [] })
     expect(s.drawerHistory.entries).toHaveLength(2)
   })
 
@@ -434,5 +466,61 @@ describe('RelationshipDrawer — a connection', () => {
       expect(screen.getByText(/Expand either end — or double-click the line/)).toBeInTheDocument()
       expect(screen.getByRole('list', { name: /Roll-ups this line stands for/ })).toBeInTheDocument()
     })
+  })
+})
+
+/**
+ * The fields its type defines, edited as an entity's are: a required one it holds no value for is a
+ * row to add it in — warned of while it is new in the draft, which publishing refuses until it has
+ * one — and a value a field refuses is said where it is. Never a block.
+ */
+describe('RelationshipDrawer — the fields its type defines', () => {
+  const field = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
+    id, name, type: 'string', required: false, showInNode: false, showInPanel: true, showInTooltip: false, displayOrder: 0, ...extra,
+  })
+  const flowsTo = {
+    id: 'FLOWS_TO', name: 'Feeds', sourceTypes: [], targetTypes: [], bidirectional: false, showLabel: false, isLineage: true,
+    visual: { strokeColor: '#6366f1', strokeWidth: 2, strokeStyle: 'solid', animated: true, animationSpeed: 'normal', arrowType: 'arrow', curveType: 'bezier' },
+    fields: [field('steward', 'Steward', { required: true, allowedValues: ['ana', 'bo'] }), field('tier', 'Tier', { type: 'status', allowedValues: ['gold', 'silver'] })],
+  }
+  const newInDraft = (properties: Record<string, unknown>) => {
+    h.relTypes = [flowsTo]
+    h.record = { ...h.record!, properties }
+    ;(h.summary!.value as { edge: { properties: unknown } }).edge.properties = properties
+    h.entry = { status: 'added', before: null, after: { properties } }
+  }
+
+  it('new in the draft: a required field it lacks is a row to add it, its allowed values a click away', async () => {
+    const user = userEvent.setup()
+    newInDraft({ tier: 'bronze' })
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    const missing = screen.getByRole('list', { name: 'Required fields without a value' })
+    expect(missing).toHaveTextContent('steward')
+    expect(missing).toHaveTextContent('Steward is required for Feeds relationships — publishing refuses a new one without it')
+    // The value the draft gives it that its field refuses, said where it is.
+    expect(screen.getByText(/Must be one of gold, silver — “bronze” isn’t\. Publishing will refuse it\./)).toBeInTheDocument()
+
+    await user.click(within(missing).getByRole('button', { name: 'ana' }))
+    expect(useStagedChangesStore.getState().changes).toMatchObject([{
+      type: 'edit_edge', targetId: 'e1', after: { properties: { tier: 'bronze', steward: 'ana' } },
+    }])
+    expect(screen.queryByRole('list', { name: 'Required fields without a value' })).toBeNull()
+  })
+
+  it('on one that predates the rule, offers the value without a warning — publishing refuses it no more', () => {
+    h.relTypes = [flowsTo]
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    const missing = screen.getByRole('list', { name: 'Required fields without a value' })
+    expect(within(missing).getByRole('button', { name: 'Edit Steward' })).toHaveTextContent('Add Steward…')
+    expect(missing).not.toHaveTextContent(/publishing refuses/)
+  })
+
+  it('offers nothing to add where it can’t be edited', () => {
+    newInDraft({})
+    setup(rel('e1'))
+    render(<RelationshipDrawer />)
+    expect(screen.queryByRole('list', { name: 'Required fields without a value' })).toBeNull()
   })
 })

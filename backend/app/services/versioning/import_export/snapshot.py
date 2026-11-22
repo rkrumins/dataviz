@@ -418,32 +418,43 @@ class Snapshot:
         live = await self.lookup_live("edge", candidates)
         return {eid for eid, w in live.items() if w.source_id in nodes or w.target_id in nodes}
 
-    async def containment_descendants(self, roots: Iterable[str], containment_types: Set[str]) -> Set[str]:
-        """Every node reachable from ``roots`` down live containment edges (the roots excluded)."""
+    async def containment_descendants(self, roots: Iterable[str], containment_types: Set[str],
+                                      child_is_source: Set[str] = frozenset()) -> Set[str]:
+        """Every node reachable from ``roots`` down live containment edges (the roots excluded).
+        An edge's source is the parent, but for the types in ``child_is_source`` (upper-cased),
+        whose edges point from the child to its parent."""
         found: Set[str] = set()
         seen: Set[str] = set(roots)
         frontier = list(seen)
         graphs = self._branches()
+        # The parent's end of each edge: the source, and the target when a type points upwards.
+        columns = [EdgeVersionORM.source_entity_id] + (
+            [EdgeVersionORM.target_entity_id] if child_is_source else [])
         while frontier:
             nxt: List[str] = []
             for chunk in _chunks(frontier, _LOOKUP_CHUNK):
                 candidates: Set[str] = set()
                 for graph_id, branches in graphs.items():
-                    async with _session() as s:
-                        rows = (await s.execute(
-                            select(EdgeVersionORM.entity_id).where(
-                                EdgeVersionORM.graph_id == graph_id,
-                                EdgeVersionORM.branch_id.in_(branches),
-                                EdgeVersionORM.source_entity_id == _ANY).distinct(),
-                            {"ids": list(chunk)})).all()
-                    candidates.update(r[0] for r in rows)
+                    for column in columns:
+                        async with _session() as s:
+                            rows = (await s.execute(
+                                select(EdgeVersionORM.entity_id).where(
+                                    EdgeVersionORM.graph_id == graph_id,
+                                    EdgeVersionORM.branch_id.in_(branches),
+                                    column == _ANY).distinct(),
+                                {"ids": list(chunk)})).all()
+                        candidates.update(r[0] for r in rows)
                 parents = set(chunk)
                 for w in (await self.lookup_live("edge", candidates)).values():
-                    if (str(w.edge_type or "").upper() in containment_types and w.source_id in parents
-                            and w.target_id and w.target_id not in seen):
-                        seen.add(w.target_id)
-                        found.add(w.target_id)
-                        nxt.append(w.target_id)
+                    kind = str(w.edge_type or "").upper()
+                    if kind not in containment_types:
+                        continue
+                    parent, child = ((w.target_id, w.source_id) if kind in child_is_source
+                                     else (w.source_id, w.target_id))
+                    if parent in parents and child and child not in seen:
+                        seen.add(child)
+                        found.add(child)
+                        nxt.append(child)
             frontier = nxt
         return found
 

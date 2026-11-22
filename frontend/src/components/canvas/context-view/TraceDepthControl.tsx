@@ -21,6 +21,10 @@
  *
  * Depth values: 0 disables the side (matches the dock direction-arrow
  * contract), 1..MAX_DEPTH narrows the drawn hops on that side.
+ *
+ * A new trace opens at the reader's default depth (1/1 until they choose):
+ * "Make this my default" makes the depth on screen it, and My preferences
+ * sets it too.
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -29,6 +33,7 @@ import { motion } from 'framer-motion'
 import { ArrowUp, ArrowDown, ChevronDown, Eye, Minus, Plus, Workflow } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
+import { usePreferencesStore } from '@/store/preferences'
 import { LineageCountsToggle } from '../trace/LineageCountsToggle'
 
 export interface TraceDepthControlProps {
@@ -223,6 +228,10 @@ export function TraceDepthControl({
 
               <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
+              <DefaultDepth upstreamDepth={upstreamDepth} downstreamDepth={downstreamDepth} />
+
+              <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
               {/* Display — what the trace shows on its cards. */}
               <div className="px-3 pt-2.5 pb-3">
                 <div className="px-1 pb-1.5 flex items-center gap-1.5 text-[10.5px] uppercase tracking-[0.12em] font-bold text-ink-muted/70">
@@ -237,6 +246,31 @@ export function TraceDepthControl({
         document.body,
       )}
     </>
+  )
+}
+
+/** The depth new traces open on, and the offer to make the one on screen it. */
+function DefaultDepth({ upstreamDepth, downstreamDepth }: { upstreamDepth: number; downstreamDepth: number }) {
+  const depth = usePreferencesStore((s) => s.defaultTraceDepth)
+  const setDepth = usePreferencesStore((s) => s.setDefaultTraceDepth)
+  const isDefault = depth.up === upstreamDepth && depth.down === downstreamDepth
+  return (
+    <div className="px-3 py-2.5 flex items-center gap-2">
+      <p className="flex-1 min-w-0 px-1 text-[11px] text-ink-muted leading-snug">
+        New traces open at{' '}
+        <span className="font-semibold text-ink tabular-nums">{depth.up}/{depth.down}</span>
+        {isDefault ? ', as this one is.' : '.'}
+      </p>
+      {!isDefault && (
+        <button
+          type="button"
+          onClick={() => setDepth({ up: upstreamDepth, down: downstreamDepth })}
+          className="flex-shrink-0 px-2.5 py-1.5 rounded-lg text-[11px] font-medium border bg-black/[0.04] text-ink-muted hover:text-ink hover:bg-black/[0.08] border-black/[0.10] dark:bg-white/[0.04] dark:border-white/[0.06] dark:hover:bg-white/[0.08] transition-colors"
+        >
+          Make this my default
+        </button>
+      )}
+    </div>
   )
 }
 

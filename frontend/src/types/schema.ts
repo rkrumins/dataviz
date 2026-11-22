@@ -54,6 +54,8 @@ export interface EntityFieldDefinition {
   format?: FieldFormat;                // How to format the value
   reconciliationKey?: boolean;         // An import matches entities of this type by this field's value
   unique?: boolean;                    // No two entities of this type share a value (publish refuses one that does)
+  allowedValues?: string[];            // The values it may hold (none: any) — publish refuses another one
+  allowOther?: boolean;                // allowedValues are suggestions: any other value is accepted too
 }
 
 export type FieldType =
@@ -133,6 +135,10 @@ export interface RelationshipTypeSchema {
   isContainment?: boolean;
   isLineage?: boolean;
   category?: 'structural' | 'flow' | 'metadata' | 'association';
+
+  // The properties its relationships carry that a publish judges, as an entity type's fields are.
+  // Optional, as above: a schema without them judges none.
+  fields?: EntityFieldDefinition[];
 }
 
 export interface RelationshipVisualConfig {

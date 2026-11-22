@@ -932,7 +932,15 @@ fails.
   node without one, as the canvas writes it. Edges are kept only when **both** endpoints are in
   scope. A view that places nothing exports the whole data source (the plan says so).
 - **Row-scoped export.** `stream.Selection` keeps only an explicit `entity_id`/`urn` set and/or
-  entity-type set (intersection), composing after view scope.
+  entity-type set (intersection), composing after view scope. With `withChildren`, the set grows
+  by everything inside its entities (`stream.with_children`): ids, URNs or `gv:<entity id>`
+  resolved as placement keys are, then `Snapshot.containment_descendants` down the ontology's
+  containment types, each in its own direction (`_live_containment_map`: a type whose edges point
+  child → parent is walked from the target). The job resolves the containment when it is created
+  and walks it on its own pinned snapshot; the plan walks it within its budget, and one that
+  takes longer leaves the counts unknown, as a large view does. The ids may come in a JSON body
+  (`{"ids": [...]}`) on `POST …/exports` and `POST …/exports/plan`, unioned with the query's, so a
+  canvas selection is never too long for a URL.
 - **Add-property columns.** `props` emits extra empty `prop.<name>` columns to fill (`:219-222`).
 
 **The options plumbing is consistent end to end** (verified against the current tree): the
@@ -942,13 +950,11 @@ them into an `options` dict stored in `field_scope` (`service.py:208-221`) → `
 `options=` to `ExportWorker` (`service.py:239`) → the worker reads `options.get("props"/"ids"/"types")`
 (`export_worker.py:191-196`).
 
-> **Limitation — the UI exposes a subset.** The **backend** supports `props` + row-scope (`ids` /
-> `types`) + view-scope + branch-vs-published + as-of. The **ExportDialog / client service** currently
-> send only `format`, `viewId`, `branchId`, and `props` (`importExportApiService.ts:135-151,
-> 200-212`) — so **row-scoped export (`ids`/`types`) is API-only today**, not surfaced in the dialog.
-> Row-scope is fully wired server-side; surfacing it in the UI is the remaining step. (An earlier
-> analysis flagged a `TypeError` in this plumbing; it is **not present in the current code** — the
-> three layers' kwargs line up.)
+> **What the UI sends.** The **ExportDialog** sends `format`, `viewId`, `branchId`, `asOfSeq` and
+> `props`; opened on a canvas selection (the selection bar's **Export…**, or **Export with
+> children…** on an entity's context menu), it sends the selected ids in the body with
+> `withChildren=true` instead of `viewId`, so the file holds them and everything inside them, to
+> edit offline and import back. Row-scope by `types` remains API-only.
 
 **Lossless round-trip.** `denormalize_node`/`denormalize_edge`
 (`rowmodel.py:132-168`) spill scalar props to `prop.*` and nested to `properties_json`, mirroring the
@@ -1189,7 +1195,8 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
 - **The S3/GCS store is optional and off by default** (§9): boto3 isn't in the default image.
   Presigned URLs serve package uploads and stored downloads, but not yet a data source's own import
   uploads (`…/imports/uploads`), whose parts still go through the API.
-- **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
+- **Export by entity type is API-only** — the UI exports a view, the whole data source, or a
+  canvas selection with what is inside it, never `types`.
 - **An import that publishes itself (`autoPublish`) pulls main when main moved under it**:
   when its publish is queued (`_publish_own_draft`), a draft behind main is brought up to date
   (`rebase_draft`, the field-level three-way merge) and queued once it pulls clean; when the queued

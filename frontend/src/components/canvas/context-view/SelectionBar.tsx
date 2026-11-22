@@ -20,13 +20,14 @@
  * reserves its own band (`--selection-bar-height`) so a column's last row
  * can still scroll clear of it — see useBandReservation.
  */
-import { useRef } from 'react'
+import { useRef, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import { Kbd } from '@/components/ui/Kbd'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useBandReservation } from './useBandReservation'
 
 /** Entities named in full before the rest are summarised. Four fits the bar
@@ -61,10 +62,23 @@ export interface SelectionBarProps {
    *  open them; with it, a selection of one gets the bar. */
   onOpenDetails?: () => void
   /** Read — and, in a draft, edit — what several held entities share
-   *  (BulkEditPanel). Absent, not offered. */
+   *  (the entity drawer, comparing them). Absent, not offered. */
   onOpenShared?: () => void
-  /** The shared panel edits: the action reads "Edit N…", otherwise "Details". */
+  /** The shared panel edits: the action reads "Compare & edit N", otherwise "Compare N". */
   sharedEditable?: boolean
+  /** Download the held entities with everything inside them, to edit offline and import back.
+   *  Absent — no version control, or no right to export — not offered. */
+  onExport?: () => void
+  /** Show the bar for ONE held entity too: where nothing else offers its actions (a trace, whose
+   *  cards have no context menu). */
+  offerForOne?: boolean
+  /** Where the bar's lane sits on a canvas other than the Context View, as position classes
+   *  (`left-4 right-4 bottom-16`). Absent, the Context View's lane: above its trace dock and layer
+   *  strip, short of its right-hand dock. */
+  placementClassName?: string
+  /** How the selection is changed on this canvas, in its own gestures. Absent, the Context View's
+   *  rows: Cmd-click adds one, Shift-click adds a range. */
+  hint?: ReactNode
 }
 
 export function SelectionBar({
@@ -80,13 +94,17 @@ export function SelectionBar({
   onOpenDetails,
   onOpenShared,
   sharedEditable = false,
+  onExport,
+  offerForOne = false,
+  placementClassName,
+  hint,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
   useBandReservation(ref, '--selection-bar-height')
 
   const count = nodeIds.length
   const single = count === 1
-  const shown = count > 1 || (single && !!onOpenDetails)
+  const shown = count > 1 || (single && (!!onOpenDetails || offerForOne))
   const named = nodeIds.slice(0, NAMED_LIMIT)
   const rest = count - named.length
   const showLineage = !!lineage && lineage.upstream + lineage.downstream > 0
@@ -108,8 +126,8 @@ export function SelectionBar({
           // as the trace dock), and stops short of the right-hand Data
           // loads / Flows column (w-80 at right-4) instead of sliding under it
           // — which is what put the Trace button out of reach.
-          className="absolute z-50 left-4 pointer-events-none flex justify-center"
-          style={{
+          className={cn('absolute z-50 pointer-events-none flex justify-center', placementClassName ?? 'left-4')}
+          style={placementClassName ? undefined : {
             right: 'calc(20rem + 1.75rem)',
             bottom: 'calc(0.75rem + var(--trace-dock-height, 0px) + var(--layer-strip-height, 0px))',
           }}
@@ -117,21 +135,27 @@ export function SelectionBar({
         <div
           className={cn(
             'pointer-events-auto max-w-full',
-            'flex items-center gap-4',
+            'flex flex-wrap items-center gap-x-4 gap-y-2',
             'pl-4 pr-3 py-2.5 rounded-2xl',
             'bg-canvas-elevated backdrop-blur-xl',
             'border border-accent-lineage/35',
             'shadow-xl shadow-black/10 dark:shadow-black/40',
           )}
         >
-          {/* What is held. The number is the one thing read at a glance. */}
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span className="flex items-baseline gap-1.5 shrink-0">
-              <span className="text-lg font-semibold text-accent-lineage tabular-nums leading-none">
-                {count}
-              </span>
-              <span className="text-xs text-ink-muted">{single ? 'entity' : 'entities'}</span>
+          {/* What is held. The number is the one thing read at a glance, so it
+              never gives way. */}
+          <span className="flex items-baseline gap-1.5 shrink-0">
+            <span className="text-lg font-semibold text-accent-lineage tabular-nums leading-none">
+              {count}
             </span>
+            <span className="text-xs text-ink-muted">{single ? 'entity' : 'entities'}</span>
+          </span>
+
+          {/* The rest of what is held takes only the room the actions leave
+              (no basis of its own), up to all of its names before the hint
+              gets any. So the names give way first, and the actions move to a
+              line of their own only when even the count leaves them too little. */}
+          <div className="flex items-center gap-2.5 min-w-0 basis-0 grow-[100] max-w-max -ml-1.5">
 
             {/* What they touch, together — in the colours the lines wear. */}
             {/* On a tight canvas (a panel open beside it) the pair gives way
@@ -207,14 +231,20 @@ export function SelectionBar({
           <div className="flex flex-wrap items-center h-[18px] basis-0 grow min-w-0 overflow-hidden">
             <span className="w-0 h-[18px]" aria-hidden />
             <span className="flex items-center gap-1 text-[11px] text-ink-muted whitespace-nowrap">
-              <Kbd shortcut="mod" /> click adds one
-              <span className="mx-0.5 text-ink-muted/60" aria-hidden>·</span>
-              <Kbd shortcut="shift" /> click adds a range
+              {hint ?? (
+                <>
+                  <Kbd shortcut="mod" /> click adds one
+                  <span className="mx-0.5 text-ink-muted/60" aria-hidden>·</span>
+                  <Kbd shortcut="shift" /> click adds a range
+                </>
+              )}
             </span>
           </div>
 
-          {/* What will happen. */}
-          <div className="flex items-center gap-2 ml-auto shrink-0">
+          {/* What will happen. Too wide to sit beside the count, they take a
+              line of their own, and wrap within it on a canvas narrower still,
+              rather than running past the bar's edge or over the count. */}
+          <div className="flex flex-wrap items-center justify-end gap-2 ml-auto shrink-0 max-w-full">
             {single && onOpenDetails && (
               <button
                 type="button"
@@ -232,23 +262,33 @@ export function SelectionBar({
                 <Kbd shortcut="enter" className="ml-0.5" />
               </button>
             )}
+            {/* The way into the comparison, so it leads the group and wears the bar's primary
+                look, as Details does for one. */}
             {!single && onOpenShared && (
-              <button
-                type="button"
-                onClick={onOpenShared}
-                className={cn(
-                  'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
-                  'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
-                  'hover:border-accent-lineage/45 hover:text-accent-lineage',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                  'transition-colors duration-150',
-                )}
+              <HoverTip
+                className="inline-flex"
+                label={sharedEditable
+                  ? 'See these side by side in the details panel, and change them together'
+                  : 'See these side by side in the details panel'}
+                detail={sharedEditable
+                  ? 'What they share, and where they differ. Changes are staged for all of them'
+                  : 'What they share, and where they differ'}
               >
-                {sharedEditable
-                  ? <LucideIcons.PenLine className="w-3.5 h-3.5" strokeWidth={2.2} />
-                  : <LucideIcons.PanelRightOpen className="w-3.5 h-3.5" strokeWidth={2.2} />}
-                {sharedEditable ? `Edit ${count}…` : 'Details'}
-              </button>
+                <button
+                  type="button"
+                  onClick={onOpenShared}
+                  className={cn(
+                    'flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12.5px] font-medium whitespace-nowrap',
+                    'text-accent-lineage bg-accent-lineage/15 border border-accent-lineage/45',
+                    'hover:bg-accent-lineage/25 hover:border-accent-lineage/65',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
+                    'transition-colors duration-150',
+                  )}
+                >
+                  <LucideIcons.Columns3 className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+                  {sharedEditable ? `Compare & edit ${count}` : `Compare ${count}`}
+                </button>
+              </HoverTip>
             )}
             {!single && onLink && (
               <button
@@ -282,6 +322,23 @@ export function SelectionBar({
               >
                 <LucideIcons.ScanSearch className="w-3.5 h-3.5" strokeWidth={2.2} />
                 Narrow…
+              </button>
+            )}
+            {onExport && (
+              <button
+                type="button"
+                onClick={onExport}
+                title="Download these with everything inside them, to edit offline and import back"
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
+                  'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
+                  'hover:border-accent-lineage/45 hover:text-accent-lineage',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                  'transition-colors duration-150',
+                )}
+              >
+                <LucideIcons.FileDown className="w-3.5 h-3.5" strokeWidth={2.2} />
+                Export…
               </button>
             )}
             {!single && onOpenLens && (

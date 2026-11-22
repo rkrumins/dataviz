@@ -39,7 +39,7 @@ function renderList(r: DisplayRuleConfig, count?: RuleCount) {
             onReorder={vi.fn()} onReveal={onReveal}
         />,
     )
-    return { onReveal, reveal: screen.getByTitle('Show every match in search') }
+    return { onReveal, reveal: screen.getByRole('button', { name: 'Show every match in search' }) }
 }
 
 
@@ -66,12 +66,31 @@ describe('DisplayRuleList count line', () => {
         expect(screen.getByText(/matches in this view/)).toBeInTheDocument()
     })
 
-    it('reads a count that left part of the view out as a floor', () => {
+    it('reads a count that left part of the view out as a floor', async () => {
         renderList(rule(), { count: 48_203, complete: true, percent: 100, lowerBound: true })
         expect(screen.getByText('48,203')).toBeInTheDocument()
         expect(screen.getByText(/At least/)).toHaveTextContent('At least 48,203 matches in this view')
-        expect(screen.getByText(/At least/)).toHaveAttribute(
-            'title', 'Part of the view couldn’t be checked in time and was left out')
+        await userEvent.setup().hover(screen.getByText(/At least/))
+        expect(await screen.findByRole('tooltip')).toHaveTextContent(
+            'Part of the view couldn’t be checked in time and was left out')
+    })
+
+    it('reads a draft count that is the published graph’s as about that many, and says why', async () => {
+        renderList(rule(), {
+            count: 310, complete: true, percent: 100, approximate: true,
+            note: 'This rule follows relationships, so for the entities your draft changed it shows the published graph’s answer.',
+        })
+        expect(screen.getByText(/About/)).toHaveTextContent('About 310 matches in this view')
+        await userEvent.setup().hover(screen.getByText(/About/))
+        expect(await screen.findByText('Counted on the published graph')).toBeInTheDocument()
+        expect(screen.getByText(/follows relationships/)).toBeInTheDocument()
+    })
+
+    it('says why some tags on what the draft changed are the published graph’s', () => {
+        useDisplayRuleMatchStore.getState().setMembershipNote(
+            '1 of your rules can’t be answered on your draft’s values alone.')
+        renderList(rule(), { count: 3, complete: true, percent: 100 })
+        expect(screen.getByText(/can’t be answered on your draft’s values alone/)).toBeInTheDocument()
     })
 
     it('says "match" for exactly one', () => {
@@ -89,17 +108,19 @@ describe('DisplayRuleList count line', () => {
         expect(reveal).toBeEnabled()
     })
 
-    it("says why a rule can't be counted", () => {
+    it("says why a rule can't be counted", async () => {
         renderList(rule(), { count: 0, complete: true, percent: 100, error: 'Unknown operator' })
-        expect(screen.getByText("Can't be counted")).toHaveAttribute('title', 'Unknown operator')
+        await userEvent.setup().hover(screen.getByText("Can't be counted"))
+        expect(await screen.findByRole('tooltip')).toHaveTextContent('Unknown operator')
     })
 
-    it('reads a stopped count as a floor, and says it stopped', () => {
+    it('reads a stopped count as a floor, and says it stopped', async () => {
         renderList(rule(), {
             count: 12_431, complete: false, percent: 64, error: 'The count stopped: Service Unavailable',
         })
         expect(screen.getByText('12,431')).toBeInTheDocument()
-        expect(screen.getByText(/At least/)).toHaveAttribute('title', 'The count stopped: Service Unavailable')
+        await userEvent.setup().hover(screen.getByText(/At least/))
+        expect(await screen.findByRole('tooltip')).toHaveTextContent('The count stopped: Service Unavailable')
         expect(screen.getByText('count stopped')).toBeInTheDocument()
         expect(screen.queryByText(/counting/)).not.toBeInTheDocument()
     })

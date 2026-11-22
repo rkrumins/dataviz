@@ -50,6 +50,8 @@ export interface LayerMenuModel {
     onStartEditing?: () => void
     /** Narrow the canvas to what is in this layer (and what that reaches). */
     onNarrow?: () => void
+    /** Change a property on every entity in this layer (on the draft). */
+    onEditProperties?: () => void
     /** The layer's settings — its essentials and its own properties; its
      *  details, read-only, outside a draft. */
     onOpenSettings?: () => void
@@ -91,6 +93,9 @@ export interface CanvasContextMenuProps {
     /** Open the Lineage Lens on this node — its immediate connections,
      *  grouped and searchable. */
     onFocusConnections?: (id: string) => void
+    /** Export… — this node (or the selection it is part of) with everything inside it, to edit
+     *  offline and import back. */
+    onExportNode?: (id: string) => void
     onCopyUrn?: (id: string) => void
     /** Arm edge connect-mode from this node */
     onConnect?: (sourceId: string) => void
@@ -135,6 +140,7 @@ export function CanvasContextMenu({
     onCreateChild,
     onTraceNode,
     onFocusConnections,
+    onExportNode,
     onCopyUrn,
     onConnect,
     onLinkNode,
@@ -242,6 +248,15 @@ export function CanvasContextMenu({
                     icon: 'Focus',
                     shortcut: 'F',
                     onClick: () => { onFocusConnections(target.id); onClose() }
+                })
+            }
+
+            if (onExportNode) {
+                result.push({
+                    id: 'export-with-children',
+                    label: 'Export with children…',
+                    icon: 'FileDown',
+                    onClick: () => { onExportNode(target.id); onClose() }
                 })
             }
 
@@ -431,6 +446,15 @@ export function CanvasContextMenu({
                     onClick: () => { m.onNarrow?.(); onClose() },
                 })
             }
+            if (m.onEditProperties) {
+                result.push({
+                    id: 'layer-edit-properties',
+                    label: 'Change properties in this layer…',
+                    icon: 'PencilLine',
+                    dividerAfter: true,
+                    onClick: () => { m.onEditProperties?.(); onClose() },
+                })
+            }
             if (m.canEdit) {
                 result.push(
                     {
@@ -500,7 +524,7 @@ export function CanvasContextMenu({
         result.push(...customActions)
 
         return result
-    }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
+    }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections, onExportNode,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical])
 

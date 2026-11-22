@@ -13,11 +13,12 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { formatShortcut } from '@/lib/platform'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { formatShortcut, isApplePlatform } from '@/lib/platform'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
-import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
-import { useCanvasStore } from '@/store/canvas'
+import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
+import { isSelectableNode, useCanvasStore } from '@/store/canvas'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { useFeature } from '@/store/features'
@@ -27,7 +28,12 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useLoadingNotification } from '@/components/ui/notifications'
 
 // UX-first interaction components (shared across canvases)
-import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
+import { CanvasContextMenu, type ContextMenuAction, type ContextMenuTarget } from './CanvasContextMenu'
+import { compareSelectionAction, menuSelection } from './selectionMenu'
+import { SelectionBar } from './context-view/SelectionBar'
+import { StagedChangesPanel } from './context-view/StagedChangesPanel'
+import { remapIdSet, useCanvasEditGate, useDraftSave, useStagedUndoShortcuts } from '@/features/versioning/canvas/useDraftSave'
+import { useCanvasPropertyJobs } from '@/features/versioning/canvas/useCanvasPropertyJobs'
 import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
 import { useCreateLinkStore } from './edge-create/createLinkStore'
 import { InlineNodeEditor } from './InlineNodeEditor'
@@ -40,7 +46,6 @@ import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
 // Editor components (shared across canvases)
-import { EditorToolbar } from './EditorToolbar'
 import { FeedMoreChip } from './FeedMoreChip'
 import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
@@ -49,7 +54,7 @@ import { BuildPanel } from './create/buildmode/BuildPanel'
 import { EntityDrawer } from '../panels/entity/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
-import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
+import { PropertyOpHost } from './property-manager/PropertyOpHost'
 import { DisplayRuleTagChips } from './property-manager/DisplayRuleTagChips'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
@@ -57,10 +62,15 @@ import { useEffectiveBranchId } from '@/store/branchStore'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { TraceToolbar } from './TraceToolbar'
+import { CanvasToolRow } from './CanvasToolRow'
+import { CanvasDisplayMenu } from './context-view/header/DisplayMenu'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
-import { resolveEntityName } from '@/lib/entityDisplayName'
+import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
+import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
+import { usePersonaMode } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 
 interface HierarchyCanvasProps {
   className?: string
@@ -86,8 +96,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const nodes = useCanvasStore(s => s.nodes)
   const edges = useCanvasStore(s => s.edges)
   const selectNode = useCanvasStore(s => s.selectNode)
+  const clearSelection = useCanvasStore(s => s.clearSelection)
   const selectedNodeIds = useCanvasStore(s => s.selectedNodeIds)
-  const selectedNodeId = selectedNodeIds[0] ?? null
+  // Every selected row wears its ring — the selection is the store's, all of it.
+  const selectedIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   // Mirrors ContextViewCanvas's isHydratingInitial — CanvasRouter writes
   // hydrationPhase into the canvas store for every canvas type, so the empty
   // state can avoid flashing before the initial load lands.
@@ -98,7 +110,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const lineageEdgeTypes = useViewLineageEdgeTypes()
   const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, loadMoreFeeds, isLoading: isLoadingChildren } = useGraphHydration()
   useLoadingNotification('hier-children', isLoadingChildren, 'Expanding hierarchy')
-  const relationshipTypes = useViewRelationshipTypes()
   // Legacy inline quick-filter (substring over visible nodes) — left
   // in place as a complementary quick-filter alongside the new
   // server-side SearchMapPanel. Full removal is tracked separately
@@ -112,6 +123,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // mounted on ContextView and Graph canvases.
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
+  // Select several, armed from the toolbar: a plain click adds to the selection.
+  const [multiSelectArmed, setMultiSelectArmed] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const provider = useGraphProvider()
   // Property Manager display-rule engine — publishes match sets so the
@@ -129,7 +142,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // The builder holds the rail unless it stepped aside for an entity's details (it stays mounted, hidden).
   const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail' && !s.suspended)
   const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build')
-  const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
 
   // Build containment hierarchy using shared hook (must precede trace + traceContextSet)
   const isContainmentEdge = useCallback(
@@ -188,6 +200,20 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
   // routes are hidden rather than left to fail.
   const editModeEnabled = useFeature('editModeEnabled')
+  // Graph edits are kept only in a draft the caller may write, with edit mode on — and a trace is
+  // read-only for its whole life. The same gate as the Context View's, and the same save.
+  const { scopeWsId, dataSourceId, viewId, graphId, branchId, isDraft, canEditGraph } = useCanvasEditGate()
+  const canvasWritable = canEditGraph && !trace.isTracing
+  // Bulk property changes: the one dialog writes to the draft open here, and its jobs are followed.
+  const propertyGraphWrite = useCanvasPropertyJobs({ wsId: scopeWsId, graphId, branchId, writable: canvasWritable })
+  const saveToDraft = useDraftSave({
+    wsId: scopeWsId,
+    viewId,
+    // An entity open before the save stays open after it: its expansion was keyed by its temp urn.
+    remapEntityIds: (ids) => setExpandedNodes((prev) => remapIdSet(prev, ids)),
+  })
+  useStagedUndoShortcuts(isDraft)
+  const isStagedPanelOpen = useStagedChangesStore((s) => s.isReviewPanelOpen)
   const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
@@ -205,7 +231,25 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         return next
       })
     },
+    onCloseEntityDrawer: () => {
+      // Review & Save takes Esc first — held while a save or a publish from it runs.
+      if (isStagedPanelOpen) {
+        if (useStagedChangesStore.getState().applyStatus !== 'applying') useStagedChangesStore.getState().closeReviewPanel()
+        return true
+      }
+      // Several entities compared: Esc closes the drawer, and the selection with it.
+      if (useCanvasStore.getState().drawerNodeIds) {
+        useCanvasStore.getState().requestDrawerMove(() => {
+          useCanvasStore.getState().closeNodeDrawer()
+          clearSelection()
+        })
+        return true
+      }
+      return false
+    },
     onExitTrace: exitTrace,
+    // ⌘A: the rows on screen — not what is collapsed away.
+    selectableIds: () => visibleRowIds,
   })
 
   // Keyboard shortcuts
@@ -214,23 +258,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     handlers: interactions.keyboardHandlers,
   })
 
-  // Handle save graph
-  const handleSave = useCallback(async () => {
-    try {
-      const response = await fetchWithTimeout('/api/v1/graph/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes, edges })
-      })
-      if (!response.ok) throw new Error('Failed to save graph')
-      alert('Graph saved successfully!')
-    } catch (error) {
-      console.error('Error saving graph:', error)
-      alert('Failed to save graph')
-    }
-  }, [nodes, edges])
-
-  // Build hierarchy tree from the shared containment maps
+  // Build hierarchy tree from the shared containment maps. Names follow the
+  // persona, as on the other canvases, so the rows sort and search by the
+  // names they show.
+  const personaMode = usePersonaMode()
   const hierarchyTree = useMemo(() => {
     if (!nodes.length) return []
 
@@ -246,7 +277,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       return {
         id: node.id,
         typeId: node.data.type as string,
-        name: resolveEntityName(node.data, 'business', node.id),
+        name: resolveEntityName(node.data, personaMode, node.id),
         data: node.data as Record<string, unknown>,
         children,
         depth,
@@ -260,7 +291,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       .map((n) => buildTree(n.id, 0))
       .filter((n): n is HierarchyNode => n !== null)
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [nodes.length, hierarchyRoots, childMap, nodeMap])
+  }, [nodes.length, hierarchyRoots, childMap, nodeMap, personaMode])
 
   // Flatten tree for search
   const flatNodes = useMemo(() => {
@@ -294,31 +325,73 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     setSearchResults(results)
   }, [searchQuery, flatNodes])
 
-  // Expand path to search result
-  const expandToNode = useCallback((nodeId: string) => {
-    const node = flatNodes.find((n) => n.id === nodeId)
-    if (!node) return
+  const flatIndex = useMemo(() => new Map(flatNodes.map((n) => [n.id, n])), [flatNodes])
 
-    const path = node.data._path as string[] | undefined
-    if (path) {
-      setExpandedNodes((prev) => {
-        const next = new Set(prev)
-        path.forEach((id) => next.add(id))
-        return next
-      })
-    }
-
-    // Select and scroll to node
-    selectNode(nodeId)
-
-    // Scroll to node after expansion, then pulse so the user sees where
-    // they landed (matches the jump-to-node feedback in other canvases).
+  // Show rows: open the path to each, then scroll the first into view and pulse it (matches the
+  // jump-to-node feedback in other canvases). Never selects — the entity drawer's "locate" leaves
+  // what the drawer holds (several entities, compared) as it is. False when none is in the tree.
+  const revealRows = useCallback((nodeIds: readonly string[]) => {
+    const paths = nodeIds.map((id) => flatIndex.get(id)?.data._path as string[] | undefined)
+    const first = nodeIds.find((id) => flatIndex.has(id))
+    if (!first) return false
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      paths.forEach((path) => path?.forEach((id) => next.add(id)))
+      return next
+    })
     setTimeout(() => {
-      const element = document.getElementById(`hierarchy-node-${nodeId}`)
+      const element = document.getElementById(`hierarchy-node-${first}`)
       element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      useCanvasStore.getState().pulseNode(nodeId)
+      useCanvasStore.getState().pulseNode(first)
     }, 100)
-  }, [flatNodes, selectNode])
+    return true
+  }, [flatIndex])
+  const revealRow = useCallback((nodeId: string) => { revealRows([nodeId]) }, [revealRows])
+  const locateRows = useCallback((nodeIds: string[]) => { revealRows(nodeIds) }, [revealRows])
+
+  // Expand path to search result, and select it
+  const expandToNode = useCallback((nodeId: string) => {
+    if (revealRows([nodeId])) selectNode(nodeId)
+  }, [revealRows, selectNode])
+
+  // The rows on screen, in the order they are drawn: a collapsed subtree contributes nothing.
+  const visibleRowIds = useMemo(() => {
+    const ids: string[] = []
+    const walk = (n: HierarchyNode) => {
+      ids.push(n.id)
+      if (expandedNodes.has(n.id)) n.children.forEach(walk)
+    }
+    hierarchyTree.forEach(walk)
+    return ids
+  }, [hierarchyTree, expandedNodes])
+  const rowIndex = useMemo(() => new Map(visibleRowIds.map((id, i) => [id, i])), [visibleRowIds])
+
+  // Row click → selection, as on the Context View's columns. Cmd/Ctrl toggles the row; Shift ADDS
+  // every row between the last-clicked one and this one, as drawn; a plain click selects it alone.
+  // With no last click on screen, a Shift-click toggles the row in, as Cmd/Ctrl would.
+  const handleRowSelect = useCallback((id: string, e: React.MouseEvent) => {
+    // A Mac Ctrl-click is the secondary click: the context menu answers it.
+    if (isApplePlatform() && e.ctrlKey && !e.metaKey) return
+    if (e.shiftKey) {
+      const { lastNodeClick, selectedNodeIds: held, setSelection } = useCanvasStore.getState()
+      const from = lastNodeClick.nodeId ? rowIndex.get(lastNodeClick.nodeId) : undefined
+      const to = rowIndex.get(id)
+      if (from !== undefined && to !== undefined) {
+        const [lo, hi] = from <= to ? [from, to] : [to, from]
+        setSelection([...new Set([...held, ...visibleRowIds.slice(lo, hi + 1)])])
+        return
+      }
+    }
+    selectNode(id, multiSelectArmed || e.shiftKey || e.metaKey || e.ctrlKey)
+  }, [rowIndex, visibleRowIds, selectNode, multiSelectArmed])
+
+  // A right-click on a row that is part of a selection of several offers the several together.
+  const contextTarget = interactions.state.contextMenu.target
+  const selectionMenuActions = useMemo<ContextMenuAction[]>(() => {
+    if (contextTarget?.type !== 'node' || !isSelectableNode(contextTarget.id)) return []
+    const ids = menuSelection(contextTarget.id, selectedNodeIds)
+    return ids.length > 1 ? [compareSelectionAction(ids, interactions.closeContextMenu)] : []
+  }, [contextTarget, selectedNodeIds, interactions.closeContextMenu])
 
   // Toggle node expansion with lazy loading
   const toggleNode = useCallback(async (nodeId: string) => {
@@ -390,31 +463,32 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas relative", className)}>
       {/* Roots/orphans beyond the first page — reachable, and said so. */}
       <FeedMoreChip loadingNodes={loadingNodes} failedNodes={failedNodes} onLoadMore={keys => void loadMoreFeeds(keys)} />
-      {/* Editor Toolbar - Unified with LineageCanvas */}
-      <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
-        <EditorToolbar
-          onAddNode={() => useHierarchyBuilderStore.getState().open()}
-          onOpenBuild={() => useHierarchyBuilderStore.getState().openBuild()}
-          onSave={handleSave}
-          edgeTypes={relationshipTypes}
-          activeEdgeType={activeEdgeType}
-          onSelectEdgeType={setActiveEdgeType}
-        />
-        {/* Property Manager toggle — browse properties + author
-            display-rule tags. Mirrors the Context View affordance. */}
-        {activeView?.id && (
-          <PropertyManagerButton
-            open={propertyManagerOpen}
-            onToggle={() => setPropertyManagerOpen((v) => !v)}
-          />
-        )}
-      </div>
-
-      {/* Header */}
-      <div className="flex-shrink-0 bg-canvas-elevated/95 backdrop-blur border-b border-glass-border px-6 py-3">
-        <div className="flex items-center justify-end gap-4">
-          {/* Search */}
-          <div className="relative">
+      {/* The toolbar — the same tools in both views (CanvasToolRow). The rows draw no lineage
+          lines, so there is no Lineage switch. */}
+      <CanvasToolRow
+        lead={
+          <div className="flex items-center gap-1">
+            <HoverTip className="inline-flex" label="Open every row" detail="Shows everything inside each entity">
+              <button type="button" onClick={expandAll} aria-label="Expand all" className="btn btn-ghost btn-sm">
+                <LucideIcons.ChevronsDownUp className="w-4 h-4 rotate-180" />
+              </button>
+            </HoverTip>
+            <HoverTip className="inline-flex" label="Close every row" detail="Back to the top-level entities">
+              <button type="button" onClick={collapseAll} aria-label="Collapse all" className="btn btn-ghost btn-sm">
+                <LucideIcons.ChevronsDownUp className="w-4 h-4" />
+              </button>
+            </HoverTip>
+            {/* Advanced search — in the row, so it covers none of the buttons beside it; here,
+                not by the filter box, which keeps the room the row saves for a search. */}
+            <CanvasSearchTrigger
+              open={advancedSearchOpen}
+              onToggle={() => setAdvancedSearchOpen((v) => !v)}
+              inline
+            />
+          </div>
+        }
+        search={
+          <div className="relative flex-1 min-w-0 max-w-xs">
             <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
             <input
               ref={searchInputRef}
@@ -422,7 +496,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               placeholder={`Search entities… (${formatShortcut('mod+f')})`}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="input pl-9 pr-8 py-1.5 w-64 text-sm"
+              className="input pl-9 pr-8 py-1.5 w-full text-sm"
             />
             {searchQuery && (
               <button
@@ -433,26 +507,17 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               </button>
             )}
           </div>
-
-          {/* Expand/Collapse All */}
-          <div className="flex items-center gap-1">
-            <button
-              onClick={expandAll}
-              className="btn btn-ghost btn-sm"
-              title="Expand All"
-            >
-              <LucideIcons.ChevronsDownUp className="w-4 h-4 rotate-180" />
-            </button>
-            <button
-              onClick={collapseAll}
-              className="btn btn-ghost btn-sm"
-              title="Collapse All"
-            >
-              <LucideIcons.ChevronsDownUp className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-
+        }
+        display={<CanvasDisplayMenu />}
+        traceActive={trace.isTracing}
+        onStartTrace={(id) => void trace.startTrace(id)}
+        onExitTrace={exitTrace}
+        multiSelectArmed={multiSelectArmed}
+        onToggleMultiSelect={() => setMultiSelectArmed((v) => !v)}
+        propertyManagerOpen={propertyManagerOpen}
+        onTogglePropertyManager={activeView?.id ? () => setPropertyManagerOpen((v) => !v) : undefined}
+        onRevealOnCanvas={revealRow}
+      >
         {/* Search Results */}
         {searchQuery && searchResults.length > 0 && (
           <div className="mt-3 flex items-center gap-2 flex-wrap">
@@ -478,7 +543,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             )}
           </div>
         )}
-      </div>
+      </CanvasToolRow>
 
       {/* Tree + right-rail row. The rail panels (builder / EntityDrawer) are
           width-animated flex siblings, so opening one shrinks the tree area
@@ -486,8 +551,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           SearchMapPanel/PropertyManagerDrawer stay outside this row, same as
           GraphCanvas — they mount below as their own flex-sibling drawers. */}
       <div className="flex-1 min-h-0 flex">
-        {/* Hierarchy Content */}
-        <div className="relative flex-1 min-w-0 overflow-auto p-6 custom-scrollbar">
+        {/* Hierarchy Content — the selection bar floats over it, outside the scroll. */}
+        <div className="relative flex-1 min-w-0">
+        <div className={cn('relative h-full overflow-auto p-6 custom-scrollbar', selectedNodeIds.length > 1 && 'pb-24')}>
           {hierarchyTree.length === 0 ? (
             !isHydratingInitial && <BuilderEmptyState />
           ) : (
@@ -497,10 +563,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
                   key={rootNode.id}
                   node={rootNode}
                   schema={schema}
-                  selectedNodeId={selectedNodeId}
+                  selectedIds={selectedIdSet}
                   expandedNodes={expandedNodes}
                   searchResults={searchResults}
-                  onSelect={selectNode}
+                  onSelect={handleRowSelect}
                   onToggle={toggleNode}
                   onContextMenu={(e, nodeId) => {
                     interactions.openContextMenu(e, {
@@ -530,6 +596,16 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             </div>
           )}
         </div>
+        <SelectionBar
+          nodeIds={selectedNodeIds}
+          labelFor={(id) => flatIndex.get(id)?.name || id}
+          onRemove={(id) => selectNode(id, true)}
+          onClear={clearSelection}
+          onOpenShared={() => useCanvasStore.getState().openNodesDrawer(selectedNodeIds)}
+          sharedEditable={canvasWritable}
+          placementClassName="left-4 right-4 bottom-16"
+        />
+        </div>
 
         {/* Right rail — mutual exclusion: creation takes the rail (an
             explicit action), so the builder is never hidden behind an
@@ -547,10 +623,14 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         )}
         {!builderOpen && !buildOpen && (
           <EntityDrawer
+            // Edits are draft-only, and a trace is read-only for its whole life.
+            canEdit={canvasWritable}
+            writesLocked={trace.isTracing}
             onTraceUp={trace.traceUpstream}
             onTraceDown={trace.traceDownstream}
             onFullTrace={trace.traceFullLineage}
-            onFocusNode={expandToNode}
+            onFocusNode={revealRow}
+            onLocateMany={locateRows}
           />
         )}
       </div>{/* end tree + right-rail row */}
@@ -585,12 +665,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       </AnimatePresence>
 
       {/* Advanced search — same SearchMapPanel surface mounted on every
-          canvas. Trigger handles ⌘⇧F globally; panel is a flex-sibling
-          drawer alongside EntityDrawer. */}
-      <CanvasSearchTrigger
-        open={advancedSearchOpen}
-        onToggle={() => setAdvancedSearchOpen((v) => !v)}
-      />
+          canvas; its trigger (⌘⇧F) is in the header. The panel is a
+          flex-sibling drawer alongside EntityDrawer. */}
       <AnimatePresence>
         {activeView?.id && advancedSearchOpen && (
           <SearchMapPanel
@@ -620,6 +696,12 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           />
         )}
       </AnimatePresence>
+      <PropertyOpHost
+        viewId={activeView?.id ?? ''}
+        graphWrite={propertyGraphWrite}
+        onOpenManager={() => setPropertyManagerOpen(true)}
+        knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
+      />
 
       {/* === UX-FIRST INTERACTION COMPONENTS (Unified with LineageCanvas) === */}
 
@@ -647,6 +729,18 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onReverseEdge={editModeEnabled ? interactions.reverseEdge : undefined}
         onCreateNode={editModeEnabled ? () => useHierarchyBuilderStore.getState().open() : undefined}
         onSelectAll={interactions.selectAll}
+        customActions={selectionMenuActions}
+      />
+
+      {/* Review & Save — opened from the header's controls, a drawer's "Review & Save", or a
+          notification; saves this canvas's staged edits to the draft as one commit. */}
+      <StagedChangesPanel
+        wsId={scopeWsId} graphId={graphId} dataSourceId={dataSourceId} viewId={viewId}
+        onReveal={(id) => {
+          useCanvasStore.getState().openNodeDrawer(id)
+          revealRow(id)
+        }}
+        onConfirm={saveToDraft}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}
@@ -679,10 +773,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 interface HierarchyContainerProps {
   node: HierarchyNode
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
-  selectedNodeId: string | null
+  selectedIds: ReadonlySet<string>
   expandedNodes: Set<string>
   searchResults: string[]
-  onSelect: (id: string) => void
+  onSelect: (id: string, event: React.MouseEvent) => void
   onToggle: (id: string) => void
   onContextMenu?: (e: React.MouseEvent, nodeId: string) => void
   onDoubleClick?: (nodeId: string, event: React.MouseEvent) => void
@@ -696,7 +790,7 @@ interface HierarchyContainerProps {
 function HierarchyContainer({
   node,
   schema,
-  selectedNodeId,
+  selectedIds,
   expandedNodes,
   searchResults,
   onSelect,
@@ -713,7 +807,7 @@ function HierarchyContainer({
   const childCount = (node.data.childCount as number) || 0
   const hasChildren = node.children.length > 0 || childCount > 0
   const isExpanded = expandedNodes.has(node.id)
-  const isSelected = selectedNodeId === node.id
+  const isSelected = selectedIds.has(node.id)
   const isSearchResult = searchResults.includes(node.id)
   // Where a click doesn't open an entity's details, its row offers them.
   const offerDetails = !useOpensDetailsOnSelect()
@@ -732,6 +826,16 @@ function HierarchyContainer({
   } = useSearchHighlight(node.urn ?? node.id, { isSelected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
   const changeDeco = useEntityDecoration(node.urn ?? node.id)
+  // Technical mode's ID under the name: the data source's identifier property, else the URN —
+  // left out when it is the name, or when Display settings hide the IDs.
+  const personaMode = usePersonaMode()
+  const identityProperty = useCanvasIdentityProperty()
+  const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
+  // Display's "Show entity type badge", as on Context View rows.
+  const showTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
+  const technical = showEntityIds
+    ? technicalIdentity(node.data, personaMode, { identityProperty, urn: node.urn, name: node.name })
+    : undefined
 
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
@@ -740,11 +844,6 @@ function HierarchyContainer({
   // trace highlight or a change decoration paints the same card, and wins.
   const ruleLook = useDisplayRuleLook(changeDeco || isFocusNode || isHighlighted ? undefined : (node.urn ?? node.id))
   const isDimmed = (isTraceActive && !isHighlighted) || isSpotlightDim
-
-  // Canvas filter Isolate / Hide modes drop this row entirely. Same
-  // null-return pattern as GenericNode — keeps the hook order intact
-  // while collapsing the row out of the rendered tree.
-  if (isHiddenByCanvasFilter) return null
 
   // Calculate roll-up counts
   const rollUpCounts = useMemo(() => {
@@ -768,6 +867,10 @@ function HierarchyContainer({
 
     return parts.join(', ')
   }, [rollUpCounts, schema])
+
+  // Canvas filter Isolate / Hide modes drop this row entirely — after every
+  // hook, so a row that is hidden and shown again runs the same hooks.
+  if (isHiddenByCanvasFilter) return null
 
   // Indentation based on depth
   const indent = depth * 24
@@ -825,7 +928,10 @@ function HierarchyContainer({
             "group/row flex items-center gap-3 px-4 py-3 cursor-pointer",
             "hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
           )}
-          onClick={() => onSelect(node.id)}
+          // Shift-click takes a range; without this the browser also paints a text selection
+          // across every row between the two clicks.
+          onMouseDown={(e) => { if (e.shiftKey) e.preventDefault() }}
+          onClick={(e) => onSelect(node.id, e)}
           onDoubleClick={(e) => onDoubleClick?.(node.id, e)}
           onContextMenu={(e) => {
             e.preventDefault()
@@ -861,12 +967,14 @@ function HierarchyContainer({
           {/* Content */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <span
-                className="text-2xs font-medium uppercase tracking-wider"
-                style={{ color: visual?.color ?? '#6b7280' }}
-              >
-                {entityType?.name ?? node.typeId}
-              </span>
+              {showTypeBadge && (
+                <span
+                  className="text-2xs font-medium uppercase tracking-wider"
+                  style={{ color: visual?.color ?? '#6b7280' }}
+                >
+                  {entityType?.name ?? node.typeId}
+                </span>
+              )}
               {hasChildren && (
                 <span className="px-1.5 py-0.5 rounded text-2xs font-medium bg-black/5 dark:bg-white/10 text-ink-muted">
                   {node.children.length}
@@ -888,6 +996,19 @@ function HierarchyContainer({
                 />
               )}
             </div>
+
+            {/* Technical identity — head-truncated, as on Context View rows: sibling URNs share a
+                long prefix, so an end ellipsis would cut the part that tells them apart. */}
+            {technical && (
+              <HoverTip label={<span className="break-all">{`${technical.property}: ${technical.value}`}</span>} className="block min-w-0 mt-0.5">
+                <span
+                  className="block text-[10px] font-mono text-ink-muted/70 truncate"
+                  style={{ direction: 'rtl', textAlign: 'left' }}
+                >
+                  {technical.value}
+                </span>
+              </HoverTip>
+            )}
 
             {/* Roll-up counts when collapsed */}
             {rollUpDisplay && !isExpanded && (
@@ -936,17 +1057,18 @@ function HierarchyContainer({
           {/* Add child — hover-visible; direct store import so the recursive
               render never threads an onAddChild prop down every level. */}
           {(entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                useHierarchyBuilderStore.getState().open({ parentUrn: node.urn ?? node.id })
-              }}
-              className="opacity-0 group-hover/row:opacity-100 flex items-center justify-center w-6 h-6 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition-all hover:scale-110 active:scale-95"
-              title={`Add inside ${node.name}`}
-              aria-label={`Add inside ${node.name}`}
-            >
-              <LucideIcons.Plus className="w-4 h-4" style={{ color: visual?.color ?? '#6b7280' }} />
-            </button>
+            <HoverTip label={`Add inside ${node.name}`} detail="Opens the builder with this as the parent" className="inline-flex">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  useHierarchyBuilderStore.getState().open({ parentUrn: node.urn ?? node.id })
+                }}
+                className="opacity-0 group-hover/row:opacity-100 flex items-center justify-center w-6 h-6 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition-all hover:scale-110 active:scale-95"
+                aria-label={`Add inside ${node.name}`}
+              >
+                <LucideIcons.Plus className="w-4 h-4" style={{ color: visual?.color ?? '#6b7280' }} />
+              </button>
+            </HoverTip>
           )}
 
           {/* Expand indicator */}
@@ -973,7 +1095,7 @@ function HierarchyContainer({
                     key={child.id}
                     node={child}
                     schema={schema}
-                    selectedNodeId={selectedNodeId}
+                    selectedIds={selectedIds}
                     expandedNodes={expandedNodes}
                     searchResults={searchResults}
                     onSelect={onSelect}

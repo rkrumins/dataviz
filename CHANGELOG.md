@@ -904,7 +904,8 @@ integration's many small changes as a few commits.
   settings store's two revisions to `main`'s chain (the merge runs nothing), then copy each
   workspace's and data source's review rules (`review_required_approvals`, `review_threads_hold`)
   into the store once, as the import above copies the rest: an old 0 approvals is "everyone asked",
-  and the old columns are written for one release too.
+  and the old columns are written for one release too. `20261122_1300_merge_rules_store` joins
+  that line to `main`'s newer head, `20261122_1200_gv_job_notices`, and runs nothing.
 - **Migrations `20261116_1200_graph_watch` and `20261119_1800_merge_graph_watch`** add `graph_seen`
   (how far each person has looked at a versioned graph) and `graph_watches` (what they watch in it),
   new tables only, then join that revision to the settings line's head (the merge runs nothing).
@@ -1205,7 +1206,6 @@ words and a way to see what a view is for. The Business / Technical switch is re
   5. Muted text and the Business green fall short of WCAG AA contrast.
   6. The intro tip shows on the first page loaded, and doesn't mention **More**.
   7. The Business view doesn't yet reach:
-     - the Graph and Hierarchy toolbars;
      - the trace dock's Performance tab;
      - the search panel's options.
   8. Mixed words:
@@ -1295,8 +1295,8 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   - the view's header leaves out **Versions**, **Export**, **Reviews**, the type count, usage, and
     the template-update and subsets chips; a request waiting on the view still shows;
   - an entity's menu leaves out **Copy URN** and **Narrow to this…**; the trace bar keeps its
-    directions and **Exit**; the Graph canvas leaves out its extra control panel, its layout
-    direction and **Edge Details**;
+    directions and **Exit**; the Graph canvas leaves out **LOD**, the **Explore** chip, its
+    layout direction and **Edge Details**;
   - **Selecting**, **Connect**, an open Property Manager and open **Edge Details** stay on screen
     while they are on;
   - **Data loads** and **Flows** start minimized, until you open or minimize them yourself.

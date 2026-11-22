@@ -142,29 +142,253 @@ to confirm.
 ## Change many entities at once
 
 1. Select the entities: hold `⌘` (Mac) or `Ctrl` (Windows) and click each one,
-   or Shift-click to add a range.
-2. In the bar at the bottom of the canvas, choose **Edit N…**. A panel opens on
-   the right with how many you hold, of which types, and what they share:
+   or Shift-click to add a range. With a layer column focused, `⌘A` / `Ctrl-A`
+   selects every entity it shows.
+2. In the bar at the bottom of the canvas, choose **Compare & edit N**, the
+   first of its actions — on a Context View, a Graph or a Hierarchy. The entity
+   drawer opens on all of them: how many you hold, of which types, who they are
+   (**and N more** lists them — show one on the canvas, or open it), and for
+   each property how they hold it:
 
    | It says | Meaning |
    | --- | --- |
-   | **Same** | Every one has this value — it's in the box |
-   | **Mixed · 7 of 12** | They differ, or only 7 of the 12 have it — the box is empty |
-   | **None set** | None of them has it |
+   | **Same** | Every one has this value — it is shown |
+   | **Differs · 3 values** | Every one has it, not all alike |
+   | **On 7 of 12** | Only 7 of the 12 have it |
+   | **Not set** | None of them has it |
 
-3. Change what should be the same for all of them:
-   - type a **Description**, or a property's value, to give all of them that
-     value (**Leave each as it is** takes a description back);
-   - the bin beside a property removes it from all of them;
-   - **Add a property to all** adds a new one.
-4. Choose **Stage for N**. Each entity's change is staged on its own, as if you
-   had edited them one by one — an entity you had already changed keeps that
-   change too, and one the edit wouldn't change isn't touched. It is one step
-   however many entities you hold: **Undo** on the message (or the toolbar's
-   **Undo**) takes the whole edit back.
+   Open a property (click its name, or `→`) to see every value it holds, how
+   many hold each, and who — and which ones hold none. **All · Same · Differs ·
+   Partial** narrows the list; **Find a property** searches it. `J` / `K` (or
+   `↑` / `↓`) move between properties.
+3. Change what should be the same for all of them. Each change waits until you
+   stage it, and ↺ takes one back:
+   - click a value (or a description) and type, to give all of them that value
+     — or **Apply to all** beside one of the values a property already holds;
+   - **Fill where missing** (✎) gives a value only to the ones without one;
+   - **Rename** and **Copy to a new property** move a property's values to a new
+     name. An entity that already holds that name is left as it is, unless you
+     tick **replace**;
+   - the bin removes a property from all of them;
+   - **Add to all** adds a new property to every one.
 
-Outside a draft the same bar says **Details**: the panel shows what they share,
-read-only, with **Edit in a draft**. Choosing one entity's own details closes it.
+   A field of the entity type that no two entities may share (a unique field)
+   can't be given one value for all — set it one entity at a time.
+
+   A field with allowed values offers them under the property (**Must be one
+   of**), one click each. A value it doesn't allow, one not of the field's type,
+   or a required field removed is said under the property — and staged all the
+   same: it is publishing the draft that refuses it, listing each entity and
+   what to change (the same is said in the single entity's drawer, and on a
+   bulk change's Review step). Only what the draft changes is judged, so values
+   from before a field had its rules still publish.
+4. Choose **Stage for N** (or `⌘S` / `Ctrl-S`). The footer first says what it
+   will do — how many entities change, and how many values are replaced or left
+   as they are. Each entity's change is staged on its own, as if you had edited
+   them one by one — an entity you had already changed keeps that change too,
+   and one the edit wouldn't change isn't touched. It is one step however many
+   entities you hold: **Undo** on the message (or the toolbar's **Undo**) takes
+   the whole edit back. The drawer stays open on them, the properties you
+   changed marked **Staged**.
+
+The drawer keeps the entities it was opened on: clicking around the canvas
+never changes what an edit would touch. When the selection has moved on, it
+offers **Compare those N**; with one entity open and several selected, the
+drawer offers **Compare them**. Changes not yet staged hold any move of the
+drawer, like an edit to one entity does (**Unsaved changes**). Up to 10,000
+entities are edited here at once; more are compared.
+
+Outside a draft the same bar says **Compare N**: the drawer compares them,
+read-only, with **Edit in a draft**. Choosing one entity's own details turns
+the drawer to it — **Back** returns to the comparison.
+
+## Change a property across the graph
+
+To change a property on more entities than you can select — a whole layer,
+everything inside a container, a search's matches, the whole view — use the
+**Property Manager**. The change runs on the server and reaches every entity
+the target includes, however many, even ones not loaded on the canvas.
+
+1. Start from where you are:
+   - **Properties** in the View's header → **Properties** tab → **New**, or
+     **Change**, **Duplicate as…**, **Clean up…** or **Remove** on a property;
+   - right-click a layer's header → **Change properties in this layer…**;
+   - right-click a container → **Change properties of its children…** or
+     **…of everything inside…** (or **Change inside…** in its drawer);
+   - **Edit properties…** on the Advanced Search results bar.
+2. **What** — choose **Set value**, **Fill if empty**, **Rename**, **Copy to
+   new** or **Remove**, the property (the View's properties are suggested, with
+   how many entities hold each), and its value or new name. For a rename or
+   copy onto a name some entities already hold, choose to leave those entities
+   as they are or replace their value. Or tidy the values it holds — see
+   [Clean up a property's values](#clean-up-a-propertys-values).
+3. **Where** — choose which entities: the one you started from is already
+   chosen. You can also pick every entity in the View, every entity with the
+   property, the entities selected on the canvas, a layer, a container's
+   children or everything inside it (and the container itself, if you like),
+   the search's matches, or your own conditions. It searches **This view**
+   unless you choose **The whole data source** and confirm it.
+4. **Review** — the exact counts: how many entities will change, whose values
+   are replaced, and which are left as they are, with a few of them by name. It
+   also says what would stop the change: a name the platform keeps, the graph's
+   property-name budget, or another change still running on this draft. Save
+   or discard any staged changes first.
+   Add a **Reason** if you like: it names the change in the draft's history,
+   and is kept in the audit when the draft is published.
+5. **Apply**. Removing, renaming, cleaning up or overwriting 1,000 entities or
+   more — or any across the whole data source — asks you to type the
+   property's name.
+
+### Clean up a property's values
+
+The same dialog tidies the values a property already holds, under **Clean up
+values**:
+
+- **Find & replace** — text in its values, in any case unless you choose
+  **Match case**; **Whole value only** replaces a value only when it is all of
+  what you typed. Only text changes (each text value of a list too), and the
+  values the View holds are shown before → after as you type.
+- **Normalize** — trim spaces at either end, one space for many, one case
+  (lower, UPPER or Title), and in lists each value once. It says which
+  different values would become one.
+- **Merge values** — values that mean the same thing written differently
+  ("Finance", "finance ", "FINANCE") become one. It reads every value the View
+  holds for the property, groups the ones that differ only in case or in the
+  spaces around them, and lets you keep or drop each group and pick the value
+  to keep. A merge matches each value exactly, as it is stored.
+- **Convert kind** — store every value as one kind (Integer, Decimal, Text or
+  Boolean). It shows how the values are stored now and which won't convert
+  ("n/a" isn't a number, "1e3" isn't read as one, 2.5 isn't an integer): leave
+  those as they are, or remove them. A convert writes the kind you chose —
+  42, not "42" — and keeps every digit.
+
+Start one from the **Properties** tab too:
+
+- **Clean up…** on a property;
+- **Merge similar values…** on a property marked **similar values**;
+- **Convert all to …** on a property marked **mixed** (stored as several kinds);
+- tick two or more of a property's values, then **Merge into…**.
+
+Review counts **up to** how many entities a clean-up changes, since what it
+changes is only known as each one is read; for entities selected on the canvas
+the count is exact. A value that ends up reading as a date is stored the way
+dates always are (YYYY-MM-DD, or a moment in UTC). A convert lists the values it
+left as they were under **Which, and why**.
+
+Merging values of a field that must be unique for its type (into one value on
+several entities) is refused; tidying one with Normalize or Find & replace is
+allowed, and publishing refuses a draft whose values then collide.
+
+The change is applied to your draft a batch at a time. The **Properties** tab
+lists it under **Changes on this draft** with how far it has got (**Stop**
+keeps what it already changed), and keeps following it if you reload the
+page. When it ends, it says how many entities changed and which it couldn't
+change; **Which, and why** downloads them. Then the canvas reloads, or offers
+**Refresh canvas** if you have staged changes. Like any change in a draft, it
+reaches Published when the draft is published.
+
+Your draft's counts follow it as it goes: the display rules' tags and counts,
+the **Properties** tab's catalog and the counts on **Review** are your draft's
+— its new, changed and deleted entities included — and are read again as each
+batch lands, so they move while the change runs, not only once it is
+published. Each batch is folded into the last count rather than counted from
+the start, so a change to a million entities keeps them up to date as it goes.
+A few things are still the published graph's, and say so:
+
+- a rule that follows relationships, tests the View's layers, reads a field
+  only the platform keeps, or names an entity your draft changes — its count
+  reads **About *N***, and hovering it says why; for what your draft changed,
+  its tags are the published graph's (a note under the rules says so);
+- a property's least and greatest value, where your draft took out the value
+  at either end: every value is still within the range shown, which may be
+  wider than it is (**Numbers within …**);
+- Advanced Search's matches and exports;
+- everything, in a draft that has changed more than 200,000 entities and then
+  has its counts read afresh: its counts and property list are the published
+  graph's, and say so. A draft that large is also slower to open, so **Review**
+  warns before a change takes it past that — publish in parts to keep it quick.
+  (An administrator sets the limit: `GRAPHVER_DRAFT_SEARCH_MAX_DELTA`.)
+
+When the draft is published, the **Activity** log's entry for the publish lists
+the bulk changes it included — "Published 27,110 changes to Sales, including
+Rename owner → steward" — each with what it did, how many entities it changed in
+the draft, who ran it and the reason given. Its row under **Changes on this
+draft** then says **Published**. A review merged in part lists a change once
+what it changed has landed (**in part** when only some has).
+
+Entities are matched on your draft as the change starts — ones new in it, or
+changed there to match, included, and ones changed so they no longer match left
+alone. Each entity is changed once, however it was found. Entities added while
+the change runs aren't reached. Where your draft can't be searched, the change
+reaches only what the published graph matches, and says so when it ends:
+
+- a search that follows relationships, tests the View's layers, reads a field
+  only the platform keeps, or names an entity your draft changes;
+- a draft that has changed more than 200,000 entities;
+- a draft on a fork, and a change to relationships.
+
+Select the others on the canvas and change them there.
+
+### Fill missing required fields
+
+A field its entity type marks required can be filled wherever it is said to be
+missing. Missing means no value: no property, or an empty one.
+
+- **When a publish is refused** because entities were left without a required
+  field, each field it counts offers **Fill N missing…**. The dialog opens on
+  **Fill if empty** for exactly the entities the publish refused, including
+  ones new in this draft. One change fills up to 20,000. Past that it fills the
+  first 20,000 and says so: publish again for the rest.
+- **Comparing several entities**, a required field that some of them lack
+  offers **Fill missing on every Type…**. That reaches every entity of the type
+  in the View without a value for it, on your draft — ones new in it, or emptied
+  there, included. (For one entity, a required field you removed or emptied is
+  said on its row; give it a value there.)
+
+Give the value on **What**. A field with allowed values offers them; when it
+takes no other value, they are the only choice. Then review and apply it like
+any other change.
+
+### Undo a bulk change
+
+A bulk change that has ended — finished, stopped or failed part-way — can be
+undone while it is still only in your draft. Under **Changes on this draft**,
+choose **Undo** on its row: it says how many entities it puts back, then runs
+like any other change, a batch at a time, and is listed as **Undo: …** (a
+rename's undo, for instance, is **Undo: Rename owner → steward**).
+
+Each entity is put back to what it held just before the change — a property
+the change added is removed, one it removed comes back, and each value is
+stored as the kind it was. An entity changed again since, by hand or by
+another change, is left as it is: the undo counts it as **changed since** and
+lists it under **Which, and why**. One deleted in the draft since is left out
+too. When the undo has finished, the change's row says **Undone**.
+
+**Undo** isn't offered for a change the draft has published, in whole or in
+part (make a new change instead), one that changed nothing, one already
+undone, or an undo itself. While another change is running on the draft, wait
+for it to finish.
+
+### Keep a change for reuse
+
+A change you make often — fill a missing owner, tidy a department's spelling —
+can be kept to run again. On **Review**, choose **Save for reuse**, name it and
+add a description if you like. It is saved in the View's library, for everyone
+who can open the View, and offered to people who can edit the View. A reusable
+change keeps where it reaches as **Where** named it — the whole View, every
+entity with a property, a layer (by its name), a search's matches or your own
+conditions, in the View or the whole data source. A change aimed at the
+entities selected on the canvas, picked relationships or a container can't be
+kept: next time other entities may be meant, and the button says so.
+
+The **Properties** tab lists the kept changes under **Reusable changes**:
+**Run** opens the dialog with the whole change, ready to review; people who
+can edit the View can rename or delete one. **From other views** lists the
+reusable changes kept on the workspace's other views you can open, to run in
+this one. A run is counted and checked again in this View before anything
+changes: a layer is found by its name (if this View has none by that name, the
+dialog asks where), and **What** says when none of this View's entities holds
+the property.
 
 ## Change a relationship
 
@@ -397,9 +621,9 @@ with resolutions**.
 ## Your draft
 
 - **In the Business view**, the version menu shows once you're in a draft. On
-  Published, **More** (`⋯`) → **Your drafts…** opens your drafts, and **More →
-  Changes & history…** opens a draft's changes, or the published history, its
-  reviews and data health.
+  Published, **More** (`⋯`) → **Your drafts…** opens your drafts. **Reviews** in
+  the view's header, as in the Technical view, opens **Changes & Reviews**: a
+  draft's changes, or the published history, its reviews and data health.
 - **Switch versions.** The version menu in the toolbar shows **Published** or
   your draft's name. It lists **Published**, then **Your drafts**, **Shared
   with you** and **Public drafts**, each marked with a globe (public) or a lock

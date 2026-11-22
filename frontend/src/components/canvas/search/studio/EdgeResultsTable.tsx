@@ -2,16 +2,18 @@
  * EdgeResultsTable — a Connections search's edges as a table, for the room
  * Search Studio has: one row an edge, in the server's order, more loaded as
  * the end comes into view. Its edge properties can be added as columns;
- * rows can be picked and framed on the canvas, or copied as CSV.
+ * rows can be picked and framed on the canvas, copied as CSV, compared and
+ * edited in the relationship drawer, or have a property changed on the server.
  */
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Copy, Crosshair, Focus } from 'lucide-react'
+import { Columns3, Copy, Crosshair, Focus, PencilLine } from 'lucide-react'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useEdgeVisual, useEntityVisual } from '@/hooks/useEntityVisual'
 import { cn } from '@/lib/utils'
+import type { EdgeMemberRef } from '@/store/canvas'
 import type { AncestorRef, EdgeEnd, EdgeHit } from '@/types/search'
 
 import { revealEdge } from '../panel/EdgeResultsList'
@@ -26,6 +28,10 @@ export interface EdgeResultsTableProps {
     onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void | Promise<unknown>
     onOpen?: (urn: string) => void
     onFrame?: (urns: string[]) => void
+    /** Change a property on the picked rows' relationships, on the server — by their ids. */
+    onEditPicked?: (edgeIds: string[]) => void
+    /** Compare and edit the picked rows' relationships in the relationship drawer. */
+    onComparePicked?: (members: EdgeMemberRef[]) => void
     canLoadMore: boolean
     isLoadingMore: boolean
     /** Why the last page failed: the table stops asking by itself and
@@ -35,8 +41,8 @@ export interface EdgeResultsTableProps {
 }
 
 
-export function EdgeResultsTable({ edges, onReveal, onOpen, onFrame, canLoadMore, isLoadingMore, loadMoreError, onLoadMore }:
-    EdgeResultsTableProps) {
+export function EdgeResultsTable({ edges, onReveal, onOpen, onFrame, onEditPicked, onComparePicked, canLoadMore, isLoadingMore,
+    loadMoreError, onLoadMore }: EdgeResultsTableProps) {
     const scrollRef = useRef<HTMLDivElement>(null)
     const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set())
     const [shownKeys, setShownKeys] = useState<string[]>([])
@@ -115,6 +121,15 @@ export function EdgeResultsTable({ edges, onReveal, onOpen, onFrame, canLoadMore
                     {onFrame && (
                         <BulkButton icon={Focus} label="Frame on canvas"
                                     onClick={() => onFrame([...new Set(pickedEdges.flatMap((e) => [e.source.urn, e.target.urn]))])} />
+                    )}
+                    {onComparePicked && pickedEdges.length > 1 && (
+                        <BulkButton icon={Columns3} label="Compare & edit"
+                                    onClick={() => onComparePicked(pickedEdges.map((e) => ({
+                                        id: e.id, source: e.source.urn, target: e.target.urn, edgeType: e.edgeType, rollup: false,
+                                    })))} />
+                    )}
+                    {onEditPicked && (
+                        <BulkButton icon={PencilLine} label="Edit properties…" onClick={() => onEditPicked(pickedEdges.map((e) => e.id))} />
                     )}
                     <BulkButton icon={Copy} label="Copy as CSV"
                                 onClick={() => void navigator.clipboard?.writeText(toCsv(pickedEdges, shownKeys))} />

@@ -154,6 +154,15 @@ Then the two are merged rule by rule — a rule the draft added, changed or
 removed takes the draft's version, and every other rule keeps the published
 one, including rules added to the published View in the meantime.
 
+On a draft, the rules tag and count the draft's entities as the draft holds
+them — a new entity gets its tags, a deleted one loses them, an edited one is
+tagged by its new values — and are asked again as the draft changes, batch by
+batch while a [bulk property change](/guide/editing-in-a-draft#change-a-property-across-the-graph)
+runs. A rule that follows relationships, tests the View's layers or names an
+entity the draft changes keeps the published graph's answer for what the
+draft changed: its count reads **About *N*** (hover it for why), and a note
+under the rules says so.
+
 Rules are part of the View's design, so a **View version** keeps them and
 restoring a version brings its rules back.
 

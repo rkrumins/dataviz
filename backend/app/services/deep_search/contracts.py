@@ -37,8 +37,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import (
-    Any, AsyncContextManager, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple,
-    runtime_checkable,
+    Any, AsyncContextManager, Callable, Dict, FrozenSet, List, Mapping, Optional, Protocol,
+    Sequence, Set, Tuple, runtime_checkable,
 )
 
 from backend.common.adapters.circuit import register_logical_exception
@@ -141,7 +141,10 @@ class SearchRunContext:
       scans need;
     * ``members`` — a view whose members are too many to list as roots: they
       bound the search beside its roots (``ViewMembers``), read per request
-      from the request's database session.
+      from the request's database session;
+    * ``named`` — rule id → the urns its name references resolved to, on the
+      published graph: a draft answers a rule naming an entity it changed as
+      main does, and says so (``providers.draft_search``).
     """
     data_version: str = ""
     scope_hash: str = ""
@@ -150,6 +153,7 @@ class SearchRunContext:
     scan: bool = True
     slot: Optional[Callable[[], AsyncContextManager[bool]]] = None
     members: Optional[ViewMembers] = None
+    named: Optional[Mapping[str, FrozenSet[str]]] = None
 
 
 @runtime_checkable

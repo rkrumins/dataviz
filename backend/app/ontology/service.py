@@ -24,6 +24,7 @@ from .defaults import (
 from .models import (
     CoverageReport,
     EntityTypeDefEntry,
+    FieldData,
     OntologyData,
     RelationshipTypeDefEntry,
     ResolvedOntology,
@@ -291,22 +292,25 @@ def _entity_def_to_dict(e: EntityTypeDefEntry) -> dict:
             "double_click_action": e.behavior.double_click_action,
             "expansion_mode": e.behavior.expansion_mode,
         },
-        "fields": [
-            {
-                "id": f.id,
-                "name": f.name,
-                "type": f.type,
-                "required": f.required,
-                "show_in_node": f.show_in_node,
-                "show_in_panel": f.show_in_panel,
-                "show_in_tooltip": f.show_in_tooltip,
-                "display_order": f.display_order,
-                "format": f.format,
-                "reconciliation_key": f.reconciliation_key,
-                "unique": f.unique,
-            }
-            for f in e.fields
-        ],
+        "fields": [_field_to_dict(f) for f in e.fields],
+    }
+
+
+def _field_to_dict(f: FieldData) -> dict:
+    return {
+        "id": f.id,
+        "name": f.name,
+        "type": f.type,
+        "required": f.required,
+        "show_in_node": f.show_in_node,
+        "show_in_panel": f.show_in_panel,
+        "show_in_tooltip": f.show_in_tooltip,
+        "display_order": f.display_order,
+        "format": f.format,
+        "reconciliation_key": f.reconciliation_key,
+        "unique": f.unique,
+        "allowed_values": list(f.allowed_values),
+        "allow_other": f.allow_other,
     }
 
 
@@ -332,4 +336,5 @@ def _rel_def_to_dict(r: RelationshipTypeDefEntry) -> dict:
         "bidirectional": r.bidirectional,
         "show_label": r.show_label,
         "label_field": r.label_field,
+        "fields": [_field_to_dict(f) for f in r.fields],
     }

@@ -4,13 +4,19 @@
  * copy through `onEdit`; leaving a field or pressing Enter stages it (`onCommit`), and Esc puts it
  * back (`onCancel`). A property change is staged as it is made. Where a field is stored —
  * top-level or among the properties — is decided by `lib/nodeFields`.
+ *
+ * A schema field is edited as its type: a number is kept as a number, Yes/No is a switch, a date
+ * a date picker, tags are chips; a required one is marked, its allowed values are one click away,
+ * and a value publishing would refuse is said under it (`lib/fieldRules`) — never a block.
  */
 import { useId, useMemo, type ComponentType, type KeyboardEvent, type ReactNode } from 'react'
 import { ArrowRight, AtSign, Briefcase, Check, Copy, Database, FileText, Layers, Link, Sparkles, Type, Unlink } from 'lucide-react'
 import { useActiveView } from '@/store/schema'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { readSchemaField, toPayloadShape, withReserved, writeBusinessLabel, writeSchemaField } from '@/lib/nodeFields'
+import { fieldWarning, governedFields, inputTypeOf, isPropertyField } from '@/lib/fieldRules'
 import { cn } from '@/lib/utils'
+import type { EntityFieldDefinition } from '@/types/schema'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import {
   Note, NodeIdentityFacts, boundFieldIds, nameOnSave, useCanvasNodeIdentity,
@@ -18,6 +24,8 @@ import {
 import { IconButton } from '@/components/ui/Button'
 import { PropertyEditor } from '../PropertyEditor'
 import { PanelErrorBoundary } from '../PanelErrorBoundary'
+import { BooleanToggle, DateTimeField, TagInput } from '../property/valueWidgets'
+import { AllowedValuePicker, FieldNote } from '../property/FieldGovernance'
 import { PlacementEditor } from './EntityPlacement'
 
 type Data = Record<string, unknown>
@@ -31,10 +39,12 @@ const INPUT = cn(
   'hover:border-black/20 dark:hover:border-white/20 focus:border-accent-lineage/60 focus:ring-2 focus:ring-accent-lineage/15',
 )
 
-function Field({ label, icon: Icon, hint, children }: {
+function Field({ label, icon: Icon, hint, required, children }: {
   label: string
   icon?: ComponentType<{ className?: string }>
   hint?: ReactNode
+  /** Marked required (the entity type's field). */
+  required?: boolean
   children: (id: string) => ReactNode
 }) {
   const id = useId()
@@ -43,6 +53,8 @@ function Field({ label, icon: Icon, hint, children }: {
       <label htmlFor={id} className="text-xs font-semibold text-ink-muted flex items-center gap-2">
         {Icon && <Icon className="w-3.5 h-3.5" aria-hidden />}
         {label}
+        {required && <span className="-ml-1 text-rose-500" aria-hidden>*</span>}
+        {required && <span className="sr-only">(required)</span>}
       </label>
       {children(id)}
       {hint && <p className="text-[11px] text-ink-muted">{hint}</p>}
@@ -50,7 +62,16 @@ function Field({ label, icon: Icon, hint, children }: {
   )
 }
 
-interface SchemaField { id: string; name: string; type?: string }
+/** A field of the entity's type; its `type` as the ontology stores it (a `textarea` too). */
+type SchemaField = Pick<EntityFieldDefinition, 'id' | 'name'> & Partial<Omit<EntityFieldDefinition, 'type'>> & { type?: string }
+
+/** A number field's text, kept as the number it reads as (a value that isn't one stays as typed,
+ *  and is warned of). */
+const asNumber = (v: unknown) => {
+  if (typeof v !== 'string' || !v.trim()) return v
+  const n = Number(v.replace(/,/g, '').trim())
+  return Number.isFinite(n) ? n : v
+}
 
 /** The node with `bag` as its user properties — reserved names kept, and the business label,
  *  which the header also shows, kept as one with its property. */
@@ -101,7 +122,7 @@ export function EntityEditTab({
   /** The properties as first read, and — in a draft — as published: what each row says changed. */
   originalProps?: Data
   publishedProps?: Data
-  entityType?: { fields?: SchemaField[] } | null
+  entityType?: { name?: string; fields?: SchemaField[] } | null
   urn: string
   /** The node's own properties (reserved names the reader mirrors in are left out). */
   userProps: Data
@@ -126,6 +147,12 @@ export function EntityEditTab({
   const identity = useCanvasNodeIdentity()
   const bound = boundFieldIds(identity)
   const schemaFields = (entityType?.fields ?? []).filter((f) => !FORM_FIELD_IDS.includes(f.id) && !bound.has(f.id))
+  const typeLabel = entityType?.name || String(form.type ?? 'this type')
+  // The type's fields a publish judges, for the property rows below (allowed values, warnings).
+  const governed = useMemo(() => {
+    const fields = governedFields(entityType?.fields as EntityFieldDefinition[] | undefined)
+    return fields.size ? { fields, typeLabel } : null
+  }, [entityType?.fields, typeLabel])
 
   // Layer placement is VIEW config (referenceLayout.assignments), managed on the canvas — shown
   // here resolved and read-only.
@@ -195,19 +222,54 @@ export function EntityEditTab({
         <div className="pt-5 border-t border-glass-border">
           <h4 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-4">Schema properties</h4>
           <div className="space-y-4">
-            {schemaFields.map((field) => (
-              <Field key={field.id} label={field.name}>
-                {(id) => field.type === 'textarea' || field.type === 'markdown' ? (
-                  <textarea id={id} rows={2} className={cn(INPUT, 'resize-none')}
-                    value={text(readSchemaField(form, field.id))}
-                    onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }} {...commitOn} />
-                ) : (
-                  <input id={id} type="text" className={INPUT}
-                    value={text(readSchemaField(form, field.id))}
-                    onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }} {...commitOn} />
-                )}
-              </Field>
-            ))}
+            {schemaFields.map((field) => {
+              const value = readSchemaField(form, field.id)
+              const keep = (v: unknown) => onCommit((d) => writeSchemaField(d, field.id, v))
+              const type = inputTypeOf(field.type)
+              // What publishing would refuse of what this edit gives it (a new entity: of anything).
+              const changed = original === null || JSON.stringify(readSchemaField(original, field.id)) !== JSON.stringify(value)
+              const warning = changed && isPropertyField(field) ? fieldWarning(field as EntityFieldDefinition, value, typeLabel) : null
+              return (
+                <Field key={field.id} label={field.name} required={field.required}>
+                  {(id) => (
+                    <div className="space-y-1.5">
+                      {field.type === 'textarea' || field.type === 'markdown' ? (
+                        <textarea id={id} rows={2} className={cn(INPUT, 'resize-none')}
+                          value={text(value)}
+                          onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }} {...commitOn} />
+                      ) : type === 'boolean' ? (
+                        <div id={id} className="h-6 flex items-center">
+                          <BooleanToggle value={value === true || String(value).toLowerCase() === 'true'} onChange={keep} />
+                        </div>
+                      ) : type === 'tags' ? (
+                        <TagInput value={Array.isArray(value) ? value.map(String) : typeof value === 'string' && value ? value.split(',').map((s) => s.trim()).filter(Boolean) : []}
+                          onChange={keep} />
+                      ) : type === 'datetime' ? (
+                        <DateTimeField value={text(value)} onChange={keep} />
+                      ) : (
+                        <input id={id} className={cn(INPUT, type === 'number' && 'font-mono')}
+                          type={type === 'date' ? 'date' : type === 'url' ? 'url' : 'text'}
+                          inputMode={type === 'number' ? 'decimal' : undefined}
+                          aria-invalid={warning ? true : undefined}
+                          value={text(value)}
+                          onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }}
+                          {...(type === 'number' ? {
+                            onBlur: () => onCommit((d) => writeSchemaField(d, field.id, asNumber(readSchemaField(d, field.id)))),
+                            onKeyDown: (e: KeyboardEvent<HTMLInputElement>) => {
+                              if (e.key === 'Escape') onCancel()
+                              else if (e.key === 'Enter') { e.preventDefault(); onCommit((d) => writeSchemaField(d, field.id, asNumber(readSchemaField(d, field.id)))) }
+                            },
+                          } : commitOn)} />
+                      )}
+                      {isPropertyField(field) && (field.allowedValues?.length ?? 0) > 0 && (
+                        <AllowedValuePicker field={field as EntityFieldDefinition} value={value} label={field.name || field.id} onPick={keep} />
+                      )}
+                      {warning && <FieldNote>{warning}</FieldNote>}
+                    </div>
+                  )}
+                </Field>
+              )
+            })}
           </div>
         </div>
       )}
@@ -224,6 +286,7 @@ export function EntityEditTab({
               searchable
               groupByPath
               bare
+              governed={governed}
             />
           </PanelErrorBoundary>
         </div>

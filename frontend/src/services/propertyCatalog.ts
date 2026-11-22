@@ -22,7 +22,9 @@ const MAX_REQUESTS = 900
 /**
  * Follow the catalog of ``viewId`` to completion, calling ``onUpdate`` with
  * every answer. ``refresh`` reads the view again rather than taking the
- * catalog the server has at hand. Rejects when aborted or a request fails.
+ * catalog the server has at hand. ``valuesFor`` lists every value the
+ * catalog keeps for that one key (up to 1,000), not only the 20 most held.
+ * Rejects when aborted or a request fails.
  */
 export async function followCatalog(
     provider: RemoteGraphProvider,
@@ -30,6 +32,7 @@ export async function followCatalog(
     opts: {
         signal?: AbortSignal
         refresh?: boolean
+        valuesFor?: string
         onUpdate?: (catalog: SearchCatalogResult) => void
     } = {},
 ): Promise<SearchCatalogResult> {
@@ -40,6 +43,7 @@ export async function followCatalog(
             waitMs: WAIT_MS,
             ...(sessionId ? { sessionId } : {}),
             ...(opts.refresh && request === 0 ? { refresh: true } : {}),
+            ...(opts.valuesFor ? { valuesFor: opts.valuesFor } : {}),
         }, { signal: opts.signal })
         opts.onUpdate?.(answer)
         if (answer.status === 'complete') return answer

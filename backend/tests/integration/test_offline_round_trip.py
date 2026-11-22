@@ -12,6 +12,9 @@ change in it is either made or refused with a reason — Postgres.
   snapshot deletes what it left out.
 * **Nothing silent.** A urn cell edited, an exported edge given a new end, and two rows for one
   node each come back with a reason.
+* **A selection with its children.** Entities picked on the canvas, exported from a draft with
+  everything inside them (containment either way round, never lineage or a sibling), edited, and
+  imported back onto that draft: exactly the edit lands.
 
 Windows of two rows make every rule cross a window.
 """
@@ -39,7 +42,7 @@ from backend.app.services.versioning.service import GraphVersioningService
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")]
 
-ONTOLOGY = {"node_types": ["Table"], "edge_types": ["LINEAGE"]}
+ONTOLOGY = {"node_types": ["Table"], "edge_types": ["LINEAGE", "CONTAINS", "BELONGS_TO"]}
 X, Y, Z, V = (f"urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f{n}" for n in ("a1", "a2", "a3", "a4"))
 
 
@@ -53,9 +56,9 @@ def _node(eid, name, **props):
                         "description": f"{name} d0", "properties": props}}
 
 
-def _edge(eid, s, t):
+def _edge(eid, s, t, kind="LINEAGE"):
     return {"op": "create", "entity_kind": "edge", "entity_id": eid,
-            "payload": {"edgeType": "LINEAGE", "sourceEntityId": s, "targetEntityId": t}}
+            "payload": {"edgeType": kind, "sourceEntityId": s, "targetEntityId": t}}
 
 
 def _set(eid, **payload):
@@ -220,6 +223,48 @@ async def _script(h):
     assert replaced["deleted"] == 2, replaced                      # src:c, and the edge to it
 
 
+async def _selection(h):
+    from backend.app.services.versioning.import_export import stream
+    from backend.app.services.versioning.import_export.snapshot import open_snapshot
+
+    parent, child, grandchild, member, other, outside, sibling, its_child = (
+        f"urn:sel:{n}" for n in ("p", "c", "g", "m", "o", "x", "s", "sc"))
+    await h.graph([_node(parent, "sales"), _node(child, "orders"), _node(grandchild, "order_id"),
+                   _node(member, "returns"), _node(other, "refunds"), _node(outside, "finance"),
+                   _node(sibling, "hr"), _node(its_child, "staff"),
+                   _edge("e1", parent, child, "CONTAINS"), _edge("e2", child, grandchild, "CONTAINS"),
+                   _edge("e3", member, parent, "BELONGS_TO"),       # the child is the source
+                   _edge("e4", parent, other, "CONTAINS"),
+                   _edge("l1", other, outside),                     # lineage leaves the subtree
+                   _edge("e5", sibling, its_child, "CONTAINS")])
+    draft = await h.svc.open_draft(graph_id=h.gid, owner="u")
+    containment = {"CONTAINS": False, "BELONGS_TO": True}
+
+    # The canvas names a node without a URN gv:<entity id>; either name finds the same subtree.
+    snap = await open_snapshot(graph_id=h.gid, branch_id=draft)
+    assert await stream.with_children(snap, [f"gv:{sibling}"], containment) == {sibling, its_child}
+    assert await stream.with_children(snap, [sibling], {}) == {sibling}, "no containment: itself"
+
+    job = await h.ie.create_export_job(workspace_id="ws1", data_source_id=h.gid, graph_id=h.gid,
+                                       actor="u", export_format="xlsx", branch_id=draft,
+                                       select_ids=[parent], select_children=containment)
+    await h.ie.run_export(job["job_id"])
+    book = [rec async for rec in XlsxAdapter().parse(
+        _one(await _drain(h.store.open_stream(job["result_uri"]))))]
+    assert {r["entity_id"] for r in book if r["kind"] == "node"} == {
+        parent, child, grandchild, member, other}
+    assert {r["entity_id"] for r in book if r["kind"] == "edge"} == {"e1", "e2", "e3", "e4"}
+
+    _row(book, kind="node", entity_id=grandchild)["description"] = "edited offline"
+    back, summary, _rows = await h.upload_xlsx(book, branch_id=draft)
+    assert back == draft
+    assert _counts(summary) == {"new": 0, "updated": 1, "deleted": 0, "unchanged": 8,
+                                "invalid": 0}, summary
+    nodes, edges = await h.state(draft)
+    assert nodes[grandchild]["description"] == "edited offline"
+    assert nodes[sibling]["description"] == "hr d0" and (other, outside) in edges
+
+
 async def _nothing_silent(h):
     e1 = "urn:uuid:0192f5a4-0000-7000-8000-0000000000e2"
     await h.graph([_node(X, "orders"), _node(Y, "revenue"), _node(Z, "legacy"), _edge(e1, X, Y)])
@@ -238,8 +283,8 @@ async def _nothing_silent(h):
     assert summary["invalid"] == 2 and summary["updated"] == 1, summary
 
 
-@pytest.mark.parametrize("scenario", [_excel, _stale, _script, _nothing_silent],
-                         ids=["excel", "stale-workbook", "script", "nothing-silent"])
+@pytest.mark.parametrize("scenario", [_excel, _stale, _script, _nothing_silent, _selection],
+                         ids=["excel", "stale-workbook", "script", "nothing-silent", "selection"])
 def test_offline_edits_come_back_reconciled(scenario):
     async def run():
         await models.create_schema_and_partitions()

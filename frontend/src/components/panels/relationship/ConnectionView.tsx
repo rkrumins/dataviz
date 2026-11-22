@@ -10,14 +10,15 @@
  *
  * A roll-up's own relationships are between entities inside the two cards, which
  * the canvas has not loaded: they are read from the data source and listed with
- * the rest, each openable like any other.
+ * the rest, each openable like any other — or all of them compared and edited
+ * as one ("Compare & edit").
  */
 import { useId, useMemo, useState } from 'react'
-import { ChevronRight, Crosshair, Waypoints } from 'lucide-react'
+import { ChevronRight, Columns3, Crosshair, Waypoints } from 'lucide-react'
 import { useCanvasStore, type DrawerEdgeTarget, type EdgeMemberRef, type LineageNode } from '@/store/canvas'
 import { useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useEdgeVisual, useEntityColorSet, useEntityTypeLabel } from '@/hooks/useEntityVisual'
-import { targetFromMember } from '@/lib/drawerEdgeTarget'
+import { targetFromMember, targetFromMembers } from '@/lib/drawerEdgeTarget'
 import { useRelationshipsBeneath } from '@/hooks/useRelationshipsBeneath'
 import { Button } from '@/components/ui/Button'
 import { Segmented } from '@/components/ui/Segmented'
@@ -117,6 +118,12 @@ export function ConnectionView({ target, onClose, resolveNode, onFocusNode, onLo
           {onLocateMany && (
             <Button size="sm" variant="subtle" leftIcon={Crosshair} onClick={() => { void onLocateMany([target.source, target.target]) }}>
               Locate both ends
+            </Button>
+          )}
+          {relationshipCount > 1 && (
+            <Button size="sm" variant="subtle" leftIcon={Columns3}
+              onClick={() => useCanvasStore.getState().openEdgeDrawer(targetFromMembers(allRelationships, target.id))}>
+              Compare &amp; edit {relationshipCount.toLocaleString()}
             </Button>
           )}
           <Button

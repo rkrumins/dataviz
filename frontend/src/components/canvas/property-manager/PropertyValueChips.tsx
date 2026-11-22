@@ -9,6 +9,7 @@ import { Braces } from 'lucide-react'
 import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 
 import { entityTypeStyle } from './entityTypeStyles'
 import { typeMeta, type ValueType } from './propertyValueTypes'
@@ -23,18 +24,18 @@ export function TypeTile({ type, accent }: { type: ValueType; accent?: 'emerald'
         : accent === 'rose'
             ? 'bg-gradient-to-br from-rose-500/25 to-pink-500/15 border-rose-500/20 text-rose-500 dark:text-rose-400'
             : meta.tile
-    return (
+    const el = (
         <div
             className={cn(
                 'shrink-0 w-8 h-8 rounded-xl border flex items-center justify-center',
                 'shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]',
                 tile,
             )}
-            title={accent ? undefined : meta.label}
         >
             <Icon className="w-4 h-4" strokeWidth={2} />
         </div>
     )
+    return accent ? el : <HoverTip label={meta.label} className="shrink-0 inline-flex">{el}</HoverTip>
 }
 
 
@@ -55,37 +56,38 @@ export function SampleValueChips({
     if (values.length === 0) return null
     const shown = expanded ? values : values.slice(0, max)
     const rest = values.length - max
-    const chipBase = 'inline-flex items-center px-2 py-[3px] rounded-md text-[10.5px] font-mono bg-black/[0.04] dark:bg-white/[0.05] text-ink-secondary max-w-[170px] truncate transition-colors'
+    const chipBase = 'inline-flex items-center px-2 py-[3px] rounded-md text-[10.5px] font-mono bg-black/[0.04] dark:bg-white/[0.05] text-ink-secondary transition-colors'
     return (
         <div className="flex flex-wrap items-center gap-1">
             {shown.map((v, i) => (onValueClick ? (
-                <button
-                    key={`${v}-${i}`}
-                    type="button"
-                    title={`Search ${v} in Advanced Search`}
-                    onClick={(e) => { e.stopPropagation(); onValueClick(v) }}
-                    className={cn(chipBase, 'hover:bg-accent-lineage/15 hover:text-accent-lineage cursor-pointer')}
-                >
-                    {v}
-                </button>
+                <HoverTip key={`${v}-${i}`} label={`Search “${v}” in Advanced Search`} className="inline-flex min-w-0">
+                    <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onValueClick(v) }}
+                        className={cn(chipBase, 'max-w-[170px] truncate hover:bg-accent-lineage/15 hover:text-accent-lineage cursor-pointer')}
+                    >
+                        {v}
+                    </button>
+                </HoverTip>
             ) : (
                 <span
                     key={`${v}-${i}`}
                     title={v}
-                    className={cn(chipBase, 'hover:bg-black/[0.07] dark:hover:bg-white/[0.08]')}
+                    className={cn(chipBase, 'max-w-[170px] truncate hover:bg-black/[0.07] dark:hover:bg-white/[0.08]')}
                 >
                     {v}
                 </span>
             )))}
             {!expanded && rest > 0 && (
-                <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); setExpanded(true) }}
-                    className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-semibold tabular-nums bg-glass/50 text-ink-muted hover:text-ink transition-colors"
-                    title="Show all sample values"
-                >
-                    +{rest}
-                </button>
+                <HoverTip label="Show all sample values" className="inline-flex">
+                    <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setExpanded(true) }}
+                        className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-semibold tabular-nums bg-glass/50 text-ink-muted hover:text-ink transition-colors"
+                    >
+                        +{rest}
+                    </button>
+                </HoverTip>
             )}
             {expanded && values.length > max && (
                 <button
@@ -121,9 +123,9 @@ export function EntityTypeChips({ types, max = 3 }: { types: string[]; max?: num
                 </span>
             ))}
             {rest > 0 && (
-                <span className="text-[10px] text-ink-muted/70 tabular-nums" title={types.join(', ')}>
-                    +{rest}
-                </span>
+                <HoverTip label={types.join(', ')} className="inline-flex">
+                    <span className="text-[10px] text-ink-muted/70 tabular-nums">+{rest}</span>
+                </HoverTip>
             )}
         </span>
     )
