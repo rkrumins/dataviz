@@ -22,6 +22,8 @@ FalkorDB compiler's meaning, as the stub provider answers with it).
 * **catalog**: main's catalog with each entity of ``D`` taken out as main holds it and put back
   as the draft does (``CatalogStats.add_entity`` / ``folded``). A range can't be narrowed without
   reading again: where the draft took out a value at either end, the range is marked not exact.
+* **draft matches**: the entities of ``D`` a search matches on the draft, judged as membership a
+  batch at a time — what a bulk property job reaches beyond main's matches (``draft_matches``).
 
 A predicate the Python evaluator can't answer for one entity alone — one that follows
 relationships, tests the view's layers, reads a field only the platform keeps, or names an entity
@@ -661,6 +663,49 @@ class DraftSearch:
 
 
 _NOTES = frozenset({RELATIONSHIPS, LAYERS, PLATFORM_FIELD, NAMES_CHANGED})
+
+#: The rule a search is judged as, by :func:`draft_matches`.
+_TARGET = "target"
+
+
+async def draft_matches(overlay, scope: Mapping[str, Any], predicate: Any, judge) -> Dict[str, Any]:
+    """Which of the nodes a draft created or changed — ``D`` less what it removed, the urns in
+    one order — a search matches there, as their entity ids, sorted: ``{"ids": [...]}``. What a
+    search of the published graph can't name: a node new in the draft, or changed there to match.
+
+    Judged ``BATCH`` urns at a time as rule membership, ``judge(request)`` answering a
+    ``SearchMembershipRequest`` for ``scope`` and ``predicate`` (JSON, as a job keeps them) as
+    ``AdvancedSearchService.membership`` does — on the draft, its view's scope resolved as a
+    search resolves it. Or ``{"unsearched": why}``, with no ids, when not all of them can be
+    answered on the draft: ``fork`` (its searches are its root's), ``too_large`` (``D`` is past
+    ``DRAFT_SEARCH_MAX_DELTA``), ``inexact`` (the answer for them is main's, a note says, or the
+    search is refused as a rule) or ``unread`` (the draft's changes couldn't be read)."""
+    from backend.app.services.advanced_search_service import ValidationError
+    from backend.common.models.search import SearchMembershipRequest
+
+    searches = getattr(overlay, "_searches_draft", None)
+    if searches is None or not searches():
+        return {"unsearched": "fork"}
+    d = await overlay._delta_()
+    if len(await asyncio.to_thread(changed_set, d)) > vconfig.DRAFT_SEARCH_MAX_DELTA:
+        return {"unsearched": "too_large"}
+    live = [u for u in await asyncio.to_thread(_changed_order, d) if u not in d.node_remove]
+    ids: List[str] = []
+    for at in range(0, len(live), BATCH):
+        request = SearchMembershipRequest.model_validate({
+            "scope": scope, "items": [{"id": _TARGET, "predicate": predicate}],
+            "urns": live[at:at + BATCH]})
+        try:
+            out = await judge(request)
+        except ValidationError:
+            return {"unsearched": "inexact"}
+        if MEMBERSHIP_NOT_DRAFT_AWARE in out.notes:
+            return {"unsearched": "unread"}
+        if out.notes or _TARGET in out.errors:
+            return {"unsearched": "inexact"}
+        # A draft's nodes in D each carry their entity id (``branch_overlay_delta``).
+        ids += [d.node_modified[u] for u in out.matches.get(_TARGET) or ()]
+    return {"ids": sorted(set(ids))}
 
 
 def _too_large(state: Dict[str, Any]) -> bool:

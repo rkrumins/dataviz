@@ -316,8 +316,18 @@ the draft, who ran it and the reason given. Its row under **Changes on this
 draft** then says **Published**. A review merged in part lists a change once
 what it changed has landed (**in part** when only some has).
 
-Entities are found as they are published: an entity new in this draft isn't
-matched — select it on the canvas instead.
+Entities are matched on your draft as the change starts — ones new in it, or
+changed there to match, included, and ones changed so they no longer match left
+alone. Each entity is changed once, however it was found. Entities added while
+the change runs aren't reached. Where your draft can't be searched, the change
+reaches only what the published graph matches, and says so when it ends:
+
+- a search that follows relationships, tests the View's layers, reads a field
+  only the platform keeps, or names an entity your draft changes;
+- a draft that has changed more than 200,000 entities;
+- a draft on a fork, and a change to relationships.
+
+Select the others on the canvas and change them there.
 
 ### Fill missing required fields
 
@@ -331,10 +341,9 @@ missing. Missing means no value: no property, or an empty one.
   first 20,000 and says so: publish again for the rest.
 - **Comparing several entities**, a required field that some of them lack
   offers **Fill missing on every Type…**. That reaches every entity of the type
-  in the View without a value for it, as Published holds them — so one new in
-  this draft, or emptied in it, is filled there in the drawer instead. (For one
-  entity, a required field you removed or emptied is said on its row; give it a
-  value there.)
+  in the View without a value for it, on your draft — ones new in it, or emptied
+  there, included. (For one entity, a required field you removed or emptied is
+  said on its row; give it a value there.)
 
 Give the value on **What**. A field with allowed values offers them; when it
 takes no other value, they are the only choice. Then review and apply it like
