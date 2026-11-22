@@ -14,14 +14,20 @@
  * Built as a ``motion.aside`` flex-sibling (mirrors EntityDrawer) so it
  * shrinks the canvas rather than overlaying it, and is driven purely by
  * props + the referenceModelStore and viewLibraryStore — no canvas
- * coupling — so other canvases can mount it with just a ``viewId``.
+ * coupling — so other canvases can mount it with just a ``viewId``. Its
+ * left edge drags to the width the reader wants, kept the next time it
+ * opens, within the details panel's bounds.
  */
 import { AnimatePresence, motion } from 'framer-motion'
 import { Download, Loader2, RefreshCw, SlidersHorizontal, Tags, Layers, Upload, X } from 'lucide-react'
-import { useState } from 'react'
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { ResizeHandle } from '@/components/canvas/search/panel/ResizeHandle'
+import { useHostRect } from '@/components/canvas/search/studio/useHostRect'
+import { CANVAS_MIN_WIDTH, DRAWER_MAX_WIDTH, DRAWER_MIN_WIDTH } from '@/components/panels/shell/drawerWidth'
+import { usePreferencesStore } from '@/store/preferences'
 import { exportViewLibrary, type LibraryImportResult } from '@/services/viewLibraryService'
 import { useDisplayRules } from '@/store/referenceModelStore'
 import { useViewLibraryStore } from '@/store/viewLibraryStore'
@@ -53,6 +59,11 @@ export interface PropertyManagerDrawerProps {
 
 type Tab = 'properties' | 'rules'
 
+/** Its width until the reader drags its edge: a step wider than the details
+ *  panel, so a property's name, coverage and values have room. */
+const DEFAULT_WIDTH = 'clamp(440px, 34vw, 640px)'
+const defaultPx = () => Math.min(640, Math.max(440, Math.round(window.innerWidth * 0.34)))
+
 /** Editor target: a brand-new rule (optionally seeded), or an edit. */
 type EditorState =
     | { mode: 'closed' }
@@ -80,6 +91,26 @@ export function PropertyManagerDrawer({
     const reorderRules = useViewLibraryStore((s) => s.reorderRules)
     const reloadLibrary = useViewLibraryStore((s) => s.reload)
     const { notify } = useAppNotifications()
+
+    // ── Width: dragged at the left edge and kept, by the details panel's rules (DrawerFrame) ──
+    const asideRef = useRef<HTMLElement>(null)
+    const storedWidth = usePreferencesStore((s) => s.propertyManagerWidth)
+    const setStoredWidth = usePreferencesStore((s) => s.setPropertyManagerWidth)
+    const [liveWidth, setLiveWidth] = useState<number | null>(null)
+    const [dragging, setDragging] = useState(false)
+    const [rowEl, setRowEl] = useState<Element | null>(null)
+    useLayoutEffect(() => setRowEl(asideRef.current?.parentElement ?? null), [open])
+    const row = useHostRect(rowEl)
+    const maxWidth = row && row.width > 0
+        ? Math.max(DRAWER_MIN_WIDTH, Math.min(DRAWER_MAX_WIDTH, row.width - CANVAS_MIN_WIDTH))
+        : DRAWER_MAX_WIDTH
+    const chosen = liveWidth ?? storedWidth
+    const width = chosen === null ? null : Math.max(DRAWER_MIN_WIDTH, Math.min(maxWidth, chosen))
+    const widthCss = width === null ? DEFAULT_WIDTH : `${width}px`
+    const commitWidth = useCallback((w: number) => {
+        setStoredWidth(w)
+        setLiveWidth(null)
+    }, [setStoredWidth])
 
     const reportFailure = (what: string) => (e: unknown) =>
         notify('error', `Couldn't ${what} — ${(e as Error).message}`)
@@ -143,18 +174,20 @@ export function PropertyManagerDrawer({
         <AnimatePresence>
             {open && (
                 <motion.aside
+                    ref={asideRef}
                     data-panel="property-manager"
                     initial={{ width: 0, opacity: 0 }}
-                    animate={{ width: 'clamp(380px, 30vw, 520px)', opacity: 1 }}
+                    animate={{ width: widthCss, opacity: 1 }}
                     exit={{ width: 0, opacity: 0 }}
-                    transition={MOTION.drawerSlide}
+                    // No easing while dragging: the edge follows the pointer.
+                    transition={dragging ? { duration: 0 } : MOTION.drawerSlide}
                     className={cn(
                         'relative h-full flex-shrink-0 overflow-hidden',
                         'bg-canvas-elevated/98 backdrop-blur-2xl',
                         'border-l border-glass-border shadow-lg shadow-black/20',
                     )}
                 >
-                    <div className="w-[clamp(380px,30vw,520px)] h-full flex flex-col overflow-hidden">
+                    <div className="h-full flex flex-col overflow-hidden" style={{ width: widthCss }}>
                         {/* Header */}
                         <div className="flex-shrink-0 p-4 border-b border-glass-border/50 bg-gradient-to-br from-accent-lineage/[0.08] to-transparent">
                             <div className="flex items-center justify-between">
@@ -282,6 +315,16 @@ export function PropertyManagerDrawer({
                             )}
                         </div>
                     </div>
+                    <ResizeHandle
+                        edge="left"
+                        label="Resize Property Manager"
+                        width={width ?? Math.min(maxWidth, defaultPx())}
+                        min={DRAWER_MIN_WIDTH}
+                        max={maxWidth}
+                        onResize={setLiveWidth}
+                        onDragChange={setDragging}
+                        onCommit={commitWidth}
+                    />
                 </motion.aside>
             )}
         </AnimatePresence>
