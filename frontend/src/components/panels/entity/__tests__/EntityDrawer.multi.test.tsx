@@ -4,14 +4,18 @@
  * some do (On 1 of 3). In a draft a change is made for all of them — set, fill where missing,
  * rename, remove, add — kept pending until "Stage", which stages each entity's own edit at once
  * (and Undo takes it back); unstaged changes hold every move of the drawer. Outside a draft it
- * compares, read-only, and offers the way into one.
+ * compares, read-only, and offers the way into one in its top line. Entities are named first; a
+ * list opened on them adds each one's ID. The drawer is wider comparing than reading one.
  */
 import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
+import { usePersonaStore } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
+import { NO_DRAFT, NO_VERSION_CONTROL } from '@/features/versioning/hooks/useEntityEditing'
 import { convertBackendEntityType, useSchemaStore } from '@/store/schema'
 import type { EntityTypeDefinition } from '@/providers/GraphDataProvider'
 import { useNotificationStore } from '@/components/ui/notifications'
@@ -255,6 +259,97 @@ describe('several entities in the drawer', () => {
     expect(screen.getByText(/You can view this draft but not change it/)).toBeInTheDocument()
     expect(screen.queryByText(/kept in a draft/)).toBeNull()
     expect(screen.getByRole('button', { name: 'Edit in a draft' })).toBeInTheDocument()
+  })
+})
+
+describe('several entities: the way into a draft', () => {
+  it('sits in the top line, beside Close — and "switch to a draft" is its tip, not a box', async () => {
+    const user = userEvent.setup()
+    editingNow.blocked = NO_DRAFT
+    render(<EntityDrawer canEdit={false} onStartEditing={vi.fn()} />)
+    const edit = screen.getByRole('button', { name: 'Edit in a draft' })
+    expect(edit.closest('div')).toContainElement(screen.getByRole('button', { name: 'Close details' }))
+    expect(edit.compareDocumentPosition(screen.getByRole('heading', { name: '3 entities' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText(NO_DRAFT)).toBeNull()
+    await user.hover(edit)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_DRAFT)
+  })
+
+  it('a reason the tip can\'t give stays, as a note — without version control there is no draft to offer', () => {
+    editingNow.blocked = NO_VERSION_CONTROL
+    render(<EntityDrawer canEdit={false} onStartEditing={vi.fn()} />)
+    expect(screen.getByText(NO_VERSION_CONTROL)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit in a draft' })).toBeNull()
+  })
+})
+
+describe('several entities: names first, IDs when a list opens', () => {
+  beforeEach(() => {
+    usePersonaStore.setState({ mode: 'business' })
+    useCanvasStore.setState({ nodes: [
+      node('orders', { sla: '1h' }, { label: 'Orders' }),
+      node('returns', { sla: '4h' }, { label: 'Returns' }),
+      // Named by its ID: there is nothing more to show beneath it.
+      node('refunds', { sla: '1h' }),
+    ] } as never)
+  })
+  afterEach(() => usePersonaStore.setState({ mode: 'technical' }))
+
+  it('the chips name them; the list they open adds each ID beneath, once', async () => {
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    expect(screen.getByRole('button', { name: 'Orders' })).toBeInTheDocument()
+    expect(screen.queryByText('orders')).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: /List them/ }))
+    const list = screen.getByRole('button', { name: 'Open Orders' }).closest('ul')!
+    expect(within(list).getByText('Orders')).toBeInTheDocument()
+    expect(within(list).getByText('orders').tagName).toBe('CODE')
+    expect(within(list).getAllByRole('button', { name: 'Copy ID' })).toHaveLength(2)
+    expect(within(list).getAllByText('refunds')).toHaveLength(1)
+  })
+
+  it('a value opened shows who holds it by name, with the ID beneath', async () => {
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    await user.click(within(rowOf('sla')).getByRole('button', { name: 'sla' }))
+    const values = screen.getByRole('list', { name: 'Values of sla' })
+    // Closed, a value says how many hold it — and what share — never who.
+    expect(within(values).getByText('67%')).toBeInTheDocument()
+    expect(within(values).queryByText('Returns')).toBeNull()
+    await user.click(within(values).getByRole('button', { name: /Show the 1 entity with this value/ }))
+    expect(within(values).getByText('Returns')).toBeInTheDocument()
+    expect(within(values).getByText('returns').tagName).toBe('CODE')
+  })
+
+  it('one not loaded any more is listed as not loaded, by its ID — never named by it', async () => {
+    const user = userEvent.setup()
+    act(() => useCanvasStore.getState().openNodesDrawer([...IDS, 'urn:archived']))
+    render(<EntityDrawer canEdit />)
+    expect(screen.getByText(/1 of the selection isn't on the canvas any more/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /List them/ }))
+    const list = screen.getByRole('button', { name: 'Open Orders' }).closest('ul')!
+    expect(within(list).getByText('Not loaded')).toBeInTheDocument()
+    expect(within(list).getByText('urn:archived').tagName).toBe('CODE')
+    expect(within(list).queryByRole('button', { name: /^Open Not loaded/ })).toBeNull()
+  })
+})
+
+describe('several entities: a wider drawer', () => {
+  it('is wider comparing several than reading one — in the same frame', () => {
+    const innerWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true })
+    usePreferencesStore.setState({ drawerWidth: null })
+    try {
+      render(<EntityDrawer canEdit />)
+      const width = () => Number(screen.getByRole('separator', { name: 'Resize details panel' }).getAttribute('aria-valuenow'))
+      const comparing = width()
+      act(() => useCanvasStore.getState().openNodeDrawer('orders'))
+      expect(screen.getByRole('heading', { name: 'orders' })).toBeInTheDocument()
+      expect(comparing).toBeGreaterThan(width())
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { value: innerWidth, configurable: true })
+    }
   })
 })
 

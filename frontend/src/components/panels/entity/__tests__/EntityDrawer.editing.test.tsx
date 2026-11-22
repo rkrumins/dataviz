@@ -1,17 +1,19 @@
 /**
  * EntityDrawer — an entity is edited only where the edit can be kept, in a
  * draft. Anywhere else the Edit tab is disabled and says why (or, where a draft
- * can be opened, the drawer offers one), and the JSON is read-only; staging an
- * edit says it still needs Review & Save, never that it was saved.
+ * can be opened, the drawer offers one in its top line), and the JSON is
+ * read-only; staging an edit says it still needs Review & Save, never that it
+ * was saved.
  */
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
     NO_DRAFT, NO_VERSION_CONTROL, type EntityEditing,
 } from '@/features/versioning/hooks/useEntityEditing'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { usePersonaStore } from '@/store/persona'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 
 import { EntityDrawer } from '../EntityDrawer'
@@ -98,5 +100,34 @@ describe('EntityDrawer — editing is kept only in a draft', () => {
         openDrawer({ canEdit: true, onStartEditing: vi.fn() })
         expect(screen.queryByRole('tab', { name: 'Edit' })).not.toBeInTheDocument()
         expect(screen.queryByRole('button', { name: /Edit in a draft/ })).not.toBeInTheDocument()
+    })
+})
+
+describe('EntityDrawer — the way to a draft sits in the top line', () => {
+    afterEach(() => usePersonaStore.setState({ mode: 'technical' }))
+
+    it.each(['technical', 'business'] as const)('in the %s view: beside Close, above the name, its tip saying why', async (mode) => {
+        usePersonaStore.setState({ mode })
+        editing = { offered: true, blocked: NO_DRAFT }
+        const user = userEvent.setup()
+        openDrawer({ onStartEditing: vi.fn() })
+        const edit = screen.getByRole('button', { name: 'Edit in a draft' })
+        expect(edit.closest('div')).toContainElement(screen.getByRole('button', { name: 'Close entity details' }))
+        expect(edit.compareDocumentPosition(screen.getByRole('heading', { name: 'Orders' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+        await user.hover(edit)
+        expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_DRAFT)
+    })
+
+    it('leaves the Business view, with nothing to edit here, no empty tab row', () => {
+        usePersonaStore.setState({ mode: 'business' })
+        editing = { offered: true, blocked: NO_DRAFT }
+        openDrawer({ onStartEditing: vi.fn() })
+        expect(screen.queryByRole('tablist')).not.toBeInTheDocument()
+        // The header ends with its quick actions: no row below them holds a lone button.
+        const header = screen.getByRole('heading', { name: 'Orders' }).parentElement!
+        expect(header.lastElementChild).toContainElement(screen.getByRole('button', { name: 'Customize' }))
+        // The Technical view keeps its tabs: View and JSON.
+        act(() => usePersonaStore.setState({ mode: 'technical' }))
+        expect(screen.getByRole('tablist', { name: 'Entity details' })).toBeInTheDocument()
     })
 })

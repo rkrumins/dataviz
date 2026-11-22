@@ -253,15 +253,27 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(screen.getByText(reason)).toBeInTheDocument()
   })
 
-  it('on the published graph, offers a draft instead of Edit', async () => {
+  it('on the published graph, offers a draft instead of Edit — in its top line, its tip saying why', async () => {
     const user = userEvent.setup()
     const onStartEditing = vi.fn()
     setup(rel('e1'))
     render(<RelationshipDrawer canEdit={false} onStartEditing={onStartEditing} onReverseEdge={vi.fn()} />)
     expect(screen.queryByRole('tab', { name: /^Edit/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reverse direction' })).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Open a draft' }))
+    const edit = screen.getByRole('button', { name: 'Edit in a draft' })
+    expect(edit.closest('div')).toContainElement(screen.getByRole('button', { name: 'Close relationship details' }))
+    expect(screen.queryByText(/^Published — open a draft/)).not.toBeInTheDocument()
+    await user.hover(edit)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Published — open a draft to change this relationship')
+    await user.click(edit)
     expect(onStartEditing).toHaveBeenCalled()
+  })
+
+  it('on the published graph with no draft to open here, says so in a notice', () => {
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit={false} />)
+    expect(screen.getByText('Published — open a draft to change this relationship.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit in a draft' })).not.toBeInTheDocument()
   })
 
   it('a relationship with no recorded history is not edited here', () => {
