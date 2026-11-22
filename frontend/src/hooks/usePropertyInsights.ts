@@ -7,11 +7,7 @@
 import { useEffect, useState } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import {
-    getAffectedSample, getValueDistribution,
-    type AffectedSample, type ValueDistribution,
-} from '@/services/propertyInsights'
-import type { Predicate } from '@/types/search'
+import { getValueDistribution, type ValueDistribution } from '@/services/propertyInsights'
 
 
 interface Async<T> { data: T | null; loading: boolean; error: string | null }
@@ -42,24 +38,5 @@ export function useValueDistribution(viewId: string, key: string, enabled: boole
             })
         return () => controller.abort()
     }, [provider, viewId, key, enabled])
-    return state
-}
-
-
-/** Sample of entities a predicate matches (lazy, keyed on the predicate). */
-export function useAffectedSample(viewId: string, predicate: Predicate | null, enabled: boolean): Async<AffectedSample> {
-    const provider = useGraphProvider()
-    const [state, setState] = useState<Async<AffectedSample>>(IDLE)
-    const predicateKey = predicate ? JSON.stringify(predicate) : ''
-    useEffect(() => {
-        if (!enabled || !viewId || !predicate) { setState(IDLE); return }
-        const controller = new AbortController()
-        setState({ data: null, loading: true, error: null })
-        getAffectedSample(provider, viewId, predicate, 8, controller.signal)
-            .then((data) => { if (!controller.signal.aborted) setState({ data, loading: false, error: null }) })
-            .catch((e: unknown) => { if (!controller.signal.aborted) setState({ data: null, loading: false, error: (e as Error).message }) })
-        return () => controller.abort()
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [provider, viewId, predicateKey, enabled])
     return state
 }

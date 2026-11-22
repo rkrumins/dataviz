@@ -38,6 +38,7 @@ import { AnimatePresence } from 'framer-motion'
 import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { isApplePlatform } from '@/lib/platform'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { generateColorFromType } from '@/lib/type-visuals'
 import { FeedMoreChip } from './FeedMoreChip'
 
@@ -47,14 +48,12 @@ import { GenericNode } from './nodes/GenericNode'
 import { LineageEdge } from './edges/LineageEdge'
 import { AggregatedEdge } from './edges/AggregatedEdge'
 import { searchLineIds } from './searchLines'
-import { CanvasControls } from './CanvasControls'
 import { EdgeLegend } from './EdgeLegend'
 import { EntityDrawer } from '../panels/entity/EntityDrawer'
 import { RelationshipDrawer } from '../panels/RelationshipDrawer'
 import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
-import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
 import { PropertyOpHost } from './property-manager/PropertyOpHost'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
@@ -69,13 +68,13 @@ import { compareSelectionAction, menuSelection } from './selectionMenu'
 import { SelectionBar } from './context-view/SelectionBar'
 import { StagedChangesPanel } from './context-view/StagedChangesPanel'
 import { Kbd } from '@/components/ui/Kbd'
-import { DraftSaveControls } from '@/features/versioning/canvas/DraftSaveControls'
 import { remapIdSet, useCanvasEditGate, useDraftSave, useStagedUndoShortcuts } from '@/features/versioning/canvas/useDraftSave'
 import { useCanvasPropertyJobs } from '@/features/versioning/canvas/useCanvasPropertyJobs'
 import { InlineNodeEditor } from './InlineNodeEditor'
 import { CommandPalette } from './CommandPalette'
-import { EditorToolbar } from './EditorToolbar'
 import { TraceToolbar } from './TraceToolbar'
+import { CanvasToolRow } from './CanvasToolRow'
+import { CanvasDisplayMenu } from './context-view/header/DisplayMenu'
 import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
 import { BuilderEmptyState } from './create/BuilderEmptyState'
@@ -115,7 +114,6 @@ import { useShallow } from 'zustand/react/shallow'
 import { isSelectableNode, useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useSearchStore } from '@/store/searchStore'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { drawerWidthCss } from '@/components/panels/shell/drawerWidth'
@@ -177,9 +175,8 @@ export function GraphCanvas({ className }: { className?: string }) {
   const schemaEntityTypes = useViewEntityTypes()
   const edgeTypeMetadata = useEdgeTypeMetadataMap()
   const { showMinimap, showGrid, drawerWidth } = usePreferencesStore()
-  // The Business view keeps the canvas's own zoom, minimap and search; the
-  // extra control panel, the layout-direction switch and the edge-details
-  // panel are the Technical view's.
+  // Both views share the toolbar (CanvasToolRow); LOD, the Explore chip, the
+  // layout-direction switch and the edge-details panel are the Technical view's.
   const technical = usePersonaMode() === 'technical'
 
   // 4. Local state
@@ -193,7 +190,6 @@ export function GraphCanvas({ className }: { className?: string }) {
   // The builder holds the rail unless it stepped aside for an entity's details (it stays mounted, hidden).
   const builderOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'rail' && !s.suspended)
   const buildOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'build')
-  const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   // Advanced search (Map + Builder + Power tools + Ask) — mounted as a
   // flex-sibling drawer alongside EntityDrawer / EdgeDetailPanel.
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
@@ -201,6 +197,8 @@ export function GraphCanvas({ className }: { className?: string }) {
   // drawer (parity with ContextViewCanvas); the engine recomputes match
   // sets so GenericNode renders the tag chips.
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
+  // Select several, armed from the toolbar: a plain click adds to the selection.
+  const [multiSelectArmed, setMultiSelectArmed] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   useDisplayRuleEngine(activeView?.id ?? null)
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
@@ -1154,9 +1152,9 @@ export function GraphCanvas({ className }: { className?: string }) {
     (event, node) => {
       // A Mac Ctrl-click is the secondary click: the context menu answers it.
       if (isApplePlatform() && event.ctrlKey && !event.metaKey) return
-      selectNode(node.id, event.metaKey || event.ctrlKey || event.shiftKey)
+      selectNode(node.id, multiSelectArmed || event.metaKey || event.ctrlKey || event.shiftKey)
     },
-    [selectNode],
+    [selectNode, multiSelectArmed],
   )
 
   const onNodeDoubleClick: NodeMouseHandler = useCallback(
@@ -1361,22 +1359,6 @@ export function GraphCanvas({ className }: { className?: string }) {
     [rawNodes, getValidEdgeTypes],
   )
 
-  // Save graph to backend
-  const handleSave = useCallback(async () => {
-    try {
-      const response = await fetchWithTimeout('/api/v1/graph/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes: rawNodes, edges: rawEdges }),
-      })
-      if (!response.ok) throw new Error('Failed to save graph')
-      alert('Graph saved successfully!')
-    } catch (error) {
-      console.error('Error saving graph:', error)
-      alert('Failed to save graph')
-    }
-  }, [rawNodes, rawEdges])
-
   // ESC-driven trace exit. Mirrors ContextViewCanvas: purges the edges the
   // trace merged into the canvas store, clears trace state, and reverts
   // ancestor-chain auto-expansion. Without this, ESC fell through to plain
@@ -1487,104 +1469,109 @@ export function GraphCanvas({ className }: { className?: string }) {
   // RENDER
   return (
     <div className={cn('w-full h-full relative flex flex-col', className)}>
-      {/* Editor Toolbar */}
-      <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
-        <EditorToolbar
-          onAddNode={() => useHierarchyBuilderStore.getState().open()}
-          onOpenBuild={() => useHierarchyBuilderStore.getState().openBuild()}
-          onSave={handleSave}
-          onDelete={canvasWritable ? interactions.deleteSelected : undefined}
-          edgeTypes={relationshipTypes}
-          activeEdgeType={activeEdgeType}
-          onSelectEdgeType={setActiveEdgeType}
-        />
-        {/* Property Manager toggle — browse properties + author
-            display-rule tags. Mirrors the Context View affordance. */}
-        {activeView?.id && (
-          <PropertyManagerButton
-            open={propertyManagerOpen}
-            onToggle={() => setPropertyManagerOpen((v) => !v)}
+      {/* The toolbar — the same tools in both views (CanvasToolRow). */}
+      <CanvasToolRow
+        lead={
+          <>
+            <h2 className="text-sm font-display font-semibold text-ink whitespace-nowrap">Graph View</h2>
+            {technical && (
+              <>
+                <span className="px-2 py-0.5 rounded-md bg-accent-lineage/10 text-accent-lineage text-2xs font-medium">
+                  {trace.isTracing ? 'Tracing' : 'Explore'}
+                </span>
+                <HoverTip
+                  className="inline-flex"
+                  label={semanticZoom.isEnabled ? 'Stop expanding entities as you zoom' : 'Expand entities as you zoom in, and collapse them as you zoom out'}
+                  detail="Level of detail follows the zoom"
+                >
+                  <button
+                    type="button"
+                    onClick={semanticZoom.toggle}
+                    className={cn(
+                      'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium whitespace-nowrap transition-all',
+                      semanticZoom.isEnabled
+                        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                        : 'bg-black/5 dark:bg-white/10 text-ink-muted',
+                    )}
+                  >
+                    <ZoomIn className="w-3.5 h-3.5" />
+                    {semanticZoom.isEnabled ? 'LOD On' : 'LOD Off'}
+                  </button>
+                </HoverTip>
+              </>
+            )}
+          </>
+        }
+        // Advanced search — in the row, so it covers nothing on the canvas.
+        search={
+          <CanvasSearchTrigger
+            open={advancedSearchOpen}
+            onToggle={() => setAdvancedSearchOpen((v) => !v)}
+            inline
           />
-        )}
-        {/* In a draft: Undo, Redo and the way to Review & Save what was staged here. */}
-        {isDraft && <DraftSaveControls />}
-      </div>
-
-      {/* Header */}
-      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
-        <div className="pointer-events-auto inline-flex items-center gap-3 bg-canvas-elevated/95 backdrop-blur rounded-xl border border-glass-border px-4 py-2 shadow-lg">
-          <h2 className="text-sm font-display font-semibold text-ink">Graph View</h2>
-          <span className="px-2 py-0.5 rounded-md bg-accent-lineage/10 text-accent-lineage text-2xs font-medium">
-            {trace.isTracing ? 'Tracing' : 'Explore'}
-          </span>
-          <button
-            onClick={() => setShowLineageFlow(!showLineageFlow)}
-            className={cn(
-              'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all',
-              showLineageFlow
-                ? 'bg-accent-lineage/10 text-accent-lineage'
-                : 'bg-black/5 dark:bg-white/10 text-ink-muted',
-            )}
-          >
-            <GitBranch className="w-3.5 h-3.5" />
-            {showLineageFlow ? 'Flow On' : 'Flow Off'}
-          </button>
-          <button
-            onClick={semanticZoom.toggle}
-            className={cn(
-              'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all',
-              semanticZoom.isEnabled
-                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                : 'bg-black/5 dark:bg-white/10 text-ink-muted',
-            )}
-            title="Semantic Zoom: auto-expand/collapse entities based on zoom level"
-          >
-            <ZoomIn className="w-3.5 h-3.5" />
-            {semanticZoom.isEnabled ? 'LOD On' : 'LOD Off'}
-          </button>
-        </div>
-      </div>
-
-      {/* Trace Toolbar — full controls, only when tracing (same as ContextViewCanvas/HierarchyCanvas) */}
-      <AnimatePresence>
-        {trace.isTracing && (
-          <div className="absolute top-14 left-1/2 -translate-x-1/2 z-20 pointer-events-auto">
-            <TraceToolbar
-              focusNodeName={displayMap.get(trace.focusId || '')?.name || trace.focusId || 'Unknown'}
-              upstreamCount={trace.upstreamCount}
-              downstreamCount={trace.downstreamCount}
-              showUpstream={trace.showUpstream}
-              showDownstream={trace.showDownstream}
-              onToggleUpstream={() => trace.setShowUpstream(!trace.showUpstream)}
-              onToggleDownstream={() => trace.setShowDownstream(!trace.showDownstream)}
-              onExitTrace={() => {
-                trace.clearTrace()
-                setExpandedNodes(new Set())
-              }}
-              onRetrace={trace.retrace}
-              onTraceUpstream={() => trace.focusId && trace.traceUpstream(trace.focusId)}
-              onTraceDownstream={() => trace.focusId && trace.traceDownstream(trace.focusId)}
-              onTraceFullLineage={() => trace.focusId && trace.traceFullLineage(trace.focusId)}
-              config={trace.config}
-              onConfigChange={trace.setConfig}
-              traceResult={trace.result}
-              statistics={trace.statistics}
-              isLoading={trace.isLoading}
-              availableLineageEdgeTypes={lineageEdgeTypes}
-              position="top"
-            />
-          </div>
-        )}
-      </AnimatePresence>
+        }
+        display={
+          <CanvasDisplayMenu
+            zoom={rfInstance ? {
+              onZoomIn: () => void rfInstance.zoomIn({ duration: 200 }),
+              onZoomOut: () => void rfInstance.zoomOut({ duration: 200 }),
+              onFit: () => void rfInstance.fitView({ padding: 0.2, duration: 300 }),
+            } : undefined}
+            mapAndGrid
+          />
+        }
+        showLineageFlow={showLineageFlow}
+        onToggleLineageFlow={() => setShowLineageFlow(!showLineageFlow)}
+        traceActive={trace.isTracing}
+        onStartTrace={(id) => void trace.startTrace(id)}
+        onExitTrace={exitTrace}
+        multiSelectArmed={multiSelectArmed}
+        onToggleMultiSelect={() => setMultiSelectArmed((v) => !v)}
+        propertyManagerOpen={propertyManagerOpen}
+        onTogglePropertyManager={activeView?.id ? () => setPropertyManagerOpen((v) => !v) : undefined}
+        onRevealOnCanvas={revealAndFocus}
+      />
 
       {/* Canvas + right-rail row. The rail panels (builder / EntityDrawer /
           EdgeDetailPanel) are width-animated flex siblings, so opening one
           shrinks the ReactFlow area rather than overlaying it — parity with
-          ContextViewCanvas. The absolute HUD (toolbars, header, stats, legend)
-          stays anchored to the root and floats over this row. */}
+          ContextViewCanvas. The absolute HUD (stats, legend) stays anchored
+          to the root and floats over this row; the toolbar sits above it. */}
       <div className="flex-1 min-h-0 flex">
       {/* React Flow Canvas */}
       <div className="relative flex-1 min-w-0">
+        {/* Trace Toolbar — full controls, only when tracing (same as ContextViewCanvas/HierarchyCanvas) */}
+        <AnimatePresence>
+          {trace.isTracing && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 pointer-events-auto">
+              <TraceToolbar
+                focusNodeName={displayMap.get(trace.focusId || '')?.name || trace.focusId || 'Unknown'}
+                upstreamCount={trace.upstreamCount}
+                downstreamCount={trace.downstreamCount}
+                showUpstream={trace.showUpstream}
+                showDownstream={trace.showDownstream}
+                onToggleUpstream={() => trace.setShowUpstream(!trace.showUpstream)}
+                onToggleDownstream={() => trace.setShowDownstream(!trace.showDownstream)}
+                onExitTrace={() => {
+                  trace.clearTrace()
+                  setExpandedNodes(new Set())
+                }}
+                onRetrace={trace.retrace}
+                onTraceUpstream={() => trace.focusId && trace.traceUpstream(trace.focusId)}
+                onTraceDownstream={() => trace.focusId && trace.traceDownstream(trace.focusId)}
+                onTraceFullLineage={() => trace.focusId && trace.traceFullLineage(trace.focusId)}
+                config={trace.config}
+                onConfigChange={trace.setConfig}
+                traceResult={trace.result}
+                statistics={trace.statistics}
+                isLoading={trace.isLoading}
+                availableLineageEdgeTypes={lineageEdgeTypes}
+                position="top"
+              />
+            </div>
+          )}
+        </AnimatePresence>
+
         <ReactFlow
           onInit={setRfInstance}
           onMoveEnd={(_, viewport) => handleViewportChange(viewport)}
@@ -1640,14 +1627,14 @@ export function GraphCanvas({ className }: { className?: string }) {
               className="opacity-40"
             />
           )}
-          {technical && <CanvasControls />}
           {showMinimap && (
             <MiniMap
               nodeColor={minimapNodeColor}
-              maskColor="rgba(0, 0, 0, 0.1)"
               className={cn(
                 'glass-panel-subtle !rounded-xl !overflow-hidden',
                 '!bottom-4 !right-4',
+                // Its mask as a variable rather than the inline maskColor, so the dark theme in globals.css can override it.
+                '[--xy-minimap-mask-background-color:rgb(0_0_0/0.1)]',
               )}
               pannable
               zoomable
@@ -1687,18 +1674,23 @@ export function GraphCanvas({ className }: { className?: string }) {
       {/* Stats Bar */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3">
         {technical && (
-        <button
-          onClick={toggleDirection}
-          className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2 hover:bg-accent-lineage/10 transition-colors"
-          title={`Layout: ${direction === 'LR' ? 'Left to Right' : 'Top to Bottom'}`}
+        <HoverTip
+          label={direction === 'LR' ? 'Lay the graph out top to bottom' : 'Lay the graph out left to right'}
+          detail={`Laid out ${direction === 'LR' ? 'left to right' : 'top to bottom'} now`}
+          className="inline-flex"
         >
-          {direction === 'LR' ? (
-            <ArrowRight className="w-3.5 h-3.5 text-accent-lineage" />
-          ) : (
-            <ArrowDown className="w-3.5 h-3.5 text-accent-lineage" />
-          )}
-          <span className="text-2xs text-ink-muted">{direction}</span>
-        </button>
+          <button
+            onClick={toggleDirection}
+            className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2 hover:bg-accent-lineage/10 transition-colors"
+          >
+            {direction === 'LR' ? (
+              <ArrowRight className="w-3.5 h-3.5 text-accent-lineage" />
+            ) : (
+              <ArrowDown className="w-3.5 h-3.5 text-accent-lineage" />
+            )}
+            <span className="text-2xs text-ink-muted">{direction}</span>
+          </button>
+        </HoverTip>
         )}
         {isLayouting && (
           <div className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">
@@ -1731,10 +1723,12 @@ export function GraphCanvas({ className }: { className?: string }) {
       </div>
 
       {/* Edge Legend */}
-      {/* Clear of the details drawer, at whatever width it is dragged to. */}
+      {/* Clear of the details drawer, at whatever width it is dragged to, and above the minimap
+          while it is shown: its top is 183px up (1rem, React Flow's 15px panel margin, 152px tall). */}
       <div
         className={cn(
-          'absolute bottom-40 z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
+          'absolute z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
+          showMinimap ? 'bottom-[12.5rem]' : 'bottom-40',
           !(entityDrawerOpen || drawerEdge) && 'right-4',
         )}
         style={entityDrawerOpen || drawerEdge
@@ -1794,14 +1788,9 @@ export function GraphCanvas({ className }: { className?: string }) {
       )}
       </div>{/* end canvas + right-rail row */}
 
-      {/* Advanced search trigger + panel. The trigger handles ⌘⇧F
-          globally; the panel mounts as a flex-sibling drawer (parity
-          with ContextViewCanvas). Disabled when no view is active. */}
-      <CanvasSearchTrigger
-        open={advancedSearchOpen}
-        onToggle={() => setAdvancedSearchOpen((v) => !v)}
-        hideButton={isEdgePanelOpen}
-      />
+      {/* Advanced search panel — its trigger (⌘⇧F) is in the toolbar. The
+          panel mounts as a flex-sibling drawer (parity with ContextViewCanvas).
+          Disabled when no view is active. */}
       <AnimatePresence>
         {activeView?.id && advancedSearchOpen && (
           <SearchMapPanel

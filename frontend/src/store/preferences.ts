@@ -141,6 +141,10 @@ interface PreferencesState {
   // sits there. Null until the reader drags it: the panel's own default.
   drawerWidth: number | null
   setDrawerWidth: (width: number | null) => void
+  // The Property Manager's width in px, kept apart from the details panel's:
+  // the two can be open side by side. Null until the reader drags it.
+  propertyManagerWidth: number | null
+  setPropertyManagerWidth: (width: number | null) => void
   // The entity drawer's sections — which show, in what order — per view.
   // Null is that view's default (panels/entity/drawerLayout.ts).
   drawerLayout: Record<PersonaMode, DrawerLayout | null>
@@ -466,6 +470,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       })),
       drawerWidth: null,
       setDrawerWidth: (drawerWidth) => set({ drawerWidth }),
+      propertyManagerWidth: null,
+      setPropertyManagerWidth: (propertyManagerWidth) => set({ propertyManagerWidth }),
       drawerLayout: { business: null, technical: null },
       setDrawerLayout: (mode, layout) => set((state) => ({
         drawerLayout: { ...state.drawerLayout, [mode]: layout },

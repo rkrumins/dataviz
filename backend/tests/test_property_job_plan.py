@@ -221,6 +221,49 @@ def test_a_window_plans_each_entity_once_and_counts_what_it_skips():
                         "detail": "It already has steward."}]
 
 
+# ── a preview's sample: one entity before and after ──────────────────────────
+def test_a_sample_row_shows_the_value_before_and_after_as_the_job_writes_it():
+    assert pj.sample_row(_op("set", value="ana"), {"owner": "bo", "x": 1}) == {
+        "before": "bo", "after": "ana", "outcome": "change"}
+    assert pj.sample_row(_op("set", value="ana"), {"owner": "ana"}) == {
+        "before": "ana", "after": "ana", "outcome": "unchanged"}
+    # A key it holds none of: no value before; after a removal, none after.
+    assert pj.sample_row(_op("fillEmpty", value="ana"), {}) == {"after": "ana", "outcome": "change"}
+    assert pj.sample_row(_op("remove"), {"owner": "bo"}) == {"before": "bo", "outcome": "change"}
+    assert pj.sample_row(_op("remove"), {}) == {"outcome": "unchanged"}
+    # Planned as the job plans it: a date in the one form it is stored in.
+    assert pj.sample_row(_op("set", value="2026-01-06 12:00+02:00"), {}) == {
+        "after": "2026-01-06T10:00:00Z", "outcome": "change"}
+
+
+def test_a_sample_row_of_a_rename_or_copy_shows_both_keys_and_a_conflict_skipped():
+    rename = _op("rename", to="steward")
+    assert pj.sample_row(rename, {"owner": "ana"}) == {"before": "ana", "after": "ana", "outcome": "change"}
+    assert pj.sample_row(rename, {"owner": "ana", "steward": "bo"}) == {
+        "before": "ana", "to": "bo", "after": "bo", "outcome": "skip", "reason": "conflict"}
+    assert pj.sample_row({**rename, "onConflict": "overwrite"}, {"owner": "ana", "steward": "bo"}) == {
+        "before": "ana", "to": "bo", "after": "ana", "outcome": "change"}
+    assert pj.sample_row(_op("copy", to="steward"), {}) == {"outcome": "unchanged"}
+
+
+def test_a_sample_row_of_a_clean_up_uses_its_rewriter_and_skips_what_wont_convert():
+    convert = _op("convert", key="k", toKind="Integer")
+    rewrite = pj.rewriter(convert)
+    assert pj.sample_row(convert, {"k": "42"}, rewrite) == {"before": "42", "after": 42, "outcome": "change"}
+    assert pj.sample_row(convert, {"k": "x"}, rewrite) == {
+        "before": "x", "after": "x", "outcome": "skip", "reason": "unconvertible"}
+    assert pj.sample_row({**convert, "onFail": "remove"}, {"k": "x"}) == {"before": "x", "outcome": "change"}
+    assert pj.sample_row(_op("normalize", key="d", case="lower"), {"d": " Fin "}) == {
+        "before": " Fin ", "after": "fin", "outcome": "change"}
+
+
+def test_a_sample_row_skipped_by_its_read_is_left_as_it_is():
+    for reason in ("no_longer_matches", "derived", "missing"):
+        assert pj.sample_row(_op("set", value="ana"), {"owner": "bo"}, skip=reason) == {
+            "before": "bo", "after": "bo", "outcome": "skip", "reason": reason}
+    assert pj.sample_row(_op("remove"), {}, skip="missing") == {"outcome": "skip", "reason": "missing"}
+
+
 # ── a search target's matches, checked again on the draft's values ───────────
 def test_a_search_answered_by_an_entitys_own_values_is_checked_again():
     gold = {"kind": "property", "key": "tier", "op": "eq", "value": "gold"}
@@ -390,6 +433,111 @@ async def test_targets_are_kept_a_window_a_file(monkeypatch):
     assert pj.targets_key("vjob_1", 0) == "property-jobs/vjob_1/targets/0.ndjson"
 
 
+class _Lease:
+    """A job's lease that records its checkpoints."""
+
+    def __init__(self):
+        self.beats = []
+
+    def check(self):
+        pass
+
+    async def checkpoint(self, s, **values):
+        self.beats.append(values)
+
+
+def _resolver(monkeypatch, store, main_keys, draft=None, recheck=None):
+    """A worker that resolves a search target: main's export is ``main_keys``; the draft's own
+    matches are ``draft`` (``draft_matches``' answer)."""
+    from contextlib import asynccontextmanager
+
+    async def targets(job):
+        for key in main_keys:
+            yield key
+
+    async def draft_matches(job):
+        return draft
+
+    @asynccontextmanager
+    async def session():
+        yield None
+
+    async def position(job_id):
+        return pj._Position(None, pj.empty_summary(), 0, 0)
+
+    monkeypatch.setattr(pj.db, "graphver_session", session)
+    worker = pj.PropertyJobWorker(None, store, targets=targets,
+                                  draft_matches=draft_matches if draft is not None else None)
+    worker._lease, worker._position, worker._recheck = _Lease(), position, recheck
+    return worker
+
+
+async def test_a_search_target_writes_the_drafts_own_matches_first_then_mains(monkeypatch):
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 2)
+    store = _Store()
+    gold = pj.predicate_recheck({"kind": "property", "key": "tier", "op": "eq", "value": "gold"})
+    worker = _resolver(monkeypatch, store, ["urn:a", "urn:b", "urn:c"],
+                       {"ids": ["B", "N9", "X"]}, gold)
+    await worker._resolve("vjob_1", {"target": {"kind": "predicate"}})
+    assert [await pj.read_lines(store, pj.targets_key("vjob_1", i)) for i in range(4)] == [
+        ["gv:B", "gv:N9"], ["gv:X"], ["urn:a", "urn:b"], ["urn:c"]]
+    assert await pj.read_lines(store, pj.extras_key("vjob_1")) == ["B", "N9", "X"]
+    assert pj.extras_key("vjob_1") == "property-jobs/vjob_1/extras.ids"
+    final = worker._lease.beats[-1]
+    assert (final["last_cursor"], final["total"]) == ("apply:0", 6)
+    assert (final["summary"]["chunks"], final["summary"]["draftChunks"]) == (4, 2)
+    assert final["summary"]["recheck"] == {"exact": True, "note": None}
+
+
+async def test_the_drafts_own_matches_count_toward_the_most_a_job_edits(monkeypatch):
+    monkeypatch.setattr(config, "PROPERTY_JOB_MAX_TARGETS", 4)
+    worker = _resolver(monkeypatch, _Store(), ["urn:a", "urn:b"], {"ids": ["B", "N9", "X"]})
+    with pytest.raises(pj.PropertyJobStopped) as stopped:
+        await worker._resolve("vjob_1", {"target": {"kind": "predicate"}})
+    assert stopped.value.code == "too_many_targets"
+
+
+async def test_without_draft_matches_the_note_says_why(monkeypatch):
+    """None found, or none searched: no draft chunks, and the summary says why when they weren't —
+    a Connections search never asks."""
+    store = _Store()
+    worker = _resolver(monkeypatch, store, ["urn:a"], {"unsearched": "too_large"},
+                       pj.predicate_recheck({"kind": "hasProperty", "key": "owner"}))
+    await worker._resolve("vjob_1", {"target": {"kind": "predicate"}})
+    summary = worker._lease.beats[-1]["summary"]
+    assert (summary["chunks"], summary["draftChunks"]) == (1, 0)
+    assert summary["recheck"] == {"exact": True, "note": pj.DRAFT_UNSEARCHED["too_large"].format(
+        n=config.DRAFT_SEARCH_MAX_DELTA)}
+    assert "more than 200,000 entities" in summary["recheck"]["note"]
+    assert not (await store.stat(pj.extras_key("vjob_1"))).exists
+
+    asked = []
+    worker = _resolver(monkeypatch, store, ["E1"], {"ids": ["never"]})
+    worker._draft_matches = lambda job: asked.append(job)
+    await worker._resolve("vjob_2", {"target": {"kind": "predicate"}, "entityKind": "edge"})
+    assert asked == [] and worker._lease.beats[-1]["summary"]["recheck"] == {
+        "exact": False, "note": f"{pj.RECHECK_APPROXIMATE} {pj.DRAFT_UNSEARCHED['edges']}"}
+
+
+def test_the_recheck_note_says_what_wasnt_judged_on_the_draft():
+    exact = pj.predicate_recheck({"kind": "hasProperty", "key": "owner"})
+    assert pj.recheck_summary(exact, None) == {"exact": True, "note": None}
+    assert pj.recheck_summary(None, None) == {"exact": False, "note": pj.RECHECK_APPROXIMATE}
+    assert pj.recheck_summary(None, "inexact") == {
+        "exact": False, "note": f"{pj.RECHECK_APPROXIMATE} {pj.DRAFT_UNSEARCHED['inexact']}"}
+    for why in ("inexact", "unread", "fork"):
+        note = pj.recheck_summary(exact, why)["note"]
+        assert "new in your draft, or changed there to match, weren't searched" in note, why
+        assert note.endswith("select them on the canvas to change them."), why
+
+
+def test_a_window_of_mains_matches_skips_what_the_drafts_windows_reached():
+    found = {"urn:a": ("A", {"code": "x"}, "urn:a"), "urn:old-b": ("B", {"code": "x"}, "urn:b")}
+    found, deleted, stale = pj.skip_reached({"B", "C", "D"}, found, {"urn:c": "C", "urn:e": "E"},
+                                            {"urn:d": "D"})
+    assert (list(found), deleted, stale) == (["urn:a"], {"urn:e": "E"}, {})
+
+
 async def test_the_refused_rows_read_as_csv_and_never_as_a_formula():
     store = _Store()
     await pj.write_lines(store, pj.refused_key("vjob_1", 1), [
@@ -483,6 +631,30 @@ def test_what_publishing_would_refuse_is_warned_never_refused(V):
     assert warned({"kind": "copy", "key": "label", "to": "tier"}) == [("field_checked", "Dataset", "tier")]
     assert warned({"kind": "set", "key": "other", "value": "x"}) == []
     assert V._property_job_warnings(_request(V, {"kind": "remove", "key": "owner"}).op, None) == []
+
+
+def test_a_job_over_relationships_is_warned_by_the_relationship_types_fields(V):
+    """Named as the ontology spells the type — the rules key edge types in capitals."""
+    from backend.app.services.versioning.ontology import EdgeRule, FieldRule
+    rules = OntologyRules(
+        entity_types={"Dataset": EntityRule(fields={"tier": FieldRule(type="status", allowed=("x",))})},
+        edge_types={"OWNS": EdgeRule(fields={
+            "tier": FieldRule(type="status", allowed=("gold", "silver"), name="Tier"),
+            "since": FieldRule(type="date", required=True, name="Since")}), "FLOWS_TO": EdgeRule()},
+        edge_type_canonical={"OWNS": "Owns", "FLOWS_TO": "FLOWS_TO"})
+
+    def warned(op):
+        body = _request(V, op, {"edgeIds": ["e1", "e2"]})
+        assert V._check_property_job(body.op, body.target, rules) is None      # never a refusal
+        return V._property_job_warnings(body.op, rules, edges=True)
+
+    [tier] = warned({"kind": "set", "key": "tier", "value": "bronze"})
+    assert (tier["code"], tier["entityType"], tier["field"]) == ("field_not_allowed", "Owns", "tier")
+    assert tier["message"].endswith("A Owns relationship given it can't be published until it holds a value "
+                                    "the field allows.")
+    assert [(w["code"], w["field"]) for w in warned({"kind": "remove", "key": "since"})] == [("field_required", "since")]
+    assert [w["code"] for w in warned({"kind": "copy", "key": "note", "to": "since"})] == ["field_checked"]
+    assert warned({"kind": "set", "key": "tier", "value": "gold"}) == []
 
 
 def test_the_job_keeps_its_op_as_the_plan_reads_it(V):
@@ -645,6 +817,10 @@ def _search_hook(monkeypatch, *, refuse=None):
             return SearchExportResult(session_id="s1", status="complete", format="ndjson",
                                       download_token=token)
 
+        async def membership(self, request, *, run_context):
+            seen.setdefault("membership", []).append((request, run_context.data_version))
+            return "answer"
+
         async def open_export(self, session_id, scope_hash):
             seen["opened"] = (session_id, scope_hash)
 
@@ -656,11 +832,11 @@ def _search_hook(monkeypatch, *, refuse=None):
     @contextlib.asynccontextmanager
     async def session():
         async def commit():
-            return None
+            seen["commits"] = seen.get("commits", 0) + 1
         yield SimpleNamespace(commit=commit)
 
     async def engine_for(*_a, **_kw):
-        return SimpleNamespace()
+        return SimpleNamespace(provider="the draft's overlay")
 
     async def data_version(_engine):
         return "dv1"
@@ -711,6 +887,27 @@ async def test_a_search_matching_too_much_stops_before_its_export_is_whole(monke
         [urn async for urn in V._property_targets_from_job(_SEARCH_JOB)]
     assert stopped.value.code == "too_many_targets" and "more than 10 entities" in str(stopped.value)
     assert seen["exports"] == [(None, 5000), ("s1", 5000)]          # 6 rows, then 12: stopped
+
+
+async def test_a_search_targets_draft_matches_are_its_membership_on_the_draft(monkeypatch, V):
+    """The draft's own matches are judged on the draft's engine, as the search's membership in the
+    job's own view and scope — no transaction held between requests."""
+    from types import SimpleNamespace
+    from backend.app.providers import draft_search
+
+    seen = _search_hook(monkeypatch)
+
+    async def draft_matches(provider, scope, predicate, judge):
+        seen["draft"] = (provider, scope, predicate)
+        return {"ids": ["N9"], "answer": await judge("request")}
+    monkeypatch.setattr(draft_search, "draft_matches", draft_matches)
+    out = await V._property_draft_matches_from_job(_SEARCH_JOB)
+    assert out == {"ids": ["N9"], "answer": "answer"}
+    assert seen["draft"] == ("the draft's overlay", {"viewId": "v1", "scopeMode": "view"},
+                             {"kind": "hasProperty", "key": "owner"})
+    assert seen["membership"] == [("request", "dv1")] and seen["commits"] == 1
+    assert await seen["can_read"](SimpleNamespace(id="v1", workspace_id="ws1", data_source_id="ds1"))
+    assert not await seen["can_read"](SimpleNamespace(id="v2", workspace_id="ws1", data_source_id="ds1"))
 
 
 async def test_a_search_the_engine_refuses_stops_the_job_saying_why(monkeypatch, V):

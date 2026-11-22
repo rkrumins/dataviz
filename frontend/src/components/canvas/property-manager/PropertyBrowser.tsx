@@ -27,9 +27,10 @@
  * to …** where a property is stored as several kinds, and **Merge into…** for
  * values picked from its value bars.
  */
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { motion } from 'framer-motion'
 import {
-    AlertTriangle, ArrowDownWideNarrow, ArrowRightLeft, ChevronRight, CircleSlash, Combine, Copy, CopyPlus, Database, Layers, ListChecks, Loader2,
+    AlertTriangle, ArrowDownWideNarrow, ArrowRightLeft, ChevronRight, CircleSlash, Combine, Copy, CopyPlus, Database, Ellipsis, Layers, ListChecks, Loader2,
     Pencil, Plus, ScanSearch, Search, Sparkles, Tag, Tags, Trash2, WandSparkles,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
@@ -77,6 +78,17 @@ type SortMode = 'usage' | 'name'
 /** Rows drawn at first, and added per "Show more" — a view can carry
  *  thousands of keys. */
 const ROWS_PAGE = 100
+
+/** A row's actions: at most two inline and the More actions menu, at the end of its first line, shown
+ *  on hover or focus (and while the menu is open). Their room is kept at rest, so showing them never
+ *  covers the name or its badges. */
+const ROW_ACTIONS = cn(
+    'shrink-0 flex items-center gap-0.5 opacity-0 transition-opacity',
+    'group-hover:opacity-100 group-focus-within:opacity-100 has-[[data-state=open]]:opacity-100',
+)
+
+/** A row's name and its badges: the badges wrap under the name when the row is narrow. */
+const ROW_TITLE = 'flex-1 min-w-0 flex flex-wrap items-center gap-x-2 gap-y-1'
 
 
 export function PropertyBrowser({
@@ -256,7 +268,7 @@ export function PropertyBrowser({
             {/* Properties */}
             {(listed.length > 0 || filteredNewKeys.length > 0) && (
                 <section className="flex flex-col gap-1.5">
-                    <h4 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted flex items-center gap-1.5">
+                    <h4 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-muted flex items-center gap-1.5">
                         <Database className="w-3 h-3" /> Properties · {(listed.length + filteredNewKeys.length).toLocaleString()}
                     </h4>
                     <div className="flex flex-col gap-1.5">
@@ -311,22 +323,27 @@ export function PropertyBrowser({
             {/* Tags */}
             {filteredTags.length > 0 && (
                 <section className="flex flex-col gap-1.5">
-                    <h4 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted flex items-center gap-1.5">
+                    <h4 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-muted flex items-center gap-1.5">
                         <Tag className="w-3 h-3" /> Tags · {filteredTags.length.toLocaleString()}
                     </h4>
                     <div className="flex flex-wrap gap-1.5">
                         {filteredTags.map(({ tag, count }) => (
-                            <button
+                            <HoverTip
                                 key={tag}
-                                type="button"
-                                onClick={() => onCreateRuleFromPredicate({ kind: 'tag', op: 'hasAny', values: [tag] }, tag)}
-                                title={`Create a display rule tagging the ${count.toLocaleString()} entities tagged "${tag}"`}
-                                className="group inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20 transition-colors"
+                                label="Create a display rule from this tag"
+                                detail={`It tags the ${count.toLocaleString()} entities tagged “${tag}”`}
+                                className="inline-flex"
                             >
-                                {tag}
-                                <span className="text-[10px] tabular-nums text-accent-lineage/70">{count.toLocaleString()}</span>
-                                <Plus className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
-                            </button>
+                                <button
+                                    type="button"
+                                    onClick={() => onCreateRuleFromPredicate({ kind: 'tag', op: 'hasAny', values: [tag] }, tag)}
+                                    className="group inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20 transition-colors"
+                                >
+                                    {tag}
+                                    <span className="text-[10px] tabular-nums text-accent-lineage/70">{count.toLocaleString()}</span>
+                                    <Plus className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                </button>
+                            </HoverTip>
                         ))}
                     </div>
                 </section>
@@ -358,19 +375,23 @@ function SortToggle({ sort, onChange }: { sort: SortMode; onChange: (s: SortMode
     return (
         <div className="shrink-0 inline-flex rounded-lg p-0.5 bg-canvas-base border border-glass-border">
             {(['usage', 'name'] as SortMode[]).map((s) => (
-                <button
+                <HoverTip
                     key={s}
-                    type="button"
-                    onClick={() => onChange(s)}
-                    title={s === 'name' ? 'Sort A–Z' : 'Sort by how many entities carry it'}
-                    aria-pressed={sort === s}
-                    className={cn(
-                        'inline-flex items-center gap-1 px-2 h-8 rounded-md text-[11px] font-medium transition-colors',
-                        sort === s ? 'bg-accent-lineage/20 text-accent-lineage' : 'text-ink-muted hover:text-ink',
-                    )}
+                    label={s === 'name' ? 'Sort the properties by name' : 'Sort the properties by how many entities carry each'}
+                    className="inline-flex"
                 >
-                    {s === 'name' ? 'A–Z' : <><ArrowDownWideNarrow className="w-3 h-3" /> Most used</>}
-                </button>
+                    <button
+                        type="button"
+                        onClick={() => onChange(s)}
+                        aria-pressed={sort === s}
+                        className={cn(
+                            'inline-flex items-center gap-1 px-2 h-8 rounded-md text-[11px] font-medium transition-colors',
+                            sort === s ? 'bg-accent-lineage/20 text-accent-lineage' : 'text-ink-muted hover:text-ink',
+                        )}
+                    >
+                        {s === 'name' ? 'A–Z' : <><ArrowDownWideNarrow className="w-3 h-3" /> Most used</>}
+                    </button>
+                </HoverTip>
             ))}
         </div>
     )
@@ -545,50 +566,58 @@ function PropertyRow({
                 tabIndex={0}
                 aria-expanded={expanded}
                 onClick={() => setExpanded((v) => !v)}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded((v) => !v) } }}
-                className="flex items-start gap-3 px-3.5 py-3 cursor-pointer"
+                // Only keys pressed on the row itself: Enter on one of its actions, or in its menu, belongs to that action.
+                onKeyDown={(e) => {
+                    if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setExpanded((v) => !v) }
+                }}
+                className="flex items-start gap-3 px-4 py-3.5 cursor-pointer"
             >
                 <TypeTile type={type} accent={pendingRemove ? 'rose' : undefined} />
                 <div className="flex-1 min-w-0 flex flex-col gap-1.5">
                     {/* Title */}
-                    <div className="flex items-center gap-2">
-                        <span className={cn('font-mono text-[12.5px] truncate', pendingRemove ? 'text-rose-300 line-through' : 'text-ink')} title={key}>
-                            {key}
-                        </span>
-                        {mixed && (
-                            <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide border bg-amber-500/15 text-amber-300 border-amber-500/30">
-                                <AlertTriangle className="w-2.5 h-2.5" /> mixed
+                    <div className="flex items-start gap-2">
+                        <div className={ROW_TITLE}>
+                            <span className={cn('font-mono text-sm leading-7 truncate', pendingRemove ? 'text-rose-600 dark:text-rose-300 line-through' : 'text-ink')} title={key}>
+                                {key}
                             </span>
-                        )}
-                        {similar.length > 0 && (
-                            <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide border bg-sky-500/15 text-sky-600 dark:text-sky-300 border-sky-500/30">
-                                <Combine className="w-2.5 h-2.5" aria-hidden /> similar values
-                            </span>
-                        )}
-                        {overlay && (
-                            <PendingBadge
-                                label={`${pendingRemove ? 'removed' : overlay.kinds.has('rename') ? 'renamed' : overlay.kinds.has('copy') ? 'copied' : 'changed'}${overlay.running ? '…' : ''}`}
-                                tone={pendingRemove ? 'rose' : 'amber'}
-                            />
-                        )}
-                        <div className="ml-auto shrink-0 flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
-                            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-                                <RowAction icon={<Copy className="w-3 h-3" />} label="Copy the name" onClick={onCopy} />
-                                {onUpdate && <RowAction icon={<Pencil className="w-3 h-3" />} label="Change" onClick={onUpdate} blocked={blocked} />}
-                                {onDuplicate && <RowAction icon={<CopyPlus className="w-3 h-3" />} label="Duplicate as…" onClick={onDuplicate} blocked={blocked} />}
-                                {onCleanUp && <RowAction icon={<WandSparkles className="w-3 h-3" />} label="Clean up…" onClick={onCleanUp} blocked={blocked} />}
-                                {onRemove && <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger blocked={blocked} />}
-                                {onPromote && <RowAction icon={<ListChecks className="w-3 h-3" />} label="Make it a field…" onClick={onPromote} />}
-                                <RowAction icon={<Plus className="w-3 h-3" />} label="Create rule" onClick={onCreateRule} />
-                            </div>
-                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg text-ink-muted group-hover:bg-glass transition-colors">
-                                <ChevronRight className={cn('w-3.5 h-3.5 transition-transform', expanded && 'rotate-90')} />
-                            </span>
+                            {mixed && (
+                                <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide border bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30">
+                                    <AlertTriangle className="w-2.5 h-2.5" /> mixed
+                                </span>
+                            )}
+                            {similar.length > 0 && (
+                                <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide border bg-sky-500/15 text-sky-600 dark:text-sky-300 border-sky-500/30">
+                                    <Combine className="w-2.5 h-2.5" aria-hidden /> similar values
+                                </span>
+                            )}
+                            {overlay && (
+                                <PendingBadge
+                                    label={`${pendingRemove ? 'removed' : overlay.kinds.has('rename') ? 'renamed' : overlay.kinds.has('copy') ? 'copied' : 'changed'}${overlay.running ? '…' : ''}`}
+                                    tone={pendingRemove ? 'rose' : 'amber'}
+                                />
+                            )}
                         </div>
+                        {/* The actions don't open the row; the chevron, like the rest of it, does. */}
+                        <div className={ROW_ACTIONS} onClick={(e) => e.stopPropagation()}>
+                            {onUpdate && <RowAction icon={<Pencil className="w-3.5 h-3.5" />} label="Change" onClick={onUpdate} blocked={blocked} />}
+                            {onCleanUp && <RowAction icon={<WandSparkles className="w-3.5 h-3.5" />} label="Clean up…" onClick={onCleanUp} blocked={blocked} />}
+                            <RowMenu name={key} actions={[
+                                { icon: <Copy className="w-3.5 h-3.5" />, label: 'Copy the name', onSelect: onCopy },
+                                onUpdate && { icon: <Pencil className="w-3.5 h-3.5" />, label: 'Change', onSelect: onUpdate, blocked },
+                                onDuplicate && { icon: <CopyPlus className="w-3.5 h-3.5" />, label: 'Duplicate as…', onSelect: onDuplicate, blocked },
+                                onCleanUp && { icon: <WandSparkles className="w-3.5 h-3.5" />, label: 'Clean up…', onSelect: onCleanUp, blocked },
+                                onPromote && { icon: <ListChecks className="w-3.5 h-3.5" />, label: 'Make it a field…', onSelect: onPromote },
+                                { icon: <Plus className="w-3.5 h-3.5" />, label: 'Create rule', onSelect: onCreateRule },
+                                onRemove && { icon: <Trash2 className="w-3.5 h-3.5" />, label: 'Remove', onSelect: onRemove, blocked, danger: true },
+                            ]} />
+                        </div>
+                        <span className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg text-ink-muted group-hover:bg-glass transition-colors">
+                            <ChevronRight className={cn('w-3.5 h-3.5 transition-transform', expanded && 'rotate-90')} />
+                        </span>
                     </div>
 
                     {/* Coverage: how many entities carry it, of the view */}
-                    <div className="flex items-center gap-2 text-[10.5px] text-ink-muted tabular-nums">
+                    <div className="flex items-center gap-2 text-[11.5px] text-ink-muted tabular-nums">
                         <div className="w-16 h-1.5 rounded-full bg-black/[0.06] dark:bg-white/[0.08] overflow-hidden shrink-0">
                             <div className="h-full rounded-full bg-accent-lineage" style={{ width: `${Math.max(2, share)}%` }} />
                         </div>
@@ -775,16 +804,21 @@ function PendingNewRow({
 }) {
     return (
         <div className="group relative rounded-2xl border border-emerald-500/40 bg-canvas-elevated shadow-sm">
-            <div className="flex items-start gap-3 px-3.5 py-3">
+            <div className="flex items-start gap-3 px-4 py-3.5">
                 <TypeTile type={null} accent="emerald" />
                 <div className="flex-1 min-w-0 flex flex-col gap-1.5">
-                    <div className="flex items-center gap-2">
-                        <span className="font-mono text-[12.5px] truncate text-ink" title={propertyKey}>{propertyKey}</span>
-                        <PendingBadge label="new" tone="emerald" />
-                        <div className="ml-auto shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-                            {onUpdate && <RowAction icon={<Pencil className="w-3 h-3" />} label="Update" onClick={onUpdate} blocked={blocked} />}
-                            {onRemove && <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger blocked={blocked} />}
-                            <RowAction icon={<Plus className="w-3 h-3" />} label="Create rule" onClick={onCreateRule} />
+                    <div className="flex items-start gap-2">
+                        <div className={ROW_TITLE}>
+                            <span className="font-mono text-sm leading-7 truncate text-ink" title={propertyKey}>{propertyKey}</span>
+                            <PendingBadge label="new" tone="emerald" />
+                        </div>
+                        <div className={ROW_ACTIONS}>
+                            {onUpdate && <RowAction icon={<Pencil className="w-3.5 h-3.5" />} label="Update" onClick={onUpdate} blocked={blocked} />}
+                            <RowMenu name={propertyKey} actions={[
+                                onUpdate && { icon: <Pencil className="w-3.5 h-3.5" />, label: 'Update', onSelect: onUpdate, blocked },
+                                { icon: <Plus className="w-3.5 h-3.5" />, label: 'Create rule', onSelect: onCreateRule },
+                                onRemove && { icon: <Trash2 className="w-3.5 h-3.5" />, label: 'Remove', onSelect: onRemove, blocked, danger: true },
+                            ]} />
                         </div>
                     </div>
                     {stagedValue !== undefined && stagedValue !== '' && <SampleValueChips values={[stagedValue]} />}
@@ -797,36 +831,107 @@ function PendingNewRow({
 
 function PendingBadge({ label, tone }: { label: string; tone: 'emerald' | 'amber' | 'rose' }) {
     const tones = {
-        emerald: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
-        amber: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-        rose: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+        emerald: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30',
+        amber: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
+        rose: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/30',
     }
     return (
-        <span className={cn('shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide border', tones[tone])}>{label}</span>
+        <span className={cn('shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide border', tones[tone])}>{label}</span>
     )
 }
 
 /** A row's icon action. ``blocked`` disables it, and its tooltip says why. */
-function RowAction({ icon, label, onClick, danger, blocked }: {
-    icon: React.ReactNode; label: string; onClick: () => void; danger?: boolean; blocked?: string | null
+function RowAction({ icon, label, onClick, blocked }: {
+    icon: React.ReactNode; label: string; onClick: () => void; blocked?: string | null
 }) {
-    const button = (
-        <button
-            type="button"
-            onClick={onClick}
-            disabled={!!blocked}
-            title={blocked ? undefined : label}
-            aria-label={label}
-            className={cn(
-                'inline-flex items-center justify-center w-6 h-6 rounded-md transition-colors disabled:opacity-40',
-                blocked ? 'text-ink-muted'
-                    : danger ? 'text-ink-muted hover:text-rose-400 hover:bg-rose-500/10' : 'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10',
-            )}
-        >
-            {icon}
-        </button>
+    return (
+        <HoverTip label={label} detail={blocked ?? undefined} className="inline-flex">
+            <button
+                type="button"
+                onClick={onClick}
+                disabled={!!blocked}
+                aria-label={label}
+                className={cn(
+                    'inline-flex items-center justify-center w-7 h-7 rounded-md transition-colors disabled:opacity-40',
+                    blocked ? 'text-ink-muted' : 'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10',
+                )}
+            >
+                {icon}
+            </button>
+        </HoverTip>
     )
-    return blocked ? <HoverTip label={label} detail={blocked} className="inline-flex">{button}</HoverTip> : button
+}
+
+
+/** An action in a row's More actions menu. ``blocked`` disables it, and its tooltip says why. */
+interface MenuAction {
+    icon: React.ReactNode
+    label: string
+    onSelect: () => void
+    blocked?: string | null
+    /** Set apart at the end, in red. */
+    danger?: boolean
+}
+
+const menuItemClass = cn(
+    'flex items-center gap-2.5 px-2.5 py-1.5 text-xs rounded-lg cursor-pointer outline-none',
+    'data-[disabled]:opacity-40 data-[disabled]:cursor-not-allowed',
+)
+
+/**
+ * Every action a row offers, in one small menu off its ⋯, under the property's name. Portalled and
+ * non-modal, as the header's MoreMenu is: no card clips it, no blurred ancestor traps it, and it is
+ * worked from the keyboard (arrows, Esc) with the focus back on ⋯ when it closes.
+ */
+function RowMenu({ name, actions }: { name: string; actions: (MenuAction | false | undefined)[] }) {
+    const offered = actions.filter((a): a is MenuAction => !!a)
+    const item = (a: MenuAction) => {
+        const el = (
+            <DropdownMenu.Item
+                key={a.label}
+                className={cn(menuItemClass, a.danger
+                    ? 'text-rose-600 dark:text-rose-400 focus:bg-rose-500/10'
+                    : 'text-ink focus:bg-accent-lineage/10')}
+                disabled={!!a.blocked}
+                onSelect={a.onSelect}
+            >
+                {a.icon}
+                {a.label}
+            </DropdownMenu.Item>
+        )
+        return a.blocked
+            ? <HoverTip key={a.label} label={a.label} detail={a.blocked} className="block">{el}</HoverTip>
+            : el
+    }
+    const danger = offered.filter((a) => a.danger)
+    return (
+        <DropdownMenu.Root modal={false}>
+            <HoverTip label="More actions" className="inline-flex">
+                <DropdownMenu.Trigger asChild>
+                    <button
+                        type="button"
+                        aria-label={`More actions for ${name}`}
+                        className="inline-flex items-center justify-center w-7 h-7 rounded-md transition-colors text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10 data-[state=open]:text-accent-lineage data-[state=open]:bg-accent-lineage/10"
+                    >
+                        <Ellipsis className="w-3.5 h-3.5" />
+                    </button>
+                </DropdownMenu.Trigger>
+            </HoverTip>
+            <DropdownMenu.Portal>
+                <DropdownMenu.Content
+                    align="end"
+                    sideOffset={4}
+                    collisionPadding={8}
+                    className="w-56 bg-canvas-elevated border border-black/[0.10] dark:border-white/[0.08] rounded-xl shadow-2xl shadow-black/20 dark:shadow-black/40 p-1.5 z-50 animate-in fade-in zoom-in-95"
+                >
+                    <DropdownMenu.Label className="px-2.5 pt-1 pb-1.5 font-mono text-[11px] text-ink-muted break-all">{name}</DropdownMenu.Label>
+                    {offered.filter((a) => !a.danger).map(item)}
+                    {danger.length > 0 && <DropdownMenu.Separator className="h-px bg-black/[0.08] dark:bg-white/[0.08] my-1.5 mx-1" />}
+                    {danger.map(item)}
+                </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+        </DropdownMenu.Root>
+    )
 }
 
 

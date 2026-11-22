@@ -1,6 +1,6 @@
 /**
  * PropertyInsightCharts — the premium insight viz: ranked bars (labels +
- * localized counts + %), the count-up number (full value via title), and
+ * localized counts + %), the count-up number (full value in its tooltip), and
  * the usage gauge (coverage % of view + per-type bars).
  */
 import { render, screen } from '@testing-library/react'
@@ -40,17 +40,19 @@ describe('RankedValueBars', () => {
 
 
 describe('AnimatedNumber', () => {
-    it('exposes the full value via title (count-up target)', () => {
-        render(<AnimatedNumber value={10000} />)
-        expect(screen.getByTitle('10,000')).toBeInTheDocument()
+    it('says the full value on hover (count-up target)', async () => {
+        const { container } = render(<AnimatedNumber value={10000} />)
+        await userEvent.setup().hover(container.firstElementChild!)
+        expect(await screen.findByRole('tooltip')).toHaveTextContent('10,000')
     })
 })
 
 
 describe('UsageGauge', () => {
-    it('renders coverage % of the view and a per-type bar', () => {
+    it('renders coverage % of the view and a per-type bar', async () => {
         render(<UsageGauge total={50} viewTotal={200} byEntityType={[{ type: 'dataset', count: 50 }]} />)
-        expect(screen.getByTitle('50')).toBeInTheDocument()                       // animated total
+        await userEvent.setup().hover(screen.getByText(/entities use this/).previousElementSibling!)
+        expect(await screen.findByRole('tooltip')).toHaveTextContent('50')        // animated total
         expect(screen.getByText(/25% of 200 in this view/i)).toBeInTheDocument()  // 50/200
         expect(screen.getByText('dataset')).toBeInTheDocument()                   // per-type bar
     })

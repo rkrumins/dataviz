@@ -11,9 +11,10 @@ import { ComprehensionTools } from '../ViewerActions'
 import { foldToolbar, SEARCH_MIN, SEARCH_ROOM, ToolbarFoldProvider } from '../toolbarFold'
 
 
-/** Seven actions in fold order, each saving 50px when folded. */
-const ITEMS = ['select', 'lens', 'properties', 'display', 'lineage', 'trace', 'edit']
+/** Eight actions in fold order, each saving 50px when folded. */
+const ITEMS = ['select', 'lens', 'properties', 'display', 'lineage', 'trace', 'edit', 'review']
     .map((id) => ({ id, saving: 50 }))
+const OTHERS = ITEMS.map((i) => i.id).filter((id) => id !== 'review')
 const LABELLED = 1000
 const fold = (row: number, lead = 130, gap = 16) =>
     foldToolbar({ row, lead, gap, labelled: LABELLED, items: ITEMS })
@@ -34,9 +35,31 @@ describe('foldToolbar', () => {
     })
 
     it('folds everything and lets the search box give way before stacking', () => {
-        const allFolded = LABELLED - 7 * 50
+        const allFolded = LABELLED - ITEMS.length * 50
         const r = fold(allFolded + 130 + SEARCH_MIN + 32)
         expect(r).toEqual({ folded: new Set(ITEMS.map((i) => i.id)), stacked: false })
+    })
+
+    it("keeps Review & Save's words until the search box is at its least", () => {
+        // Folding Review too would make room for the roomy search box here;
+        // the search box gives way instead.
+        const others = LABELLED - OTHERS.length * 50
+        const r = fold(others - 50 + 130 + SEARCH_ROOM + 32)
+        expect(r).toEqual({ folded: new Set(OTHERS), stacked: false })
+        // At its least, the search box has nothing more to give: Review folds.
+        expect(fold(others + 130 + SEARCH_MIN + 32)).toEqual({ folded: new Set(OTHERS), stacked: false })
+        expect(fold(others + 130 + SEARCH_MIN + 31).folded).toContain('review')
+    })
+
+    it('never brings a label back as the row narrows, until the actions move under the search box', () => {
+        let last = fold(ROOMY)
+        for (let row = ROOMY; row > 400; row -= 1) {
+            const r = fold(row)
+            if (r.stacked === last.stacked) expect([...last.folded].every((id) => r.folded.has(id))).toBe(true)
+            else expect(r.stacked).toBe(true)
+            last = r
+        }
+        expect(last.stacked).toBe(true)
     })
 
     it('moves the actions under the search box when not even that fits, folding only what its own line needs', () => {

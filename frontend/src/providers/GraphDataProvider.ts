@@ -246,6 +246,8 @@ export interface RelationshipTypeDefinition {
     isContainment: boolean
     isLineage: boolean
     category: 'structural' | 'flow' | 'metadata' | 'association'
+    /** The properties its relationships carry that a publish judges. Absent from an older server. */
+    fields?: FieldSchema[]
 }
 
 export interface GraphSchema {

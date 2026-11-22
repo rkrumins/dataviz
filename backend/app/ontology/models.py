@@ -98,6 +98,8 @@ class RelationshipTypeDefEntry:
     bidirectional: bool = False
     show_label: bool = False
     label_field: Optional[str] = None
+    # The properties its relationships carry that a publish judges, as an entity type's fields.
+    fields: List[FieldData] = field(default_factory=list)
 
 
 @dataclass

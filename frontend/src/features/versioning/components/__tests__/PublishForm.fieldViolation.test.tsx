@@ -1,9 +1,10 @@
 /**
- * PublishForm — a publish refused because values break the fields their entity types define says
- * so, entity by entity: its name, its type, what is wrong — and the way to it: an entity on the
- * canvas opens in the drawer, one that isn't offers its id to find it by. Past the values it lists,
- * it counts them all, field by field. Nothing was published. A required field left empty is filled on
- * the entities refused (by id) from the bulk dialog — on the draft open on the canvas.
+ * PublishForm — a publish refused because values break the fields their types define says so,
+ * entity by entity: its name, its type, what is wrong — and the way to it: an entity on the canvas
+ * opens in the drawer, one that isn't offers its id to find it by. A relationship is named by its
+ * ends and opens in the relationship drawer. Past the values it lists, it counts them all, field by
+ * field. Nothing was published. A required field left empty is filled on the entities refused (by
+ * id) from the bulk dialog — on the draft open on the canvas.
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -70,7 +71,7 @@ describe('PublishForm — a publish refused by field rules', () => {
     )
     await user.click(screen.getByRole('button', { name: /publish now/i }))
 
-    expect(screen.getByText(/Nothing was published — 1,214 values break the fields their entity types define/)).toBeInTheDocument()
+    expect(screen.getByText(/Nothing was published — 1,214 values break the fields their types define/)).toBeInTheDocument()
     const counts = within(screen.getByRole('list', { name: 'Values to change by field' })).getAllByRole('listitem')
     expect(counts.map((c) => c.textContent)).toEqual(['Table · Owner: 1,204 missing', 'Table · Tier: 10 not allowed'])
     const list = screen.getByRole('list', { name: 'Values to change' })
@@ -134,5 +135,49 @@ describe('PublishForm — filling a required field the publish refused', () => {
     refuse([owner])
     await publish()
     expect(screen.queryByRole('button', { name: /^Fill/ })).toBeNull()
+  })
+})
+
+describe('PublishForm — a relationship the publish refused by its type’s fields', () => {
+  const owns: FieldViolation = {
+    entity_id: 'e1', kind: 'edge', type: 'Owns', name: null, urn: null, source: 'urn:orders', target: 'urn:gone',
+    rule: 'field_required', field: 'since', fieldName: 'Since', value: null, reason: 'Since is required for a new Owns relationship.',
+  }
+  const since: FieldViolationCount = {
+    entityKind: 'edge', entityType: 'Owns', field: 'since', fieldName: 'Since', rule: 'field_required', count: 1, ids: ['e1'], idsComplete: true,
+  }
+  const publish = async (onClose = vi.fn()) => {
+    const user = userEvent.setup()
+    publishMutate.mockImplementation((_vars, { onError }) => onError(new FieldViolationError([owns], 1, [since])))
+    render(
+      <MemoryRouter>
+        <CommitDialog workspaceId="ws1" graphId="g1" branchId="br_1" changeSet={changeSet} onClose={onClose} />
+      </MemoryRouter>,
+    )
+    await user.click(screen.getByRole('button', { name: /publish now/i }))
+    return { user, onClose }
+  }
+
+  it('names it by its ends and opens it in the relationship drawer when the canvas holds it', async () => {
+    useCanvasStore.setState({ edges: [{ id: 'e1', source: 'urn:orders', target: 'urn:gone', data: { edgeType: 'Owns' } }] } as never)
+    const { user, onClose } = await publish()
+    const [row] = within(screen.getByRole('list', { name: 'Values to change' })).getAllByRole('listitem')
+    expect(row).toHaveTextContent('Orders → urn:gone · Owns · Since is required for a new Owns relationship.')
+    await user.click(within(row).getByRole('button', { name: 'Open Orders → urn:gone' }))
+    expect(onClose).toHaveBeenCalled()
+    expect(useCanvasStore.getState().drawerEdge).toMatchObject({ kind: 'relationship', id: 'e1', source: 'urn:orders', target: 'urn:gone' })
+  })
+
+  it('offers the id of one the canvas doesn’t hold, and fills the refused relationships by their ids', async () => {
+    branch.currentBranchId = 'br_1'
+    const { user } = await publish()
+    const [row] = within(screen.getByRole('list', { name: 'Values to change' })).getAllByRole('listitem')
+    expect(within(row).getByRole('button', { name: 'Copy the id of Orders → urn:gone' })).toBeInTheDocument()
+    const [count] = within(screen.getByRole('list', { name: 'Values to change by field' })).getAllByRole('listitem')
+    expect(count).toHaveTextContent('Owns relationships · Since: 1 missing')
+    await user.click(within(count).getByRole('button', { name: 'Fill 1 missing…' }))
+    expect(usePropertyJobsStore.getState().request).toEqual({
+      op: { kind: 'fillEmpty', key: 'since' }, target: { kind: 'relationships', ids: ['e1'] },
+    })
   })
 })

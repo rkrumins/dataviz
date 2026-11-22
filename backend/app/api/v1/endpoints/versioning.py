@@ -173,7 +173,8 @@ def get_import_export_service():
             publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope,
             identity_resolver=_resolve_node_identity_for_import, fork_hook=_fork_from_job,
             save_hook=_save_from_job, property_targets=_property_targets_from_job,
-            property_write_context=_property_write_context)
+            property_write_context=_property_write_context,
+            property_draft_matches=_property_draft_matches_from_job)
     return _ie_service
 
 
@@ -7395,6 +7396,41 @@ async def _property_targets_from_job(job: dict):
             yield urn
 
 
+async def _property_draft_matches_from_job(job: dict) -> dict:
+    """The entities a bulk property job's draft created or changed that its search target matches
+    there (``draft_search.draft_matches``) — judged as the search's rule membership on the draft,
+    the view held to the job's own and its scope resolved as the job's export resolves it."""
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.db.engine import get_async_session
+    from backend.app.providers.draft_search import draft_matches
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.app.services.view_transfer.sources import engine_for
+
+    target, ws, ds, bid = job["target"], job["workspaceId"], job["dataSourceId"], job["branchId"]
+    async with get_async_session() as session:
+        engine = await engine_for(session, ws, ds, branch_id=bid, actor=job["actor"])
+
+        async def can_read(view) -> bool:
+            return (view.id == target["viewId"] and view.workspace_id == ws
+                    and view.data_source_id in (None, ds))
+
+        search = AdvancedSearchService(engine, session=session, workspace_id=ws, data_source_id=ds,
+                                       branch_id=bid, can_read_view=can_read)
+        context = SearchRunContext(data_version=await graph_ep._search_data_version(engine),
+                                   admit=graph_ep._statement_admission(engine))
+
+        async def judge(request):
+            try:
+                return await search.membership(request, run_context=context)
+            finally:
+                await session.commit()                  # no transaction held between requests
+
+        return await draft_matches(engine.provider,
+                                   {"viewId": target["viewId"], "scopeMode": target["scopeMode"]},
+                                   target["predicate"], judge)
+
+
 async def _property_write_context(job: dict) -> dict:
     """What a bulk property job's windows are written with, as ``POST /graph/changes`` writes a
     save (``_save_from_job``): the data source's live rules and containment types, and its node
@@ -7494,11 +7530,13 @@ def _check_property_job(op: PropertyJobOp, target: PropertyJobTarget, rules) -> 
     return None
 
 
-def _property_job_warnings(op: PropertyJobOp, rules) -> List[Dict[str, str]]:
+def _property_job_warnings(op: PropertyJobOp, rules, *, edges: bool = False) -> List[Dict[str, str]]:
     """What a bulk property job would leave that publishing its draft refuses — a value its field
     doesn't allow or isn't of its type, a required field removed — per entity type that defines
-    the key: ``[{code, entityType, field, message}]``. Said before it runs, never refused: the job
-    writes the draft all the same, and the publish is the gate (``FieldViolation``)."""
+    the key, or for a job over relationships (``edges``) per relationship type, named as the
+    ontology spells it: ``[{code, entityType, field, message}]``. Said before it runs, never
+    refused: the job writes the draft all the same, and the publish is the gate
+    (``FieldViolation``)."""
     if rules is None:
         return []
     from backend.app.services.versioning.ontology import JUDGED_TYPES, allowed_phrase, field_value_problem
@@ -7507,18 +7545,21 @@ def _property_job_warnings(op: PropertyJobOp, rules) -> List[Dict[str, str]]:
     def warn(code: str, etype: str, key: str, message: str) -> None:
         out.append({"code": code, "entityType": etype, "field": key, "message": message})
 
-    for etype, rule in sorted(rules.entity_types.items()):
+    types = ([(rules.edge_type_canonical.get(t, t), r) for t, r in rules.edge_types.items()] if edges
+             else list(rules.entity_types.items()))
+    for etype, rule in sorted(types, key=lambda t: t[0]):
+        one = f"{etype} relationship" if edges else etype
         f = rule.fields.get(op.key)
         if f is not None and op.kind in ("set", "fillEmpty"):
             problem = field_value_problem(f, op.value)
             if problem:
-                warn(problem[0], etype, op.key, f"On {etype}: {problem[1]} A {etype} given it can't be "
+                warn(problem[0], etype, op.key, f"On {etype}: {problem[1]} A {one} given it can't be "
                                                 "published until it holds a value the field allows.")
             elif f.required and op.value in (None, "", []):
-                warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {etype} it is "
+                warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {one} it is "
                                                       "emptied on can't be published until it has one again.")
         if f is not None and f.required and op.kind in ("remove", "rename"):
-            warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {etype} it is "
+            warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {one} it is "
                                                   f"{'removed' if op.kind == 'remove' else 'renamed away'} from "
                                                   "can't be published until it has one again.")
         to = rule.fields.get(op.to) if op.kind in ("rename", "copy") and op.to else None
@@ -7526,7 +7567,8 @@ def _property_job_warnings(op: PropertyJobOp, rules) -> List[Dict[str, str]]:
             held = f"one of {allowed_phrase(to.allowed)}" if to.allowed else f"of type {to.type}"
             warn("field_checked", etype, op.to, f"{op.to} is a field of {etype} that must be {held}: a value "
                                                 f"{'renamed' if op.kind == 'rename' else 'copied'} into it that "
-                                                "isn't stops that entity being published until it is changed.")
+                                                f"isn't stops that {'relationship' if edges else 'entity'} being "
+                                                "published until it is changed.")
     return out
 
 
@@ -7663,12 +7705,102 @@ async def preview_property_job(
         counts = await ie.preview_property_counts(graph_id=graph_id, branch_id=branch_id,
                                                   op=body.op.wire(), ids=named,
                                                   entity_kind=body.target.entity_kind)
-    # The fields' rules are the entity types'; a relationship has none.
-    warnings = ([] if main or edges
-                else _property_job_warnings(body.op, await _rules_for_meta(session, ws_id, meta)))
+    # The fields' rules: the entity types', or for relationships the relationship types'.
+    warnings = ([] if main
+                else _property_job_warnings(body.op, await _rules_for_meta(session, ws_id, meta), edges=edges))
     return {"refusal": {"code": refusal[1], "message": refusal[2]} if refusal else None,
             "nameBudget": budget, "activeJobId": None if main else await ie.active_draft_job(branch_id),
             "counts": counts, "warnings": warnings}
+
+
+async def _property_sample_matches(session: AsyncSession, ws_id: str, data_source_id: Optional[str],
+                                   branch_id: str, actor: str, target: PropertyJobTarget, limit: int) -> List[str]:
+    """The first ``limit`` matches of a search target — urns, or for a Connections search each
+    edge's ``id`` — one page of the search as ``POST /search/advanced`` runs it, on the draft's
+    engine, in the target's view (held to it, as a job's search is). 422 ``search_refused`` when
+    the search can't run as asked."""
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
+    from backend.app.services.deep_search import SearchRunContext, get_deep_search_settings
+    from backend.app.services.view_transfer.sources import engine_for
+    from backend.common.models.search import SearchQuery
+
+    edges = target.entity_kind == "edge"
+    engine = await engine_for(session, ws_id, data_source_id, branch_id=branch_id, actor=actor)
+
+    async def can_read(view) -> bool:
+        return (view.id == target.view_id and view.workspace_id == ws_id
+                and view.data_source_id in (None, data_source_id))
+
+    search = AdvancedSearchService(engine, session=session, workspace_id=ws_id, data_source_id=data_source_id,
+                                   branch_id=branch_id, can_read_view=can_read)
+    # A Connections search answers a page of edges; any other, a page of hits.
+    options = {"pageSize": limit} if edges else {
+        "results": "hits", "pageSize": limit, "includeAncestorPath": False, "highlights": False}
+    query = SearchQuery.model_validate({
+        "predicate": target.predicate.model_dump(mode="json", by_alias=True),
+        "scope": {"viewId": target.view_id, "scopeMode": target.scope_mode}, "options": options})
+    try:
+        if get_deep_search_settings().engine == "v2":
+            page, _scope = await search.search(query, run_context=SearchRunContext(
+                data_version=await graph_ep._search_data_version(engine),
+                admit=graph_ep._statement_admission(engine)))
+        else:
+            page, _scope = await graph_ep._bounded_compute(engine, lambda: search.search(query))()
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=_refusal_detail(
+            (422, "search_refused", f"The search couldn't run: {exc}"))) from exc
+    except NotImplementedError as exc:
+        raise graph_ep._map_not_implemented(engine, exc) from exc
+    if edges:
+        return [e.id for e in page.edges or []][:limit]
+    return [h.node.urn for h in page.hits or [] if h.node.urn][:limit]
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs/preview/sample")
+async def preview_property_job_sample(
+    ws_id: str, graph_id: str, branch_id: str, body: PropertyJobRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """A few of the entities a bulk property job would reach, each before and after it, nothing
+    written — apart from the preview, so a check never waits on it. ``rows``: at most
+    ``SAMPLE_ROWS`` (8), each ``{id, urn?, name, type, before?, to?, after?, outcome, reason?}``
+    (``property_job.sample_row``: a value left out where none is held; ``outcome`` ``change``,
+    ``unchanged`` or ``skip``, with its ``reason``); ``truncated``: it reaches more. For an id
+    target, its first ids, read on the draft; for a search, its first page of matches on the
+    draft's engine, each checked again on the draft's values as a window checks it. 409
+    ``main_write_forbidden`` on main; 404 ``view_not_found`` for a search's view the caller can't
+    read; 422 ``search_refused`` when the search can't run as asked (501 where the store has no
+    search)."""
+    from backend.app.services.versioning.import_export import property_job as pj
+
+    main = branch_id == "main"
+    if not main:
+        with _property_job_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+            main = branch_id == await svc.main_branch_id(graph_id)
+    if main:
+        raise HTTPException(status_code=409, detail=_refusal_detail(
+            (409, "main_write_forbidden", "Bulk edits go to a draft; main changes only by publishing it.")))
+    target, recheck = body.target, None
+    if target.named is not None:
+        keys = list(dict.fromkeys(target.named))
+    else:
+        if not await _property_job_view_readable(session, ws_id, meta, target.view_id, user, claims):
+            raise HTTPException(status_code=404, detail=_refusal_detail(
+                (404, "view_not_found", "The view this search runs in isn't there, or you can't read it.")))
+        keys = await _property_sample_matches(session, ws_id, meta.get("data_source_id"), branch_id, user.id,
+                                              target, pj.SAMPLE_ROWS + 1)
+        if target.entity_kind == "node":
+            recheck = pj.predicate_recheck(target.predicate.model_dump(mode="json", by_alias=True))
+    rows = await pj.read_sample(graph_id, branch_id, body.op.wire(), keys[:pj.SAMPLE_ROWS],
+                                entity_kind=target.entity_kind, recheck=recheck)
+    return {"rows": rows, "truncated": len(keys) > pj.SAMPLE_ROWS}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs", status_code=202,

@@ -21,6 +21,8 @@ import { Check, Loader2, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { formatShortcut } from '@/lib/platform'
 import { cn, generateId } from '@/lib/utils'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
@@ -291,17 +293,18 @@ export function DisplayRuleEditor({
                 </div>
                 {/* Icon picker */}
                 <div className="flex items-center gap-1 flex-wrap">
-                    <button
-                        type="button"
-                        onClick={() => setIcon(undefined)}
-                        title="No icon"
-                        className={cn(
-                            'w-7 h-7 rounded-lg flex items-center justify-center text-[10px] transition-all',
-                            !icon ? 'ring-2 ring-accent-lineage/60 text-ink' : 'text-ink-muted hover:bg-glass/40',
-                        )}
-                    >
-                        None
-                    </button>
+                    <HoverTip label="Show the tag without an icon" className="inline-flex">
+                        <button
+                            type="button"
+                            onClick={() => setIcon(undefined)}
+                            className={cn(
+                                'w-7 h-7 rounded-lg flex items-center justify-center text-[10px] transition-all',
+                                !icon ? 'ring-2 ring-accent-lineage/60 text-ink' : 'text-ink-muted hover:bg-glass/40',
+                            )}
+                        >
+                            None
+                        </button>
+                    </HoverTip>
                     {ICON_CHOICES.map((ic) => (
                         <button
                             key={ic}
@@ -447,20 +450,21 @@ export function DisplayRuleEditor({
                 >
                     <X className="w-3.5 h-3.5" /> Cancel
                 </button>
-                <button
-                    type="button"
-                    onClick={() => void handleSave()}
-                    disabled={!canSave}
-                    title={canSave ? 'Save (⌘/Ctrl + Enter)' : undefined}
-                    className={cn(
-                        'inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all',
-                        canSave
-                            ? 'bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30'
-                            : 'bg-glass/30 text-ink-muted/40 cursor-not-allowed',
-                    )}
-                >
-                    <Check className="w-3.5 h-3.5" /> {saving ? 'Saving…' : rule ? 'Save rule' : 'Create rule'}
-                </button>
+                <HoverTip label="Save the rule to this view" shortcut={formatShortcut('mod+enter')} className="inline-flex">
+                    <button
+                        type="button"
+                        onClick={() => void handleSave()}
+                        disabled={!canSave}
+                        className={cn(
+                            'inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all',
+                            canSave
+                                ? 'bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30'
+                                : 'bg-glass/30 text-ink-muted/40 cursor-not-allowed',
+                        )}
+                    >
+                        <Check className="w-3.5 h-3.5" /> {saving ? 'Saving…' : rule ? 'Save rule' : 'Create rule'}
+                    </button>
+                </HoverTip>
             </div>
         </div>
     )

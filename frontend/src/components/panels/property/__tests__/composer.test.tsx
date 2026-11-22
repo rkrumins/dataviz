@@ -2,6 +2,7 @@
  * Adding a property: what others of the type carry is offered as the name is typed; a value is read
  * as what it is (a number, yes/no, a date, a link); several "name: value" lines pasted are added in
  * one change; ⌘↵ adds one and starts the next; a name already there offers to update it instead.
+ * The list's own adder is the larger form; one inside a folder keeps its size.
  */
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -80,6 +81,16 @@ describe('PropertyEditor — adding a property', () => {
     act(() => { fireEvent.keyDown(name, { key: 'Enter', metaKey: true }) })
     expect(onChange).toHaveBeenCalledWith({ tier: 'gold', domain: 'Sales' })
     expect(screen.getByRole('combobox', { name: 'Property name' })).toHaveValue('')
+  })
+
+  it("is the larger form as the list's own adder, and keeps its size inside a folder", () => {
+    render(<PropertyEditor value={{ tier: 'gold', 'B/z': 3 }} onChange={vi.fn()} inline groupByPath bare />)
+    // The list's own adder comes last, after the folders' sections.
+    fireEvent.click(screen.getAllByRole('button', { name: 'Add property' }).at(-1)!)
+    expect(screen.getByRole('combobox', { name: 'Property name' })).toHaveClass('h-10')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(within(screen.getByRole('region', { name: 'B' })).getByRole('button', { name: 'Add property in this folder' }))
+    expect(screen.getByRole('combobox', { name: 'Property name' })).not.toHaveClass('h-10')
   })
 
   it('a name already there offers to update it instead', () => {

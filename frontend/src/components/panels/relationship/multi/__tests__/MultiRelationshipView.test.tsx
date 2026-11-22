@@ -29,6 +29,8 @@ const h = vi.hoisted(() => ({
   versioned: true,
   asked: [] as string[][],
   editing: { offered: true, blocked: null as string | null },
+  /** The view's relationship types. */
+  relTypes: [] as unknown[],
 }))
 
 vi.mock('@/hooks/useRelationshipRecords', () => ({
@@ -57,7 +59,7 @@ vi.mock('@/providers/GraphProviderContext', async (importOriginal) => ({
 }))
 vi.mock('@/features/versioning/components/EntityHistory', () => ({ EntityHistory: () => null }))
 vi.mock('@/hooks/useViewSchema', () => ({
-  useViewRelationshipTypes: () => [],
+  useViewRelationshipTypes: () => h.relTypes,
   useViewContainmentEdgeTypes: () => ['CONTAINS'],
 }))
 
@@ -96,6 +98,7 @@ beforeEach(() => {
   h.versioned = true
   h.asked = []
   h.editing = { offered: true, blocked: null }
+  h.relTypes = []
   useCanvasStore.setState({
     nodes: [node('a', 'Orders'), node('b', 'Revenue'), node('c', 'Refunds')],
     edges: [], _nodeIndex: new Set(['a', 'b', 'c']), _edgeIndex: new Set(),
@@ -240,5 +243,31 @@ describe('several relationships in the relationship drawer', () => {
     act(() => screen.getByRole('button', { name: 'Change on the server…' }).click())
     const request = usePropertyJobsStore.getState().request
     expect(request?.target).toEqual({ kind: 'relationships', ids: many.map((m) => m.id) })
+  })
+})
+
+/** Their type's fields hold them as an entity type's hold entities: a field's allowed values are a
+ *  click away, and a required one some of them lack is filled on every one of the type missing it
+ *  — a Connections search, since they are relationships. */
+describe('several relationships held to their type’s fields', () => {
+  it('offers a field’s allowed values, and fills a required one where they lack it', async () => {
+    const user = userEvent.setup()
+    h.relTypes = [{
+      id: 'FLOWS_TO', name: 'Feeds', sourceTypes: [], targetTypes: [], bidirectional: false, showLabel: false, isLineage: true,
+      visual: { strokeColor: '#6366f1', strokeWidth: 2, strokeStyle: 'solid', animated: true, animationSpeed: 'normal', arrowType: 'arrow', curveType: 'bezier' },
+      fields: [{ id: 'tier', name: 'Tier', type: 'status', required: true, allowedValues: ['gold', 'silver'],
+        showInNode: false, showInPanel: true, showInTooltip: false, displayOrder: 0 }],
+    }]
+    render(<RelationshipDrawer canEdit />)
+    const tier = rowOf('tier')
+    expect(within(tier).getByRole('group', { name: 'Allowed values of tier' })).toBeInTheDocument()
+    expect(tier).toHaveTextContent('Tier is required for Feeds relationships — 2 of these Feeds relationships have none.')
+
+    await user.click(within(tier).getByRole('button', { name: 'Fill missing on every Feeds relationship…' }))
+    expect(usePropertyJobsStore.getState().request).toMatchObject({
+      op: { kind: 'fillEmpty', key: 'tier' },
+      target: { kind: 'connections', label: 'every Feeds relationship missing Tier',
+        predicate: { kind: 'edges', edgeTypes: ['FLOWS_TO'] } },
+    })
   })
 })

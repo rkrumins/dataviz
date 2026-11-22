@@ -21,16 +21,23 @@ from .models import FieldData, ResolvedOntology
 _NAME_FIELDS = frozenset({"name", "label"})
 
 
-def field_rules(fields: Iterable[FieldData]) -> Dict[str, FieldRule]:
+def field_rules(fields: Iterable[FieldData], *, edges: bool = False) -> Dict[str, FieldRule]:
     """The fields a publish judges the values of (see ``versioning.ontology.field_violations``),
     by property key — a field's id is the property it is stored as. Only a field with something
     to judge is one: required, with allowed values that aren't mere suggestions, or of a type a
-    value can fail. A field the platform stores itself (the name, a description, a urn: a
-    reserved node key) is left to the platform."""
-    from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
+    value can fail. A field the platform stores itself is left to the platform: a node's name, a
+    description, a urn (a reserved node key) — or, ``edges``, a relationship's own fields (its id,
+    its confidence: ``EDGE_NATIVE_KEYS``). A relationship has no name of its own, so a ``name``
+    field of one is a property like any other."""
+    if edges:
+        from backend.common.edge_properties import EDGE_NATIVE_KEYS
+        kept = EDGE_NATIVE_KEYS
+    else:
+        from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
+        kept = _NAME_FIELDS | _RESERVED_NODE_KEYS
     out: Dict[str, FieldRule] = {}
     for f in fields or []:
-        if not f.id or f.id in _NAME_FIELDS or f.id in _RESERVED_NODE_KEYS:
+        if not f.id or f.id in kept:
             continue
         allowed = () if getattr(f, "allow_other", False) else tuple(getattr(f, "allowed_values", None) or ())
         ftype = (getattr(f, "type", None) or "text").lower()
@@ -59,6 +66,7 @@ def resolved_ontology_to_rules(resolved: ResolvedOntology) -> OntologyRules:
             source_types=frozenset(entry.source_types or []),
             target_types=frozenset(entry.target_types or []),
             is_containment=bool(entry.is_containment),
+            fields=field_rules(entry.fields, edges=True),
         )
         for type_id, entry in (resolved.relationship_type_definitions or {}).items()
     }

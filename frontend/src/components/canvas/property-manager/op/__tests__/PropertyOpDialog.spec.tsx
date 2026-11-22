@@ -14,6 +14,7 @@ import type { ReviewCounts } from '../useReviewCounts'
 
 const api = vi.hoisted(() => ({
   preview: vi.fn(),
+  sample: vi.fn(),
   create: vi.fn(),
   get: vi.fn(),
   /** The What step fails to draw. */
@@ -22,10 +23,13 @@ const api = vi.hoisted(() => ({
   countRetries: [] as number[],
 }))
 let counts: ReviewCounts
+/** How far the view's catalog has been read. */
+let catalogStatus: 'complete' | 'running' = 'complete'
 
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/versioningApiService')>()),
   previewPropertyJob: api.preview,
+  previewPropertyJobSample: api.sample,
   createPropertyJob: api.create,
   getPropertyJob: api.get,
 }))
@@ -42,6 +46,7 @@ vi.mock('../WhatStep', async (importOriginal) => {
 vi.mock('@/hooks/usePropertyCatalog', () => ({
   usePropertyCatalog: () => ({
     catalog: {
+      status: catalogStatus,
       properties: [
         { key: 'owner', count: 900, values: [{ value: 'ana', kind: 'String', count: 700 }], kinds: { String: 900 }, byEntityType: {}, distinct: 1, distinctExact: true, residual: 0 },
         { key: 'steward', count: 40, values: [], kinds: { String: 40 }, byEntityType: {}, distinct: 1, distinctExact: true, residual: 0 },
@@ -56,9 +61,6 @@ vi.mock('@/hooks/usePropertyCatalog', () => ({
 }))
 let allValues: unknown[] | null = null
 vi.mock('../useAllValues', () => ({ useAllValues: () => ({ values: allValues, loading: false, error: null }) }))
-vi.mock('@/hooks/usePropertyInsights', () => ({
-  useAffectedSample: () => ({ data: { entities: [{ urn: 'u1', displayName: 'orders', entityType: 'Table' }], truncated: true }, loading: false, error: null }),
-}))
 vi.mock('../../../search/builder/useDiscovery', () => ({
   useDiscovery: () => ({ keysByEdgeType: { FLOWS_TO: ['owner', 'confidence'], FEEDS: ['owner', 'sla'] } }),
 }))
@@ -98,6 +100,8 @@ const next = () => screen.getByRole('button', { name: /^Next/ })
 beforeEach(() => {
   localStorage.clear()
   api.preview.mockReset().mockResolvedValue({ refusal: null, nameBudget: { registered: 10, nativeBudget: 50000, ceiling: 65534, isNew: false, verdict: 'ok' }, activeJobId: null, counts: null })
+  api.sample.mockReset().mockResolvedValue({ rows: [{ id: 'N1', urn: 'u1', name: 'orders', type: 'Table', after: 'gold', outcome: 'change' }], truncated: true })
+  catalogStatus = 'complete'
   api.create.mockReset().mockResolvedValue({ jobId: 'job-1', status: 'pending' })
   api.get.mockReset().mockResolvedValue({ jobId: 'job-0', status: 'running', progress: 0.3, op: { kind: 'rename', key: 'owner', to: 'steward' },
     target: { kind: 'predicate', scopeMode: 'view' }, createdAt: '2026-11-21T00:00:00Z' })
@@ -217,7 +221,7 @@ describe('PropertyOpDialog', () => {
     expect(await screen.findByRole('button', { name: 'Apply to 2' })).toBeEnabled()
     // Found by id on the draft — ones new in it too, unlike a search.
     expect(screen.getByText(/found by id on your draft — ones new in it too/)).toBeInTheDocument()
-    expect(screen.queryByText(/aren’t matched/)).toBeNull()
+    expect(screen.queryByText(/matched on your draft as the change starts/)).toBeNull()
     // A fill never replaces a value: no count of replaced ones.
     expect(screen.queryByText(/^(Values replaced|Replaced)$/)).toBeNull()
     expect(screen.getByRole('textbox', { name: /Reason/ })).toHaveAttribute('placeholder', 'e.g. Left empty by the last import')
@@ -293,6 +297,23 @@ describe('PropertyOpDialog', () => {
     expect(await screen.findByRole('button', { name: 'Apply to 30' })).toBeEnabled()
     expect(api.preview).toHaveBeenCalledTimes(2)
     expect(screen.queryByText(/Couldn’t check it can be applied/)).toBeNull()
+  })
+
+  it('reads a few of the entities it reaches on the draft, apart from the check — and again by its own Try again', async () => {
+    const user = userEvent.setup()
+    api.sample.mockRejectedValueOnce(new Error('The server is busy'))
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(next())
+    const sample = () => within(screen.getByRole('region', { name: 'Sample' }))
+    expect(await sample().findByText(/The server is busy — the change can be applied all the same/)).toBeInTheDocument()
+    expect(api.sample).toHaveBeenCalledWith('ws', 'g1', 'd1', { kind: 'remove', key: 'owner' },
+      { viewId: 'v1', scopeMode: 'view', predicate: { kind: 'hasProperty', key: 'owner', negate: false } }, expect.any(AbortSignal))
+    // Apply never waits on it.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Apply to 30' })).toBeEnabled())
+    await user.click(sample().getByRole('button', { name: 'Try again' }))
+    expect(await sample().findByText('orders')).toBeInTheDocument()
+    expect(api.sample).toHaveBeenCalledTimes(2)
+    expect(api.preview).toHaveBeenCalledTimes(1)
   })
 
   it('asks for the name to be typed when the counts are only approximate, however few', async () => {
@@ -542,6 +563,11 @@ describe('PropertyOpDialog — its title, its steps, and the focus', () => {
     expect(heading()).toHaveTextContent('Change a property')
   })
 
+  it('opened on chosen entities with no property named, changes them — as the menu said', () => {
+    open({ target: { kind: 'children', urns: ['urn:sales'], label: 'Sales' } })
+    expect(heading()).toHaveTextContent('Change a property')
+  })
+
   it('adds a property no entity in the view holds, and changes one they do', () => {
     open({ op: { kind: 'fillEmpty', key: 'tier', value: 'gold' }, target: { kind: 'view' } })
     expect(heading()).toHaveTextContent('Add a property')
@@ -560,7 +586,7 @@ describe('PropertyOpDialog — its title, its steps, and the focus', () => {
   it('a relationship’s property is added or changed as the view’s relationships carry it', async () => {
     const user = userEvent.setup()
     open({ target: { kind: 'relationships', ids: ['e1'] } })
-    expect(heading()).toHaveTextContent('Add a property')
+    expect(heading()).toHaveTextContent('Change a property')
     await user.type(screen.getByRole('combobox', { name: 'Property' }), 'owner')
     expect(heading()).toHaveTextContent('Change a property')
     await user.type(screen.getByRole('combobox', { name: 'Property' }), '2')
@@ -610,5 +636,94 @@ describe('PropertyOpDialog — its title, its steps, and the focus', () => {
 
     await user.keyboard('{Escape}')
     expect(onClose).toHaveBeenCalled()
+  })
+})
+
+describe('PropertyOpDialog — where it reaches by default, and the property it names', () => {
+  const checked = () => within(screen.getByRole('radiogroup', { name: 'Which entities' })).getAllByRole('radio')
+    .filter((r) => r.getAttribute('aria-checked') === 'true').map((r) => r.textContent)
+  const sentTarget = () => api.preview.mock.calls.at(-1)![4]
+  const rename = async (user: ReturnType<typeof userEvent.setup>, to: string) => {
+    const property = screen.getByRole('combobox', { name: 'Property' })
+    await user.clear(property)
+    await user.type(property, to)
+  }
+
+  it('a property renamed on What is the one Where reaches — and the one sent', async () => {
+    const user = userEvent.setup()
+    open({ kind: 'set', key: 'owner' })
+    await user.type(screen.getByRole('textbox', { name: 'Value' }), 'ana')
+    await rename(user, 'steward')
+    await user.click(next())
+    expect(checked()).toEqual([expect.stringMatching(/^Every entity with steward/)])
+    await user.click(next())
+    await waitFor(() => expect(api.preview).toHaveBeenCalled())
+    expect(sentTarget()).toEqual({ viewId: 'v1', scopeMode: 'view', predicate: { kind: 'hasProperty', key: 'steward', negate: false } })
+  })
+
+  it('so does one chosen on Where before the property was renamed', async () => {
+    const user = userEvent.setup()
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(screen.getByRole('radio', { name: /Every entity with owner/ }))
+    await user.click(screen.getByRole('button', { name: /What/ }))
+    await rename(user, 'dept')
+    await user.click(next())
+    expect(checked()).toEqual([expect.stringMatching(/^Every entity with dept/)])
+    await user.click(next())
+    await waitFor(() => expect(api.preview).toHaveBeenCalled())
+    expect(sentTarget().predicate).toEqual({ kind: 'hasProperty', key: 'dept', negate: false })
+  })
+
+  it('a property nothing in the view holds reaches every entity in the view', async () => {
+    const user = userEvent.setup()
+    open({ kind: 'set', key: 'tier' })
+    await user.type(screen.getByRole('textbox', { name: 'Value' }), 'gold')
+    await user.click(next())
+    expect(checked()).toEqual([expect.stringMatching(/^Every entity in the view/)])
+    await user.click(next())
+    await waitFor(() => expect(api.preview).toHaveBeenCalled())
+    expect(sentTarget()).toEqual({ viewId: 'v1', scopeMode: 'view', predicate: { kind: 'all' } })
+  })
+
+  it('a property named on New that the view holds reaches the entities with it', async () => {
+    const user = userEvent.setup()
+    open()
+    await user.type(screen.getByRole('combobox', { name: 'Property' }), 'owner')
+    await user.type(screen.getByRole('textbox', { name: 'Value' }), 'ana')
+    await user.click(next())
+    expect(checked()).toEqual([expect.stringMatching(/^Every entity with owner/)])
+  })
+
+  it('reaches the entities with it while the catalog is still being read', async () => {
+    const user = userEvent.setup()
+    catalogStatus = 'running'
+    open({ kind: 'set', key: 'tier' })
+    await user.type(screen.getByRole('textbox', { name: 'Value' }), 'gold')
+    await user.click(next())
+    expect(checked()).toEqual([expect.stringMatching(/^Every entity with tier/)])
+  })
+
+  it('reaches the entities with it while a change on this draft is still adding it', async () => {
+    const user = userEvent.setup()
+    usePropertyJobsStore.setState({ jobs: [{
+      jobId: 'job-9', ...GRAPH, viewId: 'v1', op: { kind: 'copy', key: 'owner', to: 'tier' }, targetLabel: 'every entity with owner',
+      startedAt: '2026-11-22T00:00:00Z', job: { jobId: 'job-9', status: 'running' },
+    }] } as never)
+    open({ kind: 'set', key: 'tier' })
+    await user.type(screen.getByRole('textbox', { name: 'Value' }), 'gold')
+    await user.click(next())
+    expect(checked()).toEqual([expect.stringMatching(/^Every entity with tier/)])
+  })
+
+  it('keeps the target chosen on Where, whatever the property becomes', async () => {
+    const user = userEvent.setup()
+    open({ kind: 'set', key: 'owner' })
+    await user.type(screen.getByRole('textbox', { name: 'Value' }), 'ana')
+    await user.click(next())
+    await user.click(screen.getByRole('radio', { name: /Every entity in the view/ }))
+    await user.click(screen.getByRole('button', { name: /What/ }))
+    await rename(user, 'steward')
+    await user.click(next())
+    expect(checked()).toEqual([expect.stringMatching(/^Every entity in the view/)])
   })
 })

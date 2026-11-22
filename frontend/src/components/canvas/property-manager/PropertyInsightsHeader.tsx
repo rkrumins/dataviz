@@ -10,6 +10,7 @@ import { type FC, type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 import { compactNum } from '@/components/dashboard/dashboard-constants'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { formatUtc, timeAgo } from '@/lib/timeAgo'
 import type { SearchCatalogResult } from '@/types/search'
@@ -101,12 +102,11 @@ function StatTile({ icon, value, label, tone, atLeast = false }: {
             <span className={cn('inline-flex items-center justify-center w-6 h-6 rounded-lg bg-canvas-base', tone)}>
                 {icon}
             </span>
-            <span
-                className="text-[15px] font-bold tabular-nums leading-none text-ink"
-                title={`${atLeast ? 'at least ' : ''}${value.toLocaleString()}`}
-            >
-                {`${atLeast ? '≥' : ''}${compactNum(value)}`}
-            </span>
+            <HoverTip label={`${atLeast ? 'At least ' : ''}${value.toLocaleString()}`} className="inline-flex">
+                <span className="text-[15px] font-bold tabular-nums leading-none text-ink">
+                    {`${atLeast ? '≥' : ''}${compactNum(value)}`}
+                </span>
+            </HoverTip>
             <span className="text-[8.5px] font-semibold uppercase tracking-[0.12em] text-ink-muted">
                 {label}
             </span>

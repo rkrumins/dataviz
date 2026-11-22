@@ -519,19 +519,19 @@ class UniqueViolation(_HttpMapped, RuntimeError):
 
 
 class FieldViolation(_HttpMapped, RuntimeError):
-    """A publish would give entities property values their type's fields refuse — not of the
-    field's type, not one of its allowed values — or leave a required field without one: refused,
-    naming each entity, field and value (the first 100), how many in all (``total``), and per
-    entity type, field and rule how many and which (``byField``: ``count``, and ``ids`` as a bulk
-    property job names them, up to 20,000, ``idsComplete`` when that is all). ``found``: the
-    publish's :class:`~.ontology.FieldFindings`."""
+    """A publish would give entities or relationships property values their type's fields refuse
+    — not of the field's type, not one of its allowed values — or leave a required field without
+    one: refused, naming each entity or relationship, field and value (the first 100), how many in
+    all (``total``), and per entity or relationship type (``entityKind``), field and rule how many
+    and which (``byField``: ``count``, and ``ids`` as a bulk property job names them, up to 20,000,
+    ``idsComplete`` when that is all). ``found``: the publish's :class:`~.ontology.FieldFindings`."""
 
     def __init__(self, found):
         self.violations = list(found.examples)
         first = self.violations[0] if self.violations else {}
         n = found.total
         super().__init__(
-            f"{n} {'value breaks' if n == 1 else 'values break'} the fields their entity types define — "
+            f"{n} {'value breaks' if n == 1 else 'values break'} the fields their types define — "
             f"{first.get('name') or first.get('entity_id')}: {first.get('reason')}",
             {"type": "field_violation", "violations": self.violations[:100], "total": n,
              "byField": found.by_field()})

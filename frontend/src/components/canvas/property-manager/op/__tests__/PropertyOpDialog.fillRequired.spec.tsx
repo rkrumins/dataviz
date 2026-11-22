@@ -14,6 +14,7 @@ const api = vi.hoisted(() => ({ preview: vi.fn(), create: vi.fn() }))
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/versioningApiService')>()),
   previewPropertyJob: api.preview,
+  previewPropertyJobSample: vi.fn(async () => ({ rows: [], truncated: false })),
   createPropertyJob: api.create,
 }))
 vi.mock('@/hooks/usePropertyCatalog', () => ({
@@ -21,7 +22,6 @@ vi.mock('@/hooks/usePropertyCatalog', () => ({
     { key: 'owner', count: 900, values: [{ value: 'ana', kind: 'String', count: 700 }], kinds: { String: 900 }, byEntityType: {}, distinct: 1, distinctExact: true, residual: 0 },
   ] } }),
 }))
-vi.mock('@/hooks/usePropertyInsights', () => ({ useAffectedSample: () => ({ data: null, loading: false, error: null }) }))
 vi.mock('../../../search/builder/useDiscovery', () => ({ useDiscovery: () => ({ keysByEdgeType: {} }) }))
 const counts: ReviewCounts = {
   counts: new Map([['target', { count: 40, complete: true, percent: 100 }], ['haveKey', { count: 0, complete: true, percent: 100 }]]),

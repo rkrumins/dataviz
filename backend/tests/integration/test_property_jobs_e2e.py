@@ -359,6 +359,163 @@ def test_a_search_target_is_resolved_by_the_job_and_one_matching_too_much_is_ref
     asyncio.run(_search_target(monkeypatch))
 
 
+# ── a search target reaches what the draft created or changed to match ────────
+GOLD = {"kind": "property", "key": "tier", "op": "eq", "value": "gold"}
+DOUBLE_X = {"kind": "replace", "key": "code", "find": "x", "replaceWith": "xx", "onConflict": "skip"}
+
+
+async def _gold_draft():
+    """Main: N0, N1, N3 gold, N2 silver. The draft: N1 silver, N2 gold, N3 changed but still gold,
+    N9 created gold. Main's export of a search finds N0, N1 and N3 (``targets``); the draft's own
+    matches are judged as the job judges them — the draft's patch set, read from Postgres, over the
+    stub provider holding main (``draft_matches``)."""
+    from types import SimpleNamespace
+
+    from backend.app.providers import draft_search
+    from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.app.services.view_scope import EffectiveViewScope
+    from backend.tests.integration.test_draft_search_e2e import CONTEXT, _stub
+    from backend.tests.test_draft_search import Main
+
+    svc, ds, gid, draft = await _draft(nodes=[
+        _node(0, tier="gold", code="x"), _node(1, tier="gold", code="x"),
+        _node(2, tier="silver", code="x"), _node(3, tier="gold", code="x")])
+    main = await svc.main_branch_id(gid)
+    await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="draft edits", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "N1", "payload": {"properties": {"tier": "silver"}}},
+        {"op": "update", "entity_kind": "node", "entity_id": "N2", "payload": {"properties": {"tier": "gold"}}},
+        {"op": "update", "entity_kind": "node", "entity_id": "N3", "payload": {"properties": {"note": "y"}}},
+        _node(9, tier="gold", code="x")])
+    store = await _stub(svc, gid, main, Main)
+    asked = []
+
+    async def targets(job):
+        for urn in ("urn:n0", "urn:n1", "urn:n3"):
+            yield urn
+
+    async def draft_matches(job):
+        asked.append(job["target"]["predicate"])
+        overlay = DraftOverlayProvider(store, svc=svc, graph_id=gid, branch_id=draft)
+        search = AdvancedSearchService(SimpleNamespace(provider=overlay), session=None, workspace_id="ws1")
+
+        async def resolve(requested):
+            return EffectiveViewScope(
+                view_id="v1", workspace_id="ws1", data_source_id=ds, canvas_kind="graph", root_urns=(),
+                entity_type_allow_list=frozenset(), layer_allow_list=frozenset(), max_depth=12,
+                scope_hash="scope-v1")
+
+        async def guard(scope):
+            return None
+
+        search._resolve_scope, search._guard_view_data_source = resolve, guard
+        target = job["target"]
+        return await draft_search.draft_matches(
+            overlay, {"viewId": target["viewId"], "scopeMode": target["scopeMode"]}, target["predicate"],
+            lambda request: search.membership(request, run_context=CONTEXT))
+
+    ie = ImportExportService(versioning=svc, property_targets=targets, property_draft_matches=draft_matches)
+    return svc, ds, gid, draft, ie, asked
+
+
+def _codes(values):
+    return [(v or {}).get("code") for v in values]
+
+
+async def _draft_matches_reached(monkeypatch) -> None:
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 2)
+    svc, ds, gid, draft, ie, asked = await _gold_draft()
+    seeded = await _messages(gid, draft)
+    search = {"viewId": "v1", "scopeMode": "view", "predicate": GOLD}
+    job_id = await _create(ie, ds, gid, draft, DOUBLE_X, search)
+    await TransferRunner(lambda: ie).run_job(await lease_job(job_id))
+    job = await ie.get_property_job(job_id)
+    assert job["status"] == "completed" and asked == [GOLD], job
+    # The draft's own matches first (N2 changed to match, N3, N9 created), then main's: N0 edited,
+    # N1 changed out of the search left alone, N3 — matched by both — replaced ONCE.
+    assert _codes([await _props(svc, gid, draft, f"N{i}") for i in (0, 1, 2, 3, 9)]) == \
+        ["xx", "x", "xx", "xx", "xx"]
+    summary = job["summary"]
+    assert (summary["changed"], summary["noLongerMatches"], summary["commits"], job["total"]) == (4, 1, 3, 6)
+    assert summary["recheck"] == {"exact": True, "note": None}
+    assert await _messages(gid, draft) == seeded + [
+        f"Bulk property: Replace “x” → “xx” in code ({i}/4)" for i in (1, 2, 3)]
+    assert await _csv(ie, job_id) == ["urn,entityId,reason,detail", "urn:n1,N1,no_longer_matches,"
+                                      "In this draft it no longer matches the search."]
+    assert _codes([await _props(svc, gid, None, f"N{i}") for i in (0, 2, 3)]) == ["x", "x", "x"]   # main untouched
+    await db.dispose_engine()
+
+
+def test_a_search_target_reaches_what_the_draft_created_or_changed_to_match_each_once(monkeypatch):
+    asyncio.run(_draft_matches_reached(monkeypatch))
+
+
+async def _inexact_adds_none(monkeypatch) -> None:
+    """A search the draft's values can't answer (it follows relationships) adds no draft matches,
+    and says so: main's matches, as published, are what it edits."""
+    from backend.app.services.versioning.import_export import property_job
+
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 2)
+    svc, ds, gid, draft, ie, asked = await _gold_draft()
+    orphan_gold = {"kind": "group", "op": "and", "children": [GOLD, {"kind": "isOrphan"}]}
+    job_id = await _create(ie, ds, gid, draft, {"kind": "set", "key": "flag", "value": "y", "onConflict": "skip"},
+                           {"viewId": "v1", "scopeMode": "view", "predicate": orphan_gold})
+    await TransferRunner(lambda: ie).run_job(await lease_job(job_id))
+    job = await ie.get_property_job(job_id)
+    assert job["status"] == "completed" and asked == [orphan_gold], job
+    assert [(await _props(svc, gid, draft, f"N{i}")).get("flag") for i in (0, 1, 2, 3, 9)] == \
+        ["y", "y", None, "y", None]
+    assert job["total"] == 3 and job["summary"]["recheck"] == {
+        "exact": False, "note": f"{property_job.RECHECK_APPROXIMATE} {property_job.DRAFT_UNSEARCHED['inexact']}"}
+    await db.dispose_engine()
+
+
+def test_a_search_the_drafts_values_cant_answer_adds_no_draft_matches(monkeypatch):
+    asyncio.run(_inexact_adds_none(monkeypatch))
+
+
+async def _draft_matches_resume(monkeypatch) -> None:
+    """Taken over while it finds its targets, and again as its first window of main's matches
+    writes: resumed each time, it finds the same targets, writes each window once, and still skips
+    the entity the draft's windows reached — the skip set is read again by the worker that resumes."""
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 2)
+    svc, ds, gid, draft, ie, asked = await _gold_draft()
+    seeded = await _messages(gid, draft)
+    job_id = await _create(ie, ds, gid, draft, DOUBLE_X, {"viewId": "v1", "scopeMode": "view", "predicate": GOLD})
+    export, taken = ie._property_targets, []
+
+    async def taken_over_once(job):
+        if not taken:
+            taken.append(await lease_job(job_id))                # another worker, mid-export
+        async for urn in export(job):
+            yield urn
+    ie._property_targets = taken_over_once
+
+    with pytest.raises(Superseded):
+        await ie.run_property(job_id, lease=await lease_job(job_id))
+    assert await _messages(gid, draft) == seeded
+
+    lease = await lease_job(job_id)
+    _on_window(svc, 3, lambda: lease_job(job_id))                 # main's first window
+    with pytest.raises(Superseded):
+        await ie.run_property(job_id, lease=lease)
+    windows = [f"Bulk property: Replace “x” → “xx” in code ({i}/4)" for i in (1, 2, 3)]
+    assert await _messages(gid, draft) == seeded + windows[:2]
+
+    svc.apply_ops = GraphVersioningService.apply_ops.__get__(svc)
+    summary = await ie.run_property(job_id)
+    assert asked == [GOLD, GOLD]                                   # resolved twice, the same
+    assert await _messages(gid, draft) == seeded + windows
+    assert _codes([await _props(svc, gid, draft, f"N{i}") for i in (0, 1, 2, 3, 9)]) == \
+        ["xx", "x", "xx", "xx", "xx"]
+    assert (summary["changed"], summary["noLongerMatches"], summary["chunks"], summary["draftChunks"]) == (4, 1, 4, 2)
+    await db.dispose_engine()
+
+
+def test_a_search_job_with_draft_matches_resumes_exactly_after_a_takeover(monkeypatch):
+    asyncio.run(_draft_matches_resume(monkeypatch))
+
+
 async def _draft_closed(monkeypatch) -> None:
     monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 3)
     svc, ds, gid, draft = await _draft()
@@ -744,6 +901,146 @@ async def _edge_routes() -> None:
 
 def test_the_edge_routes_preview_create_and_read_several_relationships():
     asyncio.run(_edge_routes())
+
+
+# ── the preview's sample: a few entities, before and after ────────────────────
+def _sample_search(monkeypatch, *, hits=(), edges=(), refuse=None):
+    """``…/preview/sample``'s search over a stub engine (the search engine needs FalkorDB): one page
+    of ``hits`` (urns), or of a Connections search's ``edges`` (ids) — the view readable. Returns
+    the queries it was asked."""
+    from types import SimpleNamespace
+    from backend.app.api.v1.endpoints import graph as graph_ep, versioning as versioning_ep
+    from backend.app.services import advanced_search_service
+    from backend.app.services.view_transfer import sources
+
+    asked = []
+
+    class Search:
+        def __init__(self, engine, **kw):
+            self.can_read = kw["can_read_view"]
+
+        async def search(self, query, run_context=None):
+            if refuse:
+                raise advanced_search_service.ValidationError(refuse)
+            asked.append(query)
+            return SimpleNamespace(hits=[SimpleNamespace(node=SimpleNamespace(urn=u)) for u in hits],
+                                   edges=[SimpleNamespace(id=e) for e in edges]), None
+
+    async def engine_for(*_a, **_kw):
+        return SimpleNamespace(provider=SimpleNamespace())
+
+    async def readable(*_a, **_kw):
+        return True
+
+    async def data_version(_engine):
+        return "dv1"
+
+    monkeypatch.setattr(advanced_search_service, "AdvancedSearchService", Search)
+    monkeypatch.setattr(sources, "engine_for", engine_for)
+    monkeypatch.setattr(versioning_ep, "_property_job_view_readable", readable)
+    monkeypatch.setattr(graph_ep, "_search_data_version", data_version)
+    monkeypatch.setattr(graph_ep, "_statement_admission", lambda _engine: None)
+    return asked
+
+
+async def _sample(monkeypatch) -> None:
+    """A few entities before and after, read on the draft as a window reads them — named by id
+    (new in the draft too), or a search's first page checked again on the draft's values — and
+    each planned as the job plans it: changed, unchanged, or skipped and why."""
+    from httpx import ASGITransport, AsyncClient
+    from .test_versioning_main_write_publish import MIA, PAT, V1, _app
+
+    svc, ds, gid, draft = await _draft(owner="pat", nodes=[
+        _node(0, tier="gold", owner="o0"), _node(1, tier="gold", owner="o1", steward="s1"),
+        _node(2, tier="gold"), _node(3, tier="gold", owner="o3"), _node(4, tier="gold", owner="o4")])
+    await svc.apply_ops(graph_id=gid, branch_id=draft, actor="pat", message="draft edits", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "N4", "payload": {"properties": {"tier": "silver"}}},
+        {"op": "delete", "entity_kind": "node", "entity_id": "N3"}, _node(9, "Table", tier="gold", owner="o9")])
+    main = await svc.main_branch_id(gid)
+    app, _G = _app()
+    sample = f"{V1}/graphs/{gid}/branches/{draft}/property-jobs/preview/sample"
+    ids = ["urn:n0", "gv:N1", "urn:n2", "urn:n3", "urn:nope", "gv:N9", "gv:N0"]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(sample, json={"op": RENAME, "target": {"ids": ids}}, headers=PAT)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"truncated": False, "rows": [
+            {"id": "N0", "urn": "urn:n0", "name": "N0", "type": "Dataset", "before": "o0", "after": "o0",
+             "outcome": "change"},
+            {"id": "N1", "urn": "urn:n1", "name": "N1", "type": "Dataset", "before": "o1", "to": "s1",
+             "after": "s1", "outcome": "skip", "reason": "conflict"},
+            {"id": "N2", "urn": "urn:n2", "name": "N2", "type": "Dataset", "outcome": "unchanged"},
+            {"id": "urn:n3", "name": "urn:n3", "type": None, "outcome": "skip", "reason": "missing"},
+            {"id": "urn:nope", "name": "urn:nope", "type": None, "outcome": "skip", "reason": "missing"},
+            {"id": "N9", "urn": "urn:n9", "name": "N9", "type": "Table", "before": "o9", "after": "o9",
+             "outcome": "change"}]}                                   # gv:N0 is N0 again: one row
+        many = {"op": RENAME, "target": {"ids": [f"urn:x{i}" for i in range(9)]}}
+        r = await c.post(sample, json=many, headers=PAT)
+        assert (len(r.json()["rows"]), r.json()["truncated"]) == (8, True), r.text
+
+        # A search's first page, on the draft: N4 matched as published, and the draft made it silver.
+        asked = _sample_search(monkeypatch, hits=["urn:n0", "urn:n4", "urn:n2"])
+        gold = {"viewId": "v1", "scopeMode": "view",
+                "predicate": {"kind": "property", "key": "tier", "op": "eq", "value": "gold"}}
+        r = await c.post(sample, json={"op": RENAME, "target": gold}, headers=PAT)
+        assert r.status_code == 200, r.text
+        assert [(row["id"], row["outcome"], row.get("reason")) for row in r.json()["rows"]] == [
+            ("N0", "change", None), ("N4", "skip", "no_longer_matches"), ("N2", "unchanged", None)]
+        assert r.json()["rows"][1]["before"] == "o4" and r.json()["truncated"] is False
+        query = asked[0]
+        assert (query.scope.view_id, query.scope.scope_mode, query.options.results, query.options.page_size) == (
+            "v1", "view", "hits", 9)
+
+        _sample_search(monkeypatch, refuse="view_not_found: view 'v1' not found")
+        r = await c.post(sample, json={"op": RENAME, "target": gold}, headers=PAT)
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "search_refused", r.text
+        r = await c.post(f"{V1}/graphs/{gid}/branches/{main}/property-jobs/preview/sample",
+                         json={"op": RENAME, "target": {"ids": ids}}, headers=PAT)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "main_write_forbidden", r.text
+        # Someone who can't read pat's private draft can't read its entities this way either.
+        assert (await c.post(sample, json={"op": RENAME, "target": {"ids": ids}}, headers=MIA)).status_code == 404
+    await db.dispose_engine()
+
+
+def test_the_sample_shows_entities_before_and_after_by_id_and_by_search(monkeypatch):
+    asyncio.run(_sample(monkeypatch))
+
+
+async def _edge_sample(monkeypatch) -> None:
+    from httpx import ASGITransport, AsyncClient
+    from .test_versioning_main_write_publish import PAT, V1, _app
+
+    svc, ds, gid, draft = await _edge_draft(owner="pat")
+    app, _G = _app()
+    sample = f"{V1}/graphs/{gid}/branches/{draft}/property-jobs/preview/sample"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(sample, json={"op": RENAME, "target": {"edgeIds": EDGE_KEYS}}, headers=PAT)
+        assert r.status_code == 200, r.text
+        missing = {"type": None, "outcome": "skip", "reason": "missing"}
+        assert r.json() == {"truncated": False, "rows": [
+            {"id": "E1", "name": "N0 → N1", "type": "FLOWS_TO", "before": "a", "after": "a", "outcome": "change"},
+            {"id": "E2", "name": "N1 → N2", "type": "FLOWS_TO", "before": "b", "to": "x", "after": "x",
+             "outcome": "skip", "reason": "conflict"},
+            {"id": "edge:E3", "name": "N2 → N3", "type": "FLOWS_TO", "before": "c", "after": "c", "outcome": "change"},
+            {"id": "E4", "name": "N0 → N2", "type": "FEEDS", "outcome": "unchanged"},
+            {"id": "E5", "name": "E5", **missing},                     # deleted in the draft
+            {"id": "R1", "name": "N0 → N3", "type": "AGGREGATED", "before": "r", "outcome": "skip",
+             "reason": "derived"},
+            {"id": "nope", "name": "nope", **missing},
+            {"id": "urn:n0|NOPE|urn:n1", "name": "urn:n0|NOPE|urn:n1", **missing}]}
+
+        # A Connections search: its first page of edges, by their ids.
+        asked = _sample_search(monkeypatch, edges=["E1", "R1"])
+        search = {"viewId": "v1", "scopeMode": "view", "predicate": {"kind": "edges", "edgeTypes": ["FLOWS_TO"]}}
+        r = await c.post(sample, json={"op": RENAME, "target": search}, headers=PAT)
+        assert r.status_code == 200, r.text
+        assert [(row["id"], row["outcome"]) for row in r.json()["rows"]] == [("E1", "change"), ("R1", "skip")]
+        # A page of edges: the search fills in its own result shape.
+        assert asked[0].options.page_size == 9 and "results" not in asked[0].options.model_fields_set
+    await db.dispose_engine()
+
+
+def test_the_sample_shows_relationships_before_and_after_never_a_roll_up_changed(monkeypatch):
+    asyncio.run(_edge_sample(monkeypatch))
 
 
 # ── undo a bulk job, from the draft's history ─────────────────────────────────

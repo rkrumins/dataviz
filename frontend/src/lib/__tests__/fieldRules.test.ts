@@ -54,6 +54,17 @@ describe('fieldRules', () => {
     expect(fieldWarning(f('name', { required: true }), '', 'Tables')).toBeNull()
   })
 
+  it('governs a relationship type’s fields by an edge’s own — a name is a property of a relationship', () => {
+    const fields = [f('name', { required: true }), f('description', { required: true }), f('confidence', { type: 'number' }),
+      f('id', { required: true }), f('since', { type: 'date' })]
+    expect([...governedFields(fields, true).keys()]).toEqual(['name', 'description', 'since'])
+    const name = f('name', { name: 'Name', required: true })
+    expect(fieldWarning(name, '', 'Owns relationships', true)).toBe(
+      'Name is required for Owns relationships — publishing refuses a new one without it, or one it is emptied on.')
+    expect(fieldProblem(f('confidence', { type: 'number' }), 'high', true)).toBeNull()
+    expect(fieldProblem(f('since', { type: 'date' }), 'soon', true)).not.toBeNull()
+  })
+
   it('edits and stores a value as its field types it', () => {
     expect(inputTypeOf('progress')).toBe('number')
     expect(inputTypeOf('status')).toBe('text')
