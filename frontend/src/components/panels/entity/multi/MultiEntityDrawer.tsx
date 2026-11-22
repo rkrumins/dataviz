@@ -6,7 +6,9 @@
  * would touch — when the selection moves on, the header offers to compare that instead.
  *
  * - **Reading.** Each property is Same on all of them, Differs, or held by only some; opening a
- *   row shows every value and who holds it.
+ *   row shows every value and who holds it. Entities are named as people find them; a list opened
+ *   on them adds each one's ID beneath (its data source's identity property, else its URN), in
+ *   either view.
  * - **Editing**, in a draft: set a value for all, fill where missing, rename, copy, remove from
  *   all, add a property to all — each change pending until "Stage", then staged as each entity's
  *   own edit in one step that Undo takes back. Unstaged changes hold every move of the drawer
@@ -23,7 +25,8 @@ import { useCanvasStore, isSelectableNode, type LineageNode } from '@/store/canv
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { nodeIndexOf } from '@/lib/storeIndex'
-import { resolveEntityName } from '@/lib/entityDisplayName'
+import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
+import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { governedFields } from '@/lib/fieldRules'
 import { NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -41,6 +44,7 @@ import { Distribution, type GovernedRule } from './ComparisonRow'
 import { EMPTY_EDIT, withChange, type KeyChange } from './editOps'
 import { MultiEntityHeader, type TypeCount } from './MultiEntityHeader'
 import { MultiProperties } from './MultiProperties'
+import type { Member } from './ValueBreakdown'
 
 /** Entities edited here at once; more are compared, and changed from Property Manager. */
 export const MULTI_EDIT_MAX = 10_000
@@ -66,15 +70,21 @@ export function MultiEntityDrawer({
   }))
   const held = useMemo(() => members.filter((n): n is LineageNode => !!n), [members])
   const heldIds = useMemo(() => held.map((n) => n.id), [held])
+  const goneIds = useMemo(() => ids.filter((_, i) => !members[i]), [ids, members])
   const fields = useMemo(() => sharedFields(held as ReadonlyArray<{ id: string; data: Record<string, unknown> }>), [held])
 
   const personaMode = usePersonaStore((s) => s.mode)
   const entityTypes = useSchemaStore((s) => s.schema?.entityTypes)
   const byId = useMemo(() => new Map(held.map((n) => [n.id, n])), [held])
-  const memberOf = useCallback((id: string) => {
+  const identityProperty = useCanvasIdentityProperty()
+  const memberOf = useCallback((id: string): Member => {
     const n = byId.get(id)
-    return { id, name: n ? resolveEntityName(n.data, personaMode, id) : id, type: n ? String((n.data as Record<string, unknown>).type ?? '') : undefined }
-  }, [byId, personaMode])
+    if (!n) return { id, name: 'Not loaded', ident: id, notLoaded: true }
+    const name = resolveEntityName(n.data, personaMode, id)
+    // Its ID in either view — detail a list opened on it shows, left out where it is the name.
+    const ident = technicalIdentity(n.data, 'technical', { identityProperty, urn: id, name })?.value
+    return { id, name, ident, type: String((n.data as Record<string, unknown>).type ?? '') }
+  }, [byId, personaMode, identityProperty])
 
   // How many of each type — the selection in the reader's words — and what no two of a type may share.
   const { types, refusals } = useMemo(() => {
@@ -203,7 +213,7 @@ export function MultiEntityDrawer({
         ids={heldIds}
         types={types}
         memberOf={memberOf}
-        gone={ids.length - held.length}
+        gone={goneIds}
         editable={editable}
         selectionNow={selectionNow}
         onUseSelection={compareSelection}
@@ -293,9 +303,9 @@ function DescriptionSection({ field, value, editable, onChange }: {
       icon={AlignLeft}
       action={
         <span className="flex items-center gap-1">
-          {field.has > 0 && (field.kind === 'same' ? <Badge tone="success">Same</Badge>
-            : field.kind === 'differs' ? <Badge tone="warning">Differs</Badge>
-              : <Badge>On {field.has.toLocaleString()} of {field.total.toLocaleString()}</Badge>)}
+          {field.has > 0 && (field.kind === 'same' ? <Badge tone="success" size="md">Same</Badge>
+            : field.kind === 'differs' ? <Badge tone="warning" size="md">Differs</Badge>
+              : <Badge size="md">On {field.has.toLocaleString()} of {field.total.toLocaleString()}</Badge>)}
           {value !== undefined && (
             <IconButton icon={RotateCcw} label="Leave each description as it is" size="sm" className="w-6 h-6" onClick={() => onChange(undefined)} />
           )}

@@ -1737,7 +1737,9 @@ export function GraphCanvas({ className }: { className?: string }) {
           'absolute bottom-40 z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
           !(entityDrawerOpen || drawerEdge) && 'right-4',
         )}
-        style={entityDrawerOpen || drawerEdge ? { right: `calc(${drawerWidthCss(drawerWidth)} + 1rem)` } : undefined}
+        style={entityDrawerOpen || drawerEdge
+          ? { right: `calc(${drawerWidthCss(drawerWidth, !!drawerNodeIds || drawerEdge?.kind === 'relationships')} + 1rem)` }
+          : undefined}
       >
         <EdgeLegend defaultExpanded={false} visibleEdges={allVisibleEdges} />
       </div>

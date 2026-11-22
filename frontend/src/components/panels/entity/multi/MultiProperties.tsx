@@ -25,7 +25,8 @@ import type { Member } from './ValueBreakdown'
 
 type Filter = 'all' | 'same' | 'differs' | 'partial' | 'changed'
 
-const ROW_ESTIMATE = 64
+/** A closed row and the gap below it, as drawn: 82–94px, read-only or editable. */
+const ROW_ESTIMATE = 88
 
 export function MultiProperties({
   fields, nodeIds, edit, onChange, onAddAll, editable, sharedValueRefused, fieldRuleFor, memberOf, onFocusNode, onOpenNode,
@@ -148,7 +149,7 @@ export function MultiProperties({
       title="Properties"
       icon={FileText}
       action={editable && !nothing ? (
-        <Button size="sm" variant="ghost" leftIcon={Plus} className="h-6 px-2 text-2xs" onClick={() => setAdding(true)}>
+        <Button size="sm" variant="ghost" leftIcon={Plus} onClick={() => setAdding(true)}>
           Add to all
         </Button>
       ) : undefined}
@@ -161,8 +162,9 @@ export function MultiProperties({
         ) : (
           <>
             {!nothing && (
-              <div className="mb-3 space-y-2">
+              <div className="mb-4 space-y-2.5">
                 <Segmented<Filter>
+                  size="md"
                   label="Show properties"
                   value={filter}
                   onChange={setFilter}
@@ -175,16 +177,16 @@ export function MultiProperties({
                   ]}
                 />
                 <div className="relative">
-                  <Search aria-hidden className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted" />
+                  <Search aria-hidden className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
                   <input
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     placeholder="Find a property"
                     aria-label="Find a property"
-                    className="w-full h-7 pl-7 pr-7 rounded-lg text-xs text-ink bg-black/[0.03] dark:bg-white/[0.04] border border-black/[0.06] dark:border-white/[0.08] placeholder:text-ink-muted/70 outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                    className="w-full h-9 pl-8 pr-8 rounded-lg text-sm text-ink bg-black/[0.03] dark:bg-white/[0.04] border border-black/[0.06] dark:border-white/[0.08] placeholder:text-ink-muted/70 outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                   />
                   {query && (
-                    <IconButton icon={X} label="Clear" size="sm" tip={false} className="absolute right-0.5 top-1/2 -translate-y-1/2 w-6 h-6" onClick={() => setQuery('')} />
+                    <IconButton icon={X} label="Clear" size="sm" tip={false} className="absolute right-1 top-1/2 -translate-y-1/2" onClick={() => setQuery('')} />
                   )}
                 </div>
               </div>
@@ -212,12 +214,12 @@ export function MultiProperties({
                 action={{ label: 'Show all', onClick: () => { setQuery(''); setFilter('all') } }} />
             ) : (
               <div ref={listRef} role="list" aria-label="Properties compared" onKeyDown={onListKey}
-                className={cn(!virtual && 'space-y-1.5')}
+                className={cn(!virtual && 'space-y-2')}
                 style={virtual ? { height: virtualizer.getTotalSize(), position: 'relative' } : undefined}>
                 {virtual
                   ? virtualizer.getVirtualItems().map((item) => (
                     <div key={item.key} role="listitem" data-index={item.index} ref={virtualizer.measureElement}
-                      className="absolute left-0 top-0 w-full pb-1.5"
+                      className="absolute left-0 top-0 w-full pb-2"
                       style={{ transform: `translateY(${item.start - virtualizer.options.scrollMargin}px)` }}>
                       {row(item.index)}
                     </div>

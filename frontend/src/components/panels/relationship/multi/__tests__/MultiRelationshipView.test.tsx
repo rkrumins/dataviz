@@ -3,7 +3,9 @@
  * canvas copy), says for each property whether they hold it alike, differently or only some do,
  * and lists the ones it leaves out and why — roll-ups, ones deleted in the draft, ones not saved
  * yet. In a draft a change is made for all of them and staged as each relationship's own edit, in
- * one step that Undo takes back; more than it compares are changed on the server instead.
+ * one step that Undo takes back; more than it compares are changed on the server instead. Each is
+ * named by its ends, with its ID in the list opened on them. The drawer is wider comparing them
+ * than reading one.
  */
 import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -11,6 +13,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useCanvasStore, type EdgeMemberRef, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
+import { usePreferencesStore } from '@/store/preferences'
+import { defaultDrawerPx } from '../../../shell/drawerWidth'
 import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { useNotificationStore } from '@/components/ui/notifications'
 import { stagedChangesToOps } from '@/features/versioning/model/stagedChangesToOps'
@@ -183,6 +187,31 @@ describe('several relationships in the relationship drawer', () => {
     expect(screen.getByText('Switch to a draft to make changes')).toBeInTheDocument()
     act(() => screen.getByRole('button', { name: 'Edit in a draft' }).click())
     expect(startEditing).toHaveBeenCalled()
+  })
+
+  it('names each by its ends; the list opened on them adds each one\'s ID as stored', async () => {
+    const user = userEvent.setup()
+    render(<RelationshipDrawer canEdit />)
+    expect(screen.queryByText('edge:e2')).toBeNull()
+    await user.click(screen.getByRole('button', { name: /List the 3 compared/ }))
+    const list = screen.getByRole('button', { name: 'Open Orders → Revenue' }).closest('ul')!
+    expect(within(list).getByText('Revenue → Refunds')).toBeInTheDocument()
+    expect(within(list).getByText('edge:e2').tagName).toBe('CODE')
+    expect(within(list).getByText('e1').tagName).toBe('CODE')
+  })
+
+  it('is wider comparing them than reading one', () => {
+    const innerWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true })
+    usePreferencesStore.setState({ drawerWidth: null })
+    try {
+      render(<RelationshipDrawer canEdit />)
+      const width = Number(screen.getByRole('separator', { name: 'Resize details panel' }).getAttribute('aria-valuenow'))
+      expect(width).toBe(defaultDrawerPx(true))
+      expect(width).toBeGreaterThan(defaultDrawerPx())
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { value: innerWidth, configurable: true })
+    }
   })
 
   it('in a draft this person can only view, says so — not that changes are kept in a draft', () => {

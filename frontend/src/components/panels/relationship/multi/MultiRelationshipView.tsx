@@ -10,7 +10,8 @@
  *   properties).
  * - **Who is compared.** Authored lineage relationships, as they are stored. Roll-ups, hierarchy
  *   links, relationships not saved yet, deleted in the draft or with a deletion staged are left out,
- *   each listed with why.
+ *   each listed with why. Each is named by its ends ("Orders → Revenue"); a list opened on them
+ *   adds each one's ID beneath.
  * - **Editing**, in a draft: set a value for all, fill where missing, rename, copy, remove, add a
  *   property to all — pending until "Stage", then staged as each relationship's own edit in one
  *   step that Undo takes back (`stageEdgeEdits`). Unstaged changes hold every move of the drawer.
@@ -141,8 +142,10 @@ export function MultiRelationshipView({
   const nameOf = useCallback((m: EdgeMemberRef) => endsOf(m).join(' → '), [endsOf])
   const memberOf = useCallback((id: string): Member => {
     const m = byId.get(id)
-    return { id, name: m ? nameOf(m) : id }
-  }, [byId, nameOf])
+    if (!m) return { id, name: 'Not loaded', ident: id, notLoaded: true }
+    // Its ID as stored, where it was read — what the single drawer shows.
+    return { id, name: nameOf(m), ident: read.records.get(id)?.entityId ?? id }
+  }, [byId, nameOf, read.records])
   const types = useMemo(() => {
     const counts = new Map<string, number>()
     for (const h of held) counts.set(h.record.edgeType || h.member.edgeType, (counts.get(h.record.edgeType || h.member.edgeType) ?? 0) + 1)
@@ -248,10 +251,10 @@ export function MultiRelationshipView({
       <DrawerHeader className="bg-gradient-to-br from-accent-lineage/[0.07] to-transparent">
         <DrawerTopBar badge={<Badge tone="accent" size="md" caps>Relationships</Badge>}
           closeLabel="Close relationship details" onClose={onClose} />
-        <h2 id={titleId} tabIndex={-1} className="text-lg font-semibold leading-tight text-ink outline-none">
+        <h2 id={titleId} tabIndex={-1} className="text-xl font-display font-semibold leading-tight text-ink outline-none">
           {target.members.length.toLocaleString()} relationships
         </h2>
-        <p className="mt-0.5 text-xs text-ink-muted">
+        <p className="mt-0.5 text-sm text-ink-muted">
           {editable ? 'What they share, and where they differ — change it for all at once.' : 'What they share, and where they differ.'}
         </p>
         {types.length > 0 && (
@@ -259,7 +262,7 @@ export function MultiRelationshipView({
             {types.map(([t, n]) => (
               <span key={t} className="inline-flex items-center gap-1">
                 <TypeChip type={t} label={relationshipCopy(t, relationshipTypes).label} />
-                <span className="text-[11px] tabular-nums text-ink-muted">{n.toLocaleString()}</span>
+                <span className="text-xs tabular-nums text-ink-muted">{n.toLocaleString()}</span>
               </span>
             ))}
           </div>
@@ -281,12 +284,12 @@ export function MultiRelationshipView({
         {heldIds.length > 0 && (
           <>
             <button type="button" onClick={() => setListOpen((o) => !o)} aria-expanded={listOpen}
-              className="mt-2.5 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+              className="mt-3 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
               {listOpen ? 'Hide' : 'List'} the {heldIds.length.toLocaleString()} compared
-              <ChevronDown className={cn('w-3 h-3 transition-transform', listOpen && 'rotate-180')} aria-hidden />
+              <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', listOpen && 'rotate-180')} aria-hidden />
             </button>
             {listOpen && (
-              <div className="mt-1.5 max-h-56 overflow-y-auto custom-scrollbar rounded-lg border border-glass-border bg-canvas">
+              <div className="mt-2 max-h-72 overflow-y-auto custom-scrollbar rounded-lg border border-glass-border bg-canvas">
                 <MemberList ids={heldIds} memberOf={memberOf} className="ml-0 my-1"
                   onFocusNode={onLocateMany ? locateOne : undefined} onOpenNode={openOne} />
               </div>

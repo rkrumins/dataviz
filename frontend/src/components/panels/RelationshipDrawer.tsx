@@ -100,7 +100,7 @@ export const RelationshipDrawer = memo(function RelationshipDrawer(props: Relati
 
   if (!target) return null
   return (
-    <DrawerFrame panel="relationship-drawer" label="Relationship details">
+    <DrawerFrame panel="relationship-drawer" label="Relationship details" comparing={target.kind === 'relationships'}>
       {target.kind === 'relationship' ? (
         <RelationshipPanel key={`r:${target.id}`} {...props} target={target} onClose={closeDrawer} />
       ) : target.kind === 'relationships' ? (
