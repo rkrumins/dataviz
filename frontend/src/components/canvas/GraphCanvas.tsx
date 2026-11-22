@@ -1630,10 +1630,11 @@ export function GraphCanvas({ className }: { className?: string }) {
           {showMinimap && (
             <MiniMap
               nodeColor={minimapNodeColor}
-              maskColor="rgba(0, 0, 0, 0.1)"
               className={cn(
                 'glass-panel-subtle !rounded-xl !overflow-hidden',
                 '!bottom-4 !right-4',
+                // Its mask as a variable, not the inline maskColor, so the dark theme's (globals.css) wins.
+                '[--xy-minimap-mask-background-color:rgb(0_0_0/0.1)]',
               )}
               pannable
               zoomable
@@ -1717,10 +1718,12 @@ export function GraphCanvas({ className }: { className?: string }) {
       </div>
 
       {/* Edge Legend */}
-      {/* Clear of the details drawer, at whatever width it is dragged to. */}
+      {/* Clear of the details drawer, at whatever width it is dragged to, and above the minimap
+          while it is shown: its top is 183px up (1rem, React Flow's 15px panel margin, 152px tall). */}
       <div
         className={cn(
-          'absolute bottom-40 z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
+          'absolute z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
+          showMinimap ? 'bottom-[12.5rem]' : 'bottom-40',
           !(entityDrawerOpen || drawerEdge) && 'right-4',
         )}
         style={entityDrawerOpen || drawerEdge
