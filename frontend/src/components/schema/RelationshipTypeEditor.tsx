@@ -4,6 +4,7 @@
  * Key features:
  * - isContainment / isLineage classification toggles
  * - Full visual configuration (stroke color, style, animation)
+ * - The fields its relationships' properties are held to at publish, as an entity type's are
  * - Source/target type selectors
  */
 import { useState, useMemo } from 'react'
@@ -16,12 +17,14 @@ import { DEFAULT_REL_VISUAL } from '@/features/ontology/lib/ontology-types'
 import { typesSharingLineStyle, type LineStyled } from '@/features/ontology/lib/lineStyle'
 import { appOwnedStrokeStyle } from '@/utils/edgeTypeUtils'
 import { ColorInput } from '@/components/ui/ColorInput'
+import { FieldsTab, fieldKeyProblems, useFieldRows } from './FieldsTab'
 
 const STROKE_STYLES = ['solid', 'dashed', 'dotted'] as const
 
 const TAB_DEFS = [
   { id: 'basic' as const, label: 'Identity', icon: LucideIcons.FileText },
   { id: 'visual' as const, label: 'Appearance', icon: LucideIcons.Palette },
+  { id: 'fields' as const, label: 'Fields', icon: LucideIcons.List },
   { id: 'connections' as const, label: 'Connections', icon: LucideIcons.Plug },
 ]
 
@@ -43,6 +46,8 @@ interface RelationshipTypeEditorProps {
    *  Omitted (the default) means the caller has nothing to compare against, and the
    *  advisory stays silent rather than guessing. */
   siblingTypes?: LineStyled[]
+  /** Property keys this type's relationships carry in the graph, offered as a new field's key. */
+  propertyKeys?: readonly string[]
   readOnly?: boolean
   onSave: (relType: RelTypeWithClassifications) => void
   onCancel: () => void
@@ -89,17 +94,20 @@ export function RelationshipTypeEditor({
   availableEntityTypes = [],
   existingTypeIds = [],
   siblingTypes = [],
+  propertyKeys = [],
   readOnly,
   onSave,
   onCancel,
 }: RelationshipTypeEditorProps) {
   const isNew = !relType
-  const [form, setForm] = useState<RelTypeWithClassifications>(
-    relType ?? createDefaultRelType()
+  // Its fields in their declared display order (drag-reorder rewrites it).
+  const [form, setForm] = useState<RelTypeWithClassifications>(() =>
+    relType?.fields ? { ...relType, fields: [...relType.fields].sort((a, b) => a.displayOrder - b.displayOrder) }
+      : relType ?? createDefaultRelType()
   )
   // Once the id is hand-edited, stop auto-deriving it from the name (slug-field pattern).
   const [idTouched, setIdTouched] = useState(false)
-  const [activeTab, setActiveTab] = useState<'basic' | 'visual' | 'connections'>('basic')
+  const [activeTab, setActiveTab] = useState<'basic' | 'visual' | 'fields' | 'connections'>('basic')
 
   const updateVisual = <K extends keyof RelationshipVisualConfig>(
     key: K,
@@ -129,7 +137,11 @@ export function RelationshipTypeEditor({
   // permanently dead-end pure re-categorization (moving an edge into Containment/Lineage), which is
   // the whole point of opening the editor. So the collision only blocks new types.
   const collision = isNew ? findCaseInsensitiveCollision(form.id, otherIds) : null
-  const canSave = !!form.name.trim() && !!form.id.trim() && !collision
+  // Every field is a property, by its key: a new one needs one no other field of the type has.
+  const fields = form.fields ?? []
+  const fieldRows = useFieldRows()
+  const keyProblems = fieldKeyProblems(fields, fieldRows.isNew)
+  const canSave = !!form.name.trim() && !!form.id.trim() && !collision && keyProblems.every((p) => p === null)
 
   // Colour is not a channel every reader has. The canvas tells edge types apart by
   // colour AND dash, so two types drawn with the same stroke style are separated by
@@ -539,6 +551,17 @@ export function RelationshipTypeEditor({
                     )}
                   </div>
                 </Section>
+              </div>
+            )}
+
+            {activeTab === 'fields' && (
+              <div className="space-y-4">
+                <p className="text-[11px] leading-relaxed text-ink-muted">
+                  The properties a relationship of this type carries that publishing checks: a
+                  required one must have a value, and one with allowed values may hold only those.
+                </p>
+                <FieldsTab relationship fields={fields} setFields={(update) => setForm((p) => ({ ...p, fields: update(p.fields ?? []) }))}
+                  readOnly={readOnly} propertyKeys={propertyKeys} rows={fieldRows} problems={keyProblems} />
               </div>
             )}
 

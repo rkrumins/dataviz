@@ -5,8 +5,8 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { entityTypesOf, fillRefusedRequest, fillRequiredRequest } from '../fillRequired'
-import { targetLabel, targetOf } from '../opModel'
+import { entityTypesOf, fillRefusedRequest, fillRequiredConnectionsRequest, fillRequiredRequest } from '../fillRequired'
+import { isEdgeTarget, targetLabel, targetOf } from '../opModel'
 
 describe('fillRequiredRequest', () => {
   it('fills the field where it is empty on every entity of the type, searched where asked', () => {
@@ -30,6 +30,22 @@ describe('fillRequiredRequest', () => {
   })
 })
 
+describe('fillRequiredConnectionsRequest', () => {
+  it('fills the field where it is empty on every relationship of the type, as a Connections search', () => {
+    const seed = fillRequiredConnectionsRequest({ edgeType: 'OWNS', edgeTypeName: 'Owns', field: 'since', fieldName: 'Since', scopeMode: 'view' })
+    expect(seed.op).toEqual({ kind: 'fillEmpty', key: 'since' })
+    expect(seed.target).toEqual({
+      kind: 'connections', scopeMode: 'view', label: 'every Owns relationship missing Since',
+      predicate: { kind: 'edges', edgeTypes: ['OWNS'], edgePredicate: { kind: 'edgeGroup', op: 'or', children: [
+        { kind: 'edgeHasProperty', key: 'since', negate: true },
+        { kind: 'edgeProperty', key: 'since', op: 'eq', value: '' },
+      ] } },
+    })
+    expect(isEdgeTarget(seed.target!)).toBe(true)
+    expect(targetLabel(seed.target!)).toBe('every Owns relationship missing Since')
+  })
+})
+
 describe('fillRefusedRequest', () => {
   it('fills the refused entities by id — all of them, or the first that fit, saying so', () => {
     const all = fillRefusedRequest({ entityType: 'Table', field: 'owner', fieldName: 'Owner', ids: ['gv:a', 'gv:b'], complete: true })
@@ -40,6 +56,12 @@ describe('fillRefusedRequest', () => {
 
     const first = fillRefusedRequest({ entityType: 'Table', field: 'owner', ids: Array.from({ length: 1200 }, (_, i) => `gv:${i}`), complete: false })
     expect(targetLabel(first.target!)).toBe('the first 1,200 the publish refused for missing owner on Table')
+  })
+
+  it('fills refused relationships by their own ids', () => {
+    const seed = fillRefusedRequest({ entityType: 'Owns', field: 'since', ids: ['e1', 'e2'], complete: true, edges: true })
+    expect(seed.target).toEqual({ kind: 'relationships', ids: ['e1', 'e2'] })
+    expect(targetOf(seed.target!, 'v1', 'view')).toEqual({ edgeIds: ['e1', 'e2'] })
   })
 })
 

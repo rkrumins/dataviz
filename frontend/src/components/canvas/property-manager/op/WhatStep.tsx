@@ -12,7 +12,7 @@ import { Segmented } from '@/components/ui/Segmented'
 import { AllowedValuePicker, FieldNote } from '@/components/panels/property/FieldGovernance'
 import { enforcedAllowed, fieldProblem, governedFields } from '@/lib/fieldRules'
 import { useSchemaStore } from '@/store/schema'
-import type { EntityFieldDefinition, EntityTypeSchema } from '@/types/schema'
+import type { EntityFieldDefinition } from '@/types/schema'
 import type { SearchCatalogProperty } from '@/types/search'
 import type { PropertyOpKind, ValueKind } from '@/services/versioningApiService'
 import { CleanupFields } from './CleanupFields'
@@ -73,8 +73,9 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
   viewId: string
   /** It changes relationships: `properties` are the keys the view's relationships carry, uncounted. */
   edges?: boolean
-  /** The entity types the target reaches, when known: a field of theirs with allowed values offers
-   *  them for the value. */
+  /** The entity types the target reaches, when known — for relationships, the relationship types
+   *  (else every one the schema has): a field of theirs with allowed values offers them for the
+   *  value. */
   entityTypes?: readonly string[]
   /** It was opened with its property named: the focus goes to what is still to give — the new
    *  name, or the value — not to the property. */
@@ -95,9 +96,12 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
   const pick = (kind: PropertyOpKind) => set(kind === 'convert' && !op.toKind ? { kind, toKind: dominantKind(known) } : { kind })
   // A field of the target's types with allowed values: picked from them — only from them when it
   // takes no other. A pick starts the free text again from it.
-  const schemaTypes = useSchemaStore((s) => s.schema?.entityTypes)
-  const allowedField = useMemo(() => (edges || !needsValue(op.kind) ? null : allowedFieldFor(op.key.trim(), entityTypes, schemaTypes)),
-    [edges, op.kind, op.key, entityTypes, schemaTypes])
+  const schemaTypes = useSchemaStore((s) => (edges ? s.schema?.relationshipTypes : s.schema?.entityTypes))
+  const allowedField = useMemo(() => {
+    if (!needsValue(op.kind)) return null
+    const types = edges ? entityTypes ?? schemaTypes?.map((t) => t.id) : entityTypes
+    return allowedFieldFor(op.key.trim(), types, schemaTypes, edges)
+  }, [edges, op.kind, op.key, entityTypes, schemaTypes])
   const onlyAllowed = !!allowedField && enforcedAllowed(allowedField).length > 0
   const [picks, setPicks] = useState(0)
   // What the property is given, beside it on a wide screen: its value, or its new name.
@@ -155,7 +159,7 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
             )}
 
             {allowedField && (
-              <AllowedValues field={allowedField} value={op.value} only={onlyAllowed}
+              <AllowedValues field={allowedField} value={op.value} only={onlyAllowed} edges={edges}
                 onPick={(value) => { set({ value: Array.isArray(value) && value.length === 0 ? '' : value }); setPicks((n) => n + 1) }} />
             )}
             {needsValue(op.kind) && !onlyAllowed && <ValueField key={picks} value={op.value} onChange={(value) => set({ value })} known={known} />}
@@ -169,11 +173,13 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
   )
 }
 
-/** The field `key` is for the first of `types` that governs it with allowed values. */
-function allowedFieldFor(key: string, types: readonly string[] | undefined, schemaTypes: readonly EntityTypeSchema[] | undefined): EntityFieldDefinition | null {
+/** The field `key` is for the first of `types` that governs it with allowed values — `edges`: of
+ *  relationship types. */
+function allowedFieldFor(key: string, types: readonly string[] | undefined,
+  schemaTypes: ReadonlyArray<{ id: string; fields?: EntityFieldDefinition[] }> | undefined, edges: boolean): EntityFieldDefinition | null {
   if (!key) return null
   for (const id of types ?? []) {
-    const field = governedFields(schemaTypes?.find((t) => t.id === id)?.fields).get(key)
+    const field = governedFields(schemaTypes?.find((t) => t.id === id)?.fields, edges).get(key)
     if (field?.allowedValues?.length) return field
   }
   return null
@@ -181,15 +187,17 @@ function allowedFieldFor(key: string, types: readonly string[] | undefined, sche
 
 /** A governed field's allowed values, one click each — said when it takes no other, and when the
  *  value given isn't one. */
-function AllowedValues({ field, value, only, onPick }: {
+function AllowedValues({ field, value, only, edges, onPick }: {
   field: EntityFieldDefinition
   value: unknown
   /** It takes no other value: these stand in for the free text. */
   only: boolean
+  /** A relationship type's field. */
+  edges: boolean
   onPick: (value: unknown) => void
 }) {
   const name = field.name || field.id
-  const problem = fieldProblem(field, value)
+  const problem = fieldProblem(field, value, edges)
   return (
     <div id="op-allowed">
       <span className={LABEL}>{only ? 'Value' : 'Suggested values'}</span>

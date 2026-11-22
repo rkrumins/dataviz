@@ -36,6 +36,7 @@ import { NO_DRAFT, NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from 
 import { stageEdgeEdits, type EdgeEdit } from '@/features/versioning/model/stageEdgeEdit'
 import { targetFromMember } from '@/lib/drawerEdgeTarget'
 import { userProperties } from '@/lib/nodeFields'
+import { governedFields } from '@/lib/fieldRules'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -48,6 +49,7 @@ import { DrawerTopBar, EditInDraftButton } from '../../shell/DrawerTopBar'
 import { useDrawerHistoryScope } from '../../useDrawerHistoryScope'
 import { EMPTY_EDIT, withChange, type KeyChange } from '../../entity/multi/editOps'
 import { MultiProperties } from '../../entity/multi/MultiProperties'
+import type { GovernedRule } from '../../entity/multi/ComparisonRow'
 import { MemberList, type Member } from '../../entity/multi/ValueBreakdown'
 import { Notice, TypeChip } from '../RelationshipParts'
 import { useEndpoints } from '../useEndpoints'
@@ -142,17 +144,40 @@ export function MultiRelationshipView({
   const endsOf = useCallback((m: EdgeMemberRef) =>
     [endpoints.get(m.source)?.name ?? m.source, endpoints.get(m.target)?.name ?? m.target] as const, [endpoints])
   const nameOf = useCallback((m: EdgeMemberRef) => endsOf(m).join(' → '), [endsOf])
+  // A type as the schema declares it, matched case-insensitively.
+  const declared = useCallback((type: string) =>
+    relationshipTypes.find((r) => r.id.toLowerCase() === type.toLowerCase()), [relationshipTypes])
   const memberOf = useCallback((id: string): Member => {
     const m = byId.get(id)
     if (!m) return { id, name: 'Not loaded', ident: id, notLoaded: true }
-    // Its ID as stored, where it was read — what the single drawer shows.
-    return { id, name: nameOf(m), ident: read.records.get(id)?.entityId ?? id }
-  }, [byId, nameOf, read.records])
+    // Its ID as stored, where it was read — what the single drawer shows — and its type, which a
+    // required field's "missing" counts by.
+    const record = read.records.get(id)
+    const type = record?.edgeType || m.edgeType
+    return { id, name: nameOf(m), ident: record?.entityId ?? id, type: declared(type)?.id ?? type }
+  }, [byId, nameOf, read.records, declared])
   const types = useMemo(() => {
     const counts = new Map<string, number>()
     for (const h of held) counts.set(h.record.edgeType || h.member.edgeType, (counts.get(h.record.edgeType || h.member.edgeType) ?? 0) + 1)
     return [...counts].sort((a, b) => b[1] - a[1])
   }, [held])
+  // The fields a publish judges, by key — the most-held type's, where two types define one. Their
+  // rows offer the allowed values and warn (never block) of a change publishing would refuse. Kept
+  // while the types held stay the same, so a write to one of them re-renders no row for it.
+  const typeOrder = types.map(([t]) => t).join('\u0000')
+  const rules = useMemo(() => {
+    const out = new Map<string, GovernedRule>()
+    for (const t of typeOrder ? typeOrder.split('\u0000') : []) {
+      const rt = declared(t)
+      if (!rt) continue
+      const name = relationshipCopy(t, relationshipTypes).label
+      for (const [key, field] of governedFields(rt.fields, true)) {
+        if (!out.has(key)) out.set(key, { field, typeLabel: `${name} relationships`, typeId: rt.id, typeName: name, edges: true })
+      }
+    }
+    return out
+  }, [typeOrder, declared, relationshipTypes])
+  const fieldRuleFor = useCallback((key: string) => rules.get(key) ?? null, [rules])
 
   // ── Whether they can be edited here ──
   const editing = useEntityEditing()
@@ -355,6 +380,7 @@ export function MultiRelationshipView({
             onAddAll={onAddAll}
             editable={editable}
             sharedValueRefused={NOT_REFUSED}
+            fieldRuleFor={fieldRuleFor}
             memberOf={memberOf}
             onFocusNode={onLocateMany ? locateOne : undefined}
             onOpenNode={openOne}

@@ -135,6 +135,10 @@ export interface RelationshipTypeSchema {
   isContainment?: boolean;
   isLineage?: boolean;
   category?: 'structural' | 'flow' | 'metadata' | 'association';
+
+  // The properties its relationships carry that a publish judges, as an entity type's fields are.
+  // Optional, as above: a schema without them judges none.
+  fields?: EntityFieldDefinition[];
 }
 
 export interface RelationshipVisualConfig {

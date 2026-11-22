@@ -25,7 +25,7 @@ import type { SharedField } from '@/components/canvas/context-view/bulkEdit'
 import { fieldWarning } from '@/lib/fieldRules'
 import type { EntityFieldDefinition } from '@/types/schema'
 import { usePropertyJobsStore } from '@/store/propertyJobsStore'
-import { fillRequiredRequest } from '@/components/canvas/property-manager/op/fillRequired'
+import { fillRequiredConnectionsRequest, fillRequiredRequest } from '@/components/canvas/property-manager/op/fillRequired'
 import { InlineValue } from '../../property/InlineValue'
 import { AllowedValuePicker, FieldNote, FillMissingButton } from '../../property/FieldGovernance'
 import { RichValue } from '../../property/RichValue'
@@ -37,8 +37,8 @@ import { OTHER_TONE, toneOf } from './tones'
 const NAME_MAX = 128
 
 /** A field a publish judges, and the entities' type as its warnings name it ("Tables") — and by its
- *  id and name, as a fill of every one missing it names it. */
-export interface GovernedRule { field: EntityFieldDefinition; typeLabel: string; typeId: string; typeName: string }
+ *  id and name, as a fill of every one missing it names it. `edges`: a relationship type's field. */
+export interface GovernedRule { field: EntityFieldDefinition; typeLabel: string; typeId: string; typeName: string; edges?: boolean }
 
 export interface ComparisonRowProps {
   index: number
@@ -178,9 +178,13 @@ export const ComparisonRow = memo(function ComparisonRow({
             <FieldNote>
               {rule.field.name || keyName} is required for {rule.typeLabel} — {lacking.toLocaleString()} of these {rule.typeLabel} {lacking === 1 ? 'has' : 'have'} none.
             </FieldNote>
-            <FillMissingButton typeName={rule.typeName} onClick={() => usePropertyJobsStore.getState().requestOp(fillRequiredRequest({
-              entityType: rule.typeId, entityTypeName: rule.typeName, field: keyName, fieldName: rule.field.name, scopeMode: 'view',
-            }))} />
+            <FillMissingButton typeName={rule.edges ? `${rule.typeName} relationship` : rule.typeName} onClick={() => usePropertyJobsStore.getState().requestOp(rule.edges
+              ? fillRequiredConnectionsRequest({
+                edgeType: rule.typeId, edgeTypeName: rule.typeName, field: keyName, fieldName: rule.field.name, scopeMode: 'view',
+              })
+              : fillRequiredRequest({
+                entityType: rule.typeId, entityTypeName: rule.typeName, field: keyName, fieldName: rule.field.name, scopeMode: 'view',
+              }))} />
           </div>
         )}
         {form === 'fill' && !pending && (
@@ -215,8 +219,8 @@ export const ComparisonRow = memo(function ComparisonRow({
 function PendingWarning({ rule, change }: { rule: GovernedRule; change: KeyChange | null }) {
   const removed = change?.kind === 'unset' || (change?.kind === 'move' && !change.keep)
   const warning = change?.kind === 'set' || change?.kind === 'fill'
-    ? fieldWarning(rule.field, change.value, rule.typeLabel)
-    : removed && rule.field.required ? fieldWarning(rule.field, undefined, rule.typeLabel) : null
+    ? fieldWarning(rule.field, change.value, rule.typeLabel, rule.edges)
+    : removed && rule.field.required ? fieldWarning(rule.field, undefined, rule.typeLabel, rule.edges) : null
   return warning ? <FieldNote className="mt-1.5">{warning}</FieldNote> : null
 }
 
