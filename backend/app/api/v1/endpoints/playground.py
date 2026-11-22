@@ -555,7 +555,7 @@ async def _start(request: Request, background: BackgroundTasks, session: AsyncSe
     try:
         made = await create_blank_graph(ws_id, CreateBlankGraphRequest(
             name=starter.title, description=starter.description, provider_id=provider_id,
-            ontology_id=starter.ontology_id), user, svc, session)
+            ontology_id=starter.ontology_id), user, svc, session, claims=None)
     except Exception:
         if own_ontology:
             await _drop_ontology(session, starter.ontology_id)

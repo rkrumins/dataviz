@@ -24,7 +24,7 @@ from sqlalchemy import select
 
 from backend.app.db.models import (OntologyAuditLogORM, OntologyORM, UserORM, WorkspaceDataSourceORM,
                                    WorkspaceORM)
-from backend.app.services import playground_layers
+from backend.app.services import playground_layers, playground_starter
 from backend.app.services.permission_service import PermissionClaims
 from tests.common.transfer_world import fake_version_store
 from tests.test_ontology_ownership import (  # noqa: F401 — ``world`` is a fixture
@@ -467,6 +467,20 @@ async def test_what_is_on_offer_and_the_refusals(test_client: AsyncClient, world
 
 
 @pytest.mark.asyncio
+async def test_a_blank_graph_in_the_playground_goes_only_on_a_layer_on_offer(
+        test_client: AsyncClient, world):
+    """The View wizard's blank graph is held to the same offer as a graph from a file: another
+    member's private layer is refused before anything is made."""
+    from backend.app.api.v1.endpoints import versioning as versioning_ep
+    bens = await make_layer(test_client, BEN, name="Ben's private", publish=True)
+    request = versioning_ep.CreateBlankGraphRequest(name="Mine", providerId="prov_sandbox",
+                                                    ontologyId=bens["id"])
+    with pytest.raises(HTTPException) as refused:
+        await versioning_ep.create_blank_graph(PG, request, ADA, None, world, claims=MEMBER)
+    assert (refused.value.status_code, refused.value.detail["type"]) == (403, "ontology_not_offered")
+
+
+@pytest.mark.asyncio
 async def test_a_layers_types_as_a_starter_graph_reads_them(world):
     world.add(org_layer("ont_shop", entities={
         "store": {"name": "Store", "plural_name": "Stores", "visual": {"icon": "Store", "color": "#111111"}},
@@ -481,6 +495,15 @@ async def test_a_layers_types_as_a_starter_graph_reads_them(world):
     assert relationships["HOLDS"].containment is True and relationships["SUPPLIES"].containment is False
     entities, relationships = await playground_layers.starter_types_of(world, "ont_shop", ["store", "shelf"])
     assert (list(entities), list(relationships)) == (["store", "shelf"], ["HOLDS"])
+    # The ends it declares stand in for rows: a graph made before its file loads still gets its
+    # Hierarchy view of what contains what, and its Context View starts at the containers.
+    assert relationships["HOLDS"].ends == (("store",), ("shelf",))
+    starter = playground_starter.Starter(
+        title="Shop", description="", icon="Store", ontology_id="ont_shop", ontology_name="Shop",
+        ontology_description="", entity_types=entities, relationship_types=relationships, fields=(),
+        rows=(), message="", view_name="Shop")
+    assert starter.containment() == ("HOLDS", "store", "shelf")
+    assert starter.top_level_types() == ["store"]
 
 
 @pytest.mark.asyncio

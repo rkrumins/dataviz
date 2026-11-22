@@ -51,6 +51,9 @@ class RelationshipType:
     color: str
     #: Structural: its source contains its target (a Hierarchy view's tree), not lineage.
     containment: bool = False
+    #: The source and target types its semantic layer declares, for a starter with no rows yet
+    #: (a graph whose file loads after it is made); rows add the types they join.
+    ends: Tuple[Tuple[str, ...], Tuple[str, ...]] = ((), ())
 
 
 @dataclass(frozen=True)
@@ -119,9 +122,11 @@ class Starter:
 
 
 def _endpoint_types(starter: Starter) -> Dict[str, Tuple[List[str], List[str]]]:
-    """Each relationship's source and target types, as its rows join them (sorted)."""
+    """Each relationship's source and target types, as its semantic layer declares them and its
+    rows join them (sorted)."""
     type_of = {row["urn"]: row["entityType"] for row in starter.rows if row["kind"] == "node"}
-    ends: Dict[str, Tuple[set, set]] = {rid: (set(), set()) for rid in starter.relationship_types}
+    ends: Dict[str, Tuple[set, set]] = {rid: (set(rel.ends[0]), set(rel.ends[1]))
+                                        for rid, rel in starter.relationship_types.items()}
     for row in starter.rows:
         if row["kind"] == "edge":
             ends[row["edgeType"]][0].add(type_of[row["source"]])

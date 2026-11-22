@@ -232,9 +232,13 @@ async def starter_types_of(session: AsyncSession, ontology_id: str,
     def among(types: List[str]) -> bool:              # none named: it joins any type
         return not types or bool(set(types) & set(entities))
 
+    def kept(types: List[str]) -> Tuple[str, ...]:   # the declared ends this graph has
+        return tuple(t for t in types if t in entities)
+
     relationships = {
         rid: RelationshipType(d.name or rid, d.description or "", d.visual.stroke_color,
-                              containment=bool(d.is_containment or rid.upper() in contained))
+                              containment=bool(d.is_containment or rid.upper() in contained),
+                              ends=(kept(d.source_types), kept(d.target_types)))
         for rid, d in parse_relationship_definitions(json.loads(row.relationship_type_definitions or "{}")).items()
         if used is None or (among(d.source_types) and among(d.target_types))
     }

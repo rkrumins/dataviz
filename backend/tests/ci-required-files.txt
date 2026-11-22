@@ -208,6 +208,7 @@ tests/test_node_identity_write_binding.py
 tests/test_node_property_hygiene.py
 tests/test_notification_kinds_have_visuals.py
 tests/test_object_store.py
+tests/test_ontology_import_audit.py
 tests/test_ontology_ownership.py
 tests/test_outbox_relay.py
 tests/test_package_ndjson_cursor.py

@@ -1949,6 +1949,7 @@ async def create_blank_graph(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
+    claims: Optional[PermissionClaims] = Depends(get_permission_claims),
 ):
     """Provision a blank, self-service lineage model in one call:
 
@@ -1968,6 +1969,12 @@ async def create_blank_graph(
     # 0) In the Playground: on its own sandbox provider, within the person's quota.
     from backend.app.services import playground_policy
     await playground_policy.assert_blank_graph(session, ws_id, body.provider_id, user.id)
+    # ... and only on a semantic layer on offer to the caller there: approved for everyone, a
+    # starter, a sample's, their own or one shared with them. The Playground's own starts check
+    # it before they call in, and pass no claims.
+    if isinstance(claims, PermissionClaims) and await playground_policy.playground_of(session, ws_id):
+        from backend.app.services import playground_layers
+        await playground_layers.assert_offered(session, claims, user.id, body.ontology_id)
 
     # 1) Provider must exist, be active, FalkorDB (Neo4j later), workspace-permitted and
     #    REACHABLE — a model is worthless if its backing store is down.

@@ -624,7 +624,7 @@ class OntologyAuditLogORM(Base):
         Index("idx_oal_created", "created_at"),
         Index("idx_oal_actor_action", "actor", "action", "created_at"),
         CheckConstraint(
-            "action IN ('created', 'updated', 'published', 'deleted', 'restored', 'cloned')",
+            "action IN ('created', 'updated', 'published', 'deleted', 'restored', 'cloned', 'imported')",
             name="ck_oal_action_enum",
         ),
     )
