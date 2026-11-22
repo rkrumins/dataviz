@@ -2105,7 +2105,8 @@ export interface PropertyJobSummary {
   publishedCommitId?: string | null
   /** Reviews merged in part that took some of what it changed to Published. */
   landedCommitIds?: string[]
-  /** A search target: whether its matches were checked again on the draft's values, and why not. */
+  /** A search target: whether its matches were checked again on the draft's values; `note` says why
+   *  not, and why the entities new or changed in the draft weren't searched there when they weren't. */
   recheck?: { exact: boolean; note: string | null }
   /** The undo that put back what it wrote. */
   undoneBy?: string | null

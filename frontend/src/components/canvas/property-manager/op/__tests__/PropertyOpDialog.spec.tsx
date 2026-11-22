@@ -217,7 +217,7 @@ describe('PropertyOpDialog', () => {
     expect(await screen.findByRole('button', { name: 'Apply to 2' })).toBeEnabled()
     // Found by id on the draft — ones new in it too, unlike a search.
     expect(screen.getByText(/found by id on your draft — ones new in it too/)).toBeInTheDocument()
-    expect(screen.queryByText(/aren’t matched/)).toBeNull()
+    expect(screen.queryByText(/matched on your draft as the change starts/)).toBeNull()
     // A fill never replaces a value: no count of replaced ones.
     expect(screen.queryByText(/^(Values replaced|Replaced)$/)).toBeNull()
     expect(screen.getByRole('textbox', { name: /Reason/ })).toHaveAttribute('placeholder', 'e.g. Left empty by the last import')

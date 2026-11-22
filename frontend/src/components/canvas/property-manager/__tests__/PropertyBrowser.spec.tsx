@@ -411,6 +411,22 @@ describe('PropertyBrowser — the draft\'s bulk changes', () => {
             .toBeInTheDocument()
     })
 
+    it('says why a search checked on the draft didn’t reach the entities new in it', () => {
+        const note = 'Your draft changed more than 200,000 entities, so entities new in your draft, or changed there to match, weren’t searched.'
+        const summary = { changed: 5, unchanged: 0, conflicts: 0, refused: { count: 0, byReason: {}, examples: [] } }
+        usePropertyJobsStore.getState().track(tracked('j7', {
+            op: { kind: 'set', key: 'tier', value: 'gold' },
+            job: { jobId: 'j7', status: 'completed', summary: { ...summary, recheck: { exact: true, note } } },
+        }))
+        usePropertyJobsStore.getState().track(tracked('j8', {
+            op: { kind: 'set', key: 'tier', value: 'gold' },
+            job: { jobId: 'j8', status: 'completed', summary: { ...summary, recheck: { exact: true, note: null } } },
+        }))
+        renderBrowser()
+        const panel = within(screen.getByRole('region', { name: 'Changes on this draft' }))
+        expect(panel.getAllByText(note)).toHaveLength(1)
+    })
+
     it('says when it lost track of one, and offers to check again — or to dismiss it', async () => {
         const user = userEvent.setup()
         usePropertyJobsStore.getState().track(tracked('j4', { lost: { at: '2026-11-21T00:00:00Z', message: 'Failed to fetch' } }))

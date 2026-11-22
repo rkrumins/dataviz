@@ -30,4 +30,10 @@ describe('ReviewStep — where it reaches', () => {
     review({ kind: 'hasKey', key: 'owner' }, 'data_source')
     expect(screen.getByText(/on every entity with owner, across the whole data source\./)).toBeInTheDocument()
   })
+
+  it('a target the server searches is matched on the draft, ones new in it included', () => {
+    review({ kind: 'hasKey', key: 'owner' }, 'view')
+    expect(screen.getByText(/Entities are matched on your draft as the change starts, ones new in it included/)).toBeInTheDocument()
+    expect(screen.queryByText(/found as published/)).toBeNull()
+  })
 })

@@ -108,8 +108,8 @@ function JobRow({ tracked }: { tracked: TrackedJob }) {
               {refused > 0 && <> · <span className="tabular-nums text-amber-700 dark:text-amber-300">{refused.toLocaleString()}</span> couldn’t be</>}
             </p>
           )}
-          {/* Its targets were judged as published, not checked again on the draft: why. */}
-          {ended && s.recheck?.exact === false && s.recheck.note && (
+          {/* What of its search wasn't judged on the draft — its matches, or the draft's new entities — and why. */}
+          {ended && s.recheck?.note && (
             <p className="mt-0.5 text-[10.5px] text-ink-muted">{s.recheck.note}</p>
           )}
           {s.publishedCommitId && (

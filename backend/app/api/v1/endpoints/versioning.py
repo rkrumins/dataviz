@@ -173,7 +173,8 @@ def get_import_export_service():
             publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope,
             identity_resolver=_resolve_node_identity_for_import, fork_hook=_fork_from_job,
             save_hook=_save_from_job, property_targets=_property_targets_from_job,
-            property_write_context=_property_write_context)
+            property_write_context=_property_write_context,
+            property_draft_matches=_property_draft_matches_from_job)
     return _ie_service
 
 
@@ -7393,6 +7394,41 @@ async def _property_targets_from_job(job: dict):
                     yield urn
         if buf.strip() and (urn := json.loads(buf).get(field)):
             yield urn
+
+
+async def _property_draft_matches_from_job(job: dict) -> dict:
+    """The entities a bulk property job's draft created or changed that its search target matches
+    there (``draft_search.draft_matches``) — judged as the search's rule membership on the draft,
+    the view held to the job's own and its scope resolved as the job's export resolves it."""
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.db.engine import get_async_session
+    from backend.app.providers.draft_search import draft_matches
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.app.services.view_transfer.sources import engine_for
+
+    target, ws, ds, bid = job["target"], job["workspaceId"], job["dataSourceId"], job["branchId"]
+    async with get_async_session() as session:
+        engine = await engine_for(session, ws, ds, branch_id=bid, actor=job["actor"])
+
+        async def can_read(view) -> bool:
+            return (view.id == target["viewId"] and view.workspace_id == ws
+                    and view.data_source_id in (None, ds))
+
+        search = AdvancedSearchService(engine, session=session, workspace_id=ws, data_source_id=ds,
+                                       branch_id=bid, can_read_view=can_read)
+        context = SearchRunContext(data_version=await graph_ep._search_data_version(engine),
+                                   admit=graph_ep._statement_admission(engine))
+
+        async def judge(request):
+            try:
+                return await search.membership(request, run_context=context)
+            finally:
+                await session.commit()                  # no transaction held between requests
+
+        return await draft_matches(engine.provider,
+                                   {"viewId": target["viewId"], "scopeMode": target["scopeMode"]},
+                                   target["predicate"], judge)
 
 
 async def _property_write_context(job: dict) -> dict:

@@ -18,7 +18,10 @@ search matches (:func:`read_edge_targets`). A roll-up is never edited: it is ref
 
 Its targets are kept as chunk files in the object store, ``property-jobs/{job}/targets/{i}.ndjson``,
 ``PROPERTY_JOB_WINDOW`` keys each: an id target's are written when the job is made; a search
-target's by the job itself, from an export of the search (the injected ``targets`` hook). Each chunk
+target's by the job itself, from an export of the search (the injected ``targets`` hook) — after
+the draft's own matches, which that export of the published graph can't name: the entities new in
+the draft or changed there to match (the ``draft_matches`` hook), which main's windows then skip,
+so none is written twice. Each chunk
 is then one WINDOW: its entities read from the draft as they stand, a properties patch planned for
 each (:func:`plan_patch`), and the patches written as ONE commit — with the job's checkpoint (its
 cursor, progress and running summary) in the same transaction, as an import window is. So the job
@@ -594,8 +597,20 @@ def plan_undo_window(rows: Iterable[Tuple[str, Optional[str], Optional[str]]],
 #: What a search target's summary says (``recheck.note``) when its matches can't be checked again.
 RECHECK_APPROXIMATE = ("This search follows relationships, tests the view's layers or where "
                        "entities sit, reads a field the platform keeps, or names entities by their "
-                       "path, so it can't be checked against your draft's values: the job edits "
-                       "what it matches in the published graph.")
+                       "path, so what it matches in the published graph can't be checked against "
+                       "your draft's values: the job edits those as they match there.")
+_UNREACHED = ("entities new in your draft, or changed there to match, weren't searched — select "
+              "them on the canvas to change them")
+#: What it says when the entities the draft created or changed weren't searched on the draft
+#: (``draft_search.draft_matches``' ``unsearched``), after the note above when both apply.
+DRAFT_UNSEARCHED = {
+    "too_large": "Your draft changed more than {n:,} entities, so " + _UNREACHED + ".",
+    "inexact": "This search can't be answered on your draft's values alone, so " + _UNREACHED + ".",
+    "unread": "Your draft's changes couldn't be read just now, so " + _UNREACHED + ".",
+    "fork": "This draft is on a fork, so " + _UNREACHED + ".",
+    "edges": ("Relationships new in your draft, or changed there to match, aren't searched — "
+              "select them on the canvas to change them."),
+}
 
 
 def predicate_recheck(predicate: Any) -> Optional[Callable[[Dict[str, Any]], bool]]:
@@ -628,10 +643,14 @@ def _own_values(p) -> bool:
     return p.kind != "is" or all(ref.urn for ref in p.refs)
 
 
-def recheck_summary(recheck) -> Dict[str, Any]:
+def recheck_summary(recheck, unsearched: Optional[str] = None) -> Dict[str, Any]:
     """A search target's ``summary.recheck``: whether its matches are checked again on the draft's
-    values (``exact``), and, when they can't be, why (``note``)."""
-    return {"exact": recheck is not None, "note": None if recheck is not None else RECHECK_APPROXIMATE}
+    values (``exact``), and ``note``: why they can't be, and why the entities the draft created or
+    changed weren't searched on it (``unsearched``, :data:`DRAFT_UNSEARCHED`) — None when the job
+    matches on the draft, its new entities included."""
+    notes = [RECHECK_APPROXIMATE if recheck is None else None,
+             DRAFT_UNSEARCHED[unsearched].format(n=config.DRAFT_SEARCH_MAX_DELTA) if unsearched else None]
+    return {"exact": recheck is not None, "note": " ".join(n for n in notes if n) or None}
 
 
 # --------------------------------------------------------------------------- #
@@ -817,6 +836,11 @@ def refused_key(job_id: str, i: int) -> str:
     return storage_key("property-jobs", job_id, "refused", f"{i}.ndjson")
 
 
+def extras_key(job_id: str) -> str:
+    """The entity ids of a search target's draft matches, which its first chunks hold."""
+    return storage_key("property-jobs", job_id, "extras.ids")
+
+
 async def _once(data: bytes):
     yield data
 
@@ -898,6 +922,16 @@ def _tally(summary: Mapping[str, Any], counts: Mapping[str, int], refused: List[
     return out
 
 
+def skip_reached(reached: set, found: Mapping[str, Tuple[str, Dict[str, Any], Optional[str]]],
+                 deleted: Mapping[str, str], stale: Mapping[str, str]):
+    """A window of main's matches (:func:`read_targets`' ``found``, ``deleted`` and ``stale``) less
+    the entities in ``reached``: the draft's own matches, which the job's first windows wrote and
+    counted. So none is written twice — a ``replace`` written again would replace again."""
+    return ({k: v for k, v in found.items() if v[0] not in reached},
+            {k: e for k, e in deleted.items() if e not in reached},
+            {k: e for k, e in stale.items() if e not in reached})
+
+
 class _Position(NamedTuple):
     cursor: Optional[str]
     summary: Dict[str, Any]
@@ -909,16 +943,21 @@ class PropertyJobWorker:
     """Runs one bulk property job on its lease, from its cursor (see the module docstring).
 
     ``targets(job)`` — an async iterator of the keys a search target matches (injected at the API
-    layer, which runs the search); ``write_context(job)`` — ``{ontology_rules, containment,
-    node_identity}`` its windows are written with, as a save is."""
+    layer, which runs the search); ``draft_matches(job)`` — the entities the draft created or
+    changed that it matches there (``draft_search.draft_matches``' answer), injected the same way;
+    ``write_context(job)`` — ``{ontology_rules, containment, node_identity}`` its windows are
+    written with, as a save is."""
 
-    def __init__(self, versioning, store, *, targets=None, write_context=None) -> None:
+    def __init__(self, versioning, store, *, targets=None, write_context=None,
+                 draft_matches=None) -> None:
         self._svc = versioning
         self._store = store
         self._targets = targets
         self._write_context = write_context
+        self._draft_matches = draft_matches
         self._lease: Optional[Lease] = None
         self._recheck = None
+        self._reached: Optional[set] = None     # the draft's matches, read once (extras.ids)
 
     async def run(self, job_id: str, *, lease: Lease) -> Dict[str, Any]:
         """Run the job to the end on ``lease``; returns its summary. Raises :class:`Superseded`
@@ -981,14 +1020,32 @@ class PropertyJobWorker:
                          row.processed or 0, row.total or 0)
 
     async def _resolve(self, job_id: str, job: Dict[str, Any]) -> None:
-        """A search target's matches, as chunk files, then ``apply:0``. Run again whole when it
-        stops part-way: the files are written over, and the search's export resumes as it is."""
+        """A search target's matches, as chunk files, then ``apply:0``: first the draft's own —
+        the entities it created or changed that the search matches there, as ``gv:<entity id>``,
+        sorted, their ids kept apart too (``extras.ids``; ``summary.draftChunks`` the chunks they
+        fill) — then the search's export of the published graph, whose windows skip those. Run
+        again whole when it stops part-way: the files are written over, and the search's export
+        resumes as it is."""
         pos = await self._position(job_id)
         if pos.cursor is not None:
             return
         cap = config.PROPERTY_JOB_MAX_TARGETS
+        if (job.get("entityKind") or "node") == "edge":
+            draft: Dict[str, Any] = {"unsearched": "edges"}
+        else:
+            draft = await self._draft_matches(job) if self._draft_matches is not None else {}
+        extras = list(draft.get("ids") or ())
+        total = len(extras)
+        if total > cap:
+            raise too_many_targets(cap)
+        draft_chunks = chunks = await write_targets(self._store, job_id, [f"gv:{e}" for e in extras])
+        if extras:
+            await write_lines(self._store, extras_key(job_id), extras)
+            self._lease.check()
+            async with db.graphver_session() as s:              # a fenced beat: a cancel stops here
+                await self._lease.checkpoint(s, expect_cursor=None, current_phase="resolve",
+                                             processed=total)
         keys: List[str] = []
-        chunks = total = 0
         async for key in self._targets(job):
             keys.append(key)
             total += 1
@@ -1006,7 +1063,9 @@ class PropertyJobWorker:
             await self._lease.checkpoint(s, expect_cursor=None, last_cursor="apply:0", total=total,
                                          processed=0, progress=0, current_phase="apply",
                                          summary={**pos.summary, "chunks": chunks,
-                                                  "recheck": recheck_summary(self._recheck)})
+                                                  "draftChunks": draft_chunks,
+                                                  "recheck": recheck_summary(
+                                                      self._recheck, draft.get("unsearched"))})
 
     async def _next_window(self, job_id: str, job: Dict[str, Any], context: Dict[str, Any]) -> bool:
         """Write the window after the job's cursor; False once none is left."""
@@ -1037,6 +1096,12 @@ class PropertyJobWorker:
                 found, deleted, missing, derived = await read_edge_targets(snap, keys)
             else:
                 (found, deleted, missing, stale), derived = await read_targets(snap, keys, self._recheck), {}
+                draft_chunks = int(pos.summary.get("draftChunks") or 0)
+                if draft_chunks and i >= draft_chunks:
+                    # Main's matches: those the draft's own windows reached are written once.
+                    if self._reached is None:
+                        self._reached = set(await read_lines(self._store, extras_key(job_id)))
+                    found, deleted, stale = skip_reached(self._reached, found, deleted, stale)
             ops, counts, refused = await asyncio.to_thread(plan_window, op, found, kind)
             counts["missing"] += len(missing)
             counts["deletedInDraft"] += len(deleted)
