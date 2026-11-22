@@ -549,7 +549,7 @@ interface ToggleRowProps {
   accent: 'cyan' | 'purple'
 }
 
-function ToggleRow({ label, description, icon: Icon, active, onClick, accent }: ToggleRowProps) {
+export function ToggleRow({ label, description, icon: Icon, active, onClick, accent }: ToggleRowProps) {
   const activeBg = accent === 'cyan'
     ? 'bg-cyan-500/12 border-cyan-500/35 shadow-sm shadow-cyan-500/10 dark:bg-cyan-400/15 dark:border-cyan-400/30'
     : 'bg-purple-500/12 border-purple-500/35 shadow-sm shadow-purple-500/10 dark:bg-purple-400/15 dark:border-purple-400/30'
