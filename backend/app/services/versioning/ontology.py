@@ -81,10 +81,13 @@ class EntityRule:
 
 @dataclass(frozen=True)
 class EdgeRule:
-    """Per-edge-type rules. Empty ``source_types``/``target_types`` = unrestricted."""
+    """Per-edge-type rules. Empty ``source_types``/``target_types`` = unrestricted. ``fields``:
+    property key → the :class:`FieldRule` a publish holds the relationship's values to, as an
+    entity type's."""
     source_types: FrozenSet[str] = frozenset()
     target_types: FrozenSet[str] = frozenset()
     is_containment: bool = False
+    fields: Mapping[str, FieldRule] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -417,32 +420,54 @@ def _same(a: Any, b: Any) -> bool:
     return json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
 
 
+def _is_edge(payload: Mapping) -> bool:
+    """An edge's payload names both its ends; a node's names neither."""
+    return (("sourceEntityId" in payload or "source_entity_id" in payload)
+            and ("targetEntityId" in payload or "target_entity_id" in payload))
+
+
+def _type_of(payload: Mapping, edge: bool, rules: OntologyRules) -> Optional[str]:
+    """The payload's type as the ontology spells it — ``None`` when the ontology has no such type."""
+    if edge:
+        return rules.canonical_edge_type(payload.get("edgeType") or payload.get("edge_type"))
+    return rules.canonical_entity_type(payload.get("entityType"))
+
+
 def field_violations(entities: Iterable[Tuple[str, Optional[Mapping], Optional[Mapping]]],
                      rules: Optional[OntologyRules]) -> List[dict]:
-    """What a publish refuses by the field rules (``EntityRule.fields``). For each node
-    ``(entity_id, value written, value on main before — None for a new one)``: a property given a
-    value its field refuses (not of its type, or not one of its allowed values), and a required
-    field left without a value.
+    """What a publish refuses by the field rules (``EntityRule.fields``, ``EdgeRule.fields``). For
+    each entity ``(entity_id, value written, value on main before — None for a new one)``: a
+    property given a value its field refuses (not of its type, or not one of its allowed values),
+    and a required field left without a value. A relationship's properties are read where it keeps
+    them: nested, or — an old one — at the top of its payload.
 
     Only what the publish CHANGES is judged, so data that predates a rule stays publishable: a new
-    node — or one whose type changes — on every field of its type; any other on the fields whose
-    value it changes (a required one emptied or removed included). Edges and deletes pass.
-    ``[{entity_id, kind, type, name, urn, rule, field, fieldName, value, reason}]``, ``rule`` one
-    of ``field_type``, ``field_not_allowed`` and ``field_required``."""
+    entity — or one whose type changes — on every field of its type; any other on the fields whose
+    value it changes (a required one emptied or removed included). Deletes pass.
+    ``[{entity_id, kind, type, name, urn, rule, field, fieldName, value, reason}]``, ``kind``
+    ``node`` or ``edge`` — a relationship, which has no name or urn, adds its ends (``source``,
+    ``target``) — and ``rule`` one of ``field_type``, ``field_not_allowed`` and ``field_required``."""
     if rules is None:
         return []
+    from .entity_serde import _split_endpoints_props
     out: List[dict] = []
     for eid, after, before in entities:
         if not after:
             continue
-        etype = rules.canonical_entity_type(after.get("entityType"))
-        rule = rules.entity_types.get(etype) if etype else None
+        edge = _is_edge(after)
+        etype = _type_of(after, edge, rules)
+        rule = (rules.edge_types.get(etype.upper()) if edge else rules.entity_types.get(etype)) if etype else None
         if rule is None or not rule.fields:
             continue
-        if before is not None and rules.canonical_entity_type(before.get("entityType")) != etype:
+        if before is not None and (_is_edge(before) != edge or _type_of(before, edge, rules) != etype):
             before = None
-        props = after.get("properties") or {}
-        was = (before.get("properties") or {}) if before is not None else {}
+        if edge:
+            src, tgt, _confidence, props = _split_endpoints_props(after)
+            was = _split_endpoints_props(before)[3] if before is not None else {}
+        else:
+            props = after.get("properties") or {}
+            was = (before.get("properties") or {}) if before is not None else {}
+        what = f"{etype} relationship" if edge else etype
         for key, f in sorted(rule.fields.items()):
             value = props.get(key)
             if before is not None and (key in props) == (key in was) and _same(value, was.get(key)):
@@ -451,15 +476,19 @@ def field_violations(entities: Iterable[Tuple[str, Optional[Mapping], Optional[M
             if _empty(value):
                 if f.required and (before is None or not _empty(was.get(key))):
                     found = "field_required", (
-                        f"{f.name or key} is required for a new {etype}." if before is None
-                        else f"{f.name or key} is required on {etype} — it can't be emptied or removed.")
+                        f"{f.name or key} is required for a new {what}." if before is None
+                        else f"{f.name or key} is required on {what}{'s' if edge else ''} — it can't be emptied "
+                             "or removed.")
             else:
                 found = field_value_problem(f, value)
             if found:
-                out.append({"entity_id": eid, "kind": "node", "type": etype,
-                            "name": after.get("displayName"), "urn": after.get("urn"),
-                            "rule": found[0], "field": key, "fieldName": f.name or key,
-                            "value": _shown(value), "reason": found[1]})
+                v = {"entity_id": eid, "kind": "edge" if edge else "node", "type": etype,
+                     "name": None if edge else after.get("displayName"), "urn": None if edge else after.get("urn"),
+                     "rule": found[0], "field": key, "fieldName": f.name or key,
+                     "value": _shown(value), "reason": found[1]}
+                if edge:
+                    v.update(source=src, target=tgt)
+                out.append(v)
     return out
 
 
@@ -472,35 +501,37 @@ FIELD_IDS_MAX = 20_000
 
 class FieldFindings:
     """What a publish's field checks found, page after page (:func:`field_violations`): the first
-    ``FIELD_EXAMPLES`` violations, how many there are in all, and per entity type, field and rule
-    how many and which (the first ``FIELD_IDS_MAX``) — so a publish of a million entities holds a
-    hundred of them, and a bounded list of ids per field, never all."""
+    ``FIELD_EXAMPLES`` violations, how many there are in all, and per entity or relationship type,
+    field and rule how many and which (the first ``FIELD_IDS_MAX``) — so a publish of a million
+    entities holds a hundred of them, and a bounded list of ids per field, never all."""
 
     def __init__(self) -> None:
         self.examples: List[dict] = []
         self.total = 0
-        # (type, field, rule) -> [name, n, ids]
-        self._by: Dict[Tuple[str, str, str], List[Any]] = {}
+        # (kind, type, field, rule) -> [name, n, ids]: an entity type and a relationship type may
+        # share a name, and are counted apart.
+        self._by: Dict[Tuple[str, str, str, str], List[Any]] = {}
 
     def add(self, found: Sequence[dict]) -> None:
         self.examples += found[:max(0, FIELD_EXAMPLES - len(self.examples))]
         self.total += len(found)
         for v in found:
-            held = self._by.setdefault((v["type"], v["field"], v["rule"]),
+            held = self._by.setdefault((v["kind"], v["type"], v["field"], v["rule"]),
                                        [v.get("fieldName") or v["field"], 0, []])
             held[1] += 1
             if len(held[2]) < FIELD_IDS_MAX:
-                held[2].append(f"gv:{v['entity_id']}")
+                held[2].append(v["entity_id"] if v["kind"] == "edge" else f"gv:{v['entity_id']}")
 
     def __bool__(self) -> bool:
         return self.total > 0
 
     def by_field(self) -> List[dict]:
-        """``[{entityType, field, fieldName, rule, count, ids, idsComplete}]``, the most refused
-        first. ``ids``: the refused entities as a bulk property job names them (``gv:<entity
-        id>``, which reaches one new in the draft too), at most ``FIELD_IDS_MAX``; ``idsComplete``:
-        they are all of them."""
-        return sorted(({"entityType": t, "field": f, "fieldName": name, "rule": r, "count": n,
-                        "ids": list(ids), "idsComplete": len(ids) == n}
-                       for (t, f, r), (name, n, ids) in self._by.items()),
-                      key=lambda e: (-e["count"], e["entityType"], e["field"], e["rule"]))
+        """``[{entityKind, entityType, field, fieldName, rule, count, ids, idsComplete}]``, the most
+        refused first. ``entityKind``: ``node``, ``entityType`` an entity type, or ``edge``, a
+        relationship type. ``ids``: the refused entities as a bulk property job names them — a node
+        as ``gv:<entity id>``, which reaches one new in the draft too, a relationship by its own id
+        — at most ``FIELD_IDS_MAX``; ``idsComplete``: they are all of them."""
+        return sorted(({"entityKind": k, "entityType": t, "field": f, "fieldName": name, "rule": r,
+                        "count": n, "ids": list(ids), "idsComplete": len(ids) == n}
+                       for (k, t, f, r), (name, n, ids) in self._by.items()),
+                      key=lambda e: (-e["count"], e["entityType"], e["field"], e["rule"], e["entityKind"]))

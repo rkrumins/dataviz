@@ -7494,11 +7494,13 @@ def _check_property_job(op: PropertyJobOp, target: PropertyJobTarget, rules) -> 
     return None
 
 
-def _property_job_warnings(op: PropertyJobOp, rules) -> List[Dict[str, str]]:
+def _property_job_warnings(op: PropertyJobOp, rules, *, edges: bool = False) -> List[Dict[str, str]]:
     """What a bulk property job would leave that publishing its draft refuses — a value its field
     doesn't allow or isn't of its type, a required field removed — per entity type that defines
-    the key: ``[{code, entityType, field, message}]``. Said before it runs, never refused: the job
-    writes the draft all the same, and the publish is the gate (``FieldViolation``)."""
+    the key, or for a job over relationships (``edges``) per relationship type, named as the
+    ontology spells it: ``[{code, entityType, field, message}]``. Said before it runs, never
+    refused: the job writes the draft all the same, and the publish is the gate
+    (``FieldViolation``)."""
     if rules is None:
         return []
     from backend.app.services.versioning.ontology import JUDGED_TYPES, allowed_phrase, field_value_problem
@@ -7507,18 +7509,21 @@ def _property_job_warnings(op: PropertyJobOp, rules) -> List[Dict[str, str]]:
     def warn(code: str, etype: str, key: str, message: str) -> None:
         out.append({"code": code, "entityType": etype, "field": key, "message": message})
 
-    for etype, rule in sorted(rules.entity_types.items()):
+    types = ([(rules.edge_type_canonical.get(t, t), r) for t, r in rules.edge_types.items()] if edges
+             else list(rules.entity_types.items()))
+    for etype, rule in sorted(types, key=lambda t: t[0]):
+        one = f"{etype} relationship" if edges else etype
         f = rule.fields.get(op.key)
         if f is not None and op.kind in ("set", "fillEmpty"):
             problem = field_value_problem(f, op.value)
             if problem:
-                warn(problem[0], etype, op.key, f"On {etype}: {problem[1]} A {etype} given it can't be "
+                warn(problem[0], etype, op.key, f"On {etype}: {problem[1]} A {one} given it can't be "
                                                 "published until it holds a value the field allows.")
             elif f.required and op.value in (None, "", []):
-                warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {etype} it is "
+                warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {one} it is "
                                                       "emptied on can't be published until it has one again.")
         if f is not None and f.required and op.kind in ("remove", "rename"):
-            warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {etype} it is "
+            warn("field_required", etype, op.key, f"{f.name} is required on {etype}: a {one} it is "
                                                   f"{'removed' if op.kind == 'remove' else 'renamed away'} from "
                                                   "can't be published until it has one again.")
         to = rule.fields.get(op.to) if op.kind in ("rename", "copy") and op.to else None
@@ -7526,7 +7531,8 @@ def _property_job_warnings(op: PropertyJobOp, rules) -> List[Dict[str, str]]:
             held = f"one of {allowed_phrase(to.allowed)}" if to.allowed else f"of type {to.type}"
             warn("field_checked", etype, op.to, f"{op.to} is a field of {etype} that must be {held}: a value "
                                                 f"{'renamed' if op.kind == 'rename' else 'copied'} into it that "
-                                                "isn't stops that entity being published until it is changed.")
+                                                f"isn't stops that {'relationship' if edges else 'entity'} being "
+                                                "published until it is changed.")
     return out
 
 
@@ -7663,9 +7669,9 @@ async def preview_property_job(
         counts = await ie.preview_property_counts(graph_id=graph_id, branch_id=branch_id,
                                                   op=body.op.wire(), ids=named,
                                                   entity_kind=body.target.entity_kind)
-    # The fields' rules are the entity types'; a relationship has none.
-    warnings = ([] if main or edges
-                else _property_job_warnings(body.op, await _rules_for_meta(session, ws_id, meta)))
+    # The fields' rules: the entity types', or for relationships the relationship types'.
+    warnings = ([] if main
+                else _property_job_warnings(body.op, await _rules_for_meta(session, ws_id, meta), edges=edges))
     return {"refusal": {"code": refusal[1], "message": refusal[2]} if refusal else None,
             "nameBudget": budget, "activeJobId": None if main else await ie.active_draft_job(branch_id),
             "counts": counts, "warnings": warnings}
