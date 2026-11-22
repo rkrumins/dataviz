@@ -43,6 +43,29 @@ describe('EntityTypeEditor — import matching and uniqueness', () => {
   })
 })
 
+describe('EntityTypeEditor — saved over the stored type', () => {
+  it('keeps what the editor does not hold, and what it edited wins', () => {
+    const stored = {
+      name: 'Table', rank: 3, fields: [],
+      visual: { icon: 'Box', color: '#111111', glow: 'soft' },
+      hierarchy: { level: 2, pinned: true },
+      behavior: { selectable: false, hover_card: 'compact' },
+    }
+    const edited = entityDefToSchema('Table', stored)
+    edited.name = 'Warehouse table'
+    edited.visual.color = '#222222'
+    edited.hierarchy.level = 1
+    edited.behavior.selectable = true
+
+    expect(entitySchemaToBackend(edited, stored)).toMatchObject({
+      name: 'Warehouse table', rank: 3,
+      visual: { icon: 'Box', color: '#222222', glow: 'soft' },
+      hierarchy: { level: 1, pinned: true },
+      behavior: { selectable: true, hover_card: 'compact' },
+    })
+  })
+})
+
 describe('EntityTypeEditor — what a field asks of a value, and the property it is', () => {
   it('keeps a field to allowed values — or makes them suggestions — and saves them with the type', async () => {
     const onSave = vi.fn()
