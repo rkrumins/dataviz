@@ -9,6 +9,7 @@ assert the state transitions + drops, which are the cache logic.
 """
 import asyncio
 import os
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +49,13 @@ async def _seed_resident(svc, proj, provider: str) -> str:
     await svc.checkpoint(graph_id=gid, branch_id=d, actor="a")
     await svc.publish(graph_id=gid, branch_id=d, actor="a", message="seed")
     await proj.project_graph(gid)                       # resident (status idle)
+    # The fake answers no query, so the pass's verify holds it back and records no
+    # last_projected_at; eviction then had no order among the graphs, and Postgres returned them
+    # in whatever order it held the rows. The coldness asserted below is the order a published
+    # pass would have stamped: seeding order.
+    async with db.graphver_session() as s, s.begin():
+        (await s.get(ProjectionStateORM, gid)).last_projected_at = (
+            datetime.now(timezone.utc).isoformat())
     return gid
 
 

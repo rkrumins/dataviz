@@ -52,3 +52,26 @@ def test_read_max_lag_caps_how_far_behind(monkeypatch):
     monkeypatch.setattr(config, "READ_MAX_LAG", 3)
     assert serving_seq(9, 12, "projecting", 9) == 9
     assert serving_seq(0, 12, "rebuilding", 8) is None
+
+
+async def test_a_graph_read_latest_serves_the_key_only_at_its_head(settings_world):
+    """A graph read ``latest`` (always the newest published version) is served from its key only
+    while the key holds the head; behind it, whatever its lag allows, its reads go to Postgres.
+    The other modes take the graph's ``reads.maxVersionsBehind`` (``build_policy.read_mode_for``)."""
+    from backend.app.services.versioning import build_policy
+
+    def lag() -> int:
+        return build_policy.read_mode_for(workspace_id="ws1", data_source_id="ds1",
+                                          platform_copy=True).max_lag
+
+    latest = lag()
+    assert serving_seq(12, 12, "idle", 12, latest) == 12
+    assert serving_seq(9, 12, "projecting", 9, latest) is None
+    assert serving_seq(0, 12, "rebuilding", 9, latest) is None
+    for mode in ("in_place", "beside"):
+        settings_world.set("reads.mode", "graph", "ds1", mode)
+        await build_policy.resolve()
+        assert serving_seq(9, 12, "projecting", 9, lag()) == 9, mode
+    settings_world.set("reads.maxVersionsBehind", "workspace", "ws1", 2)
+    await build_policy.resolve()
+    assert serving_seq(9, 12, "projecting", 9, lag()) is None, "3 behind, 2 allowed"

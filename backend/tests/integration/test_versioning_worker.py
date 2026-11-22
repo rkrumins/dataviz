@@ -48,6 +48,28 @@ async def _watermark(gid: str) -> int:
         return (await s.get(ProjectionStateORM, gid)).projected_commit_seq
 
 
+async def _quiet_others(keep) -> None:
+    """Other suites in this job leave graphs that lag, or have a build, with no worker of theirs to
+    finish them. One pass of the poll takes the stalest 100 (``project_pending``), and this test's
+    graphs lag by one commit, the least there is: past 100 others they would wait for a later pass.
+    The others go to the trash, as the residency suite trashes its own."""
+    from sqlalchemy import func, or_, select, update
+
+    from backend.app.services.versioning.models import GraphORM
+
+    others = select(ProjectionStateORM.graph_id).join(
+        GraphORM, GraphORM.id == ProjectionStateORM.graph_id).where(
+        ProjectionStateORM.graph_id.notin_(list(keep)),
+        or_(ProjectionStateORM.candidate_state.isnot(None),
+            ProjectionStateORM.quarantine_next_at.isnot(None),
+            ProjectionStateORM.projected_commit_seq
+            < func.greatest(ProjectionStateORM.target_commit_seq, GraphORM.main_head_commit_seq)))
+    async with db.graphver_session() as s, s.begin():
+        await s.execute(update(GraphORM)
+                        .where(GraphORM.id.in_(others), GraphORM.deleted_at.is_(None))
+                        .values(deleted_at=models._now()))
+
+
 async def _redis_ok() -> bool:
     try:
         await get_broker_redis().ping()
@@ -64,6 +86,7 @@ async def _run() -> None:
     # ── poll backstop catches up every lagging graph ─────────────────────
     gids = [await _seed_graph(svc) for _ in range(2)]
     assert [await _watermark(g) for g in gids] == [1, 1]        # parked at genesis, lags the head
+    await _quiet_others(gids)
     await worker.reconcile_once()
     assert [await _watermark(g) for g in gids] == [2, 2]        # all caught up to head
 

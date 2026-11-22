@@ -49,10 +49,10 @@ def test_the_plan_says_what_an_upgrade_would_do():
     behind = _plan(_below(script, head))
     assert behind["verdict"] == "upgrade" and behind["wouldRun"] == [head]
 
-    # #670's stamp: placed exactly, then everything the heads need that it doesn't have.
+    # #670's stamp: placed exactly, on #668's line, then everything the heads need that it doesn't have.
     placed = _plan(["20261116_1200_graph_watch"])
-    assert placed["placement"]["stamps"] == ["20261113_1400_gv_ps_candidate"]
-    have = schema_plan.ancestors(script, ["20261113_1400_gv_ps_candidate"])
+    assert placed["placement"]["stamps"] == ["20261116_1100_settings_import"]
+    have = schema_plan.ancestors(script, ["20261116_1100_settings_import"])
     assert set(placed["wouldRun"]) == {r.revision for r in script.walk_revisions()} - have
     assert placed["wouldRun"][-1] == head                   # ancestors first
 
@@ -259,5 +259,5 @@ def test_the_admin_schema_status_reads_the_database_live(scratch_db, monkeypatch
     # Another build's stamp: shown, with where the upgrade would place it and what it would run.
     _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261116_1200_graph_watch'")
     status = schema_status()
-    assert not status["atHead"] and status["plan"]["placement"]["stamps"] == ["20261113_1400_gv_ps_candidate"]
+    assert not status["atHead"] and status["plan"]["placement"]["stamps"] == ["20261116_1100_settings_import"]
     assert status["plan"]["wouldRun"][-1] == head

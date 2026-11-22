@@ -39,13 +39,16 @@ _UNKEYED_DELETE = "WHERE id(n) = i DETACH DELETE"
 
 
 class _Client:
-    """Records every query the projector sends."""
+    """Records every query the projector sends. A key that holds every end a rollup cell names:
+    each cell written lands."""
 
     def __init__(self):
         self.queries = []
 
     async def query(self, cypher, params=None, **_kw):
         self.queries.append(cypher)
+        if "MERGE (a)-[r:AGGREGATED]->(b)" in cypher:
+            return SimpleNamespace(result_set=[[len((params or {}).get("batch") or [])]])
         return SimpleNamespace(result_set=[])
 
     async def delete(self):

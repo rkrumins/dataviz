@@ -30,7 +30,7 @@ import pytest
 from sqlalchemy import func, select
 
 from backend.app.providers import falkor_graph_registry
-from backend.app.services.versioning import config, db, keymigrate, models, projection
+from backend.app.services.versioning import build_policy, db, keymigrate, models, projection
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.common.interfaces.provider import ProviderConfigurationError
@@ -291,7 +291,13 @@ async def _run_retire() -> None:
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_a_moved_graphs_old_key_is_dropped_once_the_new_one_caught_up(monkeypatch):
-    monkeypatch.setattr(config, "RETIRE_GRACE_SECS", 0)
+    # A move keeps its old key for New-version builds' retireGraceSecs: none, here.
+    policy = build_policy.BuildPolicy({**build_policy.defaults().values, "retireGraceSecs": 0})
+
+    async def resolve(session=None):
+        return policy
+
+    monkeypatch.setattr(build_policy, "resolve", resolve)
     asyncio.run(_run_retire())
 
 

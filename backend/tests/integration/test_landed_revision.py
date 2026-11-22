@@ -4,7 +4,7 @@
 Pins: ``published``, as the commit it landed as, at that commit's sequence number on ``main`` —
 what ``asOfSeq`` reads ``main`` as of, and ``main`` as of it holds the draft's change. A draft that
 changed nothing is ``unchanged``: it commits nothing (``main``'s head and its commits stay as they
-were), names no commit, and is held by ``main``'s head; an id ``main`` never had (a draft's own
+were), and its commit is ``main``'s head, which holds it; an id ``main`` never had (a draft's own
 head, as an older publish answered) is answered the same. A graph that is gone, with nothing.
 """
 from __future__ import annotations

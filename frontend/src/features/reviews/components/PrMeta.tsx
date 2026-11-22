@@ -62,6 +62,15 @@ export function ApprovalPill({ pr, className }: { pr: PullRequest; className?: s
 /** A draft→main MR has the same source and target graph; a fork PR targets a parent. */
 export const isDraftMr = (pr: PullRequest) => pr.graphId === pr.targetGraphId
 
+/**
+ * The commit a merged review landed on main as, or null. A fork's review always has one. A draft's
+ * has one only when its merge landed on main (`resultingCommitSeq`): one that changed nothing,
+ * merged on an older server, recorded its draft's own head, which isn't on main, so there is
+ * nothing to name or revert.
+ */
+export const mergedAs = (pr: PullRequest): string | null =>
+  pr.resultingCommitId && (!isDraftMr(pr) || pr.resultingCommitSeq != null) ? pr.resultingCommitId : null
+
 export const PrKindIcon = ({ pr, className }: { pr: PullRequest; className?: string }) =>
   isDraftMr(pr) ? <GitPullRequestArrow className={className} /> : <GitFork className={className} />
 

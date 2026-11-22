@@ -13,7 +13,8 @@
 > [CHANGELOG](../../CHANGELOG.md).
 
 **Checked against the code: §1–§9 and the screens on 2026-11-01 at `3a3e4310c`, §10–§19 on
-2026-11-02 at `c29f05f08`.**
+2026-11-02 at `c29f05f08`; §3, §10, §12, §13, §16 and §19 again on 2026-11-17, for the settings
+store.**
 
 **TL;DR.** Forking a graph now makes a data source as well as a graph: the fork's own row in
 `workspace_data_sources`, in its parent's workspace and on its parent's provider. Views, the canvas
@@ -96,19 +97,29 @@ A fork's `main` is read as a draft is: through a store with a patch set laid ove
 no fork — a fork of a fork reads the same one:
 
 - the root's own FalkorDB provider, which `ContextEngine` builds from the root's data source, while
-  the root's projection holds its head in the key it publishes;
-- otherwise the root's Postgres reader (`VersionedBranchProvider` on the root's `main`): a root
-  still catching up, evicted or in the trash, or whose provider cannot be built. The reads are the
-  same, only slower.
+  the key the root's projection publishes holds a version of the root's `main` whole: its head, or
+  behind it, the version it last published, while no pass has written into it since — idle, with
+  no window in flight (`window_rows`) and no failed pass (`last_error`) that may have written part
+  of one (`fork_serving_seq`). Behind its head only as the root's read mode allows: a root that
+  reads Always the latest (the default) is served from its key only at its head
+  ([04](04-projection-and-cache.md) §5, Read modes). The patch set is then against the root there
+  (`root_at`, below);
+- otherwise the root's Postgres reader (`VersionedBranchProvider` on the root's `main`, at its head,
+  bounded as every read from Postgres is: [04](04-projection-and-cache.md) §5): a root whose key is
+  part-way through a window or a rebuild, evicted, being loaded or in the trash, or whose provider
+  cannot be built. The reads are the same, only slower. Main's readers take a key part-way through a
+  window as it is; a fork never shows a change its root made after the fork's base, and such a key
+  would show some.
 
 Ontology and node identity still come from the fork's own row (its parent's settings, §3), and who
 may read is the fork's to decide: the root's store is read on its behalf.
 
 **The patch set** (`branch_overlay_delta` on a fork's `main`) describes the fork's value at its
-head against the root's at the root's head, for every entity either side changed since they parted:
-the fork's own changes, each fork between it and the root up to the base the level below reads it
-at, and the root's changes since the outermost base (§5). It is bounded by those changes, never by
-the graph:
+head against the root's at the seq its store holds (`root_at`: the version the root's key serves,
+else the root's head), for every entity either side changed since they parted: the fork's own
+changes, each fork between it and the root up to the base the level below reads it at, and the
+root's changes between that seq and the outermost base, either way (§5). It is bounded by those
+changes, never by the graph:
 
 | The entity at the fork's head | In the patch set |
 |---|---|
@@ -225,9 +236,14 @@ is made and are never the fork's own to change:
 `ontologyId`, `isRestricted`, `accessLevel`, `identityProperty`, `nameProperty`, and the draft
 policy (`draftDefaultVisibility`, `draftLevels`, `reviewSelfApproval`, `reviewSelfMerge`).
 
-- **A change on the parent** — through `PUT /api/v1/admin/workspaces/{ws}/data-sources/{ds}`, or
-  the versioning router's `PUT /data-sources/{ds}/drafts-policy` — is made on every fork of it,
-  forks of forks too, in the same transaction.
+The draft policy and every other versioned-graph setting are not read from the fork's row: a fork
+has no values of its own in the settings store, and each setting resolves through its root
+graph's ([Where a value comes from](/guide/versioned-graph-settings#where-a-value-comes-from)).
+The settings routes answer **409** `follows_root` for a fork, naming its root.
+
+- **A change on the parent** — through `PUT /api/v1/admin/workspaces/{ws}/data-sources/{ds}`, a
+  save of its graph's settings, or the deprecated `PUT /data-sources/{ds}/drafts-policy` — is made
+  on every fork of it, forks of forks too, in the same transaction.
 - **A change on the fork's row** is refused: **409** `fork_settings_follow_parent` `{fields, message}`,
   naming the settings it would have changed. Nothing of the request is kept. The fork's label and
   its other fields stay its own to edit.
@@ -548,7 +564,7 @@ Forks list are how people go to and from a fork.
 drawer as any other: the workspace's own list leaves forks out, so the page reads
 `…/data-sources?includeForks=true` while the link or the drawer names a `dsfork_…` id. Its drawer
 offers neither Delete nor Move: those routes refuse a fork (`use_fork_endpoints`). **Admin →
-Infrastructure → Versioned graphs** opens a fork's row the same way (**Open source**); only an
+Versioned graphs** opens a fork's row the same way (**Open data source** in its row's menu); only an
 orphan's is disabled.
 
 **A fork's review in the review drawer** (`PrDetailDrawer`). The merge is followed to its end, as a
@@ -624,8 +640,8 @@ Postgres until it is loaded again.
 | Class | Evicted | Loaded again |
 |---|---|---|
 | **Always** | Never | When it is not in FalkorDB (set to Always while evicted, its key lost, or waiting for room), queued by the next capacity pass until it fits |
-| **Standard** (the default) | When unread for the Standard idle time (7 days), or earlier when its master is under memory pressure | On its next read |
-| **Coldline** | When unread for the Coldline idle time (1 hour), and first under memory pressure | Only when a request needs FalkorDB (§12), or on a canvas read of a graph larger than the canvas-load threshold |
+| **Standard** | When unread for the Standard idle time ([Unload a Standard graph after](/guide/versioned-graph-settings#residency-standardidlesecs)), or earlier when its master is under memory pressure | On its next read |
+| **Coldline** | When unread for the Coldline idle time ([Unload a Coldline graph after](/guide/versioned-graph-settings#residency-coldlineidlesecs)), and first under memory pressure | Only when a request needs FalkorDB (§12), or on a canvas read of a graph larger than the canvas-load threshold ([Load a Coldline graph on opening above](/guide/versioned-graph-settings#residency-coldlineloadabove)) |
 
 - **The idle clock starts when residency is turned on.** Reads are not noted while it is off, so
   when the capacity leader starts the grace period after the switch is turned on (§16) it sets every
@@ -642,10 +658,19 @@ Postgres until it is loaded again.
   fork past the ceiling (§2) reads its own rows and nothing of its root's: its reads hold nothing,
   count for nothing and ask for no load, and its deep search is its own **501**. The residency
   routes answer **409** `not_for_forks` for one.
-- **Who sets the class.** System administrators only, on Admin → Infrastructure → Versioned graphs
-  (§19) or `PUT /api/v1/admin/versioning/graphs/{gid}/residency {"class": "always" | "standard" |
-  "coldline"}`. A new graph gets the policy's default class. Workspaces see the class and the state
-  on the graph's watermark and its Versioning tab.
+- **Who sets the class.** System administrators only, at every level
+  ([Residency class](/guide/versioned-graph-settings#residency-class)): for the platform, a
+  workspace or one graph (§19), or one graph through `PUT
+  /api/v1/admin/versioning/graphs/{gid}/residency {"class": "always" | "standard" | "coldline"}`.
+  Workspaces see the class and the state on the graph's watermark and its Versioning tab.
+- **Where a graph's class comes from.** It resolves graph → workspace → platform, as every
+  versioned-graph setting does: a graph's own class, else its workspace's, else the platform's
+  (`defaultResidency` on the old policy route, §13), which every graph without one of its own
+  inherits and follows when it changes. The evictor decides in SQL, so the class in force is kept on
+  the graph's row, `projection_state.residency`: a new graph is created with it
+  (`service.create_graph`, `residency_policy.default_class`), a save writes it to the graphs it
+  reaches, whether or not Graph residency is on, and each capacity pass puts every graph's back in
+  step before it plans (`residency.keep_classes`, §11).
 - **The switch.** None of this applies until a system administrator turns on **Graph residency**
   under Admin → Features (§16). Off, every graph stays loaded: nothing is evicted, and a graph still
   out of FalkorDB is brought back through admission as memory allows, reading from Postgres until it
@@ -659,13 +684,14 @@ writes yet), `size_bytes`, `size_measured_at` and `rehydrating_since`. Its `stat
 
 ## 11. The capacity loop
 
-The projection lane runs one capacity pass every policy interval (60 seconds by default), under a
-Postgres advisory lock so one worker leads; a pass another worker holds is skipped. A pass first
-reads the Graph residency switch from the feature store (§16): unreadable, it does nothing; in the
-grace period after it was turned on, and while it is off, it evicts nothing; off with nothing left
-out of FalkorDB, it idles. Then it starts idle clocks, gathers, asks a pure planner
-(`residency_plan.plan`, no I/O) and acts. The policy preview (§13) and admission checks run the
-same planner.
+The projection lane runs one capacity pass every policy interval ([Check memory
+every](/guide/versioned-graph-settings#residency-capacityintervalsecs)), under a Postgres advisory
+lock so one worker leads; a pass another worker holds is skipped. A pass first reads the Graph
+residency switch from the feature store (§16): unreadable, it does nothing; in the grace period
+after it was turned on, and while it is off, it evicts nothing; off with nothing left out of
+FalkorDB, it idles. Then it starts idle clocks, puts each graph's class back in step with the
+settings (§10), gathers, asks a pure planner (`residency_plan.plan`, no I/O) and acts. The
+settings' preview (§13) and admission checks run the same planner.
 
 **What it reads.** Every live graph that is not a fork and has a key of its own; every master of
 each of their providers' topologies, from the client's slot map (a standalone or Sentinel instance
@@ -681,7 +707,8 @@ pending or running.
 **Sizes.** A graph's size is its measured `size_bytes`. A graph never measured has no size, not 0:
 it is never a pressure candidate (its eviction would count as freeing nothing), and its load is
 estimated from its nodes and edges at the main head as graphver counts them (rollups are not in
-history), times the bytes-per-entity estimate — the data source's statistics only when graphver's
+history), times the bytes-per-entity estimate ([Memory per item,
+estimated](/guide/versioned-graph-settings#residency-bytesperentity)) — the data source's statistics only when graphver's
 counts are missing. A load with neither waits (`unsized`). A pass that could not read the sizes plans
 no pressure eviction, and makes no room for a load (§12).
 
@@ -689,9 +716,11 @@ no pressure eviction, and makes no room for a load (§12).
 (`idle_standard`), a Coldline graph unread for longer than the Coldline idle time
 (`idle_coldline`).
 
-**Pressure eviction.** A master at or above the start mark (80 % of its `maxmemory`) evicts, in
-order, the idle-longest Coldline graphs, then Standard graphs by oldest read, until its use once
-they are gone is at or under the stop mark (70 %). Idle evictions in the same pass count toward
+**Pressure eviction.** A master at or above the start mark ([Start unloading
+at](/guide/versioned-graph-settings#residency-unloadstartpct), a share of its `maxmemory`) evicts,
+in order, the idle-longest Coldline graphs, then Standard graphs by oldest read, until its use once
+they are gone is at or under the stop mark ([Stop unloading
+at](/guide/versioned-graph-settings#residency-unloadstoppct)). Idle evictions in the same pass count toward
 it. The plan keeps the next candidates in order: an eviction the evictor refuses frees nothing, and
 the pass carries on down them until the stop mark is actually reached. A master without
 `maxmemory` is never under pressure.
@@ -699,10 +728,12 @@ the pass carries on down them until the stop mark is actually reached. A master 
 **Never evicted:** an Always graph (the evictor refuses one, whatever asks), a key the platform
 did not mint, a key another data source or a catalog entry reads, a graph whose data source has a
 rollup job pending or running (the job would write the dropped key back), a graph with a read lease
-or a pass in flight (any status but `idle`), one that is not evictable at all (in the trash, at
-genesis, or still having version control enabled), and anything on a master that cannot be read or
-is loading its dataset (the drop would fail). With automatic eviction off (`evictionEnabled`),
-nothing is evicted; loads and admission go on.
+or a pass in flight (any status but `idle`), one idle between the passes of a window written a page
+at a time (`window_rows`: dropped, its key would lose the pages written and the version it serves),
+one that is not evictable at all (in the trash, at genesis, or still having version control enabled), and anything on a master that cannot be read or
+is loading its dataset (the drop would fail). With automatic eviction off ([Unload graphs
+automatically](/guide/versioned-graph-settings#residency-autounload)), nothing is evicted; loads
+and admission go on.
 
 **An eviction** goes through `CacheManager.evict`, which takes the graph's projection lock,
 re-checks all of the above (the rollup jobs and who reads the key in the management database, the
@@ -743,9 +774,12 @@ out of FalkorDB is queued again — once, keeping its place.
 
 **Admission.** Requests are taken per provider, in the order they were made. Each goes to the
 master of its provider with the most room free to take a load (§17) and starts when its estimate
-times the headroom (×1.3) fits under that master's start mark after what is held there — the
-aggregation write governor's reservations, and the estimate times the headroom of each load and full
-projection (a rebuild, a move's reseed, a first seed) in flight on it. Fitting under the start mark
+times the headroom ([Headroom a load
+needs](/guide/versioned-graph-settings#residency-loadmarginpct)) fits under that master's start
+mark after what is held there — the
+aggregation write governor's reservations, the estimate times the headroom of each load and full
+projection (a rebuild, a move's reseed, a first seed) in flight on it, and what each window in
+flight there may still add (its `window_rows` times the bytes per entity). Fitting under the start mark
 rather than under `maxmemory` is the hysteresis: a load never puts its master under pressure, so the
 next pass never evicts what it just loaded. One load per master at a time; none on a master that is
 forking for persistence, loading its dataset, or cannot be read. A request that does not fit
@@ -765,16 +799,19 @@ nothing: later requests that fit go ahead, on that master too, and the next of t
 fits on neither may have room made instead. Later requests that fit on another master go ahead
 either way. Beside masters with a limit, a master without one takes a load only when none of them
 is free (§17): a load short of room on the master with a limit it would go to waits there, and has
-room made there, rather than going to the one without. The policy preview shows these evictions.
+room made there, rather than going to the one without. A settings preview shows these evictions.
 
-Always on a graph out of FalkorDB has its room checked when it is set, on its provider's roomiest
-master (or its own, when its key stays): **409** `capacity_insufficient` `{master, shortfallBytes,
-reason, message}` when its load would not fit there, and nothing changes; otherwise the class is set
-and its load asked for. Only room is checked: setting the class writes nothing, so a master forking
-or taking a load now does not refuse it, and the load waits its turn. `reason` says why: `capacity`
-(`shortfallBytes` short under the start mark), `unsized` (its size is not known) or `unmeasured`
-(the master could not be read), each also in the message. A move and an Adopt, which write, are also
-refused when the master takes a load already (`busy`) or holds (`fork`, `loading`, …).
+Always set on one graph out of FalkorDB through `PUT …/graphs/{gid}/residency` has its room checked
+first, on its provider's roomiest master (or its own, when its key stays): **409**
+`capacity_insufficient` `{master, shortfallBytes, reason, message}` when its load would not fit
+there, and nothing changes; otherwise the class is set and its load asked for. A save through the
+settings instead shows, before it is saved, what the next capacity pass would load, unload and
+leave waiting, and that pass queues every Always graph out of FalkorDB. Only room is checked:
+setting the class writes nothing, so a master forking or taking a load now does not refuse it, and
+the load waits its turn. `reason` says why: `capacity` (`shortfallBytes` short under the start
+mark), `unsized` (its size is not known) or `unmeasured` (the master could not be read), each also
+in the message. A move and an Adopt, which write, are also refused when the master takes a load
+already (`busy`) or holds (`fork`, `loading`, …).
 
 **The load.** An admitted load pins a fresh platform key placed on the chosen master (§17), marks
 the graph `rehydrating` at watermark 0 with `rehydrating_since` (a compare-and-swap under the row's
@@ -830,40 +867,50 @@ or its switch unreadable — new writes are admitted too:
 
 ## 13. The policy: every value
 
-Every value is changed live by a system administrator, with no redeploy, and stored on
-`platform_settings` (migration `20261030_1400_residency_policy`). Unset is the environment's
-default. `residency_policy.resolve` is the one reader: the saved value, else the default, clamped
-to its range, with the pairs kept in order, memoized for up to 30 seconds per process, and never
-raising. When the row cannot be read it returns the last policy it read (the defaults would turn
-eviction back on where an administrator turned it off), or, with none yet, the defaults with
-eviction off; loads go on.
+Each value is a versioned-graph setting in the settings store, set for the platform by a system
+administrator, live, with no redeploy: Admin → Versioned graphs → **Settings** → **Memory &
+residency**. The residency class alone may also be set for a workspace or one graph (§10). What each
+value means, its default, its range and when to change it are in [Memory &
+residency](/guide/versioned-graph-settings#memory--residency). Each value, by the name the old policy route gives it:
 
-| Value | Environment default | Default | Range | What it is |
-|---|---|---|---|---|
-| `evictionEnabled` | `GRAPHVER_EVICTION_ENABLED` | on | on, off | Whether the loop evicts at all |
-| `defaultResidency` | — | `standard` | `always`, `standard`, `coldline` | The class a new graph gets (read only with residency on) |
-| `standardIdleSecs` | `GRAPHVER_STANDARD_IDLE_SECS` | 604 800 (7 days) | 3 600 – 31 536 000 (1 hour – 365 days) | How long a Standard graph stays unread before it goes |
-| `coldlineIdleSecs` | `GRAPHVER_COLDLINE_IDLE_SECS` | 3 600 (1 hour) | 300 – 604 800 (5 minutes – 7 days), and no longer than the Standard idle time | How long a Coldline graph stays unread before it goes |
-| `highWaterPct` | `GRAPHVER_MASTER_HIGH_WATER_PCT` | 80 | 50 – 95 | The start mark: pressure eviction starts at this share of a master's memory, and a load must fit under it |
-| `lowWaterPct` | `GRAPHVER_MASTER_LOW_WATER_PCT` | 70 | 30 – 90, and at least 5 under the start mark | The stop mark: pressure eviction stops here |
-| `loadMarginPct` | `GRAPHVER_LOAD_MARGIN_PCT` | 130 (×1.3) | 100 – 300 | The headroom a load needs over its estimate |
-| `bytesPerEntity` | `GRAPHVER_BYTES_PER_ENTITY` | 550 | 100 – 10 000 | The estimate per node or edge, for a graph never measured |
-| `coldlineCanvasLoadAbove` | `GRAPHVER_COLDLINE_CANVAS_LOAD_ABOVE` | 500 000 | 0 – 100 000 000 | A Coldline graph with more entities than this loads on a canvas read |
-| `capacityIntervalSecs` | `GRAPHVER_CAPACITY_SECS` | 60 | 15 – 600 | How often the loop runs |
+| Value | Setting |
+|---|---|
+| `evictionEnabled` | [Unload graphs automatically](/guide/versioned-graph-settings#residency-autounload) |
+| `defaultResidency` | [Residency class](/guide/versioned-graph-settings#residency-class), the platform's: the class every graph without one of its own inherits (§10) |
+| `standardIdleSecs` | [Unload a Standard graph after](/guide/versioned-graph-settings#residency-standardidlesecs) |
+| `coldlineIdleSecs` | [Unload a Coldline graph after](/guide/versioned-graph-settings#residency-coldlineidlesecs) |
+| `highWaterPct` | [Start unloading at](/guide/versioned-graph-settings#residency-unloadstartpct): the start mark |
+| `lowWaterPct` | [Stop unloading at](/guide/versioned-graph-settings#residency-unloadstoppct): the stop mark |
+| `loadMarginPct` | [Headroom a load needs](/guide/versioned-graph-settings#residency-loadmarginpct) |
+| `bytesPerEntity` | [Memory per item, estimated](/guide/versioned-graph-settings#residency-bytesperentity) |
+| `coldlineCanvasLoadAbove` | [Load a Coldline graph on opening above](/guide/versioned-graph-settings#residency-coldlineloadabove): the canvas-load threshold |
+| `capacityIntervalSecs` | [Check memory every](/guide/versioned-graph-settings#residency-capacityintervalsecs) |
 
-Routes, under `/api/v1/admin/versioning`, `system:admin` only and never with an API key:
+`residency_policy.resolve` is the one reader. It brings the process's settings up to date (Redis at
+most every two seconds, the database only when a save moved the settings' generation) and gives each
+value in force: in its range, with the pairs kept in order (the Coldline idle time no longer than
+the Standard one, the stop mark at least five points under the start mark), never raising. While the
+settings can't be read, before the first read or since one failed, it gives the values last read,
+or before any the defaults, with eviction off; loads go on.
+
+Routes, under `/api/v1/admin/versioning`, `system:admin` only and never with an API key. They are
+deprecated: every answer carries `Deprecation: true` and a `Link` to the settings API route that
+replaces it ([If you used the old endpoints](/guide/versioned-graph-settings#if-you-used-the-old-endpoints)).
 
 - `GET /residency-policy` → `{enabled, switch, values: {<value>: {saved, default, effective}},
   ranges: {<value>: {min, max}}, updatedBy, updatedAt}`. `enabled` is the Graph residency switch
   (Admin → Features); `switch` says where it is: `{enabled, onSince, evictionsFrom, phase: off |
-  grace | on | reloading, reloading}` (§16). `updatedBy` and `updatedAt` are the policy's own
-  (`gv_policy_updated_by`, `gv_policy_updated_at`): who last changed a residency value, and when.
+  grace | on | reloading, reloading}` (§16). `updatedBy` and `updatedAt`: who last changed a
+  residency value, and when, from the settings store.
 - `PUT /residency-policy` — partial: only the values named change, and `-1` clears one to its
   default. A value out of its range, of the wrong kind or unknown, or contradicting another
   (Coldline idle longer than Standard idle; a stop mark less than 5 points under the start mark) is
-  **422** `invalid_residency_policy` `{field, message}`, and nothing is saved. Recorded as
-  `platform.residency_policy.updated` with each changed value's before and after. The process that
-  saved applies it at once; the others within 30 seconds.
+  **422** `invalid_residency_policy` `{field, message}`, and nothing is saved. So is a change to
+  `defaultResidency`: it was the class a new graph got, and is now the class every graph inherits,
+  changed through the settings; sent back unchanged, as a client that echoes the whole policy sends
+  it, it passes. Saved through the settings store, and recorded as `platform.residency_policy.updated`
+  with each changed value's before and after. The process that saved applies it at once; the others
+  within about two seconds.
 - `POST /residency-policy/preview` — the planner on proposed values (as for `PUT`, refused as `PUT`
   refuses them) against current memory and graphs, acting on nothing: `{values, masters: [{endpoint,
   usedBytes, maxBytes, reservedBytes, usedAfterBytes, hold, evictions: [{graphId, dataSourceId,
@@ -953,10 +1000,11 @@ stays loaded, as before residency.
 - **The versioning worker**, at the start of every capacity pass, from the feature store itself
   (`residency_policy.switch_state`): on, off, or unreadable. Only the worker evicts graphs or brings
   them back, and it decides there; a switch it cannot read makes the pass do nothing.
-- **The API**, through its flag cache (30 seconds), as every switch is read. On, a person's read
-  holds its graph's read lease and is noted for `last_read_at` (§14), and a new graph gets the
-  policy's class (off, Standard). A first seed, a move, an Adopt and a package seed are admitted
-  with it on, and while it cannot be read (§12). The policy routes say `enabled`.
+- **The API**, through its flag cache (a save reaches it within about two seconds), as every switch
+  is read. On, a person's read holds its graph's read lease and is noted for `last_read_at` (§14).
+  A new graph gets the class in force for it whether the switch is on or off (§10). A first seed, a
+  move, an Adopt and a package seed are admitted with it on, and while it cannot be read (§12). The
+  policy routes say `enabled`.
 - **Reads never depend on it.** What only residency writes — `evicted`, `waiting_capacity`,
   `rehydrating` — means "not in FalkorDB" whatever the switch says: such a graph is read from
   Postgres, FalkorDB-only work answers **503** `graph_loading`, and a person's read asks for its
@@ -1007,10 +1055,10 @@ leases meanwhile.
   `load_stalled` — and `platform.versioning.graph_loaded` `{graphId, workspaceId, dataSourceId,
   master, bytes, secs}`.
 
-**On the card.** Residency & eviction (§19) says where the switch is: "Graph residency is on.
-Evictions start at 10:42 (grace period).", "Graph residency is on.", "Graph residency is off. 12
-graphs are being brought back as memory allows.", or, fully off, that an administrator can turn it
-on and the values are kept. `GET /residency-policy` carries the same as `switch` (§13).
+**On the screens.** Admin → Versioned graphs → **Settings** → **Memory & residency** (§19) shows the
+switch, on or off, with who turned it and when, and marks the category's settings **Inactive** while
+it is off. Where the switch is beyond that, its grace period or the graphs still being brought back,
+is in the activity log (below) and on the deprecated `GET /residency-policy`, as `switch` (§13).
 
 **The count budget is no longer used.** `GRAPHVER_FALKOR_MAX_RESIDENT`, `GRAPHVER_FALKOR_BUDGETS`,
 `GRAPHVER_EVICT_SECS` and a provider's `falkor_max_resident` are not acted on, whether residency is
@@ -1065,12 +1113,12 @@ The master's slots come from the client's slot map (`shard_capacity.master_slots
 
 ## 18. Adopt: a customer's key onto a platform key
 
-`POST /api/v1/admin/versioning/graphs/{gid}/adopt` (system administrators; Admin → Infrastructure →
-Versioned graphs → **Adopt…**): a graph that projects into the customer's own FalkorDB key moves
-onto a fresh platform key on the same provider, by the reseed move of doc 14 §6 — seeded from
-Postgres a page at a time, Postgres serving its reads until the new key catches up. From then the
-platform owns the key (`owns_falkor_graph` true) and the graph's residency class applies: it can be
-evicted, loaded and moved like any platform copy.
+`POST /api/v1/admin/versioning/graphs/{gid}/adopt` (system administrators; Admin → Versioned
+graphs → **Adopt…** in the graph's row menu): a graph that projects into the customer's own
+FalkorDB key moves onto a fresh platform key on the same provider, by the reseed move of doc 14 §6 —
+seeded from Postgres a page at a time, Postgres serving its reads until the new key catches up. From
+then the platform owns the key (`owns_falkor_graph` true) and the graph's residency class applies:
+it can be evicted, loaded and moved like any platform copy.
 
 - **The customer's key is left exactly as it was**: never written, dropped, renamed or relabelled,
   and not added to `retired_keys`. Its external-changes flag (`external_drift`) is cleared, and kept
@@ -1103,31 +1151,33 @@ evicted, loaded and moved like any platform copy.
 
 ## 19. The admin screens
 
-Admin → Infrastructure → **Versioned graphs** (system administrators; it opens from the projection
-panel's **All versioned graphs**):
+**Admin → Versioned graphs** (system administrators; Infrastructure's projection panel links to it
+from **All versioned graphs**):
 
-- **Each row** shows the graph's class and whether it is in memory as chips — **In memory**,
-  **Evicted**, **Loading** (with when it started), **Waiting for room** — and, for a graph that is not
-  a fork, a class selector (Always may be refused when its master has no room: the server's message
-  shows on the row), **Load now** on a graph out of FalkorDB, and **Adopt…** on a customer's key
-  (not on a graph with no key), behind a confirmation that says what changes (§18); a refusal names
-  its reason. A graph with no key shows no state chip. The state filter takes **Loading** and
-  **Waiting for room**.
-- **Residency & eviction** opens the policy card: every value with the one in force, its default and
-  its unit, **Reset** (saves `-1`), each master's memory as a gauge with the start and stop marks
-  drawn on it, who changed the values last and when, and where the Graph residency switch is (§16):
-  on, in its grace period (when evictions start), bringing graphs back after it was turned off, or
-  off. A duration's unit can be switched: the value is shown, or converted, in it. **Save**
-  asks the planner first and confirms with what the next pass would do ("Saving evicts 12 graphs,
-  9.4 GB and 2 of unknown size, on master 10.0.0.2:6379") and when: every server reads new values
-  within 30 seconds, and the next capacity pass acts on them; a value the server refuses shows next
-  to the field it names.
-- **Draft retention** opens the card for how long a merged or abandoned draft keeps its changes
-  ([03](03-branching-commits-merge.md)): the window in force and its default, **Reset** (back to the
-  default), and **Save**. A window that removes more than the one in force, shorter or where there
-  was none, asks first and says what it removes within the hour, for good, and what each draft
-  keeps.
-- **The projection panel** counts graphs **loading** and **waiting for room**.
+- **Overview → Every versioned graph.** Each row shows what its readers get and its class as chips
+  (**Reads:** …, **Class:** …) and whether it is in memory: **In memory**, **Unloaded**, **Loading**
+  (with when it started), **Waiting for room**. A graph with no key shows no state chip. The status
+  filter takes **Unloaded**, **Loading** and **Waiting for room**, and **Class** filters by class.
+  **Settings…** opens the graph's settings (below). Its row menu has **Load now** on a graph out of
+  FalkorDB, and **Adopt…** on a customer's key (not on a graph with no key), behind a confirmation
+  that says what changes (§18); a refusal names its reason. The Overview's figures count the graphs
+  in memory, unloaded, being loaded, waiting for room and with no copy yet.
+- **Settings → Memory & residency** holds the policy (§13): the **Graph residency** switch (§16),
+  every value with the one in force and where it came from, and **Where unloading starts and
+  stops**, each master's memory as a gauge with the start and stop marks drawn on it. A change is
+  staged; **Review changes** shows each value before and after and what the next capacity pass would
+  unload, load and leave waiting on each master, with any warning to acknowledge, and asks why;
+  **Save** saves it, and **Undo** puts it back. Every server reads it within about two seconds, and
+  the next capacity pass acts on it. A value the server refuses is named, with why.
+- **A graph's class** is its [Residency class](/guide/versioned-graph-settings#residency-class), under **Memory & residency** in
+  its settings: **Settings…** on its row, or **Open settings** on its data source's **Versioning**
+  tab. A workspace's is set on the workspace's **Versioned graphs** tab. Only system administrators
+  change either; a graph that sets none shows the class it inherits, and from where.
+- **Drafts & history → Keep closed drafts' changes for** is how long a merged or abandoned draft
+  keeps its changes ([03](03-branching-commits-merge.md)). A change after which the next sweep would
+  remove drafts' changes says how many, and must be acknowledged before it is saved.
+- **The projection panel** on Admin → Infrastructure counts graphs **loading** and **waiting for
+  room**.
 
 On the workspace side, a data source's **Versioning** tab (and the Data health tab) shows the graph's
 class and whether it is in memory, read-only, and reads a graph being loaded or waiting for room as

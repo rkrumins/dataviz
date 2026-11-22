@@ -15,7 +15,7 @@
  * while they're reading the summary, cancelled by any click).
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import { AlertCircle, ArrowRight, Check, Compass, Database, Loader2, RefreshCw, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -262,7 +262,8 @@ const CONFETTI_KEYFRAMES = `
 @media (prefers-reduced-motion: reduce) { .vw-confetti-piece { display: none; } }
 `
 
-/** Deterministic confetti — transform/opacity only, no layout thrash. */
+/** Deterministic confetti — transform/opacity only, no layout thrash. Its CSS hides it under the
+ *  OS's reduced motion; a page that also honours the app's calm mode leaves it out itself. */
 const CONFETTI = [
     { dx: '-62px', rot: '-150deg', delay: '0ms', color: '#3b82f6', left: '22%' },
     { dx: '38px', rot: '120deg', delay: '40ms', color: '#8b5cf6', left: '31%' },
@@ -274,7 +275,7 @@ const CONFETTI = [
     { dx: '48px', rot: '140deg', delay: '110ms', color: '#22c55e', left: '78%' },
 ]
 
-function ConfettiBurst() {
+export function ConfettiBurst() {
     return (
         <div aria-hidden className="pointer-events-none absolute inset-x-0 -top-6 h-56 overflow-hidden">
             <style>{CONFETTI_KEYFRAMES}</style>
@@ -292,6 +293,30 @@ function ConfettiBurst() {
                 />
             ))}
         </div>
+    )
+}
+
+/**
+ * The success mark: a check that springs into its tile, over a soft halo. `children` rides on it,
+ * as the view's own icon does on the view just made.
+ */
+export function SuccessMark({ children }: { children?: ReactNode }) {
+    return (
+        <motion.div
+            initial={{ scale: 0.4, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            transition={{ type: 'spring', stiffness: 380, damping: 18 }}
+            className="relative"
+        >
+            <div
+                aria-hidden
+                className="absolute -inset-5 rounded-full bg-emerald-500/15 blur-2xl"
+            />
+            <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/25">
+                <Check className="w-8 h-8 text-white" strokeWidth={3} />
+            </div>
+            {children}
+        </motion.div>
     )
 }
 
@@ -318,19 +343,7 @@ export function CreationSuccessBody({
 
             {/* Success mark, with the view's own icon riding along — the choice made
                 on Basics shows up on the thing it was made for. */}
-            <motion.div
-                initial={{ scale: 0.4, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                transition={{ type: 'spring', stiffness: 380, damping: 18 }}
-                className="relative"
-            >
-                <div
-                    aria-hidden
-                    className="absolute -inset-5 rounded-full bg-emerald-500/15 blur-2xl"
-                />
-                <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/25">
-                    <Check className="w-8 h-8 text-white" strokeWidth={3} />
-                </div>
+            <SuccessMark>
                 {icon && (
                     <motion.span
                         initial={{ scale: 0, opacity: 0 }}
@@ -341,7 +354,7 @@ export function CreationSuccessBody({
                         <DynamicIcon name={icon} className="w-3.5 h-3.5" />
                     </motion.span>
                 )}
-            </motion.div>
+            </SuccessMark>
 
             <motion.h3
                 initial={{ opacity: 0, y: 8 }}

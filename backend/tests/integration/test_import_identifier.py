@@ -8,8 +8,8 @@ Pins:
 - The replace guard: a replace whose file names its entities by another key — it would delete the
   graph and make it again — is refused before it deletes anything, its rows left on the draft,
   however often it is imported into that draft; ``allowMassDelete`` lets it through, and the job's
-  ``replaceGuard`` says which, with the counts and the limits. A replace whose first full window
-  finds (almost) nothing stops there (``identifier_matched_nothing``).
+  ``replaceGuard`` says which, with the counts and the limits. A replace whose first node window,
+  however many rows it holds, finds (almost) nothing stops there (``identifier_matched_nothing``).
 - By a property (``prop.my_unique_id``): the first import builds its index, and each later one
   catches it up from main's log, so a node made or edited on the canvas is found by its value, never
   made again; a changed value is a new key; a value two nodes hold refuses its rows, naming both; a
@@ -232,7 +232,7 @@ async def _by_urn_alone(svc, ie, store) -> None:
     assert (await ie.get_job(job["job_id"]))["identifier"] == "urn"
 
 
-async def _guard(svc, ie, store, monkeypatch) -> None:
+async def _guard(svc, ie, store, monkeypatch, settings_world) -> None:
     _BY["identifier"] = "urn"                                 # rows keyed by urn
     monkeypatch.setattr(config, "IMPORT_REPLACE_GUARD_MIN_LIVE", 10)
     monkeypatch.setattr(config, "IMPORT_REPLACE_MIN_MATCH_FRACTION", 0)    # the guard, alone
@@ -265,11 +265,9 @@ async def _guard(svc, ie, store, monkeypatch) -> None:
     assert allowed["summary"]["deleted"] == 20, allowed["summary"]
     # Its data source's limits hold over the platform's, as its job keeps them: judged only from a
     # scope of 1,000, the same file goes through, and the verdict says whose limits those were.
-    from types import SimpleNamespace
     from backend.app.services import import_settings
-    own = SimpleNamespace(**{column: None for column, _api, _d in import_settings.FIELDS})
-    own.import_replace_min_live = 1000
-    _identifier, kept = import_settings.for_import(own, "urn")
+    settings_world.set("imports.guardMinLive", "graph", ds, 1000)
+    _identifier, kept = await import_settings.for_import("ws1", ds, "urn")
     _job, looser = await _run_job(ie, store, gid, other, identifier="urn", import_settings=kept)
     assert looser["status"] == "completed", looser
     assert looser["importSettings"]["replaceLimits"]["minLive"] == 1000
@@ -370,10 +368,13 @@ async def _by_a_property(svc, ie, store, monkeypatch) -> None:
     assert on_fork["summary"]["failure"]["code"] == "matching_property_on_fork", on_fork
 
 
-def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_changed(monkeypatch):
+def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_changed(
+        monkeypatch, settings_world):
     async def run():
         await models.create_schema_and_partitions()
-        window, config.IMPORT_COMMIT_WINDOW = config.IMPORT_COMMIT_WINDOW, 7
+        # Through monkeypatch, as the cases below set it again: set directly, the case's own
+        # setting was put back at teardown to this 7, and every later test ran with windows of 7.
+        monkeypatch.setattr(config, "IMPORT_COMMIT_WINDOW", 7)
         root = tempfile.mkdtemp(prefix="import-identifier-")
         try:
             svc = GraphVersioningService()
@@ -382,10 +383,9 @@ def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_chang
             for identifier in ("entity_id", "urn", f"prop.{KEY}"):
                 await _recurring_snapshot(svc, ie, ie.store, identifier)
             await _by_urn_alone(svc, ie, ie.store)
-            await _guard(svc, ie, ie.store, monkeypatch)
+            await _guard(svc, ie, ie.store, monkeypatch, settings_world)
             await _by_a_property(svc, ie, ie.store, monkeypatch)
         finally:
-            config.IMPORT_COMMIT_WINDOW = window
             shutil.rmtree(root, ignore_errors=True)
             await db.dispose_engine()
     asyncio.run(run())

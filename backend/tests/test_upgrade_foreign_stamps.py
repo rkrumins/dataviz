@@ -53,12 +53,14 @@ def _below(script, head):
     return [down] if isinstance(down, str) else list(down)
 
 
-#: PR #670's line, off ``20261113_0900_gv_import_mentions``: its first five revisions are main's
-#: too (``20261119_1400_merge_ps_build`` joins them), so a database #670's build moved to one of
-#: them upgrades with no rewind; its later ones are not.
+#: PR #670's line, off ``20261113_0900_gv_import_mentions``: all but its last revision are main's
+#: too (``20261119_1400_merge_ps_build`` joins the first five, ``20261119_1600_merge_settings`` the
+#: next two, #668's), so a database #670's build moved to one of them upgrades with no rewind; its
+#: last is not.
 ADOPTED = ["20261113_1000_gv_ps_served_fill", "20261113_1100_build_policy", "20261113_1200_gv_ps_window_rows",
-           "20261113_1300_gv_ps_read_mode", "20261113_1400_gv_ps_candidate"]
-OTHER_LINE = ["20261116_1000_setting_values", "20261116_1100_settings_import", "20261116_1200_graph_watch"]
+           "20261113_1300_gv_ps_read_mode", "20261113_1400_gv_ps_candidate", "20261116_1000_setting_values",
+           "20261116_1100_settings_import"]
+OTHER_LINE = ["20261116_1200_graph_watch"]
 
 
 def test_where_the_chains_parted():
@@ -67,7 +69,7 @@ def test_where_the_chains_parted():
     assert upgrade._foreign(script, [*ADOPTED, head]) == []
     for rev in OTHER_LINE:
         assert upgrade._foreign(script, [rev, head]) == [rev]
-        assert upgrade._parting_point(script, [rev]) == "20261113_1400_gv_ps_candidate", rev
+        assert upgrade._parting_point(script, [rev]) == "20261116_1100_settings_import", rev
     # A newer release's: nothing of ours left to run.
     assert upgrade._parting_point(script, ["29991231_2359_from_the_future"]) == head
     # Older than everything of ours: nowhere to rewind to.
@@ -82,8 +84,7 @@ def test_a_recorded_stamp_is_placed_exactly():
     script, lines = _script(), upgrade._other_lines(_alembic_config())
     head = script.get_current_head()
     for stamp, placed in [
-        ("20261116_1200_graph_watch", ["20261113_1400_gv_ps_candidate"]),      # #670's
-        ("20261116_1100_settings_import", ["20261113_1400_gv_ps_candidate"]),  # #668's
+        ("20261116_1200_graph_watch", ["20261116_1100_settings_import"]),      # #670's, on #668's
         ("20261105_1000_import_results", ["20261103_1200_subset_views"]),      # #644's
         # #556's, where the guess says 20261018_1100_gv_ps_retired: its branch put it later.
         ("20261018_1200_change_check_secs", ["20261020_1000_ds_transfers"]),
@@ -106,7 +107,7 @@ def test_a_schema_left_short_places_it_below_the_migrations_that_make_what_is_mi
     assert upgrade._below_gaps(script, ["20261118_1100_review_rules"], [], gap) == ["20261118_1000_gv_review_records"]
     # Below it on every line it's on, and nothing else moved.
     assert upgrade._below_gaps(script, [head], [], gap) == [
-        "20261113_1400_gv_ps_candidate", "20261118_1000_gv_review_records", "20261118_1100_view_members"]
+        "20261116_1100_settings_import", "20261118_1000_gv_review_records", "20261118_1100_view_members"]
     # Ours it had stamped itself are trusted, not searched.
     assert upgrade._below_gaps(script, [head], [head], gap) is None
     # Made by create_all alone, by no migration: nothing of ours run again would bring it.
@@ -182,7 +183,7 @@ def test_another_branchs_database_upgrades_with_this_build(scratch_db):
 
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-3000:]
-    assert "Placing it at ['20261113_1400_gv_ps_candidate'], exactly" in out.stderr, out.stderr[-3000:]
+    assert "Placing it at ['20261116_1100_settings_import'], exactly" in out.stderr, out.stderr[-3000:]
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
     assert _job(scratch_db, "check").returncode == 0
     assert _sql(scratch_db, "SELECT count(*) FROM information_schema.columns "

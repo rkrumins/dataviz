@@ -71,11 +71,28 @@ def _fresh_graphver_engine():
 
     gvdb._engine = None
     gvdb._session_factory = None
+    gvdb._route_engine = None
+    gvdb._route_session_factory = None
     mgmt_engine._engines.clear()
     mgmt_engine._session_factories.clear()
     messaging._client = None
     falkordb_connection._GRAPH_CLIENTS = falkordb_connection.TopologyGraphClients()
     yield
+
+
+@pytest.fixture
+def read_mode_in_place(monkeypatch):
+    """The platform's read mode set to Keep serving, update in place: for a test of what a graph
+    serves while its key catches up or rebuilds. The default, Always the latest, reads Postgres
+    meanwhile. The settings in force are worked out again on both sides, so no other test sees
+    it."""
+    from backend.app.services.settings import effective
+    from backend.app.services.versioning import config as gv_config
+
+    monkeypatch.setattr(gv_config, "READ_MODE", "in_place")
+    effective.reset()
+    yield
+    effective.reset()
 
 
 @pytest.fixture(autouse=True)

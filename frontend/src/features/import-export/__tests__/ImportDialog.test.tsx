@@ -12,7 +12,13 @@
  *   - it matches existing items by the graph's default (sending none: the server applies it) unless
  *     you choose another; a property must be named, and one no import matched by yet says it is
  *     indexed first; a fork whose parent's default is a property says it matches by Entity ID;
- *   - a replace the replace guard refused can be replaced anyway, into the draft its rows are on.
+ *     choosing the chosen one again changes nothing, so a default of a property, then the urn,
+ *     still finds rows without the property by their urn;
+ *   - a replace the replace guard refused, or one stopped because its first rows found almost
+ *     nothing, can be replaced anyway, into the draft its rows are on;
+ *   - rows a property alone refused that their urn would find are offered "Find them by their urn",
+ *     whether the import was held or completed, which imports again into its draft;
+ *   - a replace that deletes only what holds its property says so, before and after.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -210,6 +216,25 @@ describe('ImportDialog', () => {
     expect(vi.mocked(importInParts).mock.calls[0][3]).toMatchObject({ identifier: undefined })
   })
 
+  it('keeps a default of a property, then the urn, whole when “A property” is chosen again', async () => {
+    const base = await vi.mocked(getImportSettings)('ws1', 'g1')
+    vi.mocked(getImportSettings).mockResolvedValue({
+      ...base, effective: { ...values, identifier: 'prop.external_id,urn', sources: {} },
+    } as unknown as ImportSettings)
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockReturnValue(new Promise<Job>(() => {}))
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    const prop = await screen.findByRole('radio', { name: /A property · default/ })
+    const byUrn = screen.getByRole('checkbox', { name: /Rows without it: find them by their urn/ })
+    expect(byUrn).toBeChecked()
+    await userEvent.click(prop)
+    expect(byUrn).toBeChecked()
+    expect(screen.getByLabelText('Property name')).toHaveValue('external_id')
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    // Nothing else chosen: the graph's default, prop.external_id,urn, applies.
+    expect(vi.mocked(importInParts).mock.calls[0][3]).toMatchObject({ identifier: undefined })
+  })
+
   it('matches by a property once it is named, and says one no import matched by yet is indexed first', async () => {
     vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
     vi.mocked(pollJob).mockReturnValue(new Promise<Job>(() => {}))
@@ -238,6 +263,31 @@ describe('ImportDialog', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
     expect(vi.mocked(importInParts).mock.calls[0][3]).toMatchObject({
       identifier: 'prop.external_id,urn', reconcileMode: 'replace', replaceScope: 'keyed' })
+  })
+
+  it('says a replace that deletes only what holds its property leaves the rest alone, before and after', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'completed',
+      branchId: 'br1', identifier: 'prop.external_id', summary: { new: 0, updated: 0, unchanged: 8, deleted: 2,
+        invalid: 0, replaceGuard: { state: 'passed', live: 10, deletes: 2, creates: 0, scope: 'keyed',
+          limits: { minLive: 1000, deleteFraction: 0.5, createFraction: 0.5 },
+          sources: { minLive: 'platform', deleteFraction: 'platform', createFraction: 'platform' } } } } as Job)
+    vi.mocked(getImportPreview).mockResolvedValue({ sample: [] } as never)
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(await screen.findByRole('button', { name: /Replace \(authoritative\)/ }))
+    expect(screen.getByText(/items missing from it are deleted/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('radio', { name: /A property/ }))
+    await userEvent.click(screen.getByRole('checkbox', { name: /Delete only items that have this property/ }))
+    expect(screen.getByText(/Removes the items that have this property and aren't in your file/)).toBeInTheDocument()
+    await userEvent.type(screen.getByLabelText('Property name'), 'external_id')
+    expect(screen.getByText("Removes the items that have external_id and aren't in your file; items without it are left alone."))
+      .toBeInTheDocument()
+    expect(screen.queryByText(/items missing from it are deleted/)).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(await screen.findByText(/Replace removes the items that have external_id and aren't in your file; items without it are left alone\./))
+      .toBeInTheDocument()
+    expect(screen.queryByText(/Replace removes items not in your file/)).not.toBeInTheDocument()
   })
 
   it('replaces anyway, into the draft its rows are on, once the replace guard refused it', async () => {
@@ -271,6 +321,24 @@ describe('ImportDialog', () => {
     await userEvent.click(screen.getByRole('button', { name: /Find them by their urn/ }))
     expect(vi.mocked(importInParts).mock.calls[1][3]).toMatchObject({
       reconcileMode: 'replace', branchId: 'br_9', identifier: 'prop.MY_UNIQUE_ID,urn', allowMassDelete: false })
+    expect(vi.mocked(importInParts).mock.calls[1][3]?.maxRefusedRows).toBeUndefined()
+  })
+
+  it('offers the same once an import by a property alone completed without those rows', async () => {
+    const refused = { total: 2, byCode: { no_key: 2 }, hints: { by_urn: 2 }, fixes: {}, rows: [] }
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br_9', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValueOnce({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'completed',
+      branchId: 'br_9', identifier: 'prop.MY_UNIQUE_ID',
+      summary: { new: 5, updated: 0, unchanged: 0, deleted: 0, invalid: 2, refused } } as unknown as Job)
+      .mockReturnValue(new Promise<Job>(() => {}))
+    vi.mocked(getImportPreview).mockResolvedValue({ sample: [] } as never)
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(await screen.findByText('5 changes ready to review')).toBeInTheDocument()
+    expect(screen.getByText(/2 of these rows\s+would be found by their urn/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Find them by their urn/ }))
+    expect(vi.mocked(importInParts).mock.calls[1][3]).toMatchObject({
+      reconcileMode: 'upsert', branchId: 'br_9', identifier: 'prop.MY_UNIQUE_ID,urn', allowMassDelete: false })
     expect(vi.mocked(importInParts).mock.calls[1][3]?.maxRefusedRows).toBeUndefined()
   })
 
@@ -309,16 +377,36 @@ describe('ImportDialog', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
     expect(await screen.findByRole('heading', { name: '1 row refused' })).toBeInTheDocument()
     expect(screen.getByText(/give it a urn/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Find them by their urn/ })).not.toBeInTheDocument()
   })
 
-  it('offers no way past a failure the replace guard didn’t make', async () => {
-    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
-    vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',
-      branchId: 'br1', errorMessage: 'Stopped after the file’s first 10,000 rows',
-      summary: { failure: { code: 'identifier_matched_nothing', action: 'identifier' } } } as unknown as Job)
+  it('says a replace whose first rows found almost nothing stopped, and replaces anyway into its draft', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br_9', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValueOnce({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',
+      branchId: 'br_9', identifier: 'prop.external_id', errorMessage: 'Stopped after the file’s first 10,000 rows',
+      summary: { new: 9990, updated: 10, unchanged: 0, deleted: 0, invalid: 0,
+        failure: { code: 'identifier_matched_nothing', action: 'identifier', phase: 'nodes' } } } as Job)
+      .mockReturnValue(new Promise<Job>(() => {}))
     await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByText('Replace (authoritative)'))
     await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
     expect(await screen.findByText(/Stopped after the file’s first/)).toBeInTheDocument()
+    expect(screen.getByText(/Its first rows found almost nothing by Property external_id\. Try again with another “Match existing items by”/))
+      .toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Replace anyway/ }))
+    expect(vi.mocked(importInParts).mock.calls[1][3]).toMatchObject({
+      reconcileMode: 'replace', branchId: 'br_9', allowMassDelete: true })
+  })
+
+  it('offers no way past any other failure', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',
+      branchId: 'br1', errorMessage: 'The file changed while it was read. Start it again.',
+      summary: { failure: { code: 'integrity', action: 'restart' } } } as unknown as Job)
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByText('Replace (authoritative)'))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(await screen.findByText(/The file changed while it was read/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Replace anyway/ })).not.toBeInTheDocument()
   })
 })

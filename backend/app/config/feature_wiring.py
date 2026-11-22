@@ -285,14 +285,41 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "graph's class from the policy",
         ),
         ui_surfaces=(
-            "The Residency & eviction card on Admin → Infrastructure → Versioned graphs: whether "
-            "residency is on, its grace period, and the graphs being brought back",
-            "Each graph's class, Load now and Adopt controls in the versioned graphs list",
+            "The Memory & residency category on Admin → Versioned graphs → Settings: the Graph "
+            "residency switch, and its settings marked Inactive while it is off",
+            "Each graph's class, Load now and Adopt in the list of every versioned graph on "
+            "Admin → Versioned graphs",
         ),
         still_allowed=(
             "Every graph stays loaded, as before residency; an evicted graph reads from Postgres "
             "until it is brought back",
             "Setting classes and the residency values, Load now and Adopt",
+            "Nothing is deleted — Postgres is the source of truth",
+        ),
+        depends_on=("versioningEnabled",),
+    ),
+    # Preview: building a graph's next version beside the key that serves it doubles its memory on
+    # its node while the build runs, so it ships OFF and a deployment opts in. It refuses no request:
+    # the versioning worker reads it from the feature store when it decides to start or switch a
+    # build (build_policy.switch_state), and reads never depend on it.
+    "candidateKeysEnabled": FeatureWiring(
+        key="candidateKeysEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "Building a large publish, a rebuild or a move of a platform-owned key in a second "
+            "FalkorDB key while the current one serves, then switching readers to it, in the "
+            "versioning worker's projection pass",
+        ),
+        ui_surfaces=(
+            "The New-version builds category on Admin → Versioned graphs → Settings: the "
+            "New-version builds switch, and its settings marked Inactive while it is off",
+            "The graphs building a new version, counted and listed on Admin → Versioned graphs",
+            "Each graph's build progress in its Versioning tab, Data health and sync status",
+        ),
+        still_allowed=(
+            "Every change is written into the serving key, paced, as before",
+            "Changing the New-version build settings",
             "Nothing is deleted — Postgres is the source of truth",
         ),
         depends_on=("versioningEnabled",),

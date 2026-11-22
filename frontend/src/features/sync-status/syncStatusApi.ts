@@ -32,6 +32,33 @@ export interface SyncVersioned {
    *  record (nothing written yet, or out of the graph). Absent from a server that predates it. */
   served?: number | null
   servedRevision?: SyncRevision | null
+  /** What readers get while a newer version lands, the mode in force: `latest` (the newest, from
+   *  the system of record until the graph has it), `in_place` (the last version, while the next is
+   *  written into it) or `beside` (exactly the last version, while the next is built alongside,
+   *  then one switch). Then the mode chosen (`readModeDeclared`), where it was chosen, and why the
+   *  one in force differs (`readModeWhy`): `beside` is in force only with New-version builds on and
+   *  a platform copy, else the graph updates in place (`builds_off`, `connected_graph`). Absent
+   *  from a server that predates them. */
+  readMode?: 'latest' | 'in_place' | 'beside'
+  readModeDeclared?: 'latest' | 'in_place' | 'beside'
+  readModeSource?: 'graph' | 'workspace' | 'platform' | 'env' | 'default'
+  readModeWhy?: { code: string; text: string; fix?: Record<string, unknown> | null }[]
+  /** A new version built beside the key views read (`beside`), while one is; null when none. */
+  candidate?: SyncBuild | null
+}
+
+/** A new version built beside the key views read: `queued` (waiting for room), `copying`,
+ *  `seeding` (written from the system of record instead of copied), `catching_up` (the commits
+ *  since written into it) or `switching`. */
+export interface SyncBuild {
+  step: 'queued' | 'copying' | 'seeding' | 'catching_up' | 'switching'
+  seq?: number | null
+  attempts?: number
+  error?: string | null
+  waiting?: string | null
+  rows?: number | null
+  /** How far a seed has written, while it does. */
+  progress?: { done?: number; total?: number } | null
 }
 
 export interface SyncSummaries {

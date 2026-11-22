@@ -243,6 +243,46 @@ export interface Watermark {
   lastReadAt?: string | null
   sizeBytes?: number | null
   rehydratingSince?: string | null
+  /** What readers of main get while a newer version lands, the mode in force (latest | in_place |
+   *  beside); the mode chosen, where it was chosen, and why the one in force differs (switch when
+   *  ready updates in place while New-version builds are off, or on a connected graph). A fork's
+   *  are its root's. */
+  readMode?: 'latest' | 'in_place' | 'beside'
+  readModeDeclared?: 'latest' | 'in_place' | 'beside'
+  readModeSource?: 'graph' | 'workspace' | 'platform' | 'env' | 'default'
+  readModeWhy?: { code: string; text: string; fix?: Record<string, unknown> | null }[]
+  /** The version rows of a window written a page at a time, still in flight; null when none is. */
+  windowRows?: number | null
+  /** A new version built beside the serving key (read mode `beside`), while one is; null when
+   *  none is. The serving key keeps serving `served` whole meanwhile. */
+  candidate?: BuildState | null
+}
+
+/** A new version of a graph built beside the key that serves it. */
+export interface BuildState {
+  id?: string | null
+  /** queued (waiting for room), copying, seeding (written from Postgres instead of copied),
+   *  catching_up or switching. */
+  step: 'queued' | 'copying' | 'seeding' | 'catching_up' | 'switching'
+  /** Why it was asked for: window (a large change), rebuild (a rebuild of the key) or move (a move
+   *  to another key or provider, `target`). */
+  reason?: 'window' | 'rebuild' | 'move' | null
+  /** copy (the serving key copied) or reseed (written from Postgres on the node with most room). */
+  mode?: string | null
+  /** A move's: the key and provider it goes to. */
+  target?: { providerId?: string | null; key?: string | null } | null
+  /** Who asked for the rebuild it makes: operator, or drift or failures (the projector on its
+   *  own); null when it makes none. A move asked or rebuilt during a rebuild makes one. */
+  rebuild?: 'operator' | 'drift' | 'failures' | null
+  /** The version the build's key holds whole; null until written. */
+  seq?: number | null
+  attempts?: number
+  error?: string | null
+  waiting?: string | null
+  since?: string | null
+  rows?: number | null
+  /** How far a seed from Postgres has written, while it does. */
+  progress?: { done?: number; total?: number } | null
 }
 
 /** Changes in a graph that version history doesn't hold. `via`: `verify` counted them on the last
@@ -269,10 +309,13 @@ export interface ProjectionQuarantine {
 }
 
 /** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a
- *  projection/rebuild was already in flight, so this was a no-op. */
+ *  projection/rebuild was already in flight, so this was a no-op. `beside` ⇒ it is built in a new
+ *  copy while readers keep the version they have, then switched to (read mode beside);
+ *  `watermark.candidate` follows it. */
 export interface RebuildResponse {
   started: boolean
   alreadyRunning: boolean
+  beside?: boolean
   watermark: Watermark
 }
 
@@ -1685,40 +1728,14 @@ export interface EffectiveDraftsPolicy {
   sources: Partial<Record<keyof DraftsPolicySettings, 'data_source' | 'workspace' | 'default'>>
 }
 
-/** A change to one level's settings: a value sets it, `'inherit'` clears it, left out leaves it. */
-export type DraftsPolicyChange = {
-  [K in keyof DraftsPolicySettings]?: NonNullable<DraftsPolicySettings[K]> | 'inherit'
-}
-
-export interface WorkspaceDraftsPolicy {
-  settings: DraftsPolicySettings
-  effective: EffectiveDraftsPolicy
-}
-
 export interface DataSourceDraftsPolicy {
   overrides: DraftsPolicySettings
   workspace: DraftsPolicySettings
   effective: EffectiveDraftsPolicy
 }
 
-export function getWorkspaceDraftsPolicy(wsId: string): Promise<WorkspaceDraftsPolicy> {
-  return vfetch<WorkspaceDraftsPolicy>(`${base(wsId)}/drafts-policy`)
-}
-
-export function putWorkspaceDraftsPolicy(wsId: string, change: DraftsPolicyChange): Promise<WorkspaceDraftsPolicy> {
-  return vfetch<WorkspaceDraftsPolicy>(`${base(wsId)}/drafts-policy`, { method: 'PUT', body: JSON.stringify(change) })
-}
-
 export function getDataSourceDraftsPolicy(wsId: string, dataSourceId: string): Promise<DataSourceDraftsPolicy> {
   return vfetch<DataSourceDraftsPolicy>(`${base(wsId)}/data-sources/${encodeURIComponent(dataSourceId)}/drafts-policy`)
-}
-
-export function putDataSourceDraftsPolicy(
-  wsId: string, dataSourceId: string, change: DraftsPolicyChange,
-): Promise<DataSourceDraftsPolicy> {
-  return vfetch<DataSourceDraftsPolicy>(
-    `${base(wsId)}/data-sources/${encodeURIComponent(dataSourceId)}/drafts-policy`,
-    { method: 'PUT', body: JSON.stringify(change) })
 }
 
 /** Pull the latest main into a draft ("update branch"). Returns `{clean, conflicts, ...}`; on
@@ -2940,7 +2957,9 @@ export interface PublishResult {
 }
 
 /** An answer as `PublishResult` says it; one from a server that didn't say its outcome, read from
- *  its commit (none, or a blank one, committed nothing). */
+ *  its commit (none, or a blank one, committed nothing). Such an older server answered a publish
+ *  that changed nothing with its draft's own head, not on main, whenever the draft had one: this
+ *  reads that as published. */
 function asResult(a: { commitId?: string | null; revisionId?: number | null; outcome?: PublishOutcome | null }): PublishResult {
   const commitId = a.commitId || null
   return { commitId, revisionId: a.revisionId ?? null, outcome: a.outcome ?? (commitId ? 'published' : 'unchanged') }

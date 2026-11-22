@@ -1219,6 +1219,7 @@
   .lineage-pulse::after,
   .pulse-soft,
   .animate-pulse,
+  .animate-ping,
   .animate-in,
   .animate-out,
   [data-trace-active="true"] [data-trace-focus="true"]::after {
@@ -1233,6 +1234,7 @@
 :root.reduce-motion .lineage-pulse::after,
 :root.reduce-motion .pulse-soft,
 :root.reduce-motion .animate-pulse,
+:root.reduce-motion .animate-ping,
 :root.reduce-motion .animate-in,
 :root.reduce-motion .animate-out,
 :root.reduce-motion [data-trace-active="true"] [data-trace-focus="true"]::after {

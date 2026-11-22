@@ -25,7 +25,7 @@ import pytest
 
 from backend.app.api.v1.endpoints import graph as G
 from backend.app.services.feature_flags import feature_flags
-from backend.app.services.versioning import cache_manager, config, residency, residency_policy
+from backend.app.services.versioning import cache_manager, config, residency
 from backend.app.services.versioning.service import Viewer, serves_head
 
 _VIEWER = Viewer(actor="usr_1", can_read=True)
@@ -79,13 +79,11 @@ def asked(monkeypatch, residency_on):
     monkeypatch.setattr(residency, "_entity_count", no_count)
     monkeypatch.setattr(cache_manager, "acquire_lease", lease)
     monkeypatch.setattr(residency, "_note_read", lambda gid: out.append(("read", gid)))
-    residency_policy._MEMO.update(policy=residency_policy.defaults(), at=residency_policy._clock())
     residency.READING.set(None)
     residency._HELD.clear()
     yield out
     residency.READING.set(None)
     residency._HELD.clear()
-    residency_policy.invalidate()
 
 
 async def _read(svc, gid="g", *, viewer=_VIEWER, state=None):

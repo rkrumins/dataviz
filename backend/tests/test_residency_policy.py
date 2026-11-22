@@ -1,15 +1,21 @@
-"""The residency policy: where its values are stored (``platform_settings``, migration
-``20261030_1400_residency_policy``), how they resolve (``residency_policy.resolve``: the saved
-value, else the environment's, clamped to its range, memoized, never raising) and the system
-administrator's routes that read and change them.
+"""The residency policy: where its values are stored (the settings store at the platform, written
+through to the ``platform_settings`` columns for one release, migration
+``20261030_1400_residency_policy``), how they resolve (``residency_policy.resolve``: the store's
+value, else the environment's where valid, clamped to its range, as this process's settings
+snapshot last read it, never raising) and the system administrator's routes that read and change
+them — all but the residency class, which every graph now inherits (``classes``) and which the
+routes refuse to change.
 
-The ORM/migration agreement, the resolver and the routes are checked without a database; the
-migration's round trip needs Postgres (``GRAPHVER_E2E=1``) and runs in a transaction it rolls back.
+The ORM/migration agreement, the resolver and the routes are checked without a database (the store
+is the in-memory one every test starts with, ``tests/common/settings_world.py``); the migration's
+round trip needs Postgres (``GRAPHVER_E2E=1``) and runs in a transaction it rolls back.
 """
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -25,6 +31,8 @@ from backend.app.auth import api_key_surface
 from backend.app.db.models import PlatformSettingsORM
 from backend.app.main import app
 from backend.app.services.activity import catalogue
+from backend.app.services.settings import effective, resolver
+from backend.app.services.settings import registry as settings_registry
 from backend.app.services.versioning import config, residency_policy as rp
 
 _VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
@@ -118,7 +126,8 @@ _DEFAULTS = {
 
 
 class _Session:
-    """The one platform settings row, as the routes and the resolver read and write it."""
+    """The one platform settings row, as the routes write it through and read the switch's phase
+    from (the store is the in-memory one, ``settings_world``)."""
 
     def __init__(self, row=None, fail=False):
         self.row, self.fail, self.commits, self.reads = row, fail, 0, 0
@@ -133,16 +142,27 @@ class _Session:
     def add(self, row):
         self.row = row
 
+    async def execute(self, statement, params=None):
+        """The store's writer lock (``store.lock``): one save at a time."""
+        assert "pg_advisory_xact_lock" in str(statement)
+
+    async def flush(self):
+        pass
+
     async def commit(self):
         self.commits += 1
 
+    async def rollback(self):
+        pass
 
-@pytest.fixture(autouse=True)
-def _fresh_memo():
-    rp.invalidate()
-    rp._MEMO["good"] = None
-    yield
-    rp.invalidate()
+
+def _save(world, by=None, at=None, **values) -> None:
+    """Values saved at the platform (by wire name) in the settings store, as the import migration
+    copies them: by whom and when the old storage says."""
+    for wire, value in values.items():
+        key = rp._SETTINGS[wire].key
+        row = world.set(key, "platform", "", value)
+        world.rows[(key, "platform", "")] = dataclasses.replace(row, updated_by=by, updated_at=at)
 
 
 def _values(policy) -> dict:
@@ -153,34 +173,37 @@ def test_with_nothing_saved_every_value_is_its_default():
     assert _values(rp.defaults()) == _DEFAULTS
 
 
-def test_the_defaults_come_from_the_environment_clamped_to_their_ranges(monkeypatch):
+def test_the_defaults_come_from_the_environment_where_valid_and_in_order(monkeypatch):
+    """An environment default out of its range is held to the range, as before the store, and
+    reported (``env_out_of_range``); a valid one is used, and the pairs are still kept in order."""
     monkeypatch.setattr(config, "EVICTION_ENABLED", False)
-    monkeypatch.setattr(config, "MASTER_HIGH_WATER_PCT", 99)        # past 95
-    monkeypatch.setattr(config, "MASTER_LOW_WATER_PCT", 93)         # within its range, not 5 below
-    monkeypatch.setattr(config, "CAPACITY_SECS", 1)
+    monkeypatch.setattr(config, "MASTER_HIGH_WATER_PCT", 60)
+    monkeypatch.setattr(config, "MASTER_LOW_WATER_PCT", 58)         # within its range, not 5 below
+    monkeypatch.setattr(config, "CAPACITY_SECS", 1)                 # under its 15
     policy = rp.defaults()
     assert policy.eviction_enabled is False
-    assert (policy.high_water_pct, policy.low_water_pct) == (95, 90)
+    assert (policy.high_water_pct, policy.low_water_pct) == (60, 55)
     assert policy.capacity_interval_secs == 15
+    found = resolver.resolve(effective.context_now(), "residency.capacityIntervalSecs")
+    assert "env_out_of_range" in [w["code"] for w in found["why"]]
 
 
-async def test_a_saved_value_wins_and_an_unset_one_is_the_default():
-    row = PlatformSettingsORM(id=1, gv_eviction_enabled=False, gv_default_residency="coldline",
-                              gv_high_water_pct=85, gv_bytes_per_entity=None)
-    policy = await rp.resolve(_Session(row))
+async def test_a_saved_value_wins_and_an_unset_one_is_the_default(settings_world):
+    _save(settings_world, evictionEnabled=False, defaultResidency="coldline", highWaterPct=85,
+          bytesPerEntity=None)
+    policy = await rp.resolve()
     assert _values(policy) == {**_DEFAULTS, "evictionEnabled": False,
                                "defaultResidency": "coldline", "highWaterPct": 85}
 
 
-async def test_a_saved_value_out_of_range_is_clamped_never_refused():
+async def test_a_saved_value_out_of_range_is_clamped_never_refused(settings_world):
     """Written past the routes (by hand, or by an older release), a value still resolves inside
     its range and the pairs stay ordered: Coldline never outlives Standard, the stop mark stays
     five points under the start mark."""
-    row = PlatformSettingsORM(id=1, gv_standard_idle_secs=60, gv_coldline_idle_secs=86400,
-                              gv_high_water_pct=40, gv_low_water_pct=90, gv_load_margin_pct=900,
-                              gv_bytes_per_entity=5, gv_coldline_canvas_load_above=-3,
-                              gv_capacity_interval_secs=10_000, gv_default_residency="hot")
-    policy = await rp.resolve(_Session(row))
+    _save(settings_world, standardIdleSecs=60, coldlineIdleSecs=86400, highWaterPct=40,
+          lowWaterPct=90, loadMarginPct=900, bytesPerEntity=5, coldlineCanvasLoadAbove=-3,
+          capacityIntervalSecs=10_000, defaultResidency="hot")
+    policy = await rp.resolve()
     assert policy.standard_idle_secs == 3600
     assert policy.coldline_idle_secs == 3600                  # ≤ the Standard idle time
     assert (policy.high_water_pct, policy.low_water_pct) == (50, 45)
@@ -190,36 +213,84 @@ async def test_a_saved_value_out_of_range_is_clamped_never_refused():
     assert policy.default_residency == "standard"
 
 
-async def test_an_unreadable_row_with_no_good_policy_yet_evicts_nothing_and_never_raises():
+async def test_unreadable_settings_with_none_read_yet_evict_nothing_and_never_raise(
+        settings_world):
     """The defaults would turn eviction back on where an administrator turned it off: with no
     policy read yet, the pass plans no eviction (loads go on)."""
-    assert _values(await rp.resolve(_Session(fail=True))) == {**_DEFAULTS,
-                                                              "evictionEnabled": False}
+    _save(settings_world, evictionEnabled=False)
+    settings_world.readable = False
+    assert _values(await rp.resolve()) == {**_DEFAULTS, "evictionEnabled": False}
 
 
-async def test_an_unreadable_row_keeps_the_last_good_policy_and_reads_again_later():
-    good = _Session(PlatformSettingsORM(id=1, gv_eviction_enabled=False, gv_high_water_pct=95))
-    assert (await rp.resolve(good)).high_water_pct == 95
-    rp.invalidate()                                      # a save elsewhere, or the memo's age
-    down = _Session(fail=True)
-    policy = await rp.resolve(down)
+async def test_unreadable_settings_keep_the_last_values_read_and_evict_nothing_meanwhile(
+        settings_world):
+    _save(settings_world, highWaterPct=95)
+    policy = await rp.resolve()
+    assert (policy.eviction_enabled, policy.high_water_pct) == (True, 95)
+    settings_world.readable = False                      # a save elsewhere can't be read
+    policy = await rp.resolve()
     assert (policy.eviction_enabled, policy.high_water_pct) == (False, 95)
-    await rp.resolve(down)
-    assert down.reads == 1                               # kept for the memo's 30 seconds
+    settings_world.readable = True
+    assert (await rp.resolve()).eviction_enabled is True
 
 
-async def test_the_policy_is_memoized_until_a_save_drops_it():
-    session = _Session(PlatformSettingsORM(id=1, gv_high_water_pct=85))
-    assert (await rp.resolve(session)).high_water_pct == 85
-    session.row.gv_high_water_pct = 90
-    assert (await rp.resolve(session)).high_water_pct == 85 and session.reads == 1
-    rp.invalidate()
-    assert (await rp.resolve(session)).high_water_pct == 90 and session.reads == 2
+async def test_a_store_save_reaches_resolve_after_a_refresh(settings_world):
+    """A save elsewhere is in this process's next refresh (every process within about two
+    seconds: the settings' generation), where it used to wait out a 30-second memo."""
+    settings_world.set("residency.unloadStartPct", "platform", "", 85)
+    assert (await rp.resolve()).high_water_pct == 85
+    settings_world.set("residency.unloadStartPct", "platform", "", 90)
+    assert (await rp.resolve()).high_water_pct == 90
+    settings_world.set("residency.unloadStartPct", "platform", "", None)
+    assert (await rp.resolve()).high_water_pct == _DEFAULTS["highWaterPct"]
 
 
-async def test_a_new_graph_gets_the_default_class(monkeypatch):
-    rp._MEMO.update(policy=rp.effective({"defaultResidency": "coldline"}), at=rp._clock())
+async def test_a_new_graph_gets_the_class_in_force_for_it(settings_world):
+    """The platform's, else its workspace's, else one its data source's graph had before."""
+    settings_world.set("residency.class", "platform", "", "coldline")
     assert await rp.default_class() == "coldline"
+    settings_world.set("residency.class", "workspace", "ws_1", "always")
+    assert await rp.default_class("ws_1", "ds_new") == "always"
+    assert await rp.default_class("ws_2", "ds_new") == "coldline"
+    settings_world.set("residency.class", "graph", "ds_back", "standard")
+    assert await rp.default_class("ws_1", "ds_back") == "standard"
+
+
+def _classes(*rows, pending=False):
+    """The classes the settings give with ``rows`` (scope, scope id, class) saved."""
+    reg = settings_registry()
+    ctx = resolver.context(reg.SETTINGS, [resolver.Row("residency.class", scope, scope_id, cls)
+                                          for scope, scope_id, cls in rows], why=reg.WHY)
+    return rp.classes(ctx, pending=pending)
+
+
+def test_a_graph_s_class_is_its_own_else_its_workspace_s_else_the_platform_s():
+    found = _classes(("platform", "", "coldline"), ("workspace", "ws_1", "always"),
+                     ("graph", "ds_1", "standard"))
+    assert (found.inherited, dict(found.workspaces), dict(found.own)) == (
+        "coldline", {"ws_1": "always"}, {"ds_1": "standard"})
+    assert found.of("ws_1", "ds_1", "coldline") == "standard"
+    assert found.of("ws_1", "ds_2", "standard") == "always"
+    assert found.of("ws_2", "ds_3", "always") == "coldline"
+    assert _classes().of("ws_1", "ds_1", "always") == "standard"        # nothing saved
+
+
+def test_a_class_the_resolver_cannot_take_is_passed_over_as_it_is_there():
+    found = _classes(("workspace", "ws_1", "hot"), ("graph", "ds_1", "warm"))
+    assert found.of("ws_1", "ds_1", "always") == "standard"
+
+
+def test_while_the_graphs_values_wait_for_their_import_a_graph_keeps_the_class_on_its_row():
+    """A separate graph store's graphs have their own classes copied into the store at the
+    worker's start-up (the ``legacy_graph`` marker). Until then nothing is inherited: a graph
+    keeps the class on its row unless one was set on it since, so a rollout re-classes none."""
+    found = _classes(("platform", "", "coldline"), ("workspace", "ws_1", "always"),
+                     ("graph", "ds_1", "standard"), pending=True)
+    assert found.of("ws_1", "ds_1", "coldline") == "standard"
+    assert found.of("ws_1", "ds_2", "coldline") == "coldline"
+    assert rp.graph_values_pending({"legacy"})
+    assert not rp.graph_values_pending({"legacy", "legacy_graph"})
+    assert not rp.graph_values_pending(set())             # a store made from nothing
 
 
 async def test_residency_is_off_unless_an_admin_turns_it_on(request):
@@ -242,64 +313,124 @@ async def _put(body, session, recorded=None):
         return await va.put_residency_policy(body, user=_ADMIN, session=session)
 
 
-async def test_get_says_each_value_as_saved_its_default_and_what_is_in_force():
+async def test_get_says_each_value_as_saved_its_default_and_what_is_in_force(settings_world):
     """Who changed the policy last, and when, is the policy's own: another platform setting
     saved since does not change it."""
-    row = PlatformSettingsORM(id=1, gv_low_water_pct=60,
-                              gv_policy_updated_at="2026-10-30T10:00:00+00:00",
-                              gv_policy_updated_by="usr_res",
-                              updated_at="2026-10-30T11:00:00+00:00", updated_by="usr_ops")
-    out = await va.get_residency_policy(_user=_ADMIN, session=_Session(row))
+    _save(settings_world, by="usr_res", at=datetime(2026, 10, 30, 10, 0, tzinfo=timezone.utc),
+          lowWaterPct=60)
+    settings_world.set("builds.perWorker", "platform", "", 3)          # saved since, by another
+    out = await va.get_residency_policy(_user=_ADMIN, session=_Session(PlatformSettingsORM(id=1)))
     assert out["enabled"] is False                   # Graph residency ships off
     assert out["updatedBy"] == "usr_res" and out["updatedAt"] == "2026-10-30T10:00:00+00:00"
     assert set(out["values"]) == set(_DEFAULTS)
     assert out["values"]["lowWaterPct"] == {"saved": 60, "default": 70, "effective": 60}
     assert out["values"]["highWaterPct"] == {"saved": None, "default": 80, "effective": 80}
     assert out["ranges"]["standardIdleSecs"] == {"min": 3600, "max": 365 * 86400}
+    settings_world.rows.clear()
     nothing = await va.get_residency_policy(_user=_ADMIN, session=_Session(None))
     assert nothing["updatedBy"] is None
     assert {k: v["effective"] for k, v in nothing["values"].items()} == _DEFAULTS
 
 
-async def test_get_says_residency_is_on_once_an_admin_turns_it_on(residency_on):
+async def test_get_says_residency_is_on_once_an_admin_turns_it_on(residency_on, settings_world):
     out = await va.get_residency_policy(_user=_ADMIN, session=_Session(PlatformSettingsORM(id=1)))
     assert out["enabled"] is True
 
 
-async def test_put_saves_what_it_names_and_records_from_and_to():
+async def test_put_saves_through_the_store_writes_the_columns_and_records_from_and_to(
+        settings_world):
+    """Saved in the settings store as the old API's save, written through to the old columns, and
+    this process reads it at once."""
+    _save(settings_world, highWaterPct=85)
     session, recorded = _Session(PlatformSettingsORM(id=1, gv_high_water_pct=85)), []
-    rp._MEMO.update(policy=rp.defaults(), at=rp._clock())
-    out = await _put({"highWaterPct": 75, "lowWaterPct": 60, "defaultResidency": "coldline"},
-                     session, recorded)
+    out = await _put({"highWaterPct": 75, "lowWaterPct": 60}, session, recorded)
+    (change_set,) = settings_world.saves
+    assert (change_set.source, change_set.actor) == ("legacy_api", "usr_admin")
+    assert {(a.key, a.before_value, a.after_value) for a in change_set.applied} == {
+        ("residency.unloadStartPct", 85, 75), ("residency.unloadStopPct", None, 60)}
     row = session.row
-    assert (row.gv_high_water_pct, row.gv_low_water_pct, row.gv_default_residency) == (
-        75, 60, "coldline")
+    assert (row.gv_high_water_pct, row.gv_low_water_pct) == (75, 60)
     assert row.gv_policy_updated_by == "usr_admin" and row.gv_policy_updated_at
     assert row.updated_by == "usr_admin" and row.updated_at and session.commits == 1
-    assert (out["updatedBy"], out["updatedAt"]) == ("usr_admin", row.gv_policy_updated_at)
+    assert out["updatedBy"] == "usr_admin"
     assert out["values"]["highWaterPct"]["effective"] == 75
     assert recorded == [("platform.residency_policy.updated", {"details": {
-        "from": {"defaultResidency": None, "highWaterPct": 85, "lowWaterPct": None},
-        "to": {"defaultResidency": "coldline", "highWaterPct": 75, "lowWaterPct": 60}}})]
-    assert rp._MEMO["policy"] is None                          # this process sees it at once
+        "from": {"highWaterPct": 85, "lowWaterPct": None},
+        "to": {"highWaterPct": 75, "lowWaterPct": 60}}})]
+    assert effective.value("residency.unloadStartPct") == 75    # this process reads it at once
 
 
-async def test_minus_one_clears_a_value_back_to_its_default():
+async def test_minus_one_clears_a_value_back_to_its_default(settings_world):
+    _save(settings_world, evictionEnabled=False, defaultResidency="always", bytesPerEntity=900)
     session, recorded = _Session(PlatformSettingsORM(
         id=1, gv_eviction_enabled=False, gv_default_residency="always", gv_bytes_per_entity=900)), []
-    out = await _put({"evictionEnabled": -1, "defaultResidency": -1, "bytesPerEntity": -1},
-                     session, recorded)
-    assert (session.row.gv_eviction_enabled, session.row.gv_default_residency,
-            session.row.gv_bytes_per_entity) == (None, None, None)
+    out = await _put({"evictionEnabled": -1, "bytesPerEntity": -1}, session, recorded)
+    assert (session.row.gv_eviction_enabled, session.row.gv_bytes_per_entity) == (None, None)
+    assert all(settings_world.rows[(rp._SETTINGS[w].key, "platform", "")].value is None
+               for w in ("evictionEnabled", "bytesPerEntity"))
+    assert settings_world.rows[("residency.class", "platform", "")].value == "always"
     assert out["values"]["bytesPerEntity"] == {"saved": None, "default": 550, "effective": 550}
-    assert recorded[0][1]["details"]["to"] == {
-        "bytesPerEntity": None, "defaultResidency": None, "evictionEnabled": None}
+    assert recorded[0][1]["details"]["to"] == {"bytesPerEntity": None, "evictionEnabled": None}
 
 
-async def test_a_save_that_changes_nothing_records_nothing():
+@pytest.mark.parametrize("saved, sent", [
+    (None, "coldline"),            # a class where none was saved
+    ("always", "standard"),        # another class
+    ("always", -1),                # back to the default: another class too
+])
+async def test_a_change_to_the_class_is_refused_and_says_where_it_is_set_now(saved, sent,
+                                                                            settings_world):
+    """The platform's class was the class a new graph got; it is now the class every graph
+    inherits, set in Admin → Versioned graphs. Nothing in the PUT is saved."""
+    if saved:
+        _save(settings_world, defaultResidency=saved)
+    session = _Session(PlatformSettingsORM(id=1, gv_default_residency=saved))
+    with pytest.raises(HTTPException) as caught:
+        await _put({"highWaterPct": 75, "defaultResidency": sent}, session)
+    detail = caught.value.detail
+    assert caught.value.status_code == 422
+    assert (detail["type"], detail["field"]) == ("invalid_residency_policy", "defaultResidency")
+    assert "the class every graph inherits" in detail["message"]
+    assert "Admin → Versioned graphs (residency.class)" in detail["message"]
+    assert session.commits == 0 and settings_world.saves == []
+
+
+@pytest.mark.parametrize("saved, sent", [
+    (None, None),                  # an echo of what is saved
+    (None, "standard"),            # an echo of what is in force
+    (None, -1),                    # cleared: as it is
+    ("coldline", "coldline"),
+])
+async def test_the_class_sent_back_as_it_is_passes_and_the_rest_is_saved(saved, sent,
+                                                                        settings_world):
+    """An old client that echoes the whole policy still saves the values it changed; the class is
+    left as it is, never saved here."""
+    if saved:
+        _save(settings_world, defaultResidency=saved)
+    session = _Session(PlatformSettingsORM(id=1, gv_default_residency=saved))
+    echo = {**rp.stored_values(list(settings_world.rows.values())), "defaultResidency": sent,
+            "highWaterPct": 75}
+    out = await _put(echo, session)
+    (change_set,) = settings_world.saves
+    assert [(a.key, a.after_value) for a in change_set.applied] == [
+        ("residency.unloadStartPct", 75)]
+    assert out["values"]["defaultResidency"]["saved"] == saved
+    assert session.row.gv_default_residency == saved
+
+
+async def test_the_preview_refuses_a_change_to_the_class_as_the_put_does(settings_world):
+    with pytest.raises(HTTPException) as caught:
+        await va.preview_residency_policy({"defaultResidency": "always"}, _user=_ADMIN,
+                                          session=_Session(PlatformSettingsORM(id=1)))
+    assert caught.value.status_code == 422 and caught.value.detail["field"] == "defaultResidency"
+
+
+async def test_a_save_that_changes_nothing_records_nothing(settings_world):
+    _save(settings_world, loadMarginPct=150)
     session, recorded = _Session(PlatformSettingsORM(id=1, gv_load_margin_pct=150)), []
     await _put({"loadMarginPct": 150}, session, recorded)
     assert recorded == [] and session.row.gv_policy_updated_by is None
+    assert settings_world.saves == []
 
 
 @pytest.mark.parametrize("body, field", [
@@ -327,33 +458,35 @@ async def test_a_save_that_changes_nothing_records_nothing():
     ({"defaultResidency": "hot"}, "defaultResidency"),
     ({"warmup": 5}, "warmup"),
 ])
-async def test_a_value_out_of_its_range_is_a_422_naming_it(body, field):
+async def test_a_value_out_of_its_range_is_a_422_naming_it(body, field, settings_world):
     session = _Session(PlatformSettingsORM(id=1))
     with pytest.raises(HTTPException) as caught:
         await _put(body, session)
     assert caught.value.status_code == 422
     assert caught.value.detail["type"] == "invalid_residency_policy"
     assert caught.value.detail["field"] == field and caught.value.detail["message"]
-    assert session.commits == 0
+    assert session.commits == 0 and settings_world.saves == []
 
 
 @pytest.mark.parametrize("saved, body, field", [
     # Coldline may not outlive Standard: against what is saved, the default, or the same save.
-    ({"gv_standard_idle_secs": 86400}, {"coldlineIdleSecs": 2 * 86400}, "coldlineIdleSecs"),
-    ({"gv_coldline_idle_secs": 7200}, {"standardIdleSecs": 3600}, "standardIdleSecs"),
+    ({"standardIdleSecs": 86400}, {"coldlineIdleSecs": 2 * 86400}, "coldlineIdleSecs"),
+    ({"coldlineIdleSecs": 7200}, {"standardIdleSecs": 3600}, "standardIdleSecs"),
     ({}, {"standardIdleSecs": 3600, "coldlineIdleSecs": 7200}, "coldlineIdleSecs"),
     # The stop mark sits at least five points under the start mark.
     ({}, {"lowWaterPct": 76}, "lowWaterPct"),
-    ({"gv_low_water_pct": 70}, {"highWaterPct": 74}, "highWaterPct"),
+    ({"lowWaterPct": 70}, {"highWaterPct": 74}, "highWaterPct"),
     ({}, {"highWaterPct": 60, "lowWaterPct": 60}, "lowWaterPct"),
     # Clearing one back to its default is checked against the other too.
-    ({"gv_high_water_pct": 60, "gv_low_water_pct": 50}, {"highWaterPct": 90, "lowWaterPct": -1},
-     None),
-    ({"gv_high_water_pct": 60, "gv_low_water_pct": 50}, {"highWaterPct": -1}, None),
-    ({"gv_high_water_pct": 72, "gv_low_water_pct": 60}, {"lowWaterPct": -1}, "lowWaterPct"),
+    ({"highWaterPct": 60, "lowWaterPct": 50}, {"highWaterPct": 90, "lowWaterPct": -1}, None),
+    ({"highWaterPct": 60, "lowWaterPct": 50}, {"highWaterPct": -1}, None),
+    ({"highWaterPct": 72, "lowWaterPct": 60}, {"lowWaterPct": -1}, "lowWaterPct"),
 ])
-async def test_values_that_contradict_each_other_are_a_422_naming_the_field(saved, body, field):
-    session = _Session(PlatformSettingsORM(id=1, **saved))
+async def test_values_that_contradict_each_other_are_a_422_naming_the_field(saved, body, field,
+                                                                           settings_world):
+    _save(settings_world, **saved)
+    session = _Session(PlatformSettingsORM(id=1, **{f"gv_{rp.WIRE_NAMES[w]}": v
+                                                    for w, v in saved.items()}))
     if field is None:
         await _put(body, session)
         assert session.commits == 1
@@ -414,7 +547,8 @@ def _switch(on: bool) -> None:
     (True, 30, 0, "grace"),
     (True, rp.GRACE_SECS + 1, 0, "on"),
 ])
-async def test_get_says_where_the_switch_is(monkeypatch, on, since_secs_ago, out, phase):
+async def test_get_says_where_the_switch_is(monkeypatch, on, since_secs_ago, out, phase,
+                                           settings_world):
     """On: in its grace period until evictionsFrom (from when the leader first saw it on), then on.
     Off: bringing back what is out of FalkorDB — how many — then simply off."""
     from datetime import datetime, timedelta, timezone

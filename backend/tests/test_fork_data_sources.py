@@ -117,7 +117,7 @@ async def _rows(db_session, *ids):
 
 
 async def test_a_parents_settings_reach_its_forks_and_theirs(test_client, db_session, forks,
-                                                             versioning_on):
+                                                             versioning_on, settings_world):
     r = await test_client.put(f"{_DS}/ds_parent", json={
         "ontologyId": "ont_2", "isRestricted": True, "identityProperty": "key",
         "nameProperty": "title", "label": "Revenue"})

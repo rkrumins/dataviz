@@ -147,6 +147,9 @@ connector written against it keeps working.
 - **A delete of something that isn't there is done already.** Whether it was deleted by an earlier
   run, or never existed, the row is unchanged, with the note "nothing to delete". So a delta sent
   twice is safe, and the dry run counts such rows in a hint, since a mistyped name lands there too.
+  That holds for a row named by a key the identifier reads. A delete row that names nothing it
+  reads, such as one with only a urn by `identifier=prop.external_id`, is refused (`no_key`): what
+  it would delete can't be told.
 
 **Three ways to learn a data source's columns:**
 
@@ -204,12 +207,16 @@ change. A file's keys find those ids:
   urn; one whose value no node holds yet, by its urn too, and that node takes the value, so the next
   run finds it by it. Edge ends the same: `source.external_id`, else `sourceUrn`. By
   `prop.external_id` alone those rows are refused (`no_key`, `two_entities`), and a replace holds,
-  saying so. Set it once as the graph's default.
+  saying so. In a graph of 1,000 items or more, that replace stops sooner, after its first node
+  window, with `identifier_matched_nothing`: its rows found almost nothing.
+  `summary.refused.hints.by_urn` counts the rows `,urn` would find either way. Set it once as the
+  graph's default.
 - **Sharing a graph with other writers?** A replace deletes what its file leaves out, including
   what the app or another connector made. With a property identifier, `replaceScope=keyed` deletes
   only the nodes holding the property (and the edges between two of them). A node a replace
   deletes always takes its edges with it (`summary.edgesCascaded`), and a replace never deletes a
-  node a row of the file names, refused or not, nor one an edge row names as an end.
+  node a row of the file names, refused or not (a refused delete row keeps only what it matched), nor one an edge row
+  names as an end.
 - **The data source's identifier property** (`prop.<identifier>`) finds a node too, for a source
   identified by it. It is reserved: the node's identifier holds its urn.
 - **A `urn:uuid:` your system already gave the entity** is kept as its id, given as its `urn` or
@@ -303,8 +310,9 @@ Service](/docs/import-from-your-service).
 3. **`GET …/imports/uploads/{uploadId}`** lists `received`, the parts stored whole. To resume after
    a failure or a restart, send the others. Keep `uploadId`, or you start again: a new upload knows
    nothing of an old one.
-4. **`POST …/imports/uploads/{uploadId}/complete`**, with `reconcileMode`, `viewId`, `branchId` or
-   `autoPublish` as query parameters.
+4. **`POST …/imports/uploads/{uploadId}/complete`**, with `reconcileMode`, `identifier`, `viewId`,
+   `branchId`, `autoPublish`, `replaceScope`, `maxRefusedRows` or `allowMassDelete` as query
+   parameters, as `POST …/imports` takes them.
    - It answers `202` with `jobId` and `branchId`.
    - An upload is imported once, however often it is completed: asking again — after a lost
      answer, or twice at once — answers with the same import. One that broke off before its import
@@ -395,11 +403,17 @@ three pulls, counted on the import.
 The publish job checks again, when it runs, that the import's owner may still publish. The review
 policy as it is then holds too.
 
-A `completed` publish job says where the file landed: `commitId`, the commit on `main`, and
-`revisionId`, the revision of `main` that holds it. Look it up at `GET …/revisions/{revisionId}`,
-or export the published graph as it was then (`POST …/exports?asOfSeq={revisionId}`). A draft
-you publish or merge yourself answers the same, `{commitId, revisionId, status: "completed"}`,
-or, when it is large enough to run as a job, `202` with that job's `statusUrl` to follow.
+A `completed` publish job says how it ended, in `outcome`:
+- **`published`:** the file landed as `commitId`, the commit on `main`, and `revisionId` is the
+  revision of `main` that holds it.
+- **`unchanged`:** main had the changes already, so nothing was committed. `commitId` and
+  `revisionId` are main's head, which holds them: not a commit this made, so check `outcome`
+  before you revert or diff `commitId`.
+
+Look the revision up at `GET …/revisions/{revisionId}`, or export the published graph as it was
+then (`POST …/exports?asOfSeq={revisionId}`). A draft you publish or merge yourself answers the
+same, `{outcome, commitId, revisionId, status: "completed"}`, or, when it is large enough to run as
+a job, `202` with that job's `statusUrl` to follow.
 
 ## 7. Following a job
 
@@ -415,7 +429,7 @@ like. Every few seconds at first, and every 30 s or so for a long job, is plenty
 | `stale` | Running, but its worker has gone quiet. Another worker takes it over and resumes it: wait |
 | `attempt` | Which attempt this is. A job taken over more than 3 times fails |
 | `errorMessage`, `summary.failure` | Why it failed, and whether starting it again would help |
-| `summary` | The tallies: `new`, `updated`, `unchanged`, `deleted`, `invalid` (refused), `skipped` (records that are neither a node nor an edge), `viewAssignments`, `publish` |
+| `summary` | The tallies: `new`, `updated`, `unchanged`, `deleted`, `invalid` (refused), `skipped` (records that are neither a node nor an edge), `edgesCascaded` (the edges that went with the nodes a replace deleted), `viewAssignments`, `publish` |
 
 - **The preview.** `GET …/imports/{jobId}/preview` lists changed rows, up to 200, with the reason
   for each refused one. For the whole change, read the draft's diff against `main`:
@@ -565,7 +579,8 @@ python docs/examples/connector/connector.py --file catalog.ndjson --workspace "$
     --replace --identifier urn --publish
 ```
 
-`--replace` sends `reconcileMode=replace`, `--identifier` the `identifier`, `--allow-mass-delete`
+`--replace` sends `reconcileMode=replace`, `--identifier` the `identifier`, `--replace-scope keyed`
+`replaceScope=keyed` (with a property identifier, delete only what holds it), `--allow-mass-delete`
 `allowMassDelete=true`, and `--branch br_…` imports into that open draft, which the connector then
 publishes itself with `--publish`. A replace the guard refused fails with its code
 (`mass_delete_blocked`); send it again with `--allow-mass-delete --branch <its branchId>` if the
@@ -605,6 +620,7 @@ record contract, and its calls to the routes a key may call.
 | Every run creates new nodes | Rows point by `entity_id` alone, which is file-local | Give each node a stable `urn` |
 | `stale: true` for a while | The worker running the job stopped | Wait: another takes it over and resumes it |
 | A delete row is `unchanged` with "nothing to delete" | What it names isn't in the graph | Fine for a delta sent again; otherwise check the name |
+| A delete row is refused `no_key` | It names nothing the identifier reads: by `prop.external_id`, a row with only a urn | Give it a key the identifier reads (its `prop.external_id`, or the item's `entity_id`), or send `identifier=prop.external_id,urn` to find it by its urn |
 
 ## 12. The format's versioning
 

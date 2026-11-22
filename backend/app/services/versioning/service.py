@@ -43,7 +43,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import aliased
 
-from . import config, db, keymigrate
+from . import build_policy, candidates, config, db, keymigrate
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
@@ -632,6 +632,18 @@ _DRAFT_ROWS: Tuple[Tuple[str, str], ...] = (
     ("node_versions", "graph_id, branch_id, commit_seq"),
 )
 
+
+def _of_workspaces(graph_id, workspace_ids: Optional[Collection[str]],
+                   except_ids: Collection[str]) -> List[Any]:
+    """What keeps a sweep to the graphs (``graph_id``, a column) of ``workspace_ids`` (None: any)
+    and of none of ``except_ids``: the graph store can't join the workspaces whose settings decide."""
+    where: List[Any] = []
+    if workspace_ids is not None:
+        where.append(graph_id.in_(select(GraphORM.id).where(GraphORM.workspace_id.in_(workspace_ids))))
+    if except_ids:
+        where.append(graph_id.not_in(select(GraphORM.id).where(GraphORM.workspace_id.in_(except_ids))))
+    return where
+
 # Commit kinds a machine writes; every other kind on main is a person's work. The same split
 # lifecycle.py uses. The sync curation guard reads it (see _human_commit_in_sync_base).
 _MACHINE_COMMIT_KINDS = ("genesis", "import", "sync")
@@ -678,14 +690,16 @@ _SERVES_NOTHING = ("rehydrating", "evicted", "waiting_capacity", "reseeding")
 
 
 def serving_seq(projected: int, committed: int, status: Optional[str],
-                served: Optional[int]) -> Optional[int]:
+                served: Optional[int], max_lag: Optional[int] = None) -> Optional[int]:
     """The version of main a projection's key serves reads of main at; None sends them to Postgres.
 
     The head while the key holds it (:func:`serves_head`). Behind it, while the projection catches
     up or rebuilds in place: the version the key last published (its watermark, or during a
     rebuild, which resets that, ``served_commit_seq``) — complete with its lineage summaries, with
-    part of the next window or of the rebuild's repairs over it. ``GRAPHVER_READ_MAX_LAG`` caps how
-    many versions behind (0: the head only). None while the key is out of FalkorDB, being loaded
+    part of the next window or of the rebuild's repairs over it. ``max_lag`` caps how many versions
+    behind: the graph's, as its read mode resolves (``build_policy.read_mode_for``: 0, the head
+    only, for a graph read ``latest``; else ``reads.maxVersionsBehind``, -1 for any); None, the
+    deployment's ``GRAPHVER_READ_MAX_LAG``. None while the key is out of FalkorDB, being loaded
     or reset, or holds no published version (a first seed, a move, an Adopt, a lost key). Seq 1 is
     a graph's genesis, its empty first commit: a key at it holds nothing anyone published — a new
     graph's key is empty, and an enabled source's own graph is not yet a version history holds."""
@@ -694,9 +708,24 @@ def serving_seq(projected: int, committed: int, status: Optional[str],
     if status in _SERVES_NOTHING:
         return None
     held = projected or served or 0
-    if held <= 1 or (config.READ_MAX_LAG >= 0 and committed - held > config.READ_MAX_LAG):
+    lag = config.READ_MAX_LAG if max_lag is None else max_lag
+    if held <= 1 or (lag >= 0 and committed - held > lag):
         return None
     return held
+
+
+def fork_serving_seq(serving: Optional[int], fresh: bool, status: Optional[str],
+                     window_rows: Optional[int], last_error: Optional[str]) -> Optional[int]:
+    """The version of its root's main a fork lays its patch set over in the root's key: the one the
+    key serves main's readers (``serving``, :func:`serving_seq`) while the key holds exactly that —
+    its head, or behind it, idle since it published, with no window in flight (``window_rows``) and
+    no failed pass (``last_error``) that may have written part of one. Main's readers take a key
+    part-way through a window as it is; a fork never shows a change its root made after the fork's
+    base, and a key part-way through one would show some. None: the fork reads its root's main
+    from Postgres."""
+    if fresh or (status == "idle" and window_rows is None and not last_error):
+        return serving
+    return None
 
 
 def residency_state_of(status: str, projected: int, key: Optional[str],
@@ -710,6 +739,17 @@ def residency_state_of(status: str, projected: int, key: Optional[str],
     if key in (None, f"gv_{graph_id}"):
         return None
     return "rehydrating" if projected == 0 else "resident"
+
+
+def residency_state_sql(status, projected, key, graph_id):
+    """:func:`residency_state_of` as a SQL expression over the columns that decide it (``status``
+    already coalesced to ``idle``): the same answer, row for row, so a filter lists the graphs a
+    figure counts and a row says."""
+    return case(
+        (status.in_(("evicted", "rehydrating", "waiting_capacity")), status),
+        (or_(key.is_(None), key == literal("gv_") + graph_id), null()),
+        (func.coalesce(projected, 0) == 0, "rehydrating"),
+        else_="resident")
 
 
 def bootstrap_unfinished(graph_id) -> tuple:
@@ -777,6 +817,185 @@ async def _load_actor_groups(actor: str) -> Tuple[str, ...]:
         raise GroupsUnavailable() from exc
 
 
+def _forget_build(ps, *, keep: Optional[Tuple[str, str]] = None) -> None:
+    """Drop the build a graph has, if any, inside the caller's transaction: its key is retired at
+    once (the next retire run drops it) and the build columns are cleared. For a change that makes
+    a build pointless, a rebuild or a move: the serving key it was built beside no longer holds
+    what it is copied from. ``keep`` (``(provider, key)``): the key the change goes on with, when
+    it is the build's — that one is not retired. A move's build onto a key that was waiting out
+    its grace (``target.retired``) gives that key back its own entry, as it was: readers finishing
+    on it keep it, and a move back onto it stays cheap, until its grace ends."""
+    state = getattr(ps, "candidate_state", None)
+    if not isinstance(state, dict):
+        return
+    default = config.DEFAULT_FALKOR_PROVIDER
+    if ps.candidate_graph_name and (ps.candidate_provider or default,
+                                    ps.candidate_graph_name) != keep:
+        target = state.get("target") if isinstance(state.get("target"), dict) else {}
+        was = [e for e in target.get("retired") or [] if isinstance(e, dict)]
+        ps.retired_keys = [*(ps.retired_keys or []), *(was or [{
+            "name": ps.candidate_graph_name, "provider": ps.candidate_provider,
+            "retireAfter": datetime.now(timezone.utc).isoformat(), "afterSeq": 0,
+            "build": state.get("id")}])]
+    ps.candidate_graph_name = ps.candidate_provider = None
+    ps.candidate_seq = None
+    ps.candidate_state = None
+
+
+def _read_mode(ps, graph) -> "build_policy.ReadMode":
+    """A graph's read mode from its rows (``build_policy.read_mode_for``): its workspace and data
+    source, whether its copy is the platform's, and the mode its projection state holds. A graph
+    with no projection state has no copy of its own."""
+    return build_policy.read_mode_for(
+        workspace_id=graph.workspace_id if graph is not None else None,
+        data_source_id=graph.data_source_id if graph is not None else None,
+        platform_copy=bool(getattr(ps, "owns_falkor_graph", False)),
+        own=getattr(ps, "read_mode", None))
+
+
+def _beside_ok(ps, graph, *, reason: str) -> bool:
+    """Whether a graph's row lets a rebuild or a move (``reason``) be built beside its key, as
+    ``candidates.beside_wanted`` lets the policy: a live graph and no fork; a key the platform owns
+    and has pinned; idle (no pass in flight, no rebuild or reset in place, not out of FalkorDB);
+    and serving reads of main a version it published (``serving_seq``, within the graph's
+    ``reads.maxVersionsBehind``), past genesis — so its readers keep that version until the switch,
+    and a build only ever exists beside a key that serves. A move also needs the key to hold that
+    version whole as far as the row tells, with no window part-written into it: beside would keep
+    its readers on a key part way between versions, where a move in place sends them to Postgres,
+    which is exact. A rebuild takes the key as it is: in place would serve it partly written too.
+    Read under the graph's lock, with the row locked."""
+    if graph is None or graph.deleted_at is not None or graph.fork_parent_graph_id is not None:
+        return False
+    if not ps.owns_falkor_graph or ps.falkor_graph_name in (None, f"gv_{ps.graph_id}"):
+        return False
+    if ps.status != "idle" or (ps.projected_commit_seq or 0) <= 1:
+        return False
+    if serving_seq(ps.projected_commit_seq, graph.main_head_commit_seq, ps.status,
+                   ps.served_commit_seq, _read_mode(ps, graph).max_behind) is None:
+        return False
+    if reason == "move":
+        return ps.served_commit_seq == ps.projected_commit_seq and ps.window_rows is None
+    return True
+
+
+#: :func:`_record_build`'s ``last_error`` when the build leaves it as it is.
+_KEEP = object()
+
+
+def _record_build(ps, *, state: Dict[str, object], name: Optional[str],
+                  provider: Optional[str], last_error: object = _KEEP) -> None:
+    """Ask for a build of ``ps``'s graph inside the caller's transaction, which holds the graph's
+    lock and the row: ``state`` (``candidates.new_state``) in key ``name`` on ``provider``, holding
+    no version yet. The poll's backoff is cleared, so it takes the build up at once, and the epoch
+    is bumped: a pass that read the row before this transaction loses its claim, writing nothing.
+    The serving key keeps everything it serves from: its watermark, its served version, its status,
+    a window in flight, its pin and shard map — and its last error, which describes it, not the
+    build (``last_error`` replaces it: a rebuild the projector started on its own says why)."""
+    ps.candidate_graph_name, ps.candidate_provider = name, provider
+    ps.candidate_seq = None
+    ps.candidate_state = state
+    ps.failed_attempts = 0
+    ps.next_retry_at = None
+    if last_error is not _KEEP:
+        ps.last_error = last_error
+    ps.epoch = ProjectionStateORM.epoch + 1
+
+
+def _rebuild_in_place(ps, head: int, *, cause: str, why: Optional[str] = None) -> None:
+    """A rebuild in place, inside the caller's transaction: the watermark goes to 0 and the target
+    to ``head``, so the next pass reconciles the serving key with committed main from Postgres,
+    and the epoch is bumped so a pass in flight cannot publish over it. An operator's rebuild
+    (``cause`` operator) clears the last error, as a request always has; one the projector started
+    on its own (``drift``, ``failures``) says why (``why``) until it publishes, and starts the
+    count of failures under pressure again (``FalkorProjector._escalate``)."""
+    ps.projected_commit_seq = 0
+    ps.target_commit_seq = head
+    ps.epoch = ProjectionStateORM.epoch + 1
+    ps.failed_attempts = 0
+    ps.next_retry_at = None
+    if cause == "operator":
+        ps.status = "rebuilding"
+        ps.last_error = None
+        return
+    ps.status = "rehydrating" if ps.status == "rehydrating" else "rebuilding"
+    ps.pressure_failures = 0
+    ps.last_error = f"rebuilding on its own: {why}"[:500]
+
+
+def _move_in_place(ps, graph, *, key: str, provider: str, actor: Optional[str],
+                   shard_map: Optional[dict], grace_secs: int) -> Tuple[Dict[str, object], bool]:
+    """A move in place, inside the caller's transaction (doc 14 §6 KeyMigration, phase 1: a reseed
+    move): the pin swaps to ``key`` on ``provider``, the platform owning it; the watermark goes to
+    0 (``reseeding``), so the next pass reconciles all of committed main into the new key while
+    reads fall back to Postgres; the epoch is bumped so a pass in flight cannot publish over it.
+    The old key joins ``retired_keys``, due once the new key has caught up and ``grace_secs`` have
+    passed, and ``key`` leaves them (a move back). A graph out of FalkorDB only changes its pin: a
+    load in flight is fenced off and the graph evicted again, to wait its turn. Returns the retired
+    entry, and whether the graph is out of FalkorDB (its load is the caller's to ask for)."""
+    default = config.DEFAULT_FALKOR_PROVIDER
+    retired = list(ps.retired_keys or [])
+    own = [e for e in retired if ((e.get("provider") or default), e["name"]) == (provider, key)]
+    entry = {"name": ps.falkor_graph_name, "provider": ps.falkor_provider,
+             "retireAfter": (datetime.now(timezone.utc)
+                             + timedelta(seconds=grace_secs)).isoformat(),
+             "afterSeq": graph.main_head_commit_seq, "movedBy": actor}
+    ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
+    ps.projected_commit_seq = 0
+    ps.served_commit_seq = None        # the new key is written from nothing
+    ps.target_commit_seq = graph.main_head_commit_seq
+    out = ps.status in ("evicted", "waiting_capacity", "rehydrating")
+    if not out:
+        ps.status = "reseeding"
+    elif ps.status == "rehydrating":
+        ps.status, ps.rehydrating_since = "evicted", None
+    ps.last_error = None
+    ps.failed_attempts = 0
+    ps.next_retry_at = None
+    ps.progress_done = ps.progress_total = None
+    ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
+    ps.retired_keys = [e for e in retired if e not in own] + [entry]
+    ps.shard_map = shard_map
+    return entry, out
+
+
+def _rebuild_after_move(ps, graph, rebuild: Dict[str, object], *, beside: bool) -> str:
+    """What becomes of the rebuild a cancelled move carried (``rebuild``: ``{cause, why}``), inside
+    the caller's transaction, which holds the graph's lock and the row: built beside the key the
+    graph is on when ``beside`` (the policy's and :func:`_beside_ok`'s answer), else made in place
+    as its request or the escalation would have made it (:func:`_rebuild_in_place`). Returns
+    ``beside``, ``in_place``, ``load`` (an operator's rebuild of a graph out of FalkorDB: its load
+    is the caller's to ask for, after the commit) or ``dropped`` (one the projector started, of a
+    graph out of FalkorDB: its next read loads it), as
+    :meth:`GraphVersioningService.drop_candidate` does for a rebuild's dropped build."""
+    cause, why = str(rebuild.get("cause") or "operator"), rebuild.get("why")
+    if beside:
+        serving = ps.falkor_graph_name
+        _record_build(
+            ps, state=candidates.new_state("rebuild", now=_now(),
+                                           rebuild={"cause": cause, "why": why}),
+            name=keymigrate.build_key(serving, {serving, *(
+                e.get("name") for e in ps.retired_keys or [])}),
+            provider=ps.falkor_provider,
+            **({} if cause == "operator" else
+               {"last_error": f"rebuilding beside on its own: {why}"[:500]}))
+        return "beside"
+    if ps.status == "idle":
+        _rebuild_in_place(ps, graph.main_head_commit_seq, cause=cause, why=why)
+        return "in_place"
+    if ps.status in ("evicted", "waiting_capacity") and cause == "operator":
+        return "load"
+    return "dropped"
+
+
+def _move_not_made(ps) -> None:
+    """A move's build dropped without the move, inside the caller's transaction: another graph
+    projects into its key, so the graph stays on the key it serves from. The key is retired at
+    once (the retire run leaves another graph's pin alone), and the last error says why."""
+    key = ps.candidate_graph_name
+    _forget_build(ps)
+    ps.last_error = f"the move to '{key}' was not made: another graph projects into it"
+
+
 class GraphVersioningService:
     """Service over the ``graphver`` store.  Each public method is one
     transaction (via :func:`db.graphver_session`) unless a session is passed."""
@@ -821,7 +1040,7 @@ class GraphVersioningService:
         session=None,
     ) -> Dict[str, str]:
         """Create a blank versioned graph: graph row + ``main`` branch + empty
-        genesis commit + projection state, in the residency class the policy gives a new graph
+        genesis commit + projection state, in the residency class in force for it
         (``residency_policy.default_class``).  Returns ids and the genesis seq.
 
         ``provider_aliases``: the providers on ``falkor_provider``'s server, through any of which
@@ -871,12 +1090,12 @@ class GraphVersioningService:
             # full-seed into it, so it starts parked and its first projection is the first
             # commit's window.
             parked = bool(falkor_graph_name) and not owns_falkor_graph
-            from .residency_policy import default_class, enabled
+            from .residency_policy import default_class
             s.add(
                 ProjectionStateORM(
                     graph_id=graph.id, projected_commit_seq=1 if parked else 0, target_commit_seq=1,
-                    # The policy's class for a new graph; with residency off, no policy is read.
-                    residency=await default_class() if await enabled() else "standard",
+                    # The class in force for it, which every graph's row keeps, residency on or off.
+                    residency=await default_class(workspace_id, data_source_id),
                     falkor_graph_name=falkor_graph_name,   # the data source's real graph
                     falkor_provider=falkor_provider,       # FalkorDB instance (per-provider eviction)
                     # THE GUARDRAIL, recorded at birth from a fact we actually know: we own the
@@ -1020,11 +1239,14 @@ class GraphVersioningService:
                ProjectionStateORM.falkor_graph_name == name]
         if exclude_graph_id is not None:
             key.append(ProjectionStateORM.graph_id != exclude_graph_id)
+        # Returning the graphs it clears names them to every process's route cache, which would
+        # otherwise read every graph's route again (route_cache).
         await s.execute(update(ProjectionStateORM).where(
             *key, ProjectionStateORM.owns_falkor_graph.is_(False),
             ProjectionStateORM.graph_id.in_(
                 select(GraphORM.id).where(GraphORM.deleted_at.isnot(None))),
-        ).values(falkor_graph_name=None).execution_options(synchronize_session=False))
+        ).values(falkor_graph_name=None).returning(ProjectionStateORM.graph_id)
+            .execution_options(synchronize_session=False))
         if data_source_id is not None:
             key.append(ProjectionStateORM.graph_id.not_in(
                 select(GraphORM.id).where(GraphORM.data_source_id == data_source_id)))
@@ -3067,18 +3289,20 @@ class GraphVersioningService:
             return self._branch_meta(branch)
 
     async def sweep_idle_drafts(
-        self, *, now: Optional[datetime] = None, ttl_days: Optional[int] = None,
+        self, *, ttl_days: int, now: Optional[datetime] = None,
+        workspace_ids: Optional[Collection[str]] = None, except_workspace_ids: Collection[str] = (),
     ) -> List[str]:
-        """Auto-abandon open drafts idle past the TTL (plan §17 #8) and return the
-        ids swept. One ``UPDATE … RETURNING`` — O(stale), atomic. Only ``open``
-        drafts/fork-drafts are touched; ``main`` and terminal branches are left be.
+        """Auto-abandon open drafts idle past the TTL, ``ttl_days`` (``drafts.idleCloseDays``;
+        plan §17 #8), and return the ids swept. One ``UPDATE … RETURNING`` — O(stale), atomic.
+        Only ``open`` drafts/fork-drafts are touched; ``main`` and terminal branches are left be.
         ``updated_at`` is the idle clock (bumped by checkpoint/publish/abandon).
         An idle draft still in use is kept: one with a live PR, staged (uncheckpointed)
         work, or on a deleted graph (its purge owns it). A ``publishing`` draft is not open.
         Nor is a frozen graph's draft touched — nobody can edit it — and its clock restarts at
-        the unfreeze (``lifecycle_changed_at``), so a freeze never costs a draft."""
-        ttl = config.DRAFT_TTL_DAYS if ttl_days is None else ttl_days
-        cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=ttl)).isoformat()
+        the unfreeze (``lifecycle_changed_at``), so a freeze never costs a draft. Only the drafts
+        of graphs in ``workspace_ids`` (None: any) and in none of ``except_workspace_ids``: the
+        worker's sweep runs once per window (``settings.effective.by_workspace``)."""
+        cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=ttl_days)).isoformat()
         live_pr = select(1).where(MergeRequestORM.source_branch_id == BranchORM.id,
                                   MergeRequestORM.status.not_in(_TERMINAL_PR_STATUS))
         staged = select(1).where(WorkingChangeORM.graph_id == BranchORM.graph_id,
@@ -3095,11 +3319,15 @@ class GraphVersioningService:
                     BranchORM.status == "open",
                     BranchORM.updated_at < cutoff,
                     ~live_pr.exists(), ~staged.exists(), ~held.exists(),
+                    *_of_workspaces(BranchORM.graph_id, workspace_ids, except_workspace_ids),
                 )
                 .values(status="abandoned", updated_at=_now())
-                .returning(BranchORM.id)
-            )).scalars().all()
-            return list(swept)
+                .returning(BranchORM.id, BranchORM.graph_id)
+            )).all()
+        from backend.app.services.settings import signals
+        for _branch_id, graph_id in swept:                   # once the sweep has committed
+            signals.bump("drafts.idle_closed", graph_id=graph_id)
+        return [branch_id for branch_id, _graph_id in swept]
 
     async def release_publishing(
         self, *, graph_id: Optional[str] = None, branch_id: Optional[str] = None,
@@ -3131,6 +3359,7 @@ class GraphVersioningService:
     async def prune_closed_drafts(
         self, *, older_than_days: int, budget_secs: Optional[float] = None,
         now: Optional[datetime] = None, graph_id: Optional[str] = None,
+        workspace_ids: Optional[Collection[str]] = None, except_workspace_ids: Collection[str] = (),
     ) -> List[str]:
         """Remove the changes of drafts merged or abandoned more than ``older_than_days`` ago, and
         return the ids of those whose removal finished. A merged draft's changes are in ``main`` —
@@ -3149,7 +3378,10 @@ class GraphVersioningService:
         Spends at most ``budget_secs`` (``DRAFT_PRUNE_PASS_SECS``): a removal cut off is carried on
         first by the next pass, wherever it runs. Two workers on one draft only repeat each
         other's deletes; it is called finished only once none of its rows is found. ``graph_id``
-        keeps the pass to one graph's drafts."""
+        keeps the pass to one graph's drafts. ``workspace_ids`` (None: any) and
+        ``except_workspace_ids`` keep the drafts it newly takes to some workspaces' graphs, for the
+        worker's sweep, which runs once per window (``settings.effective.by_workspace``); a
+        removal already under way is finished whoever's it is."""
         from .purge_worker import delete_window
 
         deadline = time.monotonic() + (config.DRAFT_PRUNE_PASS_SECS if budget_secs is None
@@ -3168,6 +3400,7 @@ class GraphVersioningService:
             b.kind.in_(("draft", "fork_draft")), b.status.in_(("merged", "abandoned")),
             b.pruned_at.is_(None), b.updated_at < cutoff,
             ~live_pr.exists(), ~live_job.exists(), ~held.exists(),
+            *_of_workspaces(b.graph_id, workspace_ids, except_workspace_ids),
         ).order_by(b.updated_at).limit(1).with_for_update(skip_locked=True))
         under_way = select(BranchORM.id, BranchORM.graph_id).where(
             BranchORM.pruned_at.isnot(None), BranchORM.prune_finished_at.is_(None),
@@ -3212,7 +3445,7 @@ class GraphVersioningService:
                             gone = False
                             break
                     if gone:
-                        await s.execute(
+                        marked = await s.execute(
                             update(BranchORM).where(BranchORM.id == branch_id,
                                                     BranchORM.prune_finished_at.is_(None))
                             .values(prune_finished_at=_now(), updated_at=BranchORM.updated_at)
@@ -3220,6 +3453,9 @@ class GraphVersioningService:
                         finished.append(branch_id)
             logger.info("removed %d rows of closed draft %s on graph %s%s", removed, branch_id,
                         gid, "" if gone else "; carried on next pass")
+            if gone and marked.rowcount:      # finished here (not by another worker), committed
+                from backend.app.services.settings import signals
+                signals.bump("drafts.changes_removed", graph_id=gid)
         return finished
 
     @staticmethod
@@ -3550,10 +3786,26 @@ class GraphVersioningService:
     # ------------------------------------------------------------------ #
     # Forking + pull requests (copy-on-write — plan §8, §12.5)            #
     # ------------------------------------------------------------------ #
+    @staticmethod
+    async def _forks_allowed(s, parent: GraphORM) -> int:
+        """How many live forks ``parent`` may have (``forks.maxPerGraph``): its graph's value (a
+        fork's, its root's), else its workspace's, else the platform's, as this process last read
+        them. Its callers refresh them before they lock."""
+        from backend.app.services.settings import effective
+
+        root = parent
+        while root.fork_parent_graph_id:
+            above = await s.get(GraphORM, root.fork_parent_graph_id)
+            if above is None:
+                break
+            root = above
+        return effective.value("forks.maxPerGraph", workspace_id=parent.workspace_id,
+                               graph_id=root.data_source_id)
+
     async def _fork_slot(self, s, parent_graph_id: str) -> Optional[GraphORM]:
         """The live parent a new fork may read, or None when it is missing or trashed. Its row
         is read FOR KEY SHARE, so a purge being queued (FOR UPDATE) finishes first and is seen,
-        or waits and counts the fork. At most ``config.MAX_FORKS_PER_GRAPH`` live forks
+        or waits and counts the fork. At most :meth:`_forks_allowed` live forks
         (:class:`ForkLimit`); the caller holds the parent's graph lock, so the count and the
         insert are one step."""
         parent = (await self._bounded_lock(s, select(GraphORM).where(
@@ -3564,8 +3816,9 @@ class GraphVersioningService:
             return None
         live_forks = await s.scalar(select(func.count()).select_from(GraphORM).where(
             GraphORM.fork_parent_graph_id == parent_graph_id, GraphORM.deleted_at.is_(None)))
-        if live_forks >= config.MAX_FORKS_PER_GRAPH:
-            raise ForkLimit(config.MAX_FORKS_PER_GRAPH)
+        limit = await self._forks_allowed(s, parent)
+        if live_forks >= limit:
+            raise ForkLimit(limit)
         return parent
 
     async def fork_preflight(self, *, parent_graph_id: str, workspace_id: str) -> None:
@@ -3573,6 +3826,9 @@ class GraphVersioningService:
         it writes anything of its own: a parent that is missing, trashed or in another workspace
         (``ValueError``), one whose editing is paused (:class:`GraphNotWritable`), or one at its
         fork cap (:class:`ForkLimit`). fork_graph checks all of it again under the parent's lock."""
+        from backend.app.services.settings import effective
+
+        await effective.refresh()
         async with self._session() as s:
             parent = await s.get(GraphORM, parent_graph_id)
             if parent is None or parent.deleted_at is not None or parent.workspace_id != workspace_id:
@@ -3581,8 +3837,9 @@ class GraphVersioningService:
                 raise GraphNotWritable(parent.lifecycle_state)
             live_forks = await s.scalar(select(func.count()).select_from(GraphORM).where(
                 GraphORM.fork_parent_graph_id == parent_graph_id, GraphORM.deleted_at.is_(None)))
-            if live_forks >= config.MAX_FORKS_PER_GRAPH:
-                raise ForkLimit(config.MAX_FORKS_PER_GRAPH)
+            limit = await self._forks_allowed(s, parent)
+            if live_forks >= limit:
+                raise ForkLimit(limit)
 
     async def fork_graph(
         self,
@@ -3601,10 +3858,13 @@ class GraphVersioningService:
         ``data_source_id`` is the fork's data source, the ``dsfork_…`` id of the row the route
         made for it; one is minted when it is left out.
 
-        At most ``config.MAX_FORKS_PER_GRAPH`` live forks per parent (:class:`ForkLimit`), and
-        none of a trashed parent (:meth:`_fork_slot`)."""
+        At most ``forks.maxPerGraph`` live forks per parent (:class:`ForkLimit`), and none of a
+        trashed parent (:meth:`_fork_slot`)."""
+        from backend.app.services.settings import effective
+
         if data_source_id is not None and not data_source_id.startswith("dsfork_"):
             raise ValueError(f"a fork's data source id starts with dsfork_, not {data_source_id!r}")
+        await effective.refresh()                   # before the lock: the fork cap is read under it
         async with self._session() as s:
             await self._lock_graph(s, parent_graph_id)
             parent = await self._fork_slot(s, parent_graph_id)
@@ -3712,7 +3972,7 @@ class GraphVersioningService:
     async def delete_fork(self, *, graph_id: str, workspace_id: str, actor: str) -> str:
         """Move a fork to the trash; returns its parent's id. Its drafts and pull requests are
         kept, and it can be restored (:meth:`restore_fork`) until a purge of it is queued: by
-        the reaper once ``config.PURGE_GRACE_DAYS`` have passed, or by its parent's purge, which
+        the reaper once ``trash.restoreDays`` have passed, or by its parent's purge, which
         takes it along. Refused while its pull request into the parent is live
         (:class:`PullRequestExists`) or forks of its own are (:class:`LiveForks`). The row is
         held FOR UPDATE, so an open_pr or fork_graph on it (FOR KEY SHARE) is seen or sees us."""
@@ -3736,6 +3996,9 @@ class GraphVersioningService:
         Refused once a purge of it exists (:class:`ForkNotRestorable` ``purging``), while its
         parent is missing or trashed (``parent_deleted``), and at the parent's fork cap
         (:class:`ForkLimit`), counted under the parent's graph lock as fork_graph counts."""
+        from backend.app.services.settings import effective
+
+        await effective.refresh()                   # before the lock: the fork cap is read under it
         async with self._session() as s:
             f = await s.get(GraphORM, graph_id)
             if f is None or f.workspace_id != workspace_id:
@@ -3763,8 +4026,11 @@ class GraphVersioningService:
     async def list_forks(self, *, graph_id: str, workspace_id: str, limit: int) -> List[dict]:
         """A graph's direct forks, newest first, live and trashed: when a trashed one was
         deleted and by whom, whether its purge is queued (no undo then), and when its undo
-        window (``config.PURGE_GRACE_DAYS``) ends. A live one says how far it is from this graph
-        (:meth:`_fork_distance`)."""
+        window (``trash.restoreDays``, its workspace's) ends. A live one says how far it is from
+        this graph (:meth:`_fork_distance`)."""
+        from backend.app.services.settings import effective
+
+        restore_days = await effective.value_of("trash.restoreDays", workspace_id=workspace_id)
         purging = select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
                                           JobORM.graph_id == GraphORM.id).exists()
         async with self._session() as s:
@@ -3779,7 +4045,7 @@ class GraphVersioningService:
             **self._graph_meta(g), "deleted_at": g.deleted_at, "deleted_by": g.deleted_by,
             "purging": bool(p),
             "purge_after": (datetime.fromisoformat(g.deleted_at)
-                            + timedelta(days=config.PURGE_GRACE_DAYS)).isoformat()
+                            + timedelta(days=restore_days)).isoformat()
             if g.deleted_at else None,
             **distance.get(g.id, dict.fromkeys(_FORK_DISTANCE)),
         } for g, p in rows]
@@ -5862,16 +6128,19 @@ class GraphVersioningService:
         if root is not None and root.id != graph_id:
             wm = await self.projection_watermark(root.id)
             reads_from = await self.fork_reads_from(graph_id)
-            # A fork lays its patch set over its root's store at the root's head only
-            # (ContextEngine._fork_main_reader): behind it, the fork reads Postgres.
-            on_store = bool(wm["fresh"]) and reads_from != "postgres"
-            wm["served"] = wm["committed"] if on_store else None
-            wm["served_revision"] = wm["committed_revision"] if on_store else None
+            # A fork lays its patch set over its root's store at the version the root's key serves,
+            # while the key holds exactly that (ContextEngine._fork_main_reader, fork_serving_seq);
+            # else the fork reads its root from Postgres.
+            on_store = reads_from != "postgres" and fork_serving_seq(
+                wm["served"], wm["fresh"], wm["status"], wm["window_rows"],
+                wm["last_error"]) is not None
+            if not on_store:
+                wm["served"] = wm["served_revision"] = None
             wm["read_route"] = {**wm["read_route"], "main": "falkordb" if on_store else "postgres"}
             return {**wm, "reads_through": root.id, "reads_from": reads_from,
                     "falkor_graph_name": None, "falkor_provider": None,
                     "owns_falkor_graph": False, "retired_keys": [], "external_drift": None,
-                    "residency": None}
+                    "residency": None, "candidate": None}
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
@@ -5885,7 +6154,12 @@ class GraphVersioningService:
             projected = ps.projected_commit_seq if ps else 0
             status = ps.status if ps else "idle"
             fresh = serves_head(projected, committed, status)
-            served = serving_seq(projected, committed, status, ps.served_commit_seq if ps else None)
+            # The graph's read mode, graph → workspace → platform: ``latest`` serves the key only
+            # at the head.
+            await build_policy.resolve()
+            mode = _read_mode(ps, graph)
+            served = serving_seq(projected, committed, status, ps.served_commit_seq if ps else None,
+                                 mode.max_lag)
             # The revision each side is at — the main commit with that seq (one indexed read). The
             # sync indicators show it, so "version #12" can be matched to a commit in History.
             revisions: Dict[int, CommitORM] = {}
@@ -5925,12 +6199,27 @@ class GraphVersioningService:
                 # overlays whatever serves main.
                 "read_route": {"main": "falkordb" if served is not None else "postgres",
                                "drafts": "overlay"},
+                # What its readers get while a newer version lands (``config.READ_MODES``): the
+                # mode in force; the one chosen, and where (graph, workspace, platform, env or
+                # default); and why they differ (``{code, text, fix}``: Keep serving, switch when
+                # ready updates in place while New-version builds are off, ``builds_off``, or on a
+                # connected graph, ``connected_graph``).
+                "read_mode": mode.effective,
+                "read_mode_declared": mode.declared,
+                "read_mode_source": mode.source,
+                "read_mode_why": list(mode.why),
                 # Failure reason + last success + live full-reseed progress — the Data
                 # health UI needs these to converge to an honest done/failed state.
                 "last_error": ps.last_error if ps else None,
                 "last_projected_at": ps.last_projected_at if ps else None,
                 "progress_done": ps.progress_done if ps else None,
                 "progress_total": ps.progress_total if ps else None,
+                # The version rows of a window written a page at a time, in flight: eviction leaves
+                # the graph alone until it lands, and a fork reads its root from Postgres meanwhile.
+                "window_rows": ps.window_rows if ps else None,
+                # A new version built beside the serving key, while one is (``candidates.block``):
+                # the serving key keeps serving ``served`` whole meanwhile.
+                "candidate": candidates.block(ps) if ps else None,
                 # Whose key it is, the fencing epoch, and the poll's backoff — so a graph backing
                 # off can be told from a wedged one. A liveness reset records its reason in
                 # last_error with this prefix (FalkorProjector.check_liveness).
@@ -5960,23 +6249,95 @@ class GraphVersioningService:
                                       else None),
             }
 
+    async def set_read_mode(self, graph_id: str, mode: Optional[str], *,
+                            actor: Optional[str] = None, reason: Optional[str] = None,
+                            source: str = "api", session=None,
+                            on_change: Optional[Callable[[Any, Optional[str]],
+                                                         Awaitable[None]]] = None,
+                            check: Optional[Callable[..., Awaitable[None]]] = None,
+                            ) -> Tuple[bool, Optional[str]]:
+        """Set what a graph's readers get while a newer version lands (``config.READ_MODES``), or
+        None for its workspace's or the platform's: ``(found, the graph's own mode before)``;
+        nothing is saved for a graph with no projection state (not found). Saved as the graph's
+        value in the settings store (``reads.mode`` at its data source, by ``actor`` for
+        ``reason``, ``source`` as the store records it), in ``session`` (the management
+        database's; else one of its own), under the store's writer lock, so saves go one at a time
+        and the last one wins. In the same transaction it is written through to
+        ``projection_state.read_mode``, for the previous image, and ``on_change(session, before)``
+        runs when the graph's own mode changed (the route's activity record). ``check(session,
+        scope, scope_id, changes)`` runs under the lock before anything is saved, and refuses by
+        raising (``settings.service.checker``: the platform's lock among the rest). Then the
+        graph's route is announced and this process reads the settings again: the next read in
+        any process goes by it."""
+        if mode is not None and mode not in config.READ_MODES:
+            raise ValueError(f"unknown read mode {mode!r}")
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            ps = await s.get(ProjectionStateORM, graph_id)
+            if graph is None or ps is None:
+                return False, None
+            data_source_id, held = graph.data_source_id, ps.read_mode
+        from backend.app.db.engine import get_async_session
+        from backend.app.services.settings import effective, effects, legacy, registry, store
+
+        domain = registry().DOMAIN
+        async with (contextlib.nullcontext(session) if session is not None
+                    else get_async_session()) as ms:
+            await store.lock(ms, domain)
+            row = next((r for r in await store.read_scope(ms, domain, "graph", data_source_id)
+                        if r.key == "reads.mode"), None)
+            # Until the graphs' own values are in the store, a graph's own mode is the one its
+            # projection state holds (``legacy.graph_values_imported``).
+            before = (row.value if row is not None
+                      else None if legacy.graph_values_imported() else held)
+
+            async def through(sess, change_set) -> None:
+                await legacy.write_through(sess, change_set)
+                if not change_set.applied and held != mode:
+                    # The store holds it already, but the graph store doesn't (a mode only the
+                    # graph store held, cleared before the graphs' values were copied): there too.
+                    async with self._session() as gs:
+                        (await gs.get(ProjectionStateORM, graph_id)).read_mode = mode
+                if on_change is not None and before != mode:
+                    await on_change(sess, before)
+
+            changes = [store.Change("reads.mode", "graph", data_source_id,
+                                    row.version if row is not None else 0, value=mode)]
+            if check is not None:
+                await check(ms, "graph", data_source_id, changes)
+            change_set = await store.apply(ms, domain, changes, actor=actor, reason=reason,
+                                           source=source, before_commit=through)
+        await effects.after_save(change_set)
+        await effective.refresh(strict=True)
+        return True, before
+
     async def residency_state(self, graph_id: str) -> Optional[Dict[str, object]]:
         """What a read needs to know of a graph's residency (doc 17), in one small read: its
         projection ``status``, its class (``residency``), its measured ``size_bytes``, the head it
-        is at (``committed``), and its store — ``projected``, ``fresh`` (:func:`serves_head`) and
+        is at (``committed``), and its store — ``projected``, ``fresh`` (:func:`serves_head`), the
+        version it serves reads of main at (``serving``, :func:`serving_seq`), whether a window is
+        in flight or a pass failed (``window_rows``, ``last_error``: :func:`fork_serving_seq`) and
         its pin. None for a graph with no projection row."""
         async with self._session() as s:
             row = (await s.execute(
                 select(ProjectionStateORM.status, ProjectionStateORM.residency,
                        ProjectionStateORM.size_bytes, GraphORM.main_head_commit_seq,
                        ProjectionStateORM.projected_commit_seq, ProjectionStateORM.falkor_provider,
-                       ProjectionStateORM.falkor_graph_name)
+                       ProjectionStateORM.falkor_graph_name, ProjectionStateORM.served_commit_seq,
+                       ProjectionStateORM.window_rows, ProjectionStateORM.last_error,
+                       ProjectionStateORM.read_mode, GraphORM.workspace_id,
+                       GraphORM.data_source_id, ProjectionStateORM.owns_falkor_graph)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(ProjectionStateORM.graph_id == graph_id))).first()
         if row is None:
             return None
+        await build_policy.resolve()
+        mode = build_policy.read_mode_for(workspace_id=row[11], data_source_id=row[12],
+                                          platform_copy=bool(row[13]), own=row[10])
         return {"status": row[0], "residency": row[1], "size_bytes": row[2], "committed": row[3],
                 "projected": row[4], "fresh": serves_head(row[4], row[3], row[0]),
+                "serving": serving_seq(row[4], row[3], row[0], row[7], mode.max_lag),
+                "window_rows": row[8], "last_error": row[9],
                 "falkor_provider": row[5], "falkor_graph_name": row[6]}
 
     async def clear_external_changes(self, graph_id: str, seen_at: Optional[str] = None) -> None:
@@ -6054,11 +6415,24 @@ class GraphVersioningService:
         An evicted graph (or one waiting for room) is left as it is and its load asked for instead,
         for the capacity loop to admit (``residency.request_load``) — whatever the Graph residency
         switch says: off, the loop brings such graphs back through admission too. A load in flight
-        is a rebuild already running."""
+        is a rebuild already running.
+
+        A graph that reads ``beside`` (New-version builds on, ``buildForRebuilds`` on) on a key the
+        platform owns, idle and serving a version (:func:`_beside_ok`), has its rebuild built beside
+        that key instead (``candidates``): a new key seeded from Postgres while its readers keep
+        exactly the version they have, then switched to; dropped, the rebuild is made in place, as
+        here (``drop_candidate``). A build in flight: a window's is replaced (its key retired at
+        once), a rebuild's is already running (False), and a move's rebuilds too, its raw layer
+        coming from Postgres anyway (False when it already does)."""
+        policy = await build_policy.resolve()
+        switch_on = await build_policy.switch_state()
         async with self._session() as s:
             await self._lock_graph(s, graph_id)
             await self._assert_not_bootstrapping(s, graph_id)
-            ps = await s.get(ProjectionStateORM, graph_id)
+            ps = (await s.execute(
+                select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )).scalar_one_or_none()
             graph = await s.get(GraphORM, graph_id)
             if ps is None or graph is None or graph.fork_parent_graph_id:
                 return False
@@ -6068,26 +6442,95 @@ class GraphVersioningService:
                 from .residency import request_load
                 await request_load(graph_id)
                 return True
+            build = ps.candidate_state if isinstance(ps.candidate_state, dict) else None
+            decided = candidates.on_request(build, reason="rebuild")
+            if decided == "keep":
+                return False
+            if decided == "upgrade":
+                ps.candidate_state = {**build, "rebuild": {"cause": "operator", "why": None},
+                                      "rollupsStale": True}
+                return True
             if ps.status in ("projecting", "rebuilding") and ps.projected_commit_seq < ps.target_commit_seq:
                 return False
-            ps.projected_commit_seq = 0
-            ps.target_commit_seq = graph.main_head_commit_seq
-            ps.status = "rebuilding"
-            ps.last_error = None
-            ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
-            ps.failed_attempts = 0
-            ps.next_retry_at = None
-            return True
+            beside = candidates.beside_wanted(
+                read_mode=_read_mode(ps, graph).effective, switch_on=switch_on,
+                for_rebuilds=policy["buildForRebuilds"]) and _beside_ok(ps, graph,
+                                                                        reason="rebuild")
+            _forget_build(ps)          # a window's build: the rebuild supersedes it
+            if not beside:
+                _rebuild_in_place(ps, graph.main_head_commit_seq, cause="operator")
+                return True
+            serving = ps.falkor_graph_name
+            _record_build(
+                ps, state=candidates.new_state("rebuild", now=_now(),
+                                               rebuild={"cause": "operator"}),
+                name=keymigrate.build_key(serving, {serving, *(
+                    e.get("name") for e in ps.retired_keys or [])}),
+                provider=ps.falkor_provider)
+        from backend.app.jobs.metrics import increment
+        increment("graphver_builds_total", step="queued")
+        return True
+
+    async def record_rebuild(self, graph_id: str, *, epoch: int, policy, switch_on: Optional[bool],
+                             cause: str, why: str, summaries_moved: bool = False) -> bool:
+        """Build beside the serving key the rebuild the pass at ``epoch`` escalated to on its own
+        (``FalkorProjector._escalate``: ``cause`` drift or failures, ``why``), when the policy
+        (``candidates.beside_wanted``, from ``policy`` and ``switch_on``, read by the caller) and
+        the row (:func:`_beside_ok`) want it: readers keep the version the key serves, and forks
+        read their root from Postgres (the last error says why) until the switch. The summaries a
+        window that escalated moved are owed the batch job (``rollup_state.moved``), as the
+        rebuild in place would owe them, so that one keeps them if the build is dropped. False,
+        nothing written, when the epoch moved, a build exists, or either says in place. The policy
+        is asked first, without the graph's lock: a graph that does not read ``beside`` answers at
+        once, so its rebuild in place never waits on that lock."""
+        async with self._session() as s:
+            row = (await s.execute(
+                select(GraphORM.workspace_id, GraphORM.data_source_id,
+                       ProjectionStateORM.owns_falkor_graph, ProjectionStateORM.read_mode)
+                .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+                .where(GraphORM.id == graph_id))).first()
+        if row is None or not candidates.beside_wanted(
+                read_mode=build_policy.read_mode_for(
+                    workspace_id=row.workspace_id, data_source_id=row.data_source_id,
+                    platform_copy=bool(row.owns_falkor_graph), own=row.read_mode).effective,
+                switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"]):
+            return False
+        async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            ps = (await s.execute(
+                select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )).scalar_one_or_none()
+            if (ps is None or ps.epoch != epoch or ps.candidate_state is not None
+                    or not candidates.beside_wanted(
+                        read_mode=_read_mode(ps, graph).effective,
+                        switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"])
+                    or not _beside_ok(ps, graph, reason="rebuild")):
+                return False
+            serving = ps.falkor_graph_name
+            _record_build(
+                ps, state=candidates.new_state("rebuild", now=_now(),
+                                               rebuild={"cause": cause, "why": why}),
+                name=keymigrate.build_key(serving, {serving, *(
+                    e.get("name") for e in ps.retired_keys or [])}),
+                provider=ps.falkor_provider,
+                last_error=f"rebuilding beside on its own: {why}"[:500])
+            ps.pressure_failures = 0
+            if summaries_moved:
+                state = ps.rollup_state if isinstance(ps.rollup_state, dict) else {}
+                ps.rollup_state = {**state, "moved": _now()}
+        return True
 
     async def move_projection(self, *, graph_id: str, provider: str, key: str, actor: str,
-                              shard_map: dict) -> Dict[str, object]:
+                              shard_map: dict, admitted: bool = False) -> Dict[str, object]:
         """Move a graph's projection to FalkorDB key ``key`` on ``provider`` (doc 14 §6
         KeyMigration, phase 1: a reseed move). Swaps the pin, bumps the epoch so a pass in flight
         cannot publish over it, and lowers the watermark to 0 (``reseeding``), so the next pass
         reconciles all of committed main into the new key while reads fall back to Postgres. The
         old key is appended to ``retired_keys``, to be dropped once the new key has caught up and
-        ``RETIRE_GRACE_SECS`` have passed; until then a move back onto it is allowed, and takes it
-        off that list.
+        ``retireGraceSecs`` (New-version builds) have passed; until then a move back onto it is
+        allowed, and takes it off that list.
 
         Only keys the platform owns move: an unpinned graph and a graph still projecting into the
         customer's own key are refused (:class:`ProjectionNotAdopted`), and nothing is written. The
@@ -6098,9 +6541,27 @@ class GraphVersioningService:
         No FalkorDB I/O: the caller checks the key is free there and schedules the reseed. A graph
         that is not in FalkorDB — whatever the Graph residency switch says — only changes its pin,
         and its load is asked for again (``residency.request_load``) to seed the new key once
-        admitted; a load in flight is fenced off and the graph is evicted again, to wait its turn."""
+        admitted; a load in flight is fenced off and the graph is evicted again, to wait its turn.
+
+        A graph that reads ``beside`` (New-version builds on, ``buildForRebuilds`` on), idle and
+        serving a version it holds whole with no window part-written (:func:`_beside_ok`), has the
+        move built beside instead (``candidates``, ``beside``): the new key is seeded from Postgres
+        while readers keep the version they have, then switched to; nothing retires until the
+        switch (``retiring`` None). ``admitted``: the caller admitted the seed's room with the
+        request, under the capacity lock, so the build starts seeding; otherwise it is admitted on
+        its first step. Dropped, the move is made in place, as here (``drop_candidate``). A build
+        in flight: the same move answers ``changed: False`` with it (``building``); a move back to
+        the pin cancels it (``cancelled``), and a rebuild the move carried goes on, built beside
+        (``building``) or made in place (:func:`_rebuild_after_move`); any other move replaces it,
+        its key retired at once (a rebuild's carried on by the move that replaces it). A move's
+        build onto a key waiting out its grace takes that key off ``retired_keys`` and keeps its
+        entry, which goes back as it was should the build be cancelled or replaced
+        (:func:`_forget_build`)."""
+        policy = await build_policy.resolve()
+        switch_on = await build_policy.switch_state()
         default = config.DEFAULT_FALKOR_PROVIDER
         out = False                      # not in FalkorDB under residency: its load is asked for
+        entry, building, cancelled = None, None, None
         try:
             async with self._session() as s:
                 await self._lock_graph(s, graph_id)
@@ -6116,50 +6577,295 @@ class GraphVersioningService:
                     raise ValueError(f"unknown graph {graph_id}")
                 cur = {"providerId": ps.falkor_provider or default, "key": ps.falkor_graph_name}
                 tgt = {"providerId": provider, "key": key}
-                if cur == tgt:
-                    return {"changed": False, "from": cur, "to": tgt, "retiring": None}
-                if ps.falkor_graph_name in (None, f"gv_{graph_id}"):
-                    raise ProjectionNotAdopted(
-                        "unpinned", "this graph has no FalkorDB key yet; nothing to move")
-                if not ps.owns_falkor_graph:
-                    raise ProjectionNotAdopted(
-                        "customer_key", "this graph projects into the customer's own FalkorDB "
-                        "graph; only platform keys can be moved")
-                retired = list(ps.retired_keys or [])
-                own = [e for e in retired
-                       if ((e.get("provider") or default), e["name"]) == (provider, key)]
-                if not (own or keymigrate.is_owned_key(graph_id, key)):
-                    raise ProjectionKeyInvalid(key)
-                try:
-                    await self._claim_projection_key(s, key, provider, exclude_graph_id=graph_id)
-                except ConcurrencyError:
-                    raise ProjectionKeyInUse(provider, key) from None
-                entry = {"name": ps.falkor_graph_name, "provider": ps.falkor_provider,
-                         "retireAfter": (datetime.now(timezone.utc)
-                                         + timedelta(seconds=config.RETIRE_GRACE_SECS)).isoformat(),
-                         "afterSeq": graph.main_head_commit_seq, "movedBy": actor}
-                ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
-                ps.projected_commit_seq = 0
-                ps.served_commit_seq = None        # the new key is written from nothing
-                ps.target_commit_seq = graph.main_head_commit_seq
-                out = ps.status in ("evicted", "waiting_capacity", "rehydrating")
-                if not out:
-                    ps.status = "reseeding"
-                elif ps.status == "rehydrating":
-                    ps.status, ps.rehydrating_since = "evicted", None
-                ps.last_error = None
-                ps.failed_attempts = 0
-                ps.next_retry_at = None
-                ps.progress_done = ps.progress_total = None
-                ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
-                ps.retired_keys = [e for e in retired if e not in own] + [entry]
-                ps.shard_map = shard_map
+                build = ps.candidate_state if isinstance(ps.candidate_state, dict) else None
+                decided = candidates.on_request(build, reason="move", target=tgt, pin=cur)
+                if cur == tgt and decided == "cancel":
+                    cancelled = build["id"]
+                    _forget_build(ps)      # its key is retired at once, or as it was before
+                    if build.get("rebuild"):
+                        # The move goes; a rebuild it carried does not.
+                        kept = _rebuild_after_move(
+                            ps, graph, build["rebuild"], beside=candidates.beside_wanted(
+                                read_mode=_read_mode(ps, graph).effective,
+                                switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"]
+                            ) and _beside_ok(ps, graph, reason="rebuild"))
+                        building = candidates.block(ps) if kept == "beside" else None
+                        out = kept == "load"
+                elif cur != tgt:
+                    if ps.falkor_graph_name in (None, f"gv_{graph_id}"):
+                        raise ProjectionNotAdopted(
+                            "unpinned", "this graph has no FalkorDB key yet; nothing to move")
+                    if not ps.owns_falkor_graph:
+                        raise ProjectionNotAdopted(
+                            "customer_key", "this graph projects into the customer's own FalkorDB "
+                            "graph; only platform keys can be moved")
+                    retired = list(ps.retired_keys or [])
+                    own = [e for e in retired
+                           if ((e.get("provider") or default), e["name"]) == (provider, key)]
+                    if not (own or keymigrate.is_owned_key(graph_id, key) or decided == "keep"):
+                        raise ProjectionKeyInvalid(key)
+                    try:
+                        await self._claim_projection_key(s, key, provider,
+                                                         exclude_graph_id=graph_id)
+                    except ConcurrencyError:
+                        raise ProjectionKeyInUse(provider, key) from None
+                    if decided == "keep":          # this move is already under way
+                        return {"changed": False, "from": cur, "to": tgt, "retiring": None,
+                                "beside": True, "building": candidates.block(ps), "cancelled": None}
+                    beside = candidates.beside_wanted(
+                        read_mode=_read_mode(ps, graph).effective,
+                        switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"]
+                    ) and _beside_ok(ps, graph, reason="move")
+                    if beside:
+                        # A rebuild in flight: the move replacing it makes it too.
+                        rebuild = (build or {}).get("rebuild") if decided == "replace" else None
+                        _forget_build(ps, keep=(provider, key))
+                        if own:                    # a move back: the key is no longer to retire
+                            ps.retired_keys = [e for e in ps.retired_keys or [] if e not in own]
+                        _record_build(ps, state=candidates.new_state(
+                            "move", now=_now(), rebuild=rebuild,
+                            step="seeding" if admitted else "queued",
+                            target={"providerId": provider, "key": key, "shardMap": shard_map,
+                                    "movedBy": actor, "retired": own or None}),
+                            name=key, provider=provider)
+                        building = candidates.block(ps)
+                    else:
+                        entry, out = _move_in_place(
+                            ps, graph, key=key, provider=provider, actor=actor,
+                            shard_map=shard_map, grace_secs=int(policy["retireGraceSecs"]))
+                        # A build beside the old key has nothing to switch from: its key goes,
+                        # unless it is the one moved to.
+                        _forget_build(ps, keep=(provider, key))
         except IntegrityError:
             raise ProjectionKeyInUse(provider, key) from None     # uq_ps_key: a concurrent claim won
         if out:
             from .residency import request_load
             await request_load(graph_id)
-        return {"changed": True, "from": cur, "to": tgt, "retiring": entry}
+        if building is not None:
+            from backend.app.jobs.metrics import increment
+            increment("graphver_builds_total", step="queued")
+        return {"changed": cur != tgt, "from": cur, "to": tgt, "retiring": entry,
+                "beside": building is not None, "building": building, "cancelled": cancelled}
+
+    # ── a new version built beside the serving key (read mode ``beside``; see ``candidates``) ──
+
+    async def record_candidate(self, graph_id: str, *, epoch: int, name: str,
+                               provider: Optional[str], state: Dict[str, object]) -> bool:
+        """Ask for a new version of ``graph_id`` to be built beside its serving key, in ``name`` on
+        ``provider`` (``candidates.new_state``). Fenced on the pass's ``epoch`` and on the graph
+        having no build yet, so two passes never record two: False, nothing written, when either
+        moved."""
+        async with self._session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id,
+                       ProjectionStateORM.epoch == epoch,
+                       ProjectionStateORM.candidate_state.is_(None))
+                .values(candidate_graph_name=name, candidate_provider=provider,
+                        candidate_seq=None, candidate_state=state)
+                .returning(ProjectionStateORM.graph_id)
+                .execution_options(synchronize_session=False))).first()
+        return row is not None
+
+    async def _locked_build(self, s, graph_id: str, build_id: str):
+        """``graph_id``'s projection row, locked, while build ``build_id`` is its build; else
+        None."""
+        ps = (await s.execute(
+            select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+            .with_for_update().execution_options(populate_existing=True)
+        )).scalar_one_or_none()
+        state = getattr(ps, "candidate_state", None)
+        if ps is None or not isinstance(state, dict) or state.get("id") != build_id:
+            return None
+        return ps
+
+    async def update_candidate(self, graph_id: str, build_id: str, *,
+                               seq: Optional[int] = None, name: Optional[str] = None,
+                               **changes: object) -> bool:
+        """Move build ``build_id`` of ``graph_id`` on: merge ``changes`` into its state (its step,
+        attempts, error, retryAt, waiting, progress) and, given ``seq``, record the version its
+        key now holds whole; given ``name``, the key it is built in (one placed for a seed from
+        Postgres). Fenced on the build: False, nothing written, when it is no longer the
+        graph's."""
+        async with self._session() as s:
+            ps = await self._locked_build(s, graph_id, build_id)
+            if ps is None:
+                return False
+            ps.candidate_state = {**ps.candidate_state, **changes}
+            if seq is not None:
+                ps.candidate_seq = seq
+            if name is not None:
+                ps.candidate_graph_name = name
+        return True
+
+    async def switch_to_candidate(self, graph_id: str, *, build_id: str, seq: int,
+                                  grace_secs: int, rollups_stale: bool = False) -> Optional[bool]:
+        """Switch ``graph_id``'s readers to the key build ``build_id`` holds ``seq`` whole in, in
+        one transaction. The build's key becomes the pin, serving ``seq``: projected and served at
+        ``seq``, idle, and the epoch bumped so nothing in flight publishes over it. The key that
+        served until now joins ``retired_keys``, to be dropped once ``grace_secs`` have passed, so
+        reads already under way on it finish there. Whatever main gained past ``seq`` is written
+        into the new key by the next ordinary pass, in place. A move's build (``target``) also
+        takes the move's ``shard_map``, and the retired key says who moved it.
+
+        Returns whether the lineage summaries are owed the batch job: ``rollups_stale`` (the
+        build could not keep them exact), the build's own state as locked here says so (a rebuild
+        asked while the switching pass ran: ``rollupsStale``, ``rebuild``), or a full seed owed
+        them (``rollup_state.moved``, which no later window publish would hand over once the key
+        serves a version). Owed, the ask is recorded in the same transaction
+        (``rollup_state.pending``), so the liveness loop makes it again should the caller's
+        hand-off never run.
+
+        Refused (None, nothing written) when the build is no longer the graph's, the graph is in
+        the trash or not idle (out of FalkorDB, or a pass that does not build has the row), or
+        another graph projects into the build's key."""
+        async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            ps = await self._locked_build(s, graph_id, build_id)
+            if graph is None or graph.deleted_at is not None or ps is None or ps.status != "idle":
+                return None
+            name, provider = ps.candidate_graph_name, ps.candidate_provider
+            try:
+                await self._claim_projection_key(s, name, provider, exclude_graph_id=graph_id)
+            except ConcurrencyError:
+                return None
+            now = datetime.now(timezone.utc)
+            target = ps.candidate_state.get("target")
+            entry = {"name": ps.falkor_graph_name, "provider": ps.falkor_provider,
+                     "retireAfter": (now + timedelta(seconds=max(grace_secs, 0))).isoformat(),
+                     "afterSeq": seq, "build": build_id,
+                     **({"movedBy": target.get("movedBy")} if target else {})}
+            ps.retired_keys = [*(ps.retired_keys or []), entry]
+            if target:
+                ps.shard_map = target.get("shardMap")
+            build = ps.candidate_state
+            state = dict(ps.rollup_state) if isinstance(ps.rollup_state, dict) else {}
+            moved = state.pop("moved", None)
+            owed = bool(rollups_stale or moved or build.get("rollupsStale") or build.get("rebuild"))
+            if owed:
+                state = {**state, "pending": "switched", "asked": now.isoformat(),
+                         "since": state.get("since") or now.isoformat()}
+            ps.rollup_state = state or None
+            ps.falkor_graph_name, ps.falkor_provider = name, provider
+            ps.projected_commit_seq = ps.served_commit_seq = seq
+            ps.target_commit_seq = max(ps.target_commit_seq or 0, graph.main_head_commit_seq)
+            ps.status = "idle"
+            ps.last_error = None
+            ps.failed_attempts = ps.pressure_failures = 0
+            ps.next_retry_at = None
+            ps.window_rows = None
+            ps.progress_done = ps.progress_total = None
+            ps.last_projected_at = now.isoformat()
+            ps.candidate_graph_name = ps.candidate_provider = None
+            ps.candidate_seq = None
+            ps.candidate_state = None
+            ps.epoch = ProjectionStateORM.epoch + 1
+        return owed
+
+    async def drop_candidate(self, graph_id: str, *, build_id: str,
+                             grace_secs: int = config.RETIRE_GRACE_SECS) -> Optional[str]:
+        """Forget build ``build_id`` of ``graph_id``, and make what it was for in place, as the
+        graph would without builds: its key joins ``retired_keys`` due at once (the next retire run
+        drops it), and the graph has no build again. Returns what became of it:
+
+        * ``window`` — the window is written into the serving key, in place: it is marked in flight
+          (``window_rows``), so the next pass writes it rather than ask for another build of it, and
+          its publish clears the mark;
+        * ``rebuild`` — the rebuild is made in place, as its request or the escalation would have
+          made it (:func:`_rebuild_in_place`): the next pass reconciles the serving key from
+          Postgres;
+        * ``load`` — an operator's rebuild of a graph out of FalkorDB: its load is asked for, as
+          the request would have;
+        * ``move`` — the move is made in place to the key it was built in, which becomes the pin,
+          as the request would have made it (:func:`_move_in_place`, retiring the old key after
+          ``grace_secs``): the next pass reconciles it from Postgres, keeping what the build wrote
+          that is right. Its summaries are owed the batch job once the build wrote any there. A
+          graph out of FalkorDB has that key retired at once (the load writes its own) and its load
+          asked for;
+        * ``stayed`` — the move is not made: another graph projects into its key. The key is
+          retired at once (the retire run leaves another's pin), and the last error says so;
+        * ``dropped`` — nothing more to do: the graph is in the trash, where nothing may reseed it,
+          or its key is already being written from Postgres (a reset, a load), or out of FalkorDB
+          after a rebuild the projector started on its own (its next read loads it).
+
+        None, nothing written, when the build is no longer the graph's. Under the graph's lock, as
+        a rebuild's or a move's request takes it."""
+        load = moving = False
+        try:
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)
+                ps = await self._locked_build(s, graph_id, build_id)
+                if ps is None:
+                    return None
+                graph = await s.get(GraphORM, graph_id)
+                state = dict(ps.candidate_state)
+                if state.get("reason") == "window":
+                    ps.window_rows = int(state.get("rows") or 1)
+                    _forget_build(ps)
+                    return "window"
+                if graph is None or graph.deleted_at is not None:
+                    _forget_build(ps)
+                    return "dropped"
+                if state.get("reason") == "move":
+                    moving = True
+                    took, load = await self._move_after_build(s, ps, graph, state, grace_secs)
+                else:
+                    _forget_build(ps)
+                    rebuild = state.get("rebuild") or {}
+                    if ps.status == "idle":
+                        _rebuild_in_place(ps, graph.main_head_commit_seq,
+                                          cause=rebuild.get("cause") or "operator",
+                                          why=rebuild.get("why"))
+                        took = "rebuild"
+                    elif (ps.status in ("evicted", "waiting_capacity")
+                          and rebuild.get("cause") == "operator"):
+                        load, took = True, "load"
+                    else:
+                        took = "dropped"
+        except IntegrityError:
+            if not moving:
+                raise
+            # uq_ps_key: another graph took the move's key as the move committed.
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)
+                ps = await self._locked_build(s, graph_id, build_id)
+                if ps is None:
+                    return None
+                _move_not_made(ps)
+            return "stayed"
+        if load:
+            from .residency import request_load
+            await request_load(graph_id)
+        return took
+
+    async def _move_after_build(self, s, ps, graph, state: Dict[str, object],
+                                grace_secs: int) -> Tuple[str, bool]:
+        """:meth:`drop_candidate` for a move's build, in its transaction: ``("move", out of
+        FalkorDB)`` once made in place, or ``("stayed", False)``."""
+        key, provider = ps.candidate_graph_name, ps.candidate_provider
+        try:
+            await self._claim_projection_key(s, key, provider, exclude_graph_id=ps.graph_id)
+        except ConcurrencyError:
+            _move_not_made(ps)
+            return "stayed", False
+        target = state.get("target") or {}
+        _entry, out = _move_in_place(
+            ps, graph, key=key, provider=provider or config.DEFAULT_FALKOR_PROVIDER,
+            actor=target.get("movedBy"), shard_map=target.get("shardMap"), grace_secs=grace_secs)
+        ps.candidate_graph_name = ps.candidate_provider = None   # the key is the pin now
+        ps.candidate_seq = None
+        ps.candidate_state = None
+        if out:
+            ps.retired_keys = [*ps.retired_keys, {
+                "name": key, "provider": provider, "afterSeq": 0, "build": state.get("id"),
+                "retireAfter": datetime.now(timezone.utc).isoformat()}]
+        if state.get("rollupsStale") or state.get("step") != "queued":
+            # The build carried summaries over leniently or not at all yet, or wrote raw content
+            # its summaries were not moved by: the reseed in place hands them to the batch job.
+            rollup = ps.rollup_state if isinstance(ps.rollup_state, dict) else {}
+            ps.rollup_state = {**rollup, "moved": _now()}
+        return "move", out
 
     async def adopt_projection(self, *, graph_id: str, key: str, actor: str,
                                shard_map: dict) -> Dict[str, object]:
@@ -7752,7 +8458,8 @@ class GraphVersioningService:
         }
 
     async def branch_overlay_delta(self, *, graph_id: str, branch_id: str,
-                                   extend: Optional[Mapping[str, object]] = None) -> Dict[str, object]:
+                                   extend: Optional[Mapping[str, object]] = None,
+                                   root_at: Optional[int] = None) -> Dict[str, object]:
         """The draft's patch set vs **main at the draft's fork point**, **reader-shaped** for a
         read-overlay (:class:`DraftOverlayProvider`): the draft's effective nodes/edges to upsert
         and the before-values of those it removed, PLUS a rewind of any change main took after the
@@ -7783,7 +8490,8 @@ class GraphVersioningService:
         reads no payload, whatever the draft's size or main's advance since it branched.
 
         A fork's ``main`` is read the same way over its root's store: its patch set is
-        :meth:`_fork_overlay_delta`'s, and ``extend`` is one an earlier call returned for it."""
+        :meth:`_fork_overlay_delta`'s, against the root at ``root_at`` (the version the root's key
+        serves; its head when None), and ``extend`` is one an earlier call returned for it."""
         empty = {"nodesUpsert": [], "nodesModified": [], "nodesRemove": [], "edgesUpsert": [],
                  "edgesRemove": [], "nodesNew": []}
         async with self._session() as s:
@@ -7791,7 +8499,7 @@ class GraphVersioningService:
             if branch.kind == "main":
                 graph = await s.get(GraphORM, graph_id)
                 if graph is not None and graph.fork_parent_graph_id:
-                    return await self._fork_overlay_delta(s, graph, branch, extend)
+                    return await self._fork_overlay_delta(s, graph, branch, extend, root_at)
             if getattr(branch, "status", None) == "merged":
                 # Everything the draft changed is IN main now: reading it as main ⊕ its edits
                 # applied them twice — each added child counted again in its parent's count (a
@@ -7851,7 +8559,8 @@ class GraphVersioningService:
                 "edgesUpsert": edges_upsert, "edgesRemove": edges_remove, "nodesNew": nodes_new}
 
     async def _fork_overlay_delta(self, s, fork: GraphORM, main: BranchORM,
-                                  extend: Optional[Mapping[str, object]]) -> Dict[str, object]:
+                                  extend: Optional[Mapping[str, object]],
+                                  root_at: Optional[int] = None) -> Dict[str, object]:
         """A fork's ``main`` as a patch set over its root's store (the graph up its
         ``fork_parent_graph_id`` that is no fork): the fork's value at its head against the root's
         at the root's head (:func:`_fork_patch`), for every entity the two may differ on — the
@@ -7861,12 +8570,17 @@ class GraphVersioningService:
         the fork's value of what it serves (:meth:`overlay_payloads`, through :meth:`_layers` —
         its own, or its parent's at the base).
 
+        ``root_at``: the root's seq its store holds, when not its head — the version the root's key
+        serves while its projection catches up or rebuilds. The patch set is then against the root
+        there, and holds the root's changes between it and the outermost base, either way.
+
         ``since`` says what it is of: the fork's head, the seq each of its layers reads, the root's
-        head. ``extend`` — one an earlier call returned, of the same fork head and bases — is
-        extended by the root's changes since its root head instead of built again."""
+        seq. ``extend`` — one an earlier call returned, of the same fork head and bases — is
+        extended by the root's changes since its root seq instead of built again."""
         layers = await self._layers(s, fork.id, main.id, fork.main_head_commit_seq)
         root_id, root_main, base = layers[-1]
-        root_head = (await s.get(GraphORM, root_id)).main_head_commit_seq
+        root_head = ((await s.get(GraphORM, root_id)).main_head_commit_seq if root_at is None
+                     else root_at)
         since = {"head": main.head_commit_id, "layers": [at for _g, _b, at in layers],
                  "rootHead": root_head}
         prev = (extend or {}).get("since")
@@ -7879,8 +8593,8 @@ class GraphVersioningService:
         ids = set(heads)
         for gid, bid, at in layers[1:-1]:              # each fork between: its own, to its base
             ids |= await self._own_changes(s, gid, bid, at)
-        if root_head > base:
-            ids |= await self._changed_in_window(s, root_id, root_main, base, root_head)
+        if root_head != base:                          # the root's, between its store and the base
+            ids |= await self._changed_in_window(s, root_id, root_main, *sorted((base, root_head)))
         return {**await self._fork_classified(s, layers, ids, root_head, heads), "since": since}
 
     async def _fork_classified(self, s, layers, ids, root_head: int,
@@ -7948,7 +8662,7 @@ class GraphVersioningService:
         total = int(await s.scalar(select(func.count()).select_from(own.subquery())) or 0)
         for gid, bid, at in layers[1:-1]:
             total += await self._own_change_count(s, gid, bid, -1, at, cap)
-        total += await self._own_change_count(s, root_id, root_main, base, root_head, cap)
+        total += await self._own_change_count(s, root_id, root_main, *sorted((base, root_head)), cap)
         _FORK_COUNTS[key] = total
         while len(_FORK_COUNTS) > _FORK_COUNTS_KEPT:
             _FORK_COUNTS.popitem(last=False)
@@ -7960,9 +8674,13 @@ class GraphVersioningService:
         compute it again); how it is read (``reads_from``, :meth:`fork_reads_from`'s answer from
         the count kept per version); its root (graph, ``main``, data source, in the trash or not);
         and the root's store as its ``projection_state`` row says it is now: its committed and
-        projected seqs, its status (``fresh`` by :func:`serves_head`), its pin, and its class and
-        size (what marks a read of it while it is out of FalkorDB, ``residency.mark``). That row is
-        read every time: an eviction moves the store without moving any seq the version holds.
+        projected seqs, its status (``fresh`` by :func:`serves_head`), the version of the root's
+        main its key serves (``serving``, :func:`serving_seq`), whether a window is in flight or a
+        pass failed (``window_rows``, ``last_error``), its pin, and its class and size (what marks
+        a read of it while it is out of FalkorDB, ``residency.mark``). The version and the count
+        are of the fork against its root at the version a fork reads in that key
+        (:func:`fork_serving_seq`), else at the root's head. That row is read every time: an
+        eviction moves the store without moving any seq the version holds.
         With residency on, a person's read holds the root's read lease after this, and its store as
         then read decides instead (``ContextEngine._fork_main_reader``)."""
         async with self._session() as s:
@@ -7974,21 +8692,31 @@ class GraphVersioningService:
             layers = await self._layers(s, graph_id, main_id, graph.main_head_commit_seq)
             root_id, root_main, _base = layers[-1]
             root = await s.get(GraphORM, root_id)
-            n = await self._fork_candidates(s, graph, main_id, config.FORK_REWIND_MAX,
-                                            layers=layers, root_head=root.main_head_commit_seq)
             ps = await s.get(ProjectionStateORM, root_id)
             committed = root.main_head_commit_seq
             projected = ps.projected_commit_seq if ps is not None else 0
             status = ps.status if ps is not None else "idle"
+            await build_policy.resolve()
+            serving = serving_seq(projected, committed, status,
+                                  ps.served_commit_seq if ps is not None else None,
+                                  _read_mode(ps, root).max_lag)
+            window_rows = ps.window_rows if ps is not None else None
+            last_error = ps.last_error if ps is not None else None
+            on_key = fork_serving_seq(serving, serves_head(projected, committed, status), status,
+                                      window_rows, last_error)
+            root_at = committed if on_key is None else on_key
+            n = await self._fork_candidates(s, graph, main_id, config.FORK_REWIND_MAX,
+                                            layers=layers, root_head=root_at)
             return {
                 "main_id": main_id,
-                "version": (branch.head_commit_id, tuple(at for _g, _b, at in layers), committed,
+                "version": (branch.head_commit_id, tuple(at for _g, _b, at in layers), root_at,
                             getattr(branch, "status", None)),
                 "reads_from": "postgres" if n > config.FORK_REWIND_MAX else "overlay",
                 "root_id": root_id, "root_main": root_main,
                 "root_data_source_id": root.data_source_id, "root_trashed": root.deleted_at is not None,
                 "committed": committed, "projected": projected, "status": status,
-                "fresh": serves_head(projected, committed, status),
+                "fresh": serves_head(projected, committed, status), "serving": serving,
+                "window_rows": window_rows, "last_error": last_error,
                 "falkor_provider": ps.falkor_provider if ps is not None else None,
                 "falkor_graph_name": ps.falkor_graph_name if ps is not None else None,
                 "residency": ps.residency if ps is not None else None,
@@ -8097,11 +8825,13 @@ class GraphVersioningService:
                                               known=theirs)
         return await asyncio.to_thread(_fork_patch, ids, ours, theirs, our_urns, their_urns)
 
-    async def overlay_version(self, *, graph_id: str, branch_id: str) -> tuple:
+    async def overlay_version(self, *, graph_id: str, branch_id: str,
+                              root_at: Optional[int] = None) -> tuple:
         """What a draft's :meth:`branch_overlay_delta` depends on: the draft's head and branch point,
         main's head, and the draft's status. Equal versions give equal deltas, so a reader may
         reuse one across requests instead of recomputing it for each. A fork's ``main``'s: its
-        head, the seq each of its layers reads (its bases), its root's head and its status."""
+        head, the seq each of its layers reads (its bases), the root's seq its store is read at
+        (``root_at``: what the root's key serves; else the root's head) and its status."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             graph = await s.get(GraphORM, graph_id)
@@ -8109,7 +8839,8 @@ class GraphVersioningService:
                 layers = await self._layers(s, graph_id, branch_id, graph.main_head_commit_seq)
                 root = await s.get(GraphORM, layers[-1][0])
                 return (branch.head_commit_id, tuple(at for _g, _b, at in layers),
-                        root.main_head_commit_seq, getattr(branch, "status", None))
+                        root.main_head_commit_seq if root_at is None else root_at,
+                        getattr(branch, "status", None))
             return (branch.head_commit_id, branch.base_commit_seq,
                     getattr(graph, "main_head_commit_seq", None), getattr(branch, "status", None))
 
@@ -12881,6 +13612,42 @@ class GraphVersioningService:
                 for chunk in _chunks(ids, _IN_LIST_MAX):   # one array a chunk (see _values_at)
                     cand.update((await s.execute(stmt.distinct(), {"ids": list(chunk)})).scalars().all())
         return cand
+
+    async def _some_incident_edge_ids(
+        self, s, graph_id: str, branch_id: str, node_ids, *, side: str = "source",
+        edge_types: Optional[Collection[str]] = None, per_node: int = 256,
+    ) -> Dict[str, List[str]]:
+        """At most ``per_node`` edge version rows for each of *node_ids* on ``side``, in each
+        layer :meth:`_incident_edge_ids` reads. They come through the same index, one LIMIT per
+        node (a LATERAL join). Returns each node's rows as their edge ids, one per row, so an edge
+        with several versions appears several times. A node with fewer than ``per_node`` rows has
+        every edge it ever had here; one with as many may have more.
+
+        This is for a question one live edge answers, such as whether a node holds a child. A
+        container with 500,000 children then costs ``per_node`` rows, not all of its edges'."""
+        ids = list(node_ids)
+        out: Dict[str, List[str]] = {}
+        if not ids:
+            return out
+        main_id = await self._main_branch_id(s, graph_id)
+        layers = [(graph_id, [main_id] if branch_id == main_id else [main_id, branch_id])]
+        layers += [(gid, [bid]) for gid, bid, _at in (await self._layers(s, graph_id, main_id, 0))[1:]]
+        col = {"source": EdgeVersionORM.source_entity_id,
+               "target": EdgeVersionORM.target_entity_id}[side]
+        node = func.unnest(bindparam("ids", type_=ARRAY(Text))).table_valued("id").render_derived()
+        for gid, branches in layers:
+            some = select(EdgeVersionORM.entity_id).where(
+                EdgeVersionORM.graph_id == gid, EdgeVersionORM.branch_id.in_(branches),
+                col == node.c.id)
+            if edge_types is not None:
+                some = some.where(or_(func.upper(EdgeVersionORM.edge_type).in_(list(edge_types)),
+                                      EdgeVersionORM.edge_type.is_(None)))
+            some = some.limit(per_node).lateral()
+            stmt = select(node.c.id, some.c.entity_id).select_from(node).join(some, true())
+            for chunk in _chunks(ids, _IN_LIST_MAX):
+                for nid, eid in (await s.execute(stmt, {"ids": list(chunk)})).all():
+                    out.setdefault(nid, []).append(eid)
+        return out
 
     async def _incident_live_edges(
         self, s, graph_id: str, branch_id: str, node_ids, as_of_seq: Optional[int] = None,

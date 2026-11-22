@@ -90,6 +90,135 @@ integration's many small changes as a few commits.
 
 ### Added
 
+- **Read modes: what a graph's readers get while a new version lands.** A system administrator
+  chooses for the platform, and workspace administrators for a workspace or a graph within the
+  modes the platform allows (Admin → Versioned graphs, a workspace's **Versioned graphs** tab, a
+  graph's settings; below):
+  - **Always the latest** (the default, as reads have always worked): the newest published version
+    at once, read from Postgres until FalkorDB holds it.
+  - **Keep serving, update in place**: the version FalkorDB last finished, at full speed, while the
+    next is written into the same key, paced; readers may see part of it before the rest.
+  - **Keep serving, switch when ready**: exactly that version, while a large change is built in a
+    second key, checked, then switched to in one step. The key is a copy of the serving one when its
+    node has room, else it is seeded from Postgres on the node with most room, the serving key's
+    lineage summaries carried over (**How a build makes its key**: auto, copy only, or seed from
+    Postgres). While it runs, a copy holds the new key and its own buffer, each about the graph's
+    size (**Room a copy needs**, ×2.2 by default); a seed holds about the graph once. A copy's or a
+    seed's room is reserved on its node while it is written, so builds and
+    loads never take the same room, and every step resumes after a restart. It needs a key the
+    platform owns and **New-version builds** on (Admin → Features).
+
+  The watermark, the sync chip and the admin inventory say which mode applies, where it was set, and
+  while a build is under way, its step ("Showing #5 · building #6"). Each change is recorded in the
+  activity log, with the settings' other changes (below).
+- **New-version builds settings.** A system administrator sets, live, under Admin → Versioned
+  graphs → Settings (Updates & loading, New-version builds and Database reads), how the projector
+  paces its writes (the longest write statement, the target each aims at, the pause after each,
+  and a longer one while reads wait) and the limits on reads from Postgres (a statement limit, and
+  reads at once per graph and per process), with the room and lifecycle values the coming builds of
+  a graph's next version in a second key will use. Each value shows the one in force, where it came
+  from and its default; a value the server refuses is named, with why (`422 invalid_settings`). The
+  builds themselves are behind **New-version builds** (Admin → Features, experimental, off).
+- **Rebuilds and moves built beside the key that serves, for graphs read Keep serving, switch when
+  ready.** With **Rebuilds and moves too** on (a New-version builds setting, on by default, which
+  nothing read until now), an operator's rebuild, a rebuild the projector starts on its own and an
+  administrator's move of such a graph are built in a new key seeded from Postgres, while readers
+  keep exactly the version they have, then switched to in one step:
+  - **A rebuild** seeds the newest version and carries over what it can of the lineage summaries,
+    which the batch job then rebuilds. The rebuild's answer says so (`beside`), and Data health
+    follows it to its switch.
+  - **A move** seeds its new key on its new provider at the version served, its summaries carried
+    over exactly, and nothing retires until the switch. The same move again answers with its build,
+    and a move back to where the graph is cancels it (recorded as
+    `platform.versioning.projection_move_cancelled`). A rebuild the move carried goes on, and a key
+    the cancelled move went back to keeps retiring as it was.
+  - A build that cannot finish, and a graph where it does not apply (another read mode, the setting
+    or New-version builds off, a customer's key, a graph that serves no version yet, a move from a
+    key part way through a change), is rebuilt or moved in place exactly as before. So is a rebuild
+    the projector starts on its own when there is no room for its seed: it never waits. The admin
+    inventory says what each build is for ("Rebuilding beside", "Moving to `<key>`").
+  - The poll takes builds for at most half the graphs it takes, and a build backing off only once
+    its backoff has passed, so builds waiting for room or a slot never hold up graphs that lag.
+  - **Keep the previous copy for** (`updates.retireGraceSecs`) is at least 11 minutes. A data source
+    versioned within the last 10 minutes may still read its own key, which must outlive that.
+- **Admin → Versioned graphs: every versioned graph, and every setting they read, in one place.**
+  The settings were spread over Admin → Infrastructure, a workspace's page and a data source's
+  Versioning tab, each with its own way of saving. Now:
+  - **Overview** says where things stand in a sentence, counts the graphs (in memory, unloaded,
+    loading or waiting for room, building a new version, failing, with settings of their own), and
+    lists **Every versioned graph**, moved here from Admin → Infrastructure. Each row says what its
+    readers get and its class, opens its settings (**Settings…**), and has a menu: **Rebuild…**,
+    **Check sync**, **Load now**, **Move…**, **Adopt…**, **Open data source**. **Reseed a
+    provider…** sits above the list.
+  - **Settings** holds every platform setting in seven categories: Reads & consistency, Updates &
+    loading, New-version builds, Memory & residency, Database reads, Drafts & history and Imports.
+    Each shows the value in force and where it came from (Default → Platform → Workspace → Graph),
+    why it differs from the one chosen, what it means, what raising or lowering it changes, when to
+    change it, and what we recommend. Search them with **/**, or show only those changed.
+  - **One way to save**, everywhere: a change is staged; **Review changes** shows each value before
+    and after, what it does to your graphs and any warning to acknowledge, and asks why; **Save**
+    saves it, and **Undo** puts it back.
+  - **History** lists every change: who made it, when, why, and each value from and to. **Put
+    back…** undoes one.
+- **A graph's settings, beside where it is worked on.** **Settings…** on its row in Admin →
+  Versioned graphs, and **Open settings** on its data source's Versioning tab, open a drawer with
+  each setting a graph can have, its value in force and why, and the same review and save. The
+  Versioning tab's **Settings** card shows what readers get, the residency class, what imports
+  match by, the replace guard and the draft levels, each with where it came from; it replaces the
+  tab's drafts and imports settings. A fork's settings are its root's, and say so.
+- **A workspace's Versioned graphs tab**: **Defaults** for the workspace's graphs, within the
+  platform's limits; **Graphs**, what each graph sets itself; **History**, for workspace admins.
+  The drafts and reviews policy moved here from the workspace's page.
+- **Settings for the platform, a workspace or a graph, within the platform's limits.** Each value
+  resolves graph → workspace → platform → the deployment's environment → the built-in default, and
+  a fork follows its root. System administrators set the platform's, and may limit what workspace
+  administrators choose: the allowed choices, a range, or a lock. A value a system administrator
+  sets outside them stays in force, marked as an exception, so tightening a limit never changes a
+  graph unseen. The settings that spend the graph store's memory or the database's capacity stay
+  system administrators', at every level. Seven environment variables became settings an
+  administrator sets live: how far behind a copy may serve, when idle drafts close, forks per
+  graph, the trash window, the replace guard, the refused rows an import may skip, and matching
+  properties per graph.
+  - The settings API: `GET`, `PATCH /api/v1/admin/versioning/settings` (the platform's),
+    `/api/v1/{ws}/versioning/settings` (a workspace's) and `…/versioning/graphs/{gid}/settings` (a
+    graph's), each with `/preview`, `/history` and a revert, and the registry at
+    `GET /api/v1/settings/versioned-graphs/schema`. A save is all or nothing, each value checked
+    against the version read (409 `settings_conflict`); refused values are named
+    (422 `invalid_settings`, 403 `setting_not_permitted`); a fork answers 409 `follows_root`.
+  - Each save is one activity event: `platform.versioning.settings_updated`,
+    `workspace.versioning.settings_updated` or `workspace.versioning.graph_settings_updated`.
+  - `docs/RBAC.md` has who may set what, where.
+- **The review rules are settings too.** **Approvals a review needs** (everyone asked, or a set
+  number) and **Open threads hold the merge** sit under Drafts & history with the rest of the drafts
+  and reviews policy: for a workspace or a graph as before, and now for the whole platform, where a
+  system administrator can also lock either one.
+- **Profiles: starting points for one outcome.** Balanced, Fastest reads, Always exact, Least
+  memory and Big import tonight each set the settings they cover. Applying one stages its values at
+  the level you are editing, only those you may set there, and says which it left out and why;
+  nothing is saved until you review and save.
+- **Set up with a guide.** A few plain questions, then the usual review: what matters most (the
+  profiles, offered by their goals, each showing what it would stage), what people see while new
+  data loads, whether graphs stay in memory, and who approves and publishes drafts, how long closed
+  drafts keep their changes and the replace guard. It stages through the page, so the save bar
+  counts what it stages and nothing is saved before the review; it never turns a feature switch,
+  which saves at once. Closed with choices staged, it keeps them for **Continue setup**, or puts
+  back what was staged before. A save ends on what was saved, how many graphs behave differently
+  and where, with **Undo** for ten seconds. It is on the Settings page, the Overview and an empty
+  History for system administrators, and on a workspace's **Versioned graphs** tab for its
+  administrators; a first visit in the Business view points at it once. Each profile's goal comes
+  from the settings registry, and the generated guide lists it.
+- **Signals: what actually happened.** The settings' **Something's wrong?** finder counts, over the
+  last day, the builds that waited for room, copies that timed out, builds dropped, reads asked to
+  retry or served from the database while a graph caught up, graphs unloaded because memory ran
+  short, loads that waited for room, replaces the guard stopped or stopped early, idle drafts closed
+  and closed drafts' changes removed, each beside the problem it answers and the settings behind
+  it.
+- **Docs: [Versioned Graph Settings](/guide/versioned-graph-settings)**, every setting explained
+  once: its facts, what it means, what it changes, when to change it, what we recommend, an
+  example and the measured evidence, with the profiles, the signals, a glossary, what the
+  deployment sets and a map of the old endpoints. It is generated from the settings registry in the
+  code, which also writes the app's catalogue, and CI fails when either is out of date. The
+  versioning chapters now link to it rather than restate a setting.
 - **Replaces keyed by your own id handle the rows that don't carry it.** A source that keys rows by
   its own id (`identifier=prop.MY_UNIQUE_ID`) often has rows without it, such as a top-level
   container. It also meets graphs first loaded by urn (or made in the app), whose nodes never had
@@ -105,9 +234,10 @@ integration's many small changes as a few commits.
     (`--identifier`), and the import dialog ("Rows without it: find them by their urn").
   - **`replaceScope=keyed` deletes only what holds the property.** It applies to replaces with a
     property identifier: the nodes holding it, and the edges whose two ends both hold it. Nodes
-    made in the app or by another source are left alone, with their edges. It is on
-    `POST …/imports`, an upload's `complete`, the connector (`--replace-scope keyed`), and the
-    import dialog ("Delete only items that have this property").
+    made in the app or by another source are left alone, with their edges, except an edge to a node
+    the replace deletes, which goes with that node. It is on `POST …/imports`, an upload's
+    `complete`, the connector (`--replace-scope keyed`), and the import dialog ("Delete only items
+    that have this property").
   - **Refused rows say the one change that fixes them.** A held replace by a property alone counts
     the rows `prop.<name>,urn` would find by their urn (`summary.refused.hints.by_urn`): rows without
     the property, and rows whose urn is an item's that has none yet. Its message says to send it,
@@ -204,10 +334,13 @@ integration's many small changes as a few commits.
     staged rows instead of 330 MB, 206 MB of WAL instead of 513 MB; the same draft and tallies.
 - **A publish or merge says the revision of the published graph that holds it.**
   - `POST …/branches/{id}/publish`, `POST /merge-requests/{id}/merge` and `POST /pulls/{id}/merge`
-    answer `{commitId, revisionId, status: "completed"}`. `revisionId` is the `commitSeq` of the
-    commit on `main`, which `?asOfSeq` and `GET …/revisions/{seq}` read `main` as of.
+    answer `{outcome, commitId, revisionId, status: "completed"}`. `revisionId` is the `commitSeq`
+    of the commit on `main`, which `?asOfSeq` and `GET …/revisions/{seq}` read `main` as of.
+    `outcome` is `published`, or `unchanged` when nothing was committed: `commitId` and `revisionId`
+    are then `main`'s head (below, under Changed).
   - One large enough to run as a job answers `202` with a `statusUrl`. The job
-    (`GET …/publish-jobs/{jobId}`) has `commitId` and `revisionId` once it is `completed`.
+    (`GET …/publish-jobs/{jobId}`) has `outcome`, `commitId` and `revisionId` once it is
+    `completed`.
   - An import that publishes itself (`autoPublish`) gets the same from the job that
     `summary.publish.jobId` names. The reference connector reports it.
 - **Draft retention: a merged or abandoned draft's changes are removed after 30 days.**
@@ -215,9 +348,11 @@ integration's many small changes as a few commits.
     the published graph, which the publish copied them to, so main's history, credits and reverts are
     unaffected. As with a squash-merged Git branch, the draft's intermediate commits stay listed but
     no longer have content.
-  - System administrators set the window live, from 0 (keep for good) to 3650 days, under Admin →
-    Infrastructure → Versioned graphs → Draft retention (`GET/PUT /admin/versioning/draft-retention`).
-    The default is `GRAPHVER_DRAFT_RETENTION_DAYS`. A window that removes more asks first.
+  - System administrators set the window live for the platform, and workspace administrators for
+    their workspace: **Keep closed drafts' changes for**, in Admin → Versioned graphs → Settings →
+    Drafts & history or the workspace's **Versioned graphs** tab, from 1 to 3650 days or for good.
+    The default is `GRAPHVER_DRAFT_RETENTION_DAYS`. A change after which the next sweep would remove
+    drafts' changes must be acknowledged first.
   - The versioning worker removes drafts in windows during its hourly sweep, for at most 5 minutes a
     sweep. A draft with an open review or a running job is kept, and so are drafts of a deleted or
     frozen graph.
@@ -274,9 +409,10 @@ integration's many small changes as a few commits.
   - The job's `summary.replaceGuard` says what it would have done and the limits in force; the
     message says to check the identifier, or to send `allowMassDelete=true`, which deletes all the
     same (anyone who may run the import may send it).
-  - A whole-graph replace whose first full window finds an entity for fewer than 5% of its rows stops
-    there, with `identifier_matched_nothing`, instead of reading the rest of the file first, unless
-    it was sent with `allowMassDelete=true`.
+  - A whole-graph replace whose first node window, whatever its size, finds an entity for fewer
+    than 5% of its rows, in a graph of at least 1,000 entities, stops there, with
+    `identifier_matched_nothing`, instead of reading the rest of the file first, unless it was sent
+    with `allowMassDelete=true`.
   - The operator sets the limits: `IMPORT_REPLACE_GUARD` (on), `IMPORT_REPLACE_GUARD_MIN_LIVE`
     (1000), `IMPORT_REPLACE_GUARD_DELETE_FRACTION` and `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5),
     `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05); Helm `config.imports`. A workspace admin may set a
@@ -314,12 +450,14 @@ integration's many small changes as a few commits.
   - a draft of any size pulls: past 200,000 changes ("Pull latest" too), reading only the
     entities main changed as well, never the whole draft.
   Before, any import whose data source was published to meanwhile stopped at `not_up_to_date`.
-- **A graph's own import settings.** A workspace admin sets, on the data source's Versioning tab
-  (**Imports**), what its imports' rows are matched by when an import names no `identifier`, and the
-  replace guard's limits, each over the platform's:
+- **A graph's own import settings.** A workspace admin sets, in the data source's settings
+  (**Open settings** on its Versioning tab, under **Imports**), what its imports' rows are matched by
+  when an import names no `identifier`, and the replace guard's limits, each over the workspace's
+  and the platform's:
   - `GET …/graphs/{gid}/import-settings` (an API key may read it) says what holds and where each
     comes from, and lists the properties its imports match by, with how far each index is caught
-    up; `PUT` sets them (`"inherit"` goes back to the platform's), recorded in the activity log.
+    up; `PUT` sets them (`"inherit"` goes back to the workspace's or the platform's), recorded in
+    the activity log. Both are deprecated now, for the graph's settings (above).
   - An import resolves them when it is made and keeps them (`importSettings` on the job), so a
     resumed job runs under what it started with. A fork's are its parent's, but a fork can't
     match by a property yet: where the default is a `prop.<name>`, a fork's imports match by
@@ -330,9 +468,9 @@ integration's many small changes as a few commits.
     graph's default, and says when a property is indexed first.
 - **Every refused import row carries a code** beside its reasons, in the preview and the dry run:
   `no_key`, `two_entities`, `duplicate_value`, `changed_since_export`, `named_already`,
-  `invalid_type`, `missing_type`, `end_not_found`, `edge_moved`, `write_refused`, `invalid_row`
-  (and `already_gone` for a delete with nothing to delete). A client acts on the code instead of
-  parsing the words.
+  `invalid_type`, `missing_type`, `end_not_found`, `end_refused`, `edge_moved`, `write_refused`,
+  `invalid_row` (and `already_gone` for a delete with nothing to delete). A client acts on the code
+  instead of parsing the words.
 - **Projection metrics** on the versioning worker's scrape endpoint (`:9100/metrics`):
   - `graphver_projection_passes_total{outcome}`;
   - per-statement durations and splits;
@@ -342,6 +480,72 @@ integration's many small changes as a few commits.
 
 ### Changed
 
+- **`defaultResidency` is now the class every graph inherits.** The residency policy's
+  `defaultResidency` was the class a new graph got. It is now the platform's **Residency class**:
+  a graph with no class of its own takes its workspace's, else the platform's, and follows a change
+  to either. A residency policy `PUT` that changes it is refused (422 `invalid_residency_policy`,
+  field `defaultResidency`); sent back unchanged, as a client that echoes the whole policy sends it,
+  it passes. Set it in Admin → Versioned graphs → Settings → Memory & residency. Each graph's class
+  in force stays on its row (`projection_state.residency`), where the evictor reads it: a save
+  writes it, and each capacity pass puts it back in step before it plans.
+- **An environment value outside its setting's range is held to the range, and says so.** The
+  nearest end of the range is in force, the setting shows why (`env_out_of_range`), and the API and
+  the versioning worker log a warning naming the variable at start-up. A value the setting can't
+  take at all (`GRAPHVER_READ_MODE=fastest`) is logged too, and the built-in default applies
+  (`invalid_env`). So `GRAPHVER_DRAFT_TTL_DAYS=0`, which closed every idle draft at the next sweep,
+  is now held to 1 day; set **Close idle drafts after** to **Forever** instead.
+- **A feature switch reaches every server within about two seconds**, where it took up to 30. Each
+  process asks Redis at most every two seconds whether a save moved the switches' generation
+  (`features:gen`), and reads them again every 30 seconds without Redis. A saved setting reaches
+  every process the same way (`settings:gen:versioned-graphs`).
+- **A workspace's read mode reaches its graphs' reads.** Every reader of the read mode resolves it
+  for the graph, graph → workspace → platform, from its process's settings, with no query on a read.
+  A save of it moves the routes of the graphs it reaches, so the next read goes by it.
+- **Keep serving, switch when ready writes in place while New-version builds is off, and says so.**
+  It was reported as the mode in force, and held what the projector writes inside a request to the
+  build threshold, while every change was in fact written in place. Now the mode in force is Keep
+  serving, update in place, while the switch is off (`builds_off`) and on a connected graph, whose
+  copy is its owner's (`connected_graph`). The watermark and the sync status carry `readMode` (in force),
+  `readModeDeclared`, `readModeSource` and `readModeWhy`, and the inventory `readModeEffective`,
+  which it filters by.
+- **A settings save must acknowledge some warnings.** One that removes what can't be brought back
+  (the changes of the closed drafts the next sweep would remove, `drafts_removed`), or moves a
+  high-risk setting the riskier way (`risky_change`), is refused with 409
+  `acknowledgement_required`, naming each warning, unless the request lists their codes in
+  `acknowledge`. The review asks you to acknowledge each before it saves.
+- **Reads of a versioned graph no longer ask Postgres where to go.** Each read looked up its
+  graph, main branch, pin and watermark: five checkouts of the route pool and about eight
+  statements, so Postgres' load grew with every reader. With 200 readers of a graph of 1M nodes and
+  2M edges, CI's Postgres ran out of connections. Each process now keeps a graph's route and reads
+  it again, in one query, only once a write has moved it, which a write says in Redis as its commit
+  returns. A read checks that in one round trip. "Always the latest" stays exact: a read that starts
+  after a publish has returned reads the new version, in any pod.
+  - A write that couldn't tell Redis (or one made outside the app) is seen within
+    `GRAPHVER_ROUTE_CACHE_SECS` (5 s). `0` turns the cache off.
+  - A reader that can't reach Redis routes from Postgres, as before.
+  - An eviction drops its key only once readers have been told. Otherwise the graph stays as it was.
+  - Measured with it in CI: 200 readers of that graph, as 10 processes of 20, read 2.28 million
+    times with no read failing, in every read mode that landed.
+  - Watch `graphver_route_cache_total{outcome}` and `graphver_route_announce_failed_total`.
+  - `docs/SCALING_CONCURRENT_USERS.md` §4.9 has the cost per read, and §4.1 now counts the route
+    pool (3 + 2 per process) against `max_connections`.
+- **A moved graph keeps its previous key for Keep the previous copy for.** The setting
+  (`updates.retireGraceSecs`) said it applied to moves, but a move kept the key for
+  `GRAPHVER_RETIRE_GRACE_SECS`, the setting's default; a move now takes the setting in force, as a
+  build's switch does.
+- **A large change is written in place for a graph that must keep its key.** A build switches
+  readers to a new key: for a data source whose lineage summaries live in a graph named from its key
+  (dedicated mode), the summaries were left behind, and readers of the new key found none until a
+  rebuild; for a key other data sources read, they went on reading one nobody writes. Such a graph,
+  or one where that can't be read, now has a large change written in place, and is rebuilt in place.
+- **The projector's poll takes builds first**, and takes up a graph that is building whether or not it
+  is behind, so a rebuild or a move of a graph that is caught up moves on without a nudge.
+- **The projector holds a page at a time from 100,000 rows or entities.** A publish window of more
+  than 100,000 version rows (was 200,000) is written a page at a time, and a full reconcile (a
+  first seed, a rebuild, a heal, a build's seed) of more than 100,000 live entities (was 500,000)
+  compares a page of each side at a time. Held whole, a rebuild of 100,000 nodes and 100,000 edges
+  peaked at 667 MB in the versioning-scale run, and a rebuild just under the old threshold would
+  have held about 1.4 GB; a page at a time holds about 230 MB at any size.
 - **A replace never deletes what its file names.**
   - **Refused rows.** A refused row used to protect only the entity it had matched, so a replace
     sent on with `maxRefusedRows` deleted the node a `no_key` row named by its urn, and edge rows
@@ -406,6 +610,8 @@ integration's many small changes as a few commits.
   - Postgres serves main only while FalkorDB holds no version of it: a graph just enabled, moved to
     another key, or unloaded.
   - The watermark and sync status report `served` and `servedRevision`: the version reads show.
+  - This is what the read modes that keep serving do. Always the latest, the default (above), reads
+    the newest version from Postgres meanwhile, as reads always have.
 - **An imported node keeps the urn its file gives it.** It was stored under the id derived from
   the urn, which became its urn too, so exports and search showed a `urn:uuid` instead of the
   source's name. Its id is still derived from the urn, so a re-import finds it the same way. A node
@@ -445,8 +651,98 @@ integration's many small changes as a few commits.
   passes (`GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS`; `0` = every pass). It always runs on a full
   seed, a dropped write, or after a verify that healed or failed.
 
+### Deprecated
+
+- **The old settings endpoints**, for the settings API:
+  - `GET`, `PUT /api/v1/admin/versioning/build-policy`, `…/residency-policy` and
+    `…/draft-retention`, and `POST /api/v1/admin/versioning/residency-policy/preview`;
+  - `PUT /api/v1/admin/versioning/graphs/{gid}/read-mode`;
+  - `GET`, `PUT /api/v1/{ws}/versioning/drafts-policy` and `…/data-sources/{ds}/drafts-policy`;
+  - `GET`, `PUT /api/v1/{ws}/versioning/graphs/{gid}/import-settings`.
+
+  They keep working for one more release, saving through the settings store, so their changes show
+  in the history with everyone else's. Every answer says it is deprecated: `Deprecation: true`, and
+  a `Link` header naming the route that replaces it (`rel="successor-version"`). The guide's "If
+  you used the old endpoints" maps each one.
+
 ### Fixed
 
+- **Every wizard reads at AA contrast and fits a phone** (a view, a workspace, a data source and
+  the others built on the same frame): Next and Save are a darker indigo, completed steps a darker
+  green, the step line under the title is easier to read, and on a phone the paddings shrink and
+  the steps no longer push Back, Cancel and Next off a short screen.
+- **The upgrade no longer stops on a database stamped `20261112_1700_gv_ps_served`.** An image
+  built from this work on the morning of 12 November stamped that id. The served column's
+  migration was then renumbered to `20261112_1800_gv_ps_served`, with
+  `20261112_1700_gv_ps_pressure` put before it, so every later image refused the database
+  ("alembic_version records '20261112_1700_gv_ps_served', which this image's migration chain does
+  not contain"). `alembic/env.py` now resumes such a database from `20261112_1600_import_settings`:
+  the upgrade adds the pressure column it lacks and finds the served one already there.
+- **The upgrade waits out the running release's locks instead of failing.** Each migration that
+  alters a table the release reads waits at most 5 s for its lock, and gave up whenever a publish
+  or an import held the table longer: the upgrade Job exited 1 with `LockNotAvailable`, and every
+  service waited on it. `synodic-upgrade upgrade` now runs such a migration again, after pauses
+  that let the release's queries through, for up to 180 s (`--lock-retry-secs`). Each time it logs
+  the transactions open longer than the wait.
+- **Rebuilding or seeding a graph with a very large container no longer stalls.** For a node
+  with hundreds of thousands of relationships, FalkorDB walked all of them on every lookup of one.
+  In the 1M nodes + 2M edges scale run, a root with 500,000 children made the lookups run out of
+  their budget, and the rebuild ran for more than four hours without finishing. That held whether
+  the ends were written in one pattern or each in a MATCH clause of its own. Every lookup or delete
+  of a relationship now finds both ends first, and a `WITH` binds them before the relationship is
+  matched between them. This covers rebuilds, reseeds, builds' seeds, window deletes, and the
+  lineage summaries' reads and deletes. Measured on FalkorDB 4.18.11, from a node with 200,000
+  children, a row now costs 0.009 ms where it cost 71 ms, as from a node with one relationship.
+- **A rebuild never holds a hub's relationships whole.** It read what FalkorDB holds 20,000
+  source nodes at a time, so a page holding a node with 500,000 children came back as one result,
+  about 353 MB in the projector before its lookup in Postgres. Each page is now read 50,000
+  relationships at a time.
+- **A window under a large container reads a few of its children, not all of them.** The lineage
+  summaries ask whether each end of a containment change, and of lineage, holds a live child. They
+  read every child's edge to find out, twice a window: 500,000 rows from Postgres for a container
+  of 500,000 children. They now read at most 256 of each node's, and read the rest only when none
+  of those is live.
+- **The relationship drawer reads a hub's relationship directly.** Reading the relationships
+  between a few known entities bound both ends, but in the same query part, so FalkorDB still
+  walked every relationship of the source: 61 ms a call from a node with 200,000 children. A
+  `WITH` now binds the ends first: 0.27 ms.
+- **A graph switched to a new key gets its lineage summaries.** The summaries job asked for at the
+  same commit as an earlier one was answered with that job, which had written the old key, so the
+  new key never got them — after a build's switch, and after a move in place. The ask now names the
+  key. What a switch owes the job is recorded with the switch, so it is asked for again should the
+  pod stop right after.
+- **Residency no longer counts a building graph as room it can free.** The evictor leaves a graph
+  alone while it builds a new version beside its key, but the capacity plan counted its memory as
+  freeable.
+- **Lineage summaries the projector keeps between batch runs stay the job's cells.** A node whose urn
+  changed kept its summary cells keyed by the old urn, so the next summaries job made a second cell
+  beside each; a retyped node's cells kept their old level stamps; a key whose summaries regime
+  could not be read had a cube key's cells moved as if it were a boundary key's; a graph with
+  lineage but no containment types got a cell per lineage edge that the job never stores; and
+  lineage ending on a container (table to table) missed the job's cell at the container's own
+  level, landing one level up or not at all. Each now matches what the job makes, or hands the
+  window's cells to it.
+- **Reads stay up while a large import lands.** A large import on a large graph could stop its
+  reads, and others', for as long as the graph store took to catch up:
+  - **Reads of a graph from Postgres can't take the platform down.** A graph the graph store held no
+    version of was read from Postgres, the whole graph per read, with no limit: a few such reads
+    held every database connection, and every versioned graph in the process answered 503. Each
+    read now holds a place among a bounded number per graph and per process (past them, `429`) and
+    is cut off past a statement limit (`503 graph_read_busy`, retryable); the lookups that route
+    reads run on a small pool of their own; and a FalkorDB that can't be reached fails only the
+    reads that need it.
+  - **A graph that serves a version keeps serving it.** A graph published before this release had
+    no record of the version its key holds, so its first rebuild sent its reads to Postgres for the
+    whole rebuild; the record is now filled, and restored from the key when missing. A replay that
+    would have reloaded such a graph into a fresh key reconciles it in place. Eviction leaves alone
+    a graph whose large window is half written, and keeps room for the rest of it. A fork reads its
+    root's key at the version the key holds whole, instead of from Postgres whenever the root had
+    published since.
+  - **The projector's writes yield to reads.** No projector write runs longer than 10 seconds on
+    any FalkorDB mode (a minute on a standalone or Sentinel one before); each aims at half a second;
+    and after each the projector pauses a quarter of what it took, twice what it took while reads on
+    that node are starving. Readers whose deadlines run out while it writes are told to retry, not
+    that the node is failing over.
 - **An import's publish job that found its draft merged with no commit of its own completes.** When
   the draft merged under the job's pull (an earlier attempt published it) and that publish
   committed nothing, the job read the empty answer as "not merged" and failed with a refusal.
@@ -590,6 +886,47 @@ integration's many small changes as a few commits.
 
 ### Upgrading
 
+- **Migrations `20261116_1000_setting_values` and `20261116_1100_settings_import`** create the
+  settings store (`setting_values`, `setting_changes`, `settings_imports`; new tables only) and copy
+  every saved setting into it, keeping who saved it and when: New-version builds, the residency
+  policy, draft retention, the drafts and reviews policies, data sources' import settings, and each
+  graph's own read mode and class. The copy is idempotent, reads the old storage only, and waits at
+  most five seconds for a lock. With a separate `GRAPHVER_DB_URL`, the versioning worker copies the
+  graphs' values at start-up, once.
+- **Rolling back.** For one release, every save writes the old storage too, so the previous image
+  runs as configured, but for what the old storage has no place for: a workspace's values other
+  than its drafts and reviews policy, the platform's values of the settings that were
+  environment-only, a graph's values of those, and the platform's limits. Rolled forward again, take
+  in what was changed through the old endpoints meanwhile:
+  `python -m backend.app.services.settings legacy-diff --adopt`. `docs/MIGRATIONS.md` has the
+  details.
+- **Migrations `20261119_1600_merge_settings` and `20261119_1700_review_rules_store`** join the
+  settings store's two revisions to `main`'s chain (the merge runs nothing), then copy each
+  workspace's and data source's review rules (`review_required_approvals`, `review_threads_hold`)
+  into the store once, as the import above copies the rest: an old 0 approvals is "everyone asked",
+  and the old columns are written for one release too. `20261122_1300_merge_rules_store` joins
+  that line to `main`'s newer head, `20261122_1200_gv_job_notices`, and runs nothing.
+- **Migrations `20261113_1000_gv_ps_served_fill`, `20261113_1100_build_policy`,
+  `20261113_1200_gv_ps_window_rows`, `20261113_1300_gv_ps_read_mode` and
+  `20261113_1400_gv_ps_candidate`** fill `projection_state.served_commit_seq` where a graph's key
+  holds a published version, and add `platform_settings.gv_build_policy` and `projection_state`'s
+  `window_rows`, `read_mode` and build columns (nullable; start-up adds them to a separate
+  `GRAPHVER_DB_URL`).
+- **The read mode defaults to Always the latest** (`GRAPHVER_READ_MODE=latest`): a graph behind
+  its head is read from Postgres until FalkorDB holds the newest version, as reads have always
+  worked. To keep serving the last finished version while a graph catches up, choose **Keep
+  serving, update in place** for the platform, a workspace or the graphs that need it.
+- **Each web process opens up to five more graphver connections**, for routing reads
+  (`GRAPHVER_ROUTE_POOL_SIZE` 3, `GRAPHVER_ROUTE_POOL_MAX_OVERFLOW` 2): count them toward Postgres'
+  `max_connections`.
+- **A reconcile of a graph of 100,000 to 500,000 live entities that changes anything hands its
+  lineage summaries to the aggregation job**, as larger graphs' always have, instead of moving them
+  itself. `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE=500000` and
+  `GRAPHVER_PROJECTION_PAGED_ABOVE=200000` restore the old thresholds, at the memory above.
+  `GRAPHVER_PROJECTION_CANDIDATE_ABOVE` (New-version builds) keeps its default of 200,000.
+- **Keep `GRAPHVER_READ_MAX_LAG` at `-1`** (the default), the default of **Most versions
+  behind**. It caps how far behind a graph that reads in place or beside may be served; a graph
+  that should always show the newest version chooses Always the latest instead.
 - **Migration `20261113_0900_gv_import_mentions`** adds `graphver.import_mentions`, an empty table
   (`create_schema_and_partitions` makes it for a separate `GRAPHVER_DB_URL`). Without it, a replace
   keeps only what its rows matched, as before.
@@ -607,7 +944,8 @@ integration's many small changes as a few commits.
   `published` once its publish job ends (it stayed `queued`), so a client that followed the job
   when it read `queued` keeps working, and one that reads the import later finds the end there.
 
-- **Reads of a graph being updated show the version before the update until it is written.** A
+- **Reads of a graph being updated show the version before the update until it is written**, in
+  the read modes that keep serving (Always the latest, the default, reads the newest version). A
   client that reads its own change right after publishing it should poll
   `GET …/graphs/{gid}/watermark` until `served` reaches the `revisionId` its publish returned.
   `GRAPHVER_READ_MAX_LAG=0` restores the strict rule (the head only; reads go to Postgres while the
@@ -665,10 +1003,11 @@ integration's many small changes as a few commits.
   `versioningWorker.transfer.resources`).
 - **Draft retention is on by default.** In the first sweeps after the upgrade, every draft merged or
   abandoned more than 30 days ago loses its changes; each keeps its record. To keep them, set
-  `GRAPHVER_DRAFT_RETENTION_DAYS=0` before upgrading (or a longer window), or save a window under
-  `/admin/versioning/draft-retention` right after. Migration `20261111_1000_gv_draft_prune` adds
-  `platform_settings.gv_draft_retention_days` and `branches.pruned_at` / `prune_finished_at`
-  (nullable, no rewrite). A separate `GRAPHVER_DB_URL` gets the branch columns at start-up.
+  `GRAPHVER_DRAFT_RETENTION_DAYS=0` before upgrading (or a longer window), or set **Keep closed
+  drafts' changes for** in Admin → Versioned graphs → Settings → Drafts & history right after.
+  Migration `20261111_1000_gv_draft_prune` adds `platform_settings.gv_draft_retention_days` and
+  `branches.pruned_at` / `prune_finished_at` (nullable, no rewrite). A separate `GRAPHVER_DB_URL`
+  gets the branch columns at start-up.
 - A failed import can be resumed or queued again, and a finished one's row preview read, for 3
   days after it ends, where it was 7. Set `IMPORT_STAGING_GC_DAYS=7` to keep the old window.
 - For multi-gigabyte imports, set `OBJECT_STORE_BACKEND` to `s3` or a shared volume: the default
@@ -681,6 +1020,27 @@ integration's many small changes as a few commits.
 - A review's `pullRequired` counts only people's commits. Whether automation touched the draft is
   found when it merges, and the refusal says so (`reason: overlap`). A draft's freshness checks this
   on every poll, for drafts of up to 10,000 changes.
+- **Versioned graphs are tested end to end up to 1,000,000 nodes and 2,000,000 edges**, in every
+  read mode. At 5,000,000 nodes and 5,000,000 edges, measured in CI, the import took 7.6 times as
+  long as at 1M and its memory grew to 1,335 MB. The publish took 23 times as long, and held the
+  graph's publish lock for 3 h 22 min.
+  `docs/versioning/09-scale-limits-and-roadmap.md` §2 has the measurements. Its §10, "Further work
+  found by the scale runs", has the leads and what done looks like, for these and for:
+  - event-loop lag in the worker's jobs;
+  - a publish of up to 200,000 changes held whole;
+  - the read modes at 5M;
+  - hundreds of concurrent users: the builds below, and a load test over HTTP;
+  - the lineage-summary items left to the aggregation job.
+- **A build beside the serving key didn't land under 200 concurrent readers**, measured in CI on a
+  1M + 2M graph:
+  - The copy took 76 to 88 s, and the projector's socket gives up after 75 s. The build was dropped
+    and the change written in place, so readers saw it land part by part, as Update in place shows
+    it.
+  - A seed from Postgres didn't land within an hour.
+  - No read failed. Any copy longer than 75 s fails the same way, under load or for a larger graph.
+  - A later run at the same size and load (43967953534) didn't hit it: the copy took about 32 s,
+    and switch when ready landed by a switch.
+  - `docs/versioning/09-scale-limits-and-roadmap.md` §10, item 6, has where to start.
 
 ---
 

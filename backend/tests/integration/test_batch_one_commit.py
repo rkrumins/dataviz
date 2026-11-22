@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-from backend.app.services.versioning import db, models
+from backend.app.services.versioning import db, models, route_cache
 from backend.app.services.versioning.errors import LockBusy
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -130,4 +130,6 @@ def test_a_batch_through_the_projection_is_one_commit(data_sources, no_flag_or_p
     async def _fresh(self, graph_id):
         return {"fresh": True, "committed": 1, "projected": 1, "served": 1}
     monkeypatch.setattr(GraphVersioningService, "projection_watermark", _fresh)
+    # What routes the read: the graph's route as this process keeps it.
+    monkeypatch.setattr(route_cache.RouteSnapshot, "state", lambda self: _fresh(self, self.graph_id))
     asyncio.run(_run("VersionedWriteProvider", monkeypatch, with_edges=False))

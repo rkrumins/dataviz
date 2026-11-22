@@ -375,10 +375,11 @@ its own `ProviderManager` with no listener
 legacy registry too (`backend/app/api/v1/endpoints/ontologies.py:1379`).
 
 After a provider edit — a rotated password, a moved host — those keep the old
-config until they restart. Feature flags are a smaller case of the same thing:
-a 30-second per-process cache (`backend/app/services/feature_flags.py:25`)
-whose `invalidate()` is local, so other pods see a change within 30 seconds.
-That is acceptable, and is listed so nobody "fixes" it with a longer TTL.
+config until they restart. Feature flags were a smaller case of the same thing
+until a save began moving a Redis generation (`features:gen`,
+`backend/app/services/feature_flags.py:35`) that every process's cache checks
+at most every two seconds. Other pods now see a change within about two
+seconds; the 30-second TTL (`:31`) is the bound only while Redis is out of reach.
 
 **Recommendation.** Subscribe the stats service and the control plane to the
 channel that already exists — three call sites, not a design. Then move the
@@ -829,7 +830,7 @@ memory. Delete an entry when it stops being interesting.
 | **`DATA_ARCHITECTURE.md` §6 stale reference (LOW)** | Corrected to `backend/insights_service/`. | — |
 | **Ontology cache staleness (MEDIUM)** | A Redis generation counter, `ontgen:{ws}:{ds}`, is bumped by every mutation that can change resolution and invalidates every pod on its next lookup; the 300 s TTL is now a backstop. | `backend/app/services/resolved_ontology_cache.py:15` |
 | **Stats poller: no service boundary, no graceful shutdown (MEDIUM)** | Its own service on every target, with SIGTERM/SIGINT handlers and a 60 s drain; stale stats surface as `lagging` or `unreachable` on `/health`. **Residual:** the compose service sets no `stop_grace_period`, so Docker kills it at 10 s, before the drain can finish. | `backend/insights_service/__main__.py:263`; `backend/app/services/stats_cache.py:133` |
-| **Feature flags read from the database per request (LOW)** | A 30 s per-process cache. Cross-process notice is part of §2.3. | `backend/app/services/feature_flags.py:25` |
+| **Feature flags read from the database per request (LOW)** | A 30 s per-process cache that checks a Redis generation (`features:gen`) at most every 2 s, so a save reaches every process within about 2 s. | `backend/app/services/feature_flags.py:31` |
 | **No API tokens (MEDIUM)** | Personal API keys: made under Account → API keys after a fresh sign-in, limited to chosen workspaces, views and data sources and to read or read & write, shown once and stored hashed, checked with their owner on every request, paused when an owner who signs in through an identity provider stops doing so, and audited. | `backend/app/auth/api_key_auth.py`; [ADR-027](DECISIONS.md#adr-027-personal-api-keys-scoped-per-resource) |
 | **No service accounts (MEDIUM)** | Service accounts: principals that never sign in, with their own workspace roles, whose keys (`nxsat_`) their managers — people or teams — make. Their keys work while someone in good standing manages them and pause after a grace period when nobody does; leavers are handed over at suspension, and administrators are told when an account loses its last manager. | `backend/app/api/v1/endpoints/service_accounts.py`; `backend/app/services/service_account_standing.py`; [ADR-028](DECISIONS.md#adr-028-service-accounts-answer-to-their-managers) |
 | **Control-plane scheduler doubles graph reads under HA (LOW)** | The scheduler no longer reads graphs; drift probes and the reconcile sweep moved to single-flight owners (a Redis claim and a Postgres advisory lock). **Residual:** with two replicas, a retry may be counted twice. | `backend/app/services/aggregation/scheduler.py:4`; `.../reconcile_sweeper.py:906` |

@@ -169,12 +169,15 @@ class FakeGraph:
         # of relationships with their own ids, deletes by internal id, and lookups by key.
         if cypher.startswith("MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi") \
                 and "RETURN id(r), labels(a)" in cypher:
-            return _Result([[self._rel_id(eid), [self.nodes[e["src"]].get("_label")], e["src"],
-                             e["type"], [self.nodes[e["tgt"]].get("_label")], e["tgt"], eid]
-                            for eid, e in self.edges.items()
-                            if e["src"] in self.nodes and e["tgt"] in self.nodes
-                            and e["type"] != "AGGREGATED"
-                            and params["lo"] <= self._id_of(e["src"]) < params["hi"]])
+            # A slice of a page: in internal id order, after ``$after``, at most ``$k``.
+            rows = sorted([[self._rel_id(eid), [self.nodes[e["src"]].get("_label")], e["src"],
+                            e["type"], [self.nodes[e["tgt"]].get("_label")], e["tgt"], eid]
+                           for eid, e in self.edges.items()
+                           if e["src"] in self.nodes and e["tgt"] in self.nodes
+                           and e["type"] != "AGGREGATED"
+                           and params["lo"] <= self._id_of(e["src"]) < params["hi"]
+                           and self._rel_id(eid) > params.get("after", -1)])
+            return _Result(rows[:params["k"]] if "k" in params else rows)
         if cypher == "UNWIND $ids AS i MATCH ()-[r]->() WHERE id(r) = i DELETE r":
             for eid in [k for k in self.edges if self._rel_id(k) in params["ids"]]:
                 self.edges.pop(eid, None)
@@ -199,7 +202,7 @@ class FakeGraph:
                 "RETURN it.src, it.tgt, r.gvHash"):
             slb = cypher.split("MATCH (a:", 1)[1].split(" {urn:", 1)[0]
             rel = cypher.split("-[r:", 1)[1].split("]->", 1)[0]
-            tlb = cypher.split("->(b:", 1)[1].split(" {urn:", 1)[0]
+            tlb = cypher.split("MATCH (b:", 1)[1].split(" {urn:", 1)[0]
             return _Result([[it["src"], it["tgt"], e.get("gvHash")] for it in params["batch"]
                             for e in self.edges.values()
                             if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel
@@ -252,8 +255,8 @@ class FakeGraph:
                                              "props": it.get("props"), "conf": it.get("conf"),
                                              "gvHash": it.get("gvHash")}
             return None
-        # Reconcile's edge delete by triple (no id): ...(a:{slb} {urn: item.src})-[r:{rel}]->
-        #   (b:{tlb} {urn: item.tgt}) DELETE r
+        # Reconcile's edge delete by triple (no id): MATCH (a:{slb} {urn: item.src})
+        #   MATCH (b:{tlb} {urn: item.tgt}) MATCH (a)-[r:{rel}]->(b) DELETE r
         if cypher.startswith("UNWIND $batch AS item MATCH (a:") and cypher.endswith("DELETE r") \
                 and "{id: item.eid}" not in cypher:
             rel = cypher.split("-[r:", 1)[1].split("]->", 1)[0]
@@ -314,6 +317,11 @@ class FakeGraph:
                 for e in self.edges.values():
                     e["src"] = it["new"] if e["src"] == it["old"] else e["src"]
                     e["tgt"] = it["new"] if e["tgt"] == it["old"] else e["tgt"]
+            return None
+        # The summary cells on a re-keyed or retyped node, keyed or stamped again
+        # (``_aggkey_restamp``, ``_level_restamp``): this fake holds no summary cells.
+        if (cypher.startswith("UNWIND $urns AS u MATCH (") and "[r:AGGREGATED]" in cypher
+                and any(f"SET r.{k} = " in cypher for k in ("aggKey", "sourceLevel", "targetLevel"))):
             return None
         raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
 

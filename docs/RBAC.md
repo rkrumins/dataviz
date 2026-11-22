@@ -462,6 +462,48 @@ The switch **Native read-only queries** (`nativeQueryEnabled`) turns the whole
 feature off. What may run, the limits and the audit record are in
 [Native read-only queries: security](/docs/native-queries).
 
+### Versioned-graph settings
+
+Every versioned-graph setting is chosen at one of three scopes: the platform, a workspace, or a
+graph (its data source). The registry (`backend/app/config/versioned_graph_settings.py`) says, per
+setting and scope, which of two roles may choose it: `system_admin` or `workspace_admin`. A route
+checks the permission first, then each value against the role
+(`backend/app/services/settings/validate.py`):
+
+| Settings | Read | Save, preview, history, revert |
+|---|---|---|
+| The registry: `GET /api/v1/settings/versioned-graphs/schema` | Anyone signed in | — |
+| The platform's: `/api/v1/admin/versioning/settings` | `system:admin` | `system:admin` |
+| A workspace's: `/api/v1/{ws_id}/versioning/settings`, and its graphs' list `…/settings/graphs` | `workspace:datasource:read` in the workspace | `workspace:admin` in the workspace |
+| A graph's: `/api/v1/{ws_id}/versioning/graphs/{graph_id}/settings` | `workspace:datasource:read` in the workspace | `workspace:admin` in the workspace |
+
+- **Which role a person edits as.** `system:admin` edits as `system_admin`, at every scope.
+  `workspace:admin` in the workspace edits as `workspace_admin`. `system:org-admin` holds it in
+  every workspace, so an Org Admin is a workspace admin everywhere and a system admin nowhere.
+  Anyone else only reads, and each value they are served says `editable: false`.
+- **Each value on its own.** A workspace admin may choose only the settings the registry gives
+  their role at that scope, within the limits system admins set on the platform's values
+  (`allowed`, `range`, `lock`). The settings that can take a node's memory or the database's
+  connections are system admins' only, at every scope: builds, updates and loading, residency
+  (the residency class included), database reads, and the most matching properties. A save that
+  holds any value its editor may not choose is refused whole: 403 `setting_not_permitted`,
+  naming the role that may. A system admin's value outside the limits stays in force, as an
+  exception.
+- **Decided by the server.** The workspace is the path's, and the graph must be in it (404, as
+  for every versioned graph). A fork has no settings of its own: 409 `follows_root`, naming the
+  graph it follows.
+- **Operator data.** The registry's recommendations from live facts (each node's memory, the
+  largest graph) and a preview's memory, residency and connection-pool figures are shown to
+  system admins only.
+- **History.** System admins see every change. A workspace admin sees the changes to the
+  workspace's own values and its graphs', with who made each and the reason they gave. Putting
+  one back is checked as a save is.
+- **Activity.** A save records one event: `platform.versioning.settings_updated`,
+  `workspace.versioning.settings_updated` or `workspace.versioning.graph_settings_updated`, with
+  each value before and after. The workspace's and its graphs' events are in the workspace
+  audience.
+- **Never through an API key.** None of these routes is on the API-key surface.
+
 ## Resolver behaviour
 
 A permission check resolves through a fixed short-circuit ladder — the three global
@@ -1170,9 +1212,10 @@ audience.
 
 The workspace audience is an explicit allow-list: member bindings and role
 cascades in the workspace, access requests for it, view grants, its
-aggregation runs and source operations, and its data-source and
+aggregation runs and source operations, its data-source and
 version-control changes — native query runs (`workspace.data_source.native_query_run`,
-with the query's text) among them. Everything else is platform audience. The
+with the query's text) among them — and the changes to its versioned-graph settings and
+its graphs'. Everything else is platform audience. The
 workspace scope is forced on the server, so no query parameter widens it.
 
 Each family serves `events` (keyset pages, 50 by default and 200 at most),
@@ -1247,6 +1290,7 @@ last 7 days. Through the API:
 | Permission catalogue / categories      | `backend/app/db/repositories/permission_repo.py`              |
 | View visibility and publishing         | `backend/app/services/view_access.py`                         |
 | Native queries: who may run one        | `backend/app/services/native_query/access.py`, `backend/app/services/view_access.py` (`may_query_sources`, `can_grant_source_query`) |
+| Versioned-graph settings: who may set what | `backend/app/services/settings/service.py` (`editor_of`), `backend/app/services/settings/validate.py`, `backend/app/api/v1/endpoints/versioned_graph_settings.py` |
 | API key claims and scope               | `backend/app/services/permission_service.py` (`resolve_for_api_key`, `KeyScope`), `backend/app/services/api_key_service.py` (`claims_for_key`) |
 | Frontend `checkPermission`             | `frontend/src/store/auth.ts`                                  |
 | Workspace-aware role badge             | `frontend/src/components/layout/TopBar.tsx`                   |

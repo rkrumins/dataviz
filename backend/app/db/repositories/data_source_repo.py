@@ -497,12 +497,13 @@ async def get_data_source_impact(session: AsyncSession, ds_id: str):
     #
     # Best-effort: if graphver is unreachable we still return the view impact rather than 500 the
     # dialog. A delete confirmation that fails to open is a delete confirmation nobody reads.
-    versioning = None
+    versioning, workspace_id = None, None
     try:
         from backend.common.models.management import VersioningImpact
         from backend.app.services.versioning.lifecycle import versioning_impact
         ds_row = await get_data_source_orm(session, ds_id)
         if ds_row is not None:
+            workspace_id = ds_row.workspace_id
             raw = await versioning_impact(ds_id, ds_row.workspace_id)
             if raw:
                 raw["openDrafts"] = await _name_draft_owners(session, raw.get("openDrafts") or [])
@@ -510,11 +511,11 @@ async def get_data_source_impact(session: AsyncSession, ds_id: str):
     except Exception:                                    # pragma: no cover - best effort
         logger.exception("versioning impact unavailable for ds=%s", ds_id)
 
-    from backend.app.services.versioning import config as gv_config
+    from backend.app.services.settings import effective
     return WorkspaceDataSourceImpactResponse(
         views=[ImpactedEntity(**v) for v in views],
         versioning=versioning,
-        restoreWindowDays=gv_config.PURGE_GRACE_DAYS,
+        restoreWindowDays=await effective.value_of("trash.restoreDays", workspace_id=workspace_id),
     )
 
 

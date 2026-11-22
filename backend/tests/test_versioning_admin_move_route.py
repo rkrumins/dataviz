@@ -425,3 +425,193 @@ async def test_with_residency_on_a_move_reads_the_graph_s_state_under_the_capaci
     await _move(svc, {"providerId": "prov_B"})
     assert held == [True, False] and asked == [keymigrate.owned_key(GID, 3)]
     assert len(svc.moves) == 1
+
+
+# ── a move built beside the graph's key (read mode beside, buildForRebuilds) ─────────────────
+
+class _BesideSvc(_Svc):
+    """A service that builds moves beside the key: the move under way (``candidate``) answers the
+    same move again with its build, and is cancelled by a move back to the pin."""
+
+    def __init__(self, *, moving_to=None, **kw):
+        super().__init__(**kw)
+        if moving_to is not None:
+            self.wm["candidate"] = {"id": "build_1", "step": "seeding", "reason": "move",
+                                    "target": dict(zip(("providerId", "key"), moving_to))}
+
+    async def move_projection(self, **kw):
+        self.moves.append(kw)
+        cur = {"providerId": self.wm["falkor_provider"] or "default",
+               "key": self.wm["falkor_graph_name"]}
+        tgt = {"providerId": kw["provider"], "key": kw["key"]}
+        building = self.wm.get("candidate")
+        if cur == tgt:
+            return {"changed": False, "from": cur, "to": tgt, "retiring": None, "beside": False,
+                    "building": None, "cancelled": building["id"] if building else None}
+        if building and building["target"] == tgt:
+            return {"changed": False, "from": cur, "to": tgt, "retiring": None, "beside": True,
+                    "building": building, "cancelled": None}
+        new = {"id": "build_2", "step": "seeding" if kw["admitted"] else "queued",
+               "reason": "move", "target": tgt}
+        return {"changed": True, "from": cur, "to": tgt, "retiring": None, "beside": True,
+                "building": new, "cancelled": None}
+
+
+@pytest.mark.asyncio
+async def test_a_move_built_beside_says_so_nudges_the_worker_and_is_recorded_as_built_beside():
+    """Built beside, nothing retires until the switch and nothing runs here: the projection worker
+    takes the build on. The activity names the build."""
+    svc = _BesideSvc()
+    out, background, seen = await _move(svc, {"providerId": "prov_B"})
+    key = keymigrate.owned_key(GID, 1)
+    assert (out["changed"], out["beside"], out["retiring"], out["cancelled"]) == (
+        True, True, None, None)
+    assert out["building"] == {"id": "build_2", "step": "queued", "reason": "move",
+                               "target": {"providerId": "prov_B", "key": key}}
+    (task,) = background.tasks
+    assert (task.func, task.args) == (va.nudge_projection, (GID,))
+    ((event_type, fields),) = seen["recorded"]
+    assert event_type == "platform.versioning.projection_moved"
+    assert fields["details"] == {"graphId": GID, "workspaceId": "ws1", "dataSourceId": "ds1",
+                                 "from": out["from"], "to": out["to"], "beside": True,
+                                 "build": "build_2"}
+    assert svc.moves[0]["admitted"] is False             # residency off: the build admits itself
+
+
+@pytest.mark.asyncio
+async def test_the_same_move_again_answers_with_the_build_under_way():
+    """Without a key, a move to the provider a move is under way to is that move again: its key,
+    which exists there, is no conflict. Nothing new is recorded; the worker is nudged."""
+    moving = keymigrate.owned_key(GID, 2)
+    for body in ({"providerId": "prov_B"}, {"providerId": "prov_B", "key": moving}):
+        svc = _BesideSvc(moving_to=("prov_B", moving))
+        out, background, seen = await _move(svc, dict(body), keys={moving})
+        assert svc.moves[0]["key"] == moving, body
+        assert (out["changed"], out["beside"], out["building"]["id"]) == (False, True, "build_1")
+        assert [t.func for t in background.tasks] == [va.nudge_projection]
+        assert seen["recorded"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_move_back_to_the_provider_the_graph_is_on_cancels_the_move_under_way():
+    """While a move is under way, "already there" no longer answers a move to the provider the
+    graph is on: it goes to the graph's own key, which cancels the move, and the cancel is
+    recorded with the key it would have moved to."""
+    pin = keymigrate.owned_key(GID, 1)
+    moving = keymigrate.owned_key(GID, 2)
+    svc = _BesideSvc(pin=pin, provider="prov_A", moving_to=("prov_B", moving))
+    out, background, seen = await _move(svc, {"providerId": "prov_A"})
+    assert svc.moves[0]["key"] == pin and seen["listed"] == ["prov_A"]
+    assert (out["changed"], out["cancelled"], out["beside"]) == (False, "build_1", False)
+    assert background.tasks == []
+    ((event_type, fields),) = seen["recorded"]
+    assert event_type == "platform.versioning.projection_move_cancelled"
+    assert fields["details"]["build"] == "build_1"
+    assert fields["details"]["to"] == {"providerId": "prov_B", "key": moving}
+    # With no move under way, the same request is "already there", as before.
+    svc = _BesideSvc(pin=pin, provider="prov_A")
+    out, background, seen = await _move(svc, {"providerId": "prov_A"})
+    assert out["changed"] is False and svc.moves == [] and seen["listed"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_whose_move_carried_a_rebuild_is_recorded_and_the_rebuild_goes_on():
+    """A move that carried a rebuild, cancelled by a move back: the rebuild goes on beside the key
+    the graph is on (``beside``, ``building``), the worker is nudged for it, and the cancel is
+    recorded — not a move."""
+    pin = keymigrate.owned_key(GID, 1)
+    moving = keymigrate.owned_key(GID, 2)
+    svc = _BesideSvc(pin=pin, provider="prov_A", moving_to=("prov_B", moving))
+    rebuild = {"id": "build_3", "step": "queued", "reason": "rebuild", "rebuild": "operator"}
+
+    async def cancelled_carrying_a_rebuild(**kw):
+        svc.moves.append(kw)
+        cur = {"providerId": "prov_A", "key": pin}
+        return {"changed": False, "from": cur, "to": cur, "retiring": None, "beside": True,
+                "building": rebuild, "cancelled": "build_1"}
+
+    svc.move_projection = cancelled_carrying_a_rebuild
+    out, background, seen = await _move(svc, {"providerId": "prov_A"})
+    assert (out["changed"], out["cancelled"], out["beside"], out["building"]) == (
+        False, "build_1", True, rebuild)
+    assert [t.func for t in background.tasks] == [va.nudge_projection]
+    ((event_type, fields),) = seen["recorded"]
+    assert event_type == "platform.versioning.projection_move_cancelled"
+    assert fields["details"]["build"] == "build_1"
+
+
+@pytest.mark.asyncio
+async def test_with_residency_on_the_key_the_graph_is_on_is_read_again_under_the_capacity_lock(
+        monkeypatch, residency_on):
+    """A switch that lands between the first read and the capacity lock moves the graph's key: a
+    move back onto the key it left is then a real move, admitted under the lock, not taken for
+    the key the graph is on."""
+    left, now_on = keymigrate.owned_key(GID, 1), keymigrate.owned_key(GID, 2)
+    asked = []
+
+    @asynccontextmanager
+    async def admitting(**kw):
+        yield
+
+    async def admission_on(graph_id, provider, key):
+        asked.append((provider, key))
+        return va.residency.Admitted(True, "10.0.0.3:6379", 0, None)
+
+    monkeypatch.setattr(va.residency, "admitting", admitting)
+    monkeypatch.setattr(va.residency, "admission_on", admission_on)
+    svc = _Svc(pin=left, provider="prov_A")
+    reads = iter([{}, {"falkor_graph_name": now_on,
+                       "retired_keys": [{"name": left, "provider": "prov_A"}]}])
+    real = svc.projection_watermark
+
+    async def watermark(graph_id):
+        wm = await real(graph_id)
+        wm.update(next(reads, {}))
+        return wm
+
+    svc.projection_watermark = watermark
+    await _move(svc, {"providerId": "prov_A", "key": left}, keys={left, now_on})
+    assert asked == [("prov_A", left)] and svc.moves[0]["admitted"] is True
+
+
+@pytest.mark.asyncio
+async def test_with_residency_on_a_new_move_is_admitted_with_its_request_and_the_rest_are_not(
+        monkeypatch, residency_on):
+    """A fresh move of a graph in FalkorDB is admitted under the capacity lock and recorded
+    seeding (``admitted``). The move already under way and a move back to the pin copy nothing:
+    neither is admitted, so neither is refused for want of room."""
+    pin, moving = keymigrate.owned_key(GID, 1), keymigrate.owned_key(GID, 2)
+    asked = []
+
+    @asynccontextmanager
+    async def admitting(**kw):
+        yield
+
+    async def place_key(graph_id, provider, taken):
+        return keymigrate.owned_key(GID, 3), "10.0.0.3:6379"
+
+    async def admission_on(graph_id, provider, key):
+        asked.append(key)
+        return va.residency.Admitted(True, "10.0.0.3:6379", 0, None)
+
+    monkeypatch.setattr(va.residency, "admitting", admitting)
+    monkeypatch.setattr(va.residency, "place_key", place_key)
+    monkeypatch.setattr(va.residency, "admission_on", admission_on)
+    svc = _BesideSvc(pin=pin, provider="prov_A")
+    out, _, _ = await _move(svc, {"providerId": "prov_B"})
+    assert asked == [keymigrate.owned_key(GID, 3)] and svc.moves[0]["admitted"] is True
+    assert out["building"]["step"] == "seeding"
+    for body in ({"providerId": "prov_B"}, {"providerId": "prov_A"}):
+        asked.clear()
+        svc = _BesideSvc(pin=pin, provider="prov_A", moving_to=("prov_B", moving))
+        await _move(svc, dict(body), keys={moving})
+        assert asked == [] and svc.moves[0]["admitted"] is False, body
+
+
+def test_the_activity_log_can_say_a_move_was_cancelled():
+    severity, summary = catalogue.summarize(
+        "platform.versioning.projection_move_cancelled",
+        {"details": {"graphId": GID, "to": {"providerId": "prov_B", "key": "gvp_x"}}})
+    assert severity == "info" and GID in summary and "gvp_x" in summary
+    assert catalogue.LABELS["platform.versioning.projection_move_cancelled"]
+    assert catalogue.category_of("platform.versioning.projection_move_cancelled") == "platform"

@@ -2,6 +2,8 @@
 
 * the reaper takes each expired data source on its own — one that fails does not stop the rest;
   so too each trashed fork past its grace, which has no data source row to expire;
+* each is past its grace by its workspace's trash window (the platform's for every workspace that
+  chose none); while the windows can't be read, nothing expires;
 * a graph restored while the reaper looked is left standing, and so is its data source;
 * a graph that forks still read is never purged: a person's "delete permanently" is refused, the
   reaper skips it, and the purge itself refuses at its count;
@@ -193,6 +195,42 @@ async def test_the_reaper_queues_the_purge_of_an_expired_trashed_fork(monkeypatc
     assert "deleted_at IS NOT NULL" in sql and "deleted_at <" in sql
     assert "NOT (EXISTS" in sql and "'purge'" in sql, "a fork whose purge exists is skipped"
     assert "JOIN" not in sql
+
+
+async def test_each_workspaces_trash_window_decides_and_an_unread_one_expires_nothing(
+        monkeypatch, settings_world):
+    asked = []
+
+    class _Session:
+        async def execute(self, stmt):
+            asked.append(_sql(stmt))
+            return _Rows([])
+
+    @asynccontextmanager
+    async def app():
+        yield _Session()
+
+    gv, seen = _gv({})
+    monkeypatch.setattr(purge_worker.Reaper, "_orphaned_package_sources", _no_orphans)
+    settings_world.set("trash.restoreDays", "workspace", "ws_short", 3)
+    settings_world.set("trash.restoreDays", "workspace", "ws_long", 90)
+    settings_world.set("trash.restoreDays", "workspace", "ws_same", 30)    # the platform's
+    await purge_worker.Reaper(app_session_factory=app, graphver_session_factory=gv).run_once()
+    (sources,) = asked
+    forks = [_sql(s) for s in seen if "fork_parent_graph_id IS NOT NULL" in str(s)]
+    for sql in (sources, *forks):
+        assert sql.count("deleted_at <") == 3, sql
+        assert "workspace_id IN ('ws_short')" in sql and "workspace_id IN ('ws_long')" in sql
+        assert "workspace_id NOT IN ('ws_long', 'ws_short')" in sql, "every other: the platform's"
+    assert len(forks) == 1
+
+    asked.clear()
+    seen.clear()
+    settings_world.readable = False
+    out = await purge_worker.Reaper(app_session_factory=app, graphver_session_factory=gv).run_once()
+    assert asked == [] and out["queued"] == 0, "unread: no data source is past its grace"
+    assert not [s for s in seen if "fork_parent_graph_id IS NOT NULL" in str(s)], "nor a fork"
+    assert [s for s in seen if "JOIN" in str(s)], "a failed purge is still revived"
 
 
 # ── create_purge_job ──────────────────────────────────────────────────────────

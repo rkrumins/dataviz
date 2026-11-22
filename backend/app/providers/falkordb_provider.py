@@ -828,6 +828,41 @@ _DEADLINE_STREAK_LIMIT = int(os.getenv("FALKORDB_DEADLINE_STREAK_LIMIT", "3"))
 #: about a NODE, and every provider instance in this process shares it.
 _deadline_streaks: Dict[str, int] = {}
 
+#: Whether a streak against a node the projector is writing is answered busy, not as a failover
+#: (``_own_writes_verdict``).
+_STREAK_IGNORE_PROJECTOR_WRITES = os.getenv(
+    "FALKORDB_STREAK_IGNORE_PROJECTOR_WRITES", "1").strip().lower() not in ("0", "false", "no", "off")
+#: What a reader held back by the projector's writes is told to wait.
+_OWN_WRITES_RETRY_AFTER_S = 2
+#: How long the answer to "is the projector writing this node" is reused, per process.
+_PROJECTOR_WRITING_POLL_S = 2.0
+_projector_writing_seen: Dict[str, Tuple[float, bool]] = {}
+
+
+def projector_writing_key(endpoint: str) -> str:
+    """The lease the projector holds while it writes through ``endpoint`` (``host:port``, as
+    ``FalkorDBProvider._endpoint_label`` names it): its writes, not a wedged node, are what keeps
+    reads there waiting (``projection._writing``)."""
+    return f"gvproj:writing:{endpoint}"
+
+
+async def _projector_writing(endpoint: str) -> bool:
+    """Whether the projector holds its writing lease on ``endpoint``: asked at most every
+    ``_PROJECTOR_WRITING_POLL_S`` per process, False when it can't be told."""
+    now = time.monotonic()
+    seen = _projector_writing_seen.get(endpoint)
+    if seen is not None and now - seen[0] < _PROJECTOR_WRITING_POLL_S:
+        return seen[1]
+    try:
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        writing = bool(await asyncio.wait_for(
+            get_redis().exists(projector_writing_key(endpoint)), 0.2))
+    except Exception:                                  # noqa: BLE001 — a streak as before
+        writing = False
+    _projector_writing_seen[endpoint] = (now, writing)
+    return writing
+
 
 def _retry_wall_clock(budget: float, *, read_only: bool):
     """ONE deadline for a call and every retry it may make.
@@ -4799,6 +4834,10 @@ class FalkorDBProvider(GraphDataProvider):
                     and (not read_only or waited * 1000 < FALKORDB_SLOW_QUERY_MS)
                     and isinstance(exc, (asyncio.TimeoutError, TimeoutError))
                 ):
+                    busy = await self._own_writes_verdict()
+                    if busy is not None:
+                        err = type(busy).__name__
+                        raise busy from exc
                     failover = self._deadline_streak_verdict(exc)
                     if failover is not None:
                         err = type(failover).__name__
@@ -4832,6 +4871,31 @@ class FalkorDBProvider(GraphDataProvider):
             self._graph_name, streak, endpoint,
         )
         return self._failing_over(exc)
+
+    async def _own_writes_verdict(self) -> Optional[Exception]:
+        """The deadline miss that would end a streak (``_deadline_streak_verdict``) against a node
+        the projector is writing — it holds its lease there (``projector_writing_key``) — is its
+        writes holding the reads, not a wedged node: answered busy, retryable, and the streak starts
+        over, rather than with a failover memo that answers every read of the graph from it for
+        seconds. None for any other miss, with the lease absent or unreadable, or with
+        ``FALKORDB_STREAK_IGNORE_PROJECTOR_WRITES`` off."""
+        if not _STREAK_IGNORE_PROJECTOR_WRITES:
+            return None
+        endpoint = self._streak_endpoint()
+        if endpoint is None or _deadline_streaks.get(endpoint, 0) + 1 < _DEADLINE_STREAK_LIMIT:
+            return None
+        if not await _projector_writing(endpoint):
+            return None
+        _deadline_streaks[endpoint] = 0
+        logger.info("FalkorDB %s: reads against %s keep missing their deadline while the "
+                    "projector writes there; answering busy, not as a failover",
+                    self._graph_name, endpoint)
+        from backend.common.adapters import ProviderBusy
+
+        return ProviderBusy(
+            provider_name=self._graph_name,
+            reason=f"the graph store node {endpoint} is busy with a projection's writes",
+            retry_after_seconds=_OWN_WRITES_RETRY_AFTER_S)
 
     def _note_endpoint_answered(self) -> None:
         """A node that answered is not wedged: the streak starts over."""
@@ -6988,8 +7052,12 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> Optional[List[GraphEdge]]:
         """Edges from ``source_urns`` to ``target_urns``, both ends seeked by
         their label's URN index, then expanded between (an Expand Into, not a
-        scan of either end's edges). One sub-query per (source label, target
-        label) bucket pair; the buckets are disjoint, so the rows merge as-is.
+        scan of either end's edges). The ``WITH`` binds the ends first: without
+        it FalkorDB plans the three MATCH clauses as one pattern and walks every
+        relationship of ``a``, about 61 ms a call from a node with 200,000
+        children against 0.27 ms with it (``test_hub_lookups_live.py``). One
+        sub-query per (source label, target label) bucket pair; the buckets are
+        disjoint, so the rows merge as-is.
 
         ``None`` when an end's label is unknown: an unlabeled ``urn IN`` anchor
         is a full scan, so the caller's one-sided path is the better plan."""
@@ -7007,7 +7075,7 @@ class FalkorDBProvider(GraphDataProvider):
                 res = await self._ro_query(
                     f"MATCH (a:{src_label}) WHERE a.urn IN $sourceUrns "
                     f"MATCH (b:{tgt_label}) WHERE b.urn IN $targetUrns "
-                    f"MATCH (a)-{rel_pattern}->(b){where} "
+                    f"WITH a, b MATCH (a)-{rel_pattern}->(b){where} "
                     "RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, "
                     "properties(r) AS rprops LIMIT $limit",
                     params={**params, "sourceUrns": srcs, "targetUrns": tgts, "limit": limit},

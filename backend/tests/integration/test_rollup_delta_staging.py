@@ -7,7 +7,8 @@ cells: it adds them to ``graphver.rollup_deltas``, one row per cell keyed by its
 - A window that creates and deletes lineage, moves several edges into one cell, and moves a
   container, staged (one cell held in memory, one edge or cell a page), writes exactly what the
   same window netted in memory writes: into a boundary and a cube store, with level stamps, and
-  with no containment types (no canonical delta at all).
+  with no containment types (no canonical delta at all) where the summaries job stores the leaf
+  mirror; where it does not, that window moves no cell.
 - Rows a pass that stopped left behind are deleted by the next one before it stages: nothing
   counts twice.
 - However the apply returns, the graph's rows are gone after it: written, or skipped because the
@@ -73,6 +74,7 @@ class _Store:
             rows = [[item["s"], item["t"], 10, [], 0] for item in batch]
         elif "MERGE (a)-[r:AGGREGATED]->(b)" in cypher:
             self.upserts.extend(batch)
+            rows = [[len(batch)]]                        # the key holds every end: each lands
         return type("R", (), {"result_set": rows})()
 
 
@@ -133,6 +135,12 @@ async def _staged_equals_in_memory(svc, monkeypatch):
 
         monkeypatch.setattr(config, "ROLLUP_NET_MAX_CELLS", 200000)
         monkeypatch.setattr(config, "PROJECTION_PAGE", 5000)
+        if resolver is _flat:
+            # With no containment types a lineage edge's only cell is its own ends': the leaf
+            # mirror, which the summaries job stores only with AGGREGATION_MATERIALIZE_LEAF_PAIRS.
+            monkeypatch.setenv("AGGREGATION_MATERIALIZE_LEAF_PAIRS", "false")
+            assert (await _window(gid, resolver, from_seq, to_seq))[1] is None
+            monkeypatch.setenv("AGGREGATION_MATERIALIZE_LEAF_PAIRS", "true")
         proj, netted = await _window(gid, resolver, from_seq, to_seq)
         assert isinstance(netted, dict) and netted, netted
         expect = await written(proj, netted)

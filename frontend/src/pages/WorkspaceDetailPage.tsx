@@ -3,13 +3,13 @@
  * Modern tabbed dashboard with hero header, data source grid, views,
  * aggregation, and ontology sections.
  */
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { lazy, Suspense, useState, useEffect, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
     ChevronLeft, Plus, Database, Settings2,
     GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
-    Users, ShieldOff, Send, GitPullRequestArrow, LineChart, History, Trash2,
+    Users, ShieldOff, Send, GitPullRequestArrow, LineChart, History, Trash2, Layers,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
@@ -31,10 +31,10 @@ import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspac
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
 import { DataSourceGridCard } from '@/components/admin/workspace/DataSourceGridCard'
 import { WorkspaceNodeIdentityDefaults } from '@/components/admin/workspace/WorkspaceNodeIdentityDefaults'
-import { WorkspaceDraftsPolicy } from '@/components/admin/workspace/WorkspaceDraftsPolicy'
 import { DraftsWhoseOwnerLeft } from '@/components/admin/workspace/DraftsWhoseOwnerLeft'
 import { WorkspaceCardSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { DataSourceDetailPanel } from '@/components/admin/workspace/DataSourceDetailPanel'
+import { SettingsSkeleton } from '@/components/admin/AdminVersionedGraphs/states'
 import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSection'
 import { WorkspaceAggregationDashboard } from '@/components/admin/workspace/WorkspaceAggregationDashboard'
 import { WorkspaceOntologyTimeline } from '@/components/admin/workspace/WorkspaceOntologyTimeline'
@@ -49,6 +49,10 @@ import { MoveDataSourceWizard, type MoveDataSourceWizardProps } from '@/features
 import { TransferRequestsPanel } from '@/features/data-source-transfer/TransferRequestsPanel'
 import { useDataSourcesWithForks } from '@/features/versioning/hooks/useVersioning'
 import { isForkDataSourceId } from '@/features/versioning/model/forks'
+
+// The Versioned graphs tab carries the settings kit: it loads when first opened.
+const WorkspaceVersionedGraphs = lazy(() => import('@/components/admin/AdminVersionedGraphs/WorkspaceVersionedGraphs')
+    .then((m) => ({ default: m.WorkspaceVersionedGraphs })))
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -103,13 +107,16 @@ export function WorkspaceDetailPage() {
     // link straight to a specific tab — used by the WorkspacesPage
     // "Members" shortcut.
     const tabParam = searchParams.get('tab') as
-        | 'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | 'activity' | null
-    const [activeSection, setActiveSection] = useState<'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | 'activity'>(
+        | 'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'versioned-graphs' | 'members' | 'activity' | null
+    const [activeSection, setActiveSection] = useState<'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'versioned-graphs' | 'members' | 'activity'>(
         tabParam ?? 'sources',
     )
-    // Reviews are a versioning surface; the tab (and a ?tab=reviews deep link)
-    // disappears when the admin turns version control off.
+    // Reviews and Versioned graphs are versioning surfaces; the tabs (and their deep links)
+    // disappear when the admin turns version control off.
     const versioningEnabled = useFeature('versioningEnabled')
+    // Changes staged on the Versioned graphs tab: it stays mounted (hidden) while any are, so
+    // looking at another tab never drops them, and its tab says how many.
+    const [vgStaged, setVgStaged] = useState(0)
 
     // Letting people in opens the Members tab — admins and stewards; the
     // admins also remove people and set how people get in. The store's
@@ -536,8 +543,8 @@ export function WorkspaceDetailPage() {
                 </Link>
             </div>
 
-            {/* Section Tabs */}
-            <div className="flex items-center gap-1 border-b border-glass-border mt-4 mb-0">
+            {/* Section Tabs — scrolled sideways on a phone, rather than widening the page */}
+            <div className="flex items-center gap-1 border-b border-glass-border mt-4 mb-0 overflow-x-auto">
                 {([
                     { id: 'sources' as const, label: 'Data Sources', icon: Database, count: workspace.dataSources.length, hint: 'Graph databases connected to this workspace' },
                     // Across this workspace's sources: what moved, and by how
@@ -549,7 +556,8 @@ export function WorkspaceDetailPage() {
                     { id: 'aggregation' as const, label: 'Aggregation', icon: Settings2, hint: 'Edge materialization and job monitoring' },
                     { id: 'ontology' as const, label: 'Ontology', icon: GitBranch, hint: 'Semantic type system and change history' },
                     ...(versioningEnabled
-                        ? [{ id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, hint: 'Merge requests awaiting review across this workspace' }]
+                        ? [{ id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, hint: 'Merge requests awaiting review across this workspace' },
+                            { id: 'versioned-graphs' as const, label: 'Versioned graphs', icon: Layers, hint: 'The defaults this workspace’s versioned graphs follow, each graph’s own settings, and every change' }]
                         : []),
                     ...(canAddMembers
                         ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Who is in, their requests to join, and how people get in' }]
@@ -564,7 +572,7 @@ export function WorkspaceDetailPage() {
                         <button key={tab.id} onClick={() => setActiveSection(tab.id)}
                             title={tab.hint}
                             className={cn(
-                                'flex items-center gap-2 px-5 py-3 text-sm font-semibold transition-colors duration-150 border-b-2',
+                                'flex shrink-0 items-center gap-2 whitespace-nowrap px-5 py-3 text-sm font-semibold transition-colors duration-150 border-b-2',
                                 isActive ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
                                          : 'border-transparent text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded-t-xl'
                             )}>
@@ -574,6 +582,11 @@ export function WorkspaceDetailPage() {
                                 <span className={cn("px-1.5 py-0.5 rounded-full text-[10px] font-bold",
                                     isActive ? "bg-indigo-500/20 text-indigo-600 dark:text-indigo-400" : "bg-black/5 dark:bg-white/5 text-ink-muted"
                                 )}>{tab.count}</span>
+                            )}
+                            {tab.id === 'versioned-graphs' && vgStaged > 0 && (
+                                <span className="rounded-full bg-indigo-700 px-1.5 text-[10px] font-semibold leading-4 text-white dark:bg-indigo-500">
+                                    {vgStaged}<span className="sr-only"> not saved</span>
+                                </span>
                             )}
                         </button>
                     )
@@ -606,14 +619,9 @@ export function WorkspaceDetailPage() {
                         onSaved={reload}
                     />
 
-                    {/* How drafts and reviews work across the sources below; and, for an admin,
-                        the drafts whose owner left, to hand on. */}
-                    {versioningEnabled && (
-                        <>
-                            <WorkspaceDraftsPolicy wsId={wsId!} canEdit={canManageMembers} />
-                            <DraftsWhoseOwnerLeft wsId={wsId!} />
-                        </>
-                    )}
+                    {/* For an admin, the drafts whose owner left, to hand on. How drafts and reviews
+                        work is set on the Versioned graphs tab. */}
+                    {versioningEnabled && <DraftsWhoseOwnerLeft wsId={wsId!} />}
 
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-lg font-bold text-ink">Data Sources</h3>
@@ -779,6 +787,16 @@ export function WorkspaceDetailPage() {
                     </div>
                     <WorkspaceReviewsInbox wsId={wsId} />
                 </>
+            )}
+
+            {/* ── Versioned graphs Tab (defaults, graphs, history) ── */}
+            {versioningEnabled && wsId && (activeSection === 'versioned-graphs' || vgStaged > 0) && (
+                <div hidden={activeSection !== 'versioned-graphs'}>
+                    <Suspense fallback={<div className="py-4"><SettingsSkeleton /></div>}>
+                        <WorkspaceVersionedGraphs workspaceId={wsId} workspaceName={workspace.name} onStagedChange={setVgStaged}
+                            onOpenDataSources={() => setActiveSection('sources')} />
+                    </Suspense>
+                </div>
             )}
 
             {/* ── Members Tab (RBAC) ──────────────────────── */}

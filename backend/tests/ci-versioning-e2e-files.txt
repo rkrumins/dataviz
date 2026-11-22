@@ -25,6 +25,7 @@ tests/integration/test_children_paging_exact_live.py
 tests/integration/test_children_sibling_lineage_live.py
 tests/integration/test_commit_provenance.py
 tests/integration/test_concurrent_imports.py
+tests/integration/test_context_engine_route_first.py
 tests/integration/test_draft_awareness.py
 tests/integration/test_draft_levels.py
 tests/integration/test_draft_narrowing.py
@@ -59,6 +60,7 @@ tests/integration/test_graph_changes_in_parts.py
 tests/integration/test_graph_changes_name_identity.py
 tests/integration/test_graph_changes_one_commit.py
 tests/integration/test_graph_freeze.py
+tests/integration/test_graph_health_live.py
 tests/integration/test_graph_lifecycle_purge.py
 tests/integration/test_graph_rebuild_decoding_live.py
 tests/integration/test_graph_residency.py
@@ -98,6 +100,7 @@ tests/integration/test_overlay_rollups.py
 tests/integration/test_package_seed_job.py
 tests/integration/test_private_draft_owner.py
 tests/integration/test_private_draft_read.py
+tests/integration/test_projection_builds_e2e.py
 tests/integration/test_projection_committed_rollups.py
 tests/integration/test_projection_converges.py
 tests/integration/test_projection_fencing_e2e.py
@@ -127,12 +130,18 @@ tests/integration/test_review_records.py
 tests/integration/test_review_reviewers.py
 tests/integration/test_revision_overlay_reads.py
 tests/integration/test_rollup_delta_staging.py
+tests/integration/test_route_cache_e2e.py
 tests/integration/test_seed_identity.py
+tests/integration/test_settings_consumers_live.py
+tests/integration/test_settings_import_live.py
+tests/integration/test_settings_legacy_routes_live.py
+tests/integration/test_settings_store_live.py
 tests/integration/test_shared_draft_members.py
 tests/integration/test_snapshot_edges_between.py
 tests/integration/test_stage2_collaboration_story.py
 tests/integration/test_sync_curation_guard.py
 tests/integration/test_transfer_queue.py
+tests/integration/test_versioned_graph_settings_live.py
 tests/integration/test_versioning_admin_graphs_live.py
 tests/integration/test_versioning_api.py
 tests/integration/test_versioning_apply_ops.py
@@ -175,6 +184,7 @@ tests/integration/test_versioning_fork.py
 tests/integration/test_versioning_fork_bases.py
 tests/integration/test_versioning_fork_bounded.py
 tests/integration/test_versioning_fork_merge.py
+tests/integration/test_versioning_incident_probe.py
 tests/integration/test_versioning_lost_update.py
 tests/integration/test_versioning_main_lock.py
 tests/integration/test_versioning_main_write_publish.py

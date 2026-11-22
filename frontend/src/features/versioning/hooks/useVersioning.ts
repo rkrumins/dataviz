@@ -6,7 +6,7 @@
 import { useCallback } from 'react'
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, ReviewInboxParams, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, PullRequest, ResolutionMap, ReviewInboxParams, StageOp, Watermark } from '@/services/versioningApiService'
 import { INBOX_QUERY_KEY } from '@/hooks/useInbox'
 import { workspaceService } from '@/services/workspaceService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
@@ -191,17 +191,6 @@ export function useDataSourceDraftsPolicy(wsId?: string, dataSourceId?: string |
   })
 }
 
-/** The workspace's own drafts and reviews settings, which its data sources follow unless they set
- *  their own. Its key prefixes theirs, so invalidating it refreshes them too. */
-export function useWorkspaceDraftsPolicy(wsId?: string) {
-  return useQuery({
-    queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId] as const,
-    queryFn: () => api.getWorkspaceDraftsPolicy(wsId!),
-    enabled: !!wsId,
-    staleTime: 60_000,
-  })
-}
-
 /** The workspace's open drafts whose owner left, for a workspace admin to hand on. No `wsId` for
  *  anyone else: the server would refuse them. */
 export function useDraftsWhoseOwnerLeft(wsId?: string | null) {
@@ -243,12 +232,21 @@ function expectCatchUp(wsId?: string, graphId?: string | null) {
  *  waits for room there); and, for a short window after main advanced, while merely behind — until the
  *  projection has had its chance to start. A recorded failure ends that window early, but keeps a
  *  slow poll while behind: the projector retries after its backoff, and only a fresh read shows
- *  the route back on FalkorDB. */
+ *  the route back on FalkorDB. While a new version is built beside the key that serves (a rebuild
+ *  or a move, which leave the graph in sync until they switch), at least every 15 s. */
 export function watermarkPollInterval(
-  d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
-  outSince?: number,
+  d: Pick<Watermark, 'fresh' | 'status' | 'lastError' | 'candidate'> | undefined, force: boolean,
+  advancedAt: number | undefined, now: number, outSince?: number,
 ): number | false {
   if (force) return 3_000
+  const every = behindPollInterval(d, advancedAt, now, outSince)
+  return d?.candidate && (every === false || every > 15_000) ? 15_000 : every
+}
+
+function behindPollInterval(
+  d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, advancedAt: number | undefined, now: number,
+  outSince?: number,
+): number | false {
   if (!d || d.fresh !== false) return false
   // A load or a wait for room can go on for long: after a few minutes, once a minute.
   if ((d.status === 'rehydrating' || d.status === 'waiting_capacity') && outSince !== undefined
@@ -1017,25 +1015,6 @@ function invalidateBranchMembers(qc: ReturnType<typeof useQueryClient>, wsId: st
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
 }
 
-/** Change the workspace's drafts and reviews settings (workspace admins). Refreshes its policy and
- *  every data source's, which follow it. */
-export function useSetWorkspaceDraftsPolicy(wsId: string) {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (change: DraftsPolicyChange) => api.putWorkspaceDraftsPolicy(wsId, change),
-    onSuccess: () => qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId] }),
-  })
-}
-
-/** Change one data source's own drafts and reviews settings (workspace admins). */
-export function useSetDataSourceDraftsPolicy(wsId: string, dataSourceId: string) {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (change: DraftsPolicyChange) => api.putDataSourceDraftsPolicy(wsId, dataSourceId, change),
-    onSuccess: () => qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId, dataSourceId] }),
-  })
-}
-
 /** Pull the latest main into a draft ("update branch"). Returns the RebaseResponse so the caller can
  *  open the conflict resolver when `clean === false`; on a clean pull it refreshes the draft views. */
 export function usePullLatestDraft(wsId: string, graphId: string) {
@@ -1099,10 +1078,11 @@ export function usePublishBranch(wsId: string, graphId: string) {
   return useMutation({
     mutationFn: (v: { branchId: string; message: string; resolutions?: ResolutionMap }) =>
       api.publishBranch(wsId, graphId, v.branchId, { message: v.message, resolutions: v.resolutions }),
-    onSuccess: () => {
+    onSuccess: (res) => {
       // Version control is a headline feature with no usage signal until now:
-      // Analytics could see branches exist, never that anyone shipped one.
-      recordEvent('version.published')
+      // Analytics could see branches exist, never that anyone shipped one. A publish that changed
+      // nothing (`unchanged`: main held its changes already) shipped nothing.
+      if (res.outcome === 'published') recordEvent('version.published')
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
       // Refresh ALL commit-log scopes by prefix — the new squash commit must show in History's
       // "This view" / "Whole graph" (viewCommits) and per-branch (commits) lists without a reload.

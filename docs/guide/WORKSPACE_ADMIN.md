@@ -40,10 +40,11 @@ Open **Workspaces** in the sidebar and select a workspace. Under its header, the
 | **Aggregation** | Monitor and re-run aggregation for each source | Everyone who can open the workspace (re-running needs data-source permission) |
 | **Ontology** | Follow changes to the semantic layers this workspace's sources use | Everyone who can open the workspace |
 | **Reviews** | Review merge requests across the workspace's versioned sources | Only while **Version control** is on — it is by default |
+| **Versioned graphs** | Set the defaults this workspace's versioned graphs follow, within the platform's limits; see what each graph sets itself; read every change ([Versioned Graph Settings](/guide/versioned-graph-settings)) | Only while **Version control** is on. Everyone who can open the workspace reads them; workspace admins change them and see their history |
 | **Members** | Decide who can get in, with which role, and answer their requests | Workspace admins and stewards, Org Admins and Super Admins |
 | **Activity** | See who ran, changed or granted what in this workspace — when, and why | Workspace admins, Org Admins, Org Auditors and Super Admins |
 
-> **If you don't see Reviews:** **Version control** is switched off in
+> **If you don't see Reviews or Versioned graphs:** **Version control** is switched off in
 > **Administration → Features** — see [Feature
 > Switches](/guide/feature-switches). **If you don't see Members:** you aren't
 > an admin or steward of this workspace.

@@ -1,7 +1,7 @@
 /**
  * What happened on a review, oldest first, with the draft's revisions between: who was asked, asked
  * again and no longer asked, one line each, by name; each review given as a card with its verdict,
- * summary and tally; merged.
+ * summary and tally; merged, naming the commit only when the merge landed on main.
  */
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
@@ -62,6 +62,16 @@ describe('ReviewTimeline', () => {
     const dee = screen.getByRole('article', { name: 'Dee: Approved' })
     expect(within(dee).getByText('for Finance stewards')).toBeInTheDocument()
     expect(within(dee).queryByText(/accepted/)).toBeNull()
+  })
+
+  it('names the commit a merge landed on main as, and nothing for one that changed nothing', () => {
+    state.events = EVENTS
+    // Merged on an older server, changing nothing: it recorded its draft's own head, not on main.
+    const { unmount } = render(<ReviewTimeline wsId="ws1" pr={pr({ resultingCommitId: 'cmt_drafthead', resultingCommitSeq: null })} />)
+    expect(screen.getByText('Merged by Ana')).toBeInTheDocument()
+    unmount()
+    render(<ReviewTimeline wsId="ws1" pr={pr({ resultingCommitId: 'cmt_squash1', resultingCommitSeq: 12 })} />)
+    expect(screen.getByText('Merged by Ana · cmt_squa')).toBeInTheDocument()
   })
 
   it('a fork’s review has no draft revisions to show', () => {
