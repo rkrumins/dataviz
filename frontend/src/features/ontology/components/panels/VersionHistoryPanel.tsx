@@ -78,7 +78,7 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
   const { data: versions, isLoading: versionsLoading } = useOntologyVersions(ontology.id)
   const { data: auditLog, isLoading: auditLoading, isFetching: auditFetching } = useOntologyAuditLog(ontology.id, auditLimit)
   const navigate = useNavigate()
-  const access = useSemanticLayerAccess()
+  const access = useSemanticLayerAccess(ontology)
   const mutations = useOntologyMutations()
   const { notify } = useAppNotifications()
 

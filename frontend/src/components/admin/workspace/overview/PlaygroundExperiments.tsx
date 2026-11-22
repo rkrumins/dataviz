@@ -24,6 +24,7 @@ import { useFeature } from '@/store/features'
 import { usePlayground, usePlaygroundSamples } from '@/hooks/usePlayground'
 import { SampleGallery } from '@/components/playground/SampleGallery'
 import { PlaygroundStarts } from '@/components/playground/PlaygroundStarts'
+import { YourDataModels } from '@/components/playground/YourDataModels'
 import { BringYourOwnData } from '@/components/playground/BringYourOwnData'
 import { BuilderChecklist } from '@/components/playground/BuilderChecklist'
 import { OverviewViewGrid } from './OverviewViewGrid'
@@ -195,6 +196,7 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                         {onNewGraph && <SampleGallery ref={gallery} workspaceId={workspace.id} />}
                     </div>
                 )}
+                <YourDataModels className="mt-5 border-t border-glass-border pt-4" />
                 <BuilderChecklist workspace={workspace} views={views} className="mt-5" />
             </div>
             {importing && <BringYourOwnData workspaceId={workspace.id} onClose={closeImport} quotaLeft={samples?.quotaLeft ?? (quota > 0 ? quota - used : undefined)} />}

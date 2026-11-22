@@ -42,8 +42,10 @@ import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
 import { useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
+import { useOntologyDefinition } from '@/hooks/useOntologyDefinition'
 import { useCurrentBranchId, useGraphId } from '@/store/branchStore'
 import { useCanvasStore } from '@/store/canvas'
+import { useWorkspacesStore } from '@/store/workspaces'
 import {
     useDraftPropertyJobs, usePropertyCatalogOverlay, usePropertyJobsStore, type CatalogOverlayEntry, type OpRequest,
 } from '@/store/propertyJobsStore'
@@ -112,7 +114,8 @@ export function PropertyBrowser({
         editing.offered ? () => usePropertyJobsStore.getState().requestOp(request) : undefined
     const selected = useCanvasStore((s) => s.selectedNodeIds.filter((id) => !id.startsWith('logical:')).length)
     // A property made a field of its types, in the semantic layer — by who may edit the layer.
-    const canEditLayer = useSemanticLayerAccess().canEdit
+    const layerId = useWorkspacesStore((s) => s.getActiveDataSource()?.ontologyId ?? null)
+    const canEditLayer = useSemanticLayerAccess(useOntologyDefinition(layerId).ontology).canEdit
     const [promoting, setPromoting] = useState<SearchCatalogProperty | null>(null)
 
     const properties = useMemo(() => catalog?.properties ?? [], [catalog])

@@ -7,8 +7,10 @@
  * one bulk-change dialog; the draft's changes are listed as they run and
  * once they end, and mark the properties they touch.
  */
+import type { ReactNode } from 'react'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { PropertyCatalogState } from '@/hooks/usePropertyCatalog'
@@ -78,6 +80,10 @@ function catalog(over: Partial<SearchCatalogResult> = {}): SearchCatalogResult {
     }
 }
 
+// The Promote offer reads the data source's semantic layer.
+const queryClient = new QueryClient()
+const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+
 function renderBrowser(over: Partial<PropertyCatalogState> = {}) {
     state = { catalog: catalog(), reading: null, error: null, unavailable: false, refresh: vi.fn(), ...over }
     const onSearchPredicate = vi.fn()
@@ -88,6 +94,7 @@ function renderBrowser(over: Partial<PropertyCatalogState> = {}) {
             onSearchPredicate={onSearchPredicate}
             onCreateRuleFromPredicate={onCreateRuleFromPredicate}
         />,
+        { wrapper },
     )
     return { onSearchPredicate, onCreateRuleFromPredicate }
 }
@@ -304,7 +311,7 @@ describe('PropertyBrowser — a property is changed only in a draft', () => {
         const browser = () => <PropertyBrowser viewId="view-1" onCreateRuleFromPredicate={vi.fn()} />
         state = { catalog: catalog({ status: 'running', properties: [dept([finance, spaced, { value: 'Ops', kind: 'String', count: 20 }])] }),
                   reading: 50, error: null, unavailable: false, refresh: vi.fn() }
-        const view = render(browser())
+        const view = render(browser(), { wrapper })
         await user.click(screen.getByTitle('dept'))
         await user.click(within(card('dept')).getByRole('checkbox', { name: 'Pick Ops' }))
         await user.click(within(card('dept')).getByRole('checkbox', { name: 'Pick Finance' }))
