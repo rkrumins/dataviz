@@ -1,24 +1,26 @@
 /**
  * Step 3 — Review: what the change will do, counted exactly before it is applied — how many
- * entities it changes, whose values it replaces, which it leaves alone — with a few of them by
- * name, anything that would stop it (a name the platform keeps, the property-name ceiling, another
- * change still running on the draft), and how it lands: on the draft, a window of entities at a
- * time, in its counts and catalog as each window does. A clean-up's count is a bound until it runs.
+ * entities it changes, whose values it replaces, which it leaves alone — with a few of them before
+ * and after, anything that would stop it (a name the platform keeps, the property-name ceiling,
+ * another change still running on the draft), and how it lands: on the draft, a window of entities
+ * at a time, in its counts and catalog as each window does. A clean-up's count is a bound until it runs.
  * An optional reason is kept as the change's message — in the draft's history, and in the audit of
  * its publish.
  *
  * In sections: Impact (the counts), Checks (what stops it first, then warnings, then notes — the
- * first few, the rest a click away), Sample (some of them by name and type), and Details (the reason,
- * and keeping it for reuse). How it lands is a footnote.
+ * first few, the rest a click away), Sample (a few of them as they are now and as the job would
+ * leave them — changed, unchanged, or skipped and why — read on the draft by the server), and
+ * Details (the reason, and keeping it for reuse). How it lands is a footnote.
  */
 import { useId, useState, type ReactNode } from 'react'
-import { AlertTriangle, Ban, GitBranch, Info, Loader2, RotateCw } from 'lucide-react'
+import { AlertTriangle, Ban, GitBranch, Info, Loader2, RotateCw, SearchX } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { Skeleton } from '@/components/ui/Skeleton'
-import type { AffectedSample } from '@/services/propertyInsights'
-import type { PropertyJobPreview, PropertyOpKind } from '@/services/versioningApiService'
+import type { PropertyJobPreview, PropertyJobSample, PropertyJobSampleRow, PropertyOpKind } from '@/services/versioningApiService'
 import {
   DRAFT_LARGE, OP_LABEL, isCleanup, jobOp, needsTo, needsValue, propertyJobLabel, scopedTargetLabel, type Impact, type OpDraft, type ScopeMode,
   type TargetPreset,
@@ -46,8 +48,8 @@ const REASON_EXAMPLE: Record<PropertyOpKind, string> = {
 }
 
 export function ReviewStep({
-  op, preset, scopeMode, counts, impact, exact, preview, previewLoading, previewError = null, onRetry, sample, sampleLoading, stagedCount,
-  reason = '', onReason, edges = false, onFollow, onChangeTarget, draftChanges, offerSave = true,
+  op, preset, scopeMode, counts, impact, exact, preview, previewLoading, previewError = null, onRetry, sample, sampleLoading,
+  sampleError = null, onRetrySample, stagedCount, reason = '', onReason, edges = false, onFollow, onChangeTarget, draftChanges, offerSave = true,
 }: {
   op: OpDraft
   preset: TargetPreset
@@ -62,8 +64,13 @@ export function ReviewStep({
   previewError?: string | null
   /** Check and count it again. */
   onRetry?: () => void
-  sample: AffectedSample | null
+  /** A few of the entities it reaches, before and after — read on the draft by the server. */
+  sample: PropertyJobSample | null
   sampleLoading: boolean
+  /** Why the sample couldn't be read. */
+  sampleError?: string | null
+  /** Read the sample again. */
+  onRetrySample?: () => void
   stagedCount: number
   /** How many entities the draft has changed already, where it's known. */
   draftChanges?: number
@@ -179,6 +186,8 @@ export function ReviewStep({
     )
   }
   const checks = [...blocking, ...warnings, ...notes]
+  // A sample refused for what the check refuses already (a view that can't be read) is said once.
+  const sampleFailed = !!sampleError && !preview?.refusal
   const [allChecks, setAllChecks] = useState(false)
   // A few at first, never hiding one that stops it.
   const shownChecks = allChecks ? checks : checks.slice(0, Math.max(CHECKS_SHOWN, blocking.length))
@@ -255,20 +264,30 @@ export function ReviewStep({
         </Section>
       )}
 
-      {(sampleLoading || (sample && sample.entities.length > 0)) && (
-        <Section title="Sample">
+      {(sampleLoading || sample || sampleFailed) && (
+        <Section title="Sample" busy={sampleLoading}>
           {sampleLoading ? (
-            <div className="grid gap-x-6 gap-y-2 sm:grid-cols-2">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-5 w-full rounded-md" />)}</div>
+            <>
+              <p className="sr-only">Reading a few of them from your draft…</p>
+              <div className="space-y-2.5">
+                {[0, 1, 2, 3].map((i) => (
+                  <div key={i} className={SAMPLE_GRID}>
+                    <Skeleton className="h-4 w-4/5" /><Skeleton className="h-4 w-3/5" /><Skeleton className="h-4 w-3/5" /><Skeleton className="h-4 w-16" />
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : sampleFailed ? (
+            <EmptyState compact icon={AlertTriangle} title="Couldn’t read a few of them from your draft"
+              description={`${sampleError} — the change can be applied all the same.`}
+              secondaryAction={onRetrySample && { label: 'Try again', icon: RotateCw, onClick: onRetrySample }} />
+          ) : sample && sample.rows.length === 0 ? (
+            <EmptyState compact icon={SearchX} title={`No ${edges ? 'relationships' : 'entities'} to show`}
+              description="It reaches none on your draft."
+              secondaryAction={onChangeTarget && { label: 'Choose another target', onClick: onChangeTarget }} />
           ) : sample && (
             <>
-              <ul className="grid gap-x-6 sm:grid-cols-2" aria-label={`Some of the ${edges ? 'relationships' : 'entities'} it reaches`}>
-                {sample.entities.map((e) => (
-                  <li key={e.urn} className="flex min-w-0 items-baseline justify-between gap-3 border-b border-black/[0.05] py-1.5 text-[13px] dark:border-white/[0.06]">
-                    <span className="truncate text-ink">{e.displayName}</span>
-                    {e.entityType && <span className="shrink-0 text-xs text-ink-muted">{e.entityType}</span>}
-                  </li>
-                ))}
-              </ul>
+              <SampleTable op={op} sample={sample} edges={edges} />
               {sample.truncated && <p className="text-xs text-ink-muted">A few of them — there are more.</p>}
             </>
           )}
@@ -315,15 +334,103 @@ export function ReviewStep({
   )
 }
 
-/** One part of Review, under a small heading. */
-function Section({ title, children }: { title: string; children: ReactNode }) {
+/** One part of Review, under a small heading. `busy`: what it shows is still on its way. */
+function Section({ title, children, busy }: { title: string; children: ReactNode; busy?: boolean }) {
   const id = useId()
   return (
-    <section aria-labelledby={id} className="space-y-3">
+    <section aria-labelledby={id} aria-busy={busy || undefined} className="space-y-3">
       <h4 id={id} className="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-muted">{title}</h4>
       {children}
     </section>
   )
+}
+
+/** The sample's columns: the entity, its value now, after, and what the job does to it — on a
+ *  phone, what it does on a line of its own under the other three. */
+const SAMPLE_GRID = cn('grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)] items-start gap-x-3 gap-y-1.5',
+  'sm:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.9fr)]')
+
+const OUTCOME: Record<PropertyJobSampleRow['outcome'], { label: string; tone: 'accent' | 'neutral' | 'warning' }> = {
+  change: { label: 'Changes', tone: 'accent' },
+  unchanged: { label: 'No change', tone: 'neutral' },
+  skip: { label: 'Skipped', tone: 'warning' },
+}
+
+/** Why the job leaves one as it is, in a few words. */
+function skipReason(reason: NonNullable<PropertyJobSampleRow['reason']>, to: string | null): string {
+  switch (reason) {
+    case 'conflict': return `Already has ${to ?? 'the new name'}`
+    case 'unconvertible': return 'Its value won’t convert'
+    case 'no_longer_matches': return 'Your draft changed it out of the search'
+    case 'missing': return 'Not in this draft'
+    case 'derived': return 'A roll-up, never changed'
+  }
+}
+
+/** A few of the entities the change reaches, each as it is now and as the job would leave it. */
+function SampleTable({ op, sample, edges }: { op: OpDraft; sample: PropertyJobSample; edges: boolean }) {
+  const key = op.key.trim()
+  const to = needsTo(op.kind) ? op.to.trim() : null
+  const named = (label: string, name: string) => (
+    <>{label} <span className="font-mono normal-case tracking-normal">{name}</span></>
+  )
+  return (
+    <div role="table" aria-label={`Some of the ${edges ? 'relationships' : 'entities'} it reaches, before and after`} className="text-[13px]">
+      <div role="row" className={cn(SAMPLE_GRID, 'pb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-muted')}>
+        <span role="columnheader">{edges ? 'Relationship' : 'Entity'}</span>
+        <span role="columnheader" className="min-w-0 truncate">{to ? named('Now', key) : 'Now'}</span>
+        <span role="columnheader" className="min-w-0 truncate">{to ? named('After', to) : 'After'}</span>
+        <span role="columnheader" className="sr-only sm:not-sr-only">
+          <span className="sr-only">What it does</span>
+        </span>
+      </div>
+      {sample.rows.map((row, i) => {
+        const missing = row.reason === 'missing'
+        const changes = row.outcome === 'change'
+        return (
+          <div role="row" key={`${row.id}:${i}`} className={cn(SAMPLE_GRID, 'border-t border-black/[0.05] py-2 dark:border-white/[0.06]')}>
+            <span role="cell" className="min-w-0">
+              <span className={cn('block truncate', missing ? 'font-mono text-[12.5px] text-ink-secondary' : 'text-ink')}>{row.name}</span>
+              {row.type && <span className="block truncate text-[11.5px] text-ink-muted">{row.type}</span>}
+            </span>
+            <span role="cell" className="min-w-0 space-y-1">
+              {missing ? <Absent>—</Absent> : <SampleValue has={'before' in row} value={row.before} tone={changes ? 'before' : 'plain'} />}
+              {to && 'to' in row && (
+                <span className="block min-w-0">
+                  <span className="block truncate font-mono text-[11px] text-ink-muted">{to}</span>
+                  <SampleValue has value={row.to} tone="plain" />
+                </span>
+              )}
+            </span>
+            <span role="cell" className="min-w-0">
+              {missing ? <Absent>—</Absent>
+                : <SampleValue has={'after' in row} value={row.after} tone={changes ? 'after' : 'plain'} gone={changes ? 'removed' : undefined} />}
+            </span>
+            <span role="cell" className="col-span-3 flex min-w-0 flex-wrap items-baseline gap-x-2 sm:col-span-1 sm:block">
+              <Badge size="md" tone={OUTCOME[row.outcome].tone}>{OUTCOME[row.outcome].label}</Badge>
+              {row.reason && <span className="text-[11.5px] leading-snug text-ink-muted sm:mt-1 sm:block">{skipReason(row.reason, to)}</span>}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/** One value of the sample, quoted so spaces around it show — or that none is held (`gone`: what
+ *  to call none after a change: it was removed). */
+function SampleValue({ has, value, tone, gone }: { has: boolean; value: unknown; tone: 'before' | 'after' | 'plain'; gone?: string }) {
+  if (!has) return <Absent>{gone ?? 'not set'}</Absent>
+  return (
+    <span className={cn('w-fit max-w-full rounded px-1.5 py-0.5 font-mono text-[12.5px] whitespace-pre-wrap break-words line-clamp-2',
+      tone === 'before' ? 'bg-rose-500/[0.06] text-ink-secondary' : tone === 'after' ? 'bg-emerald-500/[0.08] text-ink' : 'bg-black/[0.04] text-ink-secondary dark:bg-white/[0.06]')}>
+      {typeof value === 'string' ? `“${value}”` : JSON.stringify(value)}
+    </span>
+  )
+}
+
+function Absent({ children }: { children: ReactNode }) {
+  return <span className="block text-[12.5px] italic text-ink-muted">{children}</span>
 }
 
 function Tile({ label, value, tone, upTo, soFar }: {
