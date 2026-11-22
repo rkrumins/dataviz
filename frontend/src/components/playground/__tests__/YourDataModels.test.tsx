@@ -75,7 +75,7 @@ describe('Your data models: the list', () => {
     it('lists the reader’s own and those shared, with status, version and use', async () => {
         renderPanel()
         const listed = await rows()
-        expect(listed.map(r => r.querySelector('.truncate')?.textContent)).toEqual(['My things', 'Half done', 'Team map'])
+        expect(listed.map(r => r.querySelector('[data-model-name]')?.textContent)).toEqual(['My things', 'Half done', 'Team map'])
 
         const mine = await row('My things')
         expect(mine).toHaveTextContent('Yours')

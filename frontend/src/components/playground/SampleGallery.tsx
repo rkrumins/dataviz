@@ -89,7 +89,7 @@ export function SampleGallery({ workspaceId, className, ref }: {
                                     <DynamicIcon name={s.icon} className="w-5 h-5" />
                                 </span>
                                 <span title={layout.what} className="inline-flex items-center gap-1 rounded-full border border-glass-border bg-canvas px-2 py-0.5 text-[11px] font-medium text-ink-secondary">
-                                    <LayoutIcon className="w-3 h-3" aria-hidden /> {layout.label} view
+                                    <LayoutIcon className="w-3 h-3" aria-hidden /> {/\bview$/i.test(layout.label) ? layout.label : `${layout.label} view`}
                                 </span>
                             </div>
                             <h4 className="mt-3 text-sm font-semibold text-ink">{s.title}</h4>

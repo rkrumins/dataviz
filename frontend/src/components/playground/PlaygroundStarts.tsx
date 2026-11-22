@@ -44,14 +44,14 @@ export function PlaygroundStarts({ first, full, onSample, onImport, onBlank, cla
                     <li data-tour="playground-import">
                         <StartCard id="import" full={full} onClick={onImport} icon={UploadCloud} tile="from-sky-400 to-indigo-500 shadow-sky-500/25"
                             title="Bring your own data" cta="Choose files"
-                            detail="Your things and how they connect, from CSV or JSON files. Templates included." />
+                            detail="Your own data source from a file — simple CSVs, JSON or a standard import file — on an approved semantic layer or one of your own." />
                     </li>
                 )}
                 {onBlank && (
                     <li data-tour="playground-new-graph">
                         <StartCard id="blank" full={full} onClick={onBlank} icon={PenTool} tile="from-violet-500 to-fuchsia-500 shadow-violet-500/25"
                             title="Start a blank graph" cta="Pick a data model"
-                            detail="Pick a starter data model, then draw on the canvas — or bring things in later." />
+                            detail="Pick a data model — an approved one or your own — then draw on the canvas, or bring things in later." />
                     </li>
                 )}
             </ul>

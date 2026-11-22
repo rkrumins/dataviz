@@ -110,7 +110,7 @@ export function YourDataModels({ className }: { className?: string }) {
                                 </span>
                                 <span className="min-w-0 flex-1">
                                     <span className="flex items-center gap-1.5">
-                                        <span className="truncate text-sm font-semibold text-ink">{m.name}</span>
+                                        <span data-model-name className="min-w-0 break-words text-sm font-semibold text-ink">{m.name}</span>
                                         <KindBadge kind={m.kind} />
                                     </span>
                                     <span className="block text-[11px] text-ink-muted">
@@ -119,11 +119,14 @@ export function YourDataModels({ className }: { className?: string }) {
                                     </span>
                                 </span>
                                 {own && (
-                                    <ToggleSwitch
-                                        size="sm" checked={shared} disabled={sharing !== null}
-                                        aria-label={`Share ${m.name} with the Playground`}
-                                        onChange={next => void share(m, next)}
-                                    />
+                                    <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] text-ink-muted">
+                                        <ToggleSwitch
+                                            size="sm" checked={shared} disabled={sharing !== null}
+                                            aria-label={`Share ${m.name} with the Playground`}
+                                            onChange={next => void share(m, next)}
+                                        />
+                                        <span aria-hidden>{shared ? 'Shared' : 'Share'}</span>
+                                    </span>
                                 )}
                                 <Link
                                     to={`/schema/${m.id}`}
