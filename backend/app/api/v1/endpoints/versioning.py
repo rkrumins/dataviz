@@ -7671,6 +7671,96 @@ async def preview_property_job(
             "counts": counts, "warnings": warnings}
 
 
+async def _property_sample_matches(session: AsyncSession, ws_id: str, data_source_id: Optional[str],
+                                   branch_id: str, actor: str, target: PropertyJobTarget, limit: int) -> List[str]:
+    """The first ``limit`` matches of a search target — urns, or for a Connections search each
+    edge's ``id`` — one page of the search as ``POST /search/advanced`` runs it, on the draft's
+    engine, in the target's view (held to it, as a job's search is). 422 ``search_refused`` when
+    the search can't run as asked."""
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
+    from backend.app.services.deep_search import SearchRunContext, get_deep_search_settings
+    from backend.app.services.view_transfer.sources import engine_for
+    from backend.common.models.search import SearchQuery
+
+    edges = target.entity_kind == "edge"
+    engine = await engine_for(session, ws_id, data_source_id, branch_id=branch_id, actor=actor)
+
+    async def can_read(view) -> bool:
+        return (view.id == target.view_id and view.workspace_id == ws_id
+                and view.data_source_id in (None, data_source_id))
+
+    search = AdvancedSearchService(engine, session=session, workspace_id=ws_id, data_source_id=data_source_id,
+                                   branch_id=branch_id, can_read_view=can_read)
+    # A Connections search answers a page of edges; any other, a page of hits.
+    options = {"pageSize": limit} if edges else {
+        "results": "hits", "pageSize": limit, "includeAncestorPath": False, "highlights": False}
+    query = SearchQuery.model_validate({
+        "predicate": target.predicate.model_dump(mode="json", by_alias=True),
+        "scope": {"viewId": target.view_id, "scopeMode": target.scope_mode}, "options": options})
+    try:
+        if get_deep_search_settings().engine == "v2":
+            page, _scope = await search.search(query, run_context=SearchRunContext(
+                data_version=await graph_ep._search_data_version(engine),
+                admit=graph_ep._statement_admission(engine)))
+        else:
+            page, _scope = await graph_ep._bounded_compute(engine, lambda: search.search(query))()
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=_refusal_detail(
+            (422, "search_refused", f"The search couldn't run: {exc}"))) from exc
+    except NotImplementedError as exc:
+        raise graph_ep._map_not_implemented(engine, exc) from exc
+    if edges:
+        return [e.id for e in page.edges or []][:limit]
+    return [h.node.urn for h in page.hits or [] if h.node.urn][:limit]
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs/preview/sample")
+async def preview_property_job_sample(
+    ws_id: str, graph_id: str, branch_id: str, body: PropertyJobRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """A few of the entities a bulk property job would reach, each before and after it, nothing
+    written — apart from the preview, so a check never waits on it. ``rows``: at most
+    ``SAMPLE_ROWS`` (8), each ``{id, urn?, name, type, before?, to?, after?, outcome, reason?}``
+    (``property_job.sample_row``: a value left out where none is held; ``outcome`` ``change``,
+    ``unchanged`` or ``skip``, with its ``reason``); ``truncated``: it reaches more. For an id
+    target, its first ids, read on the draft; for a search, its first page of matches on the
+    draft's engine, each checked again on the draft's values as a window checks it. 409
+    ``main_write_forbidden`` on main; 404 ``view_not_found`` for a search's view the caller can't
+    read; 422 ``search_refused`` when the search can't run as asked (501 where the store has no
+    search)."""
+    from backend.app.services.versioning.import_export import property_job as pj
+
+    main = branch_id == "main"
+    if not main:
+        with _property_job_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+            main = branch_id == await svc.main_branch_id(graph_id)
+    if main:
+        raise HTTPException(status_code=409, detail=_refusal_detail(
+            (409, "main_write_forbidden", "Bulk edits go to a draft; main changes only by publishing it.")))
+    target, recheck = body.target, None
+    if target.named is not None:
+        keys = list(dict.fromkeys(target.named))
+    else:
+        if not await _property_job_view_readable(session, ws_id, meta, target.view_id, user, claims):
+            raise HTTPException(status_code=404, detail=_refusal_detail(
+                (404, "view_not_found", "The view this search runs in isn't there, or you can't read it.")))
+        keys = await _property_sample_matches(session, ws_id, meta.get("data_source_id"), branch_id, user.id,
+                                              target, pj.SAMPLE_ROWS + 1)
+        if target.entity_kind == "node":
+            recheck = pj.predicate_recheck(target.predicate.model_dump(mode="json", by_alias=True))
+    rows = await pj.read_sample(graph_id, branch_id, body.op.wire(), keys[:pj.SAMPLE_ROWS],
+                                entity_kind=target.entity_kind, recheck=recheck)
+    return {"rows": rows, "truncated": len(keys) > pj.SAMPLE_ROWS}
+
+
 @router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs", status_code=202,
              dependencies=[Depends(require_feature("editModeEnabled"))])
 async def create_property_job(

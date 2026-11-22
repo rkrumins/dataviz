@@ -527,6 +527,59 @@ def _refused(urn: Optional[str], eid: Optional[str], reason: str, detail: str) -
 
 
 # --------------------------------------------------------------------------- #
+# A preview's sample: a few entities, before and after (pure)                  #
+# --------------------------------------------------------------------------- #
+#: The entities a preview's sample shows (``…/property-jobs/preview/sample``).
+SAMPLE_ROWS = 8
+
+
+def sample_row(op: Mapping[str, Any], props: Mapping[str, Any], rewrite: Optional["Rewrite"] = None,
+               skip: Optional[str] = None) -> Dict[str, Any]:
+    """One entity holding ``props``, before and after ``op``, as a preview's sample shows it —
+    planned as a window plans it (:func:`plan_patch`, with the op's :func:`rewriter`), so the
+    preview never says other than what the job writes:
+
+    * ``before``: what its key holds now; for a rename or a copy, ``to``: what the new key holds;
+    * ``after``: what the key the op writes holds once it has run — the new key, for a rename or a
+      copy (a rename's old key is gone);
+    * ``outcome``: ``change``, ``unchanged``, or ``skip`` with its ``reason``: ``conflict`` or
+      ``unconvertible`` as the plan finds them, or ``skip`` — what the read found
+      (``no_longer_matches``, ``missing``, ``derived``) — and then it is left as it is.
+
+    A value is left out where the key holds none. Pure."""
+    key = op["key"]
+    to = op.get("to") if op["kind"] in ("rename", "copy") else None
+    patch, failed = None, False
+    if skip is None:
+        rewrite = rewrite or rewriter(op)
+        patch, failed = _cleanup(op, props, rewrite) if rewrite else (plan_patch(op, props), False)
+    after = dict(props)
+    for k, v in (patch or {}).items():
+        if v == PROP_DELETE:
+            after.pop(k, None)
+        else:
+            after[k] = v
+    row: Dict[str, Any] = {}
+    if key in props:
+        row["before"] = props[key]
+    if to is not None and to in props:
+        row["to"] = props[to]
+    if (to or key) in after:
+        row["after"] = after[to or key]
+    if skip is not None:
+        row.update(outcome="skip", reason=skip)
+    elif patch is not None:
+        row["outcome"] = "change"
+    elif is_conflict(op, props):
+        row.update(outcome="skip", reason="conflict")
+    elif failed:
+        row.update(outcome="skip", reason="unconvertible")
+    else:
+        row["outcome"] = "unchanged"
+    return row
+
+
+# --------------------------------------------------------------------------- #
 # An undo: what one of a job's commits wrote, put back (pure)                  #
 # --------------------------------------------------------------------------- #
 def _holds_same(a: Mapping[str, Any], b: Mapping[str, Any], key: str) -> bool:
@@ -770,6 +823,64 @@ async def read_edge_targets(snap: Snapshot, keys: Iterable[str]):
 
     found, derived = await asyncio.to_thread(parse)
     return found, deleted, missing, derived
+
+
+async def read_sample(graph_id: str, branch_id: str, op: Mapping[str, Any], keys: Iterable[str], *,
+                      entity_kind: str = "node", recheck=None) -> List[Dict[str, Any]]:
+    """A preview's sample: each of ``keys`` (an id target's first few, or a search's first page)
+    read on the draft as a window reads it — :func:`read_targets` with a search target's
+    ``recheck``, or :func:`read_edge_targets` — in their order, one row an entity:
+    ``{id, urn?, name, type, …}`` and :func:`sample_row`. ``id`` is its entity id; a key that names
+    nothing in the draft (or one the draft deleted) is a row of its own, ``missing``, by the key.
+    Its name and type are read from its payload, apart from what the window reads: a node's display
+    name and entity type; an edge's type, and its ends by their names."""
+    snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
+    keys = list(dict.fromkeys(k for k in keys if k))
+    if entity_kind == "edge":
+        found, _deleted, _missing, derived = await read_edge_targets(snap, keys)
+        skipped = {k: (eid, "derived") for k, eid in derived.items()}
+    else:
+        found, _deleted, _missing, stale = await read_targets(snap, keys, recheck)
+        skipped = {k: (eid, "no_longer_matches") for k, eid in stale.items()}
+    winners = await snap.lookup_live(entity_kind, {f[0] for f in found.values()}
+                                     | {s[0] for s in skipped.values()}, payload=True)
+    ends = (await snap.lookup_live("node", {i for w in winners.values() for i in (w.source_id, w.target_id) if i},
+                                   payload=True) if entity_kind == "edge" else {})
+
+    def rows() -> List[Dict[str, Any]]:
+        def name(w: Optional[Winner], fallback: Optional[str]) -> Optional[str]:
+            payload = json.loads(w.payload) if w is not None and w.payload else {}
+            return payload.get("displayName") or (w.urn if w is not None else None) or fallback
+
+        out, seen, rewrite = [], set(), rewriter(op)
+        for k in keys:
+            if k in found:
+                eid, props, skip = found[k][0], found[k][1], None
+            elif k in skipped:
+                (eid, skip), props = skipped[k], None
+            else:
+                eid, props, skip = None, None, "missing"
+            w = winners.get(eid) if eid is not None else None
+            if w is None:                       # none in the draft (or gone between the reads)
+                out.append({"id": k, "name": k, "type": None, **sample_row(op, {}, skip="missing")})
+                continue
+            if eid in seen:                     # named again by another of its keys
+                continue
+            seen.add(eid)
+            payload = json.loads(w.payload) if w.payload else {}
+            if props is None:
+                props = dict(payload.get("properties") or {})
+            if entity_kind == "edge":
+                row = {"id": eid, "type": w.edge_type or payload.get("edgeType"), "name": (
+                    f"{name(ends.get(w.source_id), w.source_id)} → {name(ends.get(w.target_id), w.target_id)}")}
+            else:
+                urn = w.urn or payload.get("urn")
+                row = {"id": eid, "urn": urn, "name": payload.get("displayName") or urn or eid,
+                       "type": w.entity_type or payload.get("entityType")}
+            out.append({**row, **sample_row(op, props, rewrite, skip)})
+        return out
+
+    return await asyncio.to_thread(rows)
 
 
 async def window_commits(s, graph_id: str, branch_id: str, job) -> List[List[Any]]:
