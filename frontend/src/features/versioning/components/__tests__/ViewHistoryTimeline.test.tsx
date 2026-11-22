@@ -67,6 +67,7 @@ vi.mock('../../hooks/useVersioning', () => ({
     fetchNextPage: state.fetchNextPage,
   }
   },
+  useBranches: () => ({ data: undefined }),          // useMayPublish: the permission decides
   useHistoryMonths: () => ({
     data: { headSeq: 9, tz: 'UTC', months: [
       { month: '2026-09', count: 4, firstSeq: 2, lastSeq: 5, days: [] },

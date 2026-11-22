@@ -3,6 +3,9 @@
 * Its maker publishes its drafts, merges their reviews, loads it (bulk ingest) and has an import
   publish itself, without ``workspace:datasource:publish`` — and the reviews and branches they read
   say so (``viewerCan.merge``, ``access.canPublish``). A Playground or platform admin may too.
+* Everything else that advances its main is theirs too: revert, restore, freeze and unfreeze,
+  sync, update a fork of theirs from its parent, merge a fork's review into it — and the forks
+  list says who may (``canPublish``).
 * Another member may not open, stage or resolve a draft on it: 403 ``playground_not_yours``.
 * Its drafts start private.
 * A standard workspace is unchanged: making a graph there gives no publish, and anyone who
@@ -73,9 +76,33 @@ class _VersionStore:
                 "provider_id": None, "main_branch_id": f"main_{graph_id}"}
 
     async def get_pr(self, pr_id):
-        graph_id = pr_id.removeprefix("pr_")
-        return {"pr_id": pr_id, "target_graph_id": graph_id, "source_graph_id": graph_id,
-                "source_branch_id": f"br_{graph_id}", "actor": ADA.id, "reviewers": [], "status": "open"}
+        """``pr_<graph>``: a draft's review on it; ``pr_fork_<graph>``: a fork's review into it."""
+        fork = pr_id.startswith("pr_fork_")
+        graph_id = pr_id.removeprefix("pr_fork_" if fork else "pr_")
+        return {"pr_id": pr_id, "target_graph_id": graph_id,
+                "source_graph_id": f"g_fork_of_{graph_id}" if fork else graph_id,
+                "source_branch_id": f"br_{graph_id}", "actor": BEN.id if fork else ADA.id,
+                "reviewers": [], "status": "open"}
+
+    async def revert_commit(self, **kwargs):
+        self._did("revert_commit", kwargs)
+        return "c_new"
+
+    async def restore_to_commit(self, **kwargs):
+        self._did("restore_to_commit", kwargs)
+        return "c_new"
+
+    async def set_frozen(self, **kwargs):
+        self._did("set_frozen", kwargs)
+        return {"graph_id": kwargs["graph_id"], "state": "frozen" if kwargs["frozen"] else "active",
+                "rev": kwargs["expected_rev"] + 1, "changed": True}
+
+    async def list_forks(self, **_kwargs):
+        def fork(graph_id, deleted_at=None):
+            return {"graph_id": graph_id, "workspace_id": PG, "data_source_id": "ds_ada", "kind": "fork",
+                    "fork_parent_graph_id": "g_ada", "main_head_commit_seq": 1, "created_by": ADA.id,
+                    "created_at": "t", "deleted_at": deleted_at, "deleted_by": None, "purging": False}
+        return [fork("g_fork_live"), fork("g_fork_trashed", deleted_at="2026-11-20T00:00:00+00:00")]
 
     async def branch_change_count(self, **_kwargs):
         return 1
@@ -265,6 +292,97 @@ async def test_the_review_and_the_branches_say_who_may_publish(test_client: Asyn
     assert await can_publish(BEN, MEMBER, PG, "g_ada") is False
     assert await can_publish(ADA, MEMBER, TEAM, "g_team") is False        # made it, but not in the Playground
     assert await can_publish(BEN, TEAM_PUBLISHER, TEAM, "g_team") is True
+
+
+# ── Everything else that advances main ───────────────────────────────────
+
+#: Every route that advances a graph's main, and so is its Playground maker's without publish.
+_MAKERS_ROUTES = (
+    ("POST", "/graphs/{graph_id}/branches/{branch_id}/publish"),
+    ("POST", "/merge-requests/{pr_id}/merge"),
+    ("POST", "/pulls/{pr_id}/merge"),
+    ("POST", "/graphs/{graph_id}/lifecycle/freeze"),
+    ("POST", "/graphs/{graph_id}/lifecycle/unfreeze"),
+    ("POST", "/graphs/{graph_id}/commits/{commit_id}/revert"),
+    ("POST", "/graphs/{graph_id}/commits/{commit_id}/restore"),
+    ("POST", "/graphs/{graph_id}/sync"),
+    ("POST", "/graphs/{graph_id}/update-from-parent"),
+)
+
+
+def _calls(dependant) -> set:
+    found = set()
+    for dep in dependant.dependencies:
+        found.add(dep.call)
+        found |= _calls(dep)
+    return found
+
+
+def test_every_route_that_advances_main_is_the_makers_too():
+    gates = {(method, route.path): versioning_ep.require_publish_or_maker in _calls(route.dependant)
+             for route in versioning_ep.router.routes for method in getattr(route, "methods", ())
+             if (method, route.path) in _MAKERS_ROUTES}
+    assert gates == {r: True for r in _MAKERS_ROUTES}
+
+
+@pytest.mark.asyncio
+async def test_the_maker_reverts_restores_and_freezes_their_graph(test_client: AsyncClient, world):
+    with _as(ADA, MEMBER):
+        rs = [await test_client.post(_url(PG, f"/graphs/g_ada/commits/c_1/{verb}"), json={"message": "Back"})
+              for verb in ("revert", "restore")]
+        rs += [await test_client.post(_url(PG, f"/graphs/g_ada/lifecycle/{verb}"), json={"expectedRev": 0})
+               for verb in ("freeze", "unfreeze")]
+    for r in rs:
+        assert r.status_code == 200, r.text
+    assert [c["actor"] for c in world.did("revert_commit") + world.did("restore_to_commit")] == [ADA.id] * 2
+    assert [c["frozen"] for c in world.did("set_frozen")] == [True, False]
+
+
+@pytest.mark.parametrize("who, claims, ws_id, graph_id", [
+    (BEN, MEMBER, PG, "g_ada"),         # another member, on Ada's graph
+    (ADA, MEMBER, TEAM, "g_team"),      # Ada made it, but a standard workspace needs publish
+], ids=["another-member", "standard-workspace"])
+@pytest.mark.asyncio
+async def test_nobody_else_reverts_restores_or_freezes_it(test_client: AsyncClient, world, who, claims,
+                                                          ws_id, graph_id):
+    with _as(who, claims):
+        rs = [await test_client.post(_url(ws_id, f"/graphs/{graph_id}/commits/c_1/{verb}"), json={"message": "B"})
+              for verb in ("revert", "restore")]
+        rs += [await test_client.post(_url(ws_id, f"/graphs/{graph_id}/lifecycle/{verb}"), json={"expectedRev": 0})
+               for verb in ("freeze", "unfreeze")]
+    for r in rs:
+        assert r.status_code == 403, r.text
+    assert world.did("revert_commit") == world.did("restore_to_commit") == world.did("set_frozen") == []
+
+
+@pytest.mark.asyncio
+async def test_the_parent_graphs_maker_merges_a_forks_review_into_it(world, db_session):
+    from starlette.requests import Request
+
+    def merging(pr_id):
+        return Request({"type": "http", "path_params": {"ws_id": PG, "pr_id": pr_id}})
+
+    assert await versioning_ep.require_publish_or_maker(merging("pr_fork_g_ada"), ADA, MEMBER, world, db_session) is ADA
+    with pytest.raises(HTTPException) as refused:
+        await versioning_ep.require_publish_or_maker(merging("pr_fork_g_ada"), BEN, MEMBER, world, db_session)
+    assert refused.value.status_code == 403
+    pr = await world.get_pr("pr_fork_g_ada")
+    can = await versioning_ep._viewer_can(world, db_session, pr, ADA.id, MEMBER, PG)
+    cannot = await versioning_ep._viewer_can(world, db_session, pr, BEN.id, MEMBER, PG)
+    assert (can["merge"], can["mergeReason"]) == (True, None)
+    assert (cannot["merge"], cannot["mergeReason"]) == (False, "publish_required")
+
+
+@pytest.mark.asyncio
+async def test_the_forks_list_says_who_may_update_each(test_client: AsyncClient, world):
+    async def can_publish(user):
+        with _as(user, MEMBER):
+            r = await test_client.get(_url(PG, "/graphs/g_ada/forks"))
+        assert r.status_code == 200, r.text
+        return [f.get("canPublish") for f in r.json()]
+
+    assert await can_publish(ADA) == [True, None]       # a trashed fork says nothing
+    assert await can_publish(BEN) == [False, None]
 
 
 # ── Others' graphs are read-only to them ─────────────────────────────────

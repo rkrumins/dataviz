@@ -147,6 +147,9 @@ export interface ForkSummary extends Graph {
   updateRecommended?: boolean | null
   readsFrom?: 'overlay' | 'postgres' | null
   countsCapped?: boolean | null
+  /** A live one: whether the reader may advance its main (Update from parent) — the publish
+   *  permission, or in the Playground having made it. Absent from servers that predate it. */
+  canPublish?: boolean | null
 }
 
 /** A fork just made: its graph, its own data source and its `main`. */

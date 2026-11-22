@@ -1568,7 +1568,9 @@ class ForkSummaryResponse(GraphResponse):
     last merged review (or its fork point); ``behind``, those this graph changed that it has not
     taken in; ``updateRecommended``, past ``GRAPHVER_FORK_REWIND_WARN`` of those, or past the
     ceiling its reads go to Postgres (``readsFrom``: ``overlay`` | ``postgres``). The counts stop at
-    ``GRAPHVER_FORK_REWIND_MAX`` (``countsCapped``: one is at least that). Null on a trashed one."""
+    ``GRAPHVER_FORK_REWIND_MAX`` (``countsCapped``: one is at least that). Null on a trashed one.
+    ``canPublish``: whether the reader may advance the live one's main — update it from this graph
+    (:func:`_may_publish`: with publish, or as its Playground maker)."""
     data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
     label: Optional[str] = None
     deleted_at: Optional[str] = Field(default=None, alias="deletedAt")
@@ -1580,6 +1582,7 @@ class ForkSummaryResponse(GraphResponse):
     update_recommended: Optional[bool] = Field(default=None, alias="updateRecommended")
     reads_from: Optional[Literal["overlay", "postgres"]] = Field(default=None, alias="readsFrom")
     counts_capped: Optional[bool] = Field(default=None, alias="countsCapped")
+    can_publish: Optional[bool] = Field(default=None, alias="canPublish")
 
 
 class UpdateFromParentRequest(_ApiModel):
@@ -2345,15 +2348,14 @@ async def require_publish_or_maker(
     session: AsyncSession = Depends(get_db_session),
 ):
     """``require_publish`` — or, in the Playground, the maker of the graph it publishes into (the
-    draft's own; a draft review's target), who finishes their own work without publish. Anyone
-    else is refused as ``require_publish`` refuses them."""
+    route's own graph; a review's target, a draft's or a fork's), who finishes their own work
+    without publish. Anyone else is refused as ``require_publish`` refuses them."""
     ws_id = request.path_params["ws_id"]
     if claims.key_scope is None and not has_permission(claims, _PUBLISH, workspace_id=ws_id):
         graph_id = request.path_params.get("graph_id")
         if graph_id is None and await playground_policy.playground_of(session, ws_id) is not None:
             pr = await svc.get_pr(request.path_params["pr_id"]) or {}
-            if pr.get("source_graph_id") == pr.get("target_graph_id"):      # a draft's review
-                graph_id = pr.get("target_graph_id")
+            graph_id = pr.get("target_graph_id")                             # the main it advances
         if await _playground_maker_of_graph(svc, session, ws_id, graph_id, user.id, claims):
             return user
     return await require_publish(request, user, claims, session)
@@ -3226,7 +3228,7 @@ async def _set_frozen(svc, session: AsyncSession, meta: dict, graph_id: str, exp
 async def freeze_graph(
     ws_id: str, graph_id: str, body: LifecycleRequest,
     _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
-    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    _publisher: User = Depends(require_publish_or_maker),
     meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -3242,7 +3244,7 @@ async def freeze_graph(
 async def unfreeze_graph(
     ws_id: str, graph_id: str, body: LifecycleRequest,
     _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
-    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    _publisher: User = Depends(require_publish_or_maker),
     meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -3256,7 +3258,7 @@ async def revert_commit(
     ws_id: str, graph_id: str, commit_id: str, body: RevertRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),   # writing main is privileged
-    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    _publisher: User = Depends(require_publish_or_maker),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
@@ -3275,7 +3277,7 @@ async def restore_to_commit(
     ws_id: str, graph_id: str, commit_id: str, body: RevertRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),   # writing main is privileged
-    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    _publisher: User = Depends(require_publish_or_maker),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
@@ -4092,7 +4094,7 @@ async def sync_ingest(
     strategy: str = Query("merge", pattern="^(merge|external_wins)$"),
     source: str = Query("external"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
-    _publisher: User = Depends(require_publish),
+    _publisher: User = Depends(require_publish_or_maker),
     overrides: SyncOverrides = Depends(sync_override_gate),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -4105,7 +4107,8 @@ async def sync_ingest(
     to its containment subtree (ontology-driven). Idempotent on ``idempotencyKey``. 409
     ``curation_at_risk`` / ``mass_delete_blocked`` unless a workspace admin passes ``force`` /
     ``allowMassDelete``. It advances main, so it needs publish: an API key, its owner's
-    (``require_publish``); no key passes the overrides, which need a workspace admin."""
+    (``require_publish``), or in the Playground the graph's maker (``require_publish_or_maker``);
+    no key passes the overrides, which need a workspace admin."""
     rows: List[dict] = []
     content = await request.body()
     for line in content.splitlines():
@@ -5636,12 +5639,13 @@ async def list_forks(
     ws_id: str, graph_id: str,
     limit: int = Query(100, ge=1, le=500),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     """The graph's direct forks, newest first, those in the trash included, each with the label
-    of its data source."""
+    of its data source and, a live one, whether the reader may advance it (``canPublish``)."""
     from sqlalchemy import select
 
     from backend.app.db.models import WorkspaceDataSourceORM
@@ -5653,6 +5657,8 @@ async def list_forks(
         .where(WorkspaceDataSourceORM.id.in_(ids)))).all()) if ids else {}
     for f in forks:
         f["label"] = labels.get(f["data_source_id"])
+        if not f.get("deleted_at"):
+            f["can_publish"] = await _may_publish(session, ws_id, f["data_source_id"], _user.id, claims)
     await _attach_user_names(session, forks)
     return forks
 
@@ -5713,7 +5719,7 @@ async def restore_fork(
 async def update_from_parent(
     ws_id: str, graph_id: str, body: Optional[UpdateFromParentRequest] = None,
     # It writes the fork's main, as a publish does.
-    user: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    user: User = Depends(require_publish_or_maker),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -6033,10 +6039,10 @@ async def _viewer_can(svc: GraphVersioningService, session: AsyncSession, pr: di
     publishes = (key.owner_publishes(ws_id) if key is not None
                  and pr.get("source_graph_id") == pr.get("target_graph_id")
                  else has_permission(claims, _PUBLISH, workspace_id=ws_id))
-    # In the Playground, a draft review's maker merges it without publish (``require_publish_or_maker``).
-    publishes = publishes or (pr.get("source_graph_id") == pr.get("target_graph_id") and await
-                              _playground_maker_of_graph(svc, session, ws_id, pr.get("target_graph_id"),
-                                                         viewer, claims))
+    # In the Playground, the maker of the graph a review merges into merges it without publish
+    # (``require_publish_or_maker``), a draft's review or a fork's.
+    publishes = publishes or await _playground_maker_of_graph(svc, session, ws_id, pr.get("target_graph_id"),
+                                                              viewer, claims)
     merge = _first_refusal(
         (settled is not None, settled),
         (not manages, "manage_required"),
@@ -6103,7 +6109,7 @@ async def merge_pull_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # only manage may merge into base
-    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    _publisher: User = Depends(require_publish_or_maker),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),

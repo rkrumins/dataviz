@@ -1,7 +1,8 @@
 """``POST /api/v1/{ws}/versioning/graphs/{graph_id}/lifecycle/freeze`` and ``…/unfreeze`` — a
 publisher pauses and resumes editing of a versioned graph.
 
-* Both need ``workspace:datasource:publish`` and ``manage``, and are not open to API keys.
+* Both need ``workspace:datasource:manage`` and ``publish`` — or, in the Playground, to be the
+  graph's maker (``require_publish_or_maker``) — and are not open to API keys.
 * A real change is recorded in the activity log once; repeating it changes and records nothing.
 * A stale ``expectedRev`` is 409 ``version_conflict`` naming the current rev.
 """
@@ -22,15 +23,17 @@ _BASE = "/api/v1/{ws_id}/versioning/graphs/{graph_id}/lifecycle/"
 _META = {"graph_id": "g1", "workspace_id": "ws1", "data_source_id": "ds1"}
 
 
-def _gate_perms(dependant) -> set:
-    perms, stack = set(), [dependant]
+def _gates(dependant) -> tuple:
+    """The permissions its ``requires()`` gates name, and every dependency it calls."""
+    perms, calls, stack = set(), set(), [dependant]
     while stack:
         dep = stack.pop()
+        calls.add(getattr(dep, "call", None))
         perm = getattr(getattr(dep, "call", None), "required_permission", None)
         if perm:
             perms.add(perm)
         stack.extend(dep.dependencies)
-    return perms
+    return perms, calls
 
 
 @pytest.mark.parametrize("verb", ["freeze", "unfreeze"])
@@ -38,7 +41,9 @@ def test_freeze_and_unfreeze_need_publish_and_manage(verb):
     found = [(m, r, d) for m, p, r, d in api_key_surface.routes(app) if p == _BASE + verb]
     assert [m for m, _, _ in found] == ["POST"], found
     _, route, dependant = found[0]
-    assert {"workspace:datasource:publish", "workspace:datasource:manage"} <= _gate_perms(dependant)
+    perms, calls = _gates(dependant)
+    assert "workspace:datasource:manage" in perms
+    assert V.require_publish_or_maker in calls
     assert (route.endpoint.__module__, route.endpoint.__name__) not in api_key_surface.SURFACE
 
 

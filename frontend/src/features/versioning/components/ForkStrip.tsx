@@ -62,7 +62,7 @@ function Strip({ wsId, dataSourceId, variant }: ForkStripProps) {
       <div className="flex-1" />
       {forksOn ? fork && (
         <span className="inline-flex flex-wrap items-center gap-1.5">
-          {canPublish && <UpdateFromParentButton wsId={wsId} forkGraphId={fork.graphId} />}
+          {(fork.canPublish ?? canPublish) && <UpdateFromParentButton wsId={wsId} forkGraphId={fork.graphId} />}
           <ProposeToParentButton wsId={wsId} forkGraphId={fork.graphId} parentDataSourceId={forkOf.dataSourceId}
             behind={fork.behind ?? 0} />
         </span>

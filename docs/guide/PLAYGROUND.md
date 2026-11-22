@@ -199,7 +199,10 @@ your own: open it from **See the example review**, or from **Reviews**.
 ### Publish your own
 
 The graphs you made are yours to publish. You publish your drafts, and merge
-reviews of them, without the publish permission a team workspace asks for.
+reviews of them, without the publish permission a team workspace asks for — and
+the same goes for everything else that changes the live version: **Revert** and
+**Restore** from its history, **Pause editing** and **Resume editing**, merging a
+fork's review into it, and **Update from parent** on a fork you made.
 Everyone else in the Playground sees your graphs but can't open, change or
 resolve drafts on them, and drafts in the Playground start private. See
 [Versioning & Change Control](/guide/versioning-change-control#who-can-do-what).

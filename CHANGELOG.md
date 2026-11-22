@@ -27,8 +27,10 @@ Every new capability ships behind its own switch, off by default.
     things and 20,000 connections, with downloadable templates), or a blank graph.
   - **Samples that teach:** a Context View, a Graph view and a Hierarchy; saved searches and a
     display rule; a described data source; and an example change waiting for review.
-  - **Makers finish their own work:** they publish their drafts and merge their reviews on graphs
-    they made; others' graphs are read-only to them, and drafts there start private.
+  - **Makers finish their own work:** on graphs they made they publish drafts, merge reviews (a
+    draft's, or a fork's into their graph), revert, restore, pause and resume editing, sync, and
+    update their forks from the parent, all without the publish permission. Nobody gets that
+    permission in the Playground: others' graphs are read-only to them, and drafts start private.
   - **Guidance:** a "Your first steps" checklist ticked from what you did, a Playground chip on
     its views, a tour, and a guide with a learning path.
   - **Graduate:** move an experiment into a workspace you run, or bring it in a workspace request —
@@ -81,8 +83,6 @@ Every new capability ships behind its own switch, off by default.
 - There is no email or chat delivery: notices are in the Inbox only.
 - Starting a sample or importing your own data is covered by tests against stand-ins for the graph
   store, not a live FalkorDB.
-- In the Playground, reverting, restoring and fork publishing still need the publish permission
-  (a Playground admin); publishing a draft and merging a review are the maker's own.
 - Analytics charts overflow their cards at phone width (as the Content tab already did).
 
 ---
