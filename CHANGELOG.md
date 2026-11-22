@@ -904,7 +904,8 @@ integration's many small changes as a few commits.
   settings store's two revisions to `main`'s chain (the merge runs nothing), then copy each
   workspace's and data source's review rules (`review_required_approvals`, `review_threads_hold`)
   into the store once, as the import above copies the rest: an old 0 approvals is "everyone asked",
-  and the old columns are written for one release too.
+  and the old columns are written for one release too. `20261122_1300_merge_rules_store` joins
+  that line to `main`'s newer head, `20261122_1200_gv_job_notices`, and runs nothing.
 - **Migrations `20261113_1000_gv_ps_served_fill`, `20261113_1100_build_policy`,
   `20261113_1200_gv_ps_window_rows`, `20261113_1300_gv_ps_read_mode` and
   `20261113_1400_gv_ps_candidate`** fill `projection_state.served_commit_seq` where a graph's key

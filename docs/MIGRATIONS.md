@@ -387,6 +387,11 @@ the columns the tables have, so on a database whose schema is short of what its 
 copies what is there, and runs again once `--recover` has made the rest. The downgrade forgets the
 marker.
 
+**`20261122_1300_merge_rules_store` joins that line to `main`'s newer head.** `main` went on from
+`20261119_1500_merge_view_members` to `20261122_1200_gv_job_notices` while this branch's two
+revisions above were pushed, so `20261119_1700_review_rules_store` keeps the parent it was pushed
+with and the merge revision joins the two. It runs nothing.
+
 **Rolling back.** For one release, every save through the store writes the old storage too:
 New-version builds' JSON, the `platform_settings` columns, a workspace's and a data source's
 columns (a data source's forks' as well), and a graph's `projection_state.read_mode`. Each graph's
