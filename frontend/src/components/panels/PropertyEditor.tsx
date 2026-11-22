@@ -669,7 +669,7 @@ const PropertyRow = memo(function PropertyRow({
   // A field of the entity's type: edited, its allowed values are offered, and a value the draft
   // gives it (a marked row) that publishing would refuse is said under it.
   const rule = governKey && !readOnly ? governed?.fields.get(governKey) : undefined
-  const warning = rule && mark ? fieldWarning(rule, value, governed!.typeLabel) : null
+  const warning = rule && mark ? fieldWarning(rule, value, governed!.typeLabel, governed!.edges) : null
   const fieldType = inferFieldType(value)
   const isContainer = fieldType === 'group' || fieldType === 'list'
   // Long text takes the row's whole width, under its key: a paragraph squeezed beside the key
@@ -2293,7 +2293,7 @@ function RemovedRows({ rows, onRestore, unsaved }: {
   const governed = useContext(GovernedFieldsContext)
   const warnings = onRestore && governed ? rows.flatMap(([key]) => {
     const rule = governed.fields.get(key)
-    const warning = rule ? fieldWarning(rule, undefined, governed.typeLabel) : null
+    const warning = rule ? fieldWarning(rule, undefined, governed.typeLabel, governed.edges) : null
     return warning ? [warning] : []
   }) : []
   if (rows.length === 0) return null

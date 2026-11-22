@@ -7,7 +7,8 @@
  * Mirrors `backend/app/services/versioning/ontology.py` (`field_value_problem`) and
  * `backend/app/ontology/rules.py` (`field_rules`):
  * - a field's id is the property it is stored as; the name (`name`, `label`) and the reserved node
- *   keys are the platform's to keep, and never judged;
+ *   keys are the platform's to keep, and never judged — on a relationship type's field (`edges`),
+ *   only an edge's own fields are (`EDGE_RESERVED_KEYS`): a relationship has no name of its own;
  * - only some types are judged — number, progress, boolean, date, datetime, url, email, tags — and
  *   leniently where the data is: a number or a boolean stored as its text (`"42"`, `"true"`, as a
  *   CSV import keeps it) is one, a date-time field takes a bare date, tags take a list or one text;
@@ -18,6 +19,7 @@
 import type { EntityFieldDefinition } from '@/types/schema'
 import type { FieldType as InputType } from '@/components/panels/property/fieldTypes'
 import { RESERVED_PROPERTY_KEYS } from './nodeFields'
+import { EDGE_RESERVED_KEYS } from '@/components/canvas/property-manager/op/opModel'
 
 /** Field ids that are the entity's name (`displayName`), not a property. */
 const NAME_FIELD_IDS: ReadonlySet<string> = new Set(['name', 'label'])
@@ -35,9 +37,11 @@ const NAMED = 10
 
 type Field = Pick<EntityFieldDefinition, 'id' | 'name' | 'type' | 'required' | 'allowedValues' | 'allowOther'>
 
-/** Whether the field is a property a publish judges (see the header). */
-export function isPropertyField(field: Pick<Field, 'id'>): boolean {
-  return !!field.id && !NAME_FIELD_IDS.has(field.id) && !RESERVED_PROPERTY_KEYS.has(field.id)
+/** Whether the field is a property a publish judges (see the header) — `edges`: a relationship
+ *  type's. */
+export function isPropertyField(field: Pick<Field, 'id'>, edges = false): boolean {
+  if (!field.id) return false
+  return edges ? !EDGE_RESERVED_KEYS.has(field.id) : !NAME_FIELD_IDS.has(field.id) && !RESERVED_PROPERTY_KEYS.has(field.id)
 }
 
 /** The values the field holds its property to — none when it has none, or they are suggestions. */
@@ -47,15 +51,15 @@ export function enforcedAllowed(field: Field): readonly string[] {
 
 /** Whether a publish judges the field at all: a property that is required, keeps to allowed
  *  values, or is of a type a value can fail. */
-export function isGoverned(field: Field): boolean {
-  return isPropertyField(field)
+export function isGoverned(field: Field, edges = false): boolean {
+  return isPropertyField(field, edges)
     && (field.required || enforcedAllowed(field).length > 0 || JUDGED.has(String(field.type).toLowerCase()))
 }
 
-/** The type's fields a publish judges, by property key. */
-export function governedFields(fields: readonly EntityFieldDefinition[] | undefined): ReadonlyMap<string, EntityFieldDefinition> {
+/** The type's fields a publish judges, by property key — `edges`: a relationship type's. */
+export function governedFields(fields: readonly EntityFieldDefinition[] | undefined, edges = false): ReadonlyMap<string, EntityFieldDefinition> {
   const out = new Map<string, EntityFieldDefinition>()
-  for (const f of fields ?? []) if (isGoverned(f) && !out.has(f.id)) out.set(f.id, f)
+  for (const f of fields ?? []) if (isGoverned(f, edges) && !out.has(f.id)) out.set(f.id, f)
   return out
 }
 
@@ -104,9 +108,9 @@ export function allowedPhrase(allowed: readonly string[]): string {
 }
 
 /** Why a value breaks the field, in a sentence — or null. An empty value is fine here (see
- *  `requiredMissing`). */
-export function fieldProblem(field: Field, value: unknown): string | null {
-  if (!isPropertyField(field) || isEmptyValue(value)) return null
+ *  `requiredMissing`). `edges`: a relationship type's field. */
+export function fieldProblem(field: Field, value: unknown, edges = false): string | null {
+  if (!isPropertyField(field, edges) || isEmptyValue(value)) return null
   const type = String(field.type).toLowerCase()
   const shown = typeof value === 'string' ? value : JSON.stringify(value)
   if (JUDGED.has(type) && !ofType(type, value)) return `Should be ${TYPE_WORDS[type] ?? type} — “${shown}” isn’t.`
@@ -121,16 +125,17 @@ export function fieldProblem(field: Field, value: unknown): string | null {
 }
 
 /** A required field without a value. */
-export function requiredMissing(field: Field, value: unknown): boolean {
-  return isPropertyField(field) && !!field.required && isEmptyValue(value)
+export function requiredMissing(field: Field, value: unknown, edges = false): boolean {
+  return isPropertyField(field, edges) && !!field.required && isEmptyValue(value)
 }
 
 /** What editing should be told of a value — a problem, or a required field left without one —
- *  in the words of the publish that refuses it; null when there is nothing to say. */
-export function fieldWarning(field: Field, value: unknown, typeLabel: string): string | null {
-  const problem = fieldProblem(field, value)
+ *  in the words of the publish that refuses it; null when there is nothing to say. `edges`: a
+ *  relationship type's field. */
+export function fieldWarning(field: Field, value: unknown, typeLabel: string, edges = false): string | null {
+  const problem = fieldProblem(field, value, edges)
   if (problem) return `${problem} Publishing will refuse it.`
-  if (requiredMissing(field, value)) {
+  if (requiredMissing(field, value, edges)) {
     return `${field.name || field.id} is required for ${typeLabel} — publishing refuses a new one without it, or one it is emptied on.`
   }
   return null

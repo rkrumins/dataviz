@@ -768,16 +768,19 @@ export class UniqueViolationError extends Error {
   }
 }
 
-/** One property value a publish refused by its entity type's fields: not of the field's type
- *  (`field_type`), not one of its allowed values (`field_not_allowed`), or a required field left
- *  without one (`field_required`). `entity_id` is the server's; `urn` and `name` as the entity
- *  carries them; `reason` says it in a sentence. */
+/** One property value a publish refused by its entity or relationship type's fields: not of the
+ *  field's type (`field_type`), not one of its allowed values (`field_not_allowed`), or a required
+ *  field left without one (`field_required`). `entity_id` is the server's; `urn` and `name` as the
+ *  entity carries them — a relationship (`kind` `edge`) has neither, and names its ends instead
+ *  (`source`, `target`, their entity ids); `reason` says it in a sentence. */
 export interface FieldViolation {
   entity_id: string
-  kind: 'node'
+  kind: 'node' | 'edge'
   type: string
   name?: string | null
   urn?: string | null
+  source?: string
+  target?: string
   rule: 'field_type' | 'field_not_allowed' | 'field_required'
   field: string
   fieldName?: string
@@ -785,10 +788,12 @@ export interface FieldViolation {
   reason: string
 }
 
-/** How many values a publish refused for one field of one entity type, by one rule — and which:
- *  `ids`, as a bulk property job's `ids` target names them (the first 20,000), all of them when
- *  `idsComplete`. */
+/** How many values a publish refused for one field of one entity type — or, `entityKind` `edge`,
+ *  one relationship type — by one rule, and which: `ids`, as a bulk property job names them (an
+ *  entity as `gv:<id>`, a relationship by its own id; the first 20,000), all of them when
+ *  `idsComplete`. `entityKind` is absent from an older server's: an entity type's. */
 export interface FieldViolationCount {
+  entityKind?: 'node' | 'edge'
   entityType: string
   field: string
   fieldName?: string
@@ -798,16 +803,16 @@ export interface FieldViolationCount {
   idsComplete?: boolean
 }
 
-/** A publish refused because property values break the fields their entity types define. Nothing
- *  was published. `total`: how many there are — `violations` may list fewer; `byField`: how many
- *  per entity type, field and rule, the most first. */
+/** A publish refused because property values break the fields their entity or relationship types
+ *  define. Nothing was published. `total`: how many there are — `violations` may list fewer;
+ *  `byField`: how many per type, field and rule, the most first. */
 export class FieldViolationError extends Error {
   violations: FieldViolation[]
   total: number
   byField: FieldViolationCount[]
   constructor(violations: FieldViolation[], total?: number, byField?: FieldViolationCount[]) {
     const n = total ?? violations.length
-    super(`${n === 1 ? 'A value breaks' : `${n} values break`} the fields their entity types define. `
+    super(`${n === 1 ? 'A value breaks' : `${n} values break`} the fields their types define. `
       + violations.slice(0, 2).map((v) => `${v.name || v.urn || v.entity_id}: ${v.reason}`).join('; '))
     this.name = 'FieldViolationError'
     this.violations = violations

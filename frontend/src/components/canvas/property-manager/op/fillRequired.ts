@@ -4,7 +4,8 @@
  *
  * - From a drawer: every entity of the type missing it, as a search. Missing is as a publish's
  *   required rule reads it (no key, null, '' or []), which the search's `isEmpty` matches. A
- *   search reads Published, so it reaches the entities Published holds without one.
+ *   search reads Published, so it reaches the entities Published holds without one. Every
+ *   relationship of a type missing it is a Connections search the same way.
  * - From a refused publish: the entities it refused, by id (`byField[].ids`). Those are new in the
  *   draft or emptied there, which a search of Published never reaches. A job names at most
  *   `MAX_IDS`, so a refusal of more is filled the first `MAX_IDS` at a time.
@@ -34,19 +35,49 @@ export function fillRequiredRequest({ entityType, entityTypeName, field, fieldNa
   }
 }
 
+/** Every `edgeType` relationship whose `field` is empty, as a Connections search in `scopeMode`.
+ *  A relationship keeps its properties as JSON text, which a search reads for a key or a value:
+ *  empty is no key, or ''. */
+export function fillRequiredConnectionsRequest({ edgeType, edgeTypeName, field, fieldName, scopeMode }: {
+  edgeType: string
+  edgeTypeName?: string
+  field: string
+  fieldName?: string
+  scopeMode: ScopeMode
+}): OpRequest {
+  const predicate = {
+    kind: 'edges', edgeTypes: [edgeType],
+    edgePredicate: {
+      kind: 'edgeGroup', op: 'or', children: [
+        { kind: 'edgeHasProperty', key: field, negate: true },
+        { kind: 'edgeProperty', key: field, op: 'eq', value: '' },
+      ],
+    },
+  } as Predicate
+  return {
+    op: { kind: 'fillEmpty', key: field },
+    target: {
+      kind: 'connections', predicate, scopeMode,
+      label: `every ${edgeTypeName || edgeType} relationship missing ${fieldName || field}`,
+    },
+    scopeMode,
+  }
+}
+
 /** The entities a publish refused for an empty required `field`, by id: `ids` is all of them when
- *  `complete`, else the first `MAX_IDS`. */
-export function fillRefusedRequest({ entityType, field, fieldName, ids, complete }: {
+ *  `complete`, else the first `MAX_IDS`. `edges`: they are relationships, named by their own ids. */
+export function fillRefusedRequest({ entityType, field, fieldName, ids, complete, edges = false }: {
   entityType: string
   field: string
   fieldName?: string
   ids: readonly string[]
   complete: boolean
+  edges?: boolean
 }): OpRequest {
   const missing = `missing ${fieldName || field}`
   return {
     op: { kind: 'fillEmpty', key: field },
-    target: {
+    target: edges ? { kind: 'relationships', ids } : {
       kind: 'selection', ids, entityTypes: [entityType],
       label: complete ? `every ${entityType} the publish refused for ${missing}`
         : `the first ${ids.length.toLocaleString()} the publish refused for ${missing} on ${entityType}`,

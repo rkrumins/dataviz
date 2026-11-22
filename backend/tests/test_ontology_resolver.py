@@ -513,3 +513,36 @@ def test_sync_hierarchy_idempotent():
     once = sync_hierarchy_from_relationships(ents, rels)
     twice = sync_hierarchy_from_relationships(once, rels)
     assert twice["table"]["hierarchy"]["can_contain"] == ["column"]
+
+
+def test_a_relationship_types_fields_survive_every_writer_of_its_definition():
+    """Resolved, written back by the ontology service, and served in the schema — by the context
+    engine (with or without the ontology service) and the synthetic schema — a relationship type
+    keeps the fields a publish judges its relationships by."""
+    from types import SimpleNamespace
+    from backend.app.ontology.service import _rel_def_to_dict
+    from backend.app.services.context_engine import ContextEngine
+    from backend.app.services.stats_cache import _field_dicts
+    owns = {"name": "Owns", "fields": [
+        {"id": "since", "name": "Since", "type": "date", "required": True},
+        {"id": "tier", "name": "Tier", "type": "status", "allowedValues": ["gold"], "allowOther": True}]}
+    assigned = OntologyData(id="a1", name="Assigned", version=1, entity_type_definitions={},
+                            relationship_type_definitions={"OWNS": owns})
+    resolved = resolve_ontology(system_default=None, assigned=assigned)
+    rel = resolved.relationship_type_definitions["OWNS"]
+    assert [(f.id, f.required, f.allowed_values, f.allow_other) for f in rel.fields] == [
+        ("since", True, [], False), ("tier", False, ["gold"], True)]
+    assert parse_relationship_definitions({"OWNS": _rel_def_to_dict(rel)})["OWNS"].fields == rel.fields
+
+    meta = SimpleNamespace(containment_edge_types=[], lineage_edge_types=[])
+    [served] = ContextEngine._build_rel_types_from_resolved(
+        None, SimpleNamespace(edge_type_stats=[]), meta, resolved)
+    [fallback] = ContextEngine._build_rel_types_from_dicts(
+        None, SimpleNamespace(edge_type_stats=[
+            SimpleNamespace(id="OWNS", name="Owns", source_types=[], target_types=[])]),
+        meta, {"OWNS": rel})
+    for schema in (served, fallback):
+        fields = schema.model_dump(by_alias=True)["fields"]
+        assert [(f["id"], f["required"], f["allowedValues"], f["allowOther"]) for f in fields] == [
+            ("since", True, [], False), ("tier", False, ["gold"], True)]
+    assert [f["id"] for f in _field_dicts(rel.fields)] == ["since", "tier"]

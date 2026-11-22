@@ -70,6 +70,8 @@ import { OntologyAlertBanner, type OntologyAlert } from '@/features/ontology/com
 import { EvalContextBar } from '@/features/ontology/components/EvalContextBar'
 import { DataSourcePicker } from '@/features/ontology/components/DataSourcePicker'
 import type { OntologyImpactResponse, OntologyImportResponse } from '@/services/ontologyDefinitionService'
+import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { PageContainer, pageGeometry } from '@/components/layout/PageContainer'
 
 // ---------------------------------------------------------------------------
@@ -99,6 +101,26 @@ const LEGACY_TAB_MAP: Record<string, OntologyTab> = {
   // Old combined "Adoption" tab is now split; land on Health (the match view).
   adoption: 'health',
   history: 'history',
+}
+
+/** The property keys each relationship type's edges carry in the graph the app has open, as search
+ *  discovery samples them (what `useDiscovery` gives as `keysByEdgeType`) — offered as a
+ *  relationship field's key. Asked once `wanted`; none without a graph to ask, which this page can
+ *  be without (so `useDiscovery`, which needs one, isn't used). */
+function useEdgePropertyKeys(wanted: boolean): Readonly<Record<string, string[]>> {
+  const provider = useGraphProviderIfAvailable()
+  const [keys, setKeys] = useState<Readonly<Record<string, string[]>>>({})
+  useEffect(() => {
+    if (!wanted || !(provider instanceof RemoteGraphProvider)) return
+    let live = true
+    provider.discoverSearchableProperties()
+      .then((found) => {
+        if (live) setKeys(Object.fromEntries(Object.entries(found.edges ?? {}).map(([type, info]) => [type, [...(info.keys ?? [])].sort()])))
+      })
+      .catch(() => { /* suggestions only: none is fine */ })
+    return () => { live = false }
+  }, [wanted, provider])
+  return keys
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +238,7 @@ export function OntologySchemaPage() {
 
   // ── Local state ────────────────────────────────────────────────────
   const [editorPanel, setEditorPanel] = useState<EditorPanel>(null)
+  const edgePropertyKeys = useEdgePropertyKeys(editorPanel?.kind === 'rel')
   const { notify } = useAppNotifications()
   const [search, setSearch] = useState('')
   const [isSaving, setIsSaving] = useState(false)
@@ -840,9 +863,10 @@ export function OntologySchemaPage() {
     // it added a second, differently-cased key (Has + HAS) and pushed the uppercased id into
     // the containment/lineage lists, which the backend then rejected as a duplicate type.
     const relId = relType.id
+    // Over what is stored: what the editor doesn't hold (a key a later server added) is kept.
     const updatedRelDefs = {
       ...workingRelDefs,
-      [relId]: relSchemaToBackend(relType),
+      [relId]: relSchemaToBackend(relType, (workingRelDefs as Record<string, Record<string, unknown>>)[relId]),
     }
 
     let containment = [...(workingContainment ?? selectedOntology.containmentEdgeTypes ?? [])]
@@ -1910,6 +1934,7 @@ export function OntologySchemaPage() {
                           relType={editorPanel.data}
                           availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
                           existingTypeIds={relTypes.map(rt => rt.id)}
+                          propertyKeys={editorPanel.data ? edgePropertyKeys[editorPanel.data.id] : undefined}
                           siblingTypes={relTypes.map(rt => ({
                             id: rt.id,
                             name: rt.name,

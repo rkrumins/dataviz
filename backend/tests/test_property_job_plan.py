@@ -633,6 +633,30 @@ def test_what_publishing_would_refuse_is_warned_never_refused(V):
     assert V._property_job_warnings(_request(V, {"kind": "remove", "key": "owner"}).op, None) == []
 
 
+def test_a_job_over_relationships_is_warned_by_the_relationship_types_fields(V):
+    """Named as the ontology spells the type — the rules key edge types in capitals."""
+    from backend.app.services.versioning.ontology import EdgeRule, FieldRule
+    rules = OntologyRules(
+        entity_types={"Dataset": EntityRule(fields={"tier": FieldRule(type="status", allowed=("x",))})},
+        edge_types={"OWNS": EdgeRule(fields={
+            "tier": FieldRule(type="status", allowed=("gold", "silver"), name="Tier"),
+            "since": FieldRule(type="date", required=True, name="Since")}), "FLOWS_TO": EdgeRule()},
+        edge_type_canonical={"OWNS": "Owns", "FLOWS_TO": "FLOWS_TO"})
+
+    def warned(op):
+        body = _request(V, op, {"edgeIds": ["e1", "e2"]})
+        assert V._check_property_job(body.op, body.target, rules) is None      # never a refusal
+        return V._property_job_warnings(body.op, rules, edges=True)
+
+    [tier] = warned({"kind": "set", "key": "tier", "value": "bronze"})
+    assert (tier["code"], tier["entityType"], tier["field"]) == ("field_not_allowed", "Owns", "tier")
+    assert tier["message"].endswith("A Owns relationship given it can't be published until it holds a value "
+                                    "the field allows.")
+    assert [(w["code"], w["field"]) for w in warned({"kind": "remove", "key": "since"})] == [("field_required", "since")]
+    assert [w["code"] for w in warned({"kind": "copy", "key": "note", "to": "since"})] == ["field_checked"]
+    assert warned({"kind": "set", "key": "tier", "value": "gold"}) == []
+
+
 def test_the_job_keeps_its_op_as_the_plan_reads_it(V):
     op = _request(V, {"kind": "rename", "key": "owner", "to": "steward", "onConflict": "overwrite",
                       "value": "ignored"}).op.wire()
