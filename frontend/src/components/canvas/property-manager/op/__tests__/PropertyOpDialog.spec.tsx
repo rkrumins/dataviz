@@ -3,9 +3,10 @@
  * (which entities — ready-made targets, the view or, on purpose, the whole data source), Review
  * (counted exactly, with anything that stops it), then started on the draft as a job that is
  * tracked. A large removal asks for the name to be typed; staged edits are saved first; a retry
- * after a failure carries the same key.
+ * after a failure carries the same key. Its title says what it does, each step says what was chosen
+ * there, and the focus goes into it and stays there.
  */
-import { act, render, screen, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -526,5 +527,88 @@ describe('PropertyOpDialog — cleaning up a property’s values', () => {
     await user.click(next())
     await user.click(screen.getByRole('button', { name: /^Apply/ }))
     expect(api.create.mock.calls[0][4]).toEqual({ viewId: 'v1', predicate: edges, scopeMode: 'view' })
+  })
+})
+
+describe('PropertyOpDialog — its title, its steps, and the focus', () => {
+  const heading = () => screen.getByRole('heading', { level: 3 })
+  const rail = () => within(screen.getByRole('list', { name: 'Steps' })).getAllByRole('listitem')
+
+  it('adds a property from New, and changes one once it is named and held', async () => {
+    const user = userEvent.setup()
+    open()
+    expect(heading()).toHaveTextContent('Add a property')
+    await user.type(screen.getByRole('combobox', { name: 'Property' }), 'owner')
+    expect(heading()).toHaveTextContent('Change a property')
+  })
+
+  it('adds a property no entity in the view holds, and changes one they do', () => {
+    open({ op: { kind: 'fillEmpty', key: 'tier', value: 'gold' }, target: { kind: 'view' } })
+    expect(heading()).toHaveTextContent('Add a property')
+  })
+
+  it('a held property set, or removed, is changed; a clean-up cleans one up', async () => {
+    const user = userEvent.setup()
+    open({ kind: 'set', key: 'owner' })
+    expect(heading()).toHaveTextContent('Change a property')
+    await user.click(screen.getByRole('radio', { name: /Remove/ }))
+    expect(heading()).toHaveTextContent('Change a property')
+    await user.click(screen.getByRole('radio', { name: /Normalize/ }))
+    expect(heading()).toHaveTextContent('Clean up a property')
+  })
+
+  it('a relationship’s property is added or changed as the view’s relationships carry it', async () => {
+    const user = userEvent.setup()
+    open({ target: { kind: 'relationships', ids: ['e1'] } })
+    expect(heading()).toHaveTextContent('Add a property')
+    await user.type(screen.getByRole('combobox', { name: 'Property' }), 'owner')
+    expect(heading()).toHaveTextContent('Change a property')
+    await user.type(screen.getByRole('combobox', { name: 'Property' }), '2')
+    expect(heading()).toHaveTextContent('Add a property')
+  })
+
+  it('says in each step what was chosen there: the change, where, and how many it changes', async () => {
+    const user = userEvent.setup()
+    counts = exact(1204, 300)
+    open({ op: { kind: 'set', key: 'owner', value: 'data-eng' }, target: { kind: 'hasKey', key: 'owner' } })
+    expect(rail()[0]).toHaveTextContent(/What\s*Set owner = data-eng/)
+    expect(rail()[1]).toHaveTextContent(/Where\s*Every entity with owner/)
+    expect(rail()[2]).toHaveTextContent(/Review\s*Not counted yet/)
+    await user.click(next())
+    expect(rail()[2]).toHaveTextContent(/Review\s*1,204 entities$/)
+  })
+
+  it('says a count that isn’t the draft’s own is about so many', async () => {
+    const user = userEvent.setup()
+    counts = exact(120, 30)
+    counts.counts = new Map([...counts.counts].map(([id, c]) => [id, { ...c, approximate: true, note: 'Your draft changed more than 200,000 entities' }]))
+    open({ kind: 'remove', key: 'owner' })
+    await user.click(screen.getByRole('radio', { name: 'The whole data source' }))
+    expect(rail()[1]).toHaveTextContent(/Where\s*Every entity with owner, across the whole data source/)
+    await user.click(screen.getByRole('checkbox', { name: 'I mean the whole data source' }))
+    await user.click(next())
+    expect(rail()[2]).toHaveTextContent(/Review\s*about 30 entities$/)
+  })
+
+  it('opened on Where, the focus is in it: ⌘↵ goes on, Tab stays in the dialog, and Esc closes it', async () => {
+    const user = userEvent.setup()
+    const { onClose } = open({ kind: 'remove', key: 'owner' })
+    const dialog = screen.getByRole('dialog')
+    // On the choice it opened with.
+    expect(screen.getByRole('radio', { name: /Every entity with owner/ })).toHaveFocus()
+
+    await user.keyboard('{Control>}{Enter}{/Control}')
+    expect(screen.getByText('Will change')).toBeInTheDocument()
+    expect(dialog).toContainElement(document.activeElement as HTMLElement)
+    const apply = screen.getByRole('button', { name: 'Apply to 30' })
+    await waitFor(() => expect(apply).toBeEnabled())
+    apply.focus()
+    await user.tab()
+    expect(screen.getByRole('button', { name: 'Close' })).toHaveFocus()
+    await user.tab({ shift: true })
+    expect(apply).toHaveFocus()
+
+    await user.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalled()
   })
 })

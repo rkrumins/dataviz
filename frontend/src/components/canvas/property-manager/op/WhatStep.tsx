@@ -100,60 +100,68 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
     [edges, op.kind, op.key, entityTypes, schemaTypes])
   const onlyAllowed = !!allowedField && enforcedAllowed(allowedField).length > 0
   const [picks, setPicks] = useState(0)
+  // What the property is given, beside it on a wide screen: its value, or its new name.
+  const second = needsTo(op.kind) || needsValue(op.kind)
 
   return (
-    <div ref={root} className="space-y-5">
+    <div ref={root} className="space-y-6">
       <div>
         <span className={LABEL} id="op-kind-label">Operation</span>
         <OpPicker value={op.kind} onChange={pick} edges={edges} />
-        <p className="mt-1.5 text-[11.5px] text-ink-muted">
+        <p className="mt-2 text-[13px] text-ink-muted">
           {edges ? KIND_HINT[op.kind].replace(/entities/g, 'relationships').replace(/entity/g, 'relationship') : KIND_HINT[op.kind]}
         </p>
       </div>
 
-      <div>
-        <label className={LABEL} htmlFor="op-key">Property</label>
-        <KeyCombobox id="op-key" value={op.key} onChange={(key) => set({ key })} properties={properties} counted={!edges} autoFocus={!valueFirst} />
-        {keyError ? <p role="alert" className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">{keyError}</p>
-          : op.key.trim() && (
-            <p className="mt-1 text-[11px] text-ink-muted">
-              {edges ? (known ? 'The view’s relationships carry it.'
-                : needsValue(op.kind) ? 'A new property — none of the view’s relationships carries it yet.' : 'None of the view’s relationships carries it.')
-                : known
-                ? <>Held by <span className="font-semibold text-ink-secondary tabular-nums">{known.count.toLocaleString()}</span> entities in this view.</>
-                : needsValue(op.kind) ? 'A new property — none of the view’s entities holds it yet.' : 'None of the view’s entities holds it.'}
-            </p>
-          )}
-      </div>
-
-      {needsTo(op.kind) && (
-        <div>
-          <label className={LABEL} htmlFor="op-to">New name</label>
-          <input id="op-to" value={op.to} onChange={(e) => set({ to: e.target.value })} placeholder="e.g. steward"
-            aria-invalid={toError ? true : undefined} className={cn(FIELD, 'font-mono', toError && 'border-rose-500/60')} />
-          {toError && <p role="alert" className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">{toError}</p>}
-          {toHeldBy && !toError && (
-            <fieldset className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] p-2.5">
-              <legend className="px-1 text-[11px] text-amber-700 dark:text-amber-300">
-                {edges ? 'Some relationships' : `${toHeldBy.count.toLocaleString()} entities`} already hold <span className="font-mono">{op.to.trim()}</span>. For those:
-              </legend>
-              {(['skip', 'overwrite'] as const).map((choice) => (
-                <label key={choice} className="flex items-center gap-2 py-0.5 text-[12px] text-ink">
-                  <input type="radio" name="op-conflict" checked={op.onConflict === choice} onChange={() => set({ onConflict: choice })}
-                    className="accent-indigo-500" />
-                  {choice === 'skip' ? 'Leave them as they are' : `Replace their ${op.to.trim()}`}
-                </label>
-              ))}
-            </fieldset>
-          )}
+      <div className={cn('grid gap-5', second && 'md:grid-cols-2')}>
+        <div className="min-w-0">
+          <label className={LABEL} htmlFor="op-key">Property</label>
+          <KeyCombobox id="op-key" value={op.key} onChange={(key) => set({ key })} properties={properties} counted={!edges} autoFocus={!valueFirst} />
+          {keyError ? <p role="alert" className="mt-1.5 text-xs text-rose-600 dark:text-rose-400">{keyError}</p>
+            : op.key.trim() && (
+              <p className="mt-1.5 text-xs text-ink-muted">
+                {edges ? (known ? 'The view’s relationships carry it.'
+                  : needsValue(op.kind) ? 'A new property — none of the view’s relationships carries it yet.' : 'None of the view’s relationships carries it.')
+                  : known
+                  ? <>Held by <span className="font-semibold text-ink-secondary tabular-nums">{known.count.toLocaleString()}</span> entities in this view.</>
+                  : needsValue(op.kind) ? 'A new property — none of the view’s entities holds it yet.' : 'None of the view’s entities holds it.'}
+              </p>
+            )}
         </div>
-      )}
 
-      {allowedField && (
-        <AllowedValues field={allowedField} value={op.value} only={onlyAllowed}
-          onPick={(value) => { set({ value: Array.isArray(value) && value.length === 0 ? '' : value }); setPicks((n) => n + 1) }} />
-      )}
-      {needsValue(op.kind) && !onlyAllowed && <ValueField key={picks} value={op.value} onChange={(value) => set({ value })} known={known} />}
+        {second && (
+          <div className="min-w-0 space-y-5">
+            {needsTo(op.kind) && (
+              <div>
+                <label className={LABEL} htmlFor="op-to">New name</label>
+                <input id="op-to" value={op.to} onChange={(e) => set({ to: e.target.value })} placeholder="e.g. steward"
+                  aria-invalid={toError ? true : undefined} className={cn(FIELD, 'font-mono', toError && 'border-rose-500/60')} />
+                {toError && <p role="alert" className="mt-1.5 text-xs text-rose-600 dark:text-rose-400">{toError}</p>}
+                {toHeldBy && !toError && (
+                  <fieldset className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] p-3">
+                    <legend className="px-1 text-xs text-amber-700 dark:text-amber-300">
+                      {edges ? 'Some relationships' : `${toHeldBy.count.toLocaleString()} entities`} already hold <span className="font-mono">{op.to.trim()}</span>. For those:
+                    </legend>
+                    {(['skip', 'overwrite'] as const).map((choice) => (
+                      <label key={choice} className="flex items-center gap-2 py-0.5 text-[13px] text-ink">
+                        <input type="radio" name="op-conflict" checked={op.onConflict === choice} onChange={() => set({ onConflict: choice })}
+                          className="accent-indigo-500" />
+                        {choice === 'skip' ? 'Leave them as they are' : `Replace their ${op.to.trim()}`}
+                      </label>
+                    ))}
+                  </fieldset>
+                )}
+              </div>
+            )}
+
+            {allowedField && (
+              <AllowedValues field={allowedField} value={op.value} only={onlyAllowed}
+                onPick={(value) => { set({ value: Array.isArray(value) && value.length === 0 ? '' : value }); setPicks((n) => n + 1) }} />
+            )}
+            {needsValue(op.kind) && !onlyAllowed && <ValueField key={picks} value={op.value} onChange={(value) => set({ value })} known={known} />}
+          </div>
+        )}
+      </div>
       {isCleanup(op.kind) && op.key.trim() && !keyError && (
         <CleanupFields op={op} onChange={set} known={known} viewId={viewId} />
       )}
@@ -187,7 +195,7 @@ function AllowedValues({ field, value, only, onPick }: {
       <span className={LABEL}>{only ? 'Value' : 'Suggested values'}</span>
       <AllowedValuePicker field={field} value={value} label={name} onPick={onPick} />
       {problem ? <FieldNote className="mt-1.5">{problem} Publishing will refuse it.</FieldNote>
-        : only && <p className="mt-1.5 text-[11px] text-ink-muted">{name} takes only these values — publishing refuses any other.</p>}
+        : only && <p className="mt-1.5 text-xs text-ink-muted">{name} takes only these values — publishing refuses any other.</p>}
     </div>
   )
 }
@@ -210,17 +218,17 @@ function OpPicker({ value, onChange, edges }: { value: PropertyOpKind; onChange:
     refs.current.get(to)?.focus()
   }
   return (
-    <div role="radiogroup" aria-labelledby="op-kind-label" className="space-y-1.5">
+    <div role="radiogroup" aria-labelledby="op-kind-label" className="space-y-2">
       {groups.map((g) => (
-        <div key={g.group} className="flex flex-wrap items-center gap-1.5">
-          <span className="w-24 shrink-0 text-[10.5px] text-ink-muted">{g.group}</span>
-          <div className="inline-flex flex-wrap items-center gap-0.5 rounded-lg bg-black/[0.05] p-0.5 dark:bg-white/[0.05]">
+        <div key={g.group} className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
+          <span className="shrink-0 text-xs text-ink-muted sm:w-28">{g.group}</span>
+          <div className="inline-flex flex-wrap items-center gap-0.5 self-start rounded-lg bg-black/[0.05] p-0.5 dark:bg-white/[0.05]">
             {g.kinds.map(({ value: kind, icon: Icon }) => {
               const on = kind === value
               return (
                 <button key={kind} ref={(el) => { refs.current.set(kind, el) }} type="button" role="radio" aria-checked={on}
                   tabIndex={on ? 0 : -1} onClick={() => onChange(kind)} onKeyDown={(e) => move(e, kind)}
-                  className={cn('inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors duration-150',
+                  className={cn('inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[13px] font-medium transition-colors duration-150',
                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                     on ? 'bg-canvas-elevated text-ink shadow-sm' : 'text-ink-muted hover:text-ink')}>
                   <Icon className="h-3.5 w-3.5" aria-hidden />
@@ -279,14 +287,14 @@ function KeyCombobox({ id, value, onChange, properties, counted = true, autoFocu
       />
       {show && (
         <ul id={`${id}-list`} role="listbox" aria-label="Properties in this view"
-          className="absolute z-10 mt-1 w-full max-h-64 overflow-y-auto custom-scrollbar rounded-lg border border-glass-border bg-canvas-elevated p-1 shadow-lg">
+          className="absolute z-10 mt-1 w-full max-h-52 overflow-y-auto custom-scrollbar rounded-lg border border-glass-border bg-canvas-elevated p-1 shadow-lg">
           {offered.map((p, i) => (
             <li key={p.key} role="option" aria-selected={i === active}
               onMouseDown={(e) => { e.preventDefault(); pick(p.key) }}
               onMouseEnter={() => setActive(i)}
-              className={cn('flex items-center gap-2 px-2 h-8 rounded-md cursor-pointer text-[12px]', i === active ? 'bg-accent-lineage/10 text-ink' : 'text-ink-secondary')}>
+              className={cn('flex items-center gap-2 px-2.5 h-9 rounded-md cursor-pointer text-[13px]', i === active ? 'bg-accent-lineage/10 text-ink' : 'text-ink-secondary')}>
               <span className="flex-1 min-w-0 truncate font-mono">{p.key}</span>
-              {counted && <span className="text-[10.5px] tabular-nums text-ink-muted">{p.count.toLocaleString()}</span>}
+              {counted && <span className="text-[11px] tabular-nums text-ink-muted">{p.count.toLocaleString()}</span>}
             </li>
           ))}
         </ul>
@@ -347,17 +355,17 @@ function ValueField({ value, onChange, known }: {
               className={cn(FIELD, (type === 'number' || type === 'text') && 'font-mono', numberBad && 'border-rose-500/60',
                 type === 'date' && '[color-scheme:light] dark:[color-scheme:dark]')}
             />
-            {numberBad && <p role="alert" className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">“{text.trim()}” isn’t a number</p>}
+            {numberBad && <p role="alert" className="mt-1.5 text-xs text-rose-600 dark:text-rose-400">“{text.trim()}” isn’t a number</p>}
           </div>
         )}
       </div>
       {existing.length > 0 && type !== 'boolean' && (
         <div className="mt-2 flex flex-wrap items-center gap-1">
-          <span className="text-[10.5px] text-ink-muted mr-0.5">It holds:</span>
+          <span className="text-[11px] text-ink-muted mr-0.5">It holds:</span>
           {existing.map((v) => (
             <button key={`${v.kind}:${String(v.value)}`} type="button"
               onClick={() => { const t = typeOfValue(v.value); setType(t); commitText(t, String(v.value)) }}
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-mono bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary hover:bg-accent-lineage/10 hover:text-accent-lineage transition-colors">
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-mono bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary hover:bg-accent-lineage/10 hover:text-accent-lineage transition-colors">
               {String(v.value) || '∅'}
               <span className="tabular-nums text-ink-muted">{v.count.toLocaleString()}</span>
             </button>
