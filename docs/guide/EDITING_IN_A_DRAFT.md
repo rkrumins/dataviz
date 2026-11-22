@@ -611,9 +611,9 @@ with resolutions**.
 ## Your draft
 
 - **In the Business view**, the version menu shows once you're in a draft. On
-  Published, **More** (`⋯`) → **Your drafts…** opens your drafts, and **More →
-  Changes & history…** opens a draft's changes, or the published history, its
-  reviews and data health.
+  Published, **More** (`⋯`) → **Your drafts…** opens your drafts. **Reviews** in
+  the view's header, as in the Technical view, opens **Changes & Reviews**: a
+  draft's changes, or the published history, its reviews and data health.
 - **Switch versions.** The version menu in the toolbar shows **Published** or
   your draft's name. It lists **Published**, then **Your drafts**, **Shared
   with you** and **Public drafts**, each marked with a globe (public) or a lock

@@ -7201,11 +7201,6 @@ export function ContextViewCanvas({
         onSetCanvasZoom={setCanvasZoom}
         onFitToWidth={handleFitToWidth}
         onOpenOrphans={() => setOrphansOpen(true)}
-        // The Reviews button's gate (ViewReviewsButton): a versioned graph with history to show.
-        // `branchWorkspaceId` is null in a read-only session, which gets no route into it.
-        onOpenHistory={branchWorkspaceId && graphId && (isBlankModel || mainHeadSeq > 1)
-          ? () => useVersioningPanelStore.getState().openPanel(isDraft ? 'changes' : 'history')
-          : undefined}
         canvasDensity={canvasDensity}
         onSetCanvasDensity={setCanvasDensity}
         showCanvasTypeBadge={showCanvasTypeBadge}
