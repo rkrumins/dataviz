@@ -118,6 +118,11 @@ export interface PlaygroundGraphMade {
     /** The Context View: open this. */
     viewId: string
     viewIds: { context: string; graph: string }
+    /** The semantic layer it is built on. */
+    ontologyId?: string
+    /** A layer made from the file's types: each type's name → its id there, so the rows can name
+     *  them by id. Empty for a layer on offer. */
+    typeIds?: { entity?: Record<string, string>; relationship?: Record<string, string> }
 }
 
 /** Where a semantic layer of one's own starts from. `layer`: a Semantic Layers export (JSON). */

@@ -397,7 +397,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/DISPLAY_RULES.md"
   },
   "semantic-layer": {
-    "updated": "2026-11-01",
+    "updated": "2026-11-22",
     "path": "docs/guide/SEMANTIC_LAYER.md"
   },
   "api-keys": {
@@ -417,7 +417,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/REVIEW_CENTER.md"
   },
   "import-export": {
-    "updated": "2026-11-20",
+    "updated": "2026-11-22",
     "path": "docs/guide/IMPORT_EXPORT.md"
   },
   "admin-setup": {
@@ -453,7 +453,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/GOVERNANCE_OPS.md"
   },
   "feature-switches": {
-    "updated": "2026-11-21",
+    "updated": "2026-11-22",
     "path": "docs/guide/FEATURE_SWITCHES.md"
   },
   "data-freshness": {

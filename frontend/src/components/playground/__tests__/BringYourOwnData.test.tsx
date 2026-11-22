@@ -298,6 +298,24 @@ describe('New data source from a file', () => {
         expect((await sentRows()).map(r => r.entityType ?? r.edgeType)).toEqual(['salesTable', 'dashboard', 'FLOWS_INTO'])
     })
 
+    it('names the file’s types by the ids the server says they got, with no read-back', async () => {
+        svc.createGraph.mockResolvedValueOnce({
+            dataSourceId: 'ds_new', graphId: 'g_new', mainBranchId: 'br_main', viewId: 'v_ctx',
+            viewIds: { context: 'v_ctx', graph: 'v_graph' }, ontologyId: 'own_1',
+            typeIds: { entity: { 'Sales table': 'salesTable', Dashboard: 'dashboard' },
+                       relationship: { 'flows into': 'FLOWS_INTO' } },
+        })
+        renderDialog()
+        await pick(file('things.csv', 'key,type,name\na,Sales table,A\nb,Dashboard,B\n'),
+                   file('links.csv', 'from,type,to\na,flows into,b\n'))
+        await userEvent.click(await screen.findByRole('button', { name: /Make one from my file/ }))
+        await userEvent.click(create())
+
+        await screen.findByRole('region', { name: 'Done' })
+        expect(svc.listDataSources).not.toHaveBeenCalled()
+        expect((await sentRows()).map(r => r.entityType ?? r.edgeType)).toEqual(['salesTable', 'dashboard', 'FLOWS_INTO'])
+    })
+
     it('tries a failed load again into the same graph, never making it twice', async () => {
         vi.mocked(pollJob)
             .mockResolvedValueOnce({ jobId: 'j1', jobType: 'ingest', graphId: 'g_new', status: 'failed',

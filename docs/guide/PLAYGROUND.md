@@ -102,7 +102,7 @@ Bring your own data in from files. They're read in your browser first, so
 anything that can't be used is shown before anything is made.
 
 1. Click **Bring your own data**.
-2. **Files.** Drop your files on the dialog, or choose them. Two kinds work, here
+2. **Your files.** Drop your files on the dialog, or choose them. Two kinds work, here
    and in every workspace's **Import**:
    * **The simple files**: **things.csv** and **connections.csv**, or
      **example.json** for both in one file. The templates are a small example — a
@@ -123,12 +123,12 @@ anything that can't be used is shown before anything is made.
      samples'.
    * **Make one from my file** — a data model made from the types in your file,
      yours to change afterwards.
-4. **Match your types.** Each type in your file is matched to one in the semantic
+4. **Match types.** Each type in your file is matched to one in the semantic
    layer — by its name, where it can be. Change any that's wrong, or choose
    **Leave these rows out**. A connection the semantic layer doesn't allow between
    those two types is listed under **Rows to fix**. On a semantic layer of your own,
-   **Add these types to my data model** adds what's missing.
-5. **Name** the data source, and describe it if you like. **More options** chooses
+   **Add to my data model** adds what's missing.
+5. **Name it**, and describe it if you like. **More options** chooses
    how rows match things you already have, and can keep the first load in a draft
    for you to review before publishing.
 6. Click **Create**. The data source and its views are made, then your rows load —
@@ -137,8 +137,8 @@ anything that can't be used is shown before anything is made.
    Context View, and **Add more data** opens **Import** on it.
 
 If the rows don't load — the connection drops, or too many are refused — **Try the
-import again** loads into the same data source: nothing is made twice. A data
-source with no rows yet says so on its card, with **Add data**.
+import again** loads into the same data source: nothing is made twice. **Add more
+data** beside it under **Your experiments** loads into it whenever you like.
 
 | Simple file | Columns |
 | --- | --- |
@@ -256,9 +256,9 @@ with you. **New data model** starts one:
 | Start from | You get |
 | --- | --- |
 | **Blank** | An empty semantic layer to define by hand |
-| **Copy an approved layer** | Your own copy of an approved, starter, sample or shared one, to adjust |
+| **Copy one you can use** | Your own copy of an approved, starter, sample or shared one, to adjust |
 | **Import a layer file** | One exported from **Semantic Layers** — the one your workspace already uses, say |
-| **From a file** | Opens **Bring your own data**, and makes one from your file's types |
+| **From a file of your data** | Opens **Bring your own data**, and makes one from your file's types |
 
 * **Edit it** in the editor: kinds of things and connections, what contains what,
   fields. You can edit and publish your own even where editing semantic layers is

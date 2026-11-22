@@ -224,6 +224,11 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
      *  rows name them by their ids. Unread, the rows name them as the file does. */
     const typesMadeFor = async (target: PlaygroundGraphMade): Promise<TypeMap> => {
         if (!summary) return NO_TYPES
+        // The server says which id each of the file's types got; older servers don't, so read
+        // the layer back.
+        if (target.typeIds?.entity) {
+            return { entity: { ...target.typeIds.entity }, relationship: { ...(target.typeIds.relationship ?? {}) } }
+        }
         try {
             const source = (await workspaceService.listDataSources(workspaceId)).find(d => d.id === target.dataSourceId)
             if (!source?.ontologyId) return NO_TYPES

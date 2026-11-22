@@ -245,7 +245,8 @@ async def test_a_graph_on_an_approved_layer_has_no_rows_and_its_views_are_the_fi
     assert r.status_code == 201, r.text
     body = r.json()
     assert body == {**body, "graphId": "g_1", "mainBranchId": "br_1"}
-    assert set(body) == {"dataSourceId", "graphId", "mainBranchId", "viewId", "viewIds"}
+    assert set(body) == {"dataSourceId", "graphId", "mainBranchId", "viewId", "viewIds", "ontologyId", "typeIds"}
+    assert body["typeIds"] == {}                         # a layer on offer: the rows name its ids already
     assert set(body["viewIds"]) == {"context", "graph"} and body["viewId"] == body["viewIds"]["context"]
 
     # Asked of the layer whether it is on offer to Ben, then its types — those the file uses.
@@ -323,6 +324,9 @@ async def test_a_file_makes_a_published_layer_of_their_own_and_views_over_its_ty
     assert ds.ontology_id == "ont_own_1" and store.graphs[0]["base_ontology_id"] == "ont_own_1"
     assert store.imports == [] and layers.dropped == []
     assert await _context_layers(db_session, body["viewId"]) == [["sourceSystem"], ["warehouseTable"]]
+    # Each of the file's types by its id there, so its rows can name them so.
+    assert body["ontologyId"] == "ont_own_1"
+    assert body["typeIds"]["entity"] == {"Source system": "sourceSystem", "Warehouse table": "warehouseTable"}
 
 
 @pytest.mark.asyncio

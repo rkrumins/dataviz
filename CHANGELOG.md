@@ -23,8 +23,18 @@ Every new capability ships behind its own switch, off by default.
 - **Playground** (`playgroundEnabled`): your own workspace at its first stage — one shared sandbox
   anyone who can sign in may join, on its own sandbox provider, with a per-person graph quota.
   - **Three ways to start:** a sample (a retail pipeline, a customer 360, an ML feature pipeline),
-    your own data (CSV or JSON of things and connections, checked in the browser, up to 5,000
-    things and 20,000 connections, with downloadable templates), or a blank graph.
+    a file, or a blank graph — each a versioned data source, as in any workspace.
+  - **Your own data sources, on approved semantic layers or your own:** a file (the simple
+    things/connections CSV or JSON, or the standard import file — CSV, TSV, ndjson, JSON or Excel)
+    becomes a data source on the organization's approved semantic layer that best fits it, or on
+    one of your own. Types are matched to the layer's before anything is made; the data source is
+    created, then the file loads through the standard import (progress, refused rows with why,
+    retry into the same data source). **Add more data** opens Import on it, in a draft.
+  - **Semantic layers of your own:** start one blank, by copying one you can use, from a layer file
+    exported from Semantic Layers, or from a file's types; edit it in the Semantic Layers editor
+    and publish versions yourself, whatever the org's editing switches say; share it with the
+    Playground, read-only for others. Moving a graph into a workspace takes its layer along — it
+    becomes that workspace's — and an org editor can **Approve for everyone**.
   - **Samples that teach:** a Context View, a Graph view and a Hierarchy; saved searches and a
     display rule; a described data source; and an example change waiting for review.
   - **Makers finish their own work:** on graphs they made they publish drafts, merge reviews (a
@@ -62,6 +72,14 @@ Every new capability ships behind its own switch, off by default.
 
 - **Turning a switch on in Admin → Features turns on what it needs** (`depends_on`) in the same save,
   and says so. The Playground needs Version control and Build lineage from scratch.
+- **Import takes the simple files too:** every workspace's Import accepts things/connections CSV
+  or JSON beside the standard import file, says what it found before anything is sent, and names
+  types the data source's semantic layer lacks. One standard, two ways in.
+- **Every semantic layer records who made, changed, published and deleted it**, and each layer
+  tells the reader what they may do with it (`access`); the editor follows it.
+- **Playground members can see the organization's published, organization-wide semantic layers**
+  — their types and fields, not anyone's data — to build on them. Layers kept to one workspace
+  and system layers stay hidden.
 - The Explorer keeps a selection to its list; the Review Center reads one workspace or all.
 
 ### Upgrading
@@ -73,6 +91,14 @@ Every new capability ships behind its own switch, off by default.
   nullable columns on existing tables.
 - **`20261124_1100_aal_ds_type` builds an index on the activity ledger** (`auth_audit_log`), with a
   bounded lock wait. On a large ledger, run the upgrade off-peak.
+- **`20261129_1000_ontology_owner`** adds `ontologies.owner_workspace_id` (a key to `workspaces`,
+  cleared when it goes) and `owner_visibility`; existing layers are the organization's, as before.
+  **`20261129_1100_oal_imported`** lets a semantic layer's audit log record `imported` — every
+  import that changed a layer used to fail on that check (Postgres; databases built from the
+  models already have it).
+- **A row ceiling for imports:** `IMPORT_MAX_ROWS` (0, no limit, by default) is now enforced; the
+  Playground has its own, **rows per import** (200,000), next to its graph and semantic-layer
+  quotas (5 and 20) in its settings.
 - **`20260727_1400_invite_tokenver` was edited** to check for its column with the inspector instead
   of Postgres-only `IF [NOT] EXISTS`; databases that ran it are unaffected.
 - All five new switches ship **off**. Turn them on under Admin → Features; set up the Playground
@@ -81,8 +107,11 @@ Every new capability ships behind its own switch, off by default.
 ### Known limitations
 
 - There is no email or chat delivery: notices are in the Inbox only.
-- Starting a sample or importing your own data is covered by tests against stand-ins for the graph
-  store, not a live FalkorDB.
+- Starting a sample is covered by tests against stand-ins for the graph store, not a live
+  FalkorDB; a data source from a file loads through the standard import, whose live tests run in
+  CI.
+- Excel files go to the server as they are, so the Playground can't rank semantic layers against
+  them or match their types beforehand; their rows are still checked against the layer.
 - Analytics charts overflow their cards at phone width (as the Content tab already did).
 
 ---

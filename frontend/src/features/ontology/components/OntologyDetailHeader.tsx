@@ -31,6 +31,7 @@ import { OntologyStatusBadge } from './OntologyStatusBadge'
 import { useOntologyVersions } from '../hooks/useOntologies'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { OwnLayerActions } from './OwnLayerActions'
+import { ApproveForEveryone } from './ApproveForEveryone'
 
 import type { SemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
 
@@ -251,6 +252,7 @@ export function OntologyDetailHeader({
           </div>
 
           {access.isOwn && <OwnLayerActions ontology={ontology} access={access} workspaces={workspaces} />}
+          {!access.isOwn && <ApproveForEveryone ontology={ontology} />}
 
           {/* Tier 2: Expandable details */}
           {expanded && (

@@ -210,6 +210,12 @@ export const ontologyDefinitionService = {
 
     /** Publish a draft. `force` overrides the breaking-change block (admin
      *  escape hatch — the server re-runs the impact check and 409s without it). */
+    /** Make a layer a workspace owns — one that moved there with a graph — an organization-wide
+     *  one. Org editors only. */
+    approve(id: string): Promise<OntologyDefinitionResponse> {
+        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}/approve`, { method: 'POST' })
+    },
+
     publish(id: string, force = false): Promise<OntologyDefinitionResponse> {
         return request<OntologyDefinitionResponse>(
             `${ADMIN_API}/${id}/publish${force ? '?force=true' : ''}`,

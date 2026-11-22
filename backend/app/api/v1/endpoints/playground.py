@@ -446,6 +446,11 @@ class NewGraph(BaseModel):
 class StartedGraph(Started):
     graph_id: str = Field(alias="graphId")
     main_branch_id: str = Field(alias="mainBranchId")
+    #: The semantic layer it is built on.
+    ontology_id: Optional[str] = Field(None, alias="ontologyId")
+    #: A layer made from the file's types: each type's name → its id there (``entity``,
+    #: ``relationship``), so the file's rows can name the types by id. Empty on a layer on offer.
+    type_ids: Dict[str, Dict[str, str]] = Field(default_factory=dict, alias="typeIds")
 
 
 def _type_errors(exc: ValidationError) -> List[dict]:
@@ -541,7 +546,9 @@ async def create_graph(
     made = await _start(request, background, session, svc, user, ws_id, provider_id,
                         _graph_starter(body, ontology_id, *types), failure="graph_create_failed",
                         own_ontology=infer is not None)
-    return StartedGraph(**made)
+    type_ids = ({"entity": {t.name: tid for tid, t in types[0].items()},
+                 "relationship": {r.name: rid for rid, r in types[1].items()}} if infer is not None else {})
+    return StartedGraph(**made, ontologyId=ontology_id, typeIds=type_ids)
 
 
 async def _start(request: Request, background: BackgroundTasks, session: AsyncSession,
