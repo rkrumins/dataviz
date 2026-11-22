@@ -72,6 +72,19 @@ export interface OntologySuggestResponse {
     mergedVariants: Record<string, MergedVariantSpelling[]>
 }
 
+/** What the reader may do with one semantic layer, as the server decided it: an org layer by the
+ *  semantic-layer permission and switches, a Playground layer of one's own by being its maker.
+ *  Absent from servers that predate it: the global rules decide. */
+export interface LayerAccess {
+    canEdit: boolean
+    canPublish: boolean
+    canDelete: boolean
+    canClone: boolean
+    canShare: boolean
+    canAssign: boolean
+    isOwn: boolean
+}
+
 export interface OntologyDefinitionResponse {
     id: string
     schemaId: string
@@ -98,6 +111,12 @@ export interface OntologyDefinitionResponse {
     deletedAt: string | null
     createdAt: string
     updatedAt: string
+    /** The workspace that owns it (a Playground maker's own layer, or one that moved with a graph);
+     *  null for an org layer. */
+    ownerWorkspaceId?: string | null
+    /** An owned layer: `private` to its maker, or shared with its `workspace`. */
+    ownerVisibility?: 'private' | 'workspace' | null
+    access?: LayerAccess
 }
 
 export interface OntologyAuditEntry {

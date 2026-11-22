@@ -4,6 +4,7 @@
  * administrator turns `playgroundEnabled` on and sets it up.
  */
 import { authFetch } from './apiClient'
+import type { OntologyDefinitionResponse } from './ontologyDefinitionService'
 
 export interface PlaygroundInfo {
     enabled: boolean
@@ -18,6 +19,11 @@ export interface PlaygroundInfo {
     canSetUp: boolean
     sandboxProviderId?: string | null
     starterOntologyIds?: string[] | null
+    /** Most rows one import may carry here (0: no limit). */
+    maxImportRows?: number
+    /** Most semantic layers of their own a member may keep, and how many the reader has. */
+    layerQuota?: number
+    layersUsed?: number
 }
 
 /** A graph a member may start from a sample: a card in the gallery. */
@@ -86,6 +92,77 @@ export interface ImportedGraph {
     viewIds: { context: string; graph: string }
 }
 
+/** A semantic layer a member may build on here (`GET /playground/models`): an approved org-wide
+ *  layer, a starter, a sample's, one of their own, or one another member shared. */
+export type PlaygroundModelKind = 'approved' | 'starter' | 'sample' | 'yours' | 'shared'
+
+export interface PlaygroundModel {
+    id: string
+    name: string
+    description: string | null
+    version: number
+    kind: PlaygroundModelKind
+    isPublished: boolean
+    entityTypeCount: number
+    relationshipTypeCount: number
+    /** How many of the reader's graphs are built on it. */
+    usedBy: number
+}
+
+/** A data model made from a file's types: thing types, and connection types with the type pairs
+ *  their rows join. */
+export interface InferredModel {
+    thingTypes: string[]
+    connectionTypes: { name: string; ends: [string, string][] }[]
+}
+
+/** `POST /playground/graphs`: a new data source, blank graph and views, with no rows yet — they
+ *  come through the standard import. `types`: the entity types the file uses, which set the
+ *  Context View's layers. */
+export interface NewPlaygroundGraph {
+    name: string
+    description?: string
+    model: { ontologyId: string } | { infer: InferredModel }
+    types?: string[]
+}
+
+export interface PlaygroundGraphMade {
+    dataSourceId: string
+    graphId: string
+    mainBranchId: string
+    /** The Context View: open this. */
+    viewId: string
+    viewIds: { context: string; graph: string }
+}
+
+/** Where a semantic layer of one's own starts from. `layer`: a Semantic Layers export (JSON). */
+export type LayerSource =
+    | { blank: true }
+    | { cloneOf: string }
+    | { layer: Record<string, unknown> }
+    | { infer: InferredModel }
+
+export interface NewPlaygroundLayer {
+    name: string
+    description?: string
+    from: LayerSource
+}
+
+export interface LayerTypesToAdd {
+    entityTypes: { name: string }[]
+    relationshipTypes: { name: string; ends: [string, string][] }[]
+}
+
+/** What adding types made: the layer version now in use (a new one when the layer was published),
+ *  how many of the reader's graphs moved to it, and each added name's type id. */
+export interface LayerTypesAdded {
+    ontologyId: string
+    version: number
+    movedGraphs: number
+    entityTypeIds: Record<string, string>
+    relationshipTypeIds: Record<string, string>
+}
+
 export interface PlaygroundSetup {
     name: string
     description?: string
@@ -97,6 +174,9 @@ export interface PlaygroundSetup {
 const BASE = '/api/v1/playground'
 const json = (body: unknown): RequestInit => ({
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+})
+const post = (body: unknown): RequestInit => ({
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 })
 
 export const playgroundService = {
@@ -110,4 +190,15 @@ export const playgroundService = {
     importOwnData: (body: OwnDataImport) => authFetch<ImportedGraph>(`${BASE}/imports`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     }),
+    /** The semantic layers the reader may build on here. */
+    listModels: () => authFetch<PlaygroundModel[]>(`${BASE}/models`, { silent403: true }),
+    /** The standard import template for a layer (csv | ndjson | xlsx), as a download URL. */
+    modelTemplateUrl: (ontologyId: string, format: 'csv' | 'ndjson' | 'xlsx' = 'csv') =>
+        `${BASE}/models/${encodeURIComponent(ontologyId)}/template?format=${format}`,
+    createGraph: (body: NewPlaygroundGraph) => authFetch<PlaygroundGraphMade>(`${BASE}/graphs`, post(body)),
+    createLayer: (body: NewPlaygroundLayer) => authFetch<OntologyDefinitionResponse>(`${BASE}/layers`, post(body)),
+    shareLayer: (ontologyId: string, shared: boolean) => authFetch<OntologyDefinitionResponse>(
+        `${BASE}/layers/${encodeURIComponent(ontologyId)}/share`, post({ shared })),
+    addLayerTypes: (ontologyId: string, body: LayerTypesToAdd) => authFetch<LayerTypesAdded>(
+        `${BASE}/layers/${encodeURIComponent(ontologyId)}/types`, post(body)),
 }
