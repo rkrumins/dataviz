@@ -207,6 +207,7 @@ tests/test_node_identity_write_binding.py
 tests/test_node_property_hygiene.py
 tests/test_notification_kinds_have_visuals.py
 tests/test_object_store.py
+tests/test_ontology_ownership.py
 tests/test_outbox_relay.py
 tests/test_package_ndjson_cursor.py
 tests/test_package_new_source_api.py
@@ -221,6 +222,7 @@ tests/test_placement_legacy_parity.py
 tests/test_playground.py
 tests/test_playground_graduation.py
 tests/test_playground_imports.py
+tests/test_playground_layers.py
 tests/test_playground_maker_rights.py
 tests/test_playground_samples.py
 tests/test_probe_graph_providers.py
