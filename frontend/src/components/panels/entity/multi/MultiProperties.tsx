@@ -205,6 +205,7 @@ export function MultiProperties({
                   onAddMany={(entries) => { onAddAll(entries); setAdding(false) }}
                   onUpdateExisting={(k, v) => { onAddAll([[k, v]]); setAdding(false) }}
                   onCancel={() => setAdding(false)}
+                  size="lg"
                 />
               </div>
             )}
