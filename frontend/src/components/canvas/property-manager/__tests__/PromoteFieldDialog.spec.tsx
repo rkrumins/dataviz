@@ -68,7 +68,8 @@ function renderBrowser() {
   )
 }
 const openDialog = async (user: ReturnType<typeof userEvent.setup>) => {
-  await user.click(screen.getByRole('button', { name: 'Make it a field…' }))
+  await user.click(screen.getByRole('button', { name: 'More actions for owner' }))
+  await user.click(await screen.findByRole('menuitem', { name: 'Make it a field…' }))
   return screen.getByRole('dialog', { name: /Make owner a field/ })
 }
 
@@ -85,10 +86,12 @@ beforeEach(() => {
 })
 
 describe('Make it a field…', () => {
-  it('is offered only to who may edit the semantic layer', () => {
+  it('is offered only to who may edit the semantic layer', async () => {
     canEditLayer = false
     renderBrowser()
-    expect(screen.queryByRole('button', { name: 'Make it a field…' })).toBeNull()
+    await userEvent.setup().click(screen.getByRole('button', { name: 'More actions for owner' }))
+    expect(await screen.findByRole('menu')).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Make it a field…' })).toBeNull()
   })
 
   it('adds the field, prefilled from the catalog, to a draft layer in place', async () => {
