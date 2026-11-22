@@ -489,7 +489,7 @@ function DraftKeyProbe() {
 function JobsRail() {
   const jobs = useDraftPropertyJobs(useBranchStore((s) => s.graphId), useBranchStore((s) => s.currentBranchId))
   return (
-    <aside className="w-[clamp(380px,30vw,520px)] h-full overflow-y-auto custom-scrollbar border-l border-glass-border bg-canvas-elevated shadow-lg shadow-black/20 p-4">
+    <aside className="w-[clamp(440px,34vw,640px)] h-full overflow-y-auto custom-scrollbar border-l border-glass-border bg-canvas-elevated shadow-lg shadow-black/20 p-4">
       <h2 className="mb-3 text-sm font-display font-semibold text-ink">Property Manager</h2>
       <PropertyJobsPanel jobs={jobs} />
       <DraftKeyProbe />

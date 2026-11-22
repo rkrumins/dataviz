@@ -5,10 +5,10 @@
  *
  * The REAL canvases, mounted on a stub provider: the store is the one selection (the rings, the
  * selection bar and every bulk action read it), ⌘A selects what is on screen in one write, a
- * right-click offers the several together, Esc closes the drawer comparing them, and Backspace —
- * or the edit toolbar's Delete — stages a delete rather than taking the entity out of the canvas.
- * On the Hierarchy, the search button sits in the header it used to cover, and a row the canvas
- * filter hides and shows again keeps rendering.
+ * right-click offers the several together, Esc closes the drawer comparing them, and Backspace
+ * stages a delete rather than taking the entity out of the canvas. On the Hierarchy, the search
+ * button sits in the toolbar it used to cover, and a row the canvas filter hides and shows again
+ * keeps rendering.
  */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -170,7 +170,7 @@ function countSelectionWrites() {
 }
 
 beforeEach(() => { useCanvasStore.getState().clearSelection() })
-afterEach(() => { restoreFetch(); useCanvasStore.getState().setEditing(false) })
+afterEach(() => { restoreFetch() })
 
 describe('GraphCanvas — several at once', () => {
   async function mountGraph(opts?: { draft?: boolean }) {
@@ -238,8 +238,8 @@ describe('GraphCanvas — several at once', () => {
     await settle()
     const region = bar()!
     expect(region.textContent).toContain('drag selects a box')
-    // Outside a draft, the drawer reads them: "Details", not an edit it could not keep.
-    fireEvent.click(within(region).getByRole('button', { name: 'Details' }))
+    // Outside a draft, the drawer compares them: "Compare 2", not an edit it could not keep.
+    fireEvent.click(within(region).getByRole('button', { name: 'Compare 2' }))
     expect(useCanvasStore.getState().drawerNodeIds).toEqual(['orders', 'customers'])
     fireEvent.click(within(region).getByRole('button', { name: /remove customers/i }))
     expect(selected()).toEqual(['orders'])
@@ -285,23 +285,6 @@ describe('GraphCanvas — several at once', () => {
     expect(useStagedChangesStore.getState().changes.map((c) => c.type)).toEqual(['delete_entity'])
   }, 20000)
 
-  it('the edit toolbar\'s Delete stages it too — it never takes the entity out of the canvas', async () => {
-    await mountGraph({ draft: true })
-    act(() => { useCanvasStore.getState().setEditing(true) })
-    fireEvent.click(graphCard('orders')!)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Delete' })) })
-    await settle()
-    expect(useCanvasStore.getState().nodes.find((n) => n.id === 'orders')?.data.isPending).toBe('delete')
-    expect(useStagedChangesStore.getState().changes.map((c) => c.type)).toEqual(['delete_entity'])
-  }, 20000)
-
-  it('outside a draft the edit toolbar\'s Delete is off', async () => {
-    await mountGraph()
-    act(() => { useCanvasStore.getState().setEditing(true) })
-    fireEvent.click(graphCard('orders')!)
-    expect(screen.getByRole('button', { name: 'Delete' })).toBeDisabled()
-  }, 20000)
-
   it('Backspace typed in the drawer deletes nothing — React Flow\'s own delete key is off', async () => {
     // The drawer owns its keys (keyboard scope), so the canvas's staged delete does not run. React
     // Flow's default Backspace did: it removed the selected entities from the canvas outright.
@@ -323,7 +306,7 @@ describe('GraphCanvas — several at once', () => {
     await mountGraph({ draft: true })
     act(() => { useCanvasStore.getState().setSelection(['orders', 'customers']) })
     await settle()
-    fireEvent.click(within(bar()!).getByRole('button', { name: 'Edit 2…' }))
+    fireEvent.click(within(bar()!).getByRole('button', { name: 'Compare & edit 2' }))
     expect(useCanvasStore.getState().drawerNodeIds).toEqual(['orders', 'customers'])
     // The drawer edits here — it stages for both, nothing yet changed.
     expect(await screen.findByRole('button', { name: 'Stage for 2' })).toBeDisabled()
@@ -338,8 +321,8 @@ describe('GraphCanvas — several at once', () => {
     useFeaturesStore.setState({ values: { ...useFeaturesStore.getState().values, editModeEnabled: false } } as never)
     act(() => { useCanvasStore.getState().setSelection(['orders', 'customers']) })
     await settle()
-    expect(within(bar()!).queryByRole('button', { name: 'Edit 2…' })).toBeNull()
-    fireEvent.click(within(bar()!).getByRole('button', { name: 'Details' }))
+    expect(within(bar()!).queryByRole('button', { name: 'Compare & edit 2' })).toBeNull()
+    fireEvent.click(within(bar()!).getByRole('button', { name: 'Compare 2' }))
     await settle()
     expect(screen.queryByRole('button', { name: 'Stage for 2' })).toBeNull()
   }, 20000)
@@ -371,7 +354,7 @@ describe('HierarchyCanvas — several at once', () => {
     expect(ringed('orders')).toBe(true)
     expect(ringed('returns')).toBe(true)
     expect(ringed('customers')).toBe(false)
-    fireEvent.click(within(bar()!).getByRole('button', { name: 'Details' }))
+    fireEvent.click(within(bar()!).getByRole('button', { name: 'Compare 2' }))
     expect(useCanvasStore.getState().drawerNodeIds).toEqual(['orders', 'returns'])
   }, 20000)
 
@@ -419,13 +402,13 @@ describe('HierarchyCanvas — several at once', () => {
     expect(useCanvasStore.getState().drawerNodeIds).toBeNull()
   }, 20000)
 
-  it('in a draft: "Edit N…" edits them in the drawer, and the canvas saves what was staged', async () => {
+  it('in a draft: "Compare & edit N" edits them in the drawer, and the canvas saves what was staged', async () => {
     await mountHierarchy({ draft: true })
     act(() => { useCanvasStore.getState().setSelection(['orders', 'returns']) })
     await settle()
     // Nothing staged yet: nothing to review.
     expect(screen.getByRole('button', { name: /review & save/i })).toBeDisabled()
-    fireEvent.click(within(bar()!).getByRole('button', { name: 'Edit 2…' }))
+    fireEvent.click(within(bar()!).getByRole('button', { name: 'Compare & edit 2' }))
     expect(await screen.findByRole('button', { name: 'Stage for 2' })).toBeInTheDocument()
     await saveOneFromTheCanvas()
     expect(requests.some((u) => u.includes('/graph/changes'))).toBe(true)
@@ -470,24 +453,13 @@ describe.each([
   }, 20000)
 })
 
-describe('HierarchyCanvas — its header, and rows the canvas filter hides', () => {
+describe('HierarchyCanvas — its toolbar, and rows the canvas filter hides', () => {
 
-  it('the edit toolbar\'s Delete stages the delete, as on the Graph', async () => {
-    await mount(HierarchyCanvas, 'hierarchy', { draft: true })
-    await waitFor(() => { if (!hierarchyRow('orders')) throw new Error('no rows yet') }, { timeout: 4000 })
-    act(() => { useCanvasStore.getState().setEditing(true); useCanvasStore.getState().setSelection(['orders']) })
-    await settle()
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Delete' })) })
-    await settle()
-    expect(useCanvasStore.getState().nodes.map((n) => n.id)).toEqual(ROOTS)
-    expect(useStagedChangesStore.getState().changes.map((c) => c.type)).toEqual(['delete_entity'])
-  }, 20000)
-
-  it('the search button sits in the header beside Expand / Collapse all, not floating over them', async () => {
+  it('the search button sits in the toolbar with Expand / Collapse all, not floating over them', async () => {
     await mount(HierarchyCanvas, 'hierarchy')
     const search = screen.getByRole('button', { name: /open advanced search/i })
     expect(search.className).not.toMatch(/\babsolute\b/)
-    expect(search.parentElement!.contains(screen.getByRole('button', { name: 'Collapse All' }))).toBe(true)
+    expect(search.closest('[data-canvas-toolbar]')!.contains(screen.getByRole('button', { name: 'Collapse all' }))).toBe(true)
   }, 20000)
 
   afterEach(() => { useSearchStore.setState({ matchUrnSet: new Set(), canvasFilterMode: 'highlight' } as never) })

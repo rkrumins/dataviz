@@ -669,7 +669,7 @@ const PropertyRow = memo(function PropertyRow({
   // A field of the entity's type: edited, its allowed values are offered, and a value the draft
   // gives it (a marked row) that publishing would refuse is said under it.
   const rule = governKey && !readOnly ? governed?.fields.get(governKey) : undefined
-  const warning = rule && mark ? fieldWarning(rule, value, governed!.typeLabel) : null
+  const warning = rule && mark ? fieldWarning(rule, value, governed!.typeLabel, governed!.edges) : null
   const fieldType = inferFieldType(value)
   const isContainer = fieldType === 'group' || fieldType === 'list'
   // Long text takes the row's whole width, under its key: a paragraph squeezed beside the key
@@ -1204,6 +1204,7 @@ export function PropertyComposer({
   suggestions = [],
   onAddMany,
   onUpdateExisting,
+  size = 'md',
 }: {
   /** key is '' for array items; value is the fully-formed value to insert. */
   onAdd: (key: string, value: unknown) => void
@@ -1220,7 +1221,15 @@ export function PropertyComposer({
   onAddMany?: (entries: Array<[string, unknown]>) => void
   /** A name already there: set its value instead. */
   onUpdateExisting?: (key: string, value: unknown) => void
+  /** `lg` where adding is the main thing being done (a drawer's own adder): larger fields,
+   *  preview and buttons, the Value label on a line of its own. Nested adders keep `md`. */
+  size?: 'md' | 'lg'
 }) {
+  const lg = size === 'lg'
+  const box = cn('mt-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-accent-lineage/30 shadow-sm', lg ? 'p-4 space-y-3' : 'p-3 space-y-2.5')
+  const field = lg ? 'h-10 px-3' : 'px-2.5 py-1.5'
+  const quiet = lg ? 'h-9 px-4 text-sm' : 'px-3 py-1.5 text-xs'
+  const primary = lg ? 'h-9 px-4 text-sm' : 'px-3.5 py-1.5 text-xs'
   const smartish = variant === 'object'
   const [key, setKey] = useState(initialKey)
   const [type, setType] = useState<FieldType>('text')
@@ -1304,8 +1313,7 @@ export function PropertyComposer({
     const dupes = pasted.filter((p) => existingKeys.includes(prefixLabel ? `${prefixLabel}/${p.key}` : p.key)).length
     const adding = pasted.length - dupes
     return (
-      <div onKeyDown={onFormKeyDown}
-        className="mt-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-accent-lineage/30 p-3 space-y-2.5 shadow-sm">
+      <div onKeyDown={onFormKeyDown} className={box}>
         <p className="text-xs font-semibold text-ink">
           {pasted.length.toLocaleString()} properties pasted
           {dupes > 0 && <span className="font-normal text-ink-muted"> · {dupes} already there, left as they are</span>}
@@ -1326,12 +1334,12 @@ export function PropertyComposer({
         </div>
         <div className="flex items-center justify-end gap-2">
           <button type="button" onClick={() => setPasted(null)}
-            className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5 transition-colors">
+            className={cn('rounded-lg font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5 transition-colors', quiet)}>
             Back
           </button>
           <button type="button" onClick={addPasted} disabled={adding === 0} autoFocus
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-accent-lineage text-white hover:brightness-110 shadow-sm disabled:opacity-50">
-            <Plus className="w-3.5 h-3.5" aria-hidden />Add {adding.toLocaleString()}
+            className={cn('flex items-center gap-1.5 rounded-lg font-semibold bg-accent-lineage text-white hover:brightness-110 shadow-sm disabled:opacity-50', primary)}>
+            <Plus className={lg ? 'w-4 h-4' : 'w-3.5 h-3.5'} aria-hidden />Add {adding.toLocaleString()}
           </button>
         </div>
       </div>
@@ -1339,10 +1347,7 @@ export function PropertyComposer({
   }
 
   return (
-    <div
-      onKeyDown={onFormKeyDown}
-      className="mt-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-accent-lineage/30 p-3 space-y-2.5 shadow-sm"
-    >
+    <div onKeyDown={onFormKeyDown} className={box}>
       {/* Row 1: name (with what others of this type carry) + type */}
       <div className="flex items-center gap-2">
         {prefixLabel && (
@@ -1376,7 +1381,8 @@ export function PropertyComposer({
                 }
               }}
               className={cn(
-                "w-full text-sm px-2.5 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border outline-none",
+                "w-full text-sm rounded-md bg-black/[0.03] dark:bg-white/5 border outline-none",
+                field,
                 isDup ? "border-red-500/40" : "border-black/10 dark:border-white/10 focus:border-accent-lineage/50",
               )}
             />
@@ -1405,7 +1411,7 @@ export function PropertyComposer({
       </div>
 
       {isDup && (
-        <p className="flex items-center gap-2 text-2xs text-red-500 pl-1">
+        <p className={cn('flex items-center gap-2 text-red-500 pl-1', lg ? 'text-xs' : 'text-2xs')}>
           “{candidateKey}” already exists.
           {onUpdateExisting && (
             <button type="button" onClick={updateInstead} className="font-semibold text-accent-lineage hover:underline">
@@ -1416,11 +1422,12 @@ export function PropertyComposer({
       )}
 
       {/* Row 2: value — typed as text and detected, until a type is picked */}
-      <div className="flex items-center gap-2">
-        <span className="text-2xs uppercase tracking-wider text-ink-muted w-10 flex-shrink-0">Value</span>
+      <div className={lg ? 'space-y-1.5' : 'flex items-center gap-2'}>
+        <span className={cn('text-2xs uppercase tracking-wider text-ink-muted', lg ? 'block' : 'w-10 flex-shrink-0')}>Value</span>
         <div className="flex-1 min-w-0">
           {typeChosen ? (
             <ComposerValueField
+              size={size}
               type={type}
               value={draft}
               onChange={setDraft}
@@ -1435,7 +1442,7 @@ export function PropertyComposer({
               onChange={(e) => setText(e.target.value)}
               onPaste={onPaste}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) submit() }}
-              className="w-full text-sm px-2.5 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 focus:border-accent-lineage/50 outline-none"
+              className={cn('w-full text-sm rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 focus:border-accent-lineage/50 outline-none', field)}
             />
           )}
         </div>
@@ -1443,13 +1450,13 @@ export function PropertyComposer({
 
       {/* What it will read as, before it is added. */}
       {smartish && key.trim() && !isDup && (
-        <div className="flex items-center gap-2 pl-1 text-xs min-w-0" aria-live="polite">
-          <span className={cn('px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide shrink-0', fieldTone('added').chip)}>New</span>
+        <div className={cn('flex items-center gap-2 pl-1 min-w-0', lg ? 'text-sm' : 'text-xs')} aria-live="polite">
+          <span className={cn('px-1.5 py-px rounded font-bold uppercase tracking-wide shrink-0', lg ? 'text-[10px]' : 'text-[9.5px]', fieldTone('added').chip)}>New</span>
           <span className="font-mono text-ink-secondary truncate shrink-0 max-w-[40%]">{candidateKey}</span>
           {/* Drawn as the list will draw it. */}
           <span className="min-w-0 flex-1 truncate [&_*]:truncate"><RichValue value={value} fieldKey={candidateKey} /></span>
           {!typeChosen && text.trim() && detected.type !== 'text' && (
-            <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted">read as {FIELD_TYPE_META[detected.type].label.toLowerCase()}</span>
+            <span className={cn('ml-auto shrink-0 text-ink-muted', lg ? 'text-xs' : 'text-[10.5px]')}>read as {FIELD_TYPE_META[detected.type].label.toLowerCase()}</span>
           )}
         </div>
       )}
@@ -1457,11 +1464,11 @@ export function PropertyComposer({
       {/* Row 3: actions */}
       <div className="flex items-center justify-end gap-2 pt-0.5">
         {smartish && onAddMany && (
-          <span className="mr-auto text-[10.5px] text-ink-muted hidden sm:inline">Paste several “name: value” lines to add them all</span>
+          <span className={cn('mr-auto text-ink-muted hidden sm:inline', lg ? 'text-xs' : 'text-[10.5px]')}>Paste several “name: value” lines to add them all</span>
         )}
         <button
           onClick={onCancel}
-          className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5 transition-colors"
+          className={cn('rounded-lg font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5 transition-colors', quiet)}
         >
           Cancel
         </button>
@@ -1470,13 +1477,14 @@ export function PropertyComposer({
             onClick={() => submit()}
             disabled={!canSubmit}
             className={cn(
-              "flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
+              "flex items-center gap-1.5 rounded-lg font-semibold transition-all",
+              primary,
               canSubmit
                 ? "bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/25"
                 : "bg-black/[0.03] dark:bg-white/5 text-ink-muted/50 cursor-not-allowed",
             )}
           >
-            <Plus className="w-3.5 h-3.5" />
+            <Plus className={lg ? 'w-4 h-4' : 'w-3.5 h-3.5'} />
             Add
           </button>
         </HoverTip>
@@ -1496,12 +1504,14 @@ export function PropertyComposer({
 
 /** Inline value editor used inside the composer; adapts to the chosen type. */
 function ComposerValueField({
+  size,
   type,
   value,
   onChange,
   onExpand,
   onEnter,
 }: {
+  size: 'md' | 'lg'
   type: FieldType
   value: unknown
   onChange: (v: unknown) => void
@@ -1528,7 +1538,7 @@ function ComposerValueField({
         value={value as number}
         onChange={(e) => { const n = Number(e.target.value); onChange(Number.isFinite(n) ? n : 0) }}
         onKeyDown={(e) => { if (e.key === 'Enter') onEnter() }}
-        className="w-full px-2 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 text-xs font-mono focus:border-accent-lineage/50 outline-none transition-colors"
+        className={cn('w-full rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 font-mono focus:border-accent-lineage/50 outline-none transition-colors', size === 'lg' ? 'h-10 px-3 text-sm' : 'px-2 py-1.5 text-xs')}
       />
     )
   }
@@ -1553,13 +1563,13 @@ function ComposerValueField({
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') onEnter() }}
         placeholder="Enter a value…"
-        className="flex-1 min-w-0 px-2 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 text-xs focus:border-accent-lineage/50 outline-none transition-colors"
+        className={cn('flex-1 min-w-0 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 focus:border-accent-lineage/50 outline-none transition-colors', size === 'lg' ? 'h-10 px-3 text-sm' : 'px-2 py-1.5 text-xs')}
       />
       <HoverTip label="Open editor (Markdown)" className="inline-flex flex-shrink-0">
         <button
           onClick={onExpand}
           aria-label="Open editor (Markdown)"
-          className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors"
+          className={cn('flex-shrink-0 flex items-center justify-center rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors', size === 'lg' ? 'w-10 h-10' : 'w-7 h-7')}
         >
           <Maximize2 className="w-3.5 h-3.5" />
         </button>
@@ -2240,6 +2250,7 @@ function RootAdder({ api, adding, setAdding, suggestions = [], peers = [] }: {
       suggestions={peers}
       onAddMany={(entries) => api.addEntries(entries)}
       onUpdateExisting={(k, v) => api.updateValue(k, v)}
+      size="lg"
     />
   ) : (
     <div className="flex items-center gap-x-2 gap-y-1.5 flex-wrap mt-1.5 ml-1">
@@ -2282,7 +2293,7 @@ function RemovedRows({ rows, onRestore, unsaved }: {
   const governed = useContext(GovernedFieldsContext)
   const warnings = onRestore && governed ? rows.flatMap(([key]) => {
     const rule = governed.fields.get(key)
-    const warning = rule ? fieldWarning(rule, undefined, governed.typeLabel) : null
+    const warning = rule ? fieldWarning(rule, undefined, governed.typeLabel, governed.edges) : null
     return warning ? [warning] : []
   }) : []
   if (rows.length === 0) return null

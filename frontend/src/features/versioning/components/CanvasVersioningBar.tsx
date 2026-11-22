@@ -206,6 +206,10 @@ export function CanvasVersioningBar({
     }
     clearPanelRequest()
   }, [requestedTab, requestedCompare, graphId, clearPanelRequest])
+  // The switcher's drafts manager, held in the store so the Graph and Hierarchy toolbars' More can
+  // open it ("Your drafts…").
+  const draftsOpen = useVersioningPanelStore((s) => s.draftsOpen)
+  const setDraftsOpen = useVersioningPanelStore((s) => s.setDraftsOpen)
 
   const abandon = useAbandonDraft(workspaceId, graphId ?? '')
 
@@ -398,7 +402,14 @@ export function CanvasVersioningBar({
             : 'bg-black/[0.025] dark:bg-white/[0.025] border-glass-border',
         )}
       >
-        {showBranchSwitcher && <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />}
+        {showBranchSwitcher && (
+          <BranchSwitcher
+            workspaceId={workspaceId}
+            dataSourceId={dataSourceId}
+            managerOpen={draftsOpen}
+            onManagerOpenChange={setDraftsOpen}
+          />
+        )}
         {highlightOrigin && (
           <span className="inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-full text-[11px] font-medium bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-500/20">
             <Sparkles className="w-3 h-3" />

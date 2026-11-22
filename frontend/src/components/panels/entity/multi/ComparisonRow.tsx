@@ -25,7 +25,7 @@ import type { SharedField } from '@/components/canvas/context-view/bulkEdit'
 import { fieldWarning } from '@/lib/fieldRules'
 import type { EntityFieldDefinition } from '@/types/schema'
 import { usePropertyJobsStore } from '@/store/propertyJobsStore'
-import { fillRequiredRequest } from '@/components/canvas/property-manager/op/fillRequired'
+import { fillRequiredConnectionsRequest, fillRequiredRequest } from '@/components/canvas/property-manager/op/fillRequired'
 import { InlineValue } from '../../property/InlineValue'
 import { AllowedValuePicker, FieldNote, FillMissingButton } from '../../property/FieldGovernance'
 import { RichValue } from '../../property/RichValue'
@@ -37,8 +37,8 @@ import { OTHER_TONE, toneOf } from './tones'
 const NAME_MAX = 128
 
 /** A field a publish judges, and the entities' type as its warnings name it ("Tables") — and by its
- *  id and name, as a fill of every one missing it names it. */
-export interface GovernedRule { field: EntityFieldDefinition; typeLabel: string; typeId: string; typeName: string }
+ *  id and name, as a fill of every one missing it names it. `edges`: a relationship type's field. */
+export interface GovernedRule { field: EntityFieldDefinition; typeLabel: string; typeId: string; typeName: string; edges?: boolean }
 
 export interface ComparisonRowProps {
   index: number
@@ -102,13 +102,13 @@ export const ComparisonRow = memo(function ComparisonRow({
     <div
       data-row-key={keyName}
       className={cn(
-        'group/row rounded-xl border px-3 py-2.5 transition-colors',
+        'group/row rounded-xl border px-4 py-3 transition-colors',
         removing ? 'border-rose-500/30 bg-rose-500/[0.04]'
           : pending ? 'border-accent-lineage/35 bg-accent-lineage/[0.04]'
             : 'border-black/[0.07] bg-black/[0.012] dark:border-white/[0.07] dark:bg-white/[0.02] hover:border-black/[0.12] dark:hover:border-white/[0.12]',
       )}
     >
-      <div className="flex items-center gap-1.5 min-w-0">
+      <div className="flex items-center gap-2 min-w-0">
         <button
           type="button"
           data-row-index={index}
@@ -119,13 +119,13 @@ export const ComparisonRow = memo(function ComparisonRow({
           className="flex items-center gap-1.5 min-w-0 flex-1 -m-1 p-1 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 disabled:cursor-default"
         >
           {field ? (
-            <ChevronRight aria-hidden className={cn('w-3.5 h-3.5 shrink-0 text-ink-muted transition-transform duration-150', expanded && 'rotate-90')} />
-          ) : <span className="w-3.5 shrink-0" />}
-          <span className={cn('min-w-0 truncate font-mono text-xs', removing ? 'text-ink-muted line-through' : 'text-ink')}>{keyName}</span>
+            <ChevronRight aria-hidden className={cn('w-4 h-4 shrink-0 text-ink-muted transition-transform duration-150', expanded && 'rotate-90')} />
+          ) : <span className="w-4 shrink-0" />}
+          <span className={cn('min-w-0 truncate font-mono text-sm', removing ? 'text-ink-muted line-through' : 'text-ink')}>{keyName}</span>
         </button>
         {staged && (
           <motion.span initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} transition={MOTION.collapse}>
-            <Badge tone="success"><Check className="w-2.5 h-2.5" aria-hidden /> Staged</Badge>
+            <Badge tone="success" size="md"><Check className="w-3 h-3" aria-hidden /> Staged</Badge>
           </motion.span>
         )}
         <StateBadge field={field} />
@@ -153,7 +153,7 @@ export const ComparisonRow = memo(function ComparisonRow({
         )}
       </div>
 
-      <div className="mt-1.5 pl-5">
+      <div className="mt-2 pl-6">
         <ValueLine
           keyName={keyName}
           field={field}
@@ -178,9 +178,13 @@ export const ComparisonRow = memo(function ComparisonRow({
             <FieldNote>
               {rule.field.name || keyName} is required for {rule.typeLabel} — {lacking.toLocaleString()} of these {rule.typeLabel} {lacking === 1 ? 'has' : 'have'} none.
             </FieldNote>
-            <FillMissingButton typeName={rule.typeName} onClick={() => usePropertyJobsStore.getState().requestOp(fillRequiredRequest({
-              entityType: rule.typeId, entityTypeName: rule.typeName, field: keyName, fieldName: rule.field.name, scopeMode: 'view',
-            }))} />
+            <FillMissingButton typeName={rule.edges ? `${rule.typeName} relationship` : rule.typeName} onClick={() => usePropertyJobsStore.getState().requestOp(rule.edges
+              ? fillRequiredConnectionsRequest({
+                edgeType: rule.typeId, edgeTypeName: rule.typeName, field: keyName, fieldName: rule.field.name, scopeMode: 'view',
+              })
+              : fillRequiredRequest({
+                entityType: rule.typeId, entityTypeName: rule.typeName, field: keyName, fieldName: rule.field.name, scopeMode: 'view',
+              }))} />
           </div>
         )}
         {form === 'fill' && !pending && (
@@ -215,20 +219,20 @@ export const ComparisonRow = memo(function ComparisonRow({
 function PendingWarning({ rule, change }: { rule: GovernedRule; change: KeyChange | null }) {
   const removed = change?.kind === 'unset' || (change?.kind === 'move' && !change.keep)
   const warning = change?.kind === 'set' || change?.kind === 'fill'
-    ? fieldWarning(rule.field, change.value, rule.typeLabel)
-    : removed && rule.field.required ? fieldWarning(rule.field, undefined, rule.typeLabel) : null
+    ? fieldWarning(rule.field, change.value, rule.typeLabel, rule.edges)
+    : removed && rule.field.required ? fieldWarning(rule.field, undefined, rule.typeLabel, rule.edges) : null
   return warning ? <FieldNote className="mt-1.5">{warning}</FieldNote> : null
 }
 
 function StateBadge({ field }: { field: SharedField | null }) {
-  if (!field) return <Badge tone="accent">New · for all</Badge>
-  if (field.has === 0) return <Badge>Not set</Badge>
-  if (field.kind === 'same') return <Badge tone="success"><Check className="w-2.5 h-2.5" aria-hidden /> Same</Badge>
-  if (field.kind === 'differs') return <Badge tone="warning">Differs · {field.groups.length.toLocaleString()} values</Badge>
+  if (!field) return <Badge tone="accent" size="md">New · for all</Badge>
+  if (field.has === 0) return <Badge size="md">Not set</Badge>
+  if (field.kind === 'same') return <Badge tone="success" size="md"><Check className="w-3 h-3" aria-hidden /> Same</Badge>
+  if (field.kind === 'differs') return <Badge tone="warning" size="md">Differs · {field.groups.length.toLocaleString()} values</Badge>
   return (
     <HoverTip label={`${field.has.toLocaleString()} of ${field.total.toLocaleString()} hold it`}
       detail={field.groups.length > 1 ? `${field.groups.length.toLocaleString()} different values among them` : 'All of those alike'}>
-      <Badge>On {field.has.toLocaleString()} of {field.total.toLocaleString()}</Badge>
+      <Badge size="md">On {field.has.toLocaleString()} of {field.total.toLocaleString()}</Badge>
     </HoverTip>
   )
 }
@@ -246,11 +250,11 @@ function ValueLine({ keyName, field, total, type, change, editable, refused, onS
 }) {
   const label = `${keyName} for all`
   if (change?.kind === 'unset') {
-    return <p className="text-xs text-rose-600 dark:text-rose-400">Will be removed from the {(field?.has ?? 0).toLocaleString()} that hold it.</p>
+    return <p className="text-sm text-rose-600 dark:text-rose-400">Will be removed from the {(field?.has ?? 0).toLocaleString()} that hold it.</p>
   }
   if (change?.kind === 'fill') {
     return (
-      <p className="flex items-center gap-1.5 text-xs text-ink-secondary min-w-0">
+      <p className="flex items-center gap-1.5 text-sm text-ink-secondary min-w-0 [&_.text-xs]:text-sm">
         <span className="shrink-0">Fill</span>
         <span className="min-w-0 truncate"><RichValue value={change.value} fieldKey={keyName} /></span>
         <span className="shrink-0 text-ink-muted">on the {(total - (field?.has ?? 0)).toLocaleString()} without one</span>
@@ -259,8 +263,8 @@ function ValueLine({ keyName, field, total, type, change, editable, refused, onS
   }
   if (change?.kind === 'move') {
     return (
-      <p className="flex items-center gap-1.5 text-xs text-ink-secondary min-w-0">
-        {change.keep ? <Copy className="w-3 h-3 shrink-0" aria-hidden /> : <TextCursorInput className="w-3 h-3 shrink-0" aria-hidden />}
+      <p className="flex items-center gap-1.5 text-sm text-ink-secondary min-w-0">
+        {change.keep ? <Copy className="w-3.5 h-3.5 shrink-0" aria-hidden /> : <TextCursorInput className="w-3.5 h-3.5 shrink-0" aria-hidden />}
         <span className="shrink-0">{change.keep ? 'Copy to' : 'Rename to'}</span>
         <span className="font-mono text-ink truncate">{change.to}</span>
         {change.overwrite && <span className="shrink-0 text-ink-muted">· replacing values already there</span>}
@@ -269,36 +273,38 @@ function ValueLine({ keyName, field, total, type, change, editable, refused, onS
   }
   const shown = change?.kind === 'set' ? change.value : field?.kind === 'same' ? field.value : undefined
   const summary = change?.kind === 'set'
-    ? <span className="inline-flex items-center gap-1.5 min-w-0"><RichValue value={change.value} fieldKey={keyName} /><span className="text-2xs text-ink-muted shrink-0">for all {total.toLocaleString()}</span></span>
+    ? <span className="inline-flex items-center gap-1.5 min-w-0"><RichValue value={change.value} fieldKey={keyName} /><span className="text-xs text-ink-muted shrink-0">for all {total.toLocaleString()}</span></span>
     : field?.kind === 'same' ? <RichValue value={field.value} fieldKey={keyName} />
       : field ? <Distribution field={field} /> : null
 
   if (!editable || refused) {
     return (
-      <div className="min-w-0">
+      <div className="min-w-0 [&_.text-xs]:text-sm">
         {summary}
-        {refused && editable && <p className="mt-1 text-2xs text-ink-muted">{refused}</p>}
+        {refused && editable && <p className="mt-1 text-xs text-ink-muted">{refused}</p>}
       </div>
     )
   }
   if (type === 'boolean' && field?.kind !== 'same' && change?.kind !== 'set') {
     return (
       <div className="flex items-center gap-2 min-w-0">
-        <div className="flex-1 min-w-0">{summary}</div>
-        <span className="text-2xs text-ink-muted shrink-0">Set all</span>
-        <Button size="sm" variant="subtle" className="h-6 px-2 text-2xs" onClick={() => onSet(true)}>Yes</Button>
-        <Button size="sm" variant="subtle" className="h-6 px-2 text-2xs" onClick={() => onSet(false)}>No</Button>
+        <div className="flex-1 min-w-0 [&_.text-xs]:text-sm">{summary}</div>
+        <span className="text-xs text-ink-muted shrink-0">Set all</span>
+        <Button size="sm" variant="subtle" onClick={() => onSet(true)}>Yes</Button>
+        <Button size="sm" variant="subtle" onClick={() => onSet(false)}>No</Button>
       </div>
     )
   }
   return (
-    <InlineValue
-      value={shown}
-      fieldType={type}
-      fieldLabel={label}
-      onCommit={onSet}
-      readView={summary ?? <span className="text-xs text-ink-muted">Not set</span>}
-    />
+    <div className="min-w-0 [&_.text-xs]:text-sm">
+      <InlineValue
+        value={shown}
+        fieldType={type}
+        fieldLabel={label}
+        onCommit={onSet}
+        readView={summary ?? <span className="text-xs text-ink-muted">Not set</span>}
+      />
+    </div>
   )
 }
 
@@ -309,12 +315,12 @@ export function Distribution({ field }: { field: SharedField }) {
   const rest = field.groups.slice(3).reduce((n, g) => n + g.nodeIds.length, 0)
   const pct = (n: number) => `${(n / Math.max(1, field.total)) * 100}%`
   return (
-    <div className="flex items-center gap-2 min-w-0">
-      <div className="flex h-1.5 w-24 shrink-0 rounded-full overflow-hidden bg-black/[0.05] dark:bg-white/[0.08]" aria-hidden>
+    <div className="flex items-center gap-2.5 min-w-0">
+      <div className="flex h-2 w-28 shrink-0 rounded-full overflow-hidden bg-black/[0.05] dark:bg-white/[0.08]" aria-hidden>
         {top.map((g, i) => <div key={g.id} className={toneOf(i)} style={{ width: pct(g.nodeIds.length) }} />)}
         {rest > 0 && <div className={OTHER_TONE} style={{ width: pct(rest) }} />}
       </div>
-      <span className="text-xs text-ink-secondary truncate">
+      <span className="text-sm text-ink-secondary truncate">
         {field.groups.length === 1
           ? <>One value · not set on {none.toLocaleString()}</>
           : <>{field.groups.length.toLocaleString()} values{none > 0 && <> · not set on {none.toLocaleString()}</>}</>}

@@ -6,11 +6,14 @@
  * would touch — when the selection moves on, the header offers to compare that instead.
  *
  * - **Reading.** Each property is Same on all of them, Differs, or held by only some; opening a
- *   row shows every value and who holds it.
+ *   row shows every value and who holds it. Entities are named as people find them; a list opened
+ *   on them adds each one's ID beneath (its data source's identity property, else its URN), in
+ *   either view.
  * - **Editing**, in a draft: set a value for all, fill where missing, rename, copy, remove from
  *   all, add a property to all — each change pending until "Stage", then staged as each entity's
  *   own edit in one step that Undo takes back. Unstaged changes hold every move of the drawer
- *   (`DrawerShell`), like the single drawer's do.
+ *   (`DrawerShell`), like the single drawer's do. Outside a draft, "Edit in a draft" sits in the
+ *   top line; a note says why it can't be edited here only when its tip can't.
  * - **Scale.** Read once per change of the entities (`sharedFields`, one pass); the drawer never
  *   re-renders for writes to other entities; long lists paint only what is on screen. Up to
  *   `MULTI_EDIT_MAX` entities are edited here — more are compared, and changed from Property
@@ -23,9 +26,10 @@ import { useCanvasStore, isSelectableNode, type LineageNode } from '@/store/canv
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { nodeIndexOf } from '@/lib/storeIndex'
-import { resolveEntityName } from '@/lib/entityDisplayName'
+import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
+import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { governedFields } from '@/lib/fieldRules'
-import { NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { NO_DRAFT, NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Badge } from '@/components/ui/Badge'
 import { Button, IconButton } from '@/components/ui/Button'
@@ -33,6 +37,7 @@ import {
   bulkEditSize, isEmptyBulkEdit, previewBulkEdit, sharedFields, stageBulkEdit, type BulkEdit, type SharedField,
 } from '@/components/canvas/context-view/bulkEdit'
 import { DrawerBody, DrawerFooter, DrawerShell } from '../../shell/DrawerShell'
+import { EditInDraftButton } from '../../shell/DrawerTopBar'
 import { Section } from '../../DrawerSection'
 import { InlineValue } from '../../property/InlineValue'
 import { RichValue } from '../../property/RichValue'
@@ -41,6 +46,7 @@ import { Distribution, type GovernedRule } from './ComparisonRow'
 import { EMPTY_EDIT, withChange, type KeyChange } from './editOps'
 import { MultiEntityHeader, type TypeCount } from './MultiEntityHeader'
 import { MultiProperties } from './MultiProperties'
+import type { Member } from './ValueBreakdown'
 
 /** Entities edited here at once; more are compared, and changed from Property Manager. */
 export const MULTI_EDIT_MAX = 10_000
@@ -66,15 +72,21 @@ export function MultiEntityDrawer({
   }))
   const held = useMemo(() => members.filter((n): n is LineageNode => !!n), [members])
   const heldIds = useMemo(() => held.map((n) => n.id), [held])
+  const goneIds = useMemo(() => ids.filter((_, i) => !members[i]), [ids, members])
   const fields = useMemo(() => sharedFields(held as ReadonlyArray<{ id: string; data: Record<string, unknown> }>), [held])
 
   const personaMode = usePersonaStore((s) => s.mode)
   const entityTypes = useSchemaStore((s) => s.schema?.entityTypes)
   const byId = useMemo(() => new Map(held.map((n) => [n.id, n])), [held])
-  const memberOf = useCallback((id: string) => {
+  const identityProperty = useCanvasIdentityProperty()
+  const memberOf = useCallback((id: string): Member => {
     const n = byId.get(id)
-    return { id, name: n ? resolveEntityName(n.data, personaMode, id) : id, type: n ? String((n.data as Record<string, unknown>).type ?? '') : undefined }
-  }, [byId, personaMode])
+    if (!n) return { id, name: 'Not loaded', ident: id, notLoaded: true }
+    const name = resolveEntityName(n.data, personaMode, id)
+    // Its ID in either view — detail a list opened on it shows, left out where it is the name.
+    const ident = technicalIdentity(n.data, 'technical', { identityProperty, urn: id, name })?.value
+    return { id, name, ident, type: String((n.data as Record<string, unknown>).type ?? '') }
+  }, [byId, personaMode, identityProperty])
 
   // How many of each type — the selection in the reader's words — and what no two of a type may share.
   const { types, refusals } = useMemo(() => {
@@ -186,6 +198,9 @@ export function MultiEntityDrawer({
       ? `Up to ${MULTI_EDIT_MAX.toLocaleString()} entities are edited here at once. Select fewer — or change them all from Property Manager.`
       : editing.blocked ?? (canEdit ? null : VIEW_ONLY_DRAFT)
     : null
+  const offerDraft = !!blockedNote && !!onStartEditing && !tooMany && editing.blocked !== NO_VERSION_CONTROL
+  // "Switch to a draft" is the button's tip; the note is for what the tip doesn't cover.
+  const note = offerDraft && blockedNote === NO_DRAFT ? null : blockedNote
 
   return (
     <DrawerShell
@@ -203,8 +218,9 @@ export function MultiEntityDrawer({
         ids={heldIds}
         types={types}
         memberOf={memberOf}
-        gone={ids.length - held.length}
+        gone={goneIds}
         editable={editable}
+        action={offerDraft ? <EditInDraftButton onClick={onStartEditing} reason={blockedNote} /> : undefined}
         selectionNow={selectionNow}
         onUseSelection={compareSelection}
         onClose={close}
@@ -214,18 +230,11 @@ export function MultiEntityDrawer({
       />
 
       <DrawerBody>
-        {blockedNote && (
-          <div className="mx-5 mt-4 flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] p-3">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
-            <div className="min-w-0 flex-1 text-xs leading-snug text-ink">
-              {blockedNote}
-              {onStartEditing && !tooMany && editing.blocked !== NO_VERSION_CONTROL && (
-                <div className="mt-2">
-                  <Button size="sm" variant="secondary" onClick={onStartEditing}>Edit in a draft</Button>
-                </div>
-              )}
-            </div>
-          </div>
+        {note && (
+          <p className="mx-5 mt-3 flex items-start gap-2 rounded-lg bg-amber-500/[0.07] px-3 py-1.5 text-xs leading-snug text-amber-800 dark:text-amber-200">
+            <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            {note}
+          </p>
         )}
 
         <DescriptionSection field={fields.description} value={edit.description} editable={editable} onChange={setDescription} />
@@ -293,9 +302,9 @@ function DescriptionSection({ field, value, editable, onChange }: {
       icon={AlignLeft}
       action={
         <span className="flex items-center gap-1">
-          {field.has > 0 && (field.kind === 'same' ? <Badge tone="success">Same</Badge>
-            : field.kind === 'differs' ? <Badge tone="warning">Differs</Badge>
-              : <Badge>On {field.has.toLocaleString()} of {field.total.toLocaleString()}</Badge>)}
+          {field.has > 0 && (field.kind === 'same' ? <Badge tone="success" size="md">Same</Badge>
+            : field.kind === 'differs' ? <Badge tone="warning" size="md">Differs</Badge>
+              : <Badge size="md">On {field.has.toLocaleString()} of {field.total.toLocaleString()}</Badge>)}
           {value !== undefined && (
             <IconButton icon={RotateCcw} label="Leave each description as it is" size="sm" className="w-6 h-6" onClick={() => onChange(undefined)} />
           )}

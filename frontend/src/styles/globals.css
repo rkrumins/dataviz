@@ -978,8 +978,23 @@
     @apply glass-panel-subtle rounded-xl overflow-hidden;
   }
 
+  /* React Flow paints its minimap white whatever the theme. In the dark theme it takes the
+     panel colour, and dims what is off screen as the lens's map does. */
+  .dark .react-flow__minimap {
+    --xy-minimap-background-color: var(--nx-bg-elevated);
+    --xy-minimap-mask-background-color: rgb(2 6 23 / 0.5);
+  }
+
   .react-flow__controls {
     @apply glass-panel-subtle rounded-xl overflow-hidden;
+  }
+
+  /* Its zoom buttons are painted near-white whatever the theme, too: in the dark theme they show
+     the panel through, as the minimap beside them does. */
+  .dark .react-flow__controls {
+    --xy-controls-button-background-color: transparent;
+    --xy-controls-button-background-color-hover: rgb(255 255 255 / 0.1);
+    --xy-controls-button-border-color: rgb(255 255 255 / 0.06);
   }
 
   .react-flow__controls-button {

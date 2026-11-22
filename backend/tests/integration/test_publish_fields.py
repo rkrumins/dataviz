@@ -8,7 +8,8 @@ changes is judged: data that predates a rule stays publishable. The same on each
 can take — the full merge, the narrow copy (rows judged from their identity columns, so the values
 are read in full for the types with field rules) and the paged one. A refusal names the first
 hundred values and counts them all, per entity type, field and rule — the paged publish judging the
-fields of every page after the first it refuses, so the count is the whole draft's.
+fields of every page after the first it refuses, so the count is the whole draft's. A relationship
+type's fields hold the same way, counted apart from an entity type of the same name.
 """
 import os
 
@@ -16,7 +17,7 @@ import pytest
 
 from backend.app.services.versioning import config
 from backend.app.services.versioning.errors import FieldViolation
-from backend.app.services.versioning.ontology import EntityRule, FieldRule, OntologyRules
+from backend.app.services.versioning.ontology import EdgeRule, EntityRule, FieldRule, OntologyRules
 from backend.common.property_patch import PROP_DELETE
 from backend.tests.integration.test_fork_overlay_delta import _run
 
@@ -77,10 +78,10 @@ def test_a_publish_giving_values_their_fields_refuse_is_refused(path, monkeypatc
         assert found[1]["reason"] == "Tier must be one of 'gold', 'silver' — 'bronze' isn't."
         assert exc.value.detail["total"] == 2
         assert exc.value.detail["byField"] == [
-            {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 1,
-             "ids": ["gv:urn:New"], "idsComplete": True},
-            {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 1,
-             "ids": ["gv:urn:New"], "idsComplete": True}]
+            {"entityKind": "node", "entityType": "Table", "field": "owner", "fieldName": "Owner",
+             "rule": "field_required", "count": 1, "ids": ["gv:urn:New"], "idsComplete": True},
+            {"entityKind": "node", "entityType": "Table", "field": "tier", "fieldName": "Tier",
+             "rule": "field_not_allowed", "count": 1, "ids": ["gv:urn:New"], "idsComplete": True}]
     _run(case)
 
 
@@ -142,10 +143,10 @@ def test_a_refusal_counts_every_value_to_change_by_field_page_after_page(path, m
         assert detail["total"] == 10 and len(detail["violations"]) == 3
         news = [f"gv:urn:New{i}" for i in range(5)]
         assert detail["byField"] == [
-            {"entityType": "Table", "field": "owner", "fieldName": "Owner", "rule": "field_required", "count": 5,
-             "ids": news, "idsComplete": True},
-            {"entityType": "Table", "field": "tier", "fieldName": "Tier", "rule": "field_not_allowed", "count": 5,
-             "ids": news, "idsComplete": True}]
+            {"entityKind": "node", "entityType": "Table", "field": "owner", "fieldName": "Owner",
+             "rule": "field_required", "count": 5, "ids": news, "idsComplete": True},
+            {"entityKind": "node", "entityType": "Table", "field": "tier", "fieldName": "Tier",
+             "rule": "field_not_allowed", "count": 5, "ids": news, "idsComplete": True}]
         assert [v["entity_id"] for v in detail["violations"]] == ["urn:New0", "urn:New0", "urn:New1"]
         assert await svc.commit_log(graph_id=gid, branch_id=main) == published      # nothing published
     _run(case)
@@ -190,4 +191,117 @@ def test_a_refusal_names_the_entities_to_fix_and_one_bulk_job_on_them_lets_it_pu
         assert (await ie.run_property(job))["changed"] == 5
         assert await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go",
                                  ontology_rules=RULES)
+    _run(case)
+
+
+# A relationship type's fields hold at publish as an entity type's do — the ontology spells it
+# "Owns", the rules key it in capitals.
+EDGE_RULES = OntologyRules(
+    entity_types=RULES.entity_types,
+    edge_types={"OWNS": EdgeRule(fields={
+        "since": FieldRule(type="date", required=True, name="Since"),
+        "tier": FieldRule(type="status", allowed=("gold", "silver"), name="Tier"),
+    })},
+    edge_type_canonical={"OWNS": "Owns"})
+
+
+def _owns(eid, src, tgt, op="create", **props):
+    return {"op": op, "entity_kind": "edge", "entity_id": eid,
+            "payload": {"edgeType": "Owns", "sourceEntityId": src, "targetEntityId": tgt, "properties": props}}
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_a_relationship_given_values_its_fields_refuse_is_refused_and_one_job_fills_it(path, monkeypatch):
+    """Named by its ends and counted as a relationship type's, by its own id — what a bulk property
+    job over relationships takes, so one "Fill if empty" on them is what the publish needed."""
+    from backend.app.services.versioning.import_export.service import ImportExportService
+    _take(path, monkeypatch)
+
+    async def case(svc):
+        gid = await _graph(svc)
+        draft = await _draft(svc, gid, [_owns("e1", "urn:Owned", "urn:Legacy", tier="bronze"),
+                                        _owns("e2", "urn:Legacy", "urn:Owned", since="2026-01-31", tier="gold")])
+        main = await svc.main_branch_id(gid)
+        published = await svc.commit_log(graph_id=gid, branch_id=main)
+        with pytest.raises(FieldViolation) as exc:
+            await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go",
+                              ontology_rules=EDGE_RULES)
+        detail = exc.value.detail
+        assert [(v["entity_id"], v["kind"], v["type"], v["rule"], v["field"]) for v in detail["violations"]] == [
+            ("e1", "edge", "Owns", "field_required", "since"), ("e1", "edge", "Owns", "field_not_allowed", "tier")]
+        assert (detail["violations"][0]["source"], detail["violations"][0]["target"]) == ("urn:Owned", "urn:Legacy")
+        assert detail["violations"][0]["reason"] == "Since is required for a new Owns relationship."
+        assert detail["byField"] == [
+            {"entityKind": "edge", "entityType": "Owns", "field": "since", "fieldName": "Since",
+             "rule": "field_required", "count": 1, "ids": ["e1"], "idsComplete": True},
+            {"entityKind": "edge", "entityType": "Owns", "field": "tier", "fieldName": "Tier",
+             "rule": "field_not_allowed", "count": 1, "ids": ["e1"], "idsComplete": True}]
+        assert await svc.commit_log(graph_id=gid, branch_id=main) == published      # nothing published
+
+        ie = ImportExportService(versioning=svc)
+        for key, op in (("since", {"kind": "fillEmpty", "key": "since", "value": "2026-02-01"}),
+                        ("tier", {"kind": "set", "key": "tier", "value": "silver"})):
+            job = (await ie.create_property_job(
+                workspace_id="ws1", data_source_id=None, graph_id=gid, branch_id=draft, actor="alice",
+                op=op, target={"ids": detail["byField"][0]["ids"]}, message=None, key=f"key-fill-edge-{key}",
+                entity_kind="edge"))["job_id"]
+            assert (await ie.run_property(job))["changed"] == 1
+        assert await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go",
+                                 ontology_rules=EDGE_RULES)
+    _run(case)
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_a_refusal_counts_the_nodes_and_relationships_of_types_of_one_name_apart(path, monkeypatch):
+    """A paged publish refused on a node's page still reads the relationships' pages after it, by
+    their fields alone: the counts are the whole draft's, per kind, and nothing of it is published."""
+    _take(path, monkeypatch)
+    rules = OntologyRules(entity_types={"Owns": EntityRule(fields={"since": FieldRule(required=True)}),
+                                        **RULES.entity_types},
+                          edge_types=EDGE_RULES.edge_types, edge_type_canonical=EDGE_RULES.edge_type_canonical)
+
+    async def case(svc):
+        gid = await _graph(svc)
+        draft = await _draft(svc, gid, [
+            {"op": "create", "entity_kind": "node", "entity_id": "urn:Deed",
+             "payload": {"urn": "urn:Deed", "entityType": "Owns", "displayName": "Deed", "properties": {}}},
+            _owns("e1", "urn:Owned", "urn:Legacy", tier="gold"), _owns("e2", "urn:Legacy", "urn:Owned", tier="gold")])
+        main = await svc.main_branch_id(gid)
+        published = await svc.commit_log(graph_id=gid, branch_id=main)
+        with pytest.raises(FieldViolation) as exc:
+            await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go", ontology_rules=rules)
+        assert exc.value.detail["total"] == 3
+        counts = [(c["entityKind"], c["entityType"], c["field"], c["count"], c["ids"])
+                  for c in exc.value.detail["byField"]]
+        assert counts == [("edge", "Owns", "since", 2, ["e1", "e2"]), ("node", "Owns", "since", 1, ["gv:urn:Deed"])]
+        assert await svc.commit_log(graph_id=gid, branch_id=main) == published      # nothing published
+    _run(case)
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_an_edge_whose_end_is_gone_is_refused_as_that_before_any_field_rule(path, monkeypatch):
+    """Whichever squash a publish takes, an edge left without an end is the refusal — not a value a
+    field refuses elsewhere in the draft: the paged publish reads the edges' pages past a field
+    refusal, and checks their ends first, as the others check every end before any gate."""
+    from backend.app.services.versioning import db, models
+    from backend.app.services.versioning.service import ConcurrencyError
+    _take(path, monkeypatch)
+
+    async def case(svc):
+        gid = await _graph(svc)
+        await svc.apply_ops(graph_id=gid, actor="alice", message="seed", ops=[_table("urn:Gone", owner="bo")])
+        draft = await _draft(svc, gid, [_table("urn:New", tier="bronze"),
+                                        _owns("e1", "urn:Owned", "urn:Gone", since="2026-01-31")])
+        # Main loses the edge's end, and the draft reads as up to date all the same.
+        await svc.apply_ops(graph_id=gid, actor="alice", message="drop",
+                            ops=[{"op": "delete", "entity_kind": "node", "entity_id": "urn:Gone"}])
+        async with db.graphver_session() as s, s.begin():
+            graph = await s.get(models.GraphORM, gid)
+            (await s.get(models.BranchORM, draft)).base_commit_seq = graph.main_head_commit_seq
+        main = await svc.main_branch_id(gid)
+        published = await svc.commit_log(graph_id=gid, branch_id=main)
+        with pytest.raises(ConcurrencyError, match="would dangle"):
+            await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="go",
+                              ontology_rules=EDGE_RULES)
+        assert await svc.commit_log(graph_id=gid, branch_id=main) == published      # nothing published
     _run(case)

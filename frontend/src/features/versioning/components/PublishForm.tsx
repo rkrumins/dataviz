@@ -18,7 +18,8 @@ import { useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { GitPullRequest, Rocket, Loader2, AlertTriangle, ArrowRight, ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { nodeIndexOf } from '@/lib/storeIndex'
+import { edgeIndexOf, nodeIndexOf } from '@/lib/storeIndex'
+import { targetFromEdge } from '@/lib/drawerEdgeTarget'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { CopyButton } from '@/components/ui/CopyButton'
 import { useCanvasStore } from '@/store/canvas'
@@ -389,16 +390,16 @@ export function PublishBody({ flow, offerSave = true }: {
             <span className="font-medium text-amber-700 dark:text-amber-300">
               Nothing was published — {fieldRefusal.total === 1
                 ? '1 value breaks'
-                : `${fieldRefusal.total.toLocaleString()} values break`} the fields their entity types define.
+                : `${fieldRefusal.total.toLocaleString()} values break`} the fields their types define.
             </span>{' '}
             Change them in the draft, then publish.
             {(fieldRefusal.total > Math.min(fieldRefusal.violations.length, UNIQUE_SHOWN) || fieldRefusal.byField.some(fills))
               && fieldRefusal.byField.length > 0 && (
               <ul aria-label="Values to change by field" className="mt-1.5 space-y-1 text-ink">
                 {fieldRefusal.byField.map((c) => (
-                  <li key={`${c.entityType}:${c.field}:${c.rule}`} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2">
+                  <li key={`${c.entityKind ?? 'node'}:${c.entityType}:${c.field}:${c.rule}`} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2">
                     <span className="min-w-0">
-                      <span className="font-medium">{c.entityType} · {c.fieldName || c.field}</span>
+                      <span className="font-medium">{c.entityType}{c.entityKind === 'edge' ? ' relationships' : ''} · {c.fieldName || c.field}</span>
                       <span className="text-ink-muted">: {c.count.toLocaleString()} {FIELD_RULE_PHRASE[c.rule]}</span>
                     </span>
                     {fills(c) && <FillRefused count={c} onOpen={() => { onClose(); onLeave?.() }} />}
@@ -434,9 +435,9 @@ export function PublishBody({ flow, offerSave = true }: {
   )
 }
 
-/** "Fill N missing…": the bulk dialog, "Fill if empty" on the entities the publish refused for a
- *  required field left empty — by id, so ones new in the draft too. One change takes at most the
- *  first 20,000; the next publish names the rest. */
+/** "Fill N missing…": the bulk dialog, "Fill if empty" on the entities (or relationships) the
+ *  publish refused for a required field left empty — by id, so ones new in the draft too. One change
+ *  takes at most the first 20,000; the next publish names the rest. */
 function FillRefused({ count, onOpen }: { count: FieldViolationCount; onOpen: () => void }) {
   const ids = count.ids ?? []
   const complete = !!count.idsComplete
@@ -444,6 +445,7 @@ function FillRefused({ count, onOpen }: { count: FieldViolationCount; onOpen: ()
     onOpen()
     usePropertyJobsStore.getState().requestOp(fillRefusedRequest({
       entityType: count.entityType, field: count.field, fieldName: count.fieldName, ids, complete,
+      edges: count.entityKind === 'edge',
     }))
   }
   // A column of their own at the row's end; the rest said under the fill, across the row.
@@ -458,12 +460,29 @@ function FillRefused({ count, onOpen }: { count: FieldViolationCount; onOpen: ()
   )
 }
 
-/** One value a publish refused by its field: the entity by name, what is wrong — and the way to it:
- *  opened in the drawer when it is on the canvas, else its id to find it by. */
+/** One value a publish refused by its field: the entity by name — a relationship by its ends — what
+ *  is wrong, and the way to it: opened in the drawer when it is on the canvas, else its id to find
+ *  it by. */
 function FieldViolationRow({ v, onOpen }: { v: FieldViolation; onOpen: () => void }) {
-  const id = v.urn || `gv:${v.entity_id}`
-  const onCanvas = useCanvasStore((s) => nodeIndexOf(s.nodes).has(id))
-  const name = v.name || v.urn || v.entity_id
+  const edge = v.kind === 'edge'
+  const id = edge ? v.entity_id : v.urn || `gv:${v.entity_id}`
+  const onCanvas = useCanvasStore((s) => (edge ? edgeIndexOf(s.edges) : nodeIndexOf(s.nodes)).has(id))
+  const ends = useCanvasStore((s) => {
+    if (!edge) return null
+    const nodes = nodeIndexOf(s.nodes)
+    const named = (end?: string) => (end ? (nodes.get(end)?.data?.label as string | undefined) || end : '?')
+    return `${named(v.source)} → ${named(v.target)}`
+  })
+  const name = ends ?? (v.name || v.urn || v.entity_id)
+  const open = () => {
+    onOpen()
+    const canvas = useCanvasStore.getState()
+    if (!edge) canvas.openNodeDrawer(id)
+    else {
+      const line = edgeIndexOf(canvas.edges).get(id)
+      if (line) canvas.openEdgeDrawer(targetFromEdge(line))
+    }
+  }
   return (
     <li className="flex items-start gap-2 min-w-0">
       <div className="min-w-0 flex-1 break-words">
@@ -474,7 +493,7 @@ function FieldViolationRow({ v, onOpen }: { v: FieldViolation; onOpen: () => voi
       {onCanvas ? (
         <button
           type="button"
-          onClick={() => { onOpen(); useCanvasStore.getState().openNodeDrawer(id) }}
+          onClick={open}
           aria-label={`Open ${name}`}
           className="shrink-0 px-1.5 h-5 rounded text-[10.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10"
         >

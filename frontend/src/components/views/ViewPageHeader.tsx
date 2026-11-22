@@ -223,8 +223,9 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     // Versions and Export are a preview behind one switch (Admin → Features).
     const portability = useViewPortability()
     // The Business view keeps this bar to what a reader needs: what the view is, where it
-    // lives, who can see it, and any request waiting on it. The builder's chrome — versions,
-    // export, reviews, counts and usage — is the Technical view's.
+    // lives, who can see it, any request waiting on it, and Export and Reviews, which every
+    // canvas needs and only this bar offers on all of them. The builder's chrome — versions,
+    // counts and usage — is the Technical view's.
     const technical = usePersonaMode() === 'technical'
     const exportEnabled = portability.canExport
     const [versionsOpen, setVersionsOpen] = useState(false)
@@ -785,7 +786,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     {/* Anyone who can read the view can take a copy of its design
                         elsewhere; the admin switch withdraws the button and the
                         server refuses the file together. */}
-                    {technical && exportEnabled && (
+                    {exportEnabled && (
                         <HoverTip
                             className="inline-flex"
                             label="Download this view as a file to import into another environment"
@@ -798,7 +799,10 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                 aria-label="Export"
                             >
                                 <FileDown className="w-3.5 h-3.5" aria-hidden />
-                                <span className="hidden lg:inline">Export</span>
+                                {/* Export and Reviews keep their words for a wider page than
+                                    the rest, so a laptop leaves the view's name and where it
+                                    lives readable beside them. */}
+                                <span className="hidden xl:inline">Export</span>
                             </button>
                         </HoverTip>
                     )}
@@ -807,7 +811,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         branch switcher and nothing else. A read-only session
                         gets no versioning chrome at all (CanvasRouter mounts
                         none), so it must not get a route into it either. */}
-                    {technical && !readOnly && (
+                    {!readOnly && (
                         <ViewReviewsButton
                             workspaceId={view.workspaceId}
                             dataSourceId={view.dataSourceId ?? null}

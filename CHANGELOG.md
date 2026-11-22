@@ -950,7 +950,6 @@ words and a way to see what a view is for. The Business / Technical switch is re
   5. Muted text and the Business green fall short of WCAG AA contrast.
   6. The intro tip shows on the first page loaded, and doesn't mention **More**.
   7. The Business view doesn't yet reach:
-     - the Graph and Hierarchy toolbars;
      - the trace dock's Performance tab;
      - the search panel's options.
   8. Mixed words:
@@ -1040,8 +1039,8 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   - the view's header leaves out **Versions**, **Export**, **Reviews**, the type count, usage, and
     the template-update and subsets chips; a request waiting on the view still shows;
   - an entity's menu leaves out **Copy URN** and **Narrow to this…**; the trace bar keeps its
-    directions and **Exit**; the Graph canvas leaves out its extra control panel, its layout
-    direction and **Edge Details**;
+    directions and **Exit**; the Graph canvas leaves out **LOD**, the **Explore** chip, its
+    layout direction and **Edge Details**;
   - **Selecting**, **Connect**, an open Property Manager and open **Edge Details** stay on screen
     while they are on;
   - **Data loads** and **Flows** start minimized, until you open or minimize them yourself.

@@ -30,6 +30,9 @@ interface VersioningPanelState {
   openPanel: (tab: ViewPanelTab) => void
   openCompare: (compare: CompareRequest) => void
   clearRequest: () => void
+  /** The bar's drafts manager is open. The Graph and Hierarchy toolbars open it from More. */
+  draftsOpen: boolean
+  setDraftsOpen: (open: boolean) => void
 }
 
 export const useVersioningPanelStore = create<VersioningPanelState>((set) => ({
@@ -38,4 +41,6 @@ export const useVersioningPanelStore = create<VersioningPanelState>((set) => ({
   openPanel: (tab) => set({ requestedTab: tab, requestedCompare: null }),
   openCompare: (compare) => set({ requestedTab: 'history', requestedCompare: compare }),
   clearRequest: () => set({ requestedTab: null, requestedCompare: null }),
+  draftsOpen: false,
+  setDraftsOpen: (open) => set({ draftsOpen: open }),
 }))

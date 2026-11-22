@@ -65,25 +65,30 @@ def _entity_def_from_dict(data: Dict[str, Any]) -> EntityTypeDefEntry:
             double_click_action=beh.get("double_click_action", beh.get("doubleClickAction", "expand")),
             expansion_mode=beh.get("expansion_mode", beh.get("expansionMode", "graph")),
         ),
-        fields=[
-            FieldData(
-                id=f.get("id", ""),
-                name=f.get("name", ""),
-                type=f.get("type", "text"),
-                required=f.get("required", False),
-                show_in_node=f.get("show_in_node", f.get("showInNode", True)),
-                show_in_panel=f.get("show_in_panel", f.get("showInPanel", True)),
-                show_in_tooltip=f.get("show_in_tooltip", f.get("showInTooltip", False)),
-                display_order=f.get("display_order", f.get("displayOrder", 0)),
-                format=f.get("format"),
-                reconciliation_key=bool(f.get("reconciliation_key", f.get("reconciliationKey", False))),
-                unique=bool(f.get("unique", False)),
-                allowed_values=_allowed_values(f.get("allowed_values", f.get("allowedValues"))),
-                allow_other=bool(f.get("allow_other", f.get("allowOther", False))),
-            )
-            for f in raw_fields
-        ],
+        fields=_fields_from(raw_fields),
     )
+
+
+def _fields_from(raw: Any) -> List[FieldData]:
+    """A type's fields as stored (an entity type's or a relationship type's), either casing."""
+    return [
+        FieldData(
+            id=f.get("id", ""),
+            name=f.get("name", ""),
+            type=f.get("type", "text"),
+            required=f.get("required", False),
+            show_in_node=f.get("show_in_node", f.get("showInNode", True)),
+            show_in_panel=f.get("show_in_panel", f.get("showInPanel", True)),
+            show_in_tooltip=f.get("show_in_tooltip", f.get("showInTooltip", False)),
+            display_order=f.get("display_order", f.get("displayOrder", 0)),
+            format=f.get("format"),
+            reconciliation_key=bool(f.get("reconciliation_key", f.get("reconciliationKey", False))),
+            unique=bool(f.get("unique", False)),
+            allowed_values=_allowed_values(f.get("allowed_values", f.get("allowedValues"))),
+            allow_other=bool(f.get("allow_other", f.get("allowOther", False))),
+        )
+        for f in (raw if isinstance(raw, list) else [])
+    ]
 
 
 def _allowed_values(raw: Any) -> List[str]:
@@ -122,6 +127,7 @@ def _rel_def_from_dict(data: Dict[str, Any]) -> RelationshipTypeDefEntry:
         bidirectional=data.get("bidirectional", False),
         show_label=data.get("show_label", data.get("showLabel", False)),
         label_field=data.get("label_field", data.get("labelField")),
+        fields=_fields_from(data.get("fields")),
     )
 
 

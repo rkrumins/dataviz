@@ -8,7 +8,7 @@
  * once they end, and mark the properties they touch.
  */
 import type { ReactNode } from 'react'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -102,6 +102,12 @@ function renderBrowser(over: Partial<PropertyCatalogState> = {}) {
 /** A property's card, found by its (monospaced) name. */
 function card(key: string): HTMLElement {
     return screen.getByTitle(key).closest('.group') as HTMLElement
+}
+
+/** Open a property's More actions menu; its items are portalled, out of the card. */
+async function openMenu(user: ReturnType<typeof userEvent.setup>, key: string) {
+    await user.click(within(card(key)).getByRole('button', { name: `More actions for ${key}` }))
+    return within(await screen.findByRole('menu'))
 }
 
 
@@ -198,9 +204,60 @@ describe('PropertyBrowser', () => {
         // user-event puts a clipboard of its own on the navigator.
         const user = userEvent.setup()
         renderBrowser()
-        await user.click(within(card('owner')).getByRole('button', { name: 'Copy the name' }))
+        await user.click((await openMenu(user, 'owner')).getByRole('menuitem', { name: 'Copy the name' }))
         await expect(navigator.clipboard.readText()).resolves.toBe('owner')
         expect(notify).toHaveBeenCalledWith('success', 'Copied “owner”')
+    })
+
+    it('opens and closes a row from its chevron, and not from its actions', async () => {
+        const user = userEvent.setup()
+        renderBrowser()
+        const header = () => screen.getByTitle('owner').closest('[role="button"]')!
+        const chevron = card('owner').querySelector('.lucide-chevron-right')!
+        await user.click(chevron)
+        expect(header()).toHaveAttribute('aria-expanded', 'true')
+        await user.click(chevron)
+        expect(header()).toHaveAttribute('aria-expanded', 'false')
+        // An action runs on its own: the row stays as it was.
+        await user.click(within(card('owner')).getByRole('button', { name: 'Clean up…' }))
+        await user.click((await openMenu(user, 'owner')).getByRole('menuitem', { name: 'Create rule' }))
+        expect(header()).toHaveAttribute('aria-expanded', 'false')
+    })
+
+    it('keeps at most two actions on the row, and every one in its More actions menu, which runs them', async () => {
+        const user = userEvent.setup()
+        const { onCreateRuleFromPredicate } = renderBrowser()
+        const owner = within(card('owner'))
+        const actions = ['Copy the name', 'Change', 'Duplicate as…', 'Clean up…', 'Make it a field…', 'Create rule', 'Remove']
+        expect(owner.getAllByRole('button').map((b) => b.getAttribute('aria-label')).filter((n) => actions.includes(n!)))
+            .toEqual(['Change', 'Clean up…'])
+
+        const menu = await openMenu(user, 'owner')
+        expect(menu.getAllByRole('menuitem').map((item) => item.textContent))
+            .toEqual(['Copy the name', 'Change', 'Duplicate as…', 'Clean up…', 'Create rule', 'Remove'])
+        await user.click(menu.getByRole('menuitem', { name: 'Change' }))
+        expect(usePropertyJobsStore.getState().consumeRequest()).toEqual({ kind: 'set', key: 'owner' })
+        await user.click((await openMenu(user, 'owner')).getByRole('menuitem', { name: 'Clean up…' }))
+        expect(usePropertyJobsStore.getState().consumeRequest()).toEqual({ kind: 'normalize', key: 'owner' })
+        await user.click((await openMenu(user, 'owner')).getByRole('menuitem', { name: 'Create rule' }))
+        expect(onCreateRuleFromPredicate).toHaveBeenCalledWith({ kind: 'hasProperty', key: 'owner', negate: false }, 'owner')
+    })
+
+    it('works its menu from the keyboard, and puts the focus back on More actions', async () => {
+        const user = userEvent.setup()
+        renderBrowser()
+        const more = within(card('owner')).getByRole('button', { name: 'More actions for owner' })
+        more.focus()
+        await user.keyboard('{Enter}')
+        expect(await screen.findByRole('menu')).toBeInTheDocument()
+        await waitFor(() => expect(screen.getByRole('menuitem', { name: 'Copy the name' })).toHaveFocus())
+        await user.keyboard('{ArrowDown}')
+        expect(screen.getByRole('menuitem', { name: 'Change' })).toHaveFocus()
+        await user.keyboard('{Escape}')
+        expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+        await waitFor(() => expect(more).toHaveFocus())
+        // None of it opened the row.
+        expect(screen.getByTitle('owner').closest('[role="button"]')).toHaveAttribute('aria-expanded', 'false')
     })
 
     it('shows how far the first read has got before anything is read', () => {
@@ -228,9 +285,9 @@ describe('PropertyBrowser — a property is changed only in a draft', () => {
         const owner = within(card('owner'))
         await user.click(owner.getByRole('button', { name: 'Change' }))
         expect(usePropertyJobsStore.getState().consumeRequest()).toEqual({ kind: 'set', key: 'owner' })
-        await user.click(owner.getByRole('button', { name: 'Duplicate as…' }))
+        await user.click((await openMenu(user, 'owner')).getByRole('menuitem', { name: 'Duplicate as…' }))
         expect(usePropertyJobsStore.getState().consumeRequest()).toEqual({ kind: 'copy', key: 'owner' })
-        await user.click(owner.getByRole('button', { name: 'Remove' }))
+        await user.click((await openMenu(user, 'owner')).getByRole('menuitem', { name: 'Remove' }))
         expect(usePropertyJobsStore.getState().consumeRequest()).toEqual({ kind: 'remove', key: 'owner' })
     })
 
@@ -247,12 +304,18 @@ describe('PropertyBrowser — a property is changed only in a draft', () => {
         const owner = within(card('owner'))
         const update = owner.getByRole('button', { name: 'Change' })
         expect(update).toBeDisabled()
-        expect(owner.getByRole('button', { name: 'Remove' })).toBeDisabled()
         await user.hover(update.parentElement!)
         expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_VERSION_CONTROL)
+        await user.unhover(update.parentElement!)
+
+        const menu = await openMenu(user, 'owner')
+        const remove = menu.getByRole('menuitem', { name: 'Remove' })
+        expect(remove).toHaveAttribute('aria-disabled', 'true')
+        await user.hover(remove.parentElement!)
+        expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_VERSION_CONTROL)
         // Reading, searching and rules are not edits to the graph.
-        expect(owner.getByRole('button', { name: 'Create rule' })).toBeEnabled()
-        expect(owner.getByRole('button', { name: 'Copy the name' })).toBeEnabled()
+        expect(menu.getByRole('menuitem', { name: 'Create rule' })).not.toHaveAttribute('aria-disabled')
+        expect(menu.getByRole('menuitem', { name: 'Copy the name' })).not.toHaveAttribute('aria-disabled')
     })
 
     it('says why on the first-property call to action too', async () => {
@@ -329,15 +392,15 @@ describe('PropertyBrowser — a property is changed only in a draft', () => {
         })
     })
 
-    it('offers no change at all where editing is off', () => {
+    it('offers no change at all where editing is off', async () => {
         editing = { offered: false, blocked: NO_DRAFT }
         renderBrowser()
         expect(screen.queryByRole('button', { name: 'New' })).not.toBeInTheDocument()
         const owner = within(card('owner'))
         expect(owner.queryByRole('button', { name: 'Change' })).not.toBeInTheDocument()
-        expect(owner.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
         expect(owner.queryByRole('button', { name: 'Clean up…' })).not.toBeInTheDocument()
-        expect(owner.getByRole('button', { name: 'Create rule' })).toBeEnabled()
+        const menu = await openMenu(userEvent.setup(), 'owner')
+        expect(menu.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Copy the name', 'Create rule'])
     })
 })
 
@@ -416,6 +479,22 @@ describe('PropertyBrowser — the draft\'s bulk changes', () => {
             .toMatch(/40 changed · 3 no longer matched the search on your draft — left as they are/)
         expect(panel.getByText('Your draft changed more than 200,000 entities, so its matches were judged as published.'))
             .toBeInTheDocument()
+    })
+
+    it('says why a search checked on the draft didn’t reach the entities new in it', () => {
+        const note = 'Your draft changed more than 200,000 entities, so entities new in your draft, or changed there to match, weren’t searched.'
+        const summary = { changed: 5, unchanged: 0, conflicts: 0, refused: { count: 0, byReason: {}, examples: [] } }
+        usePropertyJobsStore.getState().track(tracked('j7', {
+            op: { kind: 'set', key: 'tier', value: 'gold' },
+            job: { jobId: 'j7', status: 'completed', summary: { ...summary, recheck: { exact: true, note } } },
+        }))
+        usePropertyJobsStore.getState().track(tracked('j8', {
+            op: { kind: 'set', key: 'tier', value: 'gold' },
+            job: { jobId: 'j8', status: 'completed', summary: { ...summary, recheck: { exact: true, note: null } } },
+        }))
+        renderBrowser()
+        const panel = within(screen.getByRole('region', { name: 'Changes on this draft' }))
+        expect(panel.getAllByText(note)).toHaveLength(1)
     })
 
     it('says when it lost track of one, and offers to check again — or to dismiss it', async () => {

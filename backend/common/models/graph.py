@@ -657,6 +657,8 @@ class RelationshipTypeDefinition(BaseModel):
     is_containment: bool = Field(default=False, alias="isContainment")
     is_lineage: bool = Field(default=False, alias="isLineage")
     category: str = Field(default="association", alias="category")
+    # The properties its relationships carry that a publish judges, as an entity type's fields.
+    fields: List[FieldSchema] = Field(default_factory=list)
 
     class Config:
         populate_by_name = True

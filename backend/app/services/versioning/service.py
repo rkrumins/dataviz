@@ -2259,8 +2259,10 @@ class GraphVersioningService:
         enable of that size leaves its own.
 
         A page whose values break their fields' rules stops the writing, but not the reading: the
-        nodes' pages after it are judged by their fields alone, so the refusal counts every value
-        to change (``FieldViolation``'s total and per-field counts), not only the first page's."""
+        pages after it, the nodes' and the edges', are judged by their fields alone (an edge's ends
+        still checked first), so the refusal counts every value to change (``FieldViolation``'s
+        total and per-field counts), not only the first page's — and, raised once every page is
+        judged, it lands nothing of the pages written before it, which share its transaction."""
         gid, base = graph.id, graph.main_head_commit_seq
         strict = graph.ontology_enforcement == "strict"
         ontology = Ontology.from_spec(graph.ontology_spec) if strict else None
@@ -2374,11 +2376,11 @@ class GraphVersioningService:
             kinds.update({eid: heads[eid].table for eid in slow})
             await judge(heads, copies, deltas, kinds)
             await write(copies, deltas, kinds)
-        if fields:                                    # only nodes have fields: every page is judged
-            raise FieldViolation(fields)
 
         # 3 and 4. Its edges: re-pointed or changed ones (and those on a node it deleted, which go),
-        # then new ones — so a new edge is judged against where the changed ones now point.
+        # then new ones — so a new edge is judged against where the changed ones now point. Read
+        # and judged by their fields too once a page is refused (relationship types have fields),
+        # their ends still checked first, as the other squashes check them before any gate.
         for new in (False, True):
             async for heads in self._head_pages(s, gid, draft.id, live=True):
                 heads = {eid: h for eid, h in heads.items() if h.table == "edge"}
@@ -2409,6 +2411,8 @@ class GraphVersioningService:
                 kinds.update({eid: heads[eid].table for eid in slow})
                 await judge(heads, copies, deltas, kinds)
                 await write(copies, deltas, kinds)
+        if fields:                                    # every page judged, nodes' and edges'
+            raise FieldViolation(fields)
 
         if squash is None:
             return await self._merged_unchanged(s, graph, draft, actor, merged_via)
@@ -13333,24 +13337,29 @@ class GraphVersioningService:
                                 source: Optional[Tuple[str, str]] = None,
                                 into: Optional[FieldFindings] = None) -> FieldFindings:
         """The property values a publish would write that their type's fields refuse
-        (``EntityRule.fields``; :func:`~.ontology.field_violations`), judged against each node's
-        value on ``main`` before the publish, so only what it changes is judged. Read for the nodes
-        of a type that has field rules only: nothing when none has. ``source``: as
-        :meth:`_unique_violations` takes it — the ``(graph, branch)`` whose values ``written``
-        holds only as identity columns, read in full here.
+        (``EntityRule.fields``, ``EdgeRule.fields``; :func:`~.ontology.field_violations`), judged
+        against each entity's value on ``main`` before the publish, so only what it changes is
+        judged. Read for the nodes and relationships of a type that has field rules only: nothing
+        when none has. ``source``: as :meth:`_unique_violations` takes it — the ``(graph, branch)``
+        whose values ``written`` holds only as identity columns, read in full here.
 
-        ``FIELD_CHECK_PAGE`` nodes at a time, judged off the event loop, kept in ``into`` (else
+        ``FIELD_CHECK_PAGE`` entities at a time, judged off the event loop, kept in ``into`` (else
         a new :class:`~.ontology.FieldFindings`): a hundred examples and the counts, never every
         violation, and never every value at once."""
         found = into if into is not None else FieldFindings()
-        if ontology_rules is None or not any(r.fields for r in ontology_rules.entity_types.values()):
+        if ontology_rules is None or not any(
+                r.fields for r in (*ontology_rules.entity_types.values(), *ontology_rules.edge_types.values())):
             return found
 
         def governed(v: Optional[dict]) -> bool:
-            if not v or _is_edge_payload(v):
+            if not v:
                 return False
-            rule = ontology_rules.entity_types.get(
-                ontology_rules.canonical_entity_type(v.get("entityType")) or "")
+            if _is_edge_payload(v):
+                canon = ontology_rules.canonical_edge_type(v.get("edgeType") or v.get("edge_type"))
+                rule = ontology_rules.edge_types.get(canon.upper()) if canon else None
+            else:
+                rule = ontology_rules.entity_types.get(
+                    ontology_rules.canonical_entity_type(v.get("entityType")) or "")
             return bool(rule and rule.fields)
 
         ids = [eid for eid, v in written.items() if governed(v)]

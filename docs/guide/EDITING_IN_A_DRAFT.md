@@ -144,7 +144,8 @@ to confirm.
 1. Select the entities: hold `⌘` (Mac) or `Ctrl` (Windows) and click each one,
    or Shift-click to add a range. With a layer column focused, `⌘A` / `Ctrl-A`
    selects every entity it shows.
-2. In the bar at the bottom of the canvas, choose **Edit N…**. The entity
+2. In the bar at the bottom of the canvas, choose **Compare & edit N**, the
+   first of its actions — on a Context View, a Graph or a Hierarchy. The entity
    drawer opens on all of them: how many you hold, of which types, who they are
    (**and N more** lists them — show one on the canvas, or open it), and for
    each property how they hold it:
@@ -197,7 +198,7 @@ drawer offers **Compare them**. Changes not yet staged hold any move of the
 drawer, like an edit to one entity does (**Unsaved changes**). Up to 10,000
 entities are edited here at once; more are compared.
 
-Outside a draft the same bar says **Details**: the drawer compares them,
+Outside a draft the same bar says **Compare N**: the drawer compares them,
 read-only, with **Edit in a draft**. Choosing one entity's own details turns
 the drawer to it — **Back** returns to the comparison.
 
@@ -315,8 +316,18 @@ the draft, who ran it and the reason given. Its row under **Changes on this
 draft** then says **Published**. A review merged in part lists a change once
 what it changed has landed (**in part** when only some has).
 
-Entities are found as they are published: an entity new in this draft isn't
-matched — select it on the canvas instead.
+Entities are matched on your draft as the change starts — ones new in it, or
+changed there to match, included, and ones changed so they no longer match left
+alone. Each entity is changed once, however it was found. Entities added while
+the change runs aren't reached. Where your draft can't be searched, the change
+reaches only what the published graph matches, and says so when it ends:
+
+- a search that follows relationships, tests the View's layers, reads a field
+  only the platform keeps, or names an entity your draft changes;
+- a draft that has changed more than 200,000 entities;
+- a draft on a fork, and a change to relationships.
+
+Select the others on the canvas and change them there.
 
 ### Fill missing required fields
 
@@ -330,10 +341,9 @@ missing. Missing means no value: no property, or an empty one.
   first 20,000 and says so: publish again for the rest.
 - **Comparing several entities**, a required field that some of them lack
   offers **Fill missing on every Type…**. That reaches every entity of the type
-  in the View without a value for it, as Published holds them — so one new in
-  this draft, or emptied in it, is filled there in the drawer instead. (For one
-  entity, a required field you removed or emptied is said on its row; give it a
-  value there.)
+  in the View without a value for it, on your draft — ones new in it, or emptied
+  there, included. (For one entity, a required field you removed or emptied is
+  said on its row; give it a value there.)
 
 Give the value on **What**. A field with allowed values offers them; when it
 takes no other value, they are the only choice. Then review and apply it like
@@ -611,9 +621,9 @@ with resolutions**.
 ## Your draft
 
 - **In the Business view**, the version menu shows once you're in a draft. On
-  Published, **More** (`⋯`) → **Your drafts…** opens your drafts, and **More →
-  Changes & history…** opens a draft's changes, or the published history, its
-  reviews and data health.
+  Published, **More** (`⋯`) → **Your drafts…** opens your drafts. **Reviews** in
+  the view's header, as in the Technical view, opens **Changes & Reviews**: a
+  draft's changes, or the published history, its reviews and data health.
 - **Switch versions.** The version menu in the toolbar shows **Published** or
   your draft's name. It lists **Published**, then **Your drafts**, **Shared
   with you** and **Public drafts**, each marked with a globe (public) or a lock

@@ -10,10 +10,13 @@
  *   properties).
  * - **Who is compared.** Authored lineage relationships, as they are stored. Roll-ups, hierarchy
  *   links, relationships not saved yet, deleted in the draft or with a deletion staged are left out,
- *   each listed with why.
+ *   each listed with why. Each is named by its ends ("Orders → Revenue"); a list opened on them
+ *   adds each one's ID beneath.
  * - **Editing**, in a draft: set a value for all, fill where missing, rename, copy, remove, add a
  *   property to all — pending until "Stage", then staged as each relationship's own edit in one
  *   step that Undo takes back (`stageEdgeEdits`). Unstaged changes hold every move of the drawer.
+ *   Outside a draft, "Edit in a draft" sits in the top line; a note says why they can't be edited
+ *   here only when its tip can't.
  * - **Scale.** Up to `MULTI_RELATIONSHIP_MAX` relationships are compared here; more — or any
  *   number, on purpose — are changed on the server, by a job (Property Manager's dialog).
  */
@@ -29,10 +32,11 @@ import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useRelationshipRecords, type RelationshipRecordOf } from '@/hooks/useRelationshipRecords'
 import { edgeKind } from '@/services/ontologyPreflightService'
-import { NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { NO_DRAFT, NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { stageEdgeEdits, type EdgeEdit } from '@/features/versioning/model/stageEdgeEdit'
 import { targetFromMember } from '@/lib/drawerEdgeTarget'
 import { userProperties } from '@/lib/nodeFields'
+import { governedFields } from '@/lib/fieldRules'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -41,10 +45,11 @@ import {
   bulkEditSize, isEmptyBulkEdit, patchFor, previewBulkEdit, sharedFields, type BulkEdit,
 } from '@/components/canvas/context-view/bulkEdit'
 import { DrawerBody, DrawerFooter, DrawerHeader, DrawerShell } from '../../shell/DrawerShell'
-import { DrawerTopBar } from '../../shell/DrawerTopBar'
+import { DrawerTopBar, EditInDraftButton } from '../../shell/DrawerTopBar'
 import { useDrawerHistoryScope } from '../../useDrawerHistoryScope'
 import { EMPTY_EDIT, withChange, type KeyChange } from '../../entity/multi/editOps'
 import { MultiProperties } from '../../entity/multi/MultiProperties'
+import type { GovernedRule } from '../../entity/multi/ComparisonRow'
 import { MemberList, type Member } from '../../entity/multi/ValueBreakdown'
 import { Notice, TypeChip } from '../RelationshipParts'
 import { useEndpoints } from '../useEndpoints'
@@ -139,15 +144,40 @@ export function MultiRelationshipView({
   const endsOf = useCallback((m: EdgeMemberRef) =>
     [endpoints.get(m.source)?.name ?? m.source, endpoints.get(m.target)?.name ?? m.target] as const, [endpoints])
   const nameOf = useCallback((m: EdgeMemberRef) => endsOf(m).join(' → '), [endsOf])
+  // A type as the schema declares it, matched case-insensitively.
+  const declared = useCallback((type: string) =>
+    relationshipTypes.find((r) => r.id.toLowerCase() === type.toLowerCase()), [relationshipTypes])
   const memberOf = useCallback((id: string): Member => {
     const m = byId.get(id)
-    return { id, name: m ? nameOf(m) : id }
-  }, [byId, nameOf])
+    if (!m) return { id, name: 'Not loaded', ident: id, notLoaded: true }
+    // Its ID as stored, where it was read — what the single drawer shows — and its type, which a
+    // required field's "missing" counts by.
+    const record = read.records.get(id)
+    const type = record?.edgeType || m.edgeType
+    return { id, name: nameOf(m), ident: record?.entityId ?? id, type: declared(type)?.id ?? type }
+  }, [byId, nameOf, read.records, declared])
   const types = useMemo(() => {
     const counts = new Map<string, number>()
     for (const h of held) counts.set(h.record.edgeType || h.member.edgeType, (counts.get(h.record.edgeType || h.member.edgeType) ?? 0) + 1)
     return [...counts].sort((a, b) => b[1] - a[1])
   }, [held])
+  // The fields a publish judges, by key — the most-held type's, where two types define one. Their
+  // rows offer the allowed values and warn (never block) of a change publishing would refuse. Kept
+  // while the types held stay the same, so a write to one of them re-renders no row for it.
+  const typeOrder = types.map(([t]) => t).join('\u0000')
+  const rules = useMemo(() => {
+    const out = new Map<string, GovernedRule>()
+    for (const t of typeOrder ? typeOrder.split('\u0000') : []) {
+      const rt = declared(t)
+      if (!rt) continue
+      const name = relationshipCopy(t, relationshipTypes).label
+      for (const [key, field] of governedFields(rt.fields, true)) {
+        if (!out.has(key)) out.set(key, { field, typeLabel: `${name} relationships`, typeId: rt.id, typeName: name, edges: true })
+      }
+    }
+    return out
+  }, [typeOrder, declared, relationshipTypes])
+  const fieldRuleFor = useCallback((key: string) => rules.get(key) ?? null, [rules])
 
   // ── Whether they can be edited here ──
   const editing = useEntityEditing()
@@ -233,6 +263,9 @@ export function MultiRelationshipView({
         : held.length === 0 ? null
           : editing.blocked ?? (canEdit ? null : VIEW_ONLY_DRAFT)
     : null
+  const draftReason = blockedNote && !tooMany && onStartEditing && editing.blocked !== NO_VERSION_CONTROL ? editing.blocked : null
+  // "Switch to a draft" is the button's tip; the note is for what the tip doesn't cover.
+  const note = draftReason && blockedNote === NO_DRAFT ? null : blockedNote
 
   return (
     <DrawerShell
@@ -247,11 +280,12 @@ export function MultiRelationshipView({
     >
       <DrawerHeader className="bg-gradient-to-br from-accent-lineage/[0.07] to-transparent">
         <DrawerTopBar badge={<Badge tone="accent" size="md" caps>Relationships</Badge>}
+          action={draftReason && onStartEditing ? <EditInDraftButton onClick={onStartEditing} reason={draftReason} /> : undefined}
           closeLabel="Close relationship details" onClose={onClose} />
-        <h2 id={titleId} tabIndex={-1} className="text-lg font-semibold leading-tight text-ink outline-none">
+        <h2 id={titleId} tabIndex={-1} className="text-xl font-display font-semibold leading-tight text-ink outline-none">
           {target.members.length.toLocaleString()} relationships
         </h2>
-        <p className="mt-0.5 text-xs text-ink-muted">
+        <p className="mt-0.5 text-sm text-ink-muted">
           {editable ? 'What they share, and where they differ — change it for all at once.' : 'What they share, and where they differ.'}
         </p>
         {types.length > 0 && (
@@ -259,7 +293,7 @@ export function MultiRelationshipView({
             {types.map(([t, n]) => (
               <span key={t} className="inline-flex items-center gap-1">
                 <TypeChip type={t} label={relationshipCopy(t, relationshipTypes).label} />
-                <span className="text-[11px] tabular-nums text-ink-muted">{n.toLocaleString()}</span>
+                <span className="text-xs tabular-nums text-ink-muted">{n.toLocaleString()}</span>
               </span>
             ))}
           </div>
@@ -281,12 +315,12 @@ export function MultiRelationshipView({
         {heldIds.length > 0 && (
           <>
             <button type="button" onClick={() => setListOpen((o) => !o)} aria-expanded={listOpen}
-              className="mt-2.5 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+              className="mt-3 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
               {listOpen ? 'Hide' : 'List'} the {heldIds.length.toLocaleString()} compared
-              <ChevronDown className={cn('w-3 h-3 transition-transform', listOpen && 'rotate-180')} aria-hidden />
+              <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', listOpen && 'rotate-180')} aria-hidden />
             </button>
             {listOpen && (
-              <div className="mt-1.5 max-h-56 overflow-y-auto custom-scrollbar rounded-lg border border-glass-border bg-canvas">
+              <div className="mt-2 max-h-72 overflow-y-auto custom-scrollbar rounded-lg border border-glass-border bg-canvas">
                 <MemberList ids={heldIds} memberOf={memberOf} className="ml-0 my-1"
                   onFocusNode={onLocateMany ? locateOne : undefined} onOpenNode={openOne} />
               </div>
@@ -296,24 +330,16 @@ export function MultiRelationshipView({
       </DrawerHeader>
 
       <DrawerBody>
-        {(blockedNote || excluded.length > 0 || read.isError) && (
-          <div className="mx-5 mt-4 space-y-2">
+        {(note || excluded.length > 0 || read.isError) && (
+          <div className="mx-5 mt-3 space-y-2">
             {read.isError && (
               <Notice tone="warn" action={{ label: 'Retry', onClick: read.refetch }}>Couldn’t read these relationships.</Notice>
             )}
-            {blockedNote && (
-              <div className="flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] p-3">
-                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
-                <div className="min-w-0 flex-1 text-xs leading-snug text-ink">
-                  {blockedNote}
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {tooMany && <Button size="sm" variant="secondary" leftIcon={Database} onClick={onServer}>Change all {target.members.length.toLocaleString()} on the server</Button>}
-                    {!tooMany && onStartEditing && editing.blocked && editing.blocked !== NO_VERSION_CONTROL && (
-                      <Button size="sm" variant="secondary" onClick={onStartEditing}>Edit in a draft</Button>
-                    )}
-                  </div>
-                </div>
-              </div>
+            {note && (
+              <p className="flex items-start gap-2 rounded-lg bg-amber-500/[0.07] px-3 py-1.5 text-xs leading-snug text-amber-800 dark:text-amber-200">
+                <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+                {note}
+              </p>
             )}
             {excluded.length > 0 && (
               <div className="rounded-xl border border-glass-border p-3 text-xs text-ink-secondary">
@@ -354,6 +380,7 @@ export function MultiRelationshipView({
             onAddAll={onAddAll}
             editable={editable}
             sharedValueRefused={NOT_REFUSED}
+            fieldRuleFor={fieldRuleFor}
             memberOf={memberOf}
             onFocusNode={onLocateMany ? locateOne : undefined}
             onOpenNode={openOne}

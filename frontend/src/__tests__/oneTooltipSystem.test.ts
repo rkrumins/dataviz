@@ -28,12 +28,14 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { stripComments } from '@/test/jsxSourceScan'
 
 const SRC = resolve(__dirname, '..')
 
 /**
  * The surfaces this rule is enforced over: the view page's identity bar and
- * its two panels, the Context View toolbar, and the versioning chrome.
+ * its two panels, the Context View toolbar, the versioning chrome, Property
+ * Manager, and the Graph and Hierarchy canvases with their toolbar row.
  *
  * DELIBERATELY NOT "every tree these live in". `components/views` also holds
  * the view wizard and the layer studio, and `context-view` also holds the
@@ -50,7 +52,12 @@ const SCOPE = [
   'components/views/EditDetailsPanel.tsx',
   'components/canvas/context-view/ContextViewHeader.tsx',
   'components/canvas/context-view/header',
-  'components/canvas/property-manager/PropertyManagerButton.tsx',
+  'components/canvas/property-manager',
+  'components/canvas/search/CanvasSearchTrigger.tsx',
+  'components/canvas/CanvasToolRow.tsx',
+  'components/canvas/GraphCanvas.tsx',
+  'components/canvas/HierarchyCanvas.tsx',
+  'components/canvas/EdgeLegend.tsx',
   'components/canvas/search/panel/sentence',
   'components/canvas/search/panel/map',
   'components/canvas/search/panel/ask',
@@ -161,7 +168,9 @@ const sources = SCOPE.flatMap((entry) => {
   const files = entry.endsWith('.tsx') ? [path] : tsxFiles(path)
   return files.map((file) => ({
     rel: relative(SRC, file),
-    src: readFileSync(file, 'utf8'),
+    // Comments blanked: an apostrophe in one ("React Flow's") reads as a quote to the scanner
+    // below, and an odd number of them inside a tag hid every tag after it.
+    src: stripComments(readFileSync(file, 'utf8')),
   }))
 })
 
@@ -178,6 +187,8 @@ describe('one tooltip system on the view page, the canvas toolbar and the versio
       'components/canvas/context-view/header/HeaderSearch.tsx',
       'features/versioning/components/CanvasVersioningBar.tsx',
       'features/versioning/components/BranchSwitcher.tsx',
+      'components/canvas/property-manager/PropertyBrowser.tsx',
+      'components/canvas/GraphCanvas.tsx',
     ]) {
       expect(scanned).toContain(known)
     }

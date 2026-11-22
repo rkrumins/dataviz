@@ -6,6 +6,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useViewEntityType, useViewEntityVisual } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
 import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
@@ -141,11 +142,17 @@ export const GenericNode = memo(function GenericNode({
   // `perf-load-test-solidatus`), which is the opposite of what the toggle
   // promises. Cards from `md` up already have room for a second `text-2xs`
   // line, so they show both; `sm` has room for one, so there — and only
-  // there — the technical identity substitutes.
+  // there — the technical identity substitutes. With the IDs hidden (Display
+  // settings) a card shows neither.
   const description = typeof entityFields['description'] === 'string'
     ? entityFields['description']
     : undefined
-  const technical = technicalIdentity(entityFields, persona, { identityProperty, name: primaryLabel })
+  const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
+  // Display's "Show entity type badge", as on Context View rows.
+  const showTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
+  const technical = showEntityIds
+    ? technicalIdentity(entityFields, persona, { identityProperty, name: primaryLabel })
+    : undefined
   const technicalLine = technical?.value
   const showsBothLines = visual.size !== 'xs' && visual.size !== 'sm'
   const secondaryLabel: string | undefined = showsBothLines
@@ -428,12 +435,14 @@ export const GenericNode = memo(function GenericNode({
           {/* Content */}
           <div className="flex-1 min-w-0">
             {/* Type Badge */}
-            <span
-              className="text-2xs font-medium uppercase tracking-wider"
-              style={{ color: visual.color }}
-            >
-              {entityType.name}
-            </span>
+            {showTypeBadge && (
+              <span
+                className="text-2xs font-medium uppercase tracking-wider"
+                style={{ color: visual.color }}
+              >
+                {entityType.name}
+              </span>
+            )}
 
             {/* Primary Label + W2.1 search match badge */}
             <div className="flex items-center gap-1.5 min-w-0">
@@ -538,7 +547,7 @@ export const GenericNode = memo(function GenericNode({
         <QuestionRowMark urn={searchUrn} label={primaryLabel} className="mt-2 w-fit" />
 
         {/* Child Count for collapsed nodes */}
-        {entityData.childCount && !entityData.isExpanded && (
+        {!!entityData.childCount && !entityData.isExpanded && (
           <div className="mt-2 text-2xs text-ink-muted">
             {entityData.childCount} {entityData.childCount === 1 ? 'child' : 'children'}
           </div>

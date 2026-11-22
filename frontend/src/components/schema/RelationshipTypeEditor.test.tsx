@@ -8,9 +8,9 @@
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { RelationshipTypeEditor } from './RelationshipTypeEditor'
-import { relDefToSchema } from '@/features/ontology/lib/ontology-parsers'
+import { relDefToSchema, relSchemaToBackend } from '@/features/ontology/lib/ontology-parsers'
 
 const noop = () => {}
 
@@ -206,5 +206,60 @@ describe('RelationshipTypeEditor — the Appearance tab says which channels are 
     render(<RelationshipTypeEditor existingTypeIds={[]} onSave={noop} onCancel={noop} />)
     await userEvent.click(screen.getByRole('button', { name: /appearance/i }))
     expect(screen.getByText(/the canvas does not draw them yet/i)).toBeTruthy()
+  })
+})
+
+/**
+ * A relationship type's fields: the properties its relationships carry that publishing checks, set
+ * on a Fields tab as an entity type's are — required, allowed values — without what only an entity
+ * type's field means (where it shows, import matching, uniqueness). They travel with the type, and
+ * a save keeps what the editor doesn't hold (its label field, a key a later server added).
+ */
+describe('RelationshipTypeEditor — fields', () => {
+  const owns = () => relDefToSchema('OWNS', {
+    name: 'Owns', label_field: 'since', rank: 3,
+    fields: [{ id: 'since', name: 'Since', type: 'date', required: true, display_order: 0 }],
+  })
+
+  it('adds a field bound to a property key the type’s relationships carry, and saves it with the type', async () => {
+    const onSave = vi.fn()
+    render(<RelationshipTypeEditor relType={owns()} existingTypeIds={['OWNS']} propertyKeys={['tier', 'weight']}
+      onSave={onSave} onCancel={noop} />)
+    await userEvent.click(screen.getByRole('button', { name: /^fields$/i }))
+    expect(screen.getByText('since', { selector: 'code' })).toBeInTheDocument()
+    // An entity type's options alone are not offered.
+    expect(screen.queryByRole('checkbox', { name: 'Must be unique' })).toBeNull()
+    expect(screen.queryByRole('checkbox', { name: 'Match imports by this' })).toBeNull()
+    expect(screen.queryByRole('checkbox', { name: 'Node' })).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add Field' }))
+    expect(screen.getByRole('button', { name: /stage changes/i })).toBeDisabled()
+    await userEvent.type(screen.getAllByRole('textbox', { name: 'Field name' })[1], 'Tier')
+    // Offered the keys its relationships carry (an input with suggestions is a combobox).
+    expect(screen.getByRole('combobox', { name: 'Property key' })).toHaveValue('tier')
+    expect(document.querySelector('datalist option[value="weight"]')).not.toBeNull()
+    await userEvent.type(screen.getByRole('textbox', { name: 'Add to allowed values of tier' }), 'gold{Enter}silver{Enter}')
+    await userEvent.click(screen.getAllByRole('checkbox', { name: 'Required' })[1])
+    await userEvent.click(screen.getByRole('button', { name: /stage changes/i }))
+
+    const saved = onSave.mock.calls[0][0]
+    expect(saved.fields.map((f: { id: string; required: boolean }) => [f.id, f.required])).toEqual([['since', true], ['tier', true]])
+    expect(saved.fields[1]).toMatchObject({ allowedValues: ['gold', 'silver'] })
+    expect(relSchemaToBackend(saved, { name: 'Owns', label_field: 'since', rank: 3 })).toMatchObject({
+      rank: 3, label_field: 'since',
+      fields: [{ id: 'since', required: true, type: 'date' }, { id: 'tier', required: true, allowed_values: ['gold', 'silver'] }],
+    })
+  })
+
+  it('round-trips through the ontology: stored as set, read back as stored, nothing stored when none', () => {
+    const read = owns()
+    expect(read.labelField).toBe('since')
+    expect(read.fields).toEqual([expect.objectContaining({ id: 'since', name: 'Since', type: 'date', required: true })])
+    const stored = relSchemaToBackend(read, { name: 'Owns', label_field: 'since', rank: 3, fields: [] })
+    expect(relDefToSchema('OWNS', stored)).toEqual(read)
+    // A type without fields or a label field stores neither — and drops the ones it no longer has.
+    const plain = relSchemaToBackend({ ...read, fields: [], labelField: undefined }, stored)
+    expect('fields' in plain || 'label_field' in plain).toBe(false)
+    expect(plain.rank).toBe(3)
   })
 })

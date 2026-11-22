@@ -95,7 +95,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/FRONTEND.md"
   },
   "api-features": {
-    "updated": "2026-11-21",
+    "updated": "2026-11-22",
     "path": "docs/API_FEATURES.md"
   },
   "services-overview": {

@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/versioningApiService')>()),
   previewPropertyJob: vi.fn(async () => ({ refusal: null, nameBudget: null, activeJobId: null, counts: null })),
+  previewPropertyJobSample: vi.fn(async () => ({ rows: [], truncated: false })),
   createPropertyJob: vi.fn(),
 }))
 vi.mock('@/hooks/usePropertyCatalog', () => ({
@@ -22,7 +23,6 @@ vi.mock('@/hooks/usePropertyCatalog', () => ({
   }),
 }))
 vi.mock('../useAllValues', () => ({ useAllValues: () => ({ values: null, loading: false, error: null }) }))
-vi.mock('@/hooks/usePropertyInsights', () => ({ useAffectedSample: () => ({ data: null, loading: false, error: null }) }))
 vi.mock('../../../search/builder/useDiscovery', () => ({ useDiscovery: () => ({ keysByEdgeType: {} }) }))
 vi.mock('../useReviewCounts', () => ({
   useReviewCounts: () => ({ counts: new Map(), complete: false, percent: 0, error: null, unavailable: false }),

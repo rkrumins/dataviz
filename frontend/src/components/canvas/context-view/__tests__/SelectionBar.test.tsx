@@ -70,15 +70,38 @@ describe('SelectionBar', () => {
     expect(screen.queryByRole('button', { name: 'Export…' })).not.toBeInTheDocument()
   })
 
-  it('offers to edit what several share in a draft — and to read it outside one', async () => {
+  it('offers to compare and edit several in a draft — and to compare them outside one', async () => {
+    const user = userEvent.setup()
     const onOpenShared = vi.fn()
     const { unmount } = render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()} onClear={vi.fn()}
       onOpenShared={onOpenShared} sharedEditable />)
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Edit 2…' }))
+    await user.click(screen.getByRole('button', { name: 'Compare & edit 2' }))
     expect(onOpenShared).toHaveBeenCalledTimes(1)
     unmount()
     render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()} onClear={vi.fn()} onOpenShared={onOpenShared} />)
-    expect(screen.getByRole('button', { name: 'Details' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /edit/i })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Compare 2' }))
+    expect(onOpenShared).toHaveBeenCalledTimes(2)
+  })
+
+  it('puts Compare first among what it can do with several, as the main action', () => {
+    renderBar(['a', 'b'], { onOpenShared: vi.fn(), onLink: vi.fn(), onNarrow: vi.fn(), onExport: vi.fn() })
+    const bar = screen.getByRole('region', { name: /selected entities/i })
+    const actions = within(bar).getAllByRole('button')
+      .filter((b) => !b.getAttribute('aria-label')?.startsWith('Remove '))
+    expect(actions.map((b) => b.textContent)).toEqual(
+      ['Compare 2', 'Link…', 'Narrow…', 'Export…', 'Focus all 2', 'Trace all 2', 'Clear'],
+    )
+    // The bar's primary look, the one Details and Trace all wear.
+    expect(actions[0].className).toContain('bg-accent-lineage/15')
+  })
+
+  it('says what Compare opens in the app\'s own tooltip, not a native one', async () => {
+    renderBar(['a', 'b'], { onOpenShared: vi.fn() })
+    const compare = screen.getByRole('button', { name: 'Compare 2' })
+    expect(compare).not.toHaveAttribute('title')
+    await userEvent.setup().hover(compare)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/side by side/)
   })
 
   it('never offers Details for several', () => {

@@ -777,16 +777,19 @@ export class UniqueViolationError extends Error {
   }
 }
 
-/** One property value a publish refused by its entity type's fields: not of the field's type
- *  (`field_type`), not one of its allowed values (`field_not_allowed`), or a required field left
- *  without one (`field_required`). `entity_id` is the server's; `urn` and `name` as the entity
- *  carries them; `reason` says it in a sentence. */
+/** One property value a publish refused by its entity or relationship type's fields: not of the
+ *  field's type (`field_type`), not one of its allowed values (`field_not_allowed`), or a required
+ *  field left without one (`field_required`). `entity_id` is the server's; `urn` and `name` as the
+ *  entity carries them — a relationship (`kind` `edge`) has neither, and names its ends instead
+ *  (`source`, `target`, their entity ids); `reason` says it in a sentence. */
 export interface FieldViolation {
   entity_id: string
-  kind: 'node'
+  kind: 'node' | 'edge'
   type: string
   name?: string | null
   urn?: string | null
+  source?: string
+  target?: string
   rule: 'field_type' | 'field_not_allowed' | 'field_required'
   field: string
   fieldName?: string
@@ -794,10 +797,12 @@ export interface FieldViolation {
   reason: string
 }
 
-/** How many values a publish refused for one field of one entity type, by one rule — and which:
- *  `ids`, as a bulk property job's `ids` target names them (the first 20,000), all of them when
- *  `idsComplete`. */
+/** How many values a publish refused for one field of one entity type — or, `entityKind` `edge`,
+ *  one relationship type — by one rule, and which: `ids`, as a bulk property job names them (an
+ *  entity as `gv:<id>`, a relationship by its own id; the first 20,000), all of them when
+ *  `idsComplete`. `entityKind` is absent from an older server's: an entity type's. */
 export interface FieldViolationCount {
+  entityKind?: 'node' | 'edge'
   entityType: string
   field: string
   fieldName?: string
@@ -807,16 +812,16 @@ export interface FieldViolationCount {
   idsComplete?: boolean
 }
 
-/** A publish refused because property values break the fields their entity types define. Nothing
- *  was published. `total`: how many there are — `violations` may list fewer; `byField`: how many
- *  per entity type, field and rule, the most first. */
+/** A publish refused because property values break the fields their entity or relationship types
+ *  define. Nothing was published. `total`: how many there are — `violations` may list fewer;
+ *  `byField`: how many per type, field and rule, the most first. */
 export class FieldViolationError extends Error {
   violations: FieldViolation[]
   total: number
   byField: FieldViolationCount[]
   constructor(violations: FieldViolation[], total?: number, byField?: FieldViolationCount[]) {
     const n = total ?? violations.length
-    super(`${n === 1 ? 'A value breaks' : `${n} values break`} the fields their entity types define. `
+    super(`${n === 1 ? 'A value breaks' : `${n} values break`} the fields their types define. `
       + violations.slice(0, 2).map((v) => `${v.name || v.urn || v.entity_id}: ${v.reason}`).join('; '))
     this.name = 'FieldViolationError'
     this.violations = violations
@@ -2114,7 +2119,8 @@ export interface PropertyJobSummary {
   publishedCommitId?: string | null
   /** Reviews merged in part that took some of what it changed to Published. */
   landedCommitIds?: string[]
-  /** A search target: whether its matches were checked again on the draft's values, and why not. */
+  /** A search target: whether its matches were checked again on the draft's values; `note` says why
+   *  not, and why the entities new or changed in the draft weren't searched there when they weren't. */
   recheck?: { exact: boolean; note: string | null }
   /** The undo that put back what it wrote. */
   undoneBy?: string | null
@@ -2179,6 +2185,45 @@ export function previewPropertyJob(
   wsId: string, graphId: string, branchId: string, op: PropertyJobOp, target: PropertyJobTarget, signal?: AbortSignal,
 ): Promise<PropertyJobPreview> {
   return vfetch<PropertyJobPreview>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/property-jobs/preview`, {
+    method: 'POST', body: JSON.stringify({ op, target }), signal,
+  })
+}
+
+/** One entity a change reaches, before and after it, as the job would write it. A value is left out
+ *  (`undefined`) where the key holds none. */
+export interface PropertyJobSampleRow {
+  /** Its entity id — or, for an id that names nothing in the draft, that id. */
+  id: string
+  urn?: string | null
+  /** An entity's name; a relationship's ends, by their names. */
+  name: string
+  /** Its entity type, or a relationship's type; null for one not in the draft. */
+  type: string | null
+  /** What its key holds now. */
+  before?: unknown
+  /** A rename or a copy: what the new key holds now. */
+  to?: unknown
+  /** What the key the change writes holds after it — the new key, for a rename or a copy. */
+  after?: unknown
+  outcome: 'change' | 'unchanged' | 'skip'
+  /** Why it is left as it is: the new key held already, a value that won't convert, a search's
+   *  match the draft changed out of it, not in the draft, or a roll-up. */
+  reason?: 'conflict' | 'unconvertible' | 'no_longer_matches' | 'missing' | 'derived'
+}
+
+/** A few of the entities a change reaches — its first ids, or a search's first page — and whether
+ *  it reaches more. */
+export interface PropertyJobSample {
+  rows: PropertyJobSampleRow[]
+  truncated: boolean
+}
+
+/** A few of the entities applying `op` to `target` on the draft reaches, each before and after it,
+ *  nothing written. Asked apart from the preview, so the check never waits on it. */
+export function previewPropertyJobSample(
+  wsId: string, graphId: string, branchId: string, op: PropertyJobOp, target: PropertyJobTarget, signal?: AbortSignal,
+): Promise<PropertyJobSample> {
+  return vfetch<PropertyJobSample>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/property-jobs/preview/sample`, {
     method: 'POST', body: JSON.stringify({ op, target }), signal,
   })
 }

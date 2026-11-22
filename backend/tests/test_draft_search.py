@@ -694,6 +694,65 @@ async def test_the_membership_service_carries_the_drafts_notes():
 
 
 # ---------------------------------------------------------------------------
+# A bulk property job's draft matches: what main's export can't name
+# ---------------------------------------------------------------------------
+
+def _judge(overlay, asked=None):
+    svc = _service(overlay)
+
+    async def judge(request):
+        if asked is not None:
+            asked.append(list(request.urns))
+        return await svc.membership(request, run_context=CONTEXT)
+    return judge
+
+
+def _json(predicate) -> Dict[str, Any]:
+    return predicate.model_dump(mode="json", by_alias=True)
+
+
+async def test_draft_matches_are_what_the_draft_made_or_changed_that_matches_a_batch_at_a_time(
+        monkeypatch):
+    """c2 changed to gold and c4 created gold; c3 removed is never asked; c1 is main's to find."""
+    monkeypatch.setattr(draft_search, "BATCH", 1)
+    overlay, asked = _overlay(_first_draft()), []
+    out = await draft_search.draft_matches(overlay, {"viewId": "v"}, _json(RULES["gold"]),
+                                           _judge(overlay, asked))
+    assert out == {"ids": ["id-c2", "id-c4"]}
+    assert asked == [["c2"], ["c4"]]
+    out = await draft_search.draft_matches(overlay, {"viewId": "v"}, _json(RULES["not_gold"]),
+                                           _judge(overlay))
+    assert out == {"ids": []}
+
+
+async def test_draft_matches_are_none_when_the_draft_cant_answer_for_them(monkeypatch):
+    """A search its values can't answer, a draft past the limit, a fork, a draft that can't be
+    read: no draft matches, and why."""
+    overlay = _overlay(_first_draft())
+    orphan = {"kind": "degree", "direction": "both", "op": "eq", "value": 0}
+    assert await draft_search.draft_matches(overlay, {"viewId": "v"}, orphan, _judge(overlay)) == \
+        {"unsearched": "inexact"}
+
+    class Broken(Draft):
+        async def overlay_payloads(self, **kw):
+            raise RuntimeError("postgres went away")
+
+    broken = _overlay(_first_draft_on(Broken()))
+    assert await draft_search.draft_matches(broken, {"viewId": "v"}, _json(RULES["gold"]),
+                                            _judge(broken)) == {"unsearched": "unread"}
+
+    fork = DraftOverlayProvider(Main(), svc=_first_draft(), graph_id="g-fork", branch_id="d1",
+                                fork=True)
+    asked = []
+    assert await draft_search.draft_matches(fork, {"viewId": "v"}, _json(RULES["gold"]),
+                                            _judge(fork, asked)) == {"unsearched": "fork"}
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 2)       # D: c2, c3, c4
+    assert await draft_search.draft_matches(overlay, {"viewId": "v"}, _json(RULES["gold"]),
+                                            _judge(overlay, asked)) == {"unsearched": "too_large"}
+    assert asked == []
+
+
+# ---------------------------------------------------------------------------
 # The shared evaluator: the FalkorDB compiler's meaning
 # ---------------------------------------------------------------------------
 

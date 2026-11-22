@@ -160,6 +160,7 @@ class ImportExportService:
         save_hook=None,
         property_targets=None,
         property_write_context=None,
+        property_draft_matches=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
@@ -197,6 +198,9 @@ class ImportExportService:
         # containment, node_identity}``, what its windows are written with, as a save is.
         self._property_targets = property_targets
         self._property_write_context = property_write_context
+        # And ``(job) -> {"ids": [...]} | {"unsearched": why}``: the entities its draft created or
+        # changed that its search target matches there (``draft_search.draft_matches``).
+        self._property_draft_matches = property_draft_matches
 
     @property
     def store(self):
@@ -1096,7 +1100,8 @@ class ImportExportService:
         """Run a bulk property job on ``lease`` (taken here without one), from its cursor."""
         lease = lease or await lease_job(job_id)
         worker = PropertyJobWorker(self._svc, self._store, targets=self._property_targets,
-                                   write_context=self._property_write_context)
+                                   write_context=self._property_write_context,
+                                   draft_matches=self._property_draft_matches)
         return await worker.run(job_id, lease=lease)
 
     async def run_property_safe(self, job_id: str, lease: Lease) -> None:
