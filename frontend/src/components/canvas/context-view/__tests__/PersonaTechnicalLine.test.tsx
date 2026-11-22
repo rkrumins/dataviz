@@ -18,6 +18,7 @@
  *    part that tells two rows apart;
  *  - the virtualizer is told the row got taller, or every row it has not
  *    measured yet is estimated short;
+ *  - Display settings can hide it, and the rows shrink back with it;
  *  - and Business mode shows none of it.
  */
 import { act, render, screen } from '@testing-library/react'
@@ -31,6 +32,7 @@ import type { ViewSearchSession } from '@/components/canvas/search/session/useVi
 import { installJsdomLayout } from '@/test/canvasHarness'
 import { stubSession } from '@/test/stubSearchSession'
 import { usePersonaStore } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 import { useWorkspacesStore } from '@/store/workspaces'
 import type { ViewLayerConfig } from '@/types/schema'
 
@@ -150,6 +152,7 @@ const rowText = (id: string) =>
 beforeEach(() => usePersonaStore.setState({ mode: 'business' }))
 afterEach(() => {
     usePersonaStore.setState({ mode: 'business' })
+    usePreferencesStore.setState({ showCanvasEntityIds: true })
     useWorkspacesStore.setState({ activeWorkspaceId: null, workspaces: [] } as never)
 })
 
@@ -207,6 +210,19 @@ describe('Technical mode', () => {
     })
 })
 
+describe('Technical mode with entity IDs hidden in Display settings', () => {
+    it('shows the name alone, as in Business mode', () => {
+        keyedById()
+        usePersonaStore.setState({ mode: 'technical' })
+        usePreferencesStore.setState({ showCanvasEntityIds: false })
+        renderColumn([NATIVE, QUALIFIED, UNLOADED])
+        expect(screen.getByText('Invoices')).toBeTruthy()
+        expect(screen.queryByText('INV-000042')).toBeNull()
+        expect(screen.queryByText('urn:li:dataset:customer_orders')).toBeNull()
+        expect(screen.queryByText('urn:li:dataset:late_arrival')).toBeNull()
+    })
+})
+
 describe('the technical line is readable, not just present', () => {
     it('truncates from the HEAD so the tail that tells two rows apart survives', () => {
         usePersonaStore.setState({ mode: 'technical' })
@@ -243,6 +259,25 @@ describe('the virtualizer follows the persona', () => {
         // (search box, load-more, error) carry no technical line and must not.
         expect(technical.some((h, i) => h === business[i] + TECHNICAL_LINE_HEIGHT)).toBe(true)
         // …and the sizes already cached from Business mode have to be dropped.
+        expect(virtualSpy.measureCalls).toBeGreaterThan(measuredBefore)
+    })
+
+    it('estimates the shorter row again when the IDs are hidden, and re-measures the cached ones', () => {
+        usePersonaStore.setState({ mode: 'technical' })
+        virtualSpy.measureCalls = 0
+        renderColumn([QUALIFIED, SELF_NAMED, NOTHING])
+        const estimates = () =>
+            Array.from({ length: virtualSpy.count }, (_, i) => virtualSpy.estimateSize!(i))
+
+        const shown = estimates()
+        const measuredBefore = virtualSpy.measureCalls
+
+        act(() => usePreferencesStore.setState({ showCanvasEntityIds: false }))
+
+        const hidden = estimates()
+        expect(hidden).toHaveLength(shown.length)
+        hidden.forEach((h, i) => expect(h).toBeLessThanOrEqual(shown[i]))
+        expect(hidden.some((h, i) => h === shown[i] - TECHNICAL_LINE_HEIGHT)).toBe(true)
         expect(virtualSpy.measureCalls).toBeGreaterThan(measuredBefore)
     })
 })

@@ -125,6 +125,7 @@ export function DisplayMenu({
   }, [open])
 
   const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
+  const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
   const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
   const lineagePortSides = usePreferencesStore((s) => s.lineagePortSides) ?? 'direction'
   // The Business view's Display is the canvas and how many lines it draws; how
@@ -132,7 +133,11 @@ export function DisplayMenu({
   // Technical view's.
   const technical = usePersonaMode() === 'technical'
   const setLineagePortSides = usePreferencesStore((s) => s.setLineagePortSides)
-  const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons, showMemoryUsage })
+  // The entity IDs switch is the Technical view's: IDs hidden there are no reason for Business to offer Reset.
+  const isCustom = !isDefaultState({
+    canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons, showMemoryUsage,
+    showEntityIds: !technical || showEntityIds,
+  })
 
   return (
     <>
@@ -203,7 +208,7 @@ export function DisplayMenu({
                 {isCustom && (
                   <HoverTip
                     className="ml-auto inline-flex"
-                    label="Put zoom, density, icons, badges, tree lines and the memory gauge back to their defaults"
+                    label="Put zoom, density, icons, IDs, badges, tree lines and the memory gauge back to their defaults"
                   >
                     <button
                       type="button"

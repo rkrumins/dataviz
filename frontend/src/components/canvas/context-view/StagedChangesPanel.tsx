@@ -7,12 +7,14 @@
  *      virtualized list moved through with the keyboard, and the selected change beside it, saying
  *      what it does ("Renamed orders to Orders v2") with only the fields the save sends, shown as
  *      the values they are. Undo / Redo, discard one, the N shown, or all. What the draft already
- *      holds from earlier saves and imports is listed beneath, a page at a time.
+ *      holds from earlier saves and imports is listed beneath, a page at a time — the same list
+ *      as Changes & Reviews. With nothing staged, that list is what opens, with **Publish this
+ *      draft…** as the next step.
  *   2. **Save** — to the draft (and keep editing; save as often as you like), or save and go
  *      straight on to publishing or to a review.
  *   3. **Publish** — the shared publish flow (`PublishForm`), its title taken from what was saved,
  *      over the whole draft, not just this batch. Offered only when there is something to publish;
- *      opened straight onto when nothing is staged but the draft has changes.
+ *      its Back returns to the list.
  *
  * Theme-aware (light and dark). A save or publish in flight holds the dialog: nothing in it is
  * closed, discarded or undone until it settles.
@@ -129,16 +131,16 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   const [savedTitle, setSavedTitle] = useState('')
   const filterInputRef = useRef<HTMLInputElement>(null)
 
-  // Each opening starts afresh: on the review — or, with nothing staged and a draft that has
-  // changes, on Publish.
+  // Each opening starts afresh, on the review — with nothing staged, on what the draft already
+  // holds, so its changes are seen before Publish this draft… is chosen.
   const wasOpen = useRef(false)
   useEffect(() => {
     if (isOpen && !wasOpen.current) {
       const s = useStagedChangesStore.getState()
-      // Opened to look at what the draft holds (an import just landed): that list, not Publish —
-      // a page at a time, never 100,000 entities drawn.
+      // Opened to look at what the draft holds (an import just landed): that list, open even
+      // beside staged edits — a page at a time, never 100,000 entities drawn.
       const toLook = s.reviewIntent === 'saved' && draftCount > 0
-      setStep(s.changes.length === 0 && draftCount > 0 && canPublishHere && !toLook ? 'publish' : 'review')
+      setStep('review')
       setDestination(s.reviewIntent === 'publish' && canPublishHere ? 'publish' : 'draft')
       setView('list')
       setFilter(NO_FILTER)
@@ -301,7 +303,9 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                         ? 'Nothing new to save — publish what’s on this draft, or send it for review.'
                         : 'Saved to your draft. Publish it now, send it for review — or keep editing.')
                       : total === 0
-                        ? 'Nothing pending. Make some edits and they’ll show up here for review.'
+                        ? (draftCount > 0
+                          ? 'Nothing new to save — here’s what this draft already holds.'
+                          : 'Nothing pending. Make some edits and they’ll show up here for review.')
                         : <>You’re changing <span className="font-semibold text-ink">{describeScope(groups)}</span>. Nothing is saved until you choose below.</>}
                     {failedCount > 0 && problems.length === 0 && step === 'review' && (
                       <span className="ml-1.5 inline-flex items-center gap-1 text-rose-600 dark:text-rose-400 font-semibold">
@@ -313,7 +317,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                 </div>
               </div>
 
-              <StepTrail step={step} destination={destination} canPublish={canPublishHere} />
+              <StepTrail step={step} destination={destination} canPublish={canPublishHere} nothingToSave={total === 0 && !savedTitle} />
 
               {step === 'review' && problems.length > 0 && (
                 <SaveProblemsBanner problems={problems} onDiscard={discardUnlessSaving} />
@@ -529,16 +533,23 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
 // ─────────────────────────────────────────────────────────────────────────────
 // Subcomponents
 
-/** Review → Save → Publish, with where this review is in it. */
-function StepTrail({ step, destination, canPublish }: { step: 'review' | 'publish'; destination: ReviewDestination; canPublish: boolean }) {
+/** Review → Save → Publish, with where this review is in it. With nothing to save, Review →
+ *  Publish: the draft's changes, then publishing them. */
+function StepTrail({ step, destination, canPublish, nothingToSave }: {
+  step: 'review' | 'publish'
+  destination: ReviewDestination
+  canPublish: boolean
+  nothingToSave: boolean
+}) {
   const steps: { label: string; state: 'done' | 'current' | 'next' | 'optional' }[] = [
     { label: 'Review', state: step === 'review' ? 'current' : 'done' },
     { label: 'Save to draft', state: step === 'publish' ? 'done' : 'next' },
     {
       label: destination === 'review' ? 'Send for review' : 'Publish',
-      state: step === 'publish' ? 'current' : destination === 'draft' ? 'optional' : 'next',
+      state: step === 'publish' ? 'current' : destination === 'draft' && !nothingToSave ? 'optional' : 'next',
     },
   ]
+  if (nothingToSave) steps.splice(1, 1)
   if (!canPublish) steps.pop()
   return (
     <ol className="flex items-center gap-1.5 mt-3.5" aria-label="Steps">

@@ -68,7 +68,10 @@ import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
-import { resolveEntityName } from '@/lib/entityDisplayName'
+import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
+import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
+import { usePersonaMode } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 
 interface HierarchyCanvasProps {
   className?: string
@@ -272,7 +275,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     }
   }, [nodes, edges])
 
-  // Build hierarchy tree from the shared containment maps
+  // Build hierarchy tree from the shared containment maps. Names follow the
+  // persona, as on the other canvases, so the rows sort and search by the
+  // names they show.
+  const personaMode = usePersonaMode()
   const hierarchyTree = useMemo(() => {
     if (!nodes.length) return []
 
@@ -288,7 +294,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       return {
         id: node.id,
         typeId: node.data.type as string,
-        name: resolveEntityName(node.data, 'business', node.id),
+        name: resolveEntityName(node.data, personaMode, node.id),
         data: node.data as Record<string, unknown>,
         children,
         depth,
@@ -302,7 +308,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       .map((n) => buildTree(n.id, 0))
       .filter((n): n is HierarchyNode => n !== null)
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [nodes.length, hierarchyRoots, childMap, nodeMap])
+  }, [nodes.length, hierarchyRoots, childMap, nodeMap, personaMode])
 
   // Flatten tree for search
   const flatNodes = useMemo(() => {
@@ -857,6 +863,14 @@ function HierarchyContainer({
   } = useSearchHighlight(node.urn ?? node.id, { isSelected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
   const changeDeco = useEntityDecoration(node.urn ?? node.id)
+  // Technical mode's ID under the name: the data source's identifier property, else the URN —
+  // left out when it is the name, or when Display settings hide the IDs.
+  const personaMode = usePersonaMode()
+  const identityProperty = useCanvasIdentityProperty()
+  const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
+  const technical = showEntityIds
+    ? technicalIdentity(node.data, personaMode, { identityProperty, urn: node.urn, name: node.name })
+    : undefined
 
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
@@ -1015,6 +1029,18 @@ function HierarchyContainer({
                 />
               )}
             </div>
+
+            {/* Technical identity — head-truncated, as on Context View rows: sibling URNs share a
+                long prefix, so an end ellipsis would cut the part that tells them apart. */}
+            {technical && (
+              <span
+                className="block text-[10px] font-mono text-ink-muted/70 truncate mt-0.5"
+                style={{ direction: 'rtl', textAlign: 'left' }}
+                title={`${technical.property}: ${technical.value}`}
+              >
+                {technical.value}
+              </span>
+            )}
 
             {/* Roll-up counts when collapsed */}
             {rollUpDisplay && !isExpanded && (
