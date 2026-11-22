@@ -195,11 +195,12 @@ class Lease:
             return res.rowcount == 1
 
     async def fail(self, message: str, code: str = "internal", action: Optional[str] = None,
-                   phase: Optional[str] = None) -> bool:
+                   phase: Optional[str] = None, detail: Optional[Dict[str, Any]] = None) -> bool:
         """Fail the job, fenced, recording ``summary.failure = {code, action, phase, reason}``
-        (``phase`` defaults to the row's current phase). Codes: ``integrity`` (action restart),
-        ``infrastructure`` (action resume), ``internal`` (no action). False when superseded."""
-        failure = json.dumps({"code": code, "action": action, "reason": message})
+        with ``detail``'s fields beside them (``phase`` defaults to the row's current phase).
+        Codes: ``integrity`` (action restart), ``infrastructure`` (action resume), ``internal``
+        (no action). False when superseded."""
+        failure = json.dumps({**(detail or {}), "code": code, "action": action, "reason": message})
         async with self._sessions() as s:
             res = await s.execute(_FAIL, {
                 "id": self.job_id, "epoch": self.epoch, "message": message[:2000], "now": _now(),

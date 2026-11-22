@@ -144,6 +144,26 @@ async def test_only_a_platform_admin_sets_it_up(test_client: AsyncClient, estate
     assert json.loads(provider.permitted_workspaces) == ["ws_lab", PG]
 
 
+@pytest.mark.asyncio
+async def test_the_most_rows_one_import_holds_is_set_beside_the_quota(
+        test_client: AsyncClient, estate, db_session, flag_on):
+    with _as(BEN, MEMBER):
+        before = (await test_client.get("/api/v1/playground")).json()
+    body = {"name": "Playground", "sandboxProviderId": "prov_sandbox", "graphQuota": 2}
+    with _as(ADA, ADMIN):
+        refused = await test_client.put("/api/v1/playground", json={**body, "maxImportRows": 0})
+        done = await test_client.put("/api/v1/playground", json={**body, "maxImportRows": 5000})
+    with _as(BEN, MEMBER):
+        after = (await test_client.get("/api/v1/playground")).json()
+    assert before["maxImportRows"] == 200_000                   # unset: the default
+    assert refused.status_code == 422
+    assert done.status_code == 200, done.text
+    assert (done.json()["maxImportRows"], after["maxImportRows"], after["graphQuota"]) == (5000, 5000, 2)
+    ws = await db_session.get(WorkspaceORM, PG)
+    await db_session.refresh(ws)
+    assert playground_policy.settings_of(ws).max_import_rows == 5000
+
+
 # ── What it allows ──────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

@@ -4464,7 +4464,9 @@ async def _import_settings_for(session: AsyncSession, data_source_id: Optional[s
     runs under (``services.import_settings``) — the request's identifier, checked (422 with the
     grammar), else the data source's, else the platform's, a property default ``entity_id`` on a
     fork but for its identifier property; and what its job keeps: where the identifier came from,
-    and the replace guard's limits with where each came from."""
+    the replace guard's limits with where each came from, and the most rows its file may hold
+    (``maxRows``: the Playground's ``maxImportRows`` in the Playground, else ``IMPORT_MAX_ROWS``;
+    0, no limit)."""
     from backend.app.db.models import WorkspaceDataSourceORM
     from backend.app.services import import_settings
     from backend.app.services.versioning.import_export import identifier as identifiers
@@ -4472,10 +4474,13 @@ async def _import_settings_for(session: AsyncSession, data_source_id: Optional[s
            if data_source_id and session is not None else None)     # a direct caller may hold none
     identity = await _identity_property_of(session, row) if fork else None
     try:
-        return import_settings.for_import(row, requested, fork=fork, identity_property=identity)
+        identifier, settings = import_settings.for_import(row, requested, fork=fork,
+                                                          identity_property=identity)
     except identifiers.IdentifierError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
                                                      "message": str(exc)})
+    limit = await playground_policy.import_row_limit(session, row.workspace_id) if row is not None else None
+    return identifier, {**settings, "maxRows": vconfig.IMPORT_MAX_ROWS if limit is None else limit}
 
 
 @router.post("/graphs/{graph_id}/imports", response_model=CreateImportResponse, status_code=202)

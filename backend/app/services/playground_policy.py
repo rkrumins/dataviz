@@ -17,7 +17,8 @@ and in the Playground only:
   with people, inside the Playground.
 * **A quota.** Each person may have ``graphQuota`` graphs there at once (default 5), and
   ``layerQuota`` semantic layers of their own (default 20, ``playground_layers``).
-  Experiments do not expire; the quota is the only bound.
+  Experiments do not expire; the quota is the only bound. One import into a graph there holds
+  at most ``maxImportRows`` rows (default 200,000), in place of the platform's ``IMPORT_MAX_ROWS``.
 * **Starter data models.** A blank graph needs a published data model. A new member
   sees none (data models follow the data sources a person's workspaces use), so the
   ones the administrator chose (``starterOntologyIds``) are visible to its members.
@@ -44,6 +45,7 @@ PLAYGROUND_KIND = "playground"
 PLAYGROUND_ROLE = "workspace_playground_member"
 DEFAULT_GRAPH_QUOTA = 5
 DEFAULT_LAYER_QUOTA = 20
+DEFAULT_MAX_IMPORT_ROWS = 200_000
 
 
 @dataclass
@@ -52,6 +54,7 @@ class PlaygroundSettings:
     starter_ontology_ids: List[str] = field(default_factory=list)
     graph_quota: int = DEFAULT_GRAPH_QUOTA
     layer_quota: int = DEFAULT_LAYER_QUOTA
+    max_import_rows: int = DEFAULT_MAX_IMPORT_ROWS
 
     def to_json(self) -> str:
         return json.dumps({
@@ -59,6 +62,7 @@ class PlaygroundSettings:
             "starterOntologyIds": self.starter_ontology_ids,
             "graphQuota": self.graph_quota,
             "layerQuota": self.layer_quota,
+            "maxImportRows": self.max_import_rows,
         })
 
 
@@ -70,11 +74,13 @@ def settings_of(ws: WorkspaceORM) -> PlaygroundSettings:
         raw = {}
     quota = raw.get("graphQuota")
     layers = raw.get("layerQuota")
+    rows = raw.get("maxImportRows")
     return PlaygroundSettings(
         sandbox_provider_id=raw.get("sandboxProviderId") or None,
         starter_ontology_ids=[str(o) for o in raw.get("starterOntologyIds") or []],
         graph_quota=quota if isinstance(quota, int) and quota > 0 else DEFAULT_GRAPH_QUOTA,
         layer_quota=layers if isinstance(layers, int) and layers > 0 else DEFAULT_LAYER_QUOTA,
+        max_import_rows=rows if isinstance(rows, int) and rows > 0 else DEFAULT_MAX_IMPORT_ROWS,
     )
 
 
@@ -90,6 +96,13 @@ async def playground_of(session: AsyncSession, ws_id: Optional[str]) -> Optional
         return None
     ws = await session.get(WorkspaceORM, ws_id)
     return ws if ws is not None and ws.kind == PLAYGROUND_KIND else None
+
+
+async def import_row_limit(session: AsyncSession, ws_id: Optional[str]) -> Optional[int]:
+    """The most rows one import into ``ws_id``'s graph may hold when it is the playground
+    (``maxImportRows``); None elsewhere, where the platform's ``IMPORT_MAX_ROWS`` holds."""
+    ws = await playground_of(session, ws_id)
+    return settings_of(ws).max_import_rows if ws is not None else None
 
 
 def _refuse(code: int, kind: str, message: str) -> HTTPException:

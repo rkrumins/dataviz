@@ -1,12 +1,13 @@
 """A starter graph: what a new Playground graph is made with in one request.
 
 Two front doors make one — a sample (``playground_samples``) and a person's own data
-(``POST /playground/imports``) — and both describe it the same way, as a :class:`Starter`:
+(``POST /playground/graphs``) — and both describe it the same way, as a :class:`Starter`:
 
 * its **data model**: the entity and relationship types it uses, each relationship joining the
   types its rows join with it (:func:`ontology_row`). A relationship marked ``containment`` is a
   structural one (its source contains its target), the rest are lineage;
-* its **things and connections**: the rows of a day-0 import, loaded as the graph's first version;
+* its **things and connections**: the rows of a day-0 import, loaded as the graph's first version
+  (a sample's; a graph for a person's own data has none, and loads its file through the import);
 * its **views**: a Context View (one layer per top-level type, in the starter's order), a Graph
   view, and — when it has a containment — a Hierarchy view of the container and what it holds;
 * its **library and details** (saved queries and display rules on the Context View; the data

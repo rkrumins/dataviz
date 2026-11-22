@@ -10,9 +10,11 @@ is decided by ``backend.app.services.playground_policy``.
 ``GET /playground/samples`` lists the graphs a member may start from a sample, and how many more
 graphs they may start; ``POST /playground/samples/{sample_id}`` makes one — a blank graph loaded
 with the sample as its first version, its views, library, details and an example change waiting
-for review (``backend.app.services.playground_samples``). ``POST /playground/imports`` makes one
-from the person's own things and connections (``backend.app.services.playground_imports``). Both
-are starter graphs, made the same way (``backend.app.services.playground_starter``).
+for review (``backend.app.services.playground_samples``). ``POST /playground/graphs`` makes one
+for the person's own data, with no rows yet: on a semantic layer on offer, or on one of their own
+made from their file's types (``backend.app.services.playground_layers``); the file then loads
+through the standard import. Both are starter graphs, made the same way
+(``backend.app.services.playground_starter``).
 
 ``GET /playground/models`` lists the semantic layers a member may build on, and
 ``GET /playground/models/{id}/template`` gives one's standard import template;
@@ -25,12 +27,12 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request, status
-from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.ontologies import (
@@ -51,18 +53,17 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.models import OntologyORM, ProviderORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM
 from backend.app.db.repositories import (binding_repo, ontology_definition_repo, user_repo,
                                          view_activity_repo, view_repo, view_version_repo)
-from backend.app.services import (playground_imports, playground_layers, playground_policy,
-                                  playground_samples, playground_starter, view_library,
-                                  workspace_access)
+from backend.app.services import (playground_layers, playground_policy, playground_samples,
+                                  playground_starter, view_library, workspace_access)
 from backend.app.services.feature_flags import feature_flags
-from backend.app.services.playground_imports import PlaygroundImport
-from backend.app.services.playground_starter import Example, Starter
+from backend.app.services.playground_starter import EntityType, Example, RelationshipType, Starter
 from backend.app.services.versioning.import_export.resolve import pointer_id, pointer_seed
 from backend.common.models.view_library import DisplayRule, SavedQueryInput
 from backend.app.services.managed_sources import drop_managed_data_source
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.playground_policy import (
-    DEFAULT_GRAPH_QUOTA, DEFAULT_LAYER_QUOTA, PLAYGROUND_KIND, PLAYGROUND_ROLE, PlaygroundSettings,
+    DEFAULT_GRAPH_QUOTA, DEFAULT_LAYER_QUOTA, DEFAULT_MAX_IMPORT_ROWS, PLAYGROUND_KIND, PLAYGROUND_ROLE,
+    PlaygroundSettings,
     get_playground, graphs_made_by, settings_of,
 )
 from backend.app.services.revocation_service import revoke_subject_sessions
@@ -94,6 +95,8 @@ class PlaygroundInfo(BaseModel):
     #: Semantic layers of their own a member may keep, and how many the reader has.
     layer_quota: int = Field(DEFAULT_LAYER_QUOTA, alias="layerQuota")
     layers_used: int = Field(0, alias="layersUsed")
+    #: The most rows one import into a graph here may hold.
+    max_import_rows: int = Field(DEFAULT_MAX_IMPORT_ROWS, alias="maxImportRows")
     #: Set up and configure it — a platform administrator.
     can_set_up: bool = Field(False, alias="canSetUp")
     #: Where its blank graphs go — for its members (the wizard starts there) and its administrator.
@@ -111,6 +114,7 @@ class PlaygroundSetup(BaseModel):
     starter_ontology_ids: List[str] = Field(default_factory=list, alias="starterOntologyIds")
     graph_quota: int = Field(DEFAULT_GRAPH_QUOTA, ge=1, le=100, alias="graphQuota")
     layer_quota: int = Field(DEFAULT_LAYER_QUOTA, ge=1, le=200, alias="layerQuota")
+    max_import_rows: int = Field(DEFAULT_MAX_IMPORT_ROWS, ge=1, alias="maxImportRows")
 
 
 async def _info(session: AsyncSession, user: User, claims: PermissionClaims) -> PlaygroundInfo:
@@ -130,6 +134,7 @@ async def _info(session: AsyncSession, user: User, claims: PermissionClaims) -> 
         graphs_used=await graphs_made_by(session, ws.id, user.id) if joined else 0,
         layer_quota=settings.layer_quota,
         layers_used=await playground_layers.layers_made_by(session, ws.id, user.id) if joined else 0,
+        max_import_rows=settings.max_import_rows,
         can_set_up=admin,
         sandbox_provider_id=settings.sandbox_provider_id if admin or joined else None,
         starter_ontology_ids=settings.starter_ontology_ids if admin else None,
@@ -175,6 +180,7 @@ async def join_playground(
         graph_quota=settings_of(ws).graph_quota, graphs_used=await graphs_made_by(session, ws.id, user.id),
         layer_quota=settings_of(ws).layer_quota,
         layers_used=await playground_layers.layers_made_by(session, ws.id, user.id),
+        max_import_rows=settings_of(ws).max_import_rows,
         can_set_up=has_permission(claims, "system:admin"),
         sandbox_provider_id=settings_of(ws).sandbox_provider_id,
     )
@@ -206,7 +212,8 @@ async def set_up_playground(
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Create the Playground, or change its name, sandbox provider, starter data models and quotas.
+    """Create the Playground, or change its name, sandbox provider, starter data models, quotas and
+    the most rows one import there may hold.
     Open to everyone to join, publishing only on request — and nothing of production attachable."""
     provider = await session.get(ProviderORM, body.sandbox_provider_id)
     if provider is None or (provider.provider_type or "").lower() != "falkordb":
@@ -230,6 +237,7 @@ async def set_up_playground(
         starter_ontology_ids=list(dict.fromkeys(body.starter_ontology_ids)),
         graph_quota=body.graph_quota,
         layer_quota=body.layer_quota,
+        max_import_rows=body.max_import_rows,
     )
     ws = await get_playground(session)
     if ws is None:
@@ -286,7 +294,7 @@ class SampleCatalogue(BaseModel):
     quota_left: int = Field(alias="quotaLeft")
 
 
-class StartedImport(BaseModel):
+class Started(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     data_source_id: str = Field(alias="dataSourceId")
@@ -296,7 +304,7 @@ class StartedImport(BaseModel):
     view_ids: Dict[str, str] = Field(alias="viewIds")
 
 
-class StartedSample(StartedImport):
+class StartedSample(Started):
     #: The example change waiting for review: a private draft on the Graph view, and its review.
     draft_id: Optional[str] = Field(None, alias="draftId")
     review_id: Optional[str] = Field(None, alias="reviewId")
@@ -383,10 +391,115 @@ async def start_sample(
                                         starter, failure="sample_load_failed", own_ontology=False))
 
 
-@router.post("/imports", response_model=StartedImport, response_model_by_alias=True,
+# ── A graph for the person's own data ───────────────────────────────────
+
+#: A data model made from a file holds at most this many thing types, and connection types, each
+#: named in at most ``_TYPE_NAME_MAX`` characters; a refusal lists at most ``_ERRORS_SHOWN``.
+_INFER_TYPES_MAX = 50
+_TYPE_NAME_MAX = 60
+_ERRORS_SHOWN = 50
+
+_TypeName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=_TYPE_NAME_MAX)]
+
+
+class InferredConnectionType(BaseModel):
+    name: _TypeName
+    #: The pairs of thing types its rows join, ``[from, to]``.
+    ends: List[Tuple[_TypeName, _TypeName]] = Field(default_factory=list)
+
+
+class InferredModel(BaseModel):
+    """A data model made from a file's types: its thing types, and its connection types with the
+    pairs of thing types each joins."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    thing_types: List[_TypeName] = Field(alias="thingTypes", min_length=1)
+    connection_types: List[InferredConnectionType] = Field(default_factory=list, alias="connectionTypes")
+
+
+class GraphModel(BaseModel):
+    """What a new graph is built on: a semantic layer on offer here (``ontologyId``), or one of the
+    person's own made from their file's types (``infer``, an :class:`InferredModel` held to its
+    limits by the route) — one or the other."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    ontology_id: Optional[str] = Field(None, alias="ontologyId", min_length=1, max_length=200)
+    infer: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _one_of(self) -> "GraphModel":
+        if (self.ontology_id is None) == (self.infer is None):
+            raise ValueError("Build the graph on an ontologyId or on infer, one of the two.")
+        return self
+
+
+class NewGraph(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=80)
+    description: Optional[str] = Field(None, max_length=4000)
+    model: GraphModel
+    #: The entity types its file uses, which are its Context View's layers (on an ``ontologyId``).
+    types: Optional[List[str]] = Field(None, max_length=1000)
+
+
+class StartedGraph(Started):
+    graph_id: str = Field(alias="graphId")
+    main_branch_id: str = Field(alias="mainBranchId")
+
+
+def _type_errors(exc: ValidationError) -> List[dict]:
+    """Each wrong type, as ``invalid_rows`` names it: its section, its index there, and the field
+    that is wrong (``name`` for a thing type; the section itself when the whole list is)."""
+    out = []
+    for err in exc.errors():
+        loc = list(err["loc"]) or ["infer"]
+        if len(loc) == 1:
+            index, field = None, str(loc[0])
+        else:
+            index, field = loc[1], str(loc[2]) if len(loc) > 2 else "name"
+        out.append({"section": str(loc[0]), "index": index, "field": field, "code": "invalid",
+                    "message": err["msg"]})
+    return out
+
+
+def _inferred(raw: Dict[str, Any]) -> dict:
+    """The file's types as ``create_owned`` takes them — or the refusal: 413 ``too_large`` past
+    ``_INFER_TYPES_MAX`` thing types or connection types (with the ``limit``), 422 ``invalid_rows``
+    naming each type that is wrong."""
+    for section, what in (("thingTypes", "types of thing"), ("connectionTypes", "types of connection")):
+        listed = raw.get(section)
+        if isinstance(listed, list) and len(listed) > _INFER_TYPES_MAX:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail={
+                "type": "too_large", "section": section, "limit": _INFER_TYPES_MAX,
+                "message": f"A data model made from a file holds at most {_INFER_TYPES_MAX} {what}; "
+                           f"this one has {len(listed):,}."})
+    try:
+        return InferredModel.model_validate(raw).model_dump(by_alias=True, mode="json")
+    except ValidationError as exc:
+        errors = _type_errors(exc)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail={
+            "type": "invalid_rows", "count": len(errors), "errors": errors[:_ERRORS_SHOWN],
+            "message": f"{len(errors):,} problem{'s' if len(errors) != 1 else ''} in the file's types: "
+                       "fix them and send it again. Nothing was made."})
+
+
+def _graph_starter(body: NewGraph, ontology_id: str, entity_types: Dict[str, EntityType],
+                   relationship_types: Dict[str, RelationshipType]) -> Starter:
+    """A graph for the person's own data, as a starter with no rows: its views over the types of
+    its semantic layer ``ontology_id``. The layer exists already, so the fields that describe one
+    to make are left empty."""
+    return Starter(
+        title=body.name, description=body.description, icon="Upload", ontology_id=ontology_id,
+        ontology_name="", ontology_description="", entity_types=entity_types,
+        relationship_types=relationship_types, fields=(), rows=(), message=f"Created {body.name}",
+        view_name=body.name)
+
+
+@router.post("/graphs", response_model=StartedGraph, response_model_by_alias=True,
              status_code=status.HTTP_201_CREATED, dependencies=_SAMPLE_GATES)
-async def import_own_data(
-    body: PlaygroundImport,
+async def create_graph(
+    body: NewGraph,
     request: Request,
     background: BackgroundTasks,
     user: User = Depends(get_current_user),
@@ -394,24 +507,48 @@ async def import_own_data(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Start a graph from your own data: the things and connections the client read from a file
-    (``playground_imports``: its limits, 413 ``too_large``, 422 ``invalid_rows``), on a data model
-    made for this graph from their types — then as a sample is: a blank graph of the person's
-    quota whose first version is the rows, a Context View (to open first) and a Graph view, and
-    the data source described. Refused, or failing, it leaves nothing behind, its data model
-    included."""
-    starter = playground_imports.starter_of(body, playground_imports.new_ontology_id())
-    ws_id, provider_id = await _may_start(session, claims, user, starter)
-    await playground_starter.ensure_ontology(session, starter)
-    made = await _start(request, background, session, svc, user, ws_id, provider_id, starter,
-                        failure="import_load_failed", own_ontology=True)
-    return StartedImport(**made)
+    """Start a graph for the person's own data: a blank graph of their quota on the Playground's
+    sandbox provider, a Context View (to open first) and a Graph view, the data source described —
+    and no rows yet. Its file loads through the standard import
+    (``/{ws_id}/versioning/graphs/{graph_id}/imports``), which holds each row to its semantic layer.
+    A graph with no data is a graph: an import that fails is tried again into it.
+
+    It is built on a semantic layer on offer here (``ontologyId``: 404 ``unknown_ontology``, 422
+    ``ontology_not_published``, 403 ``ontology_not_offered``), its Context View's layers the types
+    its file uses (``types``), in the layer's order; or on a layer of their own, made and published
+    from the file's types (``infer``: 413 ``too_large``, 422 ``invalid_rows``, 409 ``layer_quota``),
+    over all of them. What would refuse it is asked first; a graph that can't be made takes its data
+    source and views with it, and the layer made for it — never a layer it was built on."""
+    infer = _inferred(body.model.infer) if body.model.infer is not None else None
+    # No rows, so no hierarchy: its views are a Context View and a Graph view whatever its types,
+    # and what would refuse them is asked before its layer is looked up or made.
+    ws_id, provider_id = await _may_start(session, claims, user, _graph_starter(body, "", {}, {}))
+    if infer is None:
+        layer = await playground_layers.assert_offered(session, claims, user.id, body.model.ontology_id)
+        ontology_id = layer.id
+        types = await playground_layers.starter_types_of(session, ontology_id, body.types or None)
+    else:
+        layer = await playground_layers.create_owned(
+            session, claims=claims, user_id=user.id, playground_id=ws_id, name=f"{body.name} data model",
+            description=f"Made for the graph “{body.name}”, from the types in its file.",
+            source={"infer": infer}, publish=True)
+        ontology_id = layer.id
+        try:
+            types = await playground_layers.starter_types_of(session, ontology_id)
+        except Exception:
+            await _drop_ontology(session, ontology_id)
+            raise
+    made = await _start(request, background, session, svc, user, ws_id, provider_id,
+                        _graph_starter(body, ontology_id, *types), failure="graph_create_failed",
+                        own_ontology=infer is not None)
+    return StartedGraph(**made)
 
 
 async def _start(request: Request, background: BackgroundTasks, session: AsyncSession,
                  svc: GraphVersioningService, user: User, ws_id: str, provider_id: Optional[str],
                  starter: Starter, *, failure: str, own_ontology: bool) -> dict:
-    """Make a starter graph on its data model (already made): the blank graph, its first version,
+    """Make a starter graph on its data model (already made): the blank graph, its first version (a
+    sample's rows; a graph for the person's own data has none, its file loads through the import),
     its views (each at version 1), the Context View's library, the data source's details and the
     example change. Returns what the routes answer. Anything that fails takes all of it with it
     (:func:`_discard`) — with ``own_ontology``, the data model too — and answers 502 ``failure``."""
@@ -425,10 +562,11 @@ async def _start(request: Request, background: BackgroundTasks, session: AsyncSe
         raise
     ds_id, graph_id = made["data_source_id"], made["graph_id"]
     try:
-        loaded = await svc.bulk_ingest(graph_id=graph_id, rows=list(starter.rows), actor=user.id,
-                                       message=starter.message, standard_ids=True)
-        if loaded.get("rejected"):
-            raise RuntimeError(f"{len(loaded['rejected'])} rows were refused")
+        if starter.rows:
+            loaded = await svc.bulk_ingest(graph_id=graph_id, rows=list(starter.rows), actor=user.id,
+                                           message=starter.message, standard_ids=True)
+            if loaded.get("rejected"):
+                raise RuntimeError(f"{len(loaded['rejected'])} rows were refused")
         digest = await _compute_ontology_digest(session, ws_id, ds_id)
         view_ids: Dict[str, str] = {}
         for key, view_type, name, config in playground_starter.views(starter):
@@ -472,8 +610,9 @@ async def _start(request: Request, background: BackgroundTasks, session: AsyncSe
             "type": failure,
             "message": "The graph couldn't be made, so nothing was kept. Try again in a moment."})
     background.add_task(project_now, graph_id)
-    return {"data_source_id": ds_id, "view_id": view_ids["context"], "view_ids": view_ids,
-            "draft_id": draft_id, "review_id": review_id}
+    return {"data_source_id": ds_id, "graph_id": graph_id, "main_branch_id": made["main_branch_id"],
+            "view_id": view_ids["context"], "view_ids": view_ids, "draft_id": draft_id,
+            "review_id": review_id}
 
 
 async def _example_change(session: AsyncSession, svc: GraphVersioningService, actor: str, ws_id: str,
@@ -513,9 +652,10 @@ def _on_this_site(request: Request, path: str) -> str:
 
 
 async def _drop_ontology(session: AsyncSession, ontology_id: str) -> None:
-    """Take away a data model made for a graph that wasn't made. Never raises."""
+    """Take away a layer of the person's own made for a graph that wasn't made
+    (``playground_layers.drop_owned``). Never raises."""
     try:
-        await session.execute(delete(OntologyORM).where(OntologyORM.id == ontology_id))
+        await playground_layers.drop_owned(session, ontology_id)
         await session.commit()
     except Exception:
         logger.exception("could not remove data model %s — left unused", ontology_id)

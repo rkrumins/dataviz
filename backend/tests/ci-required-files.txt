@@ -166,6 +166,7 @@ tests/test_import_replace.py
 tests/test_import_replace_scope.py
 tests/test_import_resolve.py
 tests/test_import_resume.py
+tests/test_import_row_ceiling.py
 tests/test_import_rowmodel.py
 tests/test_import_settings.py
 tests/test_import_template.py
@@ -221,7 +222,7 @@ tests/test_placement_dry_run.py
 tests/test_placement_legacy_parity.py
 tests/test_playground.py
 tests/test_playground_graduation.py
-tests/test_playground_imports.py
+tests/test_playground_graphs.py
 tests/test_playground_layers.py
 tests/test_playground_maker_rights.py
 tests/test_playground_samples.py

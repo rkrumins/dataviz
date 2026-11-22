@@ -222,8 +222,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         server_gates=(
             "versioning_gate.py — every /graph write (drafts, commits, merges, reverts)",
             "versioned_write_provider.py — backstop on the write-through path",
-            "GET /playground/samples, POST /playground/samples/{sample_id}, POST /playground/imports — a starter "
-            "graph's first version (and a sample's example draft)",
+            "GET /playground/samples, POST /playground/samples/{sample_id}, POST /playground/graphs — a starter "
+            "graph is a versioned graph (and a sample's first version and example draft)",
         ),
         ui_surfaces=(
             "Canvas edit mode, drafts, reviews and history",
@@ -536,7 +536,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /playground/join — refused while off",
             "GET /playground — says the Playground is off, and offers nothing",
             "GET /playground/samples, POST /playground/samples/{sample_id} — refused while off",
-            "POST /playground/imports (start a graph from your own data) — refused while off",
+            "POST /playground/graphs (start a graph for your own data) — refused while off",
             "POST /{ws_id}/versioning/blank-graphs in the Playground — starting a new graph there is refused",
             "GET /playground/models and /playground/models/{id}/template — the semantic layers a member "
             "may build on, and their import templates — refused while off",
@@ -761,7 +761,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         server_gates=(
             "POST /blank-graphs — provision a lineage model with no data source",
             "GET /playground/samples, POST /playground/samples/{sample_id} — a sample is a blank model",
-            "POST /playground/imports — a graph started from your own data is a blank model",
+            "POST /playground/graphs — a graph started for your own data is a blank model",
         ),
         ui_surfaces=(
             "Blank-model option in the View wizard",
