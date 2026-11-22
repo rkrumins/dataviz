@@ -39,12 +39,17 @@ export function entityDefToSchema(id: string, def: Record<string, unknown>): Ent
   }
 }
 
-export function entitySchemaToBackend(et: EntityTypeSchema): Record<string, unknown> {
+/** An entity type as the ontology stores it. `stored`: the definition it replaces — keys the editor
+ *  doesn't hold are kept as they were, at the top level and inside its visual, hierarchy and behavior. */
+export function entitySchemaToBackend(et: EntityTypeSchema, stored: Record<string, unknown> = {}): Record<string, unknown> {
+  const storedPart = (key: string) => (stored[key] as Record<string, unknown> | undefined) ?? {}
   return {
+    ...stored,
     name: et.name,
     plural_name: et.pluralName,
     description: et.description,
     visual: {
+      ...storedPart('visual'),
       icon: et.visual.icon,
       color: et.visual.color,
       shape: et.visual.shape,
@@ -53,6 +58,7 @@ export function entitySchemaToBackend(et: EntityTypeSchema): Record<string, unkn
       show_in_minimap: et.visual.showInMinimap,
     },
     hierarchy: {
+      ...storedPart('hierarchy'),
       level: et.hierarchy.level,
       can_contain: et.hierarchy.canContain,
       can_be_contained_by: et.hierarchy.canBeContainedBy,
@@ -60,6 +66,7 @@ export function entitySchemaToBackend(et: EntityTypeSchema): Record<string, unkn
       roll_up_fields: et.hierarchy.rollUpFields ?? [],
     },
     behavior: {
+      ...storedPart('behavior'),
       selectable: et.behavior.selectable,
       draggable: et.behavior.draggable,
       expandable: et.behavior.expandable,

@@ -6,7 +6,8 @@
  *
  * The REAL canvas, mounted on a stub provider.
  */
-import { act, render, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -107,10 +108,11 @@ describe('HierarchyCanvas — names and IDs follow the persona', () => {
     usePersonaStore.setState({ mode: 'technical' })
     await mount()
     expect(name()).toBe('orders_v2')
-    const id = Array.from(row()!.querySelectorAll<HTMLElement>('span')).find((s) => s.textContent === URN)!
+    const id = Array.from(row()!.querySelectorAll<HTMLElement>('span')).find((s) => s.textContent === URN && s.style.direction)!
     expect(id).toBeTruthy()
     expect(id.style.direction).toBe('rtl')
-    expect(id.getAttribute('title')).toBe(`urn: ${URN}`)
+    await userEvent.setup().hover(id)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(`urn: ${URN}`)
   }, 20000)
 
   it("Technical: the data source's own identifier when it maps one", async () => {

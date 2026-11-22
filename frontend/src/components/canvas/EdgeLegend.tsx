@@ -11,6 +11,7 @@ import { useState, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { GitBranch, ChevronDown, ChevronUp, Eye, EyeOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useCanvasStore } from '@/store/canvas'
 import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
 import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
@@ -249,27 +250,32 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
                                             </span>
 
                                             {/* Visibility toggle */}
-                                            <button
-                                                onClick={e => {
-                                                    e.stopPropagation()
-                                                    const filter = filters.find(f =>
-                                                        f.type.toUpperCase() === def.type.toUpperCase()
-                                                    )
-                                                    toggleFilter(filter ? filter.type : def.type.toLowerCase())
-                                                }}
-                                                className={cn(
-                                                    "p-1 rounded transition-colors flex-shrink-0",
-                                                    isVisible
-                                                        ? "text-accent-lineage hover:bg-accent-lineage/10"
-                                                        : "text-ink-muted hover:bg-black/5 dark:hover:bg-white/5"
-                                                )}
-                                                title={isVisible ? "Hide this edge type" : "Show this edge type"}
+                                            <HoverTip
+                                                label={isVisible ? "Hide this edge type on the canvas" : "Show this edge type on the canvas"}
+                                                className="inline-flex flex-shrink-0"
                                             >
-                                                {isVisible
-                                                    ? <Eye className="w-3.5 h-3.5" />
-                                                    : <EyeOff className="w-3.5 h-3.5" />
-                                                }
-                                            </button>
+                                                <button
+                                                    onClick={e => {
+                                                        e.stopPropagation()
+                                                        const filter = filters.find(f =>
+                                                            f.type.toUpperCase() === def.type.toUpperCase()
+                                                        )
+                                                        toggleFilter(filter ? filter.type : def.type.toLowerCase())
+                                                    }}
+                                                    className={cn(
+                                                        "p-1 rounded transition-colors flex-shrink-0",
+                                                        isVisible
+                                                            ? "text-accent-lineage hover:bg-accent-lineage/10"
+                                                            : "text-ink-muted hover:bg-black/5 dark:hover:bg-white/5"
+                                                    )}
+                                                    aria-label={isVisible ? `Hide ${def.label}` : `Show ${def.label}`}
+                                                >
+                                                    {isVisible
+                                                        ? <Eye className="w-3.5 h-3.5" />
+                                                        : <EyeOff className="w-3.5 h-3.5" />
+                                                    }
+                                                </button>
+                                            </HoverTip>
                                         </div>
                                     )
                                 })

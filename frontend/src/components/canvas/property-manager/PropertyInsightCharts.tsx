@@ -12,6 +12,7 @@ import { ScanSearch } from 'lucide-react'
 import { useEffect } from 'react'
 
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { CoverageRing, coverageColor } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
 
 import { entityTypeStyle } from './entityTypeStyles'
@@ -28,7 +29,12 @@ export function AnimatedNumber({ value, className }: { value: number; className?
         const controls = animate(mv, value, { duration: 0.8, ease: EASE })
         return () => controls.stop()
     }, [value, mv])
-    return <motion.span className={className} title={value.toLocaleString()}>{display}</motion.span>
+    // The figure it counts up to, while it is still counting.
+    return (
+        <HoverTip label={value.toLocaleString()} className="inline-flex">
+            <motion.span className={className}>{display}</motion.span>
+        </HoverTip>
+    )
 }
 
 

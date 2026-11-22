@@ -1000,13 +1000,14 @@ function HierarchyContainer({
             {/* Technical identity — head-truncated, as on Context View rows: sibling URNs share a
                 long prefix, so an end ellipsis would cut the part that tells them apart. */}
             {technical && (
-              <span
-                className="block text-[10px] font-mono text-ink-muted/70 truncate mt-0.5"
-                style={{ direction: 'rtl', textAlign: 'left' }}
-                title={`${technical.property}: ${technical.value}`}
-              >
-                {technical.value}
-              </span>
+              <HoverTip label={<span className="break-all">{`${technical.property}: ${technical.value}`}</span>} className="block min-w-0 mt-0.5">
+                <span
+                  className="block text-[10px] font-mono text-ink-muted/70 truncate"
+                  style={{ direction: 'rtl', textAlign: 'left' }}
+                >
+                  {technical.value}
+                </span>
+              </HoverTip>
             )}
 
             {/* Roll-up counts when collapsed */}
@@ -1056,17 +1057,18 @@ function HierarchyContainer({
           {/* Add child — hover-visible; direct store import so the recursive
               render never threads an onAddChild prop down every level. */}
           {(entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                useHierarchyBuilderStore.getState().open({ parentUrn: node.urn ?? node.id })
-              }}
-              className="opacity-0 group-hover/row:opacity-100 flex items-center justify-center w-6 h-6 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition-all hover:scale-110 active:scale-95"
-              title={`Add inside ${node.name}`}
-              aria-label={`Add inside ${node.name}`}
-            >
-              <LucideIcons.Plus className="w-4 h-4" style={{ color: visual?.color ?? '#6b7280' }} />
-            </button>
+            <HoverTip label={`Add inside ${node.name}`} detail="Opens the builder with this as the parent" className="inline-flex">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  useHierarchyBuilderStore.getState().open({ parentUrn: node.urn ?? node.id })
+                }}
+                className="opacity-0 group-hover/row:opacity-100 flex items-center justify-center w-6 h-6 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition-all hover:scale-110 active:scale-95"
+                aria-label={`Add inside ${node.name}`}
+              >
+                <LucideIcons.Plus className="w-4 h-4" style={{ color: visual?.color ?? '#6b7280' }} />
+              </button>
+            </HoverTip>
           )}
 
           {/* Expand indicator */}

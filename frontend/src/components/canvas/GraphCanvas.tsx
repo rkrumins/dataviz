@@ -1630,10 +1630,11 @@ export function GraphCanvas({ className }: { className?: string }) {
           {showMinimap && (
             <MiniMap
               nodeColor={minimapNodeColor}
-              maskColor="rgba(0, 0, 0, 0.1)"
               className={cn(
                 'glass-panel-subtle !rounded-xl !overflow-hidden',
                 '!bottom-4 !right-4',
+                // Its mask as a variable rather than the inline maskColor, so the dark theme in globals.css can override it.
+                '[--xy-minimap-mask-background-color:rgb(0_0_0/0.1)]',
               )}
               pannable
               zoomable
@@ -1673,18 +1674,23 @@ export function GraphCanvas({ className }: { className?: string }) {
       {/* Stats Bar */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3">
         {technical && (
-        <button
-          onClick={toggleDirection}
-          className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2 hover:bg-accent-lineage/10 transition-colors"
-          title={`Layout: ${direction === 'LR' ? 'Left to Right' : 'Top to Bottom'}`}
+        <HoverTip
+          label={direction === 'LR' ? 'Lay the graph out top to bottom' : 'Lay the graph out left to right'}
+          detail={`Laid out ${direction === 'LR' ? 'left to right' : 'top to bottom'} now`}
+          className="inline-flex"
         >
-          {direction === 'LR' ? (
-            <ArrowRight className="w-3.5 h-3.5 text-accent-lineage" />
-          ) : (
-            <ArrowDown className="w-3.5 h-3.5 text-accent-lineage" />
-          )}
-          <span className="text-2xs text-ink-muted">{direction}</span>
-        </button>
+          <button
+            onClick={toggleDirection}
+            className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2 hover:bg-accent-lineage/10 transition-colors"
+          >
+            {direction === 'LR' ? (
+              <ArrowRight className="w-3.5 h-3.5 text-accent-lineage" />
+            ) : (
+              <ArrowDown className="w-3.5 h-3.5 text-accent-lineage" />
+            )}
+            <span className="text-2xs text-ink-muted">{direction}</span>
+          </button>
+        </HoverTip>
         )}
         {isLayouting && (
           <div className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">
@@ -1717,10 +1723,12 @@ export function GraphCanvas({ className }: { className?: string }) {
       </div>
 
       {/* Edge Legend */}
-      {/* Clear of the details drawer, at whatever width it is dragged to. */}
+      {/* Clear of the details drawer, at whatever width it is dragged to, and above the minimap
+          while it is shown: its top is 183px up (1rem, React Flow's 15px panel margin, 152px tall). */}
       <div
         className={cn(
-          'absolute bottom-40 z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
+          'absolute z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
+          showMinimap ? 'bottom-[12.5rem]' : 'bottom-40',
           !(entityDrawerOpen || drawerEdge) && 'right-4',
         )}
         style={entityDrawerOpen || drawerEdge

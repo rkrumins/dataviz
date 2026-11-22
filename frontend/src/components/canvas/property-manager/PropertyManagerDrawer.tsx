@@ -23,6 +23,7 @@ import { Download, Loader2, RefreshCw, SlidersHorizontal, Tags, Layers, Upload, 
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ResizeHandle } from '@/components/canvas/search/panel/ResizeHandle'
 import { useHostRect } from '@/components/canvas/search/studio/useHostRect'
@@ -354,15 +355,17 @@ function LibraryActions({ canImport, onExport, onImport }: {
             <span className="mr-auto text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted">
                 Rules &amp; saved queries
             </span>
-            <button type="button" onClick={onExport} className={button}
-                title="Download this view's display rules and saved queries as a file">
-                <Download className="w-3.5 h-3.5" /> Export
-            </button>
-            {canImport && (
-                <button type="button" onClick={onImport} className={button}
-                    title="Add display rules and saved queries from a library file">
-                    <Upload className="w-3.5 h-3.5" /> Import…
+            <HoverTip label="Download this view’s display rules and saved queries as a file" className="inline-flex">
+                <button type="button" onClick={onExport} className={button}>
+                    <Download className="w-3.5 h-3.5" /> Export
                 </button>
+            </HoverTip>
+            {canImport && (
+                <HoverTip label="Add display rules and saved queries from a library file" className="inline-flex">
+                    <button type="button" onClick={onImport} className={button}>
+                        <Upload className="w-3.5 h-3.5" /> Import…
+                    </button>
+                </HoverTip>
             )}
         </div>
     )

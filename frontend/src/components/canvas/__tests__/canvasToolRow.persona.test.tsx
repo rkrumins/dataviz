@@ -204,6 +204,16 @@ describe('GraphCanvas toolbar — Business view', () => {
     expect(document.querySelector('.react-flow__minimap')).toBeNull()
   }, 20000)
 
+  it('the Edge Legend sits clear above the minimap, and comes back down when the minimap is hidden', async () => {
+    usePreferencesStore.setState({ showMinimap: true })
+    await mountGraph()
+    // The minimap's top is 183px up (1rem, its panel's 15px margin, 152px tall); the legend clears it.
+    const legend = () => screen.getByText('Edge Legend').closest<HTMLElement>('.absolute')!
+    expect(legend()).toHaveClass('bottom-[12.5rem]')
+    act(() => usePreferencesStore.setState({ showMinimap: false }))
+    expect(legend()).toHaveClass('bottom-40')
+  }, 20000)
+
   it('Select several waits under More, and then a plain click adds to the selection', async () => {
     await mountGraph()
     fireEvent.click(within(await openMore()).getByRole('menuitem', { name: /Select several/ }))

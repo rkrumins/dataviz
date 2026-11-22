@@ -801,9 +801,10 @@ export function OntologySchemaPage() {
     const newCanContain = entityType.hierarchy.canContain
     const newCanBeContainedBy = entityType.hierarchy.canBeContainedBy
 
+    // Over what is stored: what the editor doesn't hold (a key a later server added) is kept.
     const updatedDefs: Record<string, unknown> = {
       ...currentDefs,
-      [entityType.id]: entitySchemaToBackend(entityType),
+      [entityType.id]: entitySchemaToBackend(entityType, oldDef),
     }
 
     // Bidirectional sync — canContain side
