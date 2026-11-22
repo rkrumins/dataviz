@@ -1,22 +1,23 @@
 /**
  * The entity drawer's header: the trail, the entity's type and name, the one-click lineage traces,
- * quick actions, and the View / Edit / JSON tabs — or, on the published graph, the way to a draft.
- * The Business view leaves out Copy URN and the JSON tab (its At a glance tile copies the ID);
- * both views can Customize what the drawer shows.
+ * quick actions, and the View / Edit / JSON tabs. On the published graph, the way to a draft sits
+ * in its top line, beside Close. The Business view leaves out Copy URN and the JSON tab (its At a
+ * glance tile copies the ID); both views can Customize what the drawer shows.
  */
 import type { ComponentType } from 'react'
 import {
-  ArrowDownRight, ArrowUpLeft, Check, Code, Copy, ExternalLink, Eye, Focus, GitBranch, GitBranchPlus,
+  ArrowDownRight, ArrowUpLeft, Check, Code, Copy, ExternalLink, Eye, Focus, GitBranch,
   Pencil, RotateCcw, SlidersHorizontal, Trash2,
 } from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
+import { VIEW_ONLY_DRAFT } from '@/features/versioning/hooks/useEntityEditing'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { DrawerHeader } from '../shell/DrawerShell'
-import { DrawerTopBar, KindBadge } from '../shell/DrawerTopBar'
+import { DrawerTopBar, EditInDraftButton, KindBadge } from '../shell/DrawerTopBar'
 
 export type EntityTab = 'view' | 'edit' | 'json'
 
@@ -78,6 +79,9 @@ export function EntityHeader({
   ]
   // A trace takes the canvas over — a drawer move like any other, held while there are unsaved edits.
   const trace = (run: (id: string) => void) => useCanvasStore.getState().requestDrawerMove(() => run(nodeId))
+  // The Business view, with nothing to edit here, has one tab — and a strip with one tab in it is
+  // chrome with nothing to switch.
+  const showTabs = technical || editable || (!!editBlocked && !onStartEditing)
 
   return (
     <DrawerHeader style={{ background: `linear-gradient(135deg, ${colors.accent}10 0%, transparent 60%)` }}>
@@ -85,6 +89,8 @@ export function EntityHeader({
         onFocusNode={onFocusNode}
         onClose={onClose}
         closeLabel="Close entity details"
+        // The published graph is never edited in place — say where editing happens.
+        action={!editable && onStartEditing ? <EditInDraftButton onClick={onStartEditing} reason={editBlocked ?? VIEW_ONLY_DRAFT} /> : undefined}
         badge={(
           <>
             <KindBadge label={typeName} bg={colors.bg} fg={colors.text} />
@@ -165,12 +171,8 @@ export function EntityHeader({
         )}
       </div>
 
-      {/* The Business view, with nothing to edit here, has one tab — and a strip
-          with one tab in it is chrome with nothing to switch. */}
-      {(technical || editable || !!editBlocked || !!onStartEditing) && (
-      <div className="flex items-center gap-2 mt-4">
-        {(technical || editable || (!!editBlocked && !onStartEditing)) && (
-        <TabsList aria-label="Entity details" className="flex-1">
+      {showTabs && (
+        <TabsList aria-label="Entity details" className="mt-4">
           <TabsTrigger value="view" icon={Eye}>View</TabsTrigger>
           {editable ? (
             <TabsTrigger value="edit" icon={Pencil}
@@ -185,12 +187,6 @@ export function EntityHeader({
           ) : null}
           {technical && <TabsTrigger value="json" icon={Code}>JSON</TabsTrigger>}
         </TabsList>
-        )}
-        {!editable && onStartEditing && (
-          // The published graph is never edited in place — say where editing happens.
-          <Button variant="secondary" leftIcon={GitBranchPlus} onClick={onStartEditing}>Edit in a draft</Button>
-        )}
-      </div>
       )}
     </DrawerHeader>
   )

@@ -12,7 +12,8 @@
  * - **Editing**, in a draft: set a value for all, fill where missing, rename, copy, remove from
  *   all, add a property to all — each change pending until "Stage", then staged as each entity's
  *   own edit in one step that Undo takes back. Unstaged changes hold every move of the drawer
- *   (`DrawerShell`), like the single drawer's do.
+ *   (`DrawerShell`), like the single drawer's do. Outside a draft, "Edit in a draft" sits in the
+ *   top line; a note says why it can't be edited here only when its tip can't.
  * - **Scale.** Read once per change of the entities (`sharedFields`, one pass); the drawer never
  *   re-renders for writes to other entities; long lists paint only what is on screen. Up to
  *   `MULTI_EDIT_MAX` entities are edited here — more are compared, and changed from Property
@@ -28,7 +29,7 @@ import { nodeIndexOf } from '@/lib/storeIndex'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
 import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { governedFields } from '@/lib/fieldRules'
-import { NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { NO_DRAFT, NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Badge } from '@/components/ui/Badge'
 import { Button, IconButton } from '@/components/ui/Button'
@@ -36,6 +37,7 @@ import {
   bulkEditSize, isEmptyBulkEdit, previewBulkEdit, sharedFields, stageBulkEdit, type BulkEdit, type SharedField,
 } from '@/components/canvas/context-view/bulkEdit'
 import { DrawerBody, DrawerFooter, DrawerShell } from '../../shell/DrawerShell'
+import { EditInDraftButton } from '../../shell/DrawerTopBar'
 import { Section } from '../../DrawerSection'
 import { InlineValue } from '../../property/InlineValue'
 import { RichValue } from '../../property/RichValue'
@@ -196,6 +198,9 @@ export function MultiEntityDrawer({
       ? `Up to ${MULTI_EDIT_MAX.toLocaleString()} entities are edited here at once. Select fewer — or change them all from Property Manager.`
       : editing.blocked ?? (canEdit ? null : VIEW_ONLY_DRAFT)
     : null
+  const offerDraft = !!blockedNote && !!onStartEditing && !tooMany && editing.blocked !== NO_VERSION_CONTROL
+  // "Switch to a draft" is the button's tip; the note is for what the tip doesn't cover.
+  const note = offerDraft && blockedNote === NO_DRAFT ? null : blockedNote
 
   return (
     <DrawerShell
@@ -215,6 +220,7 @@ export function MultiEntityDrawer({
         memberOf={memberOf}
         gone={goneIds}
         editable={editable}
+        action={offerDraft ? <EditInDraftButton onClick={onStartEditing} reason={blockedNote} /> : undefined}
         selectionNow={selectionNow}
         onUseSelection={compareSelection}
         onClose={close}
@@ -224,18 +230,11 @@ export function MultiEntityDrawer({
       />
 
       <DrawerBody>
-        {blockedNote && (
-          <div className="mx-5 mt-4 flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] p-3">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
-            <div className="min-w-0 flex-1 text-xs leading-snug text-ink">
-              {blockedNote}
-              {onStartEditing && !tooMany && editing.blocked !== NO_VERSION_CONTROL && (
-                <div className="mt-2">
-                  <Button size="sm" variant="secondary" onClick={onStartEditing}>Edit in a draft</Button>
-                </div>
-              )}
-            </div>
-          </div>
+        {note && (
+          <p className="mx-5 mt-3 flex items-start gap-2 rounded-lg bg-amber-500/[0.07] px-3 py-1.5 text-xs leading-snug text-amber-800 dark:text-amber-200">
+            <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            {note}
+          </p>
         )}
 
         <DescriptionSection field={fields.description} value={edit.description} editable={editable} onChange={setDescription} />

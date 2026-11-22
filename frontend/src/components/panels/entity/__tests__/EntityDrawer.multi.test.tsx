@@ -4,7 +4,7 @@
  * some do (On 1 of 3). In a draft a change is made for all of them — set, fill where missing,
  * rename, remove, add — kept pending until "Stage", which stages each entity's own edit at once
  * (and Undo takes it back); unstaged changes hold every move of the drawer. Outside a draft it
- * compares, read-only, and offers the way into one. Entities are named first; a
+ * compares, read-only, and offers the way into one in its top line. Entities are named first; a
  * list opened on them adds each one's ID. The drawer is wider comparing than reading one.
  */
 import { act, render, screen, within } from '@testing-library/react'
@@ -15,6 +15,7 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
+import { NO_DRAFT, NO_VERSION_CONTROL } from '@/features/versioning/hooks/useEntityEditing'
 import { convertBackendEntityType, useSchemaStore } from '@/store/schema'
 import type { EntityTypeDefinition } from '@/providers/GraphDataProvider'
 import { useNotificationStore } from '@/components/ui/notifications'
@@ -258,6 +259,27 @@ describe('several entities in the drawer', () => {
     expect(screen.getByText(/You can view this draft but not change it/)).toBeInTheDocument()
     expect(screen.queryByText(/kept in a draft/)).toBeNull()
     expect(screen.getByRole('button', { name: 'Edit in a draft' })).toBeInTheDocument()
+  })
+})
+
+describe('several entities: the way into a draft', () => {
+  it('sits in the top line, beside Close — and "switch to a draft" is its tip, not a box', async () => {
+    const user = userEvent.setup()
+    editingNow.blocked = NO_DRAFT
+    render(<EntityDrawer canEdit={false} onStartEditing={vi.fn()} />)
+    const edit = screen.getByRole('button', { name: 'Edit in a draft' })
+    expect(edit.closest('div')).toContainElement(screen.getByRole('button', { name: 'Close details' }))
+    expect(edit.compareDocumentPosition(screen.getByRole('heading', { name: '3 entities' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText(NO_DRAFT)).toBeNull()
+    await user.hover(edit)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_DRAFT)
+  })
+
+  it('a reason the tip can\'t give stays, as a note — without version control there is no draft to offer', () => {
+    editingNow.blocked = NO_VERSION_CONTROL
+    render(<EntityDrawer canEdit={false} onStartEditing={vi.fn()} />)
+    expect(screen.getByText(NO_VERSION_CONTROL)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit in a draft' })).toBeNull()
   })
 })
 

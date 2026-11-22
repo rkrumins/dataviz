@@ -15,6 +15,8 @@
  * - **Editing**, in a draft: set a value for all, fill where missing, rename, copy, remove, add a
  *   property to all — pending until "Stage", then staged as each relationship's own edit in one
  *   step that Undo takes back (`stageEdgeEdits`). Unstaged changes hold every move of the drawer.
+ *   Outside a draft, "Edit in a draft" sits in the top line; a note says why they can't be edited
+ *   here only when its tip can't.
  * - **Scale.** Up to `MULTI_RELATIONSHIP_MAX` relationships are compared here; more — or any
  *   number, on purpose — are changed on the server, by a job (Property Manager's dialog).
  */
@@ -30,7 +32,7 @@ import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useRelationshipRecords, type RelationshipRecordOf } from '@/hooks/useRelationshipRecords'
 import { edgeKind } from '@/services/ontologyPreflightService'
-import { NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { NO_DRAFT, NO_VERSION_CONTROL, VIEW_ONLY_DRAFT, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { stageEdgeEdits, type EdgeEdit } from '@/features/versioning/model/stageEdgeEdit'
 import { targetFromMember } from '@/lib/drawerEdgeTarget'
 import { userProperties } from '@/lib/nodeFields'
@@ -42,7 +44,7 @@ import {
   bulkEditSize, isEmptyBulkEdit, patchFor, previewBulkEdit, sharedFields, type BulkEdit,
 } from '@/components/canvas/context-view/bulkEdit'
 import { DrawerBody, DrawerFooter, DrawerHeader, DrawerShell } from '../../shell/DrawerShell'
-import { DrawerTopBar } from '../../shell/DrawerTopBar'
+import { DrawerTopBar, EditInDraftButton } from '../../shell/DrawerTopBar'
 import { useDrawerHistoryScope } from '../../useDrawerHistoryScope'
 import { EMPTY_EDIT, withChange, type KeyChange } from '../../entity/multi/editOps'
 import { MultiProperties } from '../../entity/multi/MultiProperties'
@@ -236,6 +238,9 @@ export function MultiRelationshipView({
         : held.length === 0 ? null
           : editing.blocked ?? (canEdit ? null : VIEW_ONLY_DRAFT)
     : null
+  const draftReason = blockedNote && !tooMany && onStartEditing && editing.blocked !== NO_VERSION_CONTROL ? editing.blocked : null
+  // "Switch to a draft" is the button's tip; the note is for what the tip doesn't cover.
+  const note = draftReason && blockedNote === NO_DRAFT ? null : blockedNote
 
   return (
     <DrawerShell
@@ -250,6 +255,7 @@ export function MultiRelationshipView({
     >
       <DrawerHeader className="bg-gradient-to-br from-accent-lineage/[0.07] to-transparent">
         <DrawerTopBar badge={<Badge tone="accent" size="md" caps>Relationships</Badge>}
+          action={draftReason && onStartEditing ? <EditInDraftButton onClick={onStartEditing} reason={draftReason} /> : undefined}
           closeLabel="Close relationship details" onClose={onClose} />
         <h2 id={titleId} tabIndex={-1} className="text-xl font-display font-semibold leading-tight text-ink outline-none">
           {target.members.length.toLocaleString()} relationships
@@ -299,24 +305,16 @@ export function MultiRelationshipView({
       </DrawerHeader>
 
       <DrawerBody>
-        {(blockedNote || excluded.length > 0 || read.isError) && (
-          <div className="mx-5 mt-4 space-y-2">
+        {(note || excluded.length > 0 || read.isError) && (
+          <div className="mx-5 mt-3 space-y-2">
             {read.isError && (
               <Notice tone="warn" action={{ label: 'Retry', onClick: read.refetch }}>Couldn’t read these relationships.</Notice>
             )}
-            {blockedNote && (
-              <div className="flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] p-3">
-                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
-                <div className="min-w-0 flex-1 text-xs leading-snug text-ink">
-                  {blockedNote}
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {tooMany && <Button size="sm" variant="secondary" leftIcon={Database} onClick={onServer}>Change all {target.members.length.toLocaleString()} on the server</Button>}
-                    {!tooMany && onStartEditing && editing.blocked && editing.blocked !== NO_VERSION_CONTROL && (
-                      <Button size="sm" variant="secondary" onClick={onStartEditing}>Edit in a draft</Button>
-                    )}
-                  </div>
-                </div>
-              </div>
+            {note && (
+              <p className="flex items-start gap-2 rounded-lg bg-amber-500/[0.07] px-3 py-1.5 text-xs leading-snug text-amber-800 dark:text-amber-200">
+                <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+                {note}
+              </p>
             )}
             {excluded.length > 0 && (
               <div className="rounded-xl border border-glass-border p-3 text-xs text-ink-secondary">

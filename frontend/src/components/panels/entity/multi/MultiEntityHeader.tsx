@@ -2,9 +2,9 @@
  * The comparison's header: how many entities it holds and of which types, who they are (the first
  * few by name, and all of them on request — by name with each one's ID beneath, each shown on the
  * canvas or opened in one click), and, when the canvas selection has moved on since it opened, the
- * way to compare that instead.
+ * way to compare that instead. Its top line carries the drawer's action ("Edit in a draft").
  */
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { AlertCircle, ChevronDown, Layers, LocateFixed, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
@@ -19,7 +19,7 @@ const PREVIEW = 5
 export interface TypeCount { id: string; label: string; count: number; color: string }
 
 export function MultiEntityHeader({
-  titleId, ids, types, memberOf, gone, editable, selectionNow, onUseSelection, onClose, onFocusNode, onOpenNode, onLocateAll,
+  titleId, ids, types, memberOf, gone, editable, action, selectionNow, onUseSelection, onClose, onFocusNode, onOpenNode, onLocateAll,
 }: {
   titleId: string
   /** The entities still on the canvas, in order. */
@@ -29,6 +29,8 @@ export function MultiEntityHeader({
   /** The ones it was opened on that are no longer loaded — listed last, as not loaded. */
   gone: readonly string[]
   editable: boolean
+  /** Shown in the top line, before Close. */
+  action?: ReactNode
   /** The canvas selection, when it differs from what is compared. */
   selectionNow: number
   onUseSelection: () => void
@@ -46,6 +48,7 @@ export function MultiEntityHeader({
       <DrawerTopBar
         badge={<Badge tone="accent" size="md" caps>Selection</Badge>}
         closeLabel="Close details"
+        action={action}
         onClose={onClose}
         onFocusNode={onFocusNode}
       />
