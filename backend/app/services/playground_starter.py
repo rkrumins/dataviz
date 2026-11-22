@@ -18,6 +18,8 @@ except :func:`ensure_ontology`.
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -126,6 +128,64 @@ def _endpoint_types(starter: Starter) -> Dict[str, Tuple[List[str], List[str]]]:
     return {rid: (sorted(s), sorted(t)) for rid, (s, t) in ends.items()}
 
 
+def _words(name: str) -> List[str]:
+    return re.findall(r"[A-Za-z0-9]+", unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode())
+
+
+def _entity_type_id(name: str, taken: set) -> str:
+    """A type's id from its name, as the types the platform ships are named (``warehouseTable``)."""
+    words = _words(name)
+    base = (words[0].lower() + "".join(w[:1].upper() + w[1:] for w in words[1:])) if words else "type"
+    return _unique(base if base[0].isalpha() else f"t{base}", taken, "")
+
+
+def _relationship_type_id(name: str, taken: set) -> str:
+    """A relationship's id from its name, as the platform's are (``LOADS_INTO``)."""
+    base = "_".join(w.upper() for w in _words(name)) or "LINKED_TO"
+    return _unique(base if base[0].isalpha() else f"R_{base}", taken, "_")
+
+
+def _unique(base: str, taken: set, sep: str) -> str:
+    out, n = base, 1
+    while out in taken:
+        n += 1
+        out = f"{base}{sep}{n}"
+    taken.add(out)
+    return out
+
+
+def raw_entity(t: EntityType, fields: Tuple[dict, ...]) -> dict:
+    """An entity type as a data model stores it, before it is parsed."""
+    return {"name": t.name, "plural_name": t.plural, "description": t.description,
+            "visual": {"icon": t.icon, "color": t.color}, "fields": [dict(f) for f in fields]}
+
+
+def raw_relationship(r: RelationshipType, sources: List[str], targets: List[str]) -> dict:
+    """A relationship as a data model stores it, before it is parsed: lineage is ``flow``, a
+    containment ``structural``."""
+    return {"name": r.name, "description": r.description,
+            "category": "structural" if r.containment else "flow",
+            "is_containment": r.containment, "is_lineage": not r.containment,
+            "visual": {"stroke_color": r.color}, "source_types": sources, "target_types": targets}
+
+
+def definition_columns(raw_entities: Dict[str, dict], raw_relationships: Dict[str, dict]) -> dict:
+    """A data model's type columns, as ``ontologies`` holds them: the types parsed, each contained
+    type's hierarchy saying what may contain it, and the flat lists derived from them."""
+    entities = parse_entity_definitions(sync_hierarchy_from_relationships(raw_entities, raw_relationships))
+    relationships = parse_relationship_definitions(raw_relationships)
+    flat = derive_flat_lists(entities, relationships)
+    return {
+        "entity_type_definitions": json.dumps({k: asdict(v) for k, v in entities.items()}),
+        "relationship_type_definitions": json.dumps({k: asdict(v) for k, v in relationships.items()}),
+        "containment_edge_types": json.dumps(flat.containment_edge_types),
+        "lineage_edge_types": json.dumps(flat.lineage_edge_types),
+        "edge_type_metadata": json.dumps(flat.edge_type_metadata),
+        "entity_type_hierarchy": json.dumps(flat.entity_type_hierarchy),
+        "root_entity_types": json.dumps(flat.root_entity_types),
+    }
+
+
 def ontology_row(starter: Starter) -> OntologyORM:
     """Its data model as a published data model, not yet added. Lineage relationships are
     ``flow``; a containment is ``structural``, and the contained type's hierarchy says what may
@@ -133,32 +193,13 @@ def ontology_row(starter: Starter) -> OntologyORM:
     default data model as the ``is_system`` one with the highest version
     (``ontology_definition_repo.get_system_default_ontology``), so another would be taken for it."""
     ends = _endpoint_types(starter)
-    raw_entities = {
-        tid: {"name": t.name, "plural_name": t.plural, "description": t.description,
-              "visual": {"icon": t.icon, "color": t.color}, "fields": [dict(f) for f in starter.fields]}
-        for tid, t in starter.entity_types.items()
-    }
-    raw_relationships = {
-        rid: {"name": r.name, "description": r.description,
-              "category": "structural" if r.containment else "flow",
-              "is_containment": r.containment, "is_lineage": not r.containment,
-              "visual": {"stroke_color": r.color},
-              "source_types": ends[rid][0], "target_types": ends[rid][1]}
-        for rid, r in starter.relationship_types.items()
-    }
-    entities = parse_entity_definitions(sync_hierarchy_from_relationships(raw_entities, raw_relationships))
-    relationships = parse_relationship_definitions(raw_relationships)
-    flat = derive_flat_lists(entities, relationships)
+    columns = definition_columns(
+        {tid: raw_entity(t, starter.fields) for tid, t in starter.entity_types.items()},
+        {rid: raw_relationship(r, ends[rid][0], ends[rid][1]) for rid, r in starter.relationship_types.items()},
+    )
     return OntologyORM(
         id=starter.ontology_id, schema_id=starter.ontology_id, version=1,
-        name=starter.ontology_name, description=starter.ontology_description,
-        entity_type_definitions=json.dumps({k: asdict(v) for k, v in entities.items()}),
-        relationship_type_definitions=json.dumps({k: asdict(v) for k, v in relationships.items()}),
-        containment_edge_types=json.dumps(flat.containment_edge_types),
-        lineage_edge_types=json.dumps(flat.lineage_edge_types),
-        edge_type_metadata=json.dumps(flat.edge_type_metadata),
-        entity_type_hierarchy=json.dumps(flat.entity_type_hierarchy),
-        root_entity_types=json.dumps(flat.root_entity_types),
+        name=starter.ontology_name, description=starter.ontology_description, **columns,
         is_published=True, published_at=datetime.now(timezone.utc).isoformat(),
         scope="universal",
     )

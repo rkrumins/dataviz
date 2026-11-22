@@ -14,7 +14,9 @@ The visibility rules (per user's product call):
 * **Ontologies** — visible if referenced by any data source in any
   workspace the user holds ``workspace:ontology:read`` in. Ontologies
   have no per-row ACL; their workspace association is via
-  ``workspace_data_sources.ontology_id``.
+  ``workspace_data_sources.ontology_id``. A Playground member also sees
+  its starters, approved org-wide layers, their own layers and those
+  shared with the Playground (``playground_layers.visible_ontology_ids``).
 * **Providers** — visible if referenced by any data source in any
   workspace the user is bound to, *or* if the provider's
   ``permitted_workspaces`` ACL overlaps any of the user's workspaces.
@@ -152,9 +154,12 @@ def _permitted_overlaps(
 async def compute_visible_ontology_ids(
     session: AsyncSession,
     claims: PermissionClaims,
+    *,
+    user_id: Optional[str] = None,
 ) -> Optional[set[str]]:
     """Set of ontology ids visible to ``claims``. ``None`` means
-    unrestricted — caller should not filter."""
+    unrestricted — caller should not filter. ``user_id`` (the caller)
+    adds a Playground member's own layers."""
     if _is_unrestricted(claims):
         return None
     user_ws_ids = _user_workspace_ids(claims)
@@ -174,9 +179,12 @@ async def compute_visible_ontology_ids(
     result = await session.execute(stmt)
     visible = {row[0] for row in result.all() if row[0] is not None}
     # A Playground member starts blank graphs from the data models its administrator chose,
-    # which no data source of theirs uses yet.
+    # which no data source of theirs uses yet — and builds on approved org-wide layers, their
+    # own and those shared with the Playground.
+    from backend.app.services.playground_layers import visible_ontology_ids
     from backend.app.services.playground_policy import starter_ontology_ids
-    return visible | await starter_ontology_ids(session, claims)
+    return (visible | await starter_ontology_ids(session, claims)
+            | await visible_ontology_ids(session, claims, user_id))
 
 
 # ── Providers ──────────────────────────────────────────────────────
@@ -229,6 +237,7 @@ async def ensure_ontology_visible(
     ontology_id: str,
     *,
     not_found_detail: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> None:
     """Raise 404 if ``ontology_id`` is not visible to the caller.
 
@@ -236,7 +245,7 @@ async def ensure_ontology_visible(
     404 (vs 403) is deliberate — we don't leak the existence of
     ontologies the caller can't see."""
     from fastapi import HTTPException
-    visible = await compute_visible_ontology_ids(session, claims)
+    visible = await compute_visible_ontology_ids(session, claims, user_id=user_id)
     if visible is None:
         return
     if ontology_id not in visible:

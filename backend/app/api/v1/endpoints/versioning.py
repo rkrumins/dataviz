@@ -4206,37 +4206,44 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
         async with get_async_session() as session:
             resolved = await LocalOntologyService(SQLAlchemyOntologyRepository(session)).resolve(
                 workspace_id=workspace_id, data_source_id=data_source_id)
-        node_types = list(getattr(resolved, "entity_type_definitions", {}) or {})
-        edge_types = list(getattr(resolved, "relationship_type_definitions", {}) or {})
-        edge_types += list(getattr(resolved, "containment_edge_types", []) or [])
-        edge_types += list(getattr(resolved, "lineage_edge_types", []) or [])
-        if not node_types and not edge_types:
-            return None
-        # The fields each type matches imports by, and those it keeps unique (a team's own keys).
-        defs = getattr(resolved, "entity_type_definitions", {}) or {}
-        flagged = lambda flag: {t: [f.id for f in getattr(d, "fields", []) or [] if getattr(f, flag, False)]
-                                for t, d in defs.items()}
-        # And, for the import template and the record schema (import_export/contract.py), every
-        # field of each type and the types each relationship may join (none: any).
-        fields = {t: [{"id": f.id, "name": getattr(f, "name", None) or f.id,
-                       "type": getattr(f, "type", None), "required": bool(getattr(f, "required", False)),
-                       "key": bool(getattr(f, "reconciliation_key", False)),
-                       "unique": bool(getattr(f, "unique", False))}
-                      for f in getattr(d, "fields", []) or []]
-                  for t, d in defs.items()}
-        rels = getattr(resolved, "relationship_type_definitions", {}) or {}
-        edge_ends = {t: {"source": list(getattr(d, "source_types", None) or []),
-                         "target": list(getattr(d, "target_types", None) or [])}
-                     for t, d in rels.items()}
-        return {"node_types": node_types, "edge_types": edge_types,
-                # What a row's _op=delete takes with it: the node's containment subtree.
-                "containment": list(getattr(resolved, "containment_edge_types", []) or []),
-                "keys": {t: fs for t, fs in flagged("reconciliation_key").items() if fs},
-                "unique": {t: fs for t, fs in flagged("unique").items() if fs},
-                "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends}
+        return import_contract_of(resolved)
     except Exception:
         logger.exception("ontology type resolution failed for import (ds=%s)", data_source_id)
         return None
+
+
+def import_contract_of(resolved) -> Optional[dict]:
+    """A resolved ontology as the import reads it: ``{node_types, edge_types, ...}``, or ``None``
+    when it defines no types. The graph's import gate and template, and a Playground model's
+    template, all read it this way."""
+    node_types = list(getattr(resolved, "entity_type_definitions", {}) or {})
+    edge_types = list(getattr(resolved, "relationship_type_definitions", {}) or {})
+    edge_types += list(getattr(resolved, "containment_edge_types", []) or [])
+    edge_types += list(getattr(resolved, "lineage_edge_types", []) or [])
+    if not node_types and not edge_types:
+        return None
+    # The fields each type matches imports by, and those it keeps unique (a team's own keys).
+    defs = getattr(resolved, "entity_type_definitions", {}) or {}
+    flagged = lambda flag: {t: [f.id for f in getattr(d, "fields", []) or [] if getattr(f, flag, False)]
+                            for t, d in defs.items()}
+    # And, for the import template and the record schema (import_export/contract.py), every
+    # field of each type and the types each relationship may join (none: any).
+    fields = {t: [{"id": f.id, "name": getattr(f, "name", None) or f.id,
+                   "type": getattr(f, "type", None), "required": bool(getattr(f, "required", False)),
+                   "key": bool(getattr(f, "reconciliation_key", False)),
+                   "unique": bool(getattr(f, "unique", False))}
+                  for f in getattr(d, "fields", []) or []]
+              for t, d in defs.items()}
+    rels = getattr(resolved, "relationship_type_definitions", {}) or {}
+    edge_ends = {t: {"source": list(getattr(d, "source_types", None) or []),
+                     "target": list(getattr(d, "target_types", None) or [])}
+                 for t, d in rels.items()}
+    return {"node_types": node_types, "edge_types": edge_types,
+            # What a row's _op=delete takes with it: the node's containment subtree.
+            "containment": list(getattr(resolved, "containment_edge_types", []) or []),
+            "keys": {t: fs for t, fs in flagged("reconciliation_key").items() if fs},
+            "unique": {t: fs for t, fs in flagged("unique").items() if fs},
+            "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends}
 
 
 async def _resolve_node_identity_for_import(workspace_id, data_source_id):

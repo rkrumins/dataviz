@@ -14,8 +14,6 @@ named as the file names them, each relationship joining the types its rows join.
 """
 from __future__ import annotations
 
-import re
-import unicodedata
 import uuid
 from typing import Annotated, Any, Dict, List, Optional, Union
 
@@ -23,6 +21,10 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints, ValidationError
 
 from backend.app.services.playground_starter import EntityType, RelationshipType, Starter
+# A type's id from its name lives with the starters now; kept importable from here meanwhile.
+from backend.app.services.playground_starter import (  # noqa: F401
+    _entity_type_id, _relationship_type_id, _unique, _words,
+)
 
 THINGS_MAX = 5000
 CONNECTIONS_MAX = 20000
@@ -75,32 +77,6 @@ def _too_large(section: str, limit: int, what: str, count: int) -> HTTPException
 def _row_errors(section: str, index: int, exc: ValidationError) -> List[dict]:
     return [{"section": section, "index": index, "field": str(err["loc"][0]) if err["loc"] else "row",
              "code": "invalid", "message": err["msg"]} for err in exc.errors()]
-
-
-def _words(name: str) -> List[str]:
-    return re.findall(r"[A-Za-z0-9]+", unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode())
-
-
-def _entity_type_id(name: str, taken: set) -> str:
-    """A type's id from its name, as the types the platform ships are named (``warehouseTable``)."""
-    words = _words(name)
-    base = (words[0].lower() + "".join(w[:1].upper() + w[1:] for w in words[1:])) if words else "type"
-    return _unique(base if base[0].isalpha() else f"t{base}", taken, "")
-
-
-def _relationship_type_id(name: str, taken: set) -> str:
-    """A relationship's id from its name, as the platform's are (``LOADS_INTO``)."""
-    base = "_".join(w.upper() for w in _words(name)) or "LINKED_TO"
-    return _unique(base if base[0].isalpha() else f"R_{base}", taken, "_")
-
-
-def _unique(base: str, taken: set, sep: str) -> str:
-    out, n = base, 1
-    while out in taken:
-        n += 1
-        out = f"{base}{sep}{n}"
-    taken.add(out)
-    return out
 
 
 def urn_of(key: str) -> str:

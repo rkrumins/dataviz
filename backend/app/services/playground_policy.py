@@ -15,7 +15,8 @@ and in the Playground only:
   publishes its drafts, merges their reviews (:func:`is_playground_maker`).
 * **Never everyone.** Nothing in it is published to every signed-in person; sharing is
   with people, inside the Playground.
-* **A quota.** Each person may have ``graphQuota`` graphs there at once (default 5).
+* **A quota.** Each person may have ``graphQuota`` graphs there at once (default 5), and
+  ``layerQuota`` semantic layers of their own (default 20, ``playground_layers``).
   Experiments do not expire; the quota is the only bound.
 * **Starter data models.** A blank graph needs a published data model. A new member
   sees none (data models follow the data sources a person's workspaces use), so the
@@ -42,6 +43,7 @@ PLAYGROUND_FLAG = "playgroundEnabled"
 PLAYGROUND_KIND = "playground"
 PLAYGROUND_ROLE = "workspace_playground_member"
 DEFAULT_GRAPH_QUOTA = 5
+DEFAULT_LAYER_QUOTA = 20
 
 
 @dataclass
@@ -49,12 +51,14 @@ class PlaygroundSettings:
     sandbox_provider_id: Optional[str] = None
     starter_ontology_ids: List[str] = field(default_factory=list)
     graph_quota: int = DEFAULT_GRAPH_QUOTA
+    layer_quota: int = DEFAULT_LAYER_QUOTA
 
     def to_json(self) -> str:
         return json.dumps({
             "sandboxProviderId": self.sandbox_provider_id,
             "starterOntologyIds": self.starter_ontology_ids,
             "graphQuota": self.graph_quota,
+            "layerQuota": self.layer_quota,
         })
 
 
@@ -65,10 +69,12 @@ def settings_of(ws: WorkspaceORM) -> PlaygroundSettings:
     except (TypeError, ValueError):
         raw = {}
     quota = raw.get("graphQuota")
+    layers = raw.get("layerQuota")
     return PlaygroundSettings(
         sandbox_provider_id=raw.get("sandboxProviderId") or None,
         starter_ontology_ids=[str(o) for o in raw.get("starterOntologyIds") or []],
         graph_quota=quota if isinstance(quota, int) and quota > 0 else DEFAULT_GRAPH_QUOTA,
+        layer_quota=layers if isinstance(layers, int) and layers > 0 else DEFAULT_LAYER_QUOTA,
     )
 
 
