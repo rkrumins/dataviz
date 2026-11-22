@@ -31,6 +31,9 @@ ALLOWED = {
     # A view's library, by id, behind its route's access check: a view staged in a draft keeps
     # its rules on that draft (``branchId``).
     "services/view_library.py": 1,
+    # The view a bulk property job ran on, by id, named in the notice its own owner gets: a view
+    # staged in the job's draft is theirs to see.
+    "services/versioning/import_export/job_notices.py": 1,
 }
 
 
