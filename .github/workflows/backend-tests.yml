@@ -199,7 +199,7 @@ jobs:
           python -m pytest tests/integration/test_graph_copy_live.py -q -s
       - name: Keep the GRAPH.COPY report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: graph-copy-report
           path: backend/graph-copy-report.json
