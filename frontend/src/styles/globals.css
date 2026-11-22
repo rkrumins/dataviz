@@ -989,6 +989,14 @@
     @apply glass-panel-subtle rounded-xl overflow-hidden;
   }
 
+  /* Its zoom buttons are painted near-white whatever the theme, too: in the dark theme they show
+     the panel through, as the minimap beside them does. */
+  .dark .react-flow__controls {
+    --xy-controls-button-background-color: transparent;
+    --xy-controls-button-background-color-hover: rgb(255 255 255 / 0.1);
+    --xy-controls-button-border-color: rgb(255 255 255 / 0.06);
+  }
+
   .react-flow__controls-button {
     @apply bg-transparent border-none;
     @apply hover:bg-black/5 dark:hover:bg-white/10;
