@@ -34,7 +34,7 @@ from backend.app.auth.dependencies import (
     requires,
 )
 from backend.app.common import activity_context
-from backend.app.db.engine import get_db_session, get_graph_read_db_session
+from backend.app.db.engine import get_db_session, get_graph_read_db_session, get_graph_read_session
 from backend.app.db.repositories import data_source_repo
 from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
@@ -792,6 +792,50 @@ async def get_readiness(
         return await svc.get_readiness(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# ── GET /workspaces/{ws_id}/data-sources/readiness ──────────────────
+
+# How many of a workspace's sources are asked at once. Each one holds a
+# GRAPH_READ session across its provider probes, so a workspace with many
+# sources must not take the pool the canvas reads through — the browser capped
+# its own per-source fan-out at four for the same reason.
+_READINESS_FANOUT = 4
+
+
+@router.get(
+    "/workspaces/{ws_id}/data-sources/readiness",
+    summary="Get aggregation readiness for every data source in a workspace",
+    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
+)
+async def get_workspace_readiness(
+    ws_id: str,
+    request: Request,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """``{dsId: readiness}`` for the workspace's data sources, in one request —
+    the workspace page asked once per source, four at a time, so its slowest
+    source held back the rest. Each answer is the single route's; one that
+    can't be read is ``null``, so a broken source never fails the others."""
+    sources = await data_source_repo.list_data_sources(session, ws_id)
+    gate = asyncio.Semaphore(_READINESS_FANOUT)
+
+    async def _one(ds_id: str):
+        async with gate:
+            try:
+                if _PROXY_ENABLED:
+                    resp = await _proxy("GET", f"/aggregation/data-sources/{ds_id}/readiness", request)
+                    return _json.loads(resp.body) if resp.status_code == 200 else None
+                # A session each: one session cannot serve concurrent statements.
+                async with get_graph_read_session() as ds_session:
+                    return await svc.get_readiness(ds_id, ds_session)
+            except Exception:
+                logger.warning("Readiness of data source %s could not be read", ds_id, exc_info=True)
+                return None
+
+    answers = await asyncio.gather(*(_one(ds.id) for ds in sources))
+    return {ds.id: answer for ds, answer in zip(sources, answers)}
 
 
 # ── GET /data-sources/{ds_id}/projection-health ─────────────────────
