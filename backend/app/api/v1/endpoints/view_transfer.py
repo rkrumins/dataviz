@@ -44,8 +44,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.versioning import (
-    _domain_errors, _import_settings_for, draft_level, export_scope_of, get_import_export_service,
-    get_versioning_service,
+    _domain_errors, _import_settings_for, _live_containment_map, draft_level, export_scope_of,
+    get_import_export_service, get_versioning_service,
 )
 from backend.app.api.v1.endpoints.large_json import json_response
 from backend.app.api.v1.endpoints.view_guards import editable_view, may_edit_view, readable_view
@@ -264,6 +264,8 @@ async def export_view_package(
     else:
         filename = f"{len(sealed)}-views.view-package.zip"
     views = [{"viewId": item.row.id, "version": item.version.version} for item in sealed]
+    # The package's data says where each entity sits, up the containment the ontology has now.
+    containment = await _live_containment_map(session, workspace_id, ds_id)
     # The job reads these versions from another process, so they are committed before it exists.
     await session.commit()
 
@@ -276,6 +278,7 @@ async def export_view_package(
                 as_of_seq=None if branch_id else graph.get("main_head_commit_seq"), idempotency_key=key,
                 package={"fileName": filename, "scope": req.scope, "dataVersion": req.dataVersion,
                          "views": views, "actor": actor},
+                with_path=containment,
             )
     except IntegrityError:                  # the same requestId, sent twice at once
         return _package_started(await ie.find_job(graph_id=graph["graph_id"], idempotency_key=key),

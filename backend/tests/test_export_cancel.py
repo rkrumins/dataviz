@@ -139,7 +139,7 @@ class _Lease:
 def _records(log, pages=4):
     """``stream.record_pages`` over ``pages`` pages of three nodes, logging each page it gives and
     when it is closed."""
-    async def record_pages(snap, sel, tally=None, stats=None):
+    async def record_pages(snap, sel, tally=None, stats=None, place=None):
         tally.update(node=0, edge=0, passes=tally.get("passes", 0) + 1)
         try:
             for p in range(pages):

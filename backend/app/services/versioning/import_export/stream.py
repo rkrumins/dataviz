@@ -10,6 +10,10 @@ flat memory and downloads while it is produced, from whichever pod serves the re
 The spreadsheet formats (csv/tsv/xlsx) need every column before their first row, so they take one
 extra pass over the same records that keeps only their keys. A draft's current state isn't pinned
 to a commit, so an edit landing between the two passes can add a property the header lacks.
+
+An export asked for with them carries where each node sits, its parent and its path
+(``common.ancestry_columns``): read up the same snapshot as its records (:class:`Placer`), on the
+pass that writes the file only. An import ignores them.
 """
 from __future__ import annotations
 
@@ -21,9 +25,11 @@ import logging
 import os
 import tempfile
 import time
-from collections import Counter
+from collections import ChainMap, Counter
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional, Set, Tuple
+
+from backend.common import ancestry_columns as ancestry
 
 from .formats import get_adapter
 from .rowmodel import column_order, denormalize_edge, denormalize_node
@@ -259,23 +265,90 @@ async def _read_ahead(pages: AsyncIterator[Any]) -> AsyncIterator[Any]:
             ahead.cancel()
 
 
+class Placer:
+    """Where each node of an export sits (``common.ancestry_columns``): its containment chain up
+    the snapshot its records come from (:meth:`Snapshot.containment_ancestors`, so a draft's
+    chains are the draft's), and the URN, name and type of each container, read once whatever
+    the rows in it. ``containment`` is ``{TYPE: child is source}``, the ontology's when the export
+    was asked for. One chain read for every ``ancestry.CHUNK`` nodes, a level of containment at a
+    time."""
+
+    def __init__(self, snap: Snapshot, containment: Dict[str, bool]) -> None:
+        self.snap = snap
+        self.types = {str(t).upper() for t in containment}
+        self.upward = {str(t).upper() for t, is_source in containment.items() if is_source}
+        #: Child → parent, as walked so far; cleared past ``ancestry.NAMES_MAX``.
+        self.parents: Dict[str, Optional[str]] = {}
+        #: A container's URN, name and type, by entity id.
+        self.known: Dict[str, Tuple[str, str, str]] = {}
+
+    def _keep(self, eid: str, urn: Optional[str], name: Optional[str], kind: Optional[str]) -> None:
+        if len(self.known) < ancestry.NAMES_MAX:
+            urn = urn or f"gv:{eid}"                    # as the canvas names a node without one
+            self.known.setdefault(eid, (urn, name or urn, kind or ""))
+
+    async def __call__(self, records: List[Dict[str, Any]]) -> None:
+        nodes = [r for r in records if r.get("kind") == "node" and r.get("entity_id")]
+        for r in nodes:                                 # a container is often in the export itself
+            self._keep(r["entity_id"], r.get("urn"), r.get("displayName"), r.get("entityType"))
+        for i in range(0, len(nodes), ancestry.CHUNK):
+            chunk = nodes[i:i + ancestry.CHUNK]
+            if len(self.parents) > ancestry.NAMES_MAX:
+                self.parents.clear()
+            chains = await self.snap.containment_ancestors(
+                [r["entity_id"] for r in chunk], self.types, self.upward, self.parents)
+            unnamed = {a for chain in chains.values() for a in chain if a not in self.known}
+            fresh = (await asyncio.to_thread(_containers, await self.snap.lookup_live(
+                "node", unnamed, payload=True))) if unnamed else {}
+            for eid, named in fresh.items():
+                self._keep(eid, *named)
+            names = ChainMap(fresh, self.known)
+            for r in chunk:
+                held = [names.get(a) or (f"gv:{a}", f"gv:{a}", "") for a in chains[r["entity_id"]]]
+                r.update(ancestry.chains_to_columns([urn for urn, _, _ in held],
+                                                    {urn: (name, kind) for urn, name, kind in held}))
+
+
+def _containers(live: Dict[str, Winner]) -> Dict[str, Tuple[str, str, str]]:
+    """Each container's URN, name and type, from its version."""
+    out = {}
+    for eid, w in live.items():
+        urn = w.urn or f"gv:{eid}"
+        name = (json.loads(w.payload).get("displayName") if w.payload else None) or urn
+        out[eid] = (urn, name, w.entity_type or "")
+    return out
+
+
+async def _node_pages(snap: Snapshot, sel: Selection, place: Optional[Placer]) -> AsyncIterator[List[Dict[str, Any]]]:
+    """The selection's node records, a page at a time, placed by ``place`` when given. Read ahead
+    as a whole (:func:`_read_ahead`): a page's reads, its payloads' and its chains', come one after
+    another, never beside the next page's, so they share a pinned transaction safely. Closed
+    early, it closes the read under way (its cursor) at once."""
+    async with contextlib.aclosing(_payload_pages(snap, sel, "node")) as pages:
+        async for page in pages:
+            page = [w for w in page if sel.node_ok(w)]
+            if page:
+                records = await asyncio.to_thread(_node_records, page)
+                if place is not None:
+                    await place(records)
+                yield records
+
+
 async def record_pages(snap: Snapshot, sel: Selection, tally: Optional[Dict[str, int]] = None,
-                       stats: Optional[TypeStats] = None) -> AsyncIterator[List[Dict[str, Any]]]:
+                       stats: Optional[TypeStats] = None,
+                       place: Optional[Placer] = None) -> AsyncIterator[List[Dict[str, Any]]]:
     """The export's records, a page at a time: every node, then every edge. ``tally``, when
     given, counts this pass's records by kind as they go, and the passes (a spreadsheet takes two);
-    ``stats``, this pass's records by type."""
+    ``stats``, this pass's records by type. ``place``: each node says where it sits."""
     tally = tally if tally is not None else {}
     tally.update(node=0, edge=0, passes=tally.get("passes", 0) + 1)
     if stats is not None:
         stats.clear()
-    async for page in _read_ahead(_payload_pages(snap, sel, "node")):
-        page = [w for w in page if sel.node_ok(w)]
-        if page:
-            records = await asyncio.to_thread(_node_records, page)
-            tally["node"] += len(records)
-            if stats is not None:
-                stats.add("node", (r.get("entityType") for r in records))
-            yield records
+    async for records in _read_ahead(_node_pages(snap, sel, place)):
+        tally["node"] += len(records)
+        if stats is not None:
+            stats.add("node", (r.get("entityType") for r in records))
+        yield records
     async for page, ends in _read_ahead(_edge_pages(snap, sel)):
         if page:
             records = await asyncio.to_thread(_edge_records, page, ends)
@@ -358,9 +431,12 @@ class Columns:
     counts: Dict[str, int]
 
 
-async def columns_of(pages: AsyncIterator[List[Dict[str, Any]]], extra_props: Iterable[str] = ()) -> Columns:
-    """The spreadsheet columns, from a pass over the records that keeps only their keys."""
-    keys: Dict[str, Set[str]] = {"node": set(), "edge": set()}
+async def columns_of(pages: AsyncIterator[List[Dict[str, Any]]], extra_props: Iterable[str] = (),
+                     placed: bool = False) -> Columns:
+    """The spreadsheet columns, from a pass over the records that keeps only their keys.
+    ``placed``: the file's nodes say where they sit, which this pass adds as columns without
+    reading where."""
+    keys: Dict[str, Set[str]] = {"node": set(ancestry.ANCESTRY_COLUMNS if placed else ()), "edge": set()}
     counts = {"node": 0, "edge": 0}
     async for page in pages:
         for rec in page:
@@ -396,28 +472,43 @@ def check_excel(counts: Dict[str, int]) -> None:
 _BOM = "\ufeff".encode("utf-8")
 
 
-async def write_export(pages: Callable[[], AsyncIterator[List[Dict[str, Any]]]], *, fmt: str,
-                       columns: Optional[Columns] = None, props: Iterable[str] = ()) -> AsyncIterator[bytes]:
+async def _as_text(pages: AsyncIterator[List[Dict[str, Any]]]) -> AsyncIterator[List[Dict[str, Any]]]:
+    """``pages`` with each path a text cell, as a spreadsheet shows it (``A / B``, ``a; b``)."""
+    async with contextlib.aclosing(pages):
+        async for page in pages:
+            yield [ancestry.joined(r) for r in page]
+
+
+async def write_export(pages: Callable[..., AsyncIterator[List[Dict[str, Any]]]], *, fmt: str,
+                       columns: Optional[Columns] = None, props: Iterable[str] = (),
+                       placed: bool = False) -> AsyncIterator[bytes]:
     """The export file's bytes, as they are produced. ``pages()`` starts a pass over the records
     (every node, then every edge); the spreadsheet formats take two, the first for their columns
-    (with ``props`` added as empty ones), unless ``columns`` were already found."""
+    (with ``props`` added as empty ones), unless ``columns`` were already found.
+
+    ``placed``: the file says where each node sits, which ``pages()`` fills. The column pass is
+    then ``pages(placed=False)``: it reads no chain, and the columns are added as they are. In a
+    spreadsheet a path is a text cell."""
     adapter = get_adapter(fmt)
+
+    def file_pages() -> AsyncIterator[List[Dict[str, Any]]]:
+        return _as_text(pages()) if placed and fmt in SPREADSHEET_FORMATS else pages()
 
     async def body() -> AsyncIterator[bytes]:
         found = columns
         if fmt in SPREADSHEET_FORMATS and fmt != "xlsx":
             yield _BOM
         if fmt in SPREADSHEET_FORMATS and found is None:
-            found = await columns_of(pages(), props)
+            found = await columns_of(pages(placed=False) if placed else pages(), props, placed)
         if fmt == "xlsx":
             check_excel(found.counts)
-            async for chunk in adapter.write_pages(pages(), sheets=found.sheets):
+            async for chunk in adapter.write_pages(file_pages(), sheets=found.sheets):
                 yield chunk
         elif fmt in SPREADSHEET_FORMATS:
-            async for chunk in adapter.write_pages(pages(), columns=found.columns):
+            async for chunk in adapter.write_pages(file_pages(), columns=found.columns):
                 yield chunk
         else:
-            async for chunk in adapter.write_pages(pages()):
+            async for chunk in adapter.write_pages(file_pages()):
                 yield chunk
 
     total = 0

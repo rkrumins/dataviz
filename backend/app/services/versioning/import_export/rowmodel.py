@@ -9,6 +9,8 @@ One shared column schema across every format (xlsx/csv/tsv/ndjson/json):
                       source_entity_id, target_entity_id, confidence
     properties      : dynamic ``prop.<name>`` columns + a ``properties_json`` overflow
     op              : ``_op`` (blank = upsert, ``delete`` = delete)
+    informational   : parentUrn, parentName, parentType, path, pathUrns — where a node sits, as an
+                      export may write it; never read
 
 ``normalize`` turns one flat file record into the pipeline's normalized row: properties are
 assembled from ``prop.*`` + ``properties_json``, **empty cells are dropped** (a blank never blanks
@@ -26,12 +28,17 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from backend.common.ancestry_columns import ANCESTRY_COLUMNS
 from backend.common.property_patch import PROP_DELETE
 
 _NODE_CORE = (
     "urn", "entityType", "displayName", "qualifiedName",
     "description", "sourceSystem", "layerAssignment",
 )
+#: Where a node sits, as an export writes it (``common.ancestry_columns``): informational, so
+#: ``normalize`` reads none of them. Not a field of the node and never a property, whatever the
+#: cell holds: the graph's own containment edges say where a node sits.
+INFORMATIONAL_COLUMNS = ANCESTRY_COLUMNS
 _EDGE_CORE = (
     "edgeType", "sourceQualifiedName", "targetQualifiedName",
     # Endpoint URNs: entity ids are minted per graph, so an edge exported from one environment
@@ -287,10 +294,12 @@ def column_order(records: List[Dict[str, Any]], schema_props: Optional[Dict[str,
     so a defined-but-empty property is still a column to fill. ``properties_json`` is demoted to a
     pure OVERFLOW column for genuinely nested/complex values — emitted only when a record needs it.
     The full editable node core (description/tags/layer/…) is always present; edge columns only when
-    the export has edges."""
+    the export has edges; where a node sits (:data:`INFORMATIONAL_COLUMNS`) after its core, only
+    when the records carry it, so a template never has it."""
     has_edge = any(r.get("kind") == "edge" for r in records)
     schema_props = schema_props or {}
     cols: List[str] = ["kind"] + list(_NODE_COL_ORDER)
+    cols += [c for c in INFORMATIONAL_COLUMNS if any(c in r for r in records)]
     if has_edge:
         cols += [c for c in _EDGE_COL_ORDER if c not in cols]
     prop_cols = {k for r in records for k in r if k.startswith("prop.")}

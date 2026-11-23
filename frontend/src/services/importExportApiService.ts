@@ -742,16 +742,31 @@ export interface CreateExportResult {
   status: JobStatus
 }
 
+/** What an export file carries beyond its records: empty property columns to fill (`props`), its
+ *  name, and (`withPath`) each entity's parent and path, informational columns an import ignores
+ *  (`lib/ancestryColumns`). */
+export interface ExportFileOptions {
+  props?: string[]
+  filename?: string
+  withPath?: boolean
+}
+
+function fileQuery(opts: ExportFileOptions): Record<string, string | undefined> {
+  return {
+    props: opts.props?.length ? opts.props.join(',') : undefined,
+    filename: opts.filename,
+    withPath: opts.withPath ? 'true' : undefined,
+  }
+}
+
 /** Have the server prepare an export of a data source with version control: its workers write
  *  the file, then `downloadExportUrl` downloads it, a download the browser can resume. Follow it
  *  with `getExport`. */
 export function createExport(
-  target: ExportTarget, format: ImportFormat, opts: { props?: string[]; filename?: string } = {},
+  target: ExportTarget, format: ImportFormat, opts: ExportFileOptions = {},
 ): Promise<CreateExportResult> {
-  return authFetch<CreateExportResult>(`${exportBase(target)}?${exportQuery(target, format, {
-    props: opts.props?.length ? opts.props.join(',') : undefined,
-    filename: opts.filename,
-  })}`, { method: 'POST', ...selectionBody(target) })
+  return authFetch<CreateExportResult>(`${exportBase(target)}?${exportQuery(target, format, fileQuery(opts))}`,
+    { method: 'POST', ...selectionBody(target) })
 }
 
 /** Stop an export that hasn't ended: its creator may, or a manager. Answers with its job, wherever
@@ -763,12 +778,9 @@ export function cancelExport(wsId: string, graphId: string, jobId: string): Prom
 /** The streamed download itself: a plain GET the browser saves as it arrives (the session cookie
  *  authenticates it), so a file of any size never passes through this page's memory. */
 export function exportStreamUrl(
-  target: ExportTarget, format: ImportFormat, opts: { props?: string[]; filename?: string } = {},
+  target: ExportTarget, format: ImportFormat, opts: ExportFileOptions = {},
 ): string {
-  return `${exportBase(target)}/stream?${exportQuery(target, format, {
-    props: opts.props?.length ? opts.props.join(',') : undefined,
-    filename: opts.filename,
-  })}`
+  return `${exportBase(target)}/stream?${exportQuery(target, format, fileQuery(opts))}`
 }
 
 /** A failed poll worth asking again: all but a refusal. A dropped connection, a client timeout and

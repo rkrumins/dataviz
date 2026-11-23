@@ -139,7 +139,7 @@ describe('ExportMatchesDialog', () => {
         const bodies = searchExport.mock.calls.map(([body]) => body as SearchExportRequest)
         expect(bodies[0]).toEqual({
             scope: QUERY.scope, predicate: QUERY.predicate, format: 'ndjson',
-            columns: ['description', 'owner', 'legacyCode'], waitMs: 2000,
+            columns: ['description', 'owner', 'legacyCode'], withPath: true, waitMs: 2000,
         })
         expect(bodies[1].sessionId).toBe('exp-1')
 
@@ -157,6 +157,22 @@ describe('ExportMatchesDialog', () => {
 
         await user.click(screen.getByRole('button', { name: /Download again/ }))
         expect(triggerBrowserDownload).toHaveBeenCalledTimes(2)
+    })
+
+    it('says where each match sits unless that is switched off', async () => {
+        const user = userEvent.setup()
+        const searchExport = vi.spyOn(provider, 'searchExport')
+            .mockResolvedValue(answer({ status: 'complete', downloadToken: 't' }))
+        renderDialog()
+
+        const option = screen.getByRole('checkbox', { name: /Parent and path/ })
+        expect(option).toHaveAttribute('aria-checked', 'true')
+        expect(screen.getByText('11 columns')).toBeInTheDocument()      // 4 + parent and path + 2
+        await user.click(option)
+        expect(screen.getByText('6 columns')).toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: /^Export$/ }))
+
+        expect(searchExport.mock.calls[0][0]).not.toHaveProperty('withPath')
     })
 
     it("adds a property the catalog doesn't list, by name", async () => {

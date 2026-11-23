@@ -10,6 +10,7 @@ reads are proven against Postgres in tests/integration/test_export_stream.py.
 from __future__ import annotations
 
 import asyncio
+import csv
 import io
 import json
 from types import SimpleNamespace
@@ -32,9 +33,24 @@ EDGES = [GraphEdge(id="e1", sourceUrn="urn:t:0", targetUrn="urn:t:1", edgeType="
          GraphEdge(id="e2", sourceUrn="urn:t:1", targetUrn="urn:t:2", edgeType="LINEAGE")]
 
 
+#: Where the tables sit: t0 at the top of the graph, t1 in a warehouse, t2 in a schema inside it.
+CHAINS = {"urn:t:0": [], "urn:t:1": ["urn:db"], "urn:t:2": ["urn:gold", "urn:db"]}
+CONTAINERS = [GraphNode(urn="urn:db", entityType="Database", displayName="Warehouse"),
+              GraphNode(urn="urn:gold", entityType="Schema", displayName="gold")]
+
+
 class _Provider:
     def __init__(self, nodes=NODES, edges=EDGES):
         self.nodes, self.edges = nodes, edges
+        self.chain_reads, self.name_reads = [], []
+
+    async def get_ancestor_chains(self, urns):
+        self.chain_reads.append(list(urns))
+        return {u: CHAINS[u] for u in urns if u in CHAINS}
+
+    async def get_nodes(self, query):
+        self.name_reads.append(list(query.urns))
+        return [n for n in CONTAINERS if n.urn in query.urns]
 
     async def scan_nodes(self, page_size=2000):
         for i in range(0, len(self.nodes), 2):
@@ -119,6 +135,63 @@ async def test_every_format_downloads_the_whole_graph(test_client: AsyncClient, 
     assert got["csv"].decode("utf-8-sig").count("\n") == 6 and got["tsv"].decode("utf-8-sig").count("\n") == 6
     book = openpyxl.load_workbook(io.BytesIO(got["xlsx"]), read_only=True)
     assert [sum(1 for _ in book[s].iter_rows()) for s in ("Nodes", "Edges")] == [4, 3]
+
+
+async def _download(client, source, fmt, **params):
+    resp = await client.get(f"/api/v1/{source.ws}/graph/export/stream",
+                            params={"dataSourceId": source.ds, "format": fmt, **params})
+    assert resp.status_code == 200, (fmt, resp.text)
+    return resp.content
+
+
+async def _imported(fmt, blob):
+    """What an import makes of each row of the file."""
+    from backend.app.services.versioning.import_export.formats import get_adapter
+    from backend.app.services.versioning.import_export.rowmodel import normalize
+
+    async def body():
+        yield blob
+    return [normalize(r, r["kind"]) async for r in get_adapter(fmt).parse(body())]
+
+
+async def test_every_format_says_where_each_entity_sits_when_asked(test_client: AsyncClient, source):
+    """``withPath``: each node's parent and path, as the trace's file writes them — lists in
+    NDJSON and JSON, ``A / B`` and ``a; b`` in a spreadsheet's cells, empty at the top of the
+    graph and on every edge. Read on the pass that writes the file only, and an import of the file
+    makes exactly what it makes of one without them."""
+    rows = [json.loads(line) for line in (await _download(test_client, source, "ndjson", withPath="true")).splitlines()]
+    t0, t1, t2 = rows[:3]
+    assert (t0["parentUrn"], t0["path"], t0["pathUrns"]) == (None, [], [])
+    assert (t1["parentUrn"], t1["parentName"], t1["parentType"]) == ("urn:db", "Warehouse", "Database")
+    assert (t2["path"], t2["pathUrns"]) == (["Warehouse", "gold"], ["urn:db", "urn:gold"])
+    assert all("path" not in r for r in rows[3:]), "an edge sits nowhere"
+    assert source.provider.name_reads == [["urn:db"], ["urn:gold"]], "each named once, when first met"
+    assert json.loads(await _download(test_client, source, "json", withPath="true")) == rows
+
+    source.provider.chain_reads.clear()
+    text = (await _download(test_client, source, "csv", withPath="true")).decode("utf-8-sig")
+    assert len(source.provider.chain_reads) == 2, "the column pass reads no chain: two node pages"
+    table = list(csv.DictReader(io.StringIO(text)))
+    header = text.splitlines()[0].split(",")
+    at = header.index("baseVersion") + 1
+    assert header[at:at + 5] == ["parentUrn", "parentName", "parentType", "path", "pathUrns"]
+    assert (table[2]["path"], table[2]["pathUrns"]) == ("Warehouse / gold", "urn:db; urn:gold")
+    assert table[0]["path"] == "" and table[3]["path"] == ""
+
+    book = openpyxl.load_workbook(io.BytesIO(await _download(test_client, source, "xlsx", withPath="true")),
+                                  read_only=True)
+    nodes_header = [c.value for c in next(book["Nodes"].iter_rows(max_row=1))]
+    edges_header = [c.value for c in next(book["Edges"].iter_rows(max_row=1))]
+    assert "path" in nodes_header and "path" not in edges_header, "the Edges sheet stays clean"
+    t2_row = [c.value for c in list(book["Nodes"].iter_rows(min_row=4, max_row=4))[0]]
+    assert t2_row[nodes_header.index("path")] == "Warehouse / gold"
+
+    for fmt in ("ndjson", "json", "csv", "tsv", "xlsx"):
+        placed = await _download(test_client, source, fmt, withPath="true")
+        plain = await _download(test_client, source, fmt)
+        assert await _imported(fmt, placed) == await _imported(fmt, plain), fmt
+        assert b"pathUrns" in placed or fmt == "xlsx"
+        assert b"pathUrns" not in plain, "asked for only"
 
 
 async def test_spreadsheets_add_the_property_columns_asked_for(test_client: AsyncClient, source):

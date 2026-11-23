@@ -3534,6 +3534,12 @@
           "minimum": 0,
           "title": "Waitms",
           "type": "integer"
+        },
+        "withPath": {
+          "default": false,
+          "description": "Each entity's parent and path (parentUrn, parentName, parentType, path, pathUrns), after its qualified name: informational columns, which an import ignores. One containment read for every thousand matches. Not for a Connections search, whose ends name their parents.",
+          "title": "Withpath",
+          "type": "boolean"
         }
       },
       "required": [

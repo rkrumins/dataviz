@@ -166,3 +166,36 @@ def test_a_package_format_2_line_reads_its_stored_payload_whole():
     plain = normalize({"kind": "node", "urn": "urn:y", "entityType": "Table",
                        "payload": {"urn": "urn:other"}}, "node")
     assert (plain["urn"], plain["entityType"]) == ("urn:y", "Table")
+
+
+def test_where_a_node_sits_is_never_read_on_import():
+    """An export may say where each node sits (``INFORMATIONAL_COLUMNS``): its parent and its path,
+    as lists or as text cells. Importing the file back reads none of them: not a field, never a
+    property, whatever the cell holds; a view package's flat lines likewise."""
+    from backend.app.services.versioning.import_export.rowmodel import INFORMATIONAL_COLUMNS
+
+    assert INFORMATIONAL_COLUMNS == ("parentUrn", "parentName", "parentType", "path", "pathUrns")
+    place = {"parentUrn": "urn:db", "parentName": "Warehouse", "parentType": "Database",
+             "path": ["Warehouse"], "pathUrns": ["urn:db"]}
+    base = {"urn": "urn:t", "entityType": "Table", "prop.owner": "team"}
+    assert normalize({**base, **place}, "node") == normalize(base, "node")
+    as_text = {**place, "path": "Warehouse / gold", "pathUrns": "urn:db; urn:gold", "parentName": "\\N"}
+    assert normalize({**base, **as_text}, "node") == normalize(base, "node"), \
+        "a removal token there refuses nothing: the column is not the node's"
+    edge = {"edgeType": "FLOWS", "sourceUrn": "a", "targetUrn": "b"}
+    assert normalize({**edge, **dict.fromkeys(place, "")}, "edge") == normalize(edge, "edge")
+    package_line = {"kind": "node", "entity_id": "n1", **base, **place}
+    assert normalize(package_line, "node", native=True)["properties"] == {"owner": "team"}
+
+
+def test_an_export_places_its_columns_after_the_node_core_only_when_it_carries_them():
+    from backend.app.services.versioning.import_export.rowmodel import column_order
+
+    plain = [{"kind": "node", "urn": "u", "prop.owner": "x"}, {"kind": "edge", "edgeType": "E"}]
+    assert "parentUrn" not in column_order(plain), "a template, and an export without them"
+    placed = [{**plain[0], "parentUrn": None, "parentName": None, "parentType": None, "path": [],
+               "pathUrns": []}, plain[1]]
+    cols = column_order(placed)
+    at = cols.index("baseVersion") + 1
+    assert cols[at:at + 5] == ["parentUrn", "parentName", "parentType", "path", "pathUrns"]
+    assert cols.index("pathUrns") < cols.index("edgeType") < cols.index("prop.owner")

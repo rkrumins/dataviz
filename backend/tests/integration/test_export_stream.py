@@ -7,6 +7,8 @@ and deletes), a draft as of one of its commits, and a copy-on-write fork — wit
 enough that every read spans many pages. Then that the view scope, a selection, and every format
 written from it agree with the materializing path, and that an empty export is still a valid file.
 A view package's format-2 lines (``stream.native_pages``) carry the same entities' payloads whole.
+Where each node sits is read up containment in the same snapshot, a fork's and a draft's included,
+and changes nothing an import makes of the file.
 A draft read as it stands now, inside ``pinned_reads``, reads one state while it is edited. And a
 layer pinned to a commit is read by one query, however many pages it spans, through a cursor
 declared in SQL.
@@ -224,6 +226,38 @@ async def _run() -> None:
         assert parsed == rows, (fmt, [k for k in rows if parsed.get(k) != rows[k]][:3])
     assert cols.counts == {"node": sum(k == "node" for k, _ in want), "edge": sum(k == "edge" for k, _ in want)}
     assert rows[("node", "n00")]["properties"]["aliases"] == ["a", "b"], "a list property stays a list"
+
+    # Where each node sits: up live containment, a level at a time, from the snapshot its records
+    # come from — a fork's through its parent's main, a draft's its own, inside pinned_reads too
+    # (a page's reads come one after another on that one transaction). An import makes of the
+    # file exactly what it makes of the same file without them.
+    main_snap = await open_snapshot(graph_id=gid, page_size=PAGE)
+    assert await main_snap.containment_ancestors(["n01", "n08", "n13", "n00", "n_none"], {"CONTAINS"}) == {
+        "n01": ["n00"], "n08": ["n06"], "n13": [], "n00": [], "n_none": []}
+    fork_snap = await open_snapshot(graph_id=fid, page_size=PAGE)
+    assert await fork_snap.containment_ancestors(["n08", "n05"], {"CONTAINS"}) == {
+        "n08": ["n06"], "n05": ["n00"]}
+    containment = {"CONTAINS": False}
+    async with pinned_reads():
+        draft_snap = await open_snapshot(graph_id=gid, branch_id=d, page_size=PAGE)
+        placed = {r["entity_id"]: r async for page in stream.record_pages(
+            draft_snap, stream.Selection.of(), place=stream.Placer(draft_snap, containment))
+            for r in page if r["kind"] == "node"}
+    assert (placed["n02"]["parentUrn"], placed["n02"]["parentName"], placed["n02"]["path"]) == (
+        "urn:t:0", "n00", ["n00"])
+    assert placed["n07"]["pathUrns"] == ["urn:t:6"] and placed["n00"]["path"] == []
+    assert "n03" not in placed, "the draft deleted it"
+    everything = stream.Selection.of()
+    for fmt in ("csv", "ndjson", "xlsx"):
+        place = stream.Placer(main_snap, containment)
+        body = stream.write_export(
+            lambda placed=True, place=place: stream.record_pages(main_snap, everything,
+                                                                 place=place if placed else None),
+            fmt=fmt, placed=True)
+        blob = b"".join([c async for c in body])
+        plain, _ = await _file(main_snap, everything, fmt)
+        assert ([normalize(r, r["kind"]) for r in await _parse(fmt, blob)]
+                == [normalize(r, r["kind"]) for r in await _parse(fmt, plain)]), fmt
 
     # Nothing selected: still a valid file of every format, and the plan says it's empty.
     nothing = stream.Selection.of(types=["NoSuchType"])

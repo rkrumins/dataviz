@@ -458,6 +458,66 @@ class Snapshot:
             frontier = nxt
         return found
 
+    async def containment_ancestors(self, ids: Iterable[str], containment_types: Set[str],
+                                    child_is_source: Set[str] = frozenset(),
+                                    parents: Optional[Dict[str, Optional[str]]] = None,
+                                    ) -> Dict[str, List[str]]:
+        """Each of ``ids``' containment chain: the nodes it sits in, up live containment edges,
+        parent first and root last (``get_ancestor_chains``'s shape, by entity id). The mirror of
+        :meth:`containment_descendants`, a level at a time. ``parents`` (child → its parent, or
+        ``None`` at the top), when given, is read first and filled, so the containers a long
+        export meets again and again are walked once. A node with several containers keeps the
+        first by id; a containment cycle (bad data) ends the chain where it would repeat."""
+        parents = {} if parents is None else parents
+        graphs = self._branches()
+        # The child's end of each edge, each with the types that point that way: an edge's target
+        # is the child, but the source for the types in ``child_is_source``. Only edges that have
+        # ever been of a containment type are candidates: a node's lineage edges, which may be
+        # many, are never read.
+        downward = sorted(t for t in containment_types if t not in child_is_source)
+        upward = sorted(t for t in containment_types if t in child_is_source)
+        ends = [(column, types) for column, types in ((EdgeVersionORM.target_entity_id, downward),
+                                                      (EdgeVersionORM.source_entity_id, upward)) if types]
+        frontier = [i for i in dict.fromkeys(ids) if i and i not in parents]
+        while frontier and ends:
+            found: Dict[str, str] = {}
+            for chunk in _chunks(frontier, _LOOKUP_CHUNK):
+                candidates: Set[str] = set()
+                for graph_id, branches in graphs.items():
+                    for column, types in ends:
+                        async with _session() as s:
+                            rows = (await s.execute(
+                                select(EdgeVersionORM.entity_id).where(
+                                    EdgeVersionORM.graph_id == graph_id,
+                                    EdgeVersionORM.branch_id.in_(branches),
+                                    column == _ANY,
+                                    func.upper(EdgeVersionORM.edge_type).in_(types)).distinct(),
+                                {"ids": list(chunk)})).all()
+                        candidates.update(r[0] for r in rows)
+                children = set(chunk)
+                for w in (await self.lookup_live("edge", candidates)).values():
+                    kind = str(w.edge_type or "").upper()
+                    if kind not in containment_types:
+                        continue
+                    parent, child = ((w.target_id, w.source_id) if kind in child_is_source
+                                     else (w.source_id, w.target_id))
+                    if child in children and parent and (child not in found or parent < found[child]):
+                        found[child] = parent
+            for child in frontier:
+                parents[child] = found.get(child)
+            frontier = sorted({p for p in found.values() if p not in parents})
+        out: Dict[str, List[str]] = {}
+        for i in dict.fromkeys(ids):
+            chain: List[str] = []
+            seen = {i}
+            p = parents.get(i)
+            while p is not None and p not in seen:
+                chain.append(p)
+                seen.add(p)
+                p = parents.get(p)
+            out[i] = chain
+        return out
+
     async def head_counts(self) -> Optional[Dict[str, int]]:
         """Live nodes and edges from ``main``'s head pointers, in one indexed count: only for a
         graph's own ``main`` at its current head (no fork parent, not a draft, not as of an earlier

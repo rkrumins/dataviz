@@ -9,7 +9,9 @@
  * Choose the format and which properties become columns — the view's own
  * properties, from its exact catalog, each with how many entities carry it
  * — then watch the rows being written. The file downloads when it is ready,
- * and again from here for as long as the dialog is open.
+ * and again from here for as long as the dialog is open. Each match also says
+ * where it sits, its parent and path (``lib/ancestryColumns``), unless that is
+ * switched off: informational columns, which importing the file back skips.
  *
  * A Connections search exports its edges instead: each edge's fixed columns
  * — the edge, each end and each end's parent, its properties as JSON — and
@@ -24,9 +26,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import { Backdrop } from '@/components/ui/Backdrop'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
+import { ANCESTRY_COLUMNS } from '@/lib/ancestryColumns'
 import { cn } from '@/lib/utils'
+import { usePersonaMode } from '@/store/persona'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { httpStatusOf } from '@/services/graphRequestFailure'
@@ -92,6 +97,10 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose, onWith
     const [format, setFormat] = useState<Format>('csv')
     const [withDescription, setWithDescription] = useState(true)
     const [withTags, setWithTags] = useState(true)
+    // Where each match sits, as the canvas nests it: on unless asked otherwise. A connection's
+    // ends name their parents already.
+    const [withPath, setWithPath] = useState(true)
+    const technical = usePersonaMode() === 'technical'
     const [chosen, setChosen] = useState<string[]>([])
     const [filter, setFilter] = useState('')
     const [phase, setPhase] = useState<Phase>({ kind: 'choose' })
@@ -108,7 +117,9 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose, onWith
     ]), [connections, withDescription, withTags, chosen])
     const full = columns.length >= MAX_COLUMNS
     const baseColumns = connections ? EDGE_BASE_COLUMNS : BASE_COLUMNS
-    const fixedColumns = connections ? EDGE_FIXED_COLUMNS : BASE_COLUMNS.length
+    const placed = !connections && withPath
+    const fixedColumns = connections ? EDGE_FIXED_COLUMNS
+        : BASE_COLUMNS.length + (placed ? ANCESTRY_COLUMNS.length : 0)
     const noun = connections ? ['connection', 'connections'] as const : ['match', 'matches'] as const
 
     // What can become a column, with how widely it is set: a property and
@@ -143,6 +154,7 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose, onWith
         setPhase({ kind: 'exporting', answer: null })
         followExport(provider, {
             scope: query.scope, predicate: query.predicate, format, columns,
+            ...(placed ? { withPath: true } : {}),
         }, {
             signal: controller.signal,
             onUpdate: (answer) => {
@@ -265,6 +277,13 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose, onWith
                                         <>
                                             <ColumnToggle label="Description" on={withDescription} onChange={setWithDescription} />
                                             <ColumnToggle label="Tags" on={withTags} onChange={setWithTags} />
+                                            <HoverTip
+                                                label="Where each match sits: its parent, and every container above it"
+                                                detail={technical
+                                                    ? `${ANCESTRY_COLUMNS.join(', ')}: informational, an import skips them.`
+                                                    : 'Skipped when you import the file back.'}>
+                                                <ColumnToggle label="Parent and path" on={withPath} onChange={setWithPath} />
+                                            </HoverTip>
                                         </>
                                     )}
                                 </div>

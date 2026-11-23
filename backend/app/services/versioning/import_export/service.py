@@ -712,6 +712,7 @@ class ImportExportService:
         idempotency_key: Optional[str] = None,
         package: Optional[Dict[str, Any]] = None,
         file_name: Optional[str] = None,
+        with_path: Optional[Dict[str, bool]] = None,
     ) -> Dict[str, str]:
         """Create an export job; mints the ``export.<fmt>`` artifact key. Returns
         ``{job_id, result_uri}``. A whole-data-source export is a re-importable backup.
@@ -722,7 +723,8 @@ class ImportExportService:
         child is source}``) adds every entity inside the selected ones. ``package`` makes the job a
         view package's (view_transfer.package): the views' file is built from the versions sealed
         for it, then the data is written into the package as it streams. ``file_name`` names the
-        download."""
+        download. ``with_path`` (``{containment type: child is source}``): each node says where it
+        sits, up those edges (``common.ancestry_columns``)."""
         # Who started it: theirs to cancel (cancel_export).
         options: Dict[str, Any] = {"actor": actor}
         if package:
@@ -738,6 +740,8 @@ class ImportExportService:
         if select_ids and select_children is not None:
             options["children"] = True
             options["containment"] = select_children
+        if with_path is not None:
+            options["withPath"] = with_path
         async with db.graphver_session() as s:
             await self._lock_in_workspace(s, graph_id, workspace_id)
             job = JobORM(

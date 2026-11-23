@@ -41,6 +41,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.raw_path_route import RawPathSegmentRoute
+from backend.common import ancestry_columns
 from backend.common.models.property_job import PropertyJobOp
 from backend.common.models.search import Predicate
 from backend.common.property_patch import InvalidPatch, normalize_update
@@ -5418,6 +5419,7 @@ async def create_export(
         "Makes the request safe to send again: the same key, from the same caller, answers "
         "with the job it started")),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
+    with_path: bool = Query(False, alias="withPath", description=ancestry_columns.WITH_PATH),
     selection: Optional[ExportSelectionBody] = None,
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -5441,9 +5443,11 @@ async def create_export(
     await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
                                user=user, claims=claims, session=session, svc=svc)
     select_ids = _split(ids) + (selection.ids if selection else [])
-    # The containment the export follows from the selection, resolved now: the job walks it.
-    containment = (await _live_containment_map(session, ws_id, meta.get("data_source_id"))
-                   if with_children and select_ids else None)
+    # The containment the export follows from the selection, and that says where each entity
+    # sits, resolved now: the job walks it.
+    live_containment = (await _live_containment_map(session, ws_id, meta.get("data_source_id"))
+                        if (with_children and select_ids) or with_path else None)
+    containment = live_containment if with_children and select_ids else None
     key = _callers_key(user, idempotency_key)
     job = await _job_for_key(ie, graph_id, key, "export")
     if job is None:
@@ -5454,7 +5458,8 @@ async def create_export(
                     actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
                     branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
                     select_ids=select_ids, select_types=_split(types), select_children=containment,
-                    idempotency_key=key, file_name=download_name(filename, format) if filename else None)
+                    idempotency_key=key, file_name=download_name(filename, format) if filename else None,
+                    with_path=live_containment if with_path else None)
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
             job = await _job_for_key(ie, graph_id, key, "export")
@@ -5638,6 +5643,7 @@ async def stream_export(
     types: Optional[str] = Query(None),
     with_children: bool = Query(False, alias="withChildren"),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
+    with_path: bool = Query(False, alias="withPath", description=ancestry_columns.WITH_PATH),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     viewer: Viewer = Depends(viewer_ctx),
@@ -5659,15 +5665,19 @@ async def stream_export(
         ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id,
         ids=_split_list(ids), types=types, viewer=viewer, user=user, claims=claims, session=session,
         svc=svc, with_children=with_children)
+    place = (stream.Placer(snap, await _live_containment_map(session, ws_id, meta.get("data_source_id")))
+             if with_path else None)
     turn = await take_turn()
     try:
-        columns = await xlsx_columns(stream.record_pages(snap, selection), fmt, _split_list(props))
+        columns = await xlsx_columns(stream.record_pages(snap, selection), fmt, _split_list(props),
+                                     placed=with_path)
     except BaseException:
         stream.slots.release(turn)
         raise
     return ExportStreamResponse(
-        stream.write_export(lambda: stream.record_pages(snap, selection), fmt=fmt, columns=columns,
-                            props=_split_list(props)), turn=turn, fmt=fmt,
+        stream.write_export(lambda placed=True: stream.record_pages(snap, selection, place=place if placed else None),
+                            fmt=fmt, columns=columns, props=_split_list(props), placed=with_path),
+        turn=turn, fmt=fmt,
         filename=filename or f"{meta.get('data_source_id') or graph_id}-export",
         headers={"X-Export-As-Of": "" if snap.as_of_seq is None else str(snap.as_of_seq)})
 
