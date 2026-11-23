@@ -99,17 +99,19 @@ export function YourDataModels({ className }: { className?: string }) {
                     No data models of your own yet. Each graph uses one; a new one starts as a draft you can change and publish.
                 </p>
             ) : (
-                <ul aria-label="Your data models" className="mt-3 grid gap-2 sm:grid-cols-2">
+                <ul aria-label="Your data models" className="mt-3 grid gap-2 grid-cols-[repeat(auto-fill,minmax(min(100%,28rem),1fr))]">
                     {listed.map(m => {
                         const own = m.kind === 'yours'
                         const shared = own && isShared(m.id)
                         return (
-                            <li key={m.id} className="flex items-center gap-3 rounded-2xl border border-glass-border bg-canvas/60 p-3">
+                            <li key={m.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl border border-glass-border bg-canvas/60 p-3">
                                 <span className="w-9 h-9 rounded-xl bg-violet-500/10 text-violet-600 dark:text-violet-300 flex items-center justify-center shrink-0">
                                     <Layers className="w-4 h-4" aria-hidden />
                                 </span>
-                                <span className="min-w-0 flex-1">
-                                    <span className="flex items-center gap-1.5">
+                                {/* The name and facts keep a readable width; the share switch and the
+                                    editor link move below, to the right, when the card is narrow. */}
+                                <span className="min-w-[10rem] flex-1">
+                                    <span className="flex flex-wrap items-center gap-1.5">
                                         <span data-model-name className="min-w-0 break-words text-sm font-semibold text-ink">{m.name}</span>
                                         <KindBadge kind={m.kind} />
                                     </span>
@@ -118,6 +120,7 @@ export function YourDataModels({ className }: { className?: string }) {
                                         {!own && ' · read-only'}
                                     </span>
                                 </span>
+                                <span className="ml-auto flex shrink-0 items-center gap-3">
                                 {own && (
                                     <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] text-ink-muted">
                                         <ToggleSwitch
@@ -133,8 +136,9 @@ export function YourDataModels({ className }: { className?: string }) {
                                     aria-label={`Open ${m.name} in the editor`}
                                     className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold text-violet-600 dark:text-violet-300 hover:bg-violet-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
                                 >
-                                    Open in editor <ArrowRight className="w-3.5 h-3.5" aria-hidden />
+                                    Open in editor <ArrowRight className="w-3.5 h-3.5 shrink-0" aria-hidden />
                                 </Link>
+                                </span>
                             </li>
                         )
                     })}
