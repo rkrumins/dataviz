@@ -39,6 +39,8 @@ export interface PlaygroundSample {
     nodeCount: number
     edgeCount: number
     entityTypes: string[]
+    /** What its Hierarchy view would show ("Dashboards and their metrics"); null or absent: none. */
+    hierarchy?: string | null
 }
 
 export interface PlaygroundSamples {
@@ -47,13 +49,25 @@ export interface PlaygroundSamples {
     quotaLeft: number
 }
 
+/** The canvases a new graph may have beside the Context View it always opens in. */
+export type PlaygroundView = 'graph' | 'hierarchy'
+
+/** The views a new graph was made with, by kind: the Context View, and each one asked for — null
+ *  for one it can't have (a Hierarchy of a graph with no containment). */
+export interface StartedViewIds {
+    context: string
+    graph?: string | null
+    hierarchy?: string | null
+}
+
 /** What starting a sample made: a graph of the person's, its views — the Context View
- *  (`viewId`) opens first — and an example change waiting for review on the Graph view. */
+ *  (`viewId`) opens first — and an example change waiting for review on its Graph view, else on
+ *  its Context View. */
 export interface StartedSample {
     dataSourceId: string
     viewId: string
     /** Absent from servers that made one view per sample. */
-    viewIds?: { context: string; graph: string; hierarchy?: string }
+    viewIds?: StartedViewIds
     draftId?: string | null
     reviewId?: string | null
 }
@@ -109,6 +123,8 @@ export interface NewPlaygroundGraph {
     description?: string
     model: { ontologyId: string } | { infer: InferredModel }
     types?: string[]
+    /** The canvases beside its Context View; none: the Context View alone. */
+    views?: PlaygroundView[]
 }
 
 export interface PlaygroundGraphMade {
@@ -117,7 +133,7 @@ export interface PlaygroundGraphMade {
     mainBranchId: string
     /** The Context View: open this. */
     viewId: string
-    viewIds: { context: string; graph: string }
+    viewIds: StartedViewIds
     /** The semantic layer it is built on. */
     ontologyId?: string
     /** A layer made from the file's types: each type's name → its id there, so the rows can name
@@ -175,8 +191,9 @@ export const playgroundService = {
     leave: () => authFetch<void>(`${BASE}/leave`, { method: 'POST' }),
     setUp: (body: PlaygroundSetup) => authFetch<PlaygroundInfo>(BASE, json(body)),
     samples: () => authFetch<PlaygroundSamples>(`${BASE}/samples`, { silent403: true }),
-    startSample: (sampleId: string) => authFetch<StartedSample>(
-        `${BASE}/samples/${encodeURIComponent(sampleId)}`, { method: 'POST' }),
+    /** Start a sample, with `views` beside the Context View it opens in. */
+    startSample: (sampleId: string, views: PlaygroundView[] = []) => authFetch<StartedSample>(
+        `${BASE}/samples/${encodeURIComponent(sampleId)}`, post({ views })),
     /** The semantic layers the reader may build on here. */
     listModels: () => authFetch<PlaygroundModel[]>(`${BASE}/models`, { silent403: true }),
     /** The standard import template for a layer (csv | ndjson | xlsx), as a download URL. */

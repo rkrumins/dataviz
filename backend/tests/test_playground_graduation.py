@@ -124,7 +124,8 @@ async def experiment(test_client: AsyncClient, db_session, monkeypatch):
     app.dependency_overrides[get_versioning_service] = lambda: started
     try:
         with _as(ADA, ADA_CLAIMS):
-            r = await test_client.post("/api/v1/playground/samples/retail-pipeline")
+            r = await test_client.post("/api/v1/playground/samples/retail-pipeline",
+                                      json={"views": ["graph", "hierarchy"]})
     finally:
         app.dependency_overrides.pop(get_versioning_service, None)
         provider_manager.warmup_cache.pop(SANDBOX, None)

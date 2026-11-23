@@ -8,8 +8,9 @@ Two front doors make one — a sample (``playground_samples``) and a person's ow
   structural one (its source contains its target), the rest are lineage;
 * its **things and connections**: the rows of a day-0 import, loaded as the graph's first version
   (a sample's; a graph for a person's own data has none, and loads its file through the import);
-* its **views**: a Context View (one layer per top-level type, in the starter's order), a Graph
-  view, and — when it has a containment — a Hierarchy view of the container and what it holds;
+* its **views**: a Context View (one layer per top-level type, in the starter's order) and, when
+  the person asks for them, a Graph view and — when it has a containment — a Hierarchy view of the
+  container and what it holds;
 * its **library and details** (saved queries and display rules on the Context View; the data
   source's tags and links) and an **example change** waiting for review — a sample's.
 
@@ -23,7 +24,7 @@ import re
 import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -274,13 +275,28 @@ def hierarchy_view_config(starter: Starter) -> dict:
     return _config(starter, {"type": "hierarchy"}, [container, child], [rid])
 
 
-def views(starter: Starter) -> List[Tuple[str, str, str, dict]]:
-    """``(key, view type, name, config)`` of each view it is made with, the Context View first."""
-    out = [("context", "reference", starter.view_name, context_view_config(starter)),
-           ("graph", "graph", f"{starter.title}: lineage graph", graph_view_config(starter))]
+def hierarchy_of(starter: Starter) -> Optional[str]:
+    """What its Hierarchy view shows (``Dashboards and their metrics``), or None: it has no
+    containment, so it has no Hierarchy view."""
     held = starter.containment()
-    if held:
-        container, child = starter.entity_types[held[1]], starter.entity_types[held[2]]
-        out.append(("hierarchy", "hierarchy", f"{starter.title}: {container.plural} and their "
-                    f"{child.plural.lower()}", hierarchy_view_config(starter)))
+    if not held:
+        return None
+    container, child = starter.entity_types[held[1]], starter.entity_types[held[2]]
+    return f"{container.plural} and their {child.plural.lower()}"
+
+
+#: The views a person may add beside the Context View, which every starter is made with.
+OPTIONAL_VIEWS = ("graph", "hierarchy")
+
+
+def views(starter: Starter, include: Sequence[str] = ()) -> List[Tuple[str, str, str, dict]]:
+    """``(key, view type, name, config)`` of each view it is made with: the Context View first,
+    then each of ``include`` (:data:`OPTIONAL_VIEWS`) it can have — a Hierarchy view only when it
+    has a containment."""
+    out = [("context", "reference", starter.view_name, context_view_config(starter))]
+    if "graph" in include:
+        out.append(("graph", "graph", f"{starter.title}: lineage graph", graph_view_config(starter)))
+    shows = hierarchy_of(starter) if "hierarchy" in include else None
+    if shows:
+        out.append(("hierarchy", "hierarchy", f"{starter.title}: {shows}", hierarchy_view_config(starter)))
     return out

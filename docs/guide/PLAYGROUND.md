@@ -55,7 +55,7 @@ you built, how many more graphs you may start, and three ways to start the next.
 | Start from… | You get | Best when |
 | --- | --- | --- |
 | **A sample** | A realistic graph, its views, saved searches and an example change waiting for review | You've never built a graph, or want to see what one is for |
-| **A file** | A versioned data source of your things and how they connect, on an approved semantic layer or one of your own, with a Context View and a Graph view | You have a spreadsheet, an export from a workspace, or an import file |
+| **A file** | A versioned data source of your things and how they connect, on an approved semantic layer or one of your own, with a Context View, and a Graph view or a Hierarchy if you want them | You have a spreadsheet, an export from a workspace, or an import file |
 | **A blank graph** | An empty graph on the data model you pick, to draw on | You'd rather build it by hand |
 
 Whatever you start from, you get the same thing a team workspace gives you: a
@@ -66,8 +66,11 @@ layer when it moves into a workspace.
 ### Start from a sample
 
 1. Click **Start from a sample**. The samples are just below.
-2. Click **Start** on one. The button says **Starting…** while the graph is made.
-3. Its **Context View** opens. The notification offers **Take the tour** — a lap
+2. Click **Start** on one, and choose its **canvases**. It always opens in its
+   **Context View**; tick **Graph** or **Hierarchy** to get those views beside it.
+   You can add more views later.
+3. Click **Start sample**. The button says **Starting…** while the graph is made.
+4. Its **Context View** opens. The notification offers **Take the tour** — a lap
    around the canvas — and **See the example review**.
 
 | Sample | What it shows |
@@ -80,13 +83,14 @@ Each sample comes with:
 
 * a **Context View**, one layer per kind of thing in pipeline order — the one
   that opens, and the one you edit in;
-* a **Graph view** of the same graph, and a **Hierarchy view** of what the
+* if you chose them, a **Graph view** of the same graph, and a **Hierarchy view** of what the
   pipeline ends in and what it holds — dashboards and their metrics, reports and
   their metrics, or feature sets and their features;
 * **saved searches** on the Context View — the data marked PII, the certified
   data, what one team owns, and everything feeding the key output — under
   **Library → This view**, and a display rule tinting what's marked `pii`;
-* an **example change waiting for review**, on the Graph view: a private draft
+* an **example change waiting for review**, on the Graph view (or on the Context
+  View, if you didn't choose a Graph view): a private draft
   that adds one more thing, and a review of it nobody was asked to give, so no
   one is notified. Approve and merge it yourself to see how publishing works;
 * a description, the tag `sample` and a link back to this page, under **Data →
@@ -128,10 +132,14 @@ anything that can't be used is shown before anything is made.
    **Leave these rows out**. A connection the semantic layer doesn't allow between
    those two types is listed under **Rows to fix**. On a semantic layer of your own,
    **Add to my data model** adds what's missing.
-5. **Name it**, and describe it if you like. **More options** chooses
+5. **Canvases.** Your graph opens in its **Context View**. Tick **Graph** for a
+   freely laid-out view of the same things, or **Hierarchy** for what holds what.
+   A Hierarchy needs a semantic layer that puts one kind of thing inside another,
+   such as a dashboard and its metrics; when yours doesn't, the card says so.
+6. **Name it**, and describe it if you like. **More options** chooses
    how rows match things you already have, and can keep the first load in a draft
    for you to review before publishing.
-6. Click **Create**. The data source and its views are made, then your rows load —
+7. Click **Create**. The data source and its views are made, then your rows load —
    the same import every workspace uses, with its progress. When it's done you see
    what was added and anything that couldn't be, with why; **Open it** opens the
    Context View, and **Add more data** opens **Import** on it.

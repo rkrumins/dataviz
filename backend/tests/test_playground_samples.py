@@ -4,12 +4,12 @@ the Playground.
 These pin what a sample is: a blank graph on the Playground's sandbox provider, counted against
 the person's quota like any other; loaded with the sample as one day-0 import; on the sample's
 own data model, made once and shared after, with a containment at the end of its pipeline; with
-a Context View (opened first), a Graph view and a Hierarchy view of the person's, shared with
-everyone in the Playground, each at version 1; saved queries and a display rule on the Context
-View; the data source described, tagged and linked; and an example change waiting for review — a
-private draft on the Graph view and a review that asks nobody. Asking is refused to anyone not in
-it and while the Playground, blank models or version control is off, or a layout it needs is
-withdrawn; and a refusal or a failure anywhere leaves nothing behind.
+a Context View (opened first) and the Graph and Hierarchy views asked for beside it, the person's,
+shared with everyone in the Playground, each at version 1; saved queries and a display rule on the
+Context View; the data source described, tagged and linked; and an example change waiting for
+review — a private draft on the Graph view (else the Context View) and a review that asks nobody.
+Asking is refused to anyone not in it and while the Playground, blank models or version control is
+off, or a layout it needs is withdrawn; and a refusal or a failure anywhere leaves nothing behind.
 
 The version store is faked (it runs on Postgres only): it records the graphs made, the imports
 loaded into them, the drafts, saves and reviews, and the purges queued.
@@ -185,9 +185,15 @@ async def _all(db_session, orm):
     return (await db_session.execute(select(orm))).scalars().all()
 
 
-async def _start(test_client, sample_id="retail-pipeline", user=BEN, claims=MEMBER):
+#: Every view a sample can be made with: the Context View, and a Graph and a Hierarchy view beside it.
+EVERY_VIEW = ["graph", "hierarchy"]
+
+
+async def _start(test_client, sample_id="retail-pipeline", user=BEN, claims=MEMBER, views=EVERY_VIEW):
+    """Start it — with ``views`` beside the Context View; None sends no body, as an older client."""
     with _as(user, claims):
-        return await test_client.post(f"/api/v1/playground/samples/{sample_id}")
+        return await test_client.post(f"/api/v1/playground/samples/{sample_id}",
+                                      **({} if views is None else {"json": {"views": views}}))
 
 
 # ── The samples themselves ──────────────────────────────────────────────
@@ -292,6 +298,7 @@ async def test_the_catalogue_lists_every_sample_and_how_many_more_graphs_the_rea
         "nodeCount": len(RETAIL.nodes), "edgeCount": len(RETAIL.edges),
         "entityTypes": ["Source system", "Ingestion job", "Warehouse table", "Transformation", "Dashboard",
                         "Metric"],
+        "hierarchy": "Dashboards and their metrics",
     }
 
 
@@ -370,6 +377,43 @@ async def test_it_opens_a_context_view_with_a_graph_and_a_hierarchy_view_beside_
     versions = await _all(db_session, ViewVersionORM)
     assert sorted((v.view_id, v.version, v.source) for v in versions) == sorted(
         (view_id, 1, "create") for view_id in body["viewIds"].values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("views, made", [
+    (None, {"context"}),                                 # no body: the Context View alone
+    ([], {"context"}),
+    (["graph"], {"context", "graph"}),
+    (["hierarchy"], {"context", "hierarchy"}),
+])
+async def test_it_opens_a_context_view_and_only_the_views_asked_for_beside_it(
+        test_client: AsyncClient, playground, store, db_session, views, made):
+    r = await _start(test_client, views=views)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert set(body["viewIds"]) == made and all(body["viewIds"].values())
+    assert body["viewId"] == body["viewIds"]["context"]
+    assert {v.id for v in await _all(db_session, ViewORM)} == set(body["viewIds"].values())
+
+
+@pytest.mark.asyncio
+async def test_without_a_graph_view_its_example_change_waits_on_the_context_view(
+        test_client: AsyncClient, playground, store, db_session):
+    r = await _start(test_client, views=[])
+    assert r.status_code == 201, r.text
+    body = r.json()
+    [draft] = store.drafts
+    assert draft["originating_view_id"] == body["viewId"] and body["draftId"] == "br_draft_1"
+    assert await db_session.get(ViewLayoutOverlayORM, (body["viewId"], "br_draft_1")) is not None
+    assert body["reviewId"] == "pr_1"
+
+
+@pytest.mark.asyncio
+async def test_a_view_name_it_does_not_know_is_refused_and_nothing_is_made(
+        test_client: AsyncClient, playground, store, db_session):
+    r = await _start(test_client, views=["table"])
+    assert r.status_code == 422
+    assert store.graphs == [] and await _bens_sources(db_session) == []
 
 
 @pytest.mark.asyncio
@@ -506,6 +550,15 @@ async def test_a_sample_is_refused_while_a_layout_it_opens_in_is_withdrawn(
     r = await _start(test_client)
     assert r.status_code == 403 and r.json()["detail"]["feature"] == "allowedViewModes", r.text
     assert store.graphs == [] and await _bens_sources(db_session) == []
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawn_layout_it_is_not_asked_to_open_in_refuses_nothing(
+        test_client: AsyncClient, playground, store, db_session):
+    feature_flags._cache["allowedViewModes"] = ["graph", "reference"]       # no Hierarchy views
+    r = await _start(test_client, views=["graph"])
+    assert r.status_code == 201, r.text
+    assert set(r.json()["viewIds"]) == {"context", "graph"}
 
 
 @pytest.mark.asyncio

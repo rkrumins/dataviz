@@ -15,11 +15,11 @@ made as every starter graph is (``playground_starter``, :func:`starter`):
   containment, so nothing in the pipeline becomes a child;
 * its **things and connections** — the rows of a day-0 import (:func:`rows`), loaded into a new
   blank graph as its first version, the way ``POST …/bulk-ingest`` loads one;
-* its **views** — a Context View (opened first), a Graph view and a Hierarchy view — and, on the
-  Context View, saved queries and a display rule tinting personal data;
+* its **views** — a Context View (opened first) and, as the person chooses, a Graph view and a
+  Hierarchy view — and, on the Context View, saved queries and a display rule tinting personal data;
 * its **details** — a description, the tag ``sample`` and a link to how the Playground works;
-* an **example change** waiting for review: a private draft on the Graph view adding one thing,
-  and a review that asks nobody.
+* an **example change** waiting for review: a private draft on the Graph view (else the Context
+  View) adding one thing, and a review that asks nobody.
 
 Owners are teams and platforms are products: no sample names a person.
 
