@@ -17,7 +17,7 @@
  * (with Restore).
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect, memo, createContext, useContext, type ReactNode } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, memo, createContext, useContext, useId, type ReactNode } from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
@@ -43,6 +43,7 @@ import {
 import { cn } from '@/lib/utils'
 import { HighlightedText } from '@/components/ui/HighlightedText'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { SuggestionListbox, suggestionOptionId } from '@/components/ui/SuggestionListbox'
 import { fieldTone, STATE_DOT } from '@/features/versioning/model/changeTone'
 import { FieldCountChips } from '@/features/versioning/components/ChangeSummary'
 import {
@@ -1244,6 +1245,7 @@ export function PropertyComposer({
   const [highlight, setHighlight] = useState(-1)
   const [nameFocused, setNameFocused] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
+  const listId = useId()
   const recent = useRecentPropertyKeys((st) => st.keys)
   const remember = useRecentPropertyKeys((st) => st.remember)
 
@@ -1252,8 +1254,9 @@ export function PropertyComposer({
   const canSubmit = variant === 'array' || (key.trim() !== '' && !isDup)
   const value = typeChosen ? draft : detected.value
   const shownType: FieldType = typeChosen ? type : detected.type
+  // Every match: the list scrolls, and says how many it holds.
   const offered = useMemo(
-    () => (smartish ? rankSuggestions(key, suggestions, recent, existingKeys.map((k) => (prefixLabel && k.startsWith(`${prefixLabel}/`) ? k.slice(prefixLabel.length + 1) : k))) : []),
+    () => (smartish ? rankSuggestions(key, suggestions, recent, existingKeys.map((k) => (prefixLabel && k.startsWith(`${prefixLabel}/`) ? k.slice(prefixLabel.length + 1) : k)), Infinity) : []),
     [smartish, key, suggestions, recent, existingKeys, prefixLabel])
   const listOpen = nameFocused && offered.length > 0 && !(offered.length === 1 && offered[0].key === key.trim())
   const picked = suggestions.find((p) => p.key === key.trim())
@@ -1367,6 +1370,8 @@ export function PropertyComposer({
               aria-label="Property name"
               role="combobox"
               aria-expanded={listOpen}
+              aria-controls={listId}
+              aria-activedescendant={listOpen && highlight >= 0 ? suggestionOptionId(listId, highlight) : undefined}
               aria-autocomplete="list"
               onChange={(e) => { setKey(e.target.value); setHighlight(-1); setNameFocused(true) }}
               onFocus={() => setNameFocused(true)}
@@ -1387,21 +1392,26 @@ export function PropertyComposer({
               )}
             />
             {listOpen && (
-              <ul role="listbox" aria-label="Suggested names"
-                className="absolute left-0 right-0 top-full mt-1 z-20 rounded-lg border border-glass-border bg-canvas-elevated shadow-lg py-1 max-h-56 overflow-y-auto">
-                {offered.map((o, i) => (
-                  <li key={o.key} role="option" aria-selected={i === highlight}
-                    onMouseDown={(e) => { e.preventDefault(); pick(o.key) }}
-                    className={cn('flex items-center gap-2 px-2.5 py-1.5 cursor-pointer text-xs',
-                      i === highlight ? 'bg-accent-lineage/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]')}>
-                    <span className="font-mono text-ink truncate">{o.key}</span>
-                    <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted truncate max-w-[55%]">
-                      {o.recent ? 'You used it recently'
-                        : `${o.count.toLocaleString()} other${o.count === 1 ? '' : 's'}${o.examples[0] ? ` · e.g. ${o.examples[0]}` : ''}`}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <SuggestionListbox
+                id={listId}
+                label="Suggested names"
+                anchorRef={nameRef}
+                items={offered}
+                getKey={(o) => o.key}
+                activeIndex={highlight}
+                onActiveChange={setHighlight}
+                onPick={(o) => pick(o.key)}
+                rowHeight={30}
+                narrowing={key.trim() !== ''}
+                className="text-xs"
+                renderItem={(o) => (<>
+                  <span className="font-mono text-ink truncate">{o.key}</span>
+                  <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted truncate max-w-[55%]">
+                    {o.recent ? 'You used it recently'
+                      : `${o.count.toLocaleString()} other${o.count === 1 ? '' : 's'}${o.examples[0] ? ` · e.g. ${o.examples[0]}` : ''}`}
+                  </span>
+                </>)}
+              />
             )}
           </div>
         ) : (

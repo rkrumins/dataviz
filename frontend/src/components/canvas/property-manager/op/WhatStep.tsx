@@ -9,6 +9,7 @@ import { useEffect, useMemo, useRef, useState, type ComponentType, type Keyboard
 import { ArrowRightLeft, CaseSensitive, Combine, CopyPlus, Eraser, PencilLine, Replace, TextCursorInput, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Segmented } from '@/components/ui/Segmented'
+import { SuggestionListbox, suggestionOptionId } from '@/components/ui/SuggestionListbox'
 import { AllowedValuePicker, FieldNote } from '@/components/panels/property/FieldGovernance'
 import { enforcedAllowed, fieldProblem, governedFields } from '@/lib/fieldRules'
 import { useSchemaStore } from '@/store/schema'
@@ -251,7 +252,8 @@ function OpPicker({ value, onChange, edges }: { value: PropertyOpKind; onChange:
   )
 }
 
-/** A property's name, offered from every property the view carries — most carried first. */
+/** A property's name, offered from every property the view carries — most carried first, every one
+ *  that matches what is typed. */
 function KeyCombobox({ id, value, onChange, properties, counted = true, autoFocus = true }: {
   id: string
   value: string
@@ -263,9 +265,10 @@ function KeyCombobox({ id, value, onChange, properties, counted = true, autoFocu
 }) {
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
+  const input = useRef<HTMLInputElement>(null)
   const q = value.trim().toLowerCase()
   const offered = useMemo(
-    () => properties.filter((p) => !q || p.key.toLowerCase().includes(q)).slice(0, 8),
+    () => properties.filter((p) => !q || p.key.toLowerCase().includes(q)),
     [properties, q],
   )
   const show = open && offered.length > 0 && !(offered.length === 1 && offered[0]!.key === value.trim())
@@ -273,10 +276,12 @@ function KeyCombobox({ id, value, onChange, properties, counted = true, autoFocu
   return (
     <div className="relative">
       <input
+        ref={input}
         id={id}
         role="combobox"
         aria-expanded={show}
         aria-controls={`${id}-list`}
+        aria-activedescendant={show ? suggestionOptionId(`${id}-list`, active) : undefined}
         aria-autocomplete="list"
         autoFocus={autoFocus}
         value={value}
@@ -294,18 +299,23 @@ function KeyCombobox({ id, value, onChange, properties, counted = true, autoFocu
         className={cn(FIELD, 'font-mono')}
       />
       {show && (
-        <ul id={`${id}-list`} role="listbox" aria-label="Properties in this view"
-          className="absolute z-10 mt-1 w-full max-h-52 overflow-y-auto custom-scrollbar rounded-lg border border-glass-border bg-canvas-elevated p-1 shadow-lg">
-          {offered.map((p, i) => (
-            <li key={p.key} role="option" aria-selected={i === active}
-              onMouseDown={(e) => { e.preventDefault(); pick(p.key) }}
-              onMouseEnter={() => setActive(i)}
-              className={cn('flex items-center gap-2 px-2.5 h-9 rounded-md cursor-pointer text-[13px]', i === active ? 'bg-accent-lineage/10 text-ink' : 'text-ink-secondary')}>
-              <span className="flex-1 min-w-0 truncate font-mono">{p.key}</span>
-              {counted && <span className="text-[11px] tabular-nums text-ink-muted">{p.count.toLocaleString()}</span>}
-            </li>
-          ))}
-        </ul>
+        <SuggestionListbox
+          id={`${id}-list`}
+          label="Properties in this view"
+          anchorRef={input}
+          items={offered}
+          getKey={(p) => p.key}
+          activeIndex={active}
+          onActiveChange={setActive}
+          onPick={(p) => pick(p.key)}
+          rowHeight={36}
+          narrowing={q !== ''}
+          className="text-[13px]"
+          renderItem={(p) => (<>
+            <span className="flex-1 min-w-0 truncate font-mono">{p.key}</span>
+            {counted && <span className="text-[11px] tabular-nums text-ink-muted">{p.count.toLocaleString()}</span>}
+          </>)}
+        />
       )}
     </div>
   )

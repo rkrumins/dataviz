@@ -62,6 +62,21 @@ describe('PropertyEditor — adding a property', () => {
     expect(useRecentPropertyKeys.getState().keys).toEqual(['owner'])
   })
 
+  it('offers every name others carry, not the first six, and reaches the last by keyboard', () => {
+    const many = Array.from({ length: 15 }, (_, i) => ({ key: `col_${i + 1}_name`, count: 50 - i, examples: [] }))
+    render(<PropertyEditor value={{ tier: 'gold' }} onChange={vi.fn()} inline groupByPath bare suggestions={many} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add property' }))
+    const name = screen.getByRole('combobox', { name: 'Property name' })
+    fireEvent.focus(name)
+    const list = screen.getByRole('listbox', { name: 'Suggested names' })
+    expect(within(list).getAllByRole('option')).toHaveLength(15)
+    expect(name).toHaveAttribute('aria-controls', list.id)
+    for (let i = 0; i < 20; i++) fireEvent.keyDown(name, { key: 'ArrowDown' })
+    expect(name).toHaveAttribute('aria-activedescendant', within(list).getByRole('option', { name: /col_15_name/ }).id)
+    fireEvent.keyDown(name, { key: 'Enter' })
+    expect(name).toHaveValue('col_15_name')
+  })
+
   it('adds several pasted properties in one change', () => {
     const onChange = open()
     fireEvent.paste(screen.getByRole('combobox', { name: 'Property name' }), {
