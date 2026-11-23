@@ -72,6 +72,8 @@ interface WorkspaceOverviewProps {
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+/** How many of the workspace's latest changes the Overview's card shows. */
+const RECENT_CHANGES = 6
 
 const LAYOUTS: readonly SegmentedOption<OverviewLayout>[] = [
     { value: 'compact', label: 'Compact', icon: Rows3 },
@@ -195,11 +197,11 @@ export function WorkspaceOverview({
     const [layout, setLayout] = useOverviewLayout()
 
     const popularQ = useQuery({
-        queryKey: ['workspace-overview', 'popular', wsId],
+        queryKey: ['workspace-overview', 'popular', wsId, jumpBackIn.length],
         // In the Playground it is everyone's newest work; elsewhere, what is opened most.
         queryFn: () => listViews(isPlayground
             ? { workspaceIds: [wsId], sort: 'recently-modified', limit: 12 }
-            : { workspaceIds: [wsId], sort: 'most-opened', limit: 4 }),
+            : { workspaceIds: [wsId], sort: 'most-opened', limit: 4 + jumpBackIn.length }),
         enabled: views.length > 0,
         staleTime: 60_000,
     })
@@ -207,7 +209,8 @@ export function WorkspaceOverview({
     const me = useAuthStore(s => s.user?.id)
     const popular = isPlayground
         ? (popularQ.data?.items ?? []).filter(v => v.createdBy !== me).slice(0, 6)
-        : (popularQ.data?.items ?? []).slice(0, 4)
+        // What Jump back in already shows isn't shown twice.
+        : (popularQ.data?.items ?? []).filter(v => !jumpBackIn.some(j => j.id === v.id)).slice(0, 4)
 
     // ── At a glance ─────────────────────────────────────────────────────
     const lastRefreshed = sources
@@ -316,7 +319,10 @@ export function WorkspaceOverview({
                             <button type="button" onClick={() => onGoTo('activity')} className="shrink-0 text-xs font-semibold text-accent-lineage hover:underline">See all</button>
                         ) : undefined}
                     />
-                    <WorkspaceActivityFeed workspaceId={wsId} />
+                    {/* The latest few, never the whole log: the rest are on Activity (or, for a reader who
+                        can't open it, under the Views tab's governance feed). */}
+                    <WorkspaceActivityFeed workspaceId={wsId} limit={RECENT_CHANGES}
+                        onSeeAll={() => onGoTo(showActivity ? 'activity' : 'views')} />
                 </section>
             </aside>
         </div>
