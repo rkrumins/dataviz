@@ -73,6 +73,9 @@ export interface ContextMenuAction {
     disabled?: boolean
     /** A quieter second line — for a disabled item, why. */
     hint?: string
+    /** A switch on the item's own row, changing what the item does (its label
+     *  says what it does now). Flipping it keeps the menu open. */
+    toggle?: { label: string; checked: boolean; onChange: (checked: boolean) => void }
     danger?: boolean
     dividerAfter?: boolean
     onClick: () => void
@@ -133,6 +136,10 @@ export interface CanvasContextMenuProps {
     /** Nothing here can be edited (Published, or a trace holding the canvas):
      *  View & Edit reads as View details — the panel it opens reads only. */
     viewOnly?: boolean
+    /** Open what is inside the entity (or the selection it is part of) — a
+     *  level at a time, or every level — and close it all again. Right after
+     *  View: opening an entity is the first thing after looking at it. */
+    expandActions?: ContextMenuAction[]
     /** An empty column right-clicked: select everything in ITS layer, beside
      *  `onSelectAll`'s everything the canvas shows. */
     selectLayer?: { name: string; count: number; onSelect: () => void } | null
@@ -181,6 +188,7 @@ export function CanvasContextMenu({
     layerMenu = null,
     narrowActions = [],
     viewOnly = false,
+    expandActions = [],
     selectLayer = null,
     trace,
 }: CanvasContextMenuProps) {
@@ -274,6 +282,15 @@ export function CanvasContextMenu({
                     shortcut: 'Enter',
                     onClick: () => { onEditNode(target.id); onClose() }
                 })
+            }
+
+            if (expandActions.length > 0) {
+                if (result.length > 0) result[result.length - 1] = { ...result[result.length - 1], dividerAfter: true }
+                result.push(...expandActions.map((a, i) => ({
+                    ...a,
+                    dividerAfter: i === expandActions.length - 1,
+                    onClick: () => { a.onClick(); onClose() },
+                })))
             }
 
             if (onTraceNode) {
@@ -588,7 +605,7 @@ export function CanvasContextMenu({
     }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections, onAskAboutNode, onExportNode,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical,
-        viewOnly, trace, selectLayer, selectAllIn])
+        viewOnly, trace, selectLayer, selectAllIn, expandActions])
 
     // Get icon component
     const getIcon = (iconName: keyof typeof LucideIcons) => {
@@ -773,11 +790,12 @@ export function CanvasContextMenu({
                         <div className="py-1">
                             {actions().map((action, index) => (
                                 <React.Fragment key={action.id}>
+                                    <div className="flex items-center">
                                     <button
                                         onClick={action.onClick}
                                         disabled={action.disabled}
                                         className={cn(
-                                            "w-full flex items-center justify-between gap-3 px-3 py-2 text-sm transition-colors",
+                                            "flex-1 min-w-0 flex items-center justify-between gap-3 px-3 py-2 text-sm transition-colors",
                                             action.disabled
                                                 ? "text-ink-muted cursor-not-allowed"
                                                 : action.danger
@@ -801,6 +819,32 @@ export function CanvasContextMenu({
                                             </span>
                                         )}
                                     </button>
+                                    {action.toggle && (
+                                        <button
+                                            type="button"
+                                            role="switch"
+                                            aria-checked={action.toggle.checked}
+                                            aria-label={action.toggle.label}
+                                            onClick={() => action.toggle!.onChange(!action.toggle!.checked)}
+                                            className={cn(
+                                                "shrink-0 mr-2 flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[10.5px] font-medium transition-colors",
+                                                "text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5",
+                                                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40",
+                                            )}
+                                        >
+                                            {action.toggle.label}
+                                            <span className={cn(
+                                                "relative inline-flex h-3.5 w-6 rounded-full transition-colors",
+                                                action.toggle.checked ? "bg-accent-lineage" : "bg-black/15 dark:bg-white/20",
+                                            )}>
+                                                <span className={cn(
+                                                    "absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white shadow transition-transform",
+                                                    action.toggle.checked ? "translate-x-3" : "translate-x-0.5",
+                                                )} />
+                                            </span>
+                                        </button>
+                                    )}
+                                    </div>
                                     {action.dividerAfter && index < actions().length - 1 && (
                                         <div className="border-t border-glass-border my-1" />
                                     )}

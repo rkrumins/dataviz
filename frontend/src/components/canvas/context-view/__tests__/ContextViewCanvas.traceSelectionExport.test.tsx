@@ -1,11 +1,11 @@
 /**
  * EXPORT FROM A TRACE, on the real canvas.
  *
- * A trace locks every edit, and its cards have no context menu, so the selection bar used to stay
- * away for the whole trace: cards could be selected and nothing could be done with them. Export
- * only reads, so it stays on offer: selecting cards in a trace brings the bar back with Export…
- * (and Clear) alone, for one card as for several, and Export… opens the Export dialog on them.
- * A data source without version control can't take the file back, so there it isn't offered.
+ * A trace locks every edit, so the selection bar used to stay away for the whole trace: cards
+ * could be selected and nothing could be done with them. Selecting cards in a trace now brings the
+ * trace's own bar — trace from them, add them to the trace (traceMenu.harness.test) — and Export…,
+ * which only reads, for one card as for several; Export… opens the Export dialog on them. A data
+ * source without version control can't take the file back, so there Export… isn't offered.
  */
 import { act, fireEvent, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
@@ -22,7 +22,7 @@ const estate = () => {
 const bar = () => screen.queryByRole('region', { name: 'Selected entities' })
 
 describe('export from a trace', () => {
-  it('offers Export… alone for the cards selected in a trace, and opens the dialog on them', async () => {
+  it('offers Export… beside the trace\'s own actions, none of browse\'s, and opens the dialog on them', async () => {
     const h = await renderCanvasWithTrace(estate(), { focus: 'orders', versioned: true, dataSourceId: 'harness-ds' })
     await h.startTrace('orders')
     expect(bar()).toBeNull()
@@ -50,6 +50,8 @@ describe('export from a trace', () => {
     await h.startTrace('orders')
     act(() => { useCanvasStore.getState().selectNode('ledger') })
     await h.settle()
-    expect(bar()).toBeNull()
+    // The trace's own bar, without Export….
+    expect(within(bar()!).getByRole('button', { name: /Trace from here/ })).toBeTruthy()
+    expect(within(bar()!).queryByRole('button', { name: 'Export…' })).toBeNull()
   }, 30000)
 })

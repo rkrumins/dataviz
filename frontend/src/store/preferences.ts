@@ -183,6 +183,10 @@ interface PreferencesState {
   // Switching to 'raw' is the user's explicit opt-in to render everything.
   lineageRenderMode: LineageRenderMode
   setLineageRenderMode: (mode: LineageRenderMode) => void
+  /** "Expand" on a container (its menu, the selection bar, ⇧→): the next level
+   *  inside at a time, or every level (with checkpoints) — see useExpandBelow. */
+  expandDepthMode: 'level' | 'all'
+  setExpandDepthMode: (mode: 'level' | 'all') => void
   /** Threshold for 'auto' mode — a node with edgeCount ≤ this in a direction renders real edges instead of a stub. */
   lineageAutoThreshold: number
   setLineageAutoThreshold: (n: number) => void
@@ -509,6 +513,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       // Lineage rendering
       lineageRenderMode: 'stubs',
       setLineageRenderMode: (lineageRenderMode) => set({ lineageRenderMode }),
+      expandDepthMode: 'level',
+      setExpandDepthMode: (expandDepthMode) => set({ expandDepthMode }),
       lineageAutoThreshold: 5,
       setLineageAutoThreshold: (lineageAutoThreshold) => set({ lineageAutoThreshold }),
       autoStubThreshold: 500,

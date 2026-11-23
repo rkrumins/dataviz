@@ -1197,7 +1197,6 @@ export function LineageFlowOverlay({
       setComputedRibbons(prev => (prev.length === 0 && nextRibbons.length === 0 ? prev : nextRibbons))
     }
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints, portSides, backPointerColor, lineWeight, hoverLines])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed

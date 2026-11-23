@@ -170,6 +170,8 @@ import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { CanvasStatusStack } from './CanvasStatusStack'
 import { selectableIdsInLayer } from './layerSelection'
+import { nextLevel, outermost, useExpandBelow, type ExpandTree } from './useExpandBelow'
+import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import { SearchActiveChip, type SearchChipUnit } from '../search/SearchActiveChip'
 import { useCanvasProviderPill } from '../canvasProviderPill'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
@@ -311,6 +313,8 @@ const SEARCH_LINE_CAP = 1000
 /** Module constant, not an inline `?? []`. `LayerColumn` is `React.memo`'d, and
  *  a fresh array literal per render defeated that memo for every EMPTY column —
  *  so the columns with nothing in them re-rendered on every canvas render. */
+/** A trace's expansion fetches nothing: nothing is ever loading. */
+const EMPTY_LOADING: ReadonlySet<string> = new Set<string>()
 const EMPTY_LAYER_NODES: HierarchyNode[] = []
 /** The right-click Narrow entries' icons, one per reach. */
 const NARROW_PRESET_ICONS: Record<PresetId, ContextMenuAction['icon']> = {
@@ -5255,31 +5259,28 @@ export function ContextViewCanvas({
     if (!traceActive || !target || target.type !== 'node' || !isSelectableNode(target.id)) return []
     const ids = menuSelection(target.id, selectedNodeIds)
     const several = ids.length > 1
-    const actions: ContextMenuAction[] = [{
-      id: 'trace-from-here',
-      label: several ? `Trace these ${ids.length.toLocaleString()}` : 'Trace from here',
-      icon: 'GitBranch',
-      onClick: () => startCanvasTrace(ids),
-    }]
     const add = traceAddition(ids)
-    if (add.urns.length > 0) {
-      actions.push({
+    const urn = displayMap.get(target.id)?.urn ?? target.id
+    // Taking out the only starting point would be leaving the trace — the
+    // menu's footer is that.
+    const removable = !several && canvasTrace.tracedUrns.length > 1 && canvasTrace.tracedUrns.includes(urn)
+    return [
+      {
+        id: 'trace-from-here',
+        label: several ? `Trace these ${ids.length.toLocaleString()}` : 'Trace from here',
+        icon: 'GitBranch',
+        onClick: () => startCanvasTrace(ids),
+      },
+      ...(add.urns.length > 0 ? [{
         id: 'trace-add',
         label: add.urns.length > 1 ? `Add these ${add.urns.length.toLocaleString()} to this trace` : 'Add to this trace',
-        icon: 'ListPlus',
+        icon: 'ListPlus' as const,
         disabled: !!add.blocked,
         hint: add.blocked ?? undefined,
         onClick: () => { if (!add.blocked) addTraceSeeds(add.urns) },
-      })
-    }
-    // Taking out the only starting point would be leaving the trace — the
-    // menu's footer is that.
-    const urn = displayMap.get(target.id)?.urn ?? target.id
-    if (!several && canvasTrace.tracedUrns.length > 1 && canvasTrace.tracedUrns.includes(urn)) {
-      actions.push({ id: 'trace-remove', label: 'Remove from this trace', icon: 'ListMinus', onClick: () => removeTraceSeed(urn) })
-    }
-    return actions
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      }] : []),
+      ...(removable ? [{ id: 'trace-remove', label: 'Remove from this trace', icon: 'ListMinus' as const, onClick: () => removeTraceSeed(urn) }] : []),
+    ]
   }, [interactions.state.contextMenu.target, traceActive, selectedNodeIds, startCanvasTrace, traceAddition, addTraceSeeds,
     displayMap, canvasTrace.tracedUrns, removeTraceSeed])
   // What the selection adds to the trace on screen (the trace's selection bar).
@@ -5531,6 +5532,187 @@ export function ContextViewCanvas({
     if (merged) mergeDrilldownIntoCanvas(merged)
   }, [trace, nodes, edges, entityTypeLevels, mergeDrilldownIntoCanvas])
 
+  // WHAT A COLLAPSE FREES — moved here from toggleNode, and taking several rows
+  // at once, so "Collapse everything inside" prunes in ONE store write however
+  // many rows it closes. Each row is judged on its own: one whose subtree
+  // carries unsaved work keeps it, the rest are pruned.
+  //
+  // Collapse: drop every edge with an endpoint inside the collapsed
+  // subtree (the node itself + all descendants). Re-expanding
+  // refetches the dropped edges via `loadChildren` / drill paths so
+  // the store stays clean across many expand/collapse cycles.
+  //
+  // Trace-mode exemption: edges merged by `/trace/v2` or
+  // `autoDrillOnExpand` are tracked in
+  // `useUnifiedTrace.addedEdgeIds`. We preserve the ENTIRE set —
+  // both the lineage edges and the containment edges. Two reasons:
+  //
+  //  1. Lineage edges have no re-add path on re-expand. Neither
+  //     `loadChildren` nor `autoDrillOnExpand` refetches the
+  //     original `/trace/v2` lineage — it was a one-shot result.
+  //     Dropping it permanently kills the trace mesh until the
+  //     user re-runs the trace.
+  //
+  //  2. Containment edges are needed to keep the projection chain
+  //     intact. `useEdgeProjection`'s `ancestorMap` walks the
+  //     containment hierarchy (via `parentMap` from
+  //     `useContainmentHierarchy`) to roll a drilled child's
+  //     lineage edges up to its visible ancestor after collapse.
+  //     If we drop the drilled containment edges, the child node
+  //     stays in `canvas.nodes` but loses its parent entry — its
+  //     preserved lineage edges become unprojectable, and the
+  //     user sees "the ancestor lineage going into my focus node
+  //     vanished".
+  //
+  // Trade-off: preserving trace containment means
+  // `loadChildren`'s cache check (`currentChildrenCount >=
+  // childCount` in `useGraphHydration.ts`) short-circuits on
+  // re-expand, so browse-mode lineage between sibling children at
+  // deeper levels is not re-fetched. In trace mode this is
+  // acceptable — those edges are gated by
+  // `useEdgeProjection`'s trace context anyway (both endpoints
+  // must be in the trace context) and trace-relevant cross-edges
+  // are already in `addedEdgeIds` and preserved here.
+  //
+  // Browse-mode collapse (no trace active) is unchanged:
+  // `preserveEdgeIds === undefined` so every edge in the subtree
+  // is dropped, and the next `loadChildren` re-fetches everything
+  // from scratch.
+  // IMPORTANT: do NOT add ``nodeId`` itself to ``subtreeIds`` —
+  // only its descendants. ``removeEdgesByNodeIds`` drops every
+  // edge where source OR target is in the set, so including
+  // ``nodeId`` purges the parent's containment edge to
+  // ``nodeId`` as well. That orphans the just-collapsed node
+  // from ``useContainmentHierarchy``: the LayerColumn stops
+  // rendering it (the row vanishes) AND the parent's
+  // ``children.length`` drops below ``childCount`` so the
+  // virtualized tree spawns a stale "↓ load N more" pill. The
+  // bug only surfaced once ``useRevealSearchHit`` started
+  // priming deep entities that weren't in the initial page; the
+  // collapse flow was previously masked because the missing
+  // child was re-fetched via the normal page-load path anyway.
+  // The walk still seeds from ``nodeId`` so its descendants get
+  // enumerated; we just skip adding ``nodeId`` to the removal
+  // set itself.
+  //
+  // Only what the node DRAWS goes. A descendant drawn somewhere else — a
+  // child placed in another column or group, or the anchor of another
+  // column, with everything under it — is its own column's row, not
+  // this one's, and stays with its lines.
+  const pruneCollapsed = useCallback((nodeIds: readonly string[]) => {
+    // Each subtree node, to the collapsed row it belongs to.
+    const ownerOf = new Map<string, number>()
+    nodeIds.forEach((nodeId, row) => {
+      const drawnHere = new Set<string>()
+      const drawnStack = [...(displayMap.get(nodeId)?.children ?? [])]
+      while (drawnStack.length > 0) {
+        const child = drawnStack.pop()!
+        drawnHere.add(child.id)
+        drawnStack.push(...child.children)
+      }
+      const drawnElsewhere = (id: string) => (displayMap.has(id) && !drawnHere.has(id))
+        || promotedAnchors.has((nodeMap.get(id)?.data?.urn as string | undefined) ?? id)
+      const stack: string[] = [nodeId]
+      while (stack.length > 0) {
+        const id = stack.pop()!
+        const children = childMap.get(id)
+        if (!children) continue
+        for (const cid of children) {
+          if (drawnElsewhere(cid)) continue
+          if (!ownerOf.has(cid)) { ownerOf.set(cid, row); stack.push(cid) }
+        }
+      }
+    })
+
+    // Browse-mode collapse must PRUNE the subtree's descendant NODES, not
+    // just their containment edges. Dropping only edges leaves each
+    // descendant in `canvas.nodes` with no incoming containment edge; in a
+    // rule / entity-type-scoped Context View, `useLayerAssignment` then
+    // re-homes that edge-less node to its type column as a VISUAL ROOT
+    // (the root priority chain resolves it by entity type), and
+    // `useContainmentHierarchy` reports it parentless — so children and
+    // grandchildren float up as root-level siblings and the tree scrambles.
+    // Physically removing the descendants keeps collapse a true
+    // subtree-hide; re-expand refetches them via `loadChildren` (the
+    // backend returns each node with a correct `childCount`, including
+    // draft-created intermediates, so deeper drilling still works).
+    //
+    // Falls back to edge-only cleanup when:
+    //   • a trace is active — trace-merged edges have no re-add path and
+    //     `useTraceFilteredHierarchy` already hides non-context orphans, so
+    //     the existing preserve-edges behaviour is retained; or
+    //   • the subtree carries UNSAVED work. Pruning + refetch would make
+    //     in-progress authoring vanish from the canvas. Unsaved work has three
+    //     representations in this app, so the guard checks all three:
+    //       (1) a subtree NODE with an isPending overlay (create/modify/delete);
+    //       (2) a pending containment EDGE incident to the subtree — a
+    //           reparented / "Move to…" node is a SAVED, markerless node whose
+    //           pending marker lives on the NEW edge (useReparentNode.
+    //           restageContainment); pruning the node would drop it from the
+    //           canvas until a manual re-expand; and
+    //       (3) a staged property edit (rename/update) in stagedChangesStore
+    //           targeting a subtree node — these carry NO canvas marker at all.
+    //     `removeEdgesByNodeIds` already preserves unsaved edges in that fallback.
+    // One pass over each of the three, whatever the number of rows.
+    const { nodes: storeNodes, edges: storeEdges } = useCanvasStore.getState()
+    const unsaved = new Set<number>()
+    const urnOwner = new Map<string, number>()
+    for (const n of storeNodes) {
+      const row = ownerOf.get(n.id)
+      if (row === undefined) continue
+      urnOwner.set((n.data?.urn as string | undefined) ?? n.id, row)
+      if (n.data?.isPending) unsaved.add(row)
+    }
+    for (const e of storeEdges) {
+      if (!e.data?.isPending) continue
+      for (const end of [e.source, e.target]) {
+        const row = ownerOf.get(end)
+        if (row !== undefined) unsaved.add(row)
+      }
+    }
+    for (const c of useStagedChangesStore.getState().changes) {
+      const row = ownerOf.get(c.targetId) ?? (c.targetUrn ? urnOwner.get(c.targetUrn) : undefined)
+      if (row !== undefined) unsaved.add(row)
+    }
+    const prunable = traceActive ? [] : [...ownerOf].filter(([, row]) => !unsaved.has(row)).map(([id]) => id)
+
+    if (prunable.length > 0) {
+      // Atomic node + incident-edge removal.
+      removeStoreNodes(prunable)
+      // Drop the pruned descendants from `expandedNodes` so a re-expand
+      // starts from a clean single level instead of resurrecting stale
+      // expansion state that points at nodes no longer in the store.
+      setExpandedNodes((prev) => {
+        const next = new Set(prev)
+        for (const id of prunable) next.delete(id)
+        return next
+      })
+    }
+    // else — the subtree carries UNSAVED work: leave it FULLY intact in the
+    // store (no node or edge removal). The visual collapse is driven by
+    // `expandedNodes` alone, so the rows are hidden regardless; keeping every
+    // containment edge means no SAVED descendant is orphaned. Dropping the
+    // saved edges here (the old `removeEdgesByNodeIds` fallback) is exactly
+    // what re-homed those descendants as root-level siblings — the
+    // expand/collapse "scramble" that recurs whenever the subtree mixes saved
+    // nodes with new/renamed (pending) ones. Re-expand re-renders straight from
+    // the intact store (loadChildren short-circuits on the already-satisfied
+    // childCount, nothing duplicates), and every in-progress create / rename /
+    // reparent survives.
+
+    // Synchronous companion: drop matching entries in the aggregated-edge
+    // map too. Otherwise stale child-level aggregated edges linger for up
+    // to 500 ms (until the debounced fetchAggregated refreshes), producing
+    // a flicker after collapse. Resolve subtree URNs from displayMap so
+    // we don't depend on id == urn invariants.
+    const subtreeUrns = new Set<string>()
+    for (const id of ownerOf.keys()) {
+      const u = (displayMap.get(id)?.data?.urn as string | undefined) ?? id
+      if (u) subtreeUrns.add(u)
+    }
+    if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
+  }, [displayMap, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, promotedAnchors, nodeMap])
+
   const toggleNode = useCallback(async (nodeId: string) => {
     // TRACE MODE: expansion belongs to the overlay. Opening a card is a
     // re-projection of the walk model the session already holds — no fetch,
@@ -5605,176 +5787,191 @@ export function ContextViewCanvas({
       // User collapsed — drop any pending/in-flight child load so a
       // slow response doesn't repopulate a now-collapsed subtree.
       cancelChildLoad(nodeId)
-
-      // Collapse: drop every edge with an endpoint inside the collapsed
-      // subtree (the node itself + all descendants). Re-expanding
-      // refetches the dropped edges via `loadChildren` / drill paths so
-      // the store stays clean across many expand/collapse cycles.
-      //
-      // Trace-mode exemption: edges merged by `/trace/v2` or
-      // `autoDrillOnExpand` are tracked in
-      // `useUnifiedTrace.addedEdgeIds`. We preserve the ENTIRE set —
-      // both the lineage edges and the containment edges. Two reasons:
-      //
-      //  1. Lineage edges have no re-add path on re-expand. Neither
-      //     `loadChildren` nor `autoDrillOnExpand` refetches the
-      //     original `/trace/v2` lineage — it was a one-shot result.
-      //     Dropping it permanently kills the trace mesh until the
-      //     user re-runs the trace.
-      //
-      //  2. Containment edges are needed to keep the projection chain
-      //     intact. `useEdgeProjection`'s `ancestorMap` walks the
-      //     containment hierarchy (via `parentMap` from
-      //     `useContainmentHierarchy`) to roll a drilled child's
-      //     lineage edges up to its visible ancestor after collapse.
-      //     If we drop the drilled containment edges, the child node
-      //     stays in `canvas.nodes` but loses its parent entry — its
-      //     preserved lineage edges become unprojectable, and the
-      //     user sees "the ancestor lineage going into my focus node
-      //     vanished".
-      //
-      // Trade-off: preserving trace containment means
-      // `loadChildren`'s cache check (`currentChildrenCount >=
-      // childCount` in `useGraphHydration.ts`) short-circuits on
-      // re-expand, so browse-mode lineage between sibling children at
-      // deeper levels is not re-fetched. In trace mode this is
-      // acceptable — those edges are gated by
-      // `useEdgeProjection`'s trace context anyway (both endpoints
-      // must be in the trace context) and trace-relevant cross-edges
-      // are already in `addedEdgeIds` and preserved here.
-      //
-      // Browse-mode collapse (no trace active) is unchanged:
-      // `preserveEdgeIds === undefined` so every edge in the subtree
-      // is dropped, and the next `loadChildren` re-fetches everything
-      // from scratch.
-      // IMPORTANT: do NOT add ``nodeId`` itself to ``subtreeIds`` —
-      // only its descendants. ``removeEdgesByNodeIds`` drops every
-      // edge where source OR target is in the set, so including
-      // ``nodeId`` purges the parent's containment edge to
-      // ``nodeId`` as well. That orphans the just-collapsed node
-      // from ``useContainmentHierarchy``: the LayerColumn stops
-      // rendering it (the row vanishes) AND the parent's
-      // ``children.length`` drops below ``childCount`` so the
-      // virtualized tree spawns a stale "↓ load N more" pill. The
-      // bug only surfaced once ``useRevealSearchHit`` started
-      // priming deep entities that weren't in the initial page; the
-      // collapse flow was previously masked because the missing
-      // child was re-fetched via the normal page-load path anyway.
-      // The walk still seeds from ``nodeId`` so its descendants get
-      // enumerated; we just skip adding ``nodeId`` to the removal
-      // set itself.
-      //
-      // Only what the node DRAWS goes. A descendant drawn somewhere else — a
-      // child placed in another column or group, or the anchor of another
-      // column, with everything under it — is its own column's row, not
-      // this one's, and stays with its lines.
-      const drawnHere = new Set<string>()
-      const drawnStack = [...(displayMap.get(nodeId)?.children ?? [])]
-      while (drawnStack.length > 0) {
-        const child = drawnStack.pop()!
-        drawnHere.add(child.id)
-        drawnStack.push(...child.children)
-      }
-      const drawnElsewhere = (id: string) => (displayMap.has(id) && !drawnHere.has(id))
-        || promotedAnchors.has((nodeMap.get(id)?.data?.urn as string | undefined) ?? id)
-      const subtreeIds = new Set<string>()
-      const stack: string[] = [nodeId]
-      while (stack.length > 0) {
-        const id = stack.pop()!
-        const children = childMap.get(id)
-        if (!children) continue
-        for (const cid of children) {
-          if (drawnElsewhere(cid)) continue
-          if (!subtreeIds.has(cid)) { subtreeIds.add(cid); stack.push(cid) }
-        }
-      }
-
-      // Browse-mode collapse must PRUNE the subtree's descendant NODES, not
-      // just their containment edges. Dropping only edges leaves each
-      // descendant in `canvas.nodes` with no incoming containment edge; in a
-      // rule / entity-type-scoped Context View, `useLayerAssignment` then
-      // re-homes that edge-less node to its type column as a VISUAL ROOT
-      // (the root priority chain resolves it by entity type), and
-      // `useContainmentHierarchy` reports it parentless — so children and
-      // grandchildren float up as root-level siblings and the tree scrambles.
-      // Physically removing the descendants keeps collapse a true
-      // subtree-hide; re-expand refetches them via `loadChildren` (the
-      // backend returns each node with a correct `childCount`, including
-      // draft-created intermediates, so deeper drilling still works).
-      //
-      // Falls back to edge-only cleanup when:
-      //   • a trace is active — trace-merged edges have no re-add path and
-      //     `useTraceFilteredHierarchy` already hides non-context orphans, so
-      //     the existing preserve-edges behaviour is retained; or
-      //   • the subtree carries UNSAVED work. Pruning + refetch would make
-      //     in-progress authoring vanish from the canvas. Unsaved work has three
-      //     representations in this app, so the guard checks all three:
-      //       (1) a subtree NODE with an isPending overlay (create/modify/delete);
-      //       (2) a pending containment EDGE incident to the subtree — a
-      //           reparented / "Move to…" node is a SAVED, markerless node whose
-      //           pending marker lives on the NEW edge (useReparentNode.
-      //           restageContainment); pruning the node would drop it from the
-      //           canvas until a manual re-expand; and
-      //       (3) a staged property edit (rename/update) in stagedChangesStore
-      //           targeting a subtree node — these carry NO canvas marker at all.
-      //     `removeEdgesByNodeIds` already preserves unsaved edges in that fallback.
-      const { nodes: storeNodes, edges: storeEdges } = useCanvasStore.getState()
-      const subtreeNodeUrns = new Set<string>()
-      let pendingNodeInSubtree = false
-      for (const n of storeNodes) {
-        if (!subtreeIds.has(n.id)) continue
-        subtreeNodeUrns.add((n.data?.urn as string | undefined) ?? n.id)
-        if (n.data?.isPending) pendingNodeInSubtree = true
-      }
-      const pendingEdgeInSubtree = storeEdges.some(
-        (e) => !!e.data?.isPending && (subtreeIds.has(e.source) || subtreeIds.has(e.target)),
-      )
-      const stagedEditInSubtree = useStagedChangesStore.getState().changes.some(
-        (c) => subtreeIds.has(c.targetId) || (c.targetUrn ? subtreeNodeUrns.has(c.targetUrn) : false),
-      )
-      const subtreeHasUnsavedWork = pendingNodeInSubtree || pendingEdgeInSubtree || stagedEditInSubtree
-      const canPrune = !traceActive && !subtreeHasUnsavedWork
-
-      if (canPrune && subtreeIds.size > 0) {
-        // Atomic node + incident-edge removal.
-        removeStoreNodes([...subtreeIds])
-        // Drop the pruned descendants from `expandedNodes` so a re-expand
-        // starts from a clean single level instead of resurrecting stale
-        // expansion state that points at nodes no longer in the store.
-        setExpandedNodes((prev) => {
-          const next = new Set(prev)
-          for (const id of subtreeIds) next.delete(id)
-          return next
-        })
-      }
-      // else — the subtree carries UNSAVED work: leave it FULLY intact in the
-      // store (no node or edge removal). The visual collapse is driven by
-      // `expandedNodes` alone, so the rows are hidden regardless; keeping every
-      // containment edge means no SAVED descendant is orphaned. Dropping the
-      // saved edges here (the old `removeEdgesByNodeIds` fallback) is exactly
-      // what re-homed those descendants as root-level siblings — the
-      // expand/collapse "scramble" that recurs whenever the subtree mixes saved
-      // nodes with new/renamed (pending) ones. Re-expand re-renders straight from
-      // the intact store (loadChildren short-circuits on the already-satisfied
-      // childCount, nothing duplicates), and every in-progress create / rename /
-      // reparent survives.
-
-      // Synchronous companion: drop matching entries in the aggregated-edge
-      // map too. Otherwise stale child-level aggregated edges linger for up
-      // to 500 ms (until the debounced fetchAggregated refreshes), producing
-      // a flicker after collapse. Resolve subtree URNs from displayMap so
-      // we don't depend on id == urn invariants.
-      const subtreeUrns = new Set<string>()
-      for (const id of subtreeIds) {
-        const u = (displayMap.get(id)?.data?.urn as string | undefined) ?? id
-        if (u) subtreeUrns.add(u)
-      }
-      if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
+      // …and free what it drew.
+      pruneCollapsed([nodeId])
     }
-  }, [displayMap, announceChildLoad, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon, promotedAnchors, nodeMap])
+  }, [displayMap, announceChildLoad, cancelChildLoad, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon, pruneCollapsed])
 
 
 
+
+  // ── OPEN WHAT IS INSIDE, a level at a time (useExpandBelow) ──────────────
+  // From an entity's menu, the selection bar, and ⇧→ / ⇧← on a row. One
+  // expansion update per level, each container's first page through the
+  // loader the chevron uses; every level only when the reader switches it on.
+  // During a trace the run walks the overlay's cards instead — it opens only
+  // what the trace holds, and fetches nothing.
+  const expandDepthMode = usePreferencesStore((s) => s.expandDepthMode) ?? 'level'
+  const setExpandDepthMode = usePreferencesStore((s) => s.setExpandDepthMode)
+  const traceTree = useMemo(() => {
+    const kids = new Map<string, string[]>()
+    const parents = new Map<string, string>()
+    for (const lane of overlay.view?.lanes ?? []) {
+      for (const [urn, card] of lane.cards) {
+        const held = (lane.childrenOf.get(urn) ?? []).flatMap((kid) => {
+          const child = lane.cards.get(kid)
+          return child ? [child.id] : []
+        })
+        kids.set(card.id, held)
+        for (const kid of held) parents.set(kid, card.id)
+      }
+    }
+    return { kids, parents }
+  }, [overlay.view])
+  const browseTree = useMemo<ExpandTree>(() => ({
+    expanded: expandedNodes,
+    childrenOf: (id) => displayMap.get(id)?.children.map((c) => c.id) ?? [],
+    isContainer: (id) => {
+      const row = displayMap.get(id)
+      return !!row && (row.children.length > 0 || Number(row.data?.childCount ?? 0) > 0)
+    },
+  }), [expandedNodes, displayMap])
+  const traceExpandTree = useMemo<ExpandTree>(() => ({
+    expanded: overlay.traceExpansion,
+    childrenOf: (id) => traceTree.kids.get(id) ?? [],
+    isContainer: (id) => (traceTree.kids.get(id)?.length ?? 0) > 0,
+  }), [overlay.traceExpansion, traceTree])
+  const expandTree = overlay.active ? traceExpandTree : browseTree
+  const rowLabel = useCallback((id: string) => renderMap.get(id)?.name || id, [renderMap])
+  const { expand: runExpand, cancel: cancelExpand, running: expanding } = useExpandBelow(overlay.active ? {
+    ...traceExpandTree,
+    parentOf: (id) => traceTree.parents.get(id),
+    open: (ids) => { overlayRef.current?.expandPath(ids); recordTraceExpansionSoon() },
+    loading: EMPTY_LOADING,
+    loadedCount: () => useCanvasStore.getState().nodes.length,
+    labelOf: rowLabel,
+  } : {
+    ...browseTree,
+    parentOf: (id) => parentMap.get(id),
+    // One update for the level. The first pages are asked for below, so the
+    // auto-first-page effect is told they are in hand.
+    open: (ids) => setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      for (const id of ids) next.add(id)
+      return next
+    }),
+    loadFirstPage: (id) => {
+      markFirstPageHandled(id)
+      return loadChildrenSorted(id)
+    },
+    cancelLoad: cancelChildLoad,
+    loading: loadingNodes,
+    loadedCount: () => useCanvasStore.getState().nodes.length,
+    firstPageSize: (id) => Math.min(Number(displayMap.get(id)?.data?.childCount ?? 0), CHILDREN_PAGE_SIZE),
+    labelOf: rowLabel,
+  })
+  // While the walk runs and nothing is drawn yet, there is nothing to open:
+  // the columns still show browse, and opening it would write the store.
+  const expandOffered = !traceActive || overlay.active
+  const expandRows = useCallback((ids: readonly string[]) => {
+    if (expandOffered) runExpand(ids, expandDepthMode === 'all')
+  }, [expandOffered, runExpand, expandDepthMode])
+  // The open rows beneath `ids`, and the outermost of them (each row's nearest
+  // open ancestor below the root is the root itself, or none).
+  const openBeneath = useCallback((ids: readonly string[]) => {
+    const below: string[] = []
+    const outer: string[] = []
+    const seen = new Set<string>()
+    const stack = ids.flatMap((id) => expandTree.childrenOf(id).map((kid) => ({ id: kid, underOpen: false })))
+    while (stack.length > 0) {
+      const { id, underOpen } = stack.pop()!
+      if (seen.has(id)) continue
+      seen.add(id)
+      const open = expandTree.expanded.has(id)
+      if (open) {
+        below.push(id)
+        if (!underOpen) outer.push(id)
+      }
+      for (const kid of expandTree.childrenOf(id)) stack.push({ id: kid, underOpen: underOpen || open })
+    }
+    return { below, outer }
+  }, [expandTree])
+  // COLLAPSE EVERYTHING INSIDE: the roots stay open on their first level, every
+  // row beneath them closes — and what those rows drew is freed (pruneCollapsed),
+  // in one store write.
+  const collapseInside = useCallback((ids: readonly string[]) => {
+    if (overlayRef.current?.active) {
+      const { below } = openBeneath(ids)
+      for (const id of below) overlayRef.current.toggle(id)
+      if (below.length > 0) recordTraceExpansionSoon()
+      return
+    }
+    if (traceWriteLocked()) return
+    if (expanding) cancelExpand()
+    const { below, outer } = openBeneath(outermost(ids, (id) => parentMap.get(id)))
+    if (below.length === 0) return
+    for (const id of below) if (loadingNodes.has(id)) cancelChildLoad(id)
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      for (const id of below) next.delete(id)
+      return next
+    })
+    pruneCollapsed(outer)
+  }, [openBeneath, recordTraceExpansionSoon, traceWriteLocked, expanding, cancelExpand, parentMap, loadingNodes, cancelChildLoad, pruneCollapsed])
+  /** What Expand and Collapse would do for these rows, for the menu and the bar. */
+  const expandChoices = useCallback((ids: readonly string[]) => {
+    const roots = outermost(ids, overlay.active ? (id) => traceTree.parents.get(id) : (id) => parentMap.get(id))
+    return {
+      canExpand: nextLevel(roots, expandTree).ids.length > 0,
+      canCollapse: openBeneath(roots).below.length > 0,
+    }
+  }, [overlay.active, traceTree, parentMap, expandTree, openBeneath])
+  // ⇧→ / ⇧← on a focused row. One identity for LayerColumn's memo.
+  const expandRowsRef = useRef(expandRows)
+  const collapseInsideRef = useRef(collapseInside)
+  useEffect(() => {
+    expandRowsRef.current = expandRows
+    collapseInsideRef.current = collapseInside
+  }, [expandRows, collapseInside])
+  const expandRowBelow = useCallback((id: string) => expandRowsRef.current([id]), [])
+  const collapseRowInside = useCallback((id: string) => collapseInsideRef.current([id]), [])
+  // The menu's rows, for the entity right-clicked or the selection it is part
+  // of: Expand (with its All levels switch), Collapse everything inside — or,
+  // while a run is going, the way to stop it.
+  const expandMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const { target, isOpen } = interactions.state.contextMenu
+    // Only while the menu is open: its target outlives it, and this walks the
+    // open tree beneath — on every page that lands during a run, otherwise.
+    if (!isOpen || !expandOffered || !target || target.type !== 'node') return []
+    const ids = menuSelection(target.id, selectedNodeIds)
+    if (expanding) {
+      return [{ id: 'expand-stop', label: 'Stop opening', icon: 'CircleStop', onClick: cancelExpand }]
+    }
+    const { canExpand, canCollapse } = expandChoices(ids)
+    const all = expandDepthMode === 'all'
+    return [
+      ...(canExpand ? [{
+        id: 'expand-below',
+        label: all ? 'Expand all levels' : 'Expand next level',
+        icon: all ? 'ChevronsDown' as const : 'ChevronDown' as const,
+        shortcut: '⇧→',
+        toggle: { label: 'All levels', checked: all, onChange: (on: boolean) => setExpandDepthMode(on ? 'all' : 'level') },
+        onClick: () => expandRows(ids),
+      }] : []),
+      ...(canCollapse ? [{
+        id: 'collapse-inside',
+        label: 'Collapse everything inside',
+        icon: 'ChevronsUp' as const,
+        shortcut: '⇧←',
+        onClick: () => collapseInside(ids),
+      }] : []),
+    ]
+  }, [interactions.state.contextMenu, expandOffered, selectedNodeIds, expanding, cancelExpand, expandChoices,
+    expandDepthMode, setExpandDepthMode, expandRows, collapseInside])
+  // The selection bar's: the same, for every entity held.
+  const selectionExpand = useMemo(() => {
+    if (!expandOffered || bulkSelection.length === 0) return undefined
+    const { canExpand, canCollapse } = expandChoices(bulkSelection)
+    if (!canExpand && !canCollapse && !expanding) return undefined
+    return {
+      allLevels: expandDepthMode === 'all',
+      onToggleAllLevels: () => setExpandDepthMode(expandDepthMode === 'all' ? 'level' : 'all'),
+      onExpand: canExpand ? () => expandRows(bulkSelection) : undefined,
+      onCollapse: canCollapse ? () => collapseInside(bulkSelection) : undefined,
+      running: expanding,
+      onCancel: cancelExpand,
+    }
+  }, [expandOffered, bulkSelection, expandChoices, expanding, expandDepthMode, setExpandDepthMode, expandRows, collapseInside, cancelExpand])
 
   // `traceContextSet` now comes directly from useTraceFilteredHierarchy above
   // (single source of truth for both filtering and edge projection).
@@ -7833,6 +8030,7 @@ export function ContextViewCanvas({
             onOpenShared={bulkSelection.length > 1 ? openShared : undefined}
             sharedEditable={canvasWritable && !traceActive}
             onExport={exportWithChildren ? () => exportWithChildren(bulkSelection) : undefined}
+            expand={selectionExpand}
           />
         )}
         {/* During a trace the selection is something to trace FROM: start again from it, or add
@@ -7854,6 +8052,7 @@ export function ContextViewCanvas({
             addToTraceBlocked={selectionTraceAddition?.blocked}
             onOpenDetails={offerDetails ? () => useCanvasStore.getState().openNodeDrawer(bulkSelection[0]) : undefined}
             onExport={exportWithChildren ? () => exportWithChildren(bulkSelection) : undefined}
+            expand={selectionExpand}
             hint={<><Kbd shortcut="shift" /> double-click a card to trace from it</>}
             offerForOne
           />
@@ -8373,6 +8572,8 @@ export function ContextViewCanvas({
                 onSelectAllInLayer={selectAllInLayer}
                 selectedNodeIds={selectedNodeIdSet}
                 onToggle={toggleNode}
+                onExpandBelow={expandOffered ? expandRowBelow : undefined}
+                onCollapseInside={expandOffered ? collapseRowInside : undefined}
                 onContextMenu={handleContextMenu}
                 onDoubleClick={handleDoubleClick}
                 // Create affordances render only in draft (edit) mode —
@@ -8668,6 +8869,7 @@ export function ContextViewCanvas({
         onClose={interactions.closeContextMenu}
         onEditNode={interactions.editNode}
         viewOnly={!canvasWritable}
+        expandActions={expandMenuActions}
         trace={traceActive
           ? { actions: traceMenuActions, editingPaused: canEditGraph, onExit: exitCanvasTrace }
           : undefined}

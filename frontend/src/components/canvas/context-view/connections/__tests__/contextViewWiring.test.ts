@@ -76,8 +76,8 @@ describe('the Connections panel is wired into the Context View', () => {
     expect(source).toContain('buildConnectionModel(drawableLineageEdges)')
     expect(source).not.toContain('buildConnectionModel(effectiveLineageEdges)')
     // The hover pool keeps everything: hovering an end brings a delegated
-    // line back.
-    expect(source).toContain('hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}')
+    // line back — except in On Click, where a hover draws nothing at all.
+    expect(source).toContain("hoverPool={isStubsMode && !overlay.active && lineageRenderMode !== 'click' ? visibleLineageEdges : undefined}")
   })
 
   it('the panel and search highlights reach the overlay only — cards keep their own highlight', () => {
