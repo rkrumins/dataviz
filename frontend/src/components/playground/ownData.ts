@@ -10,7 +10,7 @@
  * wait on an import.
  */
 
-import { isAncestryColumn } from '@/lib/ancestryColumns'
+import { ancestryColumnsIn } from '@/lib/ancestryColumns'
 import type { OwnConnection, OwnThing, PropertyValue } from '@/services/playgroundService'
 
 export type { OwnConnection, OwnThing, PropertyValue }
@@ -160,10 +160,12 @@ export function looksLikeConnections(headers: string[]): boolean {
 
 /** The columns of things that become properties: every column not matched to a field, but where a
  *  thing sat in the graph its file was exported from (`lib/ancestryColumns`): informational, never
- *  a property of the thing. */
+ *  a property of the thing. Only in a file one of our exports wrote: someone's own `path` column
+ *  stays a property. */
 export function propertyColumns(headers: string[], cols: ThingColumns): string[] {
     const used = new Set(Object.values(cols).filter(Boolean))
-    return headers.filter(h => h && !used.has(h) && !isAncestryColumn(h))
+    const skipped = new Set(ancestryColumnsIn(headers))
+    return headers.filter(h => h && !used.has(h) && !skipped.has(h))
 }
 
 /** A cell as a property value: a plain number or true/false as such, everything else as text. A

@@ -60,6 +60,12 @@ describe('matching columns', () => {
             { key: 'urn:a', type: 'Table', name: 'A', properties: { owner: 'Ops' } }])
     })
 
+    it("keeps someone's own path column: only a file an export wrote has its ancestry skipped", () => {
+        // No parentUrn or pathUrns: this is a person's own file, and its `path` is their data.
+        const headers = ['key', 'type', 'name', 'path', 'parentName']
+        expect(propertyColumns(headers, guessThingColumns(headers))).toEqual(['path', 'parentName'])
+    })
+
     it('tells a file of connections from a file of things', () => {
         expect(looksLikeConnections(['from', 'type', 'to'])).toBe(true)
         expect(looksLikeConnections(['Source', 'Relationship', 'Target'])).toBe(true)

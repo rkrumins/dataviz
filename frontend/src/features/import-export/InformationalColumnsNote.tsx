@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react'
 import { FolderTree } from 'lucide-react'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { parseCsv } from '@/components/playground/ownData'
-import { ANCESTRY_COLUMNS, isAncestryColumn } from '@/lib/ancestryColumns'
+import { ANCESTRY_COLUMNS, ancestryColumnsIn } from '@/lib/ancestryColumns'
 import { detectFormat } from '@/services/importExportApiService'
 import { usePersonaMode } from '@/store/persona'
 
@@ -28,7 +28,7 @@ export async function informationalColumnsOf(file: File): Promise<string[]> {
     return ANCESTRY_COLUMNS.filter((c) => new RegExp(`"${c}"\\s*:`).test(head))
   }
   const firstLine = head.split(/\r?\n/, 1)[0] ?? ''
-  return parseCsv(firstLine).headers.filter(isAncestryColumn)
+  return ancestryColumnsIn(parseCsv(firstLine).headers)
 }
 
 export function InformationalColumnsNote({ files }: { files: readonly File[] }) {
