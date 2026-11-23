@@ -5,14 +5,16 @@
  *
  * A strip that may hold more tabs than its width (a drawer on a phone, a page with many sections)
  * is `scrollable`: its tabs keep their size and the strip scrolls sideways — by touch, trackpad,
- * the scrollbar or the mouse wheel — with a fade on the side that has more, and the active tab is
- * always brought into view, so a link that opens a later tab lands with it showing.
+ * the scrollbar or the mouse wheel — with a fade and a chevron on the side that has more (a strip
+ * can end exactly between two tabs, and then only the chevron says there are more), and the active
+ * tab is always brought into view, so a link that opens a later tab lands with it showing.
  */
 import {
   createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useSyncExternalStore,
   type ComponentType, type ReactNode, type RefObject,
 } from 'react'
 import * as RadixTabs from '@radix-ui/react-tabs'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 type TabsLook = 'segmented' | 'underline'
@@ -115,6 +117,14 @@ export function TabsList({ look = 'segmented', scrollable = false, className, ch
     return () => list.removeEventListener('wheel', onWheel)
   }, [scrollable])
 
+  // The chevrons: most of a strip's width at a time, and the reader has taken the strip over.
+  const page = (dir: -1 | 1) => {
+    const list = ref.current
+    if (!list) return
+    follow.current = false
+    list.scrollBy?.({ left: dir * Math.round(list.clientWidth * 0.7), behavior: 'smooth' })
+  }
+
   const strip = (
     <RadixTabs.List
       ref={ref}
@@ -137,16 +147,31 @@ export function TabsList({ look = 'segmented', scrollable = false, className, ch
         {scrollable ? (
           <div className="relative min-w-0">
             {strip}
-            <span aria-hidden data-tabs-fade="left" className={cn(
-              'pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-canvas to-transparent transition-opacity duration-150',
-              sides.left ? 'opacity-100' : 'opacity-0')} />
-            <span aria-hidden data-tabs-fade="right" className={cn(
-              'pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-canvas to-transparent transition-opacity duration-150',
-              sides.right ? 'opacity-100' : 'opacity-0')} />
+            <EdgeScroll side="left" shown={sides.left} onClick={() => page(-1)} />
+            <EdgeScroll side="right" shown={sides.right} onClick={() => page(1)} />
           </div>
         ) : strip}
       </ScrollableContext.Provider>
     </LookContext.Provider>
+  )
+}
+
+/** A scrolling strip's edge, where it has more: a fade over the tabs and a chevron that scrolls on.
+ *  Out of the tab order and hidden from screen readers — in a tablist the arrow keys move along. */
+function EdgeScroll({ side, shown, onClick }: { side: 'left' | 'right'; shown: boolean; onClick: () => void }) {
+  const Chevron = side === 'left' ? ChevronLeft : ChevronRight
+  return (
+    <span aria-hidden data-tabs-fade={side} className={cn(
+      'pointer-events-none absolute inset-y-0 flex w-12 items-center from-canvas via-canvas/80 to-transparent transition-opacity duration-150',
+      side === 'left' ? 'left-0 justify-start bg-gradient-to-r' : 'right-0 justify-end bg-gradient-to-l',
+      shown ? 'opacity-100' : 'opacity-0')}>
+      <button type="button" tabIndex={-1} disabled={!shown} onClick={onClick} data-tabs-scroll={side}
+        className={cn(
+          'flex h-6 w-6 items-center justify-center rounded-full border border-glass-border bg-canvas-elevated text-ink-muted shadow-sm transition-colors hover:text-ink',
+          shown && 'pointer-events-auto')}>
+        <Chevron className="h-3.5 w-3.5" />
+      </button>
+    </span>
   )
 }
 
