@@ -38,6 +38,8 @@ export const CANVAS_ZOOM_STEP = 0.05
 /**
  * How lineage edges render on the canvas.
  *  - 'stubs'  : every node with lineage shows a small stub; real edges materialize on hover/click.
+ *  - 'click'  : as 'stubs', but only a SELECTED entity's lines draw — a hover draws nothing and
+ *               dims nothing, for a busy board read by pointing around it.
  *  - 'auto'   : all real edges below `autoStubThreshold`; above it the STRONGEST flows (by
  *               bundled edge count) render up to the threshold as a budget, per-node
  *               indicators summarize the rest, and hover/selection materializes a node's
@@ -45,7 +47,10 @@ export const CANVAS_ZOOM_STEP = 0.05
  *               escalation to 'raw'.
  *  - 'raw'    : every fetched edge renders as a real edge (legacy behavior). Prompts at >5,000.
  */
-export type LineageRenderMode = 'stubs' | 'auto' | 'raw'
+export type LineageRenderMode = 'stubs' | 'click' | 'auto' | 'raw'
+
+/** Every edge density this build draws — a stored one outside it is not trusted. */
+const LINEAGE_RENDER_MODES: readonly LineageRenderMode[] = ['stubs', 'click', 'auto', 'raw']
 
 /**
  * Which lineage lines move (the chevrons marching along a line) — see
@@ -693,6 +698,14 @@ export const usePreferencesStore = create<PreferencesState>()(
       // chooses (null) — minimized in the Business view. A stored `false` was
       // the old default, not a choice: reset it. A stored `true` was a choice.
       version: 11,
+      // The default shallow merge, except that a stored edge density this build
+      // does not know — written by a newer build, or one since retired — falls
+      // back to the default instead of reaching a canvas that draws nothing for it.
+      merge: (persisted, current) => {
+        const state = { ...current, ...(persisted as Partial<PreferencesState>) }
+        if (!LINEAGE_RENDER_MODES.includes(state.lineageRenderMode)) state.lineageRenderMode = current.lineageRenderMode
+        return state
+      },
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }

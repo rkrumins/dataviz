@@ -6017,7 +6017,8 @@ export function ContextViewCanvas({
 
   // Render-mode resolution: `raw` shows every projected edge; `stubs`
   // suppresses ambient edges in favour of per-node indicators (hover /
-  // selection materializes); `auto` renders everything below
+  // selection materializes); `click` is `stubs` with the selection alone
+  // materializing (no hover pool, no hover spotlight); `auto` renders everything below
   // `autoStubThreshold` and switches to a BUDGETED presentation above it.
   // A trace bypasses it: the walk already bounds its lines and every trace
   // wire draws. Display › Edge Density says so.
@@ -6026,7 +6027,7 @@ export function ContextViewCanvas({
     // bounds the edge count — every trace wire draws, no stub culling.
     if (overlay.active) return false
     if (lineageRenderMode === 'raw') return false
-    if (lineageRenderMode === 'stubs') return true
+    if (lineageRenderMode === 'stubs' || lineageRenderMode === 'click') return true
     return drawableLineageEdges.length > autoStubThreshold
   }, [overlay.active, lineageRenderMode, drawableLineageEdges.length, autoStubThreshold])
 
@@ -8197,8 +8198,12 @@ export function ContextViewCanvas({
               railLineId={selectedNodeId ? null : openLine?.id ?? null}
               childMap={childMap}
               // On Hover / Adaptive draw a hovered entity's lines from here.
-              hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}
+              // On Click draws nothing for a hover: only the selection's
+              // lines, which the focus path above already holds.
+              hoverPool={isStubsMode && !overlay.active && lineageRenderMode !== 'click' ? visibleLineageEdges : undefined}
               hoverBudget={autoStubThreshold}
+              // A trace bypasses the density, this included.
+              hoverLines={overlay.active || lineageRenderMode !== 'click'}
               // A stub is a missing-link alert: lineage that leaves the view.
               // It follows the alerts switch, as the chip and the cue do.
               offCanvasLineage={overlay.active || !showMissingConnectionIndicators ? undefined : offCanvasByNode}

@@ -157,6 +157,7 @@ export function LineageFlowOverlay({
   childMap,
   hoverPool,
   hoverBudget = 500,
+  hoverLines = true,
   offCanvasLineage,
   onOpenOffCanvas,
   layerNames,
@@ -220,6 +221,11 @@ export function LineageFlowOverlay({
    *  drawn by this overlay rather than by a canvas re-render per hover. */
   hoverPool?: readonly PoolLine[],
   hoverBudget?: number,
+  /** Whether pointing at an entity draws anything: its lines, the spotlight
+   *  that lights them and dims the rest, an open container's own lines, and
+   *  the Anchor Rail following it. Off in On Click, where only a selection
+   *  draws — a hovered EDGE still says what it is. */
+  hoverLines?: boolean,
   /** Per row: lineage whose far end is outside this view — drawn as a stub
    *  beside the row. See ghostCues. */
   offCanvasLineage?: ReadonlyMap<string, OffCanvasLineage>,
@@ -427,7 +433,8 @@ export function LineageFlowOverlay({
     if (!containerRef.current) return
     // Read from the DOM, where the rows write it — never canvas state, so a
     // hover costs this pass and not a canvas re-render (hoverSpotlight.ts).
-    const hovered = document.documentElement.dataset.hoveredNode ?? lingerHoverRef.current
+    // In On Click a hovered entity is not one this pass draws for.
+    const hovered = hoverLines ? document.documentElement.dataset.hoveredNode ?? lingerHoverRef.current : null
 
     const containerRect = containerRef.current.getBoundingClientRect()
     // Find scroll parent once
@@ -1191,7 +1198,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints, portSides, backPointerColor, lineWeight])
+  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints, portSides, backPointerColor, lineWeight, hoverLines])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after
@@ -1493,14 +1500,15 @@ export function LineageFlowOverlay({
   //
   // A `MutationObserver` on the one attribute the rows write drives it — no
   // polling. No spotlight during a trace, or while a selection's own
-  // highlight is on: a click highlight wins over hover, as it always has.
+  // highlight is on: a click highlight wins over hover, as it always has —
+  // nor in On Click (`hoverLines` off), where a hover lights nothing at all.
   const hotEdgesRef = useRef<SVGGElement[]>([])
   const spotlightScrollerRef = useRef<HTMLElement | null>(null)
   // Latest inputs for the observer callback, which is bound once. Synced
   // before the recompute effect below, which reads them.
-  const spotlightInputs = useRef({ edges, childMap, allowed: true, hoverLinesFor })
+  const spotlightInputs = useRef({ edges, childMap, allowed: true, hoverLinesFor, hoverLines })
   useEffect(() => {
-    spotlightInputs.current = { edges, childMap, allowed: !isTracing && !isHighlightActive, hoverLinesFor }
+    spotlightInputs.current = { edges, childMap, allowed: hoverLines && !isTracing && !isHighlightActive, hoverLinesFor, hoverLines }
   })
 
   /** Mark the lit lines. Re-run after every render too: React may have
@@ -1557,7 +1565,7 @@ export function LineageFlowOverlay({
   // trace starting): the spotlight follows.
   useEffect(() => {
     applySpotlight()
-  }, [edges, childMap, isTracing, isHighlightActive, hoverLinesFor, applySpotlight])
+  }, [edges, childMap, isTracing, isHighlightActive, hoverLinesFor, hoverLines, applySpotlight])
 
   useEffect(() => {
     if (typeof MutationObserver === 'undefined') return
@@ -1581,8 +1589,8 @@ export function LineageFlowOverlay({
       if (railTimerRef.current) clearTimeout(railTimerRef.current)
       railTimerRef.current = setTimeout(() => {
         railTimerRef.current = null
-        dwellFocusRef.current = hovered
-        const next = selectedFocusRef.current ?? hovered
+        dwellFocusRef.current = spotlightInputs.current.hoverLines ? hovered : null
+        const next = selectedFocusRef.current ?? dwellFocusRef.current
         if (next !== focusNodeIdRef.current) {
           focusNodeIdRef.current = next
           scheduleUpdate()

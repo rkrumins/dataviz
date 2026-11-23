@@ -2,7 +2,7 @@
  * LineageDisplayPopover — Lineage Settings popover for the Context View
  * toolbar. Houses two grouped sections:
  *
- *   1. Edge Density — Stubs / Auto / Raw rendering mode
+ *   1. Edge Density — Stubs / Click / Auto / Raw rendering mode
  *   2. Direction   — arrow-marker toggle
  *
  * Visual identity mirrors `TraceDepthControl` so the two header chips
@@ -67,6 +67,16 @@ const DENSITY_OPTIONS: DensityOption[] = [
     plainDescription: 'Lines appear when you point at or pick an entity',
   },
   {
+    // For a busy board read by pointing around it: moving the pointer across
+    // the columns draws, lights and dims nothing.
+    mode: 'click',
+    label: 'On Click',
+    technical: 'Selection',
+    description: 'Edges appear only for the nodes you select; hovering draws nothing',
+    plainLabel: 'On click',
+    plainDescription: 'Lines show only for what you pick — pointing at an entity changes nothing',
+  },
+  {
     mode: 'auto',
     label: 'Adaptive',
     technical: 'Auto',
@@ -103,6 +113,7 @@ const PORT_SIDES_OPTIONS: Array<{ sides: LineagePortSides; label: string; short:
 
 const MODE_SHORT_LABEL: Record<LineageRenderMode, string> = {
   stubs: 'Stubs',
+  click: 'Click',
   auto: 'Auto',
   raw: 'Raw',
 }
@@ -926,14 +937,15 @@ const BUDGET_STEP = 50
 
 /** Adaptive edge budget — how many of the strongest flows render at once
  *  above the threshold (and the size of a focused node's materialized
- *  fan). In On Hover the same number is only that fan: "Lines per entity".
+ *  fan). In On Hover and On Click the same number is only that fan: "Lines
+ *  per entity".
  *  Reads/writes the persisted preference directly, mirroring the
  *  self-contained MissingConnectionsToggle pattern. */
 function AdaptiveBudgetSlider({ disabled, mode }: { disabled: boolean; mode: LineageRenderMode }) {
   const budget = usePreferencesStore((s) => s.autoStubThreshold)
   const setBudget = usePreferencesStore((s) => s.setAutoStubThreshold)
   const clamped = Math.min(BUDGET_MAX, Math.max(BUDGET_MIN, budget ?? 500))
-  const perEntity = mode === 'stubs'
+  const perEntity = mode === 'stubs' || mode === 'click'
   return (
     <div className="mt-2 px-2.5 py-2 rounded-lg bg-black/[0.02] dark:bg-white/[0.02] border border-black/[0.06] dark:border-white/[0.05]">
       <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
@@ -943,7 +955,7 @@ function AdaptiveBudgetSlider({ disabled, mode }: { disabled: boolean; mode: Lin
       </div>
       <p className="pt-1 pb-1.5 text-[11px] text-ink-muted/80 leading-snug">
         {perEntity
-          ? 'The most lines a hovered or selected entity draws at once, strongest first. When a selection has more, a chip on the canvas says so.'
+          ? `The most lines ${mode === 'click' ? 'a selected' : 'a hovered or selected'} entity draws at once, strongest first. When a selection has more, a chip on the canvas says so.`
           : 'How many of the strongest flows stay visible at once on dense graphs, and the most a hovered or selected entity draws. Markers summarize the rest.'}
       </p>
       <input
