@@ -46,7 +46,7 @@ export function PlacementRow({ placement, instanceId, label }: {
                     <p className="mt-1 text-[11px] text-ink-muted">
                         {placement.shardIndex != null && <>Shard {placement.shardIndex + 1} · </>}
                         slot {placement.slot.toLocaleString()} ·{' '}
-                        <span className="font-mono text-ink-secondary">{master.endpoint}</span>
+                        <span className="font-mono text-ink-secondary break-all">{master.endpoint}</span>
                         {health && (
                             <HoverTip label={HEALTH_META[health].label} detail={HEALTH_META[health].meaning}>
                                 <span className={cn(
@@ -80,7 +80,7 @@ export function PlacementRow({ placement, instanceId, label }: {
                         {placement.siblings > 0 && ` · sharing the shard with ${placement.siblings} other graph${placement.siblings === 1 ? '' : 's'}`}
                     </p>
                     {placement.replicas.length > 0 && (
-                        <p className="mt-0.5 text-[11px] text-ink-muted">
+                        <p className="mt-0.5 text-[11px] text-ink-muted [overflow-wrap:anywhere]">
                             {placement.replicas.length} replica{placement.replicas.length === 1 ? '' : 's'}:{' '}
                             {placement.replicas.map(r => `${r.endpoint} (${lagLabel(r.replication?.lagBytes)})`).join(', ')}
                         </p>

@@ -260,15 +260,15 @@ export function ProfilingChart({
                     type="button"
                     onClick={() => onFocusType?.(null)}
                     className={cn(
-                        'mb-3 inline-flex items-center gap-1.5 rounded-lg border border-glass-border',
+                        'mb-3 inline-flex max-w-full items-center gap-1.5 rounded-lg border border-glass-border',
                         'px-2.5 py-1.5 text-xs font-semibold text-ink-secondary',
                         'hover:text-ink hover:bg-canvas transition-colors',
                         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500',
                     )}
                 >
-                    <ArrowLeft className="w-3.5 h-3.5" aria-hidden />
-                    All {breakdown === 'edge_type' ? 'relationship' : 'entity'} types
-                    <span className="text-ink-muted font-normal">
+                    <ArrowLeft className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                    <span className="shrink-0">All {breakdown === 'edge_type' ? 'relationship' : 'entity'} types</span>
+                    <span className="truncate text-ink-muted font-normal">
                         · showing {focused.label}
                     </span>
                 </button>

@@ -99,7 +99,7 @@ export function TypeTrellis({
                 </label>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(13rem,1fr))]">
                 {panels.map((panel) => (
                     <Panel
                         key={panel.key}
@@ -160,7 +160,8 @@ function Panel({
                 ],
             )}
         >
-            <div className="flex items-center justify-between gap-2 mb-1.5 min-w-0">
+            {/* Room on the right for the focus icon, which would otherwise sit on the value. */}
+            <div className={cn('flex items-center justify-between gap-2 mb-1.5 min-w-0', onFocus && 'pr-4')}>
                 <span className="inline-flex items-center gap-1.5 min-w-0">
                     <span
                         className="w-2.5 h-2.5 rounded-sm shrink-0"

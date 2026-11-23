@@ -105,7 +105,7 @@ export function PrListRow({
       onClick={onOpen}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() } }}
       className={cn(
-        'group w-full flex items-center gap-3.5 rounded-2xl border border-glass-border bg-canvas-elevated/50 px-4 py-3 text-left cursor-pointer',
+        'group w-full flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-2xl border border-glass-border bg-canvas-elevated/50 px-4 py-3 text-left cursor-pointer',
         'hover:border-accent-lineage/40 hover:bg-canvas-elevated/80 hover:shadow-sm transition-all duration-150',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
       )}
@@ -123,9 +123,9 @@ export function PrListRow({
         )}
       </span>
 
-      <div className="min-w-0 flex-1">
+      <div className="min-w-[12rem] flex-1">
         {/* Title + status */}
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
           <p className="text-[14px] font-semibold text-ink truncate">{derivePrTitle(pr)}</p>
           <PrStatusBadge status={pr.status} />
           {behind && (

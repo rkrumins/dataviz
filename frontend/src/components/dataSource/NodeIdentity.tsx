@@ -631,7 +631,7 @@ export function NodeIdentityField({
                             <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-500/10 text-amber-500 tracking-wider">MAPPED</span>
                         )}
                     </div>
-                    <p className="text-[11px] text-ink-muted mt-0.5 truncate">
+                    <p className="text-[11px] text-ink-muted mt-0.5 line-clamp-2">
                         {identityInherited
                             ? <>Inherited from {SOURCE_LABELS[identitySource!]} — nodes identified by <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">{normalized}</code></>
                             : overridden

@@ -27,7 +27,7 @@ export function Segmented<T extends string>({
     return (
         <div
             role="group" aria-label={label}
-            className="inline-flex rounded-xl bg-canvas p-0.5 border border-glass-border"
+            className="inline-flex max-w-full overflow-x-auto custom-scrollbar rounded-xl bg-canvas p-0.5 border border-glass-border"
         >
             {options.map((option) => (
                 <button
@@ -36,7 +36,7 @@ export function Segmented<T extends string>({
                     aria-pressed={value === option.key}
                     onClick={() => onChange(option.key)}
                     className={cn(
-                        'font-semibold rounded-[10px] transition-colors whitespace-nowrap',
+                        'shrink-0 font-semibold rounded-[10px] transition-colors whitespace-nowrap',
                         size === 'sm' ? 'px-2.5 py-1 text-[11px]' : 'px-3 py-1.5 text-xs',
                         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500',
                         // A ring, because the selected chip is
@@ -175,7 +175,7 @@ export function ControlGroup<T extends string>({
     size?: 'sm' | 'md'
 }) {
     return (
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0 max-w-full">
             <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted shrink-0">
                 {label}
             </span>

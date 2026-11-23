@@ -218,13 +218,13 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount, label }
       <ForkStrip wsId={wsId} dataSourceId={dataSourceId} variant="tab" />
 
       {/* Status header */}
-      <div className={cn('flex items-center gap-3 rounded-xl border px-4 py-3',
+      <div className={cn('flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3',
         frozen ? 'border-amber-500/30 bg-amber-500/[0.06]' : 'border-emerald-500/20 bg-emerald-500/5')}>
-        <span className={cn('flex items-center justify-center w-8 h-8 rounded-lg border',
+        <span className={cn('flex shrink-0 items-center justify-center w-8 h-8 rounded-lg border',
           frozen ? 'bg-amber-500/10 border-amber-500/20' : 'bg-emerald-500/10 border-emerald-500/20')}>
           {frozen ? <Pause className="w-4 h-4 text-amber-500" /> : <GitBranch className="w-4 h-4 text-emerald-500" />}
         </span>
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[12rem] flex-1">
           <p className="text-sm font-medium text-ink">{frozen ? 'Editing is paused' : 'Version control is on'}</p>
           <p className="text-[11px] text-ink-muted">
             {frozen
@@ -363,9 +363,9 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount, label }
                       {kind.label}
                     </span>
                   </p>
-                  <p className="text-[11px] text-ink-muted flex items-center gap-2 mt-0.5">
+                  <p className="text-[11px] text-ink-muted flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
                     <span className="inline-flex items-center gap-1">
-                      <User className="w-3 h-3" />
+                      <User className="w-3 h-3 shrink-0" />
                       {actorLabel(c.actor, commitsQ.data?.userNames)}
                     </span>
                     <CommitProvenance commit={c} apiKeyNames={commitsQ.data?.apiKeyNames} />

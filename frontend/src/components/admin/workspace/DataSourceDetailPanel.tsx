@@ -549,7 +549,7 @@ export function DataSourceDetailPanel({
                                         pendingMode === '' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                     )}>
                                         <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === ''}
-                                            onChange={handleSelectInherit} disabled={!canManageDs} className="mt-1 accent-indigo-500" />
+                                            onChange={handleSelectInherit} disabled={!canManageDs} className="mt-1 shrink-0 accent-indigo-500" />
                                         <div>
                                             <span className="text-sm font-medium text-ink">The usual place</span>
                                             <span className="inline-flex items-center gap-1 ml-2 px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-500/10 text-emerald-500">DEFAULT</span>
@@ -562,7 +562,7 @@ export function DataSourceDetailPanel({
                                         pendingMode === 'in_source' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                     )}>
                                         <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === 'in_source'}
-                                            onChange={handleSelectInSource} disabled={!canManageDs} className="mt-1 accent-indigo-500" />
+                                            onChange={handleSelectInSource} disabled={!canManageDs} className="mt-1 shrink-0 accent-indigo-500" />
                                         <div>
                                             <span className="text-sm font-medium text-ink">With the data</span>
                                             <p className="text-xs text-ink-muted mt-0.5">Kept in the same graph as the data · in source</p>
@@ -574,7 +574,7 @@ export function DataSourceDetailPanel({
                                         pendingMode === 'dedicated' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                     )}>
                                         <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === 'dedicated'}
-                                            onChange={handleSelectDedicated} disabled={!canManageDs} className="mt-1 accent-indigo-500" />
+                                            onChange={handleSelectDedicated} disabled={!canManageDs} className="mt-1 shrink-0 accent-indigo-500" />
                                         <div className="flex-1">
                                             <span className="text-sm font-medium text-ink">In a graph of their own</span>
                                             <p className="text-xs text-ink-muted mt-0.5">A separate graph, kept apart from the data · dedicated</p>
@@ -592,7 +592,7 @@ export function DataSourceDetailPanel({
                                     </label>
 
                                     {isOverridden && !isDirty && (
-                                        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-600 dark:text-amber-400">
+                                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-600 dark:text-amber-400">
                                             <span className="font-semibold">&#x26A0; Override active</span>
                                             <span>— This data source is not using the provider default.</span>
                                         </div>
@@ -700,7 +700,7 @@ export function DataSourceDetailPanel({
                                         <div className="space-y-2">
                                             {views.map(view => (
                                                 <Link key={view.id} to={`/views/${view.id}`}
-                                                    className="flex items-center justify-between p-3 rounded-lg border border-glass-border hover:border-indigo-500/20 hover:bg-indigo-500/[0.02] transition-colors duration-150 group/view">
+                                                    className="flex items-center justify-between gap-3 p-3 rounded-lg border border-glass-border hover:border-indigo-500/20 hover:bg-indigo-500/[0.02] transition-colors duration-150 group/view">
                                                     <div className="flex items-center gap-3 min-w-0">
                                                         <div className="w-7 h-7 rounded-lg bg-cyan-500/10 text-cyan-500 flex items-center justify-center shrink-0">
                                                             <Eye className="w-3.5 h-3.5" />

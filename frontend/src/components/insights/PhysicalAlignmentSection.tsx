@@ -104,10 +104,10 @@ export function PhysicalAlignmentSection({ wsId, dataSourceId }: {
 
   return (
     <div className="rounded-2xl border border-glass-border bg-canvas-elevated/50 overflow-hidden">
-      <div className="px-4 pt-3.5 pb-1 flex items-center gap-2">
-        <Gauge className="w-4 h-4 text-indigo-500" />
+      <div className="px-4 pt-3.5 pb-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+        <Gauge className="w-4 h-4 shrink-0 text-indigo-500" />
         <h3 className="text-xs font-bold text-ink">Physical Alignment & Query Performance</h3>
-        <span className="ml-auto text-[10px] text-ink-muted">
+        <span className="ml-auto whitespace-nowrap text-[10px] text-ink-muted">
           from cached profile · {timeAgo(data.schemaUpdatedAt)}
         </span>
       </div>
@@ -148,8 +148,8 @@ export function PhysicalAlignmentSection({ wsId, dataSourceId }: {
 
           {/* Findings */}
           {data.findings.length === 0 ? (
-            <p className="flex items-center gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400">
-              <CheckCircle2 className="w-3.5 h-3.5" /> Every physical type is index-backed — no predicted slow queries.
+            <p className="flex items-start gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400">
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" /> Every physical type is index-backed — no predicted slow queries.
             </p>
           ) : (
             <ul className="space-y-1.5">
@@ -158,7 +158,7 @@ export function PhysicalAlignmentSection({ wsId, dataSourceId }: {
                 return (
                   <li key={`${f.code}-${i}`} className="flex items-start gap-2 text-[11px] text-ink-secondary leading-relaxed">
                     <Icon className={cn('w-3.5 h-3.5 mt-0.5 flex-shrink-0', cls)} />
-                    <span>{f.message}</span>
+                    <span className="min-w-0 break-words">{f.message}</span>
                   </li>
                 )
               })}

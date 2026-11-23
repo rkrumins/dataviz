@@ -194,10 +194,11 @@ export function SourceProfiling({
               bespoke tile: same trend, same delta colouring and same
               higher-is-better semantics as every other stat in the product.
             */}
-            {/* Two up from the narrowest drawer, four across a page. The
-                surface renders at ~440px, ~670px and full width, so every
-                grid here is a min-width breakpoint rather than a host flag. */}
-            <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-4">
+            {/* As many across as fit. The surface renders in a phone-width
+                drawer, a ~670px drawer and full width, and a screen
+                breakpoint can't tell those apart, so the grid follows its
+                own width rather than the viewport's. */}
+            <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(11rem,1fr))]">
                 {/*
                   A zero delta gets NO chip. Passing changePct={0} renders
                   "— 0.0%" beside the comparison AND the sub line beneath it,

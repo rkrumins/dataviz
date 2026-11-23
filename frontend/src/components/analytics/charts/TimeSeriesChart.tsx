@@ -544,41 +544,45 @@ function Tooltip({
     leftPct: number
 }) {
     const flip = leftPct > 60
+    const at = `${Math.min(Math.max(leftPct, 0), 100)}%`
+    // A row as wide as the chart, the tooltip 12px past a spacer that gives
+    // way before it does: where that side of the point has too little room —
+    // a chart the width of a drawer — the tooltip slides back inside the
+    // chart rather than running off its edge.
+    const spacer = <span aria-hidden style={{ flexBasis: flip ? `calc(100% - ${at} + 12px)` : `calc(${at} + 12px)` }} />
     return (
-        <div
-            className="pointer-events-none absolute top-2 z-10 rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2 shadow-lg min-w-[9rem]"
-            style={{
-                left: `${Math.min(Math.max(leftPct, 0), 100)}%`,
-                transform: flip ? 'translateX(-100%) translateX(-12px)' : 'translateX(12px)',
-            }}
-        >
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted mb-1.5">
-                {shortDate(bucket, true)}
-            </p>
-            <ul className="space-y-1">
-                {rows.map((r) => (
-                    <li key={r.label} className="flex items-center justify-between gap-3">
-                        <span className="flex items-center gap-1.5 min-w-0">
-                            <span aria-hidden className="w-3 h-[2px] rounded-full shrink-0"
-                                  style={{ backgroundColor: r.color }} />
-                            <span className="text-[11px] text-ink-secondary truncate">{r.label}</span>
-                        </span>
-                        <span className="flex items-baseline gap-1.5 shrink-0">
-                            <span className="text-xs font-bold text-ink tabular-nums">
-                                {exact(r.value)}
+        <div className={cn('pointer-events-none absolute inset-x-0 top-2 z-10 flex', flip && 'justify-end')}>
+            {!flip && spacer}
+            <div className="shrink-0 max-w-full rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2 shadow-lg min-w-[9rem]">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted mb-1.5">
+                    {shortDate(bucket, true)}
+                </p>
+                <ul className="space-y-1">
+                    {rows.map((r) => (
+                        <li key={r.label} className="flex items-center justify-between gap-3">
+                            <span className="flex items-center gap-1.5 min-w-0">
+                                <span aria-hidden className="w-3 h-[2px] rounded-full shrink-0"
+                                      style={{ backgroundColor: r.color }} />
+                                <span className="text-[11px] text-ink-secondary truncate">{r.label}</span>
                             </span>
-                            {r.previous !== undefined && (
-                                <span
-                                    className="text-[10px] text-ink-muted tabular-nums"
-                                    title="Same point in the previous period"
-                                >
-                                    was {exact(r.previous)}
+                            <span className="flex items-baseline gap-1.5 shrink-0">
+                                <span className="text-xs font-bold text-ink tabular-nums">
+                                    {exact(r.value)}
                                 </span>
-                            )}
-                        </span>
-                    </li>
-                ))}
-            </ul>
+                                {r.previous !== undefined && (
+                                    <span
+                                        className="text-[10px] text-ink-muted tabular-nums"
+                                        title="Same point in the previous period"
+                                    >
+                                        was {exact(r.previous)}
+                                    </span>
+                                )}
+                            </span>
+                        </li>
+                    ))}
+                </ul>
+            </div>
+            {flip && spacer}
         </div>
     )
 }
