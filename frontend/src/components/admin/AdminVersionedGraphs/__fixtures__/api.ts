@@ -322,8 +322,8 @@ export const HEALTH: GraphHealth = {
         effective: 'in_place', declared: 'beside', source: 'graph',
         why: [{ code: 'builds_off', text: SCHEMA.why.builds_off?.text ?? '', fix: SCHEMA.why.builds_off?.fix ?? null }],
     },
-    // An update's time, rows and rate are logged, never kept: the server always says so.
-    lastUpdate: null,
+    // The last update that finished, as the projector recorded it (gvlast:<graph>).
+    lastUpdate: { finishedAt: '2026-11-16T16:21:30Z', durationSecs: 42, rows: 18_400, ratePerSec: 438 },
     progress: null,
     memory: {
         bytes: 9.4 * 1024 ** 3, node: 'falkordb-2:6379', loaded: true, state: 'resident', rehydratingSince: null, class: 'coldline',
@@ -333,7 +333,6 @@ export const HEALTH: GraphHealth = {
     signals: [{ id: 'reads.from_database_while_behind', count24h: 12 }, { id: 'builds.waited_for_room', count24h: 0 }],
     follows: null,
     problems: [
-        { part: 'lastUpdate', message: 'How long its last update took, and how many rows it wrote, aren’t recorded yet.' },
         { part: 'lastBuild', message: 'The build record couldn’t be read: it was being written at the time.' },
     ],
 }

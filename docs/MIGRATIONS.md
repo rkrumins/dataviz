@@ -392,6 +392,21 @@ marker.
 revisions above were pushed, so `20261119_1700_review_rules_store` keeps the parent it was pushed
 with and the merge revision joins the two. It runs nothing.
 
+**`20261119_1800_merge_graph_watch` joins `20261116_1200_graph_watch` to `20261119_1700_review_rules_store`.** The watch
+revision (`graph_seen`, `graph_watches`: new tables only) came off `20261116_1100_settings_import`,
+and environments deployed from its branch ran it, so it keeps the parent it was pushed with (the
+lineage record lists it). The merge revision runs nothing.
+
+**`20261122_1400_merge_watch_rules` joins `20261119_1800_merge_graph_watch` to
+`20261122_1300_merge_rules_store`**, the settings line's head once `main`'s newer head merged in.
+Both were pushed with their parents, so a merge revision that runs nothing joins them.
+
+**`20261123_0100_graph_watch_told` adds `graph_watch_told`** (a new table): how far each watched
+graph's watchers have been told, which the versioning worker saves with each batch of notifications
+it sends (`digest.tell_pending`), so a restart carries on where it stopped. It adds a row, not read
+yet, for each graph watched already: the worker starts each at its head and tells nobody of what
+came before. The downgrade drops the table.
+
 **Rolling back.** For one release, every save through the store writes the old storage too:
 New-version builds' JSON, the `platform_settings` columns, a workspace's and a data source's
 columns (a data source's forks' as well), and a graph's `projection_state.read_mode`. Each graph's

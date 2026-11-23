@@ -256,6 +256,29 @@ export interface Watermark {
   /** A new version built beside the serving key (read mode `beside`), while one is; null when
    *  none is. The serving key keeps serving `served` whole meanwhile. */
   candidate?: BuildState | null
+  /** How far the update in flight is and the time it has left; null while none is. */
+  progress?: GraphUpdateProgress | null
+}
+
+/**
+ * How far a graph's update in flight is, as the server last heard from the projector: its phase
+ * (`updating` a version into the copy readers read, `building` one beside it, `switching` readers
+ * to it once caught up, `loading` a copy back into memory, `seeding` a first copy); the rows done
+ * of its total, where the phase counts them (null where it doesn't, e.g. a copy); their rate,
+ * smoothed, and the time left derived from them (null while the rate is too young to trust, or
+ * rows have stopped landing); and the version it writes (`targetVersion`, as readers know it).
+ */
+export interface GraphUpdateProgress {
+  phase: 'updating' | 'building' | 'switching' | 'loading' | 'seeding'
+  done: number | null
+  total: number | null
+  unit: string
+  ratePerSec: number | null
+  etaSecs: number | null
+  startedAt: string | null
+  updatedAt: string | null
+  targetSeq: number | null
+  targetVersion: number | null
 }
 
 /** A new version of a graph built beside the key that serves it. */
@@ -2865,6 +2888,88 @@ export function getHistoryMonths(
   if (opts.originatingViewId) sp.set('originatingViewId', opts.originatingViewId)
   const qs = sp.toString()
   return vfetch<HistoryMonths>(`${base(wsId)}/graphs/${graphId}/history/months${qs ? `?${qs}` : ''}`)
+}
+
+// ============================================
+// What changed since you last looked, and watching
+// ============================================
+
+/** A person a digest names: `id` null is the platform's own; `name` null, not in the directory. */
+export interface DigestPerson { id: string | null; name: string | null }
+
+/** What a version recorded of itself. */
+export interface DigestCounts { added: number; changed: number; removed: number }
+
+export interface DigestVersion {
+  seq: number
+  /** Its commit. */
+  version: string
+  kind: string
+  at: string
+  author: DigestPerson
+  message: string | null
+  /** Null where the version recorded none: shown as "—", never 0. */
+  counts: DigestCounts | null
+}
+
+export interface DigestReview { id: string; title: string | null; url: string; author: DigestPerson; at: string }
+
+export interface DigestWatched {
+  urn: string
+  entityId: string
+  name: string | null
+  change: 'added' | 'changed' | 'removed'
+  /** Its last change in the window. */
+  seq: number
+  at: string
+}
+
+export interface GraphDigest {
+  /** The reader's seen marker, or null: then `window` is the last 7 days. */
+  since: { seq: number; at: string } | null
+  window: 'since_seen' | 'last_7_days'
+  head: { seq: number; version: string | null }
+  /** Newest first, at most 50 (`truncated` past them). */
+  versions: DigestVersion[]
+  /** How many versions the window holds; null when the 7-day window is truncated. */
+  total: number | null
+  truncated: boolean
+  authors: Array<DigestPerson & { versions: number }>
+  reviewsWaiting: DigestReview[]
+  reviewsMore: boolean
+  watchedChanged: DigestWatched[]
+}
+
+/** What changed in the graph since the reader last looked. */
+export function getGraphDigest(wsId: string, graphId: string): Promise<GraphDigest> {
+  return vfetch<GraphDigest>(`${base(wsId)}/graphs/${graphId}/digest`)
+}
+
+/** "I've seen up to version `seq`": the marker only moves forward. Answers the marker after. */
+export function markDigestSeen(wsId: string, graphId: string, seq: number): Promise<{ seq: number; at: string }> {
+  return vfetch(`${base(wsId)}/graphs/${graphId}/digest/seen`, jsonBody({ seq }))
+}
+
+export interface GraphWatching {
+  graph: boolean
+  entities: Array<{ urn: string; since: string }>
+  entitiesMax: number
+}
+
+export function getGraphWatch(wsId: string, graphId: string): Promise<GraphWatching> {
+  return vfetch<GraphWatching>(`${base(wsId)}/graphs/${graphId}/watch`)
+}
+
+/** Watch the graph, or the entity `entityUrn` names; a publish that changes it tells you. */
+export function watchGraph(wsId: string, graphId: string, entityUrn?: string): Promise<GraphWatching> {
+  return vfetch<GraphWatching>(`${base(wsId)}/graphs/${graphId}/watch`, {
+    method: 'PUT', body: JSON.stringify(entityUrn ? { entityUrn } : {}),
+  })
+}
+
+export function unwatchGraph(wsId: string, graphId: string, entityUrn?: string): Promise<GraphWatching> {
+  const qs = entityUrn ? `?entityUrn=${encodeURIComponent(entityUrn)}` : ''
+  return vfetch<GraphWatching>(`${base(wsId)}/graphs/${graphId}/watch${qs}`, { method: 'DELETE' })
 }
 
 /** Top-level groups of a PR's Files Changed as a containment tree. */

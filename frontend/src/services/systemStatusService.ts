@@ -7,7 +7,7 @@
  * concurrent admin viewers share one probe sweep.
  */
 import { authFetch } from './apiClient'
-import type { BuildState, Watermark } from './versioningApiService'
+import type { BuildState, GraphUpdateProgress, Watermark } from './versioningApiService'
 
 export type ServiceStatus = 'healthy' | 'degraded' | 'down' | 'unknown'
 
@@ -181,6 +181,8 @@ export interface VersionedGraphRow extends ProjectionWorstRow {
     /** A new version built beside its key (read mode beside), while one is; absent or null when
      *  none is. */
     build?: BuildState | null
+    /** How far its update in flight is and the time it has left; absent or null while none is. */
+    progress?: GraphUpdateProgress | null
 }
 
 /** One New-version build setting: as saved (null: unset), its default, and the value in force. */

@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.services.versioning import update_progress
+
 from . import preview as previews, resolver, service, signals
 
 logger = logging.getLogger(__name__)
@@ -91,9 +93,17 @@ async def graph_health(session: AsyncSession, svc: Any, meta: Mapping[str, Any])
                        exc_info=True)
         problem("readMode", "How its readers read it while it updates can't be read.")
 
-    # A pass's time, rows and rate are logged, never kept: nothing to show, rather than a guess.
-    problem("lastUpdate", "How long its last update took, and how many rows it wrote, aren't "
-                          "recorded yet.")
+    # The update in flight and the last one that finished, as the projector records them
+    # (``update_progress``), in one Redis read: a fork's are its root's.
+    try:
+        out["progress"], out["lastUpdate"], unrecorded = await update_progress.read_health(
+            store_id, store)
+        if unrecorded:
+            problem("lastUpdate", unrecorded)
+    except Exception:  # noqa: BLE001
+        logger.warning("graph health: the updates of %s could not be read", gid, exc_info=True)
+        problem("progress", "How far an update is can't be read right now.")
+        problem("lastUpdate", "Its last update can't be read right now.")
 
     if store is None:
         problem("memory", "Its copy in memory can't be read.")

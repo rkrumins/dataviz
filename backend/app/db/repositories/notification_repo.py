@@ -60,6 +60,7 @@ async def notify(
     resource_id: Optional[str] = None,
     dedupe_unread: bool = False,
     once: bool = False,
+    strict: bool = False,
 ) -> int:
     """Queue one notification per recipient. Never notifies the actor
     about their own action — being told what you just did is noise.
@@ -77,7 +78,10 @@ async def notify(
 
     Best-effort: a notification failure must not roll back the action it
     describes — the work is done under a savepoint, so a database error here
-    is undone without aborting the caller's transaction.
+    is undone without aborting the caller's transaction. ``strict`` raises
+    it instead, for a caller whose transaction holds nothing but the telling
+    and keeps its place with it (``digest.tell_pending``): telling again
+    later beats a place moved past people nobody told.
     """
     wanted = {u for u in user_ids if u}
     try:
@@ -120,6 +124,8 @@ async def notify(
             await session.flush()
             return len(copies)
     except Exception:  # noqa: BLE001 — audit aid, never the write contract
+        if strict:
+            raise
         logger.exception("notify failed (kind=%s resource=%s)", kind, resource_id)
         return 0
 

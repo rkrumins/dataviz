@@ -6,6 +6,7 @@
  * Served by the graph router, so anyone who can open the view can read it (`viewId` carries that).
  */
 import { authFetch } from '@/services/apiClient'
+import type { GraphUpdateProgress } from '@/services/versioningApiService'
 
 export interface SyncRevision {
   commitId: string
@@ -45,6 +46,9 @@ export interface SyncVersioned {
   readModeWhy?: { code: string; text: string; fix?: Record<string, unknown> | null }[]
   /** A new version built beside the key views read (`beside`), while one is; null when none. */
   candidate?: SyncBuild | null
+  /** How far the update in flight is and the time it has left; null while none is. Absent from a
+   *  server that predates it. */
+  progress?: GraphUpdateProgress | null
 }
 
 /** A new version built beside the key views read: `queued` (waiting for room), `copying`,

@@ -83,6 +83,7 @@ from backend.app.services.versioning.errors import (HTTP_MAPPED, DraftNotReadabl
                                                    IneligibleOwner, PublishRequired, ReviewRequired,
                                                    SelfMerge, ServiceAccountMember)
 from backend.app.services.versioning.messaging import nudge_projection
+from backend.app.services.versioning import update_progress
 from backend.app.services.versioning.service import (
     AccessDenied,
     ApprovalRequired,
@@ -1139,6 +1140,9 @@ class WatermarkModel(_ApiModel):
     # A new version built beside the serving key (read mode beside), while one is: null when none
     # is. The serving key keeps serving ``served`` whole meanwhile.
     candidate: Optional["BuildModel"] = None
+    # How far the update in flight is and the time it has left (GET …/watermark), null while none
+    # is (``update_progress``). A fork's is its root's.
+    progress: Optional["UpdateProgressModel"] = None
 
 
 class BuildModel(_ApiModel):
@@ -1169,6 +1173,24 @@ class BuildModel(_ApiModel):
     rows: Optional[int] = None
     # How far a seed or a catch-up has written ({done, total}), while it does.
     progress: Optional[Dict[str, int]] = None
+
+
+class UpdateProgressModel(_ApiModel):
+    """How far the update in flight is, as the projector last published it (``update_progress``):
+    its phase; the rows done of its total, where the phase counts them (a copy counts none: both
+    null); their rate, smoothed, and the time left, derived when it is read, both null while the
+    rate is too young to trust or rows have stopped landing; when it started and when this was
+    published; and the version it writes (``targetVersion``: the number readers know it by)."""
+    phase: Literal["updating", "building", "switching", "loading", "seeding"]
+    done: Optional[int] = None
+    total: Optional[int] = None
+    unit: str = "rows"
+    rate_per_sec: Optional[float] = Field(default=None, alias="ratePerSec")
+    eta_secs: Optional[int] = Field(default=None, alias="etaSecs")
+    started_at: Optional[str] = Field(default=None, alias="startedAt")
+    updated_at: Optional[str] = Field(default=None, alias="updatedAt")
+    target_seq: Optional[int] = Field(default=None, alias="targetSeq")
+    target_version: Optional[int] = Field(default=None, alias="targetVersion")
 
 
 WatermarkModel.model_rebuild()
@@ -3003,11 +3025,13 @@ async def get_watermark(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised).
-    404 for a fork whose parent's graph is gone."""
+    404 for a fork whose parent's graph is gone. With the update in flight's progress: one Redis
+    read, only while one may be (``update_progress.for_watermark``)."""
     try:
         wm = await svc.projection_watermark(graph_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    wm["progress"] = await update_progress.for_watermark(graph_id, wm)
     return await _watermark_model(session, wm)
 
 
@@ -3084,7 +3108,9 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           read_mode_why=wm.get("read_mode_why") or [],
                           window_rows=wm.get("window_rows"),
                           candidate=(BuildModel(**wm["candidate"]) if wm.get("candidate")
-                                     else None))
+                                     else None),
+                          progress=(UpdateProgressModel(**wm["progress"]) if wm.get("progress")
+                                    else None))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:

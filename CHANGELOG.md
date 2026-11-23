@@ -906,6 +906,14 @@ integration's many small changes as a few commits.
   into the store once, as the import above copies the rest: an old 0 approvals is "everyone asked",
   and the old columns are written for one release too. `20261122_1300_merge_rules_store` joins
   that line to `main`'s newer head, `20261122_1200_gv_job_notices`, and runs nothing.
+- **Migrations `20261116_1200_graph_watch` and `20261119_1800_merge_graph_watch`** add `graph_seen`
+  (how far each person has looked at a versioned graph) and `graph_watches` (what they watch in it),
+  new tables only, then join that revision to the settings line's head (the merge runs nothing).
+  `20261122_1400_merge_watch_rules` joins it to that line's newer head,
+  `20261122_1300_merge_rules_store`, and runs nothing too. **`20261123_0100_graph_watch_told`**
+  adds `graph_watch_told` (a new table, with a row for each graph watched already): how far each
+  graph's watchers have been told. The versioning worker's projection lane tells them, a few seconds
+  after a publish, which no longer waits for it; with that lane off, nobody is told.
 - **Migrations `20261113_1000_gv_ps_served_fill`, `20261113_1100_build_policy`,
   `20261113_1200_gv_ps_window_rows`, `20261113_1300_gv_ps_read_mode` and
   `20261113_1400_gv_ps_candidate`** fill `projection_state.served_commit_seq` where a graph's key

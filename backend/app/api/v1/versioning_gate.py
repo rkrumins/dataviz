@@ -107,8 +107,9 @@ FORKS_FLAG = "forksEnabled"
 # export reads it, and a freeze is a safety stop), and winding the fork down — closing a review,
 # without which a fork with one open can't go to the trash, and the trash itself
 # (``DELETE …/graphs/{fork}``, matched in ``fork_write_gate``). Restoring a fork from the trash
-# never comes through here.
-_FORK_ALLOWLIST_SUFFIXES = _WRITE_ALLOWLIST_SUFFIXES + ("/close",)
+# never comes through here. And a reader's own marker and watches (``graph_digest``), which change
+# nothing in the fork.
+_FORK_ALLOWLIST_SUFFIXES = _WRITE_ALLOWLIST_SUFFIXES + ("/close", "/digest/seen", "/watch")
 
 
 async def require_forks_enabled() -> None:

@@ -226,6 +226,7 @@ class ProjectionWorker:
             if config.LIVENESS_SECS > 0:
                 loops.append(self._liveness_loop())
             loops.append(self._retire_loop())
+            loops.append(self._tell_loop())
         if "transfer" in self._lanes:
             if self._transfers is not None:
                 loops.append(self._slot_loop(self._transfers, slots=config.TRANSFER_SLOTS,
@@ -461,6 +462,22 @@ class ProjectionWorker:
                 logger.exception("projection key retire loop error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=config.LIVENESS_SECS or 60)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _tell_loop(self) -> None:
+        """Tell the people watching each graph of the versions it published since they were told
+        (``digest.tell_pending``), off every commit's path: at most one unread notification per
+        graph each, nobody twice, and one worker at a time per graph."""
+        from . import digest
+
+        while not self._stop.is_set():
+            try:
+                await digest.tell_pending()
+            except Exception:
+                logger.exception("watcher telling loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=digest.TELL_POLL_SECS)
             except asyncio.TimeoutError:
                 pass
 

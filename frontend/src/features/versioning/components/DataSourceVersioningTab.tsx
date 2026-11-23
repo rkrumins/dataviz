@@ -3,12 +3,13 @@
  * DataSourceDetailPanel). Shows whether version control is on, lets a manager enable
  * it, and surfaces the branch list, the graph's forks + recent commit history, and a summary of the
  * graph's settings (read mode, residency class, imports, drafts) that opens all of them in the
- * graph's settings drawer. Read-only overview apart from forking the graph, a fork's own actions
+ * graph's settings drawer, and what changed since you last looked (`DigestSheet`), which a watcher's
+ * notification opens here (`?whatsnew=1`). Read-only overview apart from forking the graph, a fork's own actions
  * (Update from parent, Propose to parent, the trash and back), pausing editing and the settings
  * drawer; the editing loop lives on the canvas.
  */
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play, ArrowUpRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
@@ -24,6 +25,8 @@ import { deleteFork, restoreFork, PullRequestExistsError, type Branch, type Bran
 import { PrListRow } from '@/features/reviews/components/PrListRow'
 import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
 import { BootstrapProgress } from './BootstrapProgress'
+import { DigestChip } from './DigestChip'
+import { DigestSheet } from './DigestSheet'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
 import { ForkDialog } from './ForkDialog'
 import { ForkDistance, ForksOffNote, UpdateRecommendedHint } from './ForkStatusBits'
@@ -85,6 +88,21 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount, label }
   const forksQ = useForks(wsId, graphId)
   const [openPrId, setOpenPrId] = useState<string | null>(null)
   const [showEnable, setShowEnable] = useState(false)
+  // What changed since you last looked. A watcher's notification opens it (`whatsnew=1`); closing it
+  // takes that off the address, so a reload or Back doesn't open it again.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const whatsNew = searchParams.get('whatsnew') === '1'
+  const [digestOpen, setDigestOpen] = useState(false)
+  const openDigest = (open: boolean) => {
+    setDigestOpen(open)
+    if (!open && whatsNew) {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev)
+        next.delete('whatsnew')
+        return next
+      }, { replace: true })
+    }
+  }
   // Only a FalkorDB graph can be copied into version history (the server refuses the rest). A
   // provider this viewer cannot see reads 'unknown' and is left to the server to judge.
   const providerType = useDataSourceProviderMap().resolve(dataSourceId)?.providerType
@@ -212,6 +230,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount, label }
           </p>
           {freeze.error && <p className="mt-1 text-[11px] text-red-600 dark:text-red-400" role="alert">{freeze.error.message}</p>}
         </div>
+        {graphId && <DigestChip workspaceId={wsId} graphId={graphId} onOpen={() => openDigest(true)} />}
         {canManage && canPublish && graphId && (
           <Button size="sm" variant="secondary" leftIcon={frozen ? Play : Pause} loading={freeze.isPending}
             onClick={() => freeze.mutate({ graphId, frozen: !frozen, expectedRev: resolve.data?.lifecycleRev ?? 0 })}>
@@ -284,6 +303,10 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount, label }
         </section>
       )}
       {graphId && <ForkDialog wsId={wsId} graphId={graphId} open={forking} onClose={() => setForking(false)} />}
+      {graphId && (
+        <DigestSheet wsId={wsId} graphId={graphId} mainBranchId={resolve.data?.mainBranchId ?? null}
+          open={digestOpen || whatsNew} onOpenChange={openDigest} />
+      )}
 
       {/* Merge requests */}
       <section>

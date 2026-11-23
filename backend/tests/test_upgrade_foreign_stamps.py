@@ -53,38 +53,38 @@ def _below(script, head):
     return [down] if isinstance(down, str) else list(down)
 
 
-#: PR #670's line, off ``20261113_0900_gv_import_mentions``: all but its last revision are main's
-#: too (``20261119_1400_merge_ps_build`` joins the first five, ``20261119_1600_merge_settings`` the
-#: next two, #668's), so a database #670's build moved to one of them upgrades with no rewind; its
-#: last is not.
+#: PR #670's line, off ``20261113_0900_gv_import_mentions``: every revision of it is this chain's
+#: (``20261119_1400_merge_ps_build`` joins the first five, ``20261119_1600_merge_settings`` the next
+#: two, #668's, and ``20261119_1800_merge_graph_watch`` its last), so a database #670's build moved
+#: to any of them upgrades with no rewind.
 ADOPTED = ["20261113_1000_gv_ps_served_fill", "20261113_1100_build_policy", "20261113_1200_gv_ps_window_rows",
            "20261113_1300_gv_ps_read_mode", "20261113_1400_gv_ps_candidate", "20261116_1000_setting_values",
-           "20261116_1100_settings_import"]
-OTHER_LINE = ["20261116_1200_graph_watch"]
+           "20261116_1100_settings_import", "20261116_1200_graph_watch"]
 
 
 def test_where_the_chains_parted():
     script = _script()
     head = script.get_current_head()
     assert upgrade._foreign(script, [*ADOPTED, head]) == []
-    for rev in OTHER_LINE:
-        assert upgrade._foreign(script, [rev, head]) == [rev]
-        assert upgrade._parting_point(script, [rev]) == "20261116_1100_settings_import", rev
     # A newer release's: nothing of ours left to run.
     assert upgrade._parting_point(script, ["29991231_2359_from_the_future"]) == head
     # Older than everything of ours: nowhere to rewind to.
     assert upgrade._parting_point(script, ["0000_before_it_all"]) is None
     assert upgrade._foreign(script, [head]) == []
-    # A dev database's merge revision, made by hand while main had two heads: ours from the same
-    # minute (20261119_1200_gv_review_seen) may be newer, so it counts as not run.
-    assert upgrade._parting_point(script, ["20261119_1200_merge_members_set"]) == "20261119_1100_gv_change_sets"
+    # Ours from the same minute as the stamp (20261119_1800_merge_graph_watch) may be newer, so it
+    # counts as not run.
+    assert upgrade._parting_point(script, ["20261119_1800_from_elsewhere"]) == "20261119_1700_review_rules_store"
+    # A dev database's merge revision, made by hand while main had two heads. Walking down from the
+    # head, this chain meets this branch's watch line (20261116_1200_graph_watch, joined at
+    # 20261119_1800) before main's older one, so the guess lands there; the record places the stamp
+    # exactly instead (test_a_recorded_stamp_is_placed_exactly).
+    assert upgrade._parting_point(script, ["20261119_1200_merge_members_set"]) == "20261116_1200_graph_watch"
 
 
 def test_a_recorded_stamp_is_placed_exactly():
     script, lines = _script(), upgrade._other_lines(_alembic_config())
     head = script.get_current_head()
     for stamp, placed in [
-        ("20261116_1200_graph_watch", ["20261116_1100_settings_import"]),      # #670's, on #668's
         ("20261105_1000_import_results", ["20261103_1200_subset_views"]),      # #644's
         # #556's, where the guess says 20261018_1100_gv_ps_retired: its branch put it later.
         ("20261018_1200_change_check_secs", ["20261020_1000_ds_transfers"]),
@@ -92,7 +92,7 @@ def test_a_recorded_stamp_is_placed_exactly():
         assert upgrade._placed(script, lines, [stamp], []) == placed, stamp
     assert upgrade._parting_point(script, ["20261018_1200_change_check_secs"]) == "20261018_1100_gv_ps_retired"
     # One of ours stamped beside it that already ran past it stays the place.
-    assert upgrade._placed(script, lines, ["20261116_1200_graph_watch"], [head]) == [head]
+    assert upgrade._placed(script, lines, ["20261105_1000_import_results"], [head]) == [head]
     # Dev's, recorded by hand both ways it can have come about: what both ran.
     assert upgrade._placed(script, lines, ["20261119_1200_merge_members_set"], []) == [
         "20261118_1000_member_sets", "20261119_1100_gv_change_sets"]
@@ -107,7 +107,7 @@ def test_a_schema_left_short_places_it_below_the_migrations_that_make_what_is_mi
     assert upgrade._below_gaps(script, ["20261118_1100_review_rules"], [], gap) == ["20261118_1000_gv_review_records"]
     # Below it on every line it's on, and nothing else moved.
     assert upgrade._below_gaps(script, [head], [], gap) == [
-        "20261116_1100_settings_import", "20261118_1000_gv_review_records", "20261118_1100_view_members"]
+        "20261116_1200_graph_watch", "20261118_1000_gv_review_records", "20261118_1100_view_members"]
     # Ours it had stamped itself are trusted, not searched.
     assert upgrade._below_gaps(script, [head], [head], gap) is None
     # Made by create_all alone, by no migration: nothing of ours run again would bring it.
@@ -176,14 +176,16 @@ def test_another_branchs_database_upgrades_with_this_build(scratch_db):
     head = _script().get_current_head()
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-2000:]
-    # Another branch moved it on: its stamp, and a column of its own.
+    # Another build moved it on (dev's, whose merge revision the record holds): its stamp, and a
+    # column of its own.
     _sql(scratch_db, "ALTER TABLE workspaces ADD COLUMN other_line_column text")
-    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261116_1200_graph_watch'")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261119_1200_merge_members_set'")
     assert _job(scratch_db, "check").returncode == 1
 
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-3000:]
-    assert "Placing it at ['20261116_1100_settings_import'], exactly" in out.stderr, out.stderr[-3000:]
+    assert ("Placing it at ['20261118_1000_member_sets', '20261119_1100_gv_change_sets'], exactly"
+            in out.stderr), out.stderr[-3000:]
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
     assert _job(scratch_db, "check").returncode == 0
     assert _sql(scratch_db, "SELECT count(*) FROM information_schema.columns "
@@ -214,12 +216,15 @@ def test_a_branch_that_parted_earlier_than_the_guess_recovers(scratch_db):
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-2000:]
     # It parted at 20261117_1500 and never ran 20261118_1100_review_rules (one of its columns);
-    # its own revision is dated after that one, so the guess takes review_rules as run.
+    # its own revision is dated after this branch's 20261119_1800_merge_graph_watch, where the
+    # guess lands, which takes review_rules as run. Placed below it again, it keeps the other
+    # lines' tips the guess gave it.
     _sql(scratch_db, "ALTER TABLE workspaces DROP COLUMN review_threads_hold")
-    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261118_1200_elsewhere'")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261120_1200_elsewhere'")
     out = _job(scratch_db, "upgrade", "--recover")
     assert out.returncode == 0, out.stderr[-3000:]
-    assert "placing it at ['20261118_1000_gv_review_records'] and upgrading again" in out.stderr, out.stderr[-3000:]
+    assert ("placing it at ['20261116_1200_graph_watch', '20261118_1000_gv_review_records', "
+            "'20261118_1100_view_members'] and upgrading again") in out.stderr, out.stderr[-3000:]
     assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [(head,)]
     assert _job(scratch_db, "check").returncode == 0
     assert _sql(scratch_db, "SELECT count(*) FROM information_schema.columns "
@@ -227,7 +232,7 @@ def test_a_branch_that_parted_earlier_than_the_guess_recovers(scratch_db):
 
     # Named outright, the place is taken as given.
     _sql(scratch_db, "ALTER TABLE workspaces DROP COLUMN review_threads_hold")
-    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261118_1200_elsewhere'")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261120_1200_elsewhere'")
     out = _job(scratch_db, "upgrade", "--rewind-to", "20261117_1500_gv_mr_sendback")
     assert out.returncode == 0, out.stderr[-3000:]
     assert "as named (--rewind-to)" in out.stderr
@@ -314,17 +319,20 @@ def test_a_placement_a_stopped_job_left_unchecked_is_checked_by_the_next(scratch
     head = _script().get_current_head()
     out = _job(scratch_db, "upgrade")
     assert out.returncode == 0, out.stderr[-2000:]
-    # A Job placed a database #670's build stamped, then was stopped before the check: the stamps
-    # are the place, the history says it's open — and a column the place can't explain is gone.
+    # A Job placed a database another build stamped (dev's, whose merge revision the record holds),
+    # then was stopped before the check: the stamps are the place, the history says it's open — and
+    # a column the place can't explain is gone.
     _sql(scratch_db, "ALTER TABLE announcements DROP COLUMN cta_text")
-    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261113_1400_gv_ps_candidate'")
-    _sql(scratch_db, "INSERT INTO alembic_history (revision, kind, detail) VALUES ('20261116_1200_graph_watch', "
-                     "'placed', '{\"was\": [\"20261116_1200_graph_watch\"], "
-                     "\"stamps\": [\"20261113_1400_gv_ps_candidate\"], \"kept\": []}')")
+    _sql(scratch_db, "DELETE FROM alembic_version")
+    _sql(scratch_db, "INSERT INTO alembic_version (version_num) VALUES ('20261118_1000_member_sets'), "
+                     "('20261119_1100_gv_change_sets')")
+    _sql(scratch_db, "INSERT INTO alembic_history (revision, kind, detail) VALUES ('20261119_1200_merge_members_set', "
+                     "'placed', '{\"was\": [\"20261119_1200_merge_members_set\"], "
+                     "\"stamps\": [\"20261118_1000_member_sets\", \"20261119_1100_gv_change_sets\"], \"kept\": []}')")
     out = _job(scratch_db, "upgrade")
     assert "stopped before its schema was checked: this one checks it" in out.stderr, out.stderr[-3000:]
     assert out.returncode == 1 and "still not at head" in out.stderr, out.stderr[-3000:]
-    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [("20261116_1200_graph_watch",)]
+    assert _sql(scratch_db, "SELECT version_num FROM alembic_version") == [("20261119_1200_merge_members_set",)]
     assert _sql(scratch_db, "SELECT kind FROM alembic_history ORDER BY id DESC LIMIT 1") == [("restored",)]
 
     # With the column back, the place is borne out, and closed.

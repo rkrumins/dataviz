@@ -28,6 +28,7 @@ from backend.app.services.graph_store import topology
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.settings import health, service, signals
 from backend.app.services.settings.service import Graph
+from backend.app.services.versioning import update_progress
 from backend.tests.test_settings_signals import NOW, FakeRedis
 
 _SIGNALS = "/api/v1/admin/versioning/signals"
@@ -127,6 +128,7 @@ def world(settings_world, test_client, estate, monkeypatch):
     redis, versioning = FakeRedis(), _Versioning()
     monkeypatch.setattr(service, "graphs", graphs)
     monkeypatch.setattr(signals, "_redis", lambda: redis)
+    monkeypatch.setattr(update_progress, "_redis", lambda: redis)
     monkeypatch.setattr(signals, "_clock", lambda: NOW)
     monkeypatch.setattr(topology, "snapshot_for_request", last_read)
     monkeypatch.setattr(topology, "placement_for_graph", placed)
@@ -273,7 +275,7 @@ async def test_a_graphs_health_composes_each_part_from_what_is_kept(world, test_
     assert counts == {**dict.fromkeys(signals.IDS, 0), "builds.waited_for_room": 3,
                       "reads.asked_to_retry": 2, "drafts.idle_closed": 1}
     assert body["follows"] is None
-    # How long its last update took, and its rows and rate, are not kept anywhere: none is made up.
+    # No update recorded as finished (``update_progress``): none is made up.
     assert body["lastUpdate"] is None
     assert [p["part"] for p in body["problems"]] == ["lastUpdate"]
 
@@ -327,12 +329,12 @@ async def test_each_part_that_cant_be_read_is_null_with_its_problem(world, test_
     monkeypatch.setattr(service, "context", no_context)
     body = (await test_client.get(_HEALTH.format("g_1"))).json()
     assert set(body) == CONTRACT
-    for part in ("head", "serving", "versionsBehind", "readMode", "lastUpdate", "memory",
-                 "lastBuild", "signals"):
+    for part in ("head", "serving", "versionsBehind", "readMode", "progress", "lastUpdate",
+                 "memory", "lastBuild", "signals"):
         assert body[part] is None, part
     assert [p["part"] for p in body["problems"]] == [
-        "head", "serving", "versionsBehind", "readMode", "lastUpdate", "memory", "lastBuild",
-        "signals"]
+        "head", "serving", "versionsBehind", "readMode", "progress", "lastUpdate", "memory",
+        "lastBuild", "signals"]
     assert all(p["message"] for p in body["problems"])
     # The graph store's nodes not read yet: its copy is known, the node holding it is not.
     world.versioning.unreadable.clear()

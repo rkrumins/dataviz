@@ -454,7 +454,7 @@ def test_a_rebuild_that_resumes_retries_what_its_earlier_passes_held(monkeypatch
     """A full seed that resumes from its cursor writes nothing again before where it stopped, so
     what its earlier passes held is retried, as a window retries it, never cleared unwritten. One
     that starts over clears it."""
-    for cursor, expect in (([[0, 5, "node", "ent_9", False, 0]], False), ([], True)):
+    for cursor, expect in (([[0, 5, "node", "ent_9", False, 0, 0, None, None]], False), ([], True)):
         ps = _PS(projected=0, target=5)
         ps.status, ps.quarantine_next_at = "rebuilding", "2000-01-01T00:00:00+00:00"
         proj, ps, client, _seen = _projector(monkeypatch, ps=ps)
@@ -595,8 +595,8 @@ def test_a_resumed_paged_window_knows_what_its_earlier_pages_did(monkeypatch):
     reports both, so it bumps the graph's generation and verifies, though its own pages did
     neither; and each of its pages' cursors carries them on, for a pass after it."""
     proj, _ps, client, _seen = _projector(monkeypatch)
-    pages = {"node": [(([("n2", "u2", {"entityType": "Dataset"})], [], [], []), "v2")],
-             "edge": [(([], [], [], []), "v3")]}
+    pages = {"node": [(([("n2", "u2", {"entityType": "Dataset"})], [], [], []), "v2", 1)],
+             "edge": [(([], [], [], []), "v3", 1)]}
 
     async def window_rows(*a):
         return 2
@@ -655,7 +655,7 @@ def test_with_residency_on_a_key_holding_a_stopped_rebuild_is_resumed_not_queued
     page: a pass that failed or was cancelled after it left the graph idle, and this pass claims
     the row and resumes it in place. A key with no cursor, one that does not exist (asking does
     not create it) or one out of reach is queued, as before."""
-    stopped = [[0, 5, "fk_edge", "20000", False, 0]]
+    stopped = [[0, 5, "fk_edge", "20000", False, 0, 0, None, None]]
     for found, queued in ((stopped, False), ([], True), ("missing", True), ("unreachable", True)):
         proj, _ps, client, seen = _projector(monkeypatch, ps=_PS(projected=0, target=5))
         asked = []
