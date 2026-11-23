@@ -506,29 +506,29 @@ export function WorkspacesPage() {
 `}</style>
 
             {/* ── Header ── */}
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex min-w-[14rem] flex-1 items-center gap-3">
+                    <div className="w-9 h-9 shrink-0 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
                         <Boxes className="w-5 h-5 text-white" />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                         <h1 className="text-xl font-bold text-ink leading-tight">Workspaces</h1>
                         <p className="text-[11px] text-ink-muted">Your data domains — group sources, govern schemas, and power team views</p>
                     </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="ml-auto flex shrink-0 items-center gap-2">
                     {/* The tour for what is on screen: answering requests for workspaces while they
                         wait on Requests; for someone who can't create workspaces, asking for one. */}
                     <TourLaunchButton tourId={tab === 'requests' && !!toAnswer?.length ? 'workspace-approver'
                         : !canCreateWorkspace && requestsOn ? 'request-workspace' : 'workspaces'} />
                     {!canCreateWorkspace && requestsOn && (
-                        <button type="button" data-tour="workspaces-request" onClick={() => openRequestWizard()} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-sm font-semibold shadow-lg shadow-violet-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
-                            <Plus className="w-4 h-4" /> Request a workspace
+                        <button type="button" data-tour="workspaces-request" onClick={() => openRequestWizard()} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-sm font-semibold shadow-lg shadow-violet-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200 whitespace-nowrap">
+                            <Plus className="w-4 h-4 shrink-0" /> Request a workspace
                         </button>
                     )}
                     {canCreateWorkspace && (
-                        <button data-tour="workspaces-create" onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
-                            <Plus className="w-4 h-4" /> Create Workspace
+                        <button data-tour="workspaces-create" onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200 whitespace-nowrap">
+                            <Plus className="w-4 h-4 shrink-0" /> Create Workspace
                         </button>
                     )}
                 </div>
