@@ -92,6 +92,20 @@ const platform = params.get('platform') === '1'
 const steward = params.get('steward') === '1'
 const click = params.get('click')
 const fresh = params.get('fresh') === '1'
+
+/** People asking to join, as the API answers (the People tab lists them; the page counts them). In the
+ *  Playground they ask to be Playground members. */
+const ACCESS_REQUESTS = [
+    ['ar1', 'usr_sam', 'Sam Reader', 'workspace_viewer', 'Reading the month-end views for the audit.', 1],
+    ['ar2', 'usr_liam', 'Liam Chen', 'workspace_member', 'I build the VaR model inputs and want to keep them current.', 2],
+    ['ar3', 'usr_priya', 'Priya Nair', 'workspace_data_engineer', null, 3],
+].map(([id, uid, name, role, why, days]) => ({
+    id, requester: { id: uid, email: `${String(uid).slice(4)}@example.com`, displayName: name, ssoLinked: false },
+    target: { type: 'workspace', id: 'ws_fin', label: null, accessMode: 'request' },
+    requestedRole: fixture === 'playground' ? 'workspace_playground_member' : role, justification: why,
+    status: 'pending', createdAt: new Date(Date.now() - Number(days) * 86_400_000).toISOString(),
+    resolvedAt: null, resolvedBy: null, resolutionNote: null,
+}))
 const full = params.get('full') === '1'
 const sampleDone = params.get('sample') === 'done'
 const byod = params.get('byod')
@@ -430,7 +444,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         return json({ counts: { needs_review: as === 'viewer' ? 0 : 2, waiting: 1, sent_back: 0, ready: 0, open: 3, done: 12 }, unread: {}, capped: false })
     }
     // Counted on the workspace page; the Workspaces page would list them in full, so none there.
-    if (p.includes('/access-requests') || p.includes('/to-answer')) return json(as === 'admin' && page !== 'workspaces' ? [{ id: 'ar1' }, { id: 'ar2' }, { id: 'ar3' }] : [])
+    if (p.includes('/access-requests') || p.includes('/to-answer')) return json(as === 'admin' && page !== 'workspaces' ? ACCESS_REQUESTS : [])
     if (p.includes('/drafts/owner-left')) return json([])
     if (p.includes('transfer')) return json([])
     if (p === '/api/v1/layout-templates') return json({ items: [], total: 0 })

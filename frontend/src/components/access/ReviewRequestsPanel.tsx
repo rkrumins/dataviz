@@ -110,7 +110,7 @@ function RequestRow({ request: r, showWorkspace, onReview }: {
     })
 
     return (
-        <li className="px-5 py-3.5 flex items-start gap-3">
+        <li className="px-4 sm:px-5 py-3.5 flex flex-wrap items-start gap-3">
             {r.serviceAccount ? (
                 <span className="w-9 h-9 rounded-full bg-sky-500/10 border border-sky-500/20 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
                     <Bot className="w-4 h-4" aria-hidden />
@@ -118,9 +118,9 @@ function RequestRow({ request: r, showWorkspace, onReview }: {
             ) : (
                 <UserAvatar userId={r.requester.id} name={who} shape="gradient" className="w-9 h-9 text-xs font-bold shrink-0" />
             )}
-            <div className="min-w-0 flex-1">
+            <div className="min-w-[13rem] flex-1">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <p className="text-sm font-semibold text-ink truncate">{who}</p>
+                    <p className="min-w-0 max-w-full text-sm font-semibold text-ink truncate">{who}</p>
                     {r.serviceAccount && <ServiceAccountBadge />}
                     {!r.serviceAccount && r.requester.email && r.requester.email !== who && (
                         <p className="text-xs text-ink-muted truncate">{r.requester.email}</p>
@@ -132,32 +132,32 @@ function RequestRow({ request: r, showWorkspace, onReview }: {
                     </span>
                     {waited >= 1 && (
                         <span className={cn(
-                            'inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold',
+                            'inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-1.5 py-0.5 text-[10px] font-semibold',
                             waited >= 7
                                 ? 'border-rose-500/20 bg-rose-500/10 text-rose-600 dark:text-rose-400'
                                 : waited >= 3
                                     ? 'border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-400'
                                     : 'border-slate-500/20 bg-slate-500/10 text-ink-muted',
                         )}>
-                            <Clock className="w-2.5 h-2.5" /> Waiting {waited} {waited === 1 ? 'day' : 'days'}
+                            <Clock className="w-2.5 h-2.5 shrink-0" aria-hidden /> Waiting {waited} {waited === 1 ? 'day' : 'days'}
                         </span>
                     )}
                     {open && r.escalatedAt && (
-                        <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/20 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-rose-600 dark:text-rose-400">
-                            <ShieldAlert className="w-2.5 h-2.5" /> Sent to the Org Admins
+                        <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-rose-500/20 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-rose-600 dark:text-rose-400">
+                            <ShieldAlert className="w-2.5 h-2.5 shrink-0" aria-hidden /> Sent to the Org Admins
                         </span>
                     )}
                     {r.target.accessMode === 'idp' && (
-                        <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-sky-600 dark:text-sky-400">
-                            <KeyRound className="w-2.5 h-2.5" /> Identity provider
+                        <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-sky-600 dark:text-sky-400">
+                            <KeyRound className="w-2.5 h-2.5 shrink-0" aria-hidden /> Identity provider
                         </span>
                     )}
                 </div>
                 {r.justification && <p className="text-xs text-ink-secondary mt-1 break-words">“{r.justification}”</p>}
                 <ServiceAccountFacts request={r} />
                 <p className="text-[10px] text-ink-muted mt-1 flex flex-wrap items-center gap-1.5">
-                    <span className={cn('inline-flex items-center gap-1 rounded-full border px-1.5 py-px font-semibold', meta.pill)}>
-                        <StatusIcon className="w-2.5 h-2.5" /> {meta.label}
+                    <span className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-1.5 py-px font-semibold', meta.pill)}>
+                        <StatusIcon className="w-2.5 h-2.5 shrink-0" aria-hidden /> {meta.label}
                     </span>
                     Asked {timeAgo(r.createdAt)}
                     {r.status === 'awaiting_idp' && r.idpGroup && <> · pointed to “{r.idpGroup}”</>}
@@ -199,7 +199,7 @@ function RequestRow({ request: r, showWorkspace, onReview }: {
                 )}
             </div>
             {open && !denying && (
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="ml-auto flex items-center gap-1.5 shrink-0">
                     <button
                         type="button"
                         onClick={onReview}
