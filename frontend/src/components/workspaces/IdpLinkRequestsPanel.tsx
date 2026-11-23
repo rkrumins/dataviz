@@ -27,14 +27,14 @@ export function IdpLinkRequestsPanel() {
 
     return (
         <section aria-labelledby="idp-links-title" className="overflow-hidden rounded-2xl border border-violet-500/25 bg-canvas-elevated">
-            <div className="flex items-center gap-2 border-b border-glass-border px-5 py-3">
-                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-500/10 text-violet-600 dark:text-violet-300">
+            <div className="flex items-start gap-2 border-b border-glass-border px-4 sm:px-5 py-3">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-violet-500/10 text-violet-600 dark:text-violet-300">
                     <KeyRound className="h-3.5 w-3.5" aria-hidden />
                 </span>
-                <div>
+                <div className="min-w-0">
                     <h2 id="idp-links-title" className="flex items-center gap-2 text-sm font-bold text-ink">
                         Identity-provider links to confirm
-                        <span className="rounded-full bg-violet-500/10 px-2 py-0.5 text-[11px] font-semibold text-violet-700 dark:text-violet-300">{waiting.length}</span>
+                        <span className="shrink-0 rounded-full bg-violet-500/10 px-2 py-0.5 text-[11px] font-semibold text-violet-700 dark:text-violet-300">{waiting.length}</span>
                     </h2>
                     <p className="text-[11px] text-ink-muted">Workspace groups that should follow a directory group. Once linked, people in it join at their next sign-in.</p>
                 </div>
@@ -56,16 +56,16 @@ function LinkRow({ request: r, providers }: { request: IdpLinkRequest; providers
     const busy = link.isPending || decline.isPending
 
     return (
-        <li className="px-5 py-3">
+        <li className="px-4 sm:px-5 py-3">
             <div className="flex flex-wrap items-center gap-3">
                 <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-semibold text-ink">{group}</span>
                     <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-muted">
-                        <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 px-2 py-0.5 font-semibold text-violet-700 dark:text-violet-300">
-                            <Link2 className="h-3 w-3" aria-hidden /> {r.idpGroup}
+                        <span className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-full bg-violet-500/10 px-2 py-0.5 font-semibold text-violet-700 dark:text-violet-300">
+                            <Link2 className="h-3 w-3 shrink-0" aria-hidden /> <span className="truncate">{r.idpGroup}</span>
                         </span>
                         <span className="inline-flex items-center gap-1">
-                            <Users className="h-3 w-3" aria-hidden />
+                            <Users className="h-3 w-3 shrink-0" aria-hidden />
                             {r.seenCount > 0 ? `${r.seenCount} ${r.seenCount === 1 ? 'person has' : 'people have'} it` : 'Nobody has signed in with it yet'}
                         </span>
                         <span>
