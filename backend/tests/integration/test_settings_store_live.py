@@ -23,7 +23,7 @@ from types import SimpleNamespace
 from typing import Any, Iterator, Optional
 
 import pytest
-from sqlalchemy import create_engine, make_url, text
+from sqlalchemy import MetaData, Table, create_engine, make_url, text
 from sqlalchemy.orm import Session
 
 from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
@@ -97,14 +97,43 @@ def graph_store_tables(name: str) -> None:
 
 
 def seed(name: str, *rows: Any) -> None:
-    """ORM rows into database ``name``, committed, in the order given."""
+    """ORM rows into database ``name``, committed, in the order given.
+
+    A database built at an earlier revision gets only the columns its tables have: a column a
+    later revision adds is left out, with its default (``workspaces.kind``, say, which the model
+    always sends). Such a row is written against its table as that database has it."""
     engine = create_engine(db_url(name, "psycopg2"))
+    tables: dict = {}
     with Session(engine) as session:
         for row in rows:
-            session.add(row)
+            model = row.__table__
+            if model.key not in tables:
+                tables[model.key] = Table(model.name, MetaData(), schema=model.schema,
+                                          autoload_with=session.connection())
+            table = tables[model.key]
+            if all(c.name in table.c for c in model.columns):
+                session.add(row)
+            else:
+                session.execute(table.insert().values(**_present_values(row, table)))
             session.flush()
         session.commit()
     engine.dispose()
+
+
+def _present_values(row: Any, table: Table) -> dict:
+    """``row``'s values for the columns ``table`` has: what is set on it, else its model's Python
+    default, as the ORM would have sent it."""
+    mapper = row.__mapper__
+    values = {}
+    for col in row.__table__.columns:
+        if col.name not in table.c:
+            continue
+        value = getattr(row, mapper.get_property_by_column(col).key)
+        if value is None and col.default is not None and not col.default.is_sequence:
+            value = col.default.arg(None) if col.default.is_callable else col.default.arg
+        if value is not None:
+            values[col.name] = value
+    return values
 
 
 def query(name: str, sql: str, **params: Any) -> list:
