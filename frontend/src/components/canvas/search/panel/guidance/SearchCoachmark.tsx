@@ -37,10 +37,10 @@ export function SearchCoachmark({ anchor }: {
     const left = rect.left + rect.width / 2 - 20
     return createPortal(
         <>
-            <span aria-hidden className="pointer-events-none fixed z-50 rounded-lg ring-2 ring-accent-lineage/50 motion-safe:animate-pulse"
+            <span aria-hidden className="pointer-events-none fixed z-coach rounded-lg ring-2 ring-accent-lineage/50 motion-safe:animate-pulse"
                   style={{ top: rect.top - 2, left: rect.left - 2, width: rect.width + 4, height: rect.height + 4 }} />
             <div role="status" style={{ top: rect.top + rect.height + 10, left }}
-                 className="fixed z-50 w-72 rounded-xl border border-accent-lineage/40 bg-canvas-elevated py-2.5 pl-3 pr-8 text-xs leading-snug text-ink shadow-xl shadow-black/30">
+                 className="fixed z-coach w-72 rounded-xl border border-accent-lineage/40 bg-canvas-elevated py-2.5 pl-3 pr-8 text-xs leading-snug text-ink shadow-xl shadow-black/30">
                 <span className="font-semibold text-accent-lineage">New — Search Studio.</span>{' '}
                 Open this search out over the canvas: the query, a table of what it finds and what the view
                 holds, side by side. Press <Kbd shortcut="e" /> from the panel any time.
