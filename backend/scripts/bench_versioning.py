@@ -1443,7 +1443,8 @@ async def run_draft_search(*, graph_id: str, branch_id: str, falkor_graph: str, 
 
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
-    host, port = os.getenv("FALKORDB_HOST", "localhost"), int(os.getenv("FALKORDB_PORT", "6379"))
+    from backend.common.env_port import env_port
+    host, port = os.getenv("FALKORDB_HOST", "localhost"), env_port("FALKORDB_PORT", 6379, store="falkordb")
     # Its provider would make an empty key of a name that is gone (the integration suite's session
     # end drops every gvt_* key of the FalkorDB it is pointed at).
     if falkor_graph not in {k.decode() if isinstance(k, bytes) else k
@@ -1824,8 +1825,9 @@ async def _memory_peak(stop: asyncio.Event, seen: Dict[str, int]) -> None:
     from falkordb.asyncio import FalkorDB
     from redis.asyncio import ConnectionPool
 
+    from backend.common.env_port import env_port
     pool = ConnectionPool(host=os.getenv("FALKORDB_HOST", "localhost"),
-                          port=int(os.getenv("FALKORDB_PORT", "6379")), max_connections=2)
+                          port=env_port("FALKORDB_PORT", 6379, store="falkordb"), max_connections=2)
     try:
         conn = FalkorDB(connection_pool=pool).connection
     except Exception:  # noqa: BLE001 — no reading is no run lost
@@ -2309,7 +2311,8 @@ async def _gen_falkor(args) -> int:
     # Plain standalone Redis only, as the other FalkorDB scripts: --drop against a Cluster or a
     # Sentinel replica would half-apply.
     assert_standalone_env("bench_versioning.py")
-    db = FalkorDB(host=os.getenv("FALKORDB_HOST", "localhost"), port=int(os.getenv("FALKORDB_PORT", "6379")))
+    from backend.common.env_port import env_port
+    db = FalkorDB(host=os.getenv("FALKORDB_HOST", "localhost"), port=env_port("FALKORDB_PORT", 6379, store="falkordb"))
     client = db.select_graph(args.graph)
     if args.drop:
         with contextlib.suppress(Exception):

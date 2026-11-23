@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 # Add project root for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from backend.common.env_port import env_port
 from backend.app.models.graph import GraphNode, GraphEdge
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 
@@ -253,7 +254,7 @@ class LargeSeeder:
 
 async def push_to_falkordb(seeder: LargeSeeder):
     host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
+    port = env_port("FALKORDB_PORT", 6379, store="falkordb")
     graph_name = os.getenv("FALKORDB_GRAPH_NAME", "nexus_lineage")
 
     # Speaks PLAIN standalone Redis: against a Cluster this reaches only the slots

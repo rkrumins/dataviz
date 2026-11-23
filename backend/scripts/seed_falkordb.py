@@ -42,6 +42,7 @@ from typing import Dict, List
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from backend.common.env_port import env_port
 from backend.app.models.graph import GraphNode, GraphEdge
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1037,7 +1038,7 @@ async def push_to_falkordb(builder: EnterpriseGraphBuilder, graph_name: str):
     from backend.app.providers.falkordb_provider import FalkorDBProvider
     provider = FalkorDBProvider(
         host=os.getenv("FALKORDB_HOST", "localhost"),
-        port=int(os.getenv("FALKORDB_PORT", "6379")),
+        port=env_port("FALKORDB_PORT", 6379, store="falkordb"),
         graph_name=graph_name,
     )
     await provider._ensure_connected()
@@ -1062,7 +1063,7 @@ async def materialize_aggregated(graph_name: str):
     from backend.app.providers.falkordb_provider import FalkorDBProvider
     provider = FalkorDBProvider(
         host=os.getenv("FALKORDB_HOST", "localhost"),
-        port=int(os.getenv("FALKORDB_PORT", "6379")),
+        port=env_port("FALKORDB_PORT", 6379, store="falkordb"),
         graph_name=graph_name,
     )
     await provider._ensure_connected()

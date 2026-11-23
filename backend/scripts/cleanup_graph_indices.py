@@ -64,6 +64,7 @@ except ImportError:  # pragma: no cover - operator-facing script
     print("redis-py is required: pip install redis", file=sys.stderr)
     raise SystemExit(2)
 
+from backend.common.env_port import env_port
 from backend.app.providers.index_policy import (  # noqa: E402
     CONDITIONAL_EDGE_INDEXES, RETIRED_EDGE_INDEXES, declared_edge_indexes,
 )
@@ -227,7 +228,7 @@ async def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default=os.getenv("FALKORDB_HOST", "localhost"))
-    ap.add_argument("--port", type=int, default=int(os.getenv("FALKORDB_PORT", "6379")))
+    ap.add_argument("--port", type=int, default=env_port("FALKORDB_PORT", 6379, store="falkordb"))
     ap.add_argument("--password", default=os.getenv("FALKORDB_PASSWORD") or None)
     ap.add_argument("--graph", action="append", default=[],
                     help="limit to these graph keys; repeatable. Default: all.")

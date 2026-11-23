@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 
 from backend.app.config import resilience
+from backend.common.env_port import env_port
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,7 @@ class StatsServiceConfig:
             poll_timeout_large_secs=resilience.STATS_POLL_TIMEOUT_LARGE_SECS,
             poll_large_threshold=resilience.STATS_POLL_LARGE_THRESHOLD,
             dedup_ttl_secs=int(os.getenv("STATS_DEDUP_TTL_SECS", str(default_dedup_ttl))),
-            health_port=int(os.getenv("STATS_HEALTH_PORT", "8092")),
+            health_port=env_port("STATS_HEALTH_PORT", 8092),
         )
 
     def resolve_poll_timeout(self, last_known_node_count: int) -> float:

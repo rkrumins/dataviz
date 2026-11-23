@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from backend.common.env_port import env_port
 from backend.app.models.graph import GraphNode, GraphEdge
 
 
@@ -312,7 +313,7 @@ def main():
 
             provider = FalkorDBProvider(
                 host=os.getenv("FALKORDB_HOST", "localhost"),
-                port=int(os.getenv("FALKORDB_PORT", "6379")),
+                port=env_port("FALKORDB_PORT", 6379, store="falkordb"),
                 graph_name=os.getenv("FALKORDB_GRAPH_NAME", "nexus"),
             )
             import asyncio
