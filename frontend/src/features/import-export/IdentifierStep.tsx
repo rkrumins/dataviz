@@ -12,7 +12,7 @@
  *
  * `useIdentifierChoice` holds the choice and the read as it settles it; the import sends that read.
  */
-import { useId, useMemo, useState } from 'react'
+import { useId } from 'react'
 import { motion } from 'framer-motion'
 import { AlertTriangle, CheckCircle2, Fingerprint, Info } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -20,24 +20,8 @@ import { MOTION } from '@/lib/motion'
 import { Badge } from '@/components/ui/Badge'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { Select } from '@/components/ui/Select'
-import { withIdentifierColumn, type FileRead } from './fileRows'
-import { checkIdentifiers, type IdentifierCheck } from './identifierCheck'
-
-/** The column the identifiers are read from, as chosen (null: the file's own, or the guess), the
- *  read with it applied, and that read's check. A new file starts from its own. */
-export function useIdentifierChoice(read: FileRead | null) {
-  const [column, setColumn] = useState<string | null>(null)
-  const [of, setOf] = useState(read)
-  if (read !== of) {
-    setOf(read)
-    setColumn(null)
-  }
-  const settled = useMemo(() => (read && column ? withIdentifierColumn(read, column) : read), [read, column])
-  const check = useMemo(() => (settled ? checkIdentifiers(settled, column) : null), [settled, column])
-  return { column, setColumn, read: settled, check, guessed: column === null }
-}
-
-export type IdentifierChoice = ReturnType<typeof useIdentifierChoice>
+import type { IdentifierCheck } from './identifierCheck'
+import type { IdentifierChoice } from './useIdentifierChoice'
 
 const n = (count: number) => count.toLocaleString('en-US')
 const plural = (count: number, one: string, many = `${one}s`) => `${n(count)} ${count === 1 ? one : many}`

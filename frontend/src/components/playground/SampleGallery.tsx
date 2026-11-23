@@ -9,7 +9,7 @@
  * is one of their graphs, so the quota holds it as it holds a blank one, and it is theirs to
  * change (backend `endpoints/playground.py`).
  */
-import { useCallback, useId, useState, type Ref } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type Ref } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
@@ -23,7 +23,8 @@ import { useAppNotifications, type NotificationAction } from '@/components/ui/no
 import { useFeature } from '@/store/features'
 import { usePlaygroundSamples, useStartSample } from '@/hooks/usePlayground'
 import type { PlaygroundSample, PlaygroundView } from '@/services/playgroundService'
-import { CanvasChoice, useCanvasChoice } from './CanvasChoice'
+import { CanvasChoice } from './CanvasChoice'
+import { useCanvasChoice } from './canvasChoiceModel'
 
 /** A sample's colour name → its icon tile. */
 const TILES: Record<string, string> = {
@@ -48,7 +49,11 @@ export function SampleGallery({ workspaceId, className, ref }: {
     const start = useStartSample(workspaceId)
     /** The sample whose canvases are being chosen. */
     const [picking, setPicking] = useState<PlaygroundSample | null>(null)
-    const closeSheet = useCallback(() => { if (!start.isPending) setPicking(null) }, [start.isPending])
+    // Stable, so the sheet's focus handling doesn't start over as its sample begins: not while
+    // the sample is being made, which leaving would hide.
+    const pending = useRef(false)
+    useEffect(() => { pending.current = start.isPending })
+    const closeSheet = useCallback(() => { if (!pending.current) setPicking(null) }, [])
 
     if (!catalogue?.samples.length) return null
     const full = catalogue.quotaLeft <= 0

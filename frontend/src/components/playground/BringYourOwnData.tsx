@@ -44,12 +44,14 @@ import { matchTypes, toImportFile, whereOf, type TypeMap } from '@/features/impo
 import { downloadSimpleTemplate, useFileIntake } from '@/features/import-export/useFileIntake'
 import { byUrnFix, refusedOf, useImportRun } from '@/features/import-export/useImportRun'
 import { ImportOptions, matchNote } from '@/features/import-export/ImportOptions'
-import { IdentifierStep, useIdentifierChoice } from '@/features/import-export/IdentifierStep'
+import { IdentifierStep } from '@/features/import-export/IdentifierStep'
+import { useIdentifierChoice } from '@/features/import-export/useIdentifierChoice'
 import { formatIdentifier, parseIdentifier, type Match } from '@/features/import-export/identifier'
 import { OWN_DATA_LIMITS, TEMPLATE_FILES } from './ownData'
 import { ModelBadge } from './ModelBadge'
 import { TypeMatchTable, type ModelTypes, type TypeKind } from './TypeMatchTable'
-import { CanvasChoice, hierarchyOfLayer, madeWith, useCanvasChoice, type HierarchyOption } from './CanvasChoice'
+import { CanvasChoice } from './CanvasChoice'
+import { hierarchyOfLayer, madeWith, useCanvasChoice, type HierarchyOption } from './canvasChoiceModel'
 
 /** Rows to fix shown at once; the rest are counted. */
 const SHOWN = 8

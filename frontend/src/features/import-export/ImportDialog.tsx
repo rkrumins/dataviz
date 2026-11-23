@@ -29,7 +29,8 @@ import { matchTypes, whereOf, type FileRead, type TypeMap, type TypeRef } from '
 import { downloadSimpleTemplate, useFileIntake, type FileIntake } from './useFileIntake'
 import { blocked, byUrnFix, heldForRows, matchedNothing, refusedOf, useImportRun } from './useImportRun'
 import { ImportOptions, matchNote } from './ImportOptions'
-import { IdentifierStep, useIdentifierChoice } from './IdentifierStep'
+import { IdentifierStep } from './IdentifierStep'
+import { useIdentifierChoice } from './useIdentifierChoice'
 import { useWorkspacesStore } from '@/store/workspaces'
 
 /** The graph's types, which the simple files' types are matched to. */
