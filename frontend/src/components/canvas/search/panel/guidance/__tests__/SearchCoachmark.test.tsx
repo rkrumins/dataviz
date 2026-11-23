@@ -26,6 +26,7 @@ describe('SearchCoachmark', () => {
     beforeEach(() => {
         localStorage.clear()
         useSearchStore.getState().setStudioOpen(false)
+        useSearchStore.setState({ matchUrnSet: new Set() })
     })
 
     it('points at Search Studio once, with the guide a click away, until dismissed', () => {
@@ -49,6 +50,14 @@ describe('SearchCoachmark', () => {
         act(() => useSearchStore.getState().setStudioOpen(false))
         expect(screen.queryByRole('status')).not.toBeInTheDocument()
         expect(localStorage.getItem(SEARCH_INTRO_KEY)).toBe('1')
+    })
+
+    it("waits while a search is lit on the canvas, whose chip it would cover", () => {
+        useSearchStore.setState({ matchUrnSet: new Set(['urn:a']) })
+        render(<SearchCoachmark anchor={control()} />, { wrapper: MemoryRouter })
+        expect(screen.queryByRole('status')).not.toBeInTheDocument()
+        act(() => useSearchStore.setState({ matchUrnSet: new Set() }))
+        expect(screen.getByRole('status')).toHaveTextContent(/New — Search Studio\./)
     })
 
     it('has nothing to point from while its control is hidden', () => {
