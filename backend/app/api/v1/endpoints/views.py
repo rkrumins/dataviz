@@ -287,10 +287,15 @@ async def _compute_ontology_digest(
 
 
 def _clear_publish_request(view_orm: ViewORM) -> None:
-    """Drop a pending publication request (approved, denied, or withdrawn)."""
+    """Drop a pending publication request (approved, denied, or withdrawn).
+
+    Not an edit of the view, so ``updated_at`` stays as it was (assigned its own
+    column, the column's ``onupdate`` does not fire): the Explorer sorts and
+    filters on it, and answering a request is not a change to what the view shows."""
     view_orm.publish_requested_by = None
     view_orm.publish_requested_at = None
     view_orm.publish_request_note = None
+    view_orm.updated_at = ViewORM.updated_at
 
 
 async def _enriched_or_404(
@@ -520,6 +525,15 @@ async def get_view_facets(
 @router.get("/stats", response_model=ViewCatalogStats)
 async def get_view_stats(
     f: ViewFilterQuery = Depends(view_filter_query),
+    recent_since: Optional[str] = Query(
+        None,
+        alias="recentSince",
+        description=(
+            "Where ``recentlyAdded`` starts counting: an ISO date or date-time. "
+            "Seven days ago when absent. The Explorer sends the cutoff its Recent "
+            "list uses, so the tile counts exactly that list."
+        ),
+    ),
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
@@ -540,6 +554,7 @@ async def get_view_stats(
         ids_in=ids_in,
         user_id=_user_id(user),
         readable=clause,
+        recent_since=_instant(recent_since, "recentSince"),
     )
 
 
@@ -649,13 +664,16 @@ async def list_views(
     sort: Optional[str] = Query(
         None,
         description=(
-            "Server-side ordering key: recently-modified (default), data-newest, "
-            "data-oldest, newest, oldest, updated, popular, az, za. Ordering runs "
-            "across the whole result set so it stays correct with infinite scroll."
+            "Server-side ordering key: recently-modified (default; the later of a "
+            "settings edit and a data publish), modified-asc, updated, updated-asc "
+            "(settings edits alone), data-newest, data-oldest, newest, oldest, az, za "
+            "(ignoring case), popular, likes-asc, type-az, type-za, owner-az, "
+            "owner-za, most-opened. Ordering runs across the whole result set so it "
+            "stays correct with infinite scroll."
         ),
     ),
     limit: int = Query(50, le=200),
-    offset: int = Query(0),
+    offset: int = Query(0, ge=0),
     include: List[str] = Query(
         default_factory=list,
         description=(
@@ -1426,6 +1444,7 @@ async def request_publication(
     view_orm.publish_requested_by = user.id
     view_orm.publish_requested_at = datetime.now(timezone.utc).isoformat()
     view_orm.publish_request_note = (note or "").strip() or None
+    view_orm.updated_at = ViewORM.updated_at      # asking is not an edit (_clear_publish_request)
     await session.flush()
     await view_activity_repo.record_view_activity(
         session, view_id=view_id, workspace_id=view_orm.workspace_id,
@@ -1504,6 +1523,8 @@ async def approve_publication(
     _clear_publish_request(view_orm)
     view_orm.visibility = "enterprise"
     view_orm.updated_by = user.id
+    # The visibility change is a settings edit, stamped as update_visibility stamps one.
+    view_orm.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
     await view_activity_repo.record_view_activity(
         session, view_id=view_id, workspace_id=view_orm.workspace_id,

@@ -71,9 +71,10 @@ export function useViewHealth(views: View[]): Map<string, ViewHealthInfo> {
         }
       }
 
-      // Check for staleness
-      const updatedAt = new Date(view.updatedAt)
-      const daysSinceUpdate = (Date.now() - updatedAt.getTime()) / (1000 * 60 * 60 * 24)
+      // Stale when nothing changed, settings or data, as the server judges it: a
+      // view whose data is published weekly is not stale for untouched settings.
+      const changedAt = view.dataUpdatedAt && view.dataUpdatedAt > view.updatedAt ? view.dataUpdatedAt : view.updatedAt
+      const daysSinceUpdate = (Date.now() - new Date(changedAt).getTime()) / (1000 * 60 * 60 * 24)
       if (daysSinceUpdate > STALE_THRESHOLD_DAYS) {
         healthMap.set(view.id, { status: 'stale', reason: `Not updated in ${Math.floor(daysSinceUpdate)} days` })
         continue

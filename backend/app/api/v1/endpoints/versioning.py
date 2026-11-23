@@ -368,51 +368,26 @@ async def _bump_main_cache(graph_id: str) -> None:
 
 
 async def _touch_views_data_updated(graph_id: str, actor: str) -> None:
-    """Stamp ``data_updated_at``/``data_updated_by`` on every live view of the graph's data
-    source after a main-advancing write (publish / MR merge / fork-PR merge / revert), so
-    Explorer's "last updated" reflects DATA changes, not just settings edits. One bulk indexed
-    UPDATE (idx_view_data_source); awaited inline like ``_bump_main_cache``. Best-effort by
-    contract — the graphver commit already landed and the management DB may be a separate
-    instance (no 2PC), so a failure here logs and never fails the user's write; the staleness
-    self-corrects on the next publish. Interactive main write-throughs (``/graph/changes`` on
-    main) are deliberately excluded — the canvas requires a draft, so every user-visible data
-    change reaches one of the four call sites."""
+    """Stamp ``data_updated_at``/``data_updated_by`` on every live view that reads the graph's
+    data source after a main-advancing write (publish / MR merge / fork-PR merge / revert), so
+    Explorer's "last updated" reflects DATA changes, not just settings edits
+    (``view_repo.touch_views_data_updated``, which an external graph's reconcile sweep calls
+    too); awaited inline like ``_bump_main_cache``. Best-effort by contract — the graphver
+    commit already landed and the management DB may be a separate instance (no 2PC), so a
+    failure here logs and never fails the user's write; the staleness self-corrects on the next
+    publish. Interactive main write-throughs (``/graph/changes`` on main) are deliberately
+    excluded — the canvas requires a draft, so every user-visible data change reaches one of the
+    four call sites."""
     try:
         svc = get_versioning_service()
         meta = await svc.get_graph(graph_id)
         ds = str(meta.get("data_source_id") or "") if meta else ""
         if not ds:
             return
-        from sqlalchemy import select as sa_select, update as sa_update
         from backend.app.db.engine import get_async_session
-        from backend.app.db.models import ViewORM, _now
-        from backend.app.db.repositories import view_activity_repo
+        from backend.app.db.repositories import view_repo
         async with get_async_session() as session:
-            # Snapshot the affected views BEFORE the bulk update so we can fan
-            # out a per-view "data_changed" activity event (the timeline's Data
-            # channel — a graph publish/merge changed what this view shows).
-            affected = (await session.execute(
-                sa_select(ViewORM.id, ViewORM.workspace_id).where(
-                    ViewORM.data_source_id == ds, ViewORM.deleted_at.is_(None),
-                )
-            )).all()
-            await session.execute(
-                sa_update(ViewORM)
-                .where(ViewORM.data_source_id == ds, ViewORM.deleted_at.is_(None))
-                # Self-assign updated_at so SQLAlchemy's column onupdate=_now does NOT
-                # fire on this Core UPDATE — data freshness must not masquerade as a
-                # settings edit (the whole reason these fields are separate).
-                .values(data_updated_at=_now(), data_updated_by=actor,
-                        updated_at=ViewORM.updated_at)
-                .execution_options(synchronize_session=False)
-            )
-            for view_id, workspace_id in affected:
-                await view_activity_repo.record_view_activity(
-                    session, view_id=view_id, workspace_id=workspace_id,
-                    action="data_changed", actor=actor,
-                    summary="Underlying data updated",
-                    changes={"graphId": graph_id},
-                )
+            await view_repo.touch_views_data_updated(session, ds, actor, changes={"graphId": graph_id})
             await session.commit()
     except Exception as exc:
         logger.warning("view data-freshness stamp for %s skipped: %s", graph_id, exc)

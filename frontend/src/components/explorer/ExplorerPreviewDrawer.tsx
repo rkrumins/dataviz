@@ -674,12 +674,21 @@ export function ExplorerPreviewDrawer({
                         className="h-3.5 w-3.5 shrink-0 text-ink-muted transition-transform group-open/dates:rotate-90"
                       />
                       See all details
-                      {/* The gist, so the fold costs nothing at a glance. */}
-                      {view.updatedAt && (
-                        <span className="ml-1 truncate font-normal text-ink-muted/70 group-open/dates:hidden">
-                          updated {timeAgo(view.updatedAt)}
-                        </span>
-                      )}
+                      {/* The gist, so the fold costs nothing at a glance: the last
+                          change of either kind, as the cards, the sorts and the
+                          stale badge read it; the tip tells the two apart. */}
+                      {view.updatedAt && (() => {
+                        const dataAt = view.dataUpdatedAt ?? null
+                        const changedAt = dataAt && dataAt > view.updatedAt ? dataAt : view.updatedAt
+                        return (
+                          <HoverTip
+                            className="ml-1 min-w-0 truncate group-open/dates:hidden"
+                            label={`Settings edited ${timeAgo(view.updatedAt)} · ${dataAt ? `Data updated ${timeAgo(dataAt)}` : 'No published data changes yet'}`}
+                          >
+                            <span className="truncate font-normal text-ink-muted/70">updated {timeAgo(changedAt)}</span>
+                          </HoverTip>
+                        )
+                      })()}
                     </summary>
                     <div className="space-y-3 pt-3">
                   {/* THE TYPE IS ALREADY THE PILL BESIDE THE TITLE, and the

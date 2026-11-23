@@ -431,6 +431,70 @@ async def test_raw_drift_is_detected_with_before_and_after_counts(session_factor
     assert st.drift_state == "drifting"
 
 
+_SETTINGS_EDITED = "2026-01-01T00:00:00+00:00"
+
+
+async def _views_reading_ds_1(factory):
+    """A view of ds_1, and one with no source of its own in ws_1, whose default ds_1 is."""
+    from backend.app.db.models import ViewORM
+    async with factory() as s:
+        s.add_all([
+            ViewORM(id="v_own", name="Own", workspace_id="ws_1", data_source_id="ds_1",
+                    updated_at=_SETTINGS_EDITED),
+            ViewORM(id="v_default", name="Default", workspace_id="ws_1", updated_at=_SETTINGS_EDITED),
+        ])
+        await s.commit()
+
+
+async def _views(factory):
+    from backend.app.db.models import ViewORM
+    async with factory() as s:
+        return list((await s.execute(select(ViewORM))).scalars())
+
+
+@pytest.mark.asyncio
+async def test_a_changed_external_source_stamps_the_views_that_read_it(session_factory):
+    """Nothing publishes an external graph here; this sweep is what finds it changed,
+    so it is what tells its views — the Explorer sorts and filters on that."""
+    await _seed(session_factory, raw_fingerprint="fp_old")
+    await _views_reading_ds_1(session_factory)
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_reason == {"raw_drift": 1} and result.actions == 1
+    views = await _views(session_factory)
+    assert {v.id for v in views if v.data_updated_at} == {"v_own", "v_default"}
+    assert {v.data_updated_by for v in views} == {None}, "nobody here published it"
+    assert {v.updated_at for v in views} == {_SETTINGS_EDITED}, "not a settings edit"
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_overlay_is_not_a_data_change(session_factory):
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    await _views_reading_ds_1(session_factory)
+    result = await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+
+    assert result.by_reason == {"overlay_missing": 1}
+    assert not any(v.data_updated_at for v in await _views(session_factory))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_view_stamp_never_costs_the_dispatch(session_factory, monkeypatch):
+    await _seed(session_factory, raw_fingerprint="fp_old")
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("management DB hiccup")
+
+    monkeypatch.setattr(
+        "backend.app.db.repositories.view_repo.touch_views_data_updated", _boom,
+    )
+    result = await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+
+    assert result.actions == 1 and result.errors == 0
+    st = await _state(session_factory)
+    assert st.raw_fingerprint != "fp_old", "the baseline was adopted all the same"
+
+
 @pytest.mark.asyncio
 async def test_never_built_source_gets_a_first_build_via_trigger(session_factory):
     """It must NOT go through signal_source_changed — that path treats a

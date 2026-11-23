@@ -305,6 +305,11 @@ interface PreferencesState {
   changeListLayout: ChangeListLayout | null
   setChangeListLayout: (layout: ChangeListLayout) => void
 
+  /** The Business view's sync card: whether its "Show technical details" (the stores and
+   *  revisions behind the plain lanes) is open. Closed by default; the choice is remembered. */
+  syncTechnicalDetailsOpen: boolean
+  setSyncTechnicalDetailsOpen: (open: boolean) => void
+
   // Context View display settings — control canvas-side rendering density,
   // zoom, and visual chrome from the header's Display Settings popover.
   canvasZoom: number
@@ -594,6 +599,9 @@ export const usePreferencesStore = create<PreferencesState>()(
 
       changeListLayout: null,
       setChangeListLayout: (changeListLayout) => set({ changeListLayout }),
+
+      syncTechnicalDetailsOpen: false,
+      setSyncTechnicalDetailsOpen: (syncTechnicalDetailsOpen) => set({ syncTechnicalDetailsOpen }),
 
       // Context View display settings
       canvasZoom: 1,
