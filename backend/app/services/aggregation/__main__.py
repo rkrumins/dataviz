@@ -703,7 +703,8 @@ async def _serve_metrics():
 
         from backend.app.api.v1.endpoints import metrics as metrics_endpoint
 
-        port = int(os.getenv("METRICS_PORT", "9100"))
+        from backend.common.env_port import env_port
+        port = env_port("METRICS_PORT", 9100)
         metrics_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
         metrics_app.include_router(metrics_endpoint.router)
         config = uvicorn.Config(
@@ -822,7 +823,8 @@ async def main() -> None:
     )
 
     # Start health endpoint
-    health_port = int(os.getenv("WORKER_HEALTH_PORT", "8090"))
+    from backend.common.env_port import env_port
+    health_port = env_port("WORKER_HEALTH_PORT", 8090)
     try:
         await _run_health_server(consumer, health_port)
     except Exception as e:

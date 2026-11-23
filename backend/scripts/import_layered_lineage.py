@@ -43,6 +43,7 @@ from typing import Dict, List, Optional, Any
 # Ensure project root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
+from backend.common.env_port import env_port
 from backend.common.models.graph import GraphNode, GraphEdge
 
 logger = logging.getLogger("import_layered_lineage")
@@ -273,14 +274,14 @@ async def push_to_falkordb(builder, graph_name: str, declared_labels=None, *, bu
     import redis.asyncio as _aioredis
     provider = FalkorDBProvider(
         host=os.getenv("FALKORDB_HOST", "localhost"),
-        port=int(os.getenv("FALKORDB_PORT", "6379")),
+        port=env_port("FALKORDB_PORT", 6379, store="falkordb"),
         graph_name=graph_name,
     )
     await provider._ensure_connected()
 
     _r = _aioredis.Redis(
         host=os.getenv("FALKORDB_HOST", "localhost"),
-        port=int(os.getenv("FALKORDB_PORT", "6379")))
+        port=env_port("FALKORDB_PORT", 6379, store="falkordb"))
 
     # REPLACE the target graph by default: a re-run of a bulk load should overwrite, not MERGE
     # into a stale copy. Without this, re-running (e.g. a perf load) merges millions of rows into

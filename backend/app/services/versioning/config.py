@@ -28,6 +28,7 @@ import os
 # cache graph against committed main must exclude them. ONE definition, shared
 # — see the module docstring there for the two separate outages a second copy
 # of this list caused.
+from backend.common.env_port import env_port as _env_port
 from backend.common.derived_artifacts import (  # noqa: F401  (re-export)
     DERIVED_LABELS,
     not_derived_clause,
@@ -258,7 +259,7 @@ PROJECTION_PAGE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGE", "20000"))
 # 230 MB at any size, and hands the lineage summaries to the aggregation job when anything changed.
 PROJECTION_RECONCILE_STREAMED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE",
                                                          "100000"))
-WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
+WORKER_HEALTH_PORT: int = _env_port("GRAPHVER_WORKER_HEALTH_PORT", 8092)
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):
 # a full reseed is O(whole main graph), so it gets a generous budget — unlike the

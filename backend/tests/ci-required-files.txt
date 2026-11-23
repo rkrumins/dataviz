@@ -116,6 +116,7 @@ tests/test_edge_update_patch_semantics.py
 tests/test_edges_beneath.py
 tests/test_entity_audit_unit.py
 tests/test_entity_serde.py
+tests/test_env_port.py
 tests/test_exception_handlers.py
 tests/test_export_cancel.py
 tests/test_export_downloads.py

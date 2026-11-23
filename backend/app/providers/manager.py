@@ -79,10 +79,10 @@ def apply_local_dev_falkordb_override(host, port):
     if os.getenv("LOCAL_DEV_FALKORDB_OVERRIDE", "").strip().lower() in (
         "1", "true", "yes",
     ):
+        from backend.common.env_port import env_port
         host = os.getenv("FALKORDB_HOST") or host
-        _port_override = os.getenv("FALKORDB_PORT")
-        if _port_override:
-            port = int(_port_override)
+        # A port, or a Kubernetes service link's ``tcp://ip:port`` (common/env_port.py).
+        port = env_port("FALKORDB_PORT", port, store="falkordb")
     return host, port
 
 

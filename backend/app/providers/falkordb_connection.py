@@ -63,6 +63,7 @@ from backend.common.adapters.redis_tls import (
     tls_pool_kwargs,
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
+from backend.common.env_port import read_port
 
 logger = logging.getLogger(__name__)
 
@@ -1421,10 +1422,19 @@ def env_conn_config() -> FalkorDBConnConfig:
     An authenticated PROVIDER ROW keeps resolving its own credentials from the
     encrypted credentials blob, unaffected by these env vars.
     """
+    # A port, or a Kubernetes service link's ``tcp://ip:port`` (common/env_port.py). Anything else
+    # is a misconfiguration, said as one — the Redis & Graph Store page shows it, the status probe
+    # reports it — rather than a connection to a guessed port.
+    raw_port = os.getenv("FALKORDB_PORT")
+    port = 6379 if not (raw_port or "").strip() else read_port(raw_port, name="FALKORDB_PORT", store="falkordb")
+    if port is None:
+        raise ProviderConfigurationError(
+            "FALKORDB_PORT is not a port: set it to the FalkorDB port alone (e.g. 6379), "
+            "or a service link's tcp://host:port.")
     return load_connection_config(
         None,
         host=os.getenv("FALKORDB_HOST", "localhost"),
-        port=int(os.getenv("FALKORDB_PORT", "6379")),
+        port=port,
         username=os.getenv("FALKORDB_USERNAME"),
         password=_env_secret("FALKORDB_PASSWORD", "FALKORDB_PASSWORD_FILE"),
     )

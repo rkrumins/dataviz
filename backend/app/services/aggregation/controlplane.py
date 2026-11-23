@@ -306,7 +306,8 @@ async def lifespan(app: FastAPI):
     app.state.aggregation_service = svc
     app.state.session_factory = get_jobs_session
 
-    port = os.getenv("AGGREGATION_API_PORT", "8091")
+    from backend.common.env_port import env_port
+    port = env_port("AGGREGATION_API_PORT", 8091)
     logger.info("=== Aggregation Control Plane ready (port %s) ===", port)
 
     yield
@@ -1465,7 +1466,8 @@ def _main() -> None:
     """Run the Control Plane as a standalone process."""
     import uvicorn
 
-    port = int(os.getenv("AGGREGATION_API_PORT", "8091"))
+    from backend.common.env_port import env_port
+    port = env_port("AGGREGATION_API_PORT", 8091)
     log_level = os.getenv("LOG_LEVEL", "info").lower()
 
     uvicorn.run(

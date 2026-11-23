@@ -40,7 +40,9 @@ async def same_server_providers(session: AsyncSession, provider_id: Optional[str
     connection (:func:`_endpoints`) meets this one's. ``'default'`` is the env's ``FALKORDB_*``
     settings. Provider rows are not unique by server, so a key's provider id alone does not say
     which physical graph it is: who claims or reads a key asks under every one of these.
-    ``provider_id`` comes first; an id no FalkorDB row has stands alone."""
+    ``provider_id`` comes first; an id no FalkorDB row has stands alone, and so does one whose
+    port can't be read (:func:`_endpoints`): only connections configured correctly are linked —
+    one that isn't is neither guessed at nor allowed to fail the caller."""
     from backend.app.db.models import ProviderORM
     from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER as default
 
@@ -49,24 +51,31 @@ async def same_server_providers(session: AsyncSession, provider_id: Optional[str
         .where(ProviderORM.provider_type == "falkordb").order_by(ProviderORM.id))).all()
     servers = {pid: _endpoints(host, port, extra) for pid, host, port, extra in rows}
     servers[default] = _endpoints(os.getenv("FALKORDB_HOST", "localhost"),
-                                  os.getenv("FALKORDB_PORT", "6379"), None)
+                                  os.getenv("FALKORDB_PORT"), None, port_name="FALKORDB_PORT")
     own = provider_id or default
     if own not in servers:
         return [own]
     return [own] + [pid for pid, ends in servers.items() if pid != own and ends & servers[own]]
 
 
-def _endpoints(host, port, extra_config: Optional[str]) -> set:
+def _endpoints(host, port, extra_config: Optional[str], *, port_name: str = "a FalkorDB provider's port") -> set:
     """Where a FalkorDB connection starts, as the provider's connection settings say
     (``falkordbConnection`` in ``extra_config``, the env for what it leaves out): its host and
     port; for a sentinel topology each sentinel with the master it serves; for a cluster, its
     seed nodes. Sentinel and cluster providers leave the host blank, so it says nothing there.
     Two connections whose endpoints meet reach one server; two seed lists of one cluster that
-    share no node are not seen as one. Unreadable settings: the host and port."""
+    share no node are not seen as one. Unreadable settings: the host and port. A port that isn't
+    one — not a number, nor a service link's ``tcp://ip:port`` (common/env_port.py) — gives no
+    endpoints, so that connection is linked to nothing."""
     from backend.app.providers.falkordb_connection import load_connection_config
     from backend.app.providers.falkordb_provider import resolve_falkordb_target
+    from backend.common.env_port import read_port
 
-    target = resolve_falkordb_target(host, int(port or 6379))
+    given = 6379 if not port or (isinstance(port, str) and not port.strip()) \
+        else read_port(port, name=port_name, store="falkordb")
+    if given is None:
+        return set()
+    target = resolve_falkordb_target(host, given)
     try:
         conn = (json.loads(extra_config) if extra_config else {}).get("falkordbConnection")
         cfg = load_connection_config(conn, host=target[0], port=target[1], username=None,

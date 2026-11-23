@@ -54,6 +54,7 @@ from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from backend.common.env_port import env_port
 from backend.app.models.graph import GraphEdge, GraphNode
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1371,7 +1372,7 @@ async def push_to_falkordb(builder: PlatformLineageBuilder, graph_name: str):
     from falkordb.asyncio import FalkorDB
 
     host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
+    port = env_port("FALKORDB_PORT", 6379, store="falkordb")
     # Speaks PLAIN standalone Redis: against a Cluster this reaches only the slots
     # of one node and against Sentinel it can land on a demoted replica — a wipe or
     # GRAPH.DELETE would half-apply and a reindex would silently skip shards.
@@ -1454,7 +1455,7 @@ async def push_to_falkordb(builder: PlatformLineageBuilder, graph_name: str):
 async def materialize_aggregated(graph_name: str):
     from backend.app.providers.falkordb_provider import FalkorDBProvider
     host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
+    port = env_port("FALKORDB_PORT", 6379, store="falkordb")
     provider = FalkorDBProvider(host=host, port=port, graph_name=graph_name)
     await provider._ensure_connected()
     logger.info("Materializing AGGREGATED edges...")

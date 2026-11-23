@@ -23,6 +23,7 @@ import time
 # Ensure project root is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from backend.common.env_port import env_port
 from backend.scripts.seed_falkordb import EnterpriseDataGenerator, seed_falkordb
 
 logging.basicConfig(
@@ -110,7 +111,7 @@ async def main():
     args = parser.parse_args()
 
     host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
+    port = env_port("FALKORDB_PORT", 6379, store="falkordb")
     graph_name = os.getenv("FALKORDB_GRAPH_NAME", "nexus_lineage")
 
     # 1. Wait for FalkorDB

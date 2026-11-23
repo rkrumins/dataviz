@@ -65,7 +65,8 @@ def _pg_dsn() -> str:
 
 def _falkor_url() -> str:
     host = os.getenv("FALKORDB_HOST", "localhost")
-    port = os.getenv("FALKORDB_PORT", "6379")
+    from backend.common.env_port import env_port
+    port = env_port("FALKORDB_PORT", 6379, store="falkordb")
     return f"redis://{host}:{port}"
 
 
