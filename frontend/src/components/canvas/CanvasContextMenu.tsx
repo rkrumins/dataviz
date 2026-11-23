@@ -60,6 +60,9 @@ export interface LayerMenuModel {
     onAddEntity?: () => void
     onNewGroup?: () => void
     onBuild?: () => void
+    /** Select everything the layer shows (layerSelection.ts) — in both views, and
+     *  during a trace too: selecting writes nothing. */
+    selectAll?: { count: number; onSelect: () => void }
 }
 
 export interface ContextMenuAction {
@@ -130,6 +133,9 @@ export interface CanvasContextMenuProps {
     /** Nothing here can be edited (Published, or a trace holding the canvas):
      *  View & Edit reads as View details — the panel it opens reads only. */
     viewOnly?: boolean
+    /** An empty column right-clicked: select everything in ITS layer, beside
+     *  `onSelectAll`'s everything the canvas shows. */
+    selectLayer?: { name: string; count: number; onSelect: () => void } | null
     /** A trace holds the canvas. Its own actions lead the entity's menu (start
      *  it again from here, add this, take this out), and every menu ends by
      *  saying why there is nothing to edit, with the way out. */
@@ -175,6 +181,7 @@ export function CanvasContextMenu({
     layerMenu = null,
     narrowActions = [],
     viewOnly = false,
+    selectLayer = null,
     trace,
 }: CanvasContextMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null)
@@ -232,6 +239,16 @@ export function CanvasContextMenu({
     // The Business view's entity menu reads and walks; copying an identifier
     // and narrowing the canvas are the Technical view's.
     const technical = usePersonaMode() === 'technical'
+
+    /** "Select all in <Layer> (N)" — offered with nothing to select too, saying why. */
+    const selectAllIn = useCallback((name: string, count: number, onSelect: () => void): ContextMenuAction => ({
+        id: 'select-layer',
+        label: `Select all in ${name}${count > 0 ? ` (${count.toLocaleString()})` : ''}`,
+        icon: 'CheckSquare',
+        disabled: count === 0,
+        hint: count === 0 ? 'Nothing in this layer is on the canvas yet' : undefined,
+        onClick: () => { if (count > 0) { onSelect(); onClose() } },
+    }), [onClose])
 
     // Build actions based on target type
     const actions = useCallback((): ContextMenuAction[] => {
@@ -446,11 +463,15 @@ export function CanvasContextMenu({
                 })
             }
 
+            if (selectLayer) {
+                result.push(selectAllIn(selectLayer.name, selectLayer.count, selectLayer.onSelect))
+            }
             if (onSelectAll) {
                 result.push({
                     id: 'select-all',
-                    label: 'Select All',
-                    icon: 'CheckSquare',
+                    // Beside a layer's own, "all" needs saying: the whole canvas.
+                    label: selectLayer ? 'Select everything' : 'Select All',
+                    icon: selectLayer ? 'ListChecks' : 'CheckSquare',
                     shortcut: '⌘A',
                     onClick: () => { onSelectAll(); onClose() }
                 })
@@ -462,9 +483,12 @@ export function CanvasContextMenu({
                     id: 'layer-settings',
                     label: m.canEdit ? 'Layer settings…' : 'Layer details…',
                     icon: 'SlidersHorizontal',
-                    dividerAfter: true,
+                    dividerAfter: !m.selectAll,
                     onClick: () => { m.onOpenSettings?.(); onClose() },
                 })
+            }
+            if (m.selectAll) {
+                result.push({ ...selectAllIn(m.name, m.selectAll.count, m.selectAll.onSelect), dividerAfter: true })
             }
             if (m.canEdit) {
                 const adds: ContextMenuAction[] = []
@@ -564,7 +588,7 @@ export function CanvasContextMenu({
     }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections, onAskAboutNode, onExportNode,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical,
-        viewOnly, trace])
+        viewOnly, trace, selectLayer, selectAllIn])
 
     // Get icon component
     const getIcon = (iconName: keyof typeof LucideIcons) => {

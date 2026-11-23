@@ -169,6 +169,7 @@ import { LayerColumn } from './LayerColumn'
 import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { CanvasStatusStack } from './CanvasStatusStack'
+import { selectableIdsInLayer } from './layerSelection'
 import { SearchActiveChip, type SearchChipUnit } from '../search/SearchActiveChip'
 import { useCanvasProviderPill } from '../canvasProviderPill'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
@@ -916,7 +917,13 @@ export function ContextViewCanvas({
     },
   })
 
+  // What ⌘A and "Select everything" select: every entity the layers show, as
+  // their filters leave them — not every node the store holds (a loaded
+  // container's insides in a view that places them nowhere, say). Filled in
+  // once the layers exist, below.
+  const selectableEverythingRef = useRef<() => readonly string[]>(() => useCanvasStore.getState().nodes.map((n) => n.id))
   const interactions = useCanvasInteractions({
+    selectableIds: () => selectableEverythingRef.current(),
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     // A new entity is one to fill in: its details open, whatever a click does.
     onNodeCreated: (nodeId) => { selectNode(nodeId); useCanvasStore.getState().openNodeDrawer(nodeId) },
@@ -6175,14 +6182,46 @@ export function ContextViewCanvas({
       durationMs: 8000,
     })
   }, [currentLayout, deleteLayer])
+  // SELECT ALL IN A LAYER — one rule (layerSelection.ts) behind the layer's
+  // menu, an empty column's menu and ⌘A in a column: what the layer shows, as
+  // the search and the narrowing leave it (not a narrowing during a trace,
+  // which draws its own picture). Read when asked, so nothing subscribes.
+  const selectableInLayer = useCallback((layerId: string) => {
+    const searched = useSearchStore.getState()
+    return selectableIdsInLayer(layerId, renderByLayer, {
+      search: { mode: searched.canvasFilterMode, matches: searched.matchUrnSet, spine: searched.ancestorMatchCounts },
+      narrow: overlay.active ? null : narrowApplied?.visibility ?? null,
+      selected: new Set(useCanvasStore.getState().selectedNodeIds),
+    })
+  }, [renderByLayer, overlay.active, narrowApplied])
+  const selectableInLayerRef = useRef(selectableInLayer)
+  useEffect(() => {
+    selectableInLayerRef.current = selectableInLayer
+    selectableEverythingRef.current = () => sortedLayers.flatMap((layer) => selectableInLayer(layer.id))
+  }, [selectableInLayer, sortedLayers])
+  // ⌘A in a column. One identity for LayerColumn's memo.
+  const selectAllInLayer = useCallback((layerId: string) => {
+    const ids = selectableInLayerRef.current(layerId)
+    if (ids.length > 0) setSelection(ids)
+  }, [setSelection])
   const contextTarget = interactions.state.contextMenu.target
   const menuLayerId = contextTarget?.type === 'layer' ? contextTarget.layerId : null
+  // An empty column right-clicked: its own layer's "Select all", beside everything.
+  const canvasMenuLayer = contextTarget?.type === 'canvas' && contextTarget.layerId
+    ? sortedLayers.find((l) => l.id === contextTarget.layerId) ?? null
+    : null
+  const canvasMenuSelectLayer = useMemo(() => {
+    if (!canvasMenuLayer) return null
+    const ids = selectableInLayer(canvasMenuLayer.id)
+    return { name: canvasMenuLayer.name, count: ids.length, onSelect: () => setSelection(ids) }
+  }, [canvasMenuLayer, selectableInLayer, setSelection])
   const layerMenu = useMemo(() => {
     if (!menuLayerId) return null
     const index = sortedLayers.findIndex((l) => l.id === menuLayerId)
     const layer = sortedLayers[index]
     if (!layer) return null
     const neighbour = (dir: -1 | 1) => sortedLayers[index + dir]
+    const selectable = selectableInLayer(layer.id)
     return {
       name: layer.name,
       color: layer.color ?? '#6366f1',
@@ -6220,11 +6259,14 @@ export function ContextViewCanvas({
       onEditProperties: canvasWritable
         ? () => usePropertyJobsStore.getState().requestOp({ target: { kind: 'layer', layerId: layer.id, name: layer.name } })
         : undefined,
+      // Everything the layer shows, in one selection — then the selection bar's bulk actions.
+      selectAll: { count: selectable.length, onSelect: () => setSelection(selectable) },
     }
   }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
     canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, personaMode, canEditGraph, subsetView,
-    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setLayerSettingsFor, canvasWritable])
+    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setLayerSettingsFor, canvasWritable,
+    selectableInLayer, setSelection])
 
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
@@ -8328,6 +8370,7 @@ export function ContextViewCanvas({
                 searchResults={advancedMatchUrns}
                 onSelect={bulkLinkPickingOnCanvas ? handleRowSelect : selectNode}
                 onSelectRange={setSelection}
+                onSelectAllInLayer={selectAllInLayer}
                 selectedNodeIds={selectedNodeIdSet}
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
@@ -8664,6 +8707,7 @@ export function ContextViewCanvas({
           useHierarchyBuilderStore.getState().open({ layerId })
         } : undefined}
         onSelectAll={interactions.selectAll}
+        selectLayer={canvasMenuSelectLayer}
         layers={sortedLayers}
         onMoveToLayer={layerEditsAllowed ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
         customActions={nodeCustomActions}
