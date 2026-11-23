@@ -54,9 +54,9 @@ export function FinishImportingViewsBanner({ wsId, dataSourceId, viewCount }: {
   if (!origin || !kept.data || !viewEditor || viewCount > 0) return null
 
   return (
-    <div className="mx-6 mt-3 flex items-start gap-3 rounded-xl border border-indigo-500/20 bg-indigo-500/[0.06] px-4 py-3">
+    <div className="flex flex-wrap items-start gap-3 rounded-xl border border-indigo-500/20 bg-indigo-500/[0.06] px-4 py-3">
       <Layers className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
-      <div className="min-w-0 flex-1">
+      <div className="min-w-[12rem] flex-1">
         <p className="text-sm font-semibold text-ink">Its views haven’t been imported yet</p>
         <p className="text-[11px] text-ink-muted mt-0.5">
           This data source was copied from a view package, which is still kept: bring its views in from there, once the copy is done.

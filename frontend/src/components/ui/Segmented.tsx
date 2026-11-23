@@ -41,7 +41,9 @@ export function Segmented<T extends string>({ options, value, onChange, label, s
 
   return (
     <div role="radiogroup" aria-label={label}
-      className={cn('inline-flex w-fit h-fit items-center gap-0.5 p-0.5 rounded-lg bg-black/[0.05] dark:bg-white/[0.05]', className)}>
+      className={cn('inline-flex w-fit h-fit max-w-full items-center gap-0.5 p-0.5 rounded-lg bg-black/[0.05] dark:bg-white/[0.05]',
+        // Wider than its room (a phone): it scrolls sideways, and no option squeezes or wraps.
+        'overflow-x-auto overflow-y-hidden custom-scrollbar', className)}>
       {options.map((o, i) => {
         const on = o.value === value
         const Icon = o.icon
@@ -57,14 +59,14 @@ export function Segmented<T extends string>({ options, value, onChange, label, s
             onClick={() => onChange(o.value)}
             onKeyDown={(e) => move(e, i)}
             className={cn(
-              'inline-flex items-center gap-1.5 rounded-md font-medium transition-colors duration-150',
+              'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-colors duration-150',
               'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
               'disabled:opacity-40 disabled:cursor-not-allowed',
               size === 'sm' ? 'h-6 px-2 text-[11px]' : 'h-8 px-3 text-xs',
               on ? 'bg-canvas-elevated text-ink shadow-sm' : 'text-ink-secondary hover:text-ink',
             )}
           >
-            {Icon && <Icon className="w-3.5 h-3.5" aria-hidden />}
+            {Icon && <Icon className="w-3.5 h-3.5 shrink-0" aria-hidden />}
             {o.label}
             {o.count !== undefined && (
               <span className="tabular-nums text-[10px] font-semibold text-ink-secondary">

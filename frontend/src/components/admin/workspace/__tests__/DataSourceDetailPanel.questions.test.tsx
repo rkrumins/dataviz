@@ -73,7 +73,7 @@ beforeEach(() => {
 describe('the Questions tab of a data source', () => {
     it('is not there while conversations are off, and its link falls back to the Overview', () => {
         renderAt('/workspaces/ws1?ds=ds_gl&dstab=questions&discussion=th_1')
-        expect(screen.queryByRole('button', { name: /Questions/ })).toBeNull()
+        expect(screen.queryByRole('tab', { name: /Questions/ })).toBeNull()
         expect(screen.queryByTestId('thread')).toBeNull()
         expect(screen.getByRole('button', { name: 'Ask the contacts' })).toBeInTheDocument()
     })
@@ -81,7 +81,7 @@ describe('the Questions tab of a data source', () => {
     it('counts the open questions, and opens a thread in the tab, kept in the address', async () => {
         useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, conversationsEnabled: true } })
         renderAt('/workspaces/ws1?ds=ds_gl')
-        await userEvent.click(screen.getByRole('button', { name: /Questions\s*3/ }))
+        await userEvent.click(screen.getByRole('tab', { name: /Questions\s*3/ }))
         expect(screen.getByTestId('panel')).toHaveTextContent('Questions about General Ledger')
         await userEvent.click(screen.getByRole('button', { name: 'Open th_9' }))
         expect(screen.getByTestId('thread')).toHaveTextContent('Thread th_9')
@@ -95,7 +95,7 @@ describe('the Questions tab of a data source', () => {
         useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, conversationsEnabled: true } })
         renderAt('/workspaces/ws1?ds=ds_gl&dstab=questions&discussion=th_1&message=m_2')
         expect(screen.getByTestId('thread')).toHaveTextContent('Thread th_1')
-        await userEvent.click(screen.getByRole('button', { name: /Overview/ }))
+        await userEvent.click(screen.getByRole('tab', { name: /Overview/ }))
         expect(screen.getByTestId('where')).not.toHaveTextContent('discussion=')
         expect(screen.getByTestId('where')).not.toHaveTextContent('message=')
     })

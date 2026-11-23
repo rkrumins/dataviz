@@ -17,6 +17,7 @@ import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/No
 import { cn } from '@/lib/utils'
 import { viewTypeLabel } from '@/lib/viewUtils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { SourceProfiling } from '@/components/ingestion/profiling/SourceProfiling'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
@@ -116,34 +117,22 @@ interface DataSourceDetailPanelProps {
 // Sub-components
 // ─────────────────────────────────────────────────────────────────────
 
-function TabBtn({ active, icon: Icon, label, count, onClick }: {
-    active: boolean
+/** One of the drawer's tabs: its icon, label and, when there is one, a count. */
+function DrawerTab({ value, icon, label, count }: {
+    value: DataSourceTab
     icon: React.ComponentType<{ className?: string }>
     label: string
     count?: number
-    onClick: () => void
 }) {
     return (
-        <button
-            onClick={onClick}
-            className={cn(
-                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors duration-150",
-                active
-                    ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20"
-                    : "text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 border border-transparent"
-            )}
-        >
-            <Icon className="w-3 h-3" />
-            {label}
-            {count !== undefined && count > 0 && (
-                <span className={cn(
-                    "ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold",
-                    active ? "bg-indigo-500/20 text-indigo-600 dark:text-indigo-400" : "bg-black/5 dark:bg-white/5 text-ink-muted"
-                )}>
+        <TabsTrigger value={value} icon={icon} className="h-11 px-2.5 text-xs sm:text-[13px]"
+            badge={count !== undefined && count > 0 ? (
+                <span className="rounded-full bg-black/[0.05] px-1.5 text-[10px] font-bold leading-4 text-ink-muted tabular-nums dark:bg-white/[0.07]">
                     {count}
                 </span>
-            )}
-        </button>
+            ) : undefined}>
+            {label}
+        </TabsTrigger>
     )
 }
 
@@ -333,7 +322,7 @@ export function DataSourceDetailPanel({
                     <motion.aside
                         key="data-source-detail-drawer"
                         className={cn(
-                            'fixed right-0 top-0 h-full w-full max-w-2xl z-[61]',
+                            'fixed inset-y-0 right-0 w-full max-w-2xl z-[61]',
                             'bg-canvas border-l border-glass-border',
                             'flex flex-col shadow-lg',
                         )}
@@ -342,7 +331,7 @@ export function DataSourceDetailPanel({
                         transition={MOTION.drawerSlide}
                     >
                         {/* ── Header ─────────────────────────────────────── */}
-                        <div className="px-6 pt-6 pb-4 border-b border-glass-border/50 shrink-0">
+                        <div className="px-4 sm:px-6 pt-5 sm:pt-6 pb-4 border-b border-glass-border/50 shrink-0">
                             <div className="flex items-start justify-between gap-3 mb-4">
                                 <div className="flex items-center gap-3 min-w-0">
                                     <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/20 flex items-center justify-center shrink-0">
@@ -390,14 +379,15 @@ export function DataSourceDetailPanel({
                                 {ontologyName && (
                                     <Link
                                         to={ontologyId ? `/schema/${ontologyId}` : '/schema'}
-                                        className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20 hover:bg-violet-500/20 transition-colors"
+                                        title={ontologyName}
+                                        className="inline-flex min-w-0 max-w-full items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20 hover:bg-violet-500/20 transition-colors"
                                     >
-                                        <GitBranch className="w-3 h-3" /> {ontologyName}
+                                        <GitBranch className="w-3 h-3 shrink-0" aria-hidden /> <span className="truncate">{ontologyName}</span>
                                     </Link>
                                 )}
                                 {liveLastAggregatedAt && (
-                                    <span className="flex items-center gap-1 text-[10px] text-ink-muted">
-                                        <Clock className="w-3 h-3" /> Connections refreshed {new Date(liveLastAggregatedAt).toLocaleDateString()}
+                                    <span className="flex items-center gap-1 whitespace-nowrap text-[10px] text-ink-muted">
+                                        <Clock className="w-3 h-3 shrink-0" aria-hidden /> Connections refreshed {new Date(liveLastAggregatedAt).toLocaleDateString()}
                                     </span>
                                 )}
                                 {technical && <NodeIdentityBadge value={ds.identityProperty} />}
@@ -405,65 +395,69 @@ export function DataSourceDetailPanel({
                             </div>
 
                             {/* Quick action buttons */}
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                                 {/* What a source is for is its views — that is the way in. Editing its
                                     data model is for the people who manage the model. */}
                                 <Link
                                     to={`/explorer?workspace=${wsId}&dataSource=${ds.id}`}
-                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-500 text-white text-[11px] font-semibold hover:bg-indigo-600 transition-colors"
+                                    className="flex items-center gap-1.5 whitespace-nowrap px-3 py-2 rounded-lg bg-indigo-500 text-white text-[11px] font-semibold hover:bg-indigo-600 transition-colors"
                                 >
-                                    <Compass className="w-3 h-3" /> Explore views
+                                    <Compass className="w-3 h-3 shrink-0" aria-hidden /> Explore views
                                 </Link>
                                 {canEditModel && (
                                     <Link
                                         to={`/schema?workspaceId=${wsId}&dataSourceId=${ds.id}`}
-                                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-[11px] font-semibold text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                                        className="flex items-center gap-1.5 whitespace-nowrap px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-[11px] font-semibold text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
                                     >
-                                        <ExternalLink className="w-3 h-3" /> Edit data model
+                                        <ExternalLink className="w-3 h-3 shrink-0" aria-hidden /> Edit data model
                                     </Link>
                                 )}
-                                {conversations && dsSubject && <WatchButton subject={dsSubject} />}
-                                <DataSourceActions
-                                    wsId={wsId}
-                                    onEdit={startEditing}
-                                    onDelete={onDelete}
-                                    onDeletePermanent={onDeletePermanent}
-                                    onMove={onMove}
-                                />
+                                <div className="ml-auto flex shrink-0 items-center gap-1" data-testid="ds-actions-end">
+                                    {conversations && dsSubject && <WatchButton subject={dsSubject} />}
+                                    <DataSourceActions
+                                        wsId={wsId}
+                                        onEdit={startEditing}
+                                        onDelete={onDelete}
+                                        onDeletePermanent={onDeletePermanent}
+                                        onMove={onMove}
+                                    />
+                                </div>
                                 {/* DataSourceActions handles permission gating per
                                     workspace; falls back to hidden buttons if the
                                     viewer can't manage data sources here. */}
                             </div>
                         </div>
 
-                        {/* Per-source vocabulary-alignment drift (Task E) — own component,
-                            no overlap with the header chips. */}
-                        {!editing && <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />}
-                        {!editing && <FinishImportingViewsBanner wsId={wsId} dataSourceId={ds.id} viewCount={views.length} />}
-                        {/* Where it has lived: a request waiting, a move that can still be undone. */}
-                        {!editing && <DataSourceLifecycle wsId={wsId} dataSourceId={ds.id} onChanged={onMovedAway} />}
-
-                        {/* ── Tab Bar ────────────────────────────────────── */}
+                        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as DataSourceTab)}
+                            className="flex min-h-0 flex-1 flex-col">
+                        {/* ── Tab Bar: every tab keeps its size; on a narrow drawer the strip scrolls ── */}
                         {!editing && (
-                        <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
-                            <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Overview" onClick={() => setActiveTab('insights')} />
-                            <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Processing" onClick={() => setActiveTab('aggregation')} />
-                            <TabBtn active={activeTab === 'profiling'} icon={LineChart} label="Trends" onClick={() => setActiveTab('profiling')} />
-                            <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
+                        <TabsList look="underline" scrollable aria-label="About this data source"
+                            className="shrink-0 gap-1 border-glass-border/40 px-4 sm:px-6">
+                            <DrawerTab value="insights" icon={BarChart3} label="Overview" />
+                            <DrawerTab value="aggregation" icon={Settings2} label="Processing" />
+                            <DrawerTab value="profiling" icon={LineChart} label="Trends" />
+                            <DrawerTab value="views" icon={Eye} label="Views" count={views.length} />
                             {conversations && (
-                                <TabBtn active={activeTab === 'questions'} icon={MessageCircleQuestion} label="Questions" count={questions?.open} onClick={() => setActiveTab('questions')} />
+                                <DrawerTab value="questions" icon={MessageCircleQuestion} label="Questions" count={questions?.open} />
                             )}
-                            {details && (
-                                <TabBtn active={activeTab === 'activity'} icon={History} label="Activity" onClick={() => setActiveTab('activity')} />
-                            )}
-                            {versioningEnabled && (
-                                <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
-                            )}
-                        </div>
+                            {details && <DrawerTab value="activity" icon={History} label="Activity" />}
+                            {versioningEnabled && <DrawerTab value="versioning" icon={GitBranch} label="Versioning" />}
+                        </TabsList>
                         )}
 
                         {/* ── Content (scrollable): inline edit OR the active tab ── */}
-                        <div className="flex-1 overflow-y-auto custom-scrollbar px-6 py-5">
+                        <div className="flex-1 overflow-y-auto custom-scrollbar px-4 sm:px-6 py-5">
+                            {/* What needs attention first, above the tab and scrolling with it, so it
+                                never squeezes the tab away: vocabulary drift, views still to import,
+                                and where the source has lived (a request waiting, a move to undo). */}
+                            {!editing && (
+                                <div className="mb-5 space-y-3 empty:hidden">
+                                    <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} className="" />
+                                    <FinishImportingViewsBanner wsId={wsId} dataSourceId={ds.id} viewCount={views.length} />
+                                    <DataSourceLifecycle wsId={wsId} dataSourceId={ds.id} onChanged={onMovedAway} />
+                                </div>
+                            )}
                             {editing ? (
                             <div className="max-w-lg mx-auto space-y-5 animate-in fade-in duration-200">
                                 <div>
@@ -496,7 +490,7 @@ export function DataSourceDetailPanel({
                                     </button>
                                 </div>
                             </div>
-                            ) : (<>
+                            ) : (<TabsContent value={activeTab}>
                             {/* ─── Insights Tab ─────────────────────────── */}
                             {activeTab === 'insights' && (<div className="space-y-5">
                                 <AboutDataSourceCard key={ds.id} wsId={wsId} dsId={ds.id} tagSuggestions={tagSuggestions} onShowRequests={onShowDataRequests} />
@@ -517,7 +511,7 @@ export function DataSourceDetailPanel({
                             {activeTab === 'questions' && dsSubject && (
                                 openThreadId ? (
                                     <ThreadView key={openThreadId} threadId={openThreadId} focusMessageId={searchParams.get('message')}
-                                        onBack={() => showThread(null)} onDeleted={() => showThread(null)} className="-mx-6 -my-5" />
+                                        onBack={() => showThread(null)} onDeleted={() => showThread(null)} className="-mx-4 sm:-mx-6 -my-5" />
                                 ) : (
                                     <DiscussionPanel subject={dsSubject} onOpenThread={showThread}
                                         compose={askOpen} onComposeChange={setAskOpen} />
@@ -747,11 +741,12 @@ export function DataSourceDetailPanel({
                                     itemCount={stats && !stats.computing ? stats.nodeCount + stats.edgeCount : null}
                                 />
                             )}
-                            </>)}
+                            </TabsContent>)}
                         </div>
+                        </Tabs>
 
                         {/* ── Footer action ──────────────────────────────── */}
-                        <div className="px-6 py-4 border-t border-glass-border/50 shrink-0">
+                        <div className="px-4 sm:px-6 py-3 sm:py-4 border-t border-glass-border/50 shrink-0">
                             {/* Views are the payoff of a data source; the primary
                                 footer CTA opens the Explorer pre-filtered to this
                                 source so the user browses exactly its views. */}

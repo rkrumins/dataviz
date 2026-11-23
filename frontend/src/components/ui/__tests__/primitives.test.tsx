@@ -61,6 +61,40 @@ describe('Tabs', () => {
     await user.keyboard('{ArrowLeft}')
     expect(screen.getByRole('tab', { name: 'View' })).toHaveAttribute('aria-selected', 'true')
   })
+
+  it('scrolls a strip wider than its room, with a fade on the side that has more', () => {
+    render(
+      <Tabs defaultValue="a">
+        <TabsList look="underline" scrollable aria-label="Sections">
+          <TabsTrigger value="a" icon={Inbox}>Alpha</TabsTrigger>
+          <TabsTrigger value="b" icon={Trash2}>Beta</TabsTrigger>
+        </TabsList>
+      </Tabs>,
+    )
+    const strip = screen.getByRole('tablist', { name: 'Sections' })
+    expect(strip.className).toMatch(/overflow-x-auto/)
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab.className).toMatch(/shrink-0/)
+      expect(tab.className).toMatch(/whitespace-nowrap/)
+      expect(tab.querySelector('svg')?.getAttribute('class')).toMatch(/shrink-0/)
+    }
+    // Nothing overflows in jsdom (no layout), so neither fade shows.
+    const fades = strip.parentElement!.querySelectorAll('[data-tabs-fade]')
+    expect(fades).toHaveLength(2)
+    for (const fade of fades) expect(fade.className).toMatch(/opacity-0/)
+  })
+
+  it('leaves a strip that isn’t scrollable as it was', () => {
+    render(
+      <Tabs defaultValue="a">
+        <TabsList aria-label="Plain"><TabsTrigger value="a">Alpha</TabsTrigger></TabsList>
+      </Tabs>,
+    )
+    const strip = screen.getByRole('tablist', { name: 'Plain' })
+    expect(strip.className).not.toMatch(/overflow-x-auto/)
+    expect(strip.parentElement!.querySelector('[data-tabs-fade]')).toBeNull()
+    expect(screen.getByRole('tab').className).not.toMatch(/whitespace-nowrap/)
+  })
 })
 
 describe('Segmented', () => {
