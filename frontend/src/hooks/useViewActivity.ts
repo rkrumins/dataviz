@@ -3,7 +3,7 @@
  * Short staleTime so the timeline reflects recent changes without hammering
  * the endpoint; disabled until a viewId is present (e.g. drawer closed).
  */
-import { useQuery, type UseQueryResult } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, type UseQueryResult } from '@tanstack/react-query'
 import {
     getViewActivity,
     getWorkspaceViewActivity,
@@ -52,14 +52,19 @@ export function useMyActivityFeed(
     })
 }
 
-export function useWorkspaceViewActivity(
-    workspaceId: string | null,
-    enabled = true,
-): UseQueryResult<ViewActivityEntry[], Error> {
-    return useQuery<ViewActivityEntry[], Error>({
+/** Changes across a workspace's views fetched in one page. */
+export const WORKSPACE_ACTIVITY_PAGE = 25
+
+/** A workspace's activity across its views, newest first, a page at a time: there is another
+ *  page while the last one came back full. */
+export function useWorkspaceViewActivityPages(workspaceId: string | null) {
+    return useInfiniteQuery({
         queryKey: [WORKSPACE_ACTIVITY_QUERY_KEY, workspaceId],
-        queryFn: () => getWorkspaceViewActivity(workspaceId!, { limit: 25 }),
-        enabled: enabled && !!workspaceId,
+        queryFn: ({ pageParam }) => getWorkspaceViewActivity(workspaceId!, { limit: WORKSPACE_ACTIVITY_PAGE, offset: pageParam }),
+        initialPageParam: 0,
+        getNextPageParam: (last: ViewActivityEntry[], all: ViewActivityEntry[][]) =>
+            last.length === WORKSPACE_ACTIVITY_PAGE ? all.length * WORKSPACE_ACTIVITY_PAGE : undefined,
+        enabled: !!workspaceId,
         staleTime: 30_000,
         retry: 1,
     })

@@ -623,10 +623,13 @@ export async function getMyActivityFeed(limit = 15): Promise<ViewActivityEntry[]
 /** Recent activity across all of a workspace's views (each entry has viewName). */
 export async function getWorkspaceViewActivity(
     workspaceId: string,
-    opts?: { limit?: number },
+    opts?: { limit?: number; offset?: number },
 ): Promise<ViewActivityEntry[]> {
-    const qs = opts?.limit ? `?limit=${opts.limit}` : ''
-    return apiFetch<ViewActivityEntry[]>(`/api/v1/views/workspace/${workspaceId}/activity${qs}`)
+    const qs = new URLSearchParams()
+    if (opts?.limit) qs.set('limit', String(opts.limit))
+    if (opts?.offset) qs.set('offset', String(opts.offset))
+    const q = qs.toString()
+    return apiFetch<ViewActivityEntry[]>(`/api/v1/views/workspace/${workspaceId}/activity${q ? `?${q}` : ''}`)
 }
 
 /** Update an existing view */

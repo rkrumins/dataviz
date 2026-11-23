@@ -319,10 +319,9 @@ export function WorkspaceOverview({
                             <button type="button" onClick={() => onGoTo('activity')} className="shrink-0 text-xs font-semibold text-accent-lineage hover:underline">See all</button>
                         ) : undefined}
                     />
-                    {/* The latest few, never the whole log: the rest are on Activity (or, for a reader who
-                        can't open it, under the Views tab's governance feed). */}
-                    <WorkspaceActivityFeed workspaceId={wsId} limit={RECENT_CHANGES}
-                        onSeeAll={() => onGoTo(showActivity ? 'activity' : 'views')} />
+                    {/* Opens on the latest few, so it never grows by itself; the reader shows more in
+                        place, as far back as they like, and folds it back. See all opens Activity. */}
+                    <WorkspaceActivityFeed workspaceId={wsId} limit={RECENT_CHANGES} />
                 </section>
             </aside>
         </div>

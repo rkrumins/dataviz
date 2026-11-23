@@ -31,6 +31,8 @@
  *   click    a button's text, clicked once the page has loaded (e.g. "Edit details"; "Start"
  *            starts the first Playground sample, and it stays starting)
  *   fresh    1 — fixture=playground before the reader's first graph (their graphs and views gone)
+ *   changes  N — the workspace's views have N changes (served by limit and offset), for the
+ *            Overview's Recent changes expanding as far back as they go (default 4)
  *   full     1 — fixture=playground with every graph of the reader's used
  *   sample   done — starting a sample answers (its Context View opens, with the notification)
  *            instead of staying on "Starting…"; &tours=1 offers the canvas tour in it
@@ -464,6 +466,16 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
             id: `act${i}`, viewId: `v${i}`, action, actor: `usr_${i}`, actorName, actorEmail: null, summary, changes: null,
             createdAt: new Date(Date.now() - h * 3_600_000).toISOString(), viewName, workspaceId: 'ws_fin', workspaceName: 'Finance Risk',
         })
+        const many = Number(params.get('changes'))
+        if (many && p.startsWith('/api/v1/views/workspace/')) {
+            const ACTS = ['updated', 'created', 'visibility_changed', 'favourited'] as const
+            const VIEWS = ['Counterparty exposure lineage', 'VaR model inputs', 'FR Y-9C return sources', 'Chart of accounts', 'Month-end close map']
+            const PEOPLE = ['Ada Okafor', 'Liam Chen', 'Priya Nair', 'Ben Hall']
+            const limit = Number(url.searchParams.get('limit') ?? 30)
+            const offset = Number(url.searchParams.get('offset') ?? 0)
+            return json(Array.from({ length: many }, (_, i) => row(i + 1, ACTS[i % 4], VIEWS[i % 5], PEOPLE[i % 4], 'Updated the layout', 1 + i * 7))
+                .slice(offset, offset + limit))
+        }
         return json([
             row(1, 'updated', 'Counterparty exposure lineage', 'Ada Okafor', 'Updated the layout', 1),
             row(2, 'created', 'VaR model inputs', 'Liam Chen', 'Created "VaR model inputs"', 5),
