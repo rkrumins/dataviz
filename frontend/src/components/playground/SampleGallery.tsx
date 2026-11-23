@@ -58,26 +58,34 @@ export function SampleGallery({ workspaceId, className, ref }: {
     if (!catalogue?.samples.length) return null
     const full = catalogue.quotaLeft <= 0
 
-    const begin = (sample: PlaygroundSample, views: PlaygroundView[]) => start.mutate({ sampleId: sample.id, views }, {
-        onSuccess: (made) => {
-            setPicking(null)
-            // The ways on from here: the canvas tour, and the change waiting for review — the
-            // review itself, else its draft, on its Graph view or else its Context View (an older
-            // server offers neither).
-            const next: NotificationAction[] = []
-            if (toursOn) next.push({ label: 'Take the tour', onClick: () => navigate(`/views/${made.viewId}?tour=canvas-lineage`) })
-            const example = made.reviewId
-                ? `/workspaces/${workspaceId}/reviews/${made.reviewId}`
-                : made.draftId && made.viewIds ? `/views/${made.viewIds.graph ?? made.viewId}?branch=${made.draftId}` : null
-            if (example) next.push({ label: 'See the example review', onClick: () => navigate(example) })
-            notify('success', `“${sample.title}” is ready — explore it, then make it your own.`,
-                next.length ? next : undefined, next.length ? 12_000 : undefined)
-            navigate(`/views/${made.viewId}`)
-        },
-        onError: (err) => notify('error', err instanceof Error && err.message
-            ? err.message
-            : 'Couldn’t start that sample. Try again in a moment.'),
-    })
+    // Awaited, not `mutate`'s per-call callbacks: making the graph refreshes the Playground, whose
+    // page swaps its first-graph layout for the next one and remounts this gallery — and React
+    // Query drops a per-call `onSuccess` once its component has unmounted, so the new graph made
+    // but never opened.
+    const begin = async (sample: PlaygroundSample, views: PlaygroundView[]) => {
+        let made: Awaited<ReturnType<typeof start.mutateAsync>>
+        try {
+            made = await start.mutateAsync({ sampleId: sample.id, views })
+        } catch (err) {
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : 'Couldn’t start that sample. Try again in a moment.')
+            return
+        }
+        setPicking(null)
+        // The ways on from here: the canvas tour, and the change waiting for review — the
+        // review itself, else its draft, on its Graph view or else its Context View (an older
+        // server offers neither).
+        const next: NotificationAction[] = []
+        if (toursOn) next.push({ label: 'Take the tour', onClick: () => navigate(`/views/${made.viewId}?tour=canvas-lineage`) })
+        const example = made.reviewId
+            ? `/workspaces/${workspaceId}/reviews/${made.reviewId}`
+            : made.draftId && made.viewIds ? `/views/${made.viewIds.graph ?? made.viewId}?branch=${made.draftId}` : null
+        if (example) next.push({ label: 'See the example review', onClick: () => navigate(example) })
+        notify('success', `“${sample.title}” is ready — explore it, then make it your own.`,
+            next.length ? next : undefined, next.length ? 12_000 : undefined)
+        navigate(`/views/${made.viewId}`)
+    }
 
     return (
         <section ref={ref} aria-labelledby="samples-title" className={cn('scroll-mt-24', className)}>
