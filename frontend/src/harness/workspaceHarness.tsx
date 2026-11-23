@@ -77,7 +77,7 @@ import { useActiveDraftAccess } from '../features/versioning/hooks/useActiveDraf
 import { buildChangeSet } from '../features/versioning/model/changeModel'
 import { TEMPLATE_FILES } from '../components/playground/ownData'
 import {
-    ONTOLOGIES, STATS, contactsOf, metadataOf, readinessOf, sourceActivityOf, viewsOf, workspaceOf, type WorkspaceFixtureName,
+    ONTOLOGIES, PEOPLE, STATS, contactsOf, metadataOf, ontologyAuditOf, readinessOf, sourceActivityOf, viewsOf, workspaceOf, type WorkspaceFixtureName,
 } from './workspaceFixtures'
 
 const params = new URLSearchParams(window.location.search)
@@ -109,6 +109,10 @@ const ACCESS_REQUESTS = [
 const full = params.get('full') === '1'
 const sampleDone = params.get('sample') === 'done'
 const byod = params.get('byod')
+// Every CSS animation lands on its end state at once: a screenshot otherwise catches the page mid-fade.
+const still = document.createElement('style')
+still.textContent = '*, *::before, *::after { transition: none !important; animation-duration: 0s !important; }'
+document.head.appendChild(still)
 /** Without the reader's own rows, before their first graph (`&fresh=1`). */
 const notMine = <T,>(rows: readonly T[]): T[] => rows.filter(r => !fresh || (r as { createdBy?: string }).createdBy !== 'usr_me')
 const graphsUsed = full ? 5 : fresh ? 0 : 2
@@ -393,6 +397,12 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     }
     if ((m = p.match(/^\/api\/v1\/admin\/data-sources\/([^/]+)\/readiness$/))) return json(readinessOf(fixture, m[1]))
     if (p === '/api/v1/admin/ontologies' || p === '/api/v1/admin/ontologies/') return json(ONTOLOGIES)
+    // What changed in each semantic layer (Data → Data model), and the people who changed it.
+    if ((m = p.match(/^\/api\/v1\/admin\/ontologies\/([^/]+)\/audit$/))) return json(ontologyAuditOf(m[1]))
+    if (p === '/api/v1/directory/people') {
+        const ids = (url.searchParams.get('ids') ?? '').split(',')
+        return json(Object.values(PEOPLE).filter(u => ids.includes(u.id)))
+    }
     if (p.startsWith('/api/v1/admin/catalog') || p.startsWith('/api/v1/admin/providers')) return json([])
     if (p === '/api/v1/views/' || p === '/api/v1/views') {
         const limit = Number(url.searchParams.get('limit') ?? 50)
