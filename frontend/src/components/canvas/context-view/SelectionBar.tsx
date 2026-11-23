@@ -468,6 +468,8 @@ interface ExpandControlProps {
   onExpand?: () => void
   /** Absent when nothing inside is open. */
   onCollapse?: () => void
+  /** "Collapse everything inside", or "Collapse" when only the rows themselves are open. */
+  collapseLabel?: string
   /** A run is going: the control is the way to stop it. */
   running: boolean
   onCancel: () => void
@@ -475,7 +477,7 @@ interface ExpandControlProps {
 
 /** Expand — next level or all levels, the switch on the control itself — and
  *  Collapse everything inside; while a run goes, Stop. */
-function ExpandControl({ allLevels, onToggleAllLevels, onExpand, onCollapse, running, onCancel }: ExpandControlProps) {
+function ExpandControl({ allLevels, onToggleAllLevels, onExpand, onCollapse, collapseLabel = 'Collapse everything inside', running, onCancel }: ExpandControlProps) {
   const segment = cn(
     'flex items-center gap-1.5 py-1.5 text-[12.5px] font-medium whitespace-nowrap transition-colors duration-150',
     'text-ink hover:text-accent-lineage',
@@ -528,11 +530,11 @@ function ExpandControl({ allLevels, onToggleAllLevels, onExpand, onCollapse, run
         </>
       )}
       {onCollapse && (
-        <HoverTip className="inline-flex" label="Collapse everything inside" detail="What it had loaded is let go" shortcut="⇧←">
+        <HoverTip className="inline-flex" label={collapseLabel} detail="What it had loaded is let go" shortcut="⇧←">
           <button
             type="button"
             onClick={onCollapse}
-            aria-label="Collapse everything inside"
+            aria-label={collapseLabel}
             className={cn(segment, 'px-2.5', onExpand && 'border-l border-glass-border')}
           >
             <LucideIcons.ChevronsUp className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />

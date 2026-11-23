@@ -58,6 +58,12 @@ describe('expand from the menu', () => {
     // …and what those rows had loaded is let go.
     expect(useCanvasStore.getState().nodes.some(n => n.id === 'orders.channel')).toBe(false)
 
+    // With nothing open beneath it, the way back is the row itself: Collapse.
+    await menuOn(h, 'INTERMEDIATE_T2')
+    expect(menuItem(/^Collapse everything inside$/)).toBeUndefined()
+    await choose(h, /^Collapse$/)
+    expect(cards(h)).not.toContain('orders')
+
     // The switch on the row: every level, remembered.
     await menuOn(h, 'REPORTING')
     const allLevels = document.querySelector<HTMLButtonElement>('[data-canvas-context-menu] [role="switch"][aria-label="All levels"]')!

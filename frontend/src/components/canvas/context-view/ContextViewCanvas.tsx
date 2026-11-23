@@ -5886,19 +5886,29 @@ export function ContextViewCanvas({
     }
     return { below, outer }
   }, [expandTree])
-  // COLLAPSE EVERYTHING INSIDE: the roots stay open on their first level, every
-  // row beneath them closes — and what those rows drew is freed (pruneCollapsed),
-  // in one store write.
+  // What Collapse closes for these rows. COLLAPSE EVERYTHING INSIDE: the roots
+  // stay open on their first level and every row beneath them closes. With
+  // nothing open beneath — straight after one "Expand next level" — it closes
+  // the roots themselves instead ("Collapse"), so the way back from the last
+  // step is always offered.
+  const collapseTargets = useCallback((ids: readonly string[]) => {
+    const roots = outermost(ids, overlay.active ? (id) => traceTree.parents.get(id) : (id) => parentMap.get(id))
+    const { below, outer } = openBeneath(roots)
+    if (below.length > 0) return { below, outer, self: false }
+    const open = roots.filter((id) => expandTree.expanded.has(id))
+    return { below: open, outer: open, self: open.length > 0 }
+  }, [overlay.active, traceTree, parentMap, openBeneath, expandTree])
+  // ...and what those rows drew is freed (pruneCollapsed), in one store write.
   const collapseInside = useCallback((ids: readonly string[]) => {
     if (overlayRef.current?.active) {
-      const { below } = openBeneath(ids)
+      const { below } = collapseTargets(ids)
       for (const id of below) overlayRef.current.toggle(id)
       if (below.length > 0) recordTraceExpansionSoon()
       return
     }
     if (traceWriteLocked()) return
     if (expanding) cancelExpand()
-    const { below, outer } = openBeneath(outermost(ids, (id) => parentMap.get(id)))
+    const { below, outer } = collapseTargets(ids)
     if (below.length === 0) return
     for (const id of below) if (loadingNodes.has(id)) cancelChildLoad(id)
     setExpandedNodes((prev) => {
@@ -5907,15 +5917,17 @@ export function ContextViewCanvas({
       return next
     })
     pruneCollapsed(outer)
-  }, [openBeneath, recordTraceExpansionSoon, traceWriteLocked, expanding, cancelExpand, parentMap, loadingNodes, cancelChildLoad, pruneCollapsed])
+  }, [collapseTargets, recordTraceExpansionSoon, traceWriteLocked, expanding, cancelExpand, loadingNodes, cancelChildLoad, pruneCollapsed])
   /** What Expand and Collapse would do for these rows, for the menu and the bar. */
   const expandChoices = useCallback((ids: readonly string[]) => {
     const roots = outermost(ids, overlay.active ? (id) => traceTree.parents.get(id) : (id) => parentMap.get(id))
+    const collapse = collapseTargets(roots)
     return {
       canExpand: nextLevel(roots, expandTree).ids.length > 0,
-      canCollapse: openBeneath(roots).below.length > 0,
+      canCollapse: collapse.below.length > 0,
+      collapseLabel: collapse.self ? 'Collapse' : 'Collapse everything inside',
     }
-  }, [overlay.active, traceTree, parentMap, expandTree, openBeneath])
+  }, [overlay.active, traceTree, parentMap, expandTree, collapseTargets])
   // ⇧→ / ⇧← on a focused row. One identity for LayerColumn's memo.
   const expandRowsRef = useRef(expandRows)
   const collapseInsideRef = useRef(collapseInside)
@@ -5937,7 +5949,7 @@ export function ContextViewCanvas({
     if (expanding) {
       return [{ id: 'expand-stop', label: 'Stop opening', icon: 'CircleStop', onClick: cancelExpand }]
     }
-    const { canExpand, canCollapse } = expandChoices(ids)
+    const { canExpand, canCollapse, collapseLabel } = expandChoices(ids)
     const all = expandDepthMode === 'all'
     return [
       ...(canExpand ? [{
@@ -5950,7 +5962,7 @@ export function ContextViewCanvas({
       }] : []),
       ...(canCollapse ? [{
         id: 'collapse-inside',
-        label: 'Collapse everything inside',
+        label: collapseLabel,
         icon: 'ChevronsUp' as const,
         shortcut: '⇧←',
         onClick: () => collapseInside(ids),
@@ -5961,9 +5973,10 @@ export function ContextViewCanvas({
   // The selection bar's: the same, for every entity held.
   const selectionExpand = useMemo(() => {
     if (!expandOffered || bulkSelection.length === 0) return undefined
-    const { canExpand, canCollapse } = expandChoices(bulkSelection)
+    const { canExpand, canCollapse, collapseLabel } = expandChoices(bulkSelection)
     if (!canExpand && !canCollapse && !expanding) return undefined
     return {
+      collapseLabel,
       allLevels: expandDepthMode === 'all',
       onToggleAllLevels: () => setExpandDepthMode(expandDepthMode === 'all' ? 'level' : 'all'),
       onExpand: canExpand ? () => expandRows(bulkSelection) : undefined,
