@@ -184,7 +184,7 @@ function Row({
                             <ul className="space-y-0.5">
                                 {movements.slice(0, 12).map((m) => (
                                     <li key={`${m.kind}-${m.name}`} className="text-xs flex items-baseline gap-2">
-                                        <span className="font-medium text-ink">{m.name}</span>
+                                        <span className="min-w-0 break-all font-medium text-ink">{m.name}</span>
                                         <span className="text-ink-muted tabular-nums">
                                             {exact(m.before)} → {exact(m.after)}
                                         </span>

@@ -191,7 +191,7 @@ export function DimBreakdown({ title, dim }: { title: string; dim: AdoptionDimen
       unmapped: 'bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300 border-red-200/70 dark:border-red-800/50',
       unused: 'bg-black/[0.03] dark:bg-white/[0.04] text-ink-muted border-glass-border',
     }[tone]
-    return <span title={t} className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded-md border font-mono text-[11px]', cls)}>{children}</span>
+    return <span title={t} className={cn('inline-flex max-w-full items-center gap-1 px-2 py-0.5 rounded-md border font-mono text-[11px] break-all', cls)}>{children}</span>
   }
   return (
     <div>
@@ -200,7 +200,7 @@ export function DimBreakdown({ title, dim }: { title: string; dim: AdoptionDimen
         {dim.exact.map(e => <Chip key={`e${e.id}`} tone="exact" title={`${formatCount(e.count)} instances`}>{e.id}</Chip>)}
         {dim.caseDrift.map(x => (
           <Chip key={`d${x.id}`} tone="drift" title={`Physical "${x.id}" won't hit the "${x.declared}" label/index — align the casing`}>
-            {x.id}<Icons.ArrowRight className="w-2.5 h-2.5 opacity-60" />{x.declared}
+            {x.id}<Icons.ArrowRight className="w-2.5 h-2.5 shrink-0 opacity-60" />{x.declared}
           </Chip>
         ))}
         {dim.unmapped.map(u => <Chip key={`u${u.id}`} tone="unmapped" title={`${formatCount(u.count)} instances — not defined in the ontology`}>{u.id}</Chip>)}

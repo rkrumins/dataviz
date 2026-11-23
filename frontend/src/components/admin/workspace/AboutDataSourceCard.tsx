@@ -76,8 +76,8 @@ export function AboutDataSourceCard({ wsId, dsId, tagSuggestions = [], onShowReq
     if (!on || isError) return null
 
     return (
-        <section aria-labelledby={`ds-about-${dsId}`} className="relative overflow-hidden rounded-2xl border border-glass-border bg-canvas-elevated">
-            {data?.trustStatus && <div aria-hidden className={cn('h-1 w-full bg-gradient-to-r', ACCENT[data.trustStatus])} />}
+        <section aria-labelledby={`ds-about-${dsId}`} className="relative rounded-2xl border border-glass-border bg-canvas-elevated">
+            {data?.trustStatus && <div aria-hidden className={cn('h-1 w-full rounded-t-2xl bg-gradient-to-r', ACCENT[data.trustStatus])} />}
             <div className="p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                     <h3 id={`ds-about-${dsId}`} className="flex items-center gap-2 text-sm font-bold text-ink">
@@ -156,15 +156,15 @@ function ReadView({ meta, onEdit, onShowRequests, unnamed }: {
 
             {meta.links.length > 0 && (
                 <ul aria-label="Links" className="flex flex-wrap gap-2">
-                    {meta.links.map((l, i) => <li key={`${l.url}-${i}`}><LinkPill link={l} /></li>)}
+                    {meta.links.map((l, i) => <li key={`${l.url}-${i}`} className="max-w-full"><LinkPill link={l} /></li>)}
                 </ul>
             )}
 
             {meta.tags.length > 0 && (
                 <ul aria-label="Tags" className="flex flex-wrap items-center gap-1.5">
-                    <Tag className="h-3.5 w-3.5 text-ink-muted" aria-hidden />
+                    <Tag className="h-3.5 w-3.5 shrink-0 text-ink-muted" aria-hidden />
                     {meta.tags.map(t => (
-                        <li key={t} className="rounded-full border border-accent-lineage/20 bg-accent-lineage/10 px-2 py-0.5 text-xs font-medium text-accent-lineage">{t}</li>
+                        <li key={t} className="inline-flex max-w-full rounded-full border border-accent-lineage/20 bg-accent-lineage/10 px-2 py-0.5 text-xs font-medium text-accent-lineage"><span className="truncate">{t}</span></li>
                     ))}
                 </ul>
             )}
@@ -250,7 +250,7 @@ function TrustSummary({ meta }: { meta: DataSourceMetadata }) {
 function LinkPill({ link }: { link: DataSourceLink }) {
     if (!isWebUrl(link.url)) {
         // Not a web address: named, never followed.
-        return <span className="inline-flex items-center gap-1.5 rounded-xl border border-glass-border px-2.5 py-1.5 text-xs text-ink-muted">{link.label}</span>
+        return <span className="inline-flex max-w-full items-center gap-1.5 rounded-xl border border-glass-border px-2.5 py-1.5 text-xs text-ink-muted"><span className="truncate">{link.label}</span></span>
     }
     return (
         <a href={link.url} target="_blank" rel="noopener noreferrer"

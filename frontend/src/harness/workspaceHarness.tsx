@@ -31,6 +31,8 @@
  *   click    a button's text, clicked once the page has loaded (e.g. "Edit details"; "Start"
  *            starts the first Playground sample, and it stays starting)
  *   fresh    1 — fixture=playground before the reader's first graph (their graphs and views gone)
+ *   changes  N — the workspace's views have N changes (served by limit and offset), for the
+ *            Overview's Recent changes expanding as far back as they go (default 4)
  *   full     1 — fixture=playground with every graph of the reader's used
  *   sample   done — starting a sample answers (its Context View opens, with the notification)
  *            instead of staying on "Starting…"; &tours=1 offers the canvas tour in it
@@ -77,7 +79,7 @@ import { useActiveDraftAccess } from '../features/versioning/hooks/useActiveDraf
 import { buildChangeSet } from '../features/versioning/model/changeModel'
 import { TEMPLATE_FILES } from '../components/playground/ownData'
 import {
-    ONTOLOGIES, STATS, contactsOf, metadataOf, readinessOf, sourceActivityOf, viewsOf, workspaceOf, type WorkspaceFixtureName,
+    ONTOLOGIES, PEOPLE, STATS, contactsOf, metadataOf, ontologyAuditOf, readinessOf, sourceActivityOf, viewsOf, workspaceOf, type WorkspaceFixtureName,
 } from './workspaceFixtures'
 
 const params = new URLSearchParams(window.location.search)
@@ -92,9 +94,27 @@ const platform = params.get('platform') === '1'
 const steward = params.get('steward') === '1'
 const click = params.get('click')
 const fresh = params.get('fresh') === '1'
+
+/** People asking to join, as the API answers (the People tab lists them; the page counts them). In the
+ *  Playground they ask to be Playground members. */
+const ACCESS_REQUESTS = [
+    ['ar1', 'usr_sam', 'Sam Reader', 'workspace_viewer', 'Reading the month-end views for the audit.', 1],
+    ['ar2', 'usr_liam', 'Liam Chen', 'workspace_member', 'I build the VaR model inputs and want to keep them current.', 2],
+    ['ar3', 'usr_priya', 'Priya Nair', 'workspace_data_engineer', null, 3],
+].map(([id, uid, name, role, why, days]) => ({
+    id, requester: { id: uid, email: `${String(uid).slice(4)}@example.com`, displayName: name, ssoLinked: false },
+    target: { type: 'workspace', id: 'ws_fin', label: null, accessMode: 'request' },
+    requestedRole: fixture === 'playground' ? 'workspace_playground_member' : role, justification: why,
+    status: 'pending', createdAt: new Date(Date.now() - Number(days) * 86_400_000).toISOString(),
+    resolvedAt: null, resolvedBy: null, resolutionNote: null,
+}))
 const full = params.get('full') === '1'
 const sampleDone = params.get('sample') === 'done'
 const byod = params.get('byod')
+// Every CSS animation lands on its end state at once: a screenshot otherwise catches the page mid-fade.
+const still = document.createElement('style')
+still.textContent = '*, *::before, *::after { transition: none !important; animation-duration: 0s !important; }'
+document.head.appendChild(still)
 /** Without the reader's own rows, before their first graph (`&fresh=1`). */
 const notMine = <T,>(rows: readonly T[]): T[] => rows.filter(r => !fresh || (r as { createdBy?: string }).createdBy !== 'usr_me')
 const graphsUsed = full ? 5 : fresh ? 0 : 2
@@ -379,6 +399,12 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     }
     if ((m = p.match(/^\/api\/v1\/admin\/data-sources\/([^/]+)\/readiness$/))) return json(readinessOf(fixture, m[1]))
     if (p === '/api/v1/admin/ontologies' || p === '/api/v1/admin/ontologies/') return json(ONTOLOGIES)
+    // What changed in each semantic layer (Data → Data model), and the people who changed it.
+    if ((m = p.match(/^\/api\/v1\/admin\/ontologies\/([^/]+)\/audit$/))) return json(ontologyAuditOf(m[1]))
+    if (p === '/api/v1/directory/people') {
+        const ids = (url.searchParams.get('ids') ?? '').split(',')
+        return json(Object.values(PEOPLE).filter(u => ids.includes(u.id)))
+    }
     if (p.startsWith('/api/v1/admin/catalog') || p.startsWith('/api/v1/admin/providers')) return json([])
     if (p === '/api/v1/views/' || p === '/api/v1/views') {
         const limit = Number(url.searchParams.get('limit') ?? 50)
@@ -430,7 +456,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         return json({ counts: { needs_review: as === 'viewer' ? 0 : 2, waiting: 1, sent_back: 0, ready: 0, open: 3, done: 12 }, unread: {}, capped: false })
     }
     // Counted on the workspace page; the Workspaces page would list them in full, so none there.
-    if (p.includes('/access-requests') || p.includes('/to-answer')) return json(as === 'admin' && page !== 'workspaces' ? [{ id: 'ar1' }, { id: 'ar2' }, { id: 'ar3' }] : [])
+    if (p.includes('/access-requests') || p.includes('/to-answer')) return json(as === 'admin' && page !== 'workspaces' ? ACCESS_REQUESTS : [])
     if (p.includes('/drafts/owner-left')) return json([])
     if (p.includes('transfer')) return json([])
     if (p === '/api/v1/layout-templates') return json({ items: [], total: 0 })
@@ -440,6 +466,16 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
             id: `act${i}`, viewId: `v${i}`, action, actor: `usr_${i}`, actorName, actorEmail: null, summary, changes: null,
             createdAt: new Date(Date.now() - h * 3_600_000).toISOString(), viewName, workspaceId: 'ws_fin', workspaceName: 'Finance Risk',
         })
+        const many = Number(params.get('changes'))
+        if (many && p.startsWith('/api/v1/views/workspace/')) {
+            const ACTS = ['updated', 'created', 'visibility_changed', 'favourited'] as const
+            const VIEWS = ['Counterparty exposure lineage', 'VaR model inputs', 'FR Y-9C return sources', 'Chart of accounts', 'Month-end close map']
+            const PEOPLE = ['Ada Okafor', 'Liam Chen', 'Priya Nair', 'Ben Hall']
+            const limit = Number(url.searchParams.get('limit') ?? 30)
+            const offset = Number(url.searchParams.get('offset') ?? 0)
+            return json(Array.from({ length: many }, (_, i) => row(i + 1, ACTS[i % 4], VIEWS[i % 5], PEOPLE[i % 4], 'Updated the layout', 1 + i * 7))
+                .slice(offset, offset + limit))
+        }
         return json([
             row(1, 'updated', 'Counterparty exposure lineage', 'Ada Okafor', 'Updated the layout', 1),
             row(2, 'created', 'VaR model inputs', 'Liam Chen', 'Created "VaR model inputs"', 5),

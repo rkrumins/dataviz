@@ -101,7 +101,6 @@ export function PurposeStep({ draft, onChange, nameError, suggestion, onUseSugge
                     onChange={e => onChange({ name: e.target.value })}
                     placeholder={`e.g. ${chosen.example}`}
                     maxLength={120}
-                    autoFocus
                     aria-invalid={!!nameError}
                     state={nameError ? 'invalid' : length > 0 ? 'valid' : 'idle'}
                 />

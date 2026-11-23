@@ -104,6 +104,7 @@ export const SYSTEM_ROLE_LABELS: Record<SystemRole, string> = {
     [ROLE_NAMES.WORKSPACE_PUBLISHER]: 'Publisher',
     [ROLE_NAMES.WORKSPACE_STEWARD]: 'Steward',
     [ROLE_NAMES.WORKSPACE_VIEWER]: 'Viewer',
+    [ROLE_NAMES.WORKSPACE_PLAYGROUND_MEMBER]: 'Playground Member',
 }
 
 /**

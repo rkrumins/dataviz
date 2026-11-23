@@ -79,10 +79,10 @@ export function DataContactsCard({ wsId, dsId, onAsk }: {
     const editing = draft !== null
     return (
         <section aria-labelledby={`ds-contacts-${dsId}`} className="rounded-2xl border border-glass-border bg-canvas-elevated p-4">
-            <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-[12rem] flex-1">
                     <h3 id={`ds-contacts-${dsId}`} className="flex items-center gap-2 text-sm font-bold text-ink">
-                        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white">
                             <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
                         </span>
                         Who to ask about this data

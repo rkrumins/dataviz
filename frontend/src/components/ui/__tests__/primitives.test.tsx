@@ -61,6 +61,76 @@ describe('Tabs', () => {
     await user.keyboard('{ArrowLeft}')
     expect(screen.getByRole('tab', { name: 'View' })).toHaveAttribute('aria-selected', 'true')
   })
+
+  it('scrolls a strip wider than its room, with a fade on the side that has more', () => {
+    render(
+      <Tabs defaultValue="a">
+        <TabsList look="underline" scrollable aria-label="Sections">
+          <TabsTrigger value="a" icon={Inbox}>Alpha</TabsTrigger>
+          <TabsTrigger value="b" icon={Trash2}>Beta</TabsTrigger>
+        </TabsList>
+      </Tabs>,
+    )
+    const strip = screen.getByRole('tablist', { name: 'Sections' })
+    expect(strip.className).toMatch(/overflow-x-auto/)
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab.className).toMatch(/shrink-0/)
+      expect(tab.className).toMatch(/whitespace-nowrap/)
+      expect(tab.querySelector('svg')?.getAttribute('class')).toMatch(/shrink-0/)
+    }
+    // Nothing overflows in jsdom (no layout), so neither fade shows.
+    const fades = strip.parentElement!.querySelectorAll('[data-tabs-fade]')
+    expect(fades).toHaveLength(2)
+    for (const fade of fades) expect(fade.className).toMatch(/opacity-0/)
+  })
+
+  it('shows a chevron on the side with more, which scrolls the strip on', async () => {
+    // The strip shows 300px of 600px of tabs, scrolled to its start: more to the right only.
+    const spies = [
+      vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.getAttribute('role') === 'tablist' ? 300 : 0
+      }),
+      vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.getAttribute('role') === 'tablist' ? 600 : 0
+      }),
+    ]
+    const scrollBy = vi.fn()
+    HTMLElement.prototype.scrollBy = scrollBy
+    try {
+      render(
+        <Tabs defaultValue="a">
+          <TabsList look="underline" scrollable aria-label="Sections">
+            <TabsTrigger value="a">Alpha</TabsTrigger>
+            <TabsTrigger value="b">Beta</TabsTrigger>
+          </TabsList>
+        </Tabs>,
+      )
+      const wrap = screen.getByRole('tablist', { name: 'Sections' }).parentElement!
+      const left = wrap.querySelector<HTMLButtonElement>('[data-tabs-scroll="left"]')!
+      const right = wrap.querySelector<HTMLButtonElement>('[data-tabs-scroll="right"]')!
+      expect(left).toBeDisabled()
+      expect(right).toBeEnabled()
+      expect(right).toHaveAttribute('tabindex', '-1')                 // the arrow keys move along a tablist
+      expect(wrap.querySelector('[data-tabs-fade="right"]')?.className).toMatch(/opacity-100/)
+      await userEvent.click(right)
+      expect(scrollBy).toHaveBeenCalledWith({ left: 210, behavior: 'smooth' })
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+      delete (HTMLElement.prototype as Partial<HTMLElement>).scrollBy
+    }
+  })
+
+  it('leaves a strip that isn’t scrollable as it was', () => {
+    render(
+      <Tabs defaultValue="a">
+        <TabsList aria-label="Plain"><TabsTrigger value="a">Alpha</TabsTrigger></TabsList>
+      </Tabs>,
+    )
+    const strip = screen.getByRole('tablist', { name: 'Plain' })
+    expect(strip.className).not.toMatch(/overflow-x-auto/)
+    expect(strip.parentElement!.querySelector('[data-tabs-fade]')).toBeNull()
+    expect(screen.getByRole('tab').className).not.toMatch(/whitespace-nowrap/)
+  })
 })
 
 describe('Segmented', () => {

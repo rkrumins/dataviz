@@ -224,11 +224,12 @@ export function StackedAreaChart({
         onPointerCancel: () => setDragAt(null),
     } : {}
 
-    // Axis ticks: at most six, always including both ends.
+    // Axis ticks: at most six, always including both ends — and never one
+    // less than a step before the last, where the two labels would overlap.
     const tickStep = Math.max(1, Math.ceil(buckets.length / 6))
     const tickIndexes = buckets
         .map((_, i) => i)
-        .filter((i) => i % tickStep === 0 || i === buckets.length - 1)
+        .filter((i) => (i % tickStep === 0 && buckets.length - 1 - i >= tickStep) || i === buckets.length - 1)
 
     return (
         <div ref={wrapRef} className={cn('relative w-full', className)}>
@@ -436,13 +437,13 @@ export function StackedAreaChart({
                         ? theme.neutralMark
                         : theme.series[s.slot % theme.series.length]
                     return (
-                        <span key={s.key} className="inline-flex items-center gap-1.5">
+                        <span key={s.key} className="inline-flex max-w-full items-center gap-1.5">
                             <span
                                 className="w-2 h-2 rounded-sm shrink-0"
                                 style={{ backgroundColor: colour }}
                                 aria-hidden
                             />
-                            <span className="text-ink-secondary">{s.label}</span>
+                            <span className="truncate text-ink-secondary">{s.label}</span>
                             <span className="text-ink font-semibold tabular-nums">
                                 {exact(value)}
                             </span>
@@ -475,44 +476,46 @@ function StackedTooltip({
     leftPct: number
 }) {
     const flip = leftPct > 60
+    const at = `${Math.min(Math.max(leftPct, 0), 100)}%`
+    // As in `TimeSeriesChart`: the spacer gives way before the tooltip does,
+    // so a tooltip with too little room beside the point stays inside the chart.
+    const spacer = <span aria-hidden style={{ flexBasis: flip ? `calc(100% - ${at} + 12px)` : `calc(${at} + 12px)` }} />
     return (
-        <div
-            className="pointer-events-none absolute top-2 z-10 rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2 shadow-lg min-w-[11rem] max-w-[16rem]"
-            style={{
-                left: `${Math.min(Math.max(leftPct, 0), 100)}%`,
-                transform: flip ? 'translateX(-100%) translateX(-12px)' : 'translateX(12px)',
-            }}
-        >
-            <p className="flex items-baseline justify-between gap-3 text-[10px] font-semibold uppercase tracking-wide text-ink-muted mb-1.5">
-                <span>{bucket}</span>
-                <span className="text-ink tabular-nums normal-case">{exact(total)}</span>
-            </p>
-            <ul className="space-y-1">
-                {rows.slice(0, 10).map((r) => (
-                    <li key={r.label} className="flex items-center justify-between gap-3">
-                        <span className="flex items-center gap-1.5 min-w-0">
-                            <span aria-hidden className="w-3 h-[2px] rounded-full shrink-0"
-                                  style={{ backgroundColor: r.color }} />
-                            <span className="text-[11px] text-ink-secondary truncate">{r.label}</span>
-                        </span>
-                        <span className="flex items-baseline gap-1.5 shrink-0">
-                            <span className="text-xs font-bold text-ink tabular-nums">
-                                {exact(r.value)}
+        <div className={cn('pointer-events-none absolute inset-x-0 top-2 z-10 flex', flip && 'justify-end')}>
+            {!flip && spacer}
+            <div className="shrink-0 rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2 shadow-lg min-w-[11rem] max-w-[16rem]">
+                <p className="flex items-baseline justify-between gap-3 text-[10px] font-semibold uppercase tracking-wide text-ink-muted mb-1.5">
+                    <span>{bucket}</span>
+                    <span className="text-ink tabular-nums normal-case">{exact(total)}</span>
+                </p>
+                <ul className="space-y-1">
+                    {rows.slice(0, 10).map((r) => (
+                        <li key={r.label} className="flex items-center justify-between gap-3">
+                            <span className="flex items-center gap-1.5 min-w-0">
+                                <span aria-hidden className="w-3 h-[2px] rounded-full shrink-0"
+                                      style={{ backgroundColor: r.color }} />
+                                <span className="text-[11px] text-ink-secondary truncate">{r.label}</span>
                             </span>
-                            {share && total > 0 && (
-                                <span className="text-[10px] text-ink-muted tabular-nums">
-                                    {((r.value / total) * 100).toFixed(1)}%
+                            <span className="flex items-baseline gap-1.5 shrink-0">
+                                <span className="text-xs font-bold text-ink tabular-nums">
+                                    {exact(r.value)}
                                 </span>
-                            )}
-                        </span>
-                    </li>
-                ))}
-                {rows.length > 10 && (
-                    <li className="text-[10px] text-ink-muted pt-0.5">
-                        and {rows.length - 10} more
-                    </li>
-                )}
-            </ul>
+                                {share && total > 0 && (
+                                    <span className="text-[10px] text-ink-muted tabular-nums">
+                                        {((r.value / total) * 100).toFixed(1)}%
+                                    </span>
+                                )}
+                            </span>
+                        </li>
+                    ))}
+                    {rows.length > 10 && (
+                        <li className="text-[10px] text-ink-muted pt-0.5">
+                            and {rows.length - 10} more
+                        </li>
+                    )}
+                </ul>
+            </div>
+            {flip && spacer}
         </div>
     )
 }

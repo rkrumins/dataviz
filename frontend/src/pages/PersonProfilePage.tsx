@@ -95,7 +95,7 @@ function Profile({ id }: { id: string }) {
             {p ? <Header profile={p} views={viewList} viewCount={views.data?.total ?? null} canAdmin={canAdmin} /> : <HeaderSkeleton />}
 
             <Tabs value={tab} onValueChange={setTab}>
-                <TabsList look="underline" aria-label="Profile sections" className="gap-1 sm:gap-2 overflow-x-auto overflow-y-hidden custom-scrollbar">
+                <TabsList look="underline" scrollable aria-label="Profile sections" className="gap-1 sm:gap-2">
                     <TabsTrigger value="overview" icon={Sparkles}>Overview</TabsTrigger>
                     <TabsTrigger value="views" icon={LayoutGrid} badge={<Count n={views.data?.total} />}>Views</TabsTrigger>
                     <TabsTrigger value="data" icon={Database} badge={<Count n={p?.dataContacts.length} />}>Data</TabsTrigger>

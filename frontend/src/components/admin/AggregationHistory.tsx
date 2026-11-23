@@ -107,7 +107,7 @@ const JobCard = memo(function JobCard({ job }: { job: AggregationJobResponse }) 
 
     return (
         <div className={cn("p-3 rounded-xl border flex flex-col gap-2 transition-colors", bgColor)}>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-2">
                     {icon}
                     <span className={cn("text-xs font-semibold", statusColor)}>

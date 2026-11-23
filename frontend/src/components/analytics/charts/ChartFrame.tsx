@@ -149,7 +149,7 @@ export function ChartFrame({
             {legend.length > 1 && !showTable && (
                 <ul className="flex flex-wrap items-center gap-x-4 gap-y-1.5 mb-3">
                     {legend.map((s) => (
-                        <li key={s.key} className="flex items-center gap-1.5">
+                        <li key={s.key} className="flex max-w-full items-center gap-1.5">
                             <span
                                 aria-hidden
                                 className={cn(
@@ -173,7 +173,7 @@ export function ChartFrame({
                                 }
                             />
                             <span className={cn(
-                                'text-[11px] font-medium',
+                                'truncate text-[11px] font-medium',
                                 s.faded ? 'text-ink-muted' : 'text-ink-secondary',
                             )}>
                                 {s.label}

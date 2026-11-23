@@ -2,7 +2,7 @@
  * DataSourceProfile — the reusable core of a data source's picture.
  *
  * Rendered in three contexts of very different widths: the full page, the
- * Ingestion slide-over (~672px), and the Workspaces detail drawer (~440px).
+ * Ingestion slide-over (~672px), and the Workspaces detail drawer (672px).
  * The app has no container-query plugin, so viewport breakpoints (`lg:`)
  * can't tell how wide the *container* is — a 4-col grid would get forced
  * into a narrow drawer. So the layout is deliberately SINGLE-COLUMN and

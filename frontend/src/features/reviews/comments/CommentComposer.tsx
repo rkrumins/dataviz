@@ -208,7 +208,7 @@ export function CommentComposer({
             className="block w-full resize-none bg-transparent px-3 pt-2 pb-1 text-[13px] leading-relaxed text-ink placeholder:text-ink-muted/60 focus:outline-none"
           />
           <div className="flex items-center gap-2 px-2 pb-1.5">
-            <span className={cn('text-[10.5px] tabular-nums', tooLong ? 'text-rose-600 dark:text-rose-300' : 'text-ink-muted/70')}>
+            <span className={cn('min-w-0 truncate text-[10.5px] tabular-nums', tooLong ? 'text-rose-600 dark:text-rose-300' : 'text-ink-muted/70')}>
               {tooLong ? `${(body.length - MAX_BODY).toLocaleString()} characters too long` : (body ? <><kbd className="font-sans">⌘↵</kbd> to {editing ? 'save' : 'post'} · @ to mention</> : '@ to mention someone')}
             </span>
             <span className="flex-1" />

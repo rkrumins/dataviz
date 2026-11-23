@@ -50,7 +50,7 @@ export function DataSourceLifecycle({ wsId, dataSourceId, onChanged }: {
     const moments = historyMoments(transfers)
 
     return (
-        <div className="px-6 pt-3 shrink-0 space-y-2">
+        <div className="space-y-2">
             {pending && (
                 <Card tone="amber" icon={Clock}>
                     Waiting for <span className="font-semibold">{workspaceLabel(pending.toWorkspace.name)}</span>’s admins

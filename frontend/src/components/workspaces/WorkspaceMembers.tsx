@@ -20,7 +20,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as Popover from '@radix-ui/react-popover'
 import {
-    Users, Shield, UserCog, Eye, UserPlus, Trash2, RefreshCw,
+    Users, Shield, UserCog, UserPlus, Trash2, RefreshCw,
     Search, Loader2, X, AlertCircle, AlertTriangle, Mail, Users2,
     ChevronDown, ChevronUp, ChevronRight, Clock, CalendarClock,
     UserCheck, Bot,
@@ -76,40 +76,8 @@ type ModalType =
     | { kind: 'add' }
     | null
 
-const KPI_CARDS = [
-    {
-        key: 'total',
-        label: 'Members',
-        icon: Users,
-        gradient: 'from-indigo-500/20 to-indigo-500/0',
-        accent: 'text-indigo-600 dark:text-indigo-400',
-        iconBg: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
-    },
-    {
-        key: ROLE_NAMES.WORKSPACE_ADMIN,
-        label: 'Admins',
-        icon: Shield,
-        gradient: 'from-amber-500/20 to-amber-500/0',
-        accent: 'text-amber-600 dark:text-amber-400',
-        iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
-    },
-    {
-        key: ROLE_NAMES.WORKSPACE_MEMBER,
-        label: 'Members',
-        icon: UserCog,
-        gradient: 'from-sky-500/20 to-sky-500/0',
-        accent: 'text-sky-600 dark:text-sky-400',
-        iconBg: 'bg-sky-500/10 text-sky-500 border-sky-500/20',
-    },
-    {
-        key: ROLE_NAMES.WORKSPACE_VIEWER,
-        label: 'Viewers',
-        icon: Eye,
-        gradient: 'from-slate-500/20 to-slate-500/0',
-        accent: 'text-slate-600 dark:text-slate-400',
-        iconBg: 'bg-slate-500/10 text-slate-500 border-slate-500/20',
-    },
-] as const
+/** The three roles every workspace has; any other role gets a counter once someone holds it. */
+const KPI_ROLES = [ROLE_NAMES.WORKSPACE_ADMIN, ROLE_NAMES.WORKSPACE_MEMBER, ROLE_NAMES.WORKSPACE_VIEWER] as const
 
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -440,12 +408,13 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
 
     // ── KPIs + filtering + sort ─────────────────────────────────────
 
-    const kpis = useMemo(() => ({
-        total: members.length,
-        [ROLE_NAMES.WORKSPACE_ADMIN]: members.filter(m => m.role === ROLE_NAMES.WORKSPACE_ADMIN).length,
-        [ROLE_NAMES.WORKSPACE_MEMBER]: members.filter(m => m.role === ROLE_NAMES.WORKSPACE_MEMBER).length,
-        [ROLE_NAMES.WORKSPACE_VIEWER]: members.filter(m => m.role === ROLE_NAMES.WORKSPACE_VIEWER).length,
-    }), [members])
+    // One counter per role: the three every workspace has, then any other role someone holds
+    // (a steward, a Playground member…), each named by the role's own label.
+    const kpis = useMemo(() => {
+        const byRole = new Map<string, number>(KPI_ROLES.map(r => [r, 0]))
+        for (const m of members) byRole.set(m.role, (byRole.get(m.role) ?? 0) + 1)
+        return [...byRole].map(([role, count]) => ({ role, count, visual: roleVisualFor(role) }))
+    }, [members])
 
     const processedMembers = useMemo(() => {
         let list = [...members]
@@ -594,18 +563,18 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
     return (
         <div className="space-y-6 py-4">
             {/* Section intro */}
-            <div className="flex items-start gap-3">
+            <div className="flex flex-wrap items-start gap-3">
                 <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500/20 to-violet-500/20 border border-indigo-500/20 flex items-center justify-center shrink-0">
                     <Users className="w-4 h-4 text-indigo-500" />
                 </div>
-                <div className="flex-1">
+                <div className="min-w-[14rem] flex-1">
                     <h3 className="text-base font-bold text-ink">Members</h3>
                     {canManage ? (
                         <p className="text-sm text-ink-secondary leading-relaxed mt-0.5">
-                            Bind users or groups to this workspace. Each binding grants a role —
-                            <span className="font-semibold"> Admin</span>,
-                            <span className="font-semibold"> User</span>, or
-                            <span className="font-semibold"> Viewer</span>.
+                            Bind users or groups to this workspace. Each binding grants one role, such as
+                            <span className="font-semibold"> Workspace admin</span>,
+                            <span className="font-semibold"> member</span> or
+                            <span className="font-semibold"> viewer</span>.
                             Group bindings cascade to every member of the group.
                         </p>
                     ) : (
@@ -616,7 +585,7 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
                         </p>
                     )}
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="ml-auto flex items-center gap-2 shrink-0">
                     <button
                         onClick={() => setModal({ kind: 'add' })}
                         className="px-4 py-2 rounded-xl font-medium text-sm text-white bg-accent-lineage hover:brightness-110 transition-colors duration-150 flex items-center gap-2 shadow-sm shadow-accent-lineage/20"
@@ -663,27 +632,30 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
 
             {/* KPI strip */}
             {viewMode === 'bindings' && (
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                {KPI_CARDS.map(kpi => {
+            <ul aria-label="Bindings by role" className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3">
+                {[
+                    { role: 'total', count: members.length, label: 'Bindings', icon: Users,
+                      gradient: 'from-indigo-500/20 to-indigo-500/0', iconBg: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20' },
+                    ...kpis.map(k => ({ role: k.role, count: k.count, ...k.visual })),
+                ].map(kpi => {
                     const Icon = kpi.icon
-                    const value = kpis[kpi.key as keyof typeof kpis]
                     return (
-                        <div
-                            key={kpi.key}
+                        <li
+                            key={kpi.role}
                             className="relative overflow-hidden border border-glass-border rounded-xl p-4 bg-canvas-elevated"
                         >
                             <div className={cn('absolute inset-0 bg-gradient-to-br pointer-events-none', kpi.gradient)} />
-                            <div className="relative">
+                            <div className="relative min-w-0">
                                 <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center mb-2', kpi.iconBg)}>
-                                    <Icon className="w-4 h-4" />
+                                    <Icon className="w-4 h-4 shrink-0" aria-hidden />
                                 </div>
-                                <p className={cn('text-xl font-bold', kpi.accent)}>{value}</p>
-                                <p className="text-[11px] text-ink-muted mt-0.5">{kpi.label}</p>
+                                <p className="text-xl font-bold text-ink tabular-nums">{kpi.count}</p>
+                                <p className="text-[11px] text-ink-muted mt-0.5 truncate" title={kpi.label}>{kpi.label}</p>
                             </div>
-                        </div>
+                        </li>
                     )
                 })}
-            </div>
+            </ul>
             )}
 
             {/* Error banner */}

@@ -54,7 +54,7 @@ describe('data source details in the drawer', () => {
     it('shows no badges and no Activity tab while the switch is off', () => {
         renderAt('/workspaces/ws1?ds=ds_gl&dstab=activity')
         expect(screen.queryByText('Certified')).toBeNull()
-        expect(screen.queryByRole('button', { name: /Activity/ })).toBeNull()
+        expect(screen.queryByRole('tab', { name: /Activity/ })).toBeNull()
         expect(screen.queryByText('History of the source')).toBeNull()
         expect(screen.getByText('Contacts card')).toBeInTheDocument()
     })
@@ -66,7 +66,7 @@ describe('data source details in the drawer', () => {
         expect(screen.getByText('Confidential')).toBeInTheDocument()
         const about = screen.getByText('About card')
         expect(about.compareDocumentPosition(screen.getByText('Contacts card')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-        await userEvent.click(screen.getByRole('button', { name: /Activity/ }))
+        await userEvent.click(screen.getByRole('tab', { name: /Activity/ }))
         expect(screen.getByText('History of the source')).toBeInTheDocument()
     })
 })

@@ -99,6 +99,7 @@ tests/integration/test_offline_round_trip.py
 tests/integration/test_overlay_edge_rewind.py
 tests/integration/test_overlay_rollups.py
 tests/integration/test_package_seed_job.py
+tests/integration/test_playground_samples_live.py
 tests/integration/test_private_draft_owner.py
 tests/integration/test_private_draft_read.py
 tests/integration/test_projection_builds_e2e.py

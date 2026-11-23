@@ -213,7 +213,7 @@ export function ProjectionHealthCard({ wsId, graphId, showActions = false, dataS
         </HoverTip>
       </div>
 
-      <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-[12px]">
+      <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[12px]">
         <dt className="text-ink-muted">Provider</dt>
         <dd className="text-ink min-w-0 truncate">{wm.providerName ?? wm.providerId ?? 'Default graph store'}</dd>
         <dt className="text-ink-muted">Key</dt>

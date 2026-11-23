@@ -213,7 +213,7 @@ export function AskComposer({ subject, entity, onClearEntity, initialRecipients,
                 )}
             </div>
 
-            <fieldset className="space-y-2">
+            <fieldset className="min-w-0 space-y-2">
                 <legend className="mb-1.5 text-[10.5px] font-bold uppercase tracking-[0.12em] text-ink-muted">Send to</legend>
                 <div className="flex flex-wrap items-center gap-2">
                     {isView && (
@@ -223,11 +223,11 @@ export function AskComposer({ subject, entity, onClearEntity, initialRecipients,
                     <RouteToggle label="Data owners" on={route.dataContacts} onChange={(v) => setRoute((r) => ({ ...r, dataContacts: v }))}
                         roles={contacts} people={people} loading={loading} />
                     {recipients.map((r) => (
-                        <span key={r.id} className="inline-flex items-center gap-1.5 rounded-xl border border-glass-border/70 bg-black/[0.02] dark:bg-white/[0.03] pl-1.5 pr-1 h-9 text-[12px] font-semibold text-ink">
+                        <span key={r.id} className="inline-flex max-w-full items-center gap-1.5 rounded-xl border border-glass-border/70 bg-black/[0.02] dark:bg-white/[0.03] pl-1.5 pr-1 h-9 text-[12px] font-semibold text-ink">
                             <UserAvatar userId={r.id} name={recipientName(r)} avatarId={r.avatarId ?? people[r.id]?.avatarId} hasImage={r.hasImage ?? people[r.id]?.hasImage} className="w-6 h-6 text-[9px] font-bold" />
-                            {recipientName(r)}
+                            <span className="truncate">{recipientName(r)}</span>
                             <button type="button" aria-label={`Don’t ask ${recipientName(r)}`} onClick={() => setRecipients((rs) => rs.filter((x) => x.id !== r.id))}
-                                className="rounded-md p-0.5 text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"><X className="w-3 h-3" aria-hidden /></button>
+                                className="shrink-0 rounded-md p-0.5 text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"><X className="w-3 h-3" aria-hidden /></button>
                         </span>
                     ))}
                     <AddPeople subject={subject} exclude={exclude} disabled={recipients.length >= MAX_RECIPIENTS}

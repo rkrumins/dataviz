@@ -24,6 +24,9 @@ const COUNTED_STATUSES = new Set(['open', 'mergeable', 'approved', 'conflicts', 
  *  counted from its change index (cached, one row per change) — never a merge per inbox row; a
  *  fork's from its capped summary. */
 function ChangeCount({ wsId, pr }: { wsId: string; pr: PullRequest }) {
+  // Its own separator, so a row with no count (a merged review, a summary that didn't load)
+  // doesn't read "· ·".
+  const dot = <span className="text-ink-muted/40">·</span>
   const enabled = COUNTED_STATUSES.has(pr.status)
   const draft = isDraftMr(pr)
   const draftQ = useChangeSummary(enabled && draft ? wsId : undefined, pr.graphId,
@@ -33,11 +36,12 @@ function ChangeCount({ wsId, pr }: { wsId: string; pr: PullRequest }) {
   if (!enabled) return null
   const c = q.data?.counts
   if (!c) {
-    return <span className="text-[11px] text-ink-muted/50 tabular-nums">{q.isLoading ? '…' : ''}</span>
+    return q.isLoading ? <>{dot}<span className="text-[11px] text-ink-muted/50 tabular-nums">…</span></> : null
   }
   const total = c.added + c.modified + c.removed
-  if (total === 0) return <span className="text-[11px] text-ink-muted/60">no changes</span>
-  return (
+  if (total === 0) return <>{dot}<span className="text-[11px] text-ink-muted/60">no changes</span></>
+  return (<>
+    {dot}
     <HoverTip label={`${c.added} added · ${c.modified} modified · ${c.removed} removed`}
       className="inline-flex items-center gap-2 text-[11px] font-medium tabular-nums">
       <span className="text-ink-muted">{total} change{total === 1 ? '' : 's'}</span>
@@ -47,7 +51,7 @@ function ChangeCount({ wsId, pr }: { wsId: string; pr: PullRequest }) {
         {c.removed > 0 && <span className="inline-flex items-center gap-0.5 text-rose-500"><Minus className="w-2.5 h-2.5" strokeWidth={3} />{c.removed}</span>}
       </span>
     </HoverTip>
-  )
+  </>)
 }
 
 /** Up to 3 reviewer avatars, overlapping, +N overflow. Each names itself on hover; how far the
@@ -105,7 +109,7 @@ export function PrListRow({
       onClick={onOpen}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() } }}
       className={cn(
-        'group w-full flex items-center gap-3.5 rounded-2xl border border-glass-border bg-canvas-elevated/50 px-4 py-3 text-left cursor-pointer',
+        'group w-full flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-2xl border border-glass-border bg-canvas-elevated/50 px-4 py-3 text-left cursor-pointer',
         'hover:border-accent-lineage/40 hover:bg-canvas-elevated/80 hover:shadow-sm transition-all duration-150',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
       )}
@@ -123,9 +127,9 @@ export function PrListRow({
         )}
       </span>
 
-      <div className="min-w-0 flex-1">
+      <div className="min-w-[12rem] flex-1">
         {/* Title + status */}
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
           <p className="text-[14px] font-semibold text-ink truncate">{derivePrTitle(pr)}</p>
           <PrStatusBadge status={pr.status} />
           {behind && (
@@ -159,7 +163,6 @@ export function PrListRow({
             </span>
           )}
           {sourceLabel && (<><span className="text-ink-muted/40">·</span><span className="truncate max-w-[160px]">{sourceLabel}</span></>)}
-          <span className="text-ink-muted/40">·</span>
           <ChangeCount wsId={wsId} pr={pr} />
           <span className="text-ink-muted/40">·</span>
           <span>by <span className="text-ink/70 font-medium">{author}</span></span>

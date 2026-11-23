@@ -29,7 +29,7 @@ const SOURCES = [
     },
     {
         id: 'ds_reg', workspaceId: 'ws_fin', catalogItemId: 'cat_reg', label: 'Regulatory Reporting',
-        isPrimary: false, isActive: true, ontologyId: 'ont_fin', aggregationStatus: 'ready',
+        isPrimary: false, isActive: true, ontologyId: 'ont_reg', aggregationStatus: 'ready',
         lastAggregatedAt: ago(72), projectionMode: 'in_source', identityProperty: 'urn',
         createdAt: ago(300), updatedAt: ago(70), sourceMode: 'managed', aggregationEdgeCount: 9_800,
         // On its way out, with a note saying what to use instead.
@@ -205,6 +205,47 @@ export const STATS: Record<string, { nodeCount: number; edgeCount: number }> = {
     ds_pg_ml: { nodeCount: 140, edgeCount: 260 },
 }
 
+const typesOf = (...ids: string[]) => Object.fromEntries(ids.map(id => [id, { name: id }]))
+
+// Finance Lineage is shared by the ledger and the risk models; Regulatory Reporting has a draft of its own.
 export const ONTOLOGIES = [
-    { id: 'ont_fin', name: 'Finance Lineage', version: 4, isPublished: true, entityTypeDefinitions: {}, relationshipTypeDefinitions: {}, createdAt: ago(2000) },
+    { id: 'ont_fin', schemaId: 'finance-lineage', name: 'Finance Lineage', version: 4, isPublished: true,
+        entityTypeDefinitions: typesOf('Ledger', 'Account', 'JournalEntry', 'TrialBalance', 'Report', 'RiskModel', 'Control', 'Counterparty', 'Exposure'),
+        relationshipTypeDefinitions: typesOf('POSTS_TO', 'ROLLS_UP_TO', 'FEEDS', 'CONTROLS', 'EXPOSED_TO'),
+        createdAt: ago(2000), updatedAt: ago(3) },
+    { id: 'ont_reg', schemaId: 'regulatory-returns', name: 'Regulatory Returns', version: 2, isPublished: false,
+        entityTypeDefinitions: typesOf('Return', 'Schedule', 'LineItem', 'Filing'),
+        relationshipTypeDefinitions: typesOf('REPORTS_ON', 'PART_OF', 'FILED_AS'),
+        createdAt: ago(320), updatedAt: ago(1.5) },
 ]
+
+/** A semantic layer's history, newest first, as GET /admin/ontologies/{id}/audit answers it. */
+export function ontologyAuditOf(id: string) {
+    let n = 0
+    const schemaId = ONTOLOGIES.find(o => o.id === id)?.schemaId ?? id
+    const entry = (action: string, version: number, h: number, actor: keyof typeof PEOPLE | null, summary: string, changes: object | null = null) => ({
+        id: `oa_${id}_${++n}`, ontologyId: id, schemaId, action, actor, version, summary, changes, createdAt: ago(h),
+    })
+    if (id === 'ont_fin') return [
+        entry('published', 4, 3, 'usr_ada', 'Published v4'),
+        entry('updated', 4, 5, 'usr_ben', 'Added 2 entity type(s); Added 1 relationship(s); Removed 1 relationship(s)',
+            { addedEntityTypes: ['Counterparty', 'Exposure'], addedRelationshipTypes: ['EXPOSED_TO'], removedRelationshipTypes: ['LINKED_TO'] }),
+        entry('cloned', 4, 26, 'usr_ben', 'Created v4 from published v3'),
+        entry('published', 3, 144, 'usr_ada', 'Published v3'),
+        entry('imported', 3, 150, 'usr_ana', 'Imported into draft v3: Added 1 entity type(s); Removed 1 entity type(s)',
+            { addedEntityTypes: ['RiskModel'], removedEntityTypes: ['Spreadsheet'] }),
+        entry('restored', 2, 400, 'usr_ada', 'Restored "Finance Lineage" v2'),
+        entry('deleted', 2, 410, 'usr_ana', 'Deleted "Finance Lineage" v2'),
+        entry('updated', 2, 720, 'usr_ben', 'Added 1 entity type(s); Added 1 relationship(s)',
+            { addedEntityTypes: ['Control'], addedRelationshipTypes: ['CONTROLS'] }),
+        entry('created', 1, 2000, null, 'Created draft v1 with 6 entity types, 4 relationships'),
+    ]
+    if (id === 'ont_reg') return [
+        entry('updated', 2, 1.5, 'usr_me', 'Added 1 entity type(s); Removed 1 entity type(s); Added 1 relationship(s)',
+            { addedEntityTypes: ['Filing'], removedEntityTypes: ['Submission'], addedRelationshipTypes: ['FILED_AS'] }),
+        entry('cloned', 2, 30, 'usr_ada', 'Created v2 from published v1'),
+        entry('published', 1, 300, 'usr_ada', 'Published v1'),
+        entry('created', 1, 320, 'usr_ana', 'Created draft v1 with 3 entity types, 2 relationships'),
+    ]
+    return []
+}

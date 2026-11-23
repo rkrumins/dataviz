@@ -668,7 +668,7 @@ export function WorkspaceDetailPage() {
                 inside a scroller re-rasterises every frame). */}
             <div className="sticky top-0 z-20 mt-4 pt-2 bg-canvas">
             <Tabs value={activeTab} onValueChange={v => goTo(v as WorkspaceTab)}>
-                <TabsList look="underline" aria-label="Workspace sections" className="gap-1 sm:gap-2 overflow-x-auto overflow-y-hidden custom-scrollbar" data-tour="workspace-tabs">
+                <TabsList look="underline" scrollable aria-label="Workspace sections" className="gap-1 sm:gap-2" data-tour="workspace-tabs">
                     {tabs.map(tab => (
                         <TabsTrigger key={tab.id} value={tab.id} icon={tab.icon} className="px-3 h-11 shrink-0"
                             badge={tab.id === 'versioned-graphs' && vgStaged > 0 ? (

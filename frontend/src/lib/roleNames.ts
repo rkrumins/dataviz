@@ -31,6 +31,9 @@ export const ROLE_NAMES = {
     WORKSPACE_PUBLISHER: 'workspace_publisher',
     WORKSPACE_STEWARD: 'workspace_steward',
     WORKSPACE_VIEWER: 'workspace_viewer',
+    /** The Playground's own role: build graphs and views there, change only what you made. Held
+     *  only in the Playground, so it is no template a workspace's members are bound to. */
+    WORKSPACE_PLAYGROUND_MEMBER: 'workspace_playground_member',
 } as const
 
 export type RoleName = (typeof ROLE_NAMES)[keyof typeof ROLE_NAMES]
