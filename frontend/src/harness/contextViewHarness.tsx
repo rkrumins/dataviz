@@ -9,6 +9,7 @@
  *   open http://localhost:5199/context-view-harness.html?fixture=top&theme=dark
  *
  *   fixture   `top`    every notice the top of the canvas can show at once
+ *                      (`searchMode=isolate|hide` for the search chip's others)
  *             `trace`  a trace walking (its capsule), with the provider pill
  *             `scale`  a warehouse of `containers` schemas × `children` tables
  *                      (default 500 × 200), to expand a level at a time
@@ -40,6 +41,7 @@ import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { usePersonaStore } from '../store/persona'
 import { usePreferencesStore } from '../store/preferences'
 import { useSchemaStore } from '../store/schema'
+import { useSearchStore, type CanvasFilterMode } from '../store/searchStore'
 import type { GraphDataProvider, GraphNode } from '../providers/GraphDataProvider'
 import type { MembershipResult } from '../types/membership'
 
@@ -207,6 +209,11 @@ if (fixture === 'top') {
     viewId: 'harness-view',
     applied: { spec: specFor({ urns: ['wh'] }, { children: 'all', upstream: 'all' }), seedsLabel: 'Warehouse', result, visibility: visibilityOf(result) },
   })
+  // A search left on the canvas with its panel closed (`searchMode` picks how it filters).
+  useSearchStore.setState({
+    viewId: 'harness-view', matchUrnSet: new Set(['wh', 'd0']), orderedMatchUrns: ['wh', 'd0'],
+    canvasFilterMode: (params.get('searchMode') ?? 'highlight') as CanvasFilterMode,
+  } as never)
 }
 
 // The pill CanvasRouter hands a canvas that has data on it but a load that ended short.

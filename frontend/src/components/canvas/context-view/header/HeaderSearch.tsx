@@ -45,6 +45,7 @@ import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { usePersonaMode } from '@/store/persona'
+import { useIsSearchSpotlightActive } from '@/store/searchStore'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import type { SearchHit } from '@/types/search'
@@ -151,6 +152,9 @@ function HeaderSearchBox() {
   const technical = usePersonaMode() === 'technical'
   const scope = quick.scope
   const view = advanced.view
+  // A search can be shaping the canvas with nothing in the box — run from
+  // the panel, or from a right-click — and the × is the way to stop it.
+  const searchOnCanvas = useIsSearchSpotlightActive()
 
   // The list's own state. All three are the box's, not the session's: a
   // search that is still standing has to survive the list being closed
@@ -589,12 +593,16 @@ function HeaderSearchBox() {
           </HoverTip>
 
           {/* Third control in a 40px stretch that had three treatments: a
-              native pill, a HoverTip, and — here — nothing at all. */}
-          {quick.text && (
+              native pill, a HoverTip, and — here — nothing at all. Offered
+              whenever a search is on, typed here or not: with the panel
+              closed, this and the canvas's search chip are the ways out. */}
+          {(quick.text || searchOnCanvas) && (
             <HoverTip
               className="inline-flex shrink-0"
-              label="Clear what you typed"
-              detail="Keeps where you are looking and how it matches"
+              label={quick.text ? 'Clear what you typed' : 'Clear the search'}
+              detail={quick.text
+                ? 'Keeps where you are looking and how it matches'
+                : 'Takes its highlights off the canvas'}
             >
               <button
                 type="button"
