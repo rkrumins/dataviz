@@ -135,6 +135,7 @@ connector written against it keeps working.
 | `properties_json` | Properties too nested for a column, as a JSON object |
 | `baseVersion` | The version an export wrote the row at. An exported row edited offline is merged with what changed since ([§4](#4-full-snapshots-and-deltas)) |
 | `_op` | Blank (or `upsert`) creates or updates; `delete` deletes |
+| `parentUrn`, `parentName`, `parentType`, `path`, `pathUrns` | **Informational, ignored on import.** Where a node sat in the graph it was exported from (an export asked `withPath=true`, the Export dialog's default): its direct container, then every container from the top of the graph down to it, by name and by urn. Lists in NDJSON and JSON; `A / B` and `a; b` in a text cell. The schema names them, so a file you exported validates; they never become properties. To place a node, send its containment edge |
 
 **What a row says, and what it leaves alone:**
 
@@ -625,7 +626,8 @@ record contract, and its calls to the routes a key may call.
 ## 12. The format's versioning
 
 - **Version 1 only gains columns.** An import ignores columns it doesn't know, and the dry run
-  reports them.
+  reports them. The informational columns an export may add (`parentUrn` … `pathUrns`) are named
+  by the schema and ignored the same way, never reported.
 - **A change to how v1 rows are read is announced in the [changelog](/docs/changelog)** before it
   ships, under **Changed**, with what to do (for example, rows exported with `baseVersion` merged
   field by field, or deletes of what's gone counting as done).

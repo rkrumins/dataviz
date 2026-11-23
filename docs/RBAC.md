@@ -94,12 +94,12 @@ Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each 
 
 | Role | Count | Permissions granted |
 |---|---|---|
-| `super_admin` | 28 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:service-accounts:manage`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
-| `org_admin` | 22 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:service-accounts:manage`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `super_admin` | 29 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:service-accounts:manage`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:create`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `org_admin` | 23 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:service-accounts:manage`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:create`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
 | `org_auditor` | 4 | `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:org-viewer` |
 | `org_reader` | 1 | `system:org-viewer` |
 | `workspace_admin` | 1 | `workspace:admin` |
-| `workspace_data_engineer` | 13 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_data_engineer` | 14 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:create`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_member` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_publisher` | 11 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_steward` | 11 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
@@ -147,6 +147,7 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `workspace:datasource:read` | workspace | List and use workspace data sources in views. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 | `workspace:members:add` | workspace | Answer access requests and add people to a workspace. | `super_admin`, `org_admin`, `workspace_steward` |
 | `workspace:native-query:read` | workspace | Run your own read-only queries on a workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
+| `workspace:ontology:create` | workspace | Create new semantic layers: a blank draft, a clone, or an imported file. Checked on top of `workspace:ontology:manage`. | `super_admin`, `org_admin`, `workspace_data_engineer` |
 | `workspace:ontology:manage` | workspace | Create, edit, version, publish, and delete ontologies in the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer` |
 | `workspace:ontology:read` | workspace | Read ontologies (semantic layers) that the workspace's data sources reference. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 | `workspace:provider:read` | workspace | Read providers (database connections) that back the workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
@@ -184,6 +185,30 @@ enforce, and the app shows or hides it to match:
 
 Entering **Administration** and opening one of its pages are separate checks: a page inside
 it needs its own permission as well as one of the four that open Administration.
+
+### Who may create and change a semantic layer
+
+Semantic layers have no workspace of their own, so their checks are `workspace_any`: the
+permission in any one workspace. Two further rules decide which layer and whether a new one:
+
+| To | Needs |
+|---|---|
+| Read a layer | `workspace:ontology:read`, and a data source in one of your workspaces uses the layer — or you made it (an org layer), or the Playground offers it to you |
+| Start a new layer: a blank draft, a clone, a file imported as new | `workspace:ontology:manage` **and** `workspace:ontology:create`, and the **Create semantic layers** switch (`semanticLayerCreation`), which stops administrators too |
+| Change a layer: save, new version, import into, publish, delete, restore | `workspace:ontology:manage` **in a workspace that uses the layer** (one of its data sources is built on that version) **or owns it** — or, while no data source uses it, being the person who made it. Otherwise 403 `layer_not_manageable` |
+
+- **Platform administrators** (`system:admin`, `system:org-admin`) change any layer they can
+  see, as before.
+- **Holding manage somewhere is no longer enough.** It used to let a data engineer in one
+  workspace change a layer only another workspace's data sources use.
+- **A Playground member's own layers** answer to the owner rule instead: their maker changes them
+  whatever these say, and nobody else does.
+- **Upgrading took nothing away.** `20261201_1000_ontology_create` gave `workspace:ontology:create`
+  to every role that held `workspace:ontology:manage`, custom ones included, and `workspace:admin`
+  implies it. Take it off a role to stop its holders starting layers while they keep looking
+  after the ones their workspaces use.
+- Each layer says what its reader may do (`access` on every layer the API returns), and every
+  change is recorded on the layer's history and in the Activity log as `ontology.layer.*`.
 
 ### View visibility and sharing
 

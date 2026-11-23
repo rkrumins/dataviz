@@ -19,6 +19,10 @@
  * Docked bottom-centre over the columns, above the trace dock, and it
  * reserves its own band (`--selection-bar-height`) so a column's last row
  * can still scroll clear of it — see useBandReservation.
+ *
+ * During a trace it is the slim trace bar: what was picked on the trace can
+ * be traced FROM (a new trace, the one on screen a Back away) or added to the
+ * trace on screen, besides Details and Export, which only read.
  */
 import { useRef, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -69,8 +73,18 @@ export interface SelectionBarProps {
   /** Download the held entities with everything inside them, to edit offline and import back.
    *  Absent — no version control, or no right to export — not offered. */
   onExport?: () => void
-  /** Show the bar for ONE held entity too: where nothing else offers its actions (a trace, whose
-   *  cards have no context menu). */
+  /** During a trace: trace again, from the held entities. Absent, not offered. */
+  onTraceFrom?: () => void
+  /** During a trace: add the held entities to the trace on screen. Absent when they are all in
+   *  it already. */
+  onAddToTrace?: () => void
+  /** Why they cannot all be added (the trace's cap) — the action then says so, disabled. */
+  addToTraceBlocked?: string | null
+  /** Open what is inside the held entities, a level at a time or every level, and close it
+   *  again (useExpandBelow). Absent when there is nothing either way. */
+  expand?: ExpandControlProps
+  /** Show the bar for ONE held entity too: where its actions are not otherwise to hand (a
+   *  trace, whose cards are traced from here). */
   offerForOne?: boolean
   /** Where the bar's lane sits on a canvas other than the Context View, as position classes
    *  (`left-4 right-4 bottom-16`). Absent, the Context View's lane: above its trace dock and layer
@@ -95,6 +109,10 @@ export function SelectionBar({
   onOpenShared,
   sharedEditable = false,
   onExport,
+  onTraceFrom,
+  onAddToTrace,
+  addToTraceBlocked = null,
+  expand,
   offerForOne = false,
   placementClassName,
   hint,
@@ -324,6 +342,54 @@ export function SelectionBar({
                 Narrow…
               </button>
             )}
+            {/* The trace bar's own: trace again from these, or add them to this trace. */}
+            {onAddToTrace && (
+              <HoverTip
+                className="inline-flex"
+                label={addToTraceBlocked ?? (single ? 'Add it to the trace on screen' : 'Add them to the trace on screen')}
+                detail={addToTraceBlocked ? 'Take a starting point out in the trace dock to make room' : 'The trace keeps what it shows, and walks these too'}
+              >
+                <button
+                  type="button"
+                  onClick={onAddToTrace}
+                  disabled={!!addToTraceBlocked}
+                  className={cn(
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium whitespace-nowrap',
+                    'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
+                    'hover:border-accent-lineage/45 hover:text-accent-lineage',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    'disabled:opacity-50 disabled:pointer-events-none',
+                    'transition-colors duration-150',
+                  )}
+                >
+                  <LucideIcons.ListPlus className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+                  Add to trace
+                </button>
+              </HoverTip>
+            )}
+            {onTraceFrom && (
+              <HoverTip
+                className="inline-flex"
+                label={single ? 'Trace from this entity instead' : 'Trace from these instead'}
+                detail="A new trace — Back in the trace dock returns to this one"
+              >
+                <button
+                  type="button"
+                  onClick={onTraceFrom}
+                  className={cn(
+                    'flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12.5px] font-medium whitespace-nowrap',
+                    'text-accent-lineage bg-accent-lineage/15 border border-accent-lineage/45',
+                    'hover:bg-accent-lineage/25 hover:border-accent-lineage/65',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
+                    'transition-colors duration-150',
+                  )}
+                >
+                  <LucideIcons.GitBranch className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+                  {single ? 'Trace from here' : `Trace these ${count}`}
+                </button>
+              </HoverTip>
+            )}
+            {expand && <ExpandControl {...expand} />}
             {onExport && (
               <button
                 type="button"
@@ -391,5 +457,91 @@ export function SelectionBar({
         </motion.div>
       )}
     </AnimatePresence>
+  )
+}
+
+interface ExpandControlProps {
+  /** Every level, or the next one only (a remembered preference). */
+  allLevels: boolean
+  onToggleAllLevels: () => void
+  /** Absent when everything inside is open already. */
+  onExpand?: () => void
+  /** Absent when nothing inside is open. */
+  onCollapse?: () => void
+  /** "Collapse everything inside", or "Collapse" when only the rows themselves are open. */
+  collapseLabel?: string
+  /** A run is going: the control is the way to stop it. */
+  running: boolean
+  onCancel: () => void
+}
+
+/** Expand — next level or all levels, the switch on the control itself — and
+ *  Collapse everything inside; while a run goes, Stop. */
+function ExpandControl({ allLevels, onToggleAllLevels, onExpand, onCollapse, collapseLabel = 'Collapse everything inside', running, onCancel }: ExpandControlProps) {
+  const segment = cn(
+    'flex items-center gap-1.5 py-1.5 text-[12.5px] font-medium whitespace-nowrap transition-colors duration-150',
+    'text-ink hover:text-accent-lineage',
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40',
+  )
+  if (running) {
+    return (
+      <button
+        type="button"
+        onClick={onCancel}
+        className={cn(segment, 'px-3 rounded-xl border border-glass-border bg-black/[0.04] dark:bg-white/[0.06]')}
+      >
+        <LucideIcons.CircleStop className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+        Stop opening
+      </button>
+    )
+  }
+  return (
+    <span role="group" aria-label="Open what is inside" className="flex items-center rounded-xl border border-glass-border bg-black/[0.04] dark:bg-white/[0.06] overflow-hidden">
+      {onExpand && (
+        <>
+          <HoverTip
+            className="inline-flex"
+            label={allLevels ? 'Open every level inside these' : 'Open the next level inside these'}
+            detail={allLevels
+              ? 'A level at a time, pausing every 2,000 entities loaded'
+              : 'Each press opens the level below the last'}
+            shortcut="⇧→"
+          >
+            <button type="button" onClick={onExpand} className={cn(segment, 'pl-3 pr-2 rounded-l-xl')}>
+              {allLevels
+                ? <LucideIcons.ChevronsDown className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+                : <LucideIcons.ChevronDown className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />}
+              {allLevels ? 'Expand all levels' : 'Expand next level'}
+            </button>
+          </HoverTip>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={allLevels}
+            aria-label="All levels"
+            onClick={onToggleAllLevels}
+            className={cn(segment, 'gap-1.5 px-2 text-[11px] text-ink-muted border-l border-glass-border')}
+          >
+            All levels
+            <span className={cn('relative inline-flex h-3.5 w-6 rounded-full transition-colors', allLevels ? 'bg-accent-lineage' : 'bg-black/15 dark:bg-white/20')}>
+              <span className={cn('absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white shadow transition-transform', allLevels ? 'translate-x-3' : 'translate-x-0.5')} />
+            </span>
+          </button>
+        </>
+      )}
+      {onCollapse && (
+        <HoverTip className="inline-flex" label={collapseLabel} detail="What it had loaded is let go" shortcut="⇧←">
+          <button
+            type="button"
+            onClick={onCollapse}
+            aria-label={collapseLabel}
+            className={cn(segment, 'px-2.5', onExpand && 'border-l border-glass-border')}
+          >
+            <LucideIcons.ChevronsUp className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+            {!onExpand && 'Collapse inside'}
+          </button>
+        </HoverTip>
+      )}
+    </span>
   )
 }

@@ -59,6 +59,7 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     semanticLayerExportEnabled: true,
     semanticLayerAutoSuggest: true,
     semanticLayerVersionHistory: true,
+    semanticLayerCreation: true,
     semanticLayerNonAdminEditing: false,  // fail CLOSED — see above
     // Fail CLOSED, same reasoning: this WIDENS who can read platform-wide
     // growth and how many workspaces exist. Guessing "on" while the real value

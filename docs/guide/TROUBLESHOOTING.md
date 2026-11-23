@@ -103,6 +103,7 @@ switch on **Administration → Features** — see
 | "Exporting semantic layers is turned off…" | **Export layers** |
 | "Suggesting a semantic layer from the graph is turned off…" | **Suggest from graph** |
 | "Semantic layer history is hidden…" | **Layer history & audit** |
+| "Creating new semantic layers is turned off…" | **Create semantic layers** |
 | "Self-registration is turned off…" | **Self-registration** |
 | "Invite links are turned off…" | **Invite links** |
 

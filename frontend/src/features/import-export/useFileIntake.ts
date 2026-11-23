@@ -134,11 +134,13 @@ export function useFileIntake() {
     setAutoDetected(false)
   }, [])
 
-  /** What goes up, its types as `typeMap` maps them (for the simple files): the file and its format. */
-  const upload = useCallback((typeMap: TypeMap): { file: File; format: ImportFormat } | null => {
-    if (!read) return null
-    if (read.passthrough) return { file: read.passthrough, format }
-    return { file: toImportFile(read, typeMap, files), format: 'ndjson' }
+  /** What goes up, its types as `typeMap` maps them (for the simple files): the file and its format.
+   *  `from`: the read as the person settled it — its things identified by another column, say
+   *  (`withIdentifierColumn`) — else the files' own. */
+  const upload = useCallback((typeMap: TypeMap, from: FileRead | null = read): { file: File; format: ImportFormat } | null => {
+    if (!from) return null
+    if (from.passthrough) return { file: from.passthrough, format: from.passthroughFormat ?? format }
+    return { file: toImportFile(from, typeMap, files), format: 'ndjson' }
   }, [read, format, files])
 
   const warning = read?.passthrough

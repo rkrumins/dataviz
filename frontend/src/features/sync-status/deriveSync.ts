@@ -58,6 +58,10 @@ export interface SyncVerdict {
   busy: boolean
   /** Views show an earlier version, complete, while the graph is written to the newer one. */
   showingOlder?: boolean
+  /** The same reading for the Business view: what a reader acts on, with no store names and no
+   *  account of the path. Its lanes are Saved version, What you see and Summaries (Source and
+   *  Summaries for an external graph); each keeps its technical lane's key and tone. */
+  plain: { headline: string; detail: string; lanes: SyncLane[] }
 }
 
 const RANK: Record<SyncTone, number> = { idle: 0, ok: 1, busy: 2, warn: 3, bad: 4 }
@@ -75,10 +79,12 @@ export const KIND_TEXT = {
   versioned: {
     label: 'Versioned graph',
     explainer: 'Managed here: changes are published through review into the system of record, then written to the graph.',
+    plain: 'Every change is saved as a version',
   },
   external: {
     label: 'External graph',
     explainer: 'Read from its own FalkorDB — never edited here. This app watches it for changes and keeps its lineage summaries current.',
+    plain: 'Read live from its source — never changed here',
   },
 } as const
 
@@ -148,10 +154,16 @@ const BUILD_STEP: Record<SyncBuild['step'], string> = {
   catching_up: 'building', switching: 'switching to',
 }
 
+/** The summaries lane in the Business view: a failure's own reason is the server's words, which
+ *  can name a store or a query — the lane already says it failed, when, and what happens next. */
+const plainSummaries = (lane: SyncLane, s: SyncSummaries | null | undefined): SyncLane =>
+  ({ ...lane, title: 'Summaries', tech: '', lines: lane.lines.filter((l) => l !== s?.lastFailureReason) })
+
 export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()): SyncVerdict {
   if (!doc) {
     return { kind: null, kindLabel: '', kindExplainer: '', tone: 'idle', chip: 'Checking sync…',
-      headline: 'Checking sync…', detail: '', lanes: [], busy: false }
+      headline: 'Checking sync…', detail: '', lanes: [], busy: false,
+      plain: { headline: 'Checking sync…', detail: '', lanes: [] } }
   }
   const summaries = summariesLane(doc.summaries, doc, now)
   const counts = doc.counts
@@ -262,8 +274,46 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
       : showingOlder
         ? `Views show version #${shown}${shownAt} until version #${v.committed} is written to the graph, then refresh on their own`
         : `The system of record is at #${v.committed}; the graph holds #${v.projected}`
+
+    // The Business view's lanes: the version saved, the version on screen and how it gets there,
+    // and the summaries. "What you see" carries the revision views read — the saved one while they
+    // read the system of record — so its commit is the one on screen.
+    const plainRecord: SyncLane = { ...record, title: 'Saved version', tech: '',
+      status: v.committed > 0 ? `Version ${v.committed}` : 'Nothing published yet' }
+    const plainGraph: SyncLane = {
+      key: 'graph', title: 'What you see', tech: '', tone: graphTone, version: shown,
+      revision: readsRecord || latestFromRecord ? v.committedRevision : graph.revision,
+      progress: graph.progress,
+      status: graphTone === 'ok' || latestFromRecord ? `Version ${v.committed} · the latest`
+        : (build || showingOlder) ? (v.lastError ? `Version ${shown} · its update failed` : `Version ${shown}, complete`)
+        : v.status === 'rebuilding' ? (pct != null ? `Being rebuilt · ${pct}%` : 'Being rebuilt…')
+        : active ? `Updating to version ${v.committed}`
+        : v.lastError ? `Update failed · ${versions(behind)} behind`
+        : `${versions(behind)} behind`,
+      lines: [
+        ...(build
+          ? [`Version ${v.committed} is prepared beside it, then everything switches to it at once`,
+             ...(buildFailed ? ['An attempt failed · trying again'] : [])]
+          : showingOlder ? [`Switches to version ${v.committed} on its own once it is written`] : []),
+        ...(showingOlder && active && inForce !== 'beside' ? [`Parts of version ${v.committed} can appear before the rest`] : []),
+        ...(latestFromRecord ? ['Can load more slowly, without summaries, until the update finishes'] : []),
+        ...(readsRecord && !latestFromRecord ? ['Can load more slowly until it catches up'] : []),
+        ...(countLine ? [countLine] : []),
+      ],
+      next: graphTone === 'ok' ? 'Updates on its own after every publish'
+        : active || latestFromRecord ? undefined
+        : v.lastError ? 'A manager can fix it from Data health'
+        : 'Catches up on its own',
+    }
+    const plain = {
+      headline: latestFromRecord ? 'Showing the newest version while the graph updates' : headline,
+      detail: readsRecord || latestFromRecord ? `Views show version ${v.committed} now, a little more slowly until the graph catches up`
+        : graph.tone === 'ok' || build || showingOlder ? detail
+        : `Version ${v.committed} is saved; views show version ${v.projected} until they catch up`,
+      lanes: [plainRecord, plainGraph, plainSummaries(summaries, doc.summaries)],
+    }
     return { kind: 'versioned', kindLabel: KIND_TEXT.versioned.label, kindExplainer: KIND_TEXT.versioned.explainer,
-      tone, chip, headline, detail, lanes, busy, showingOlder }
+      tone, chip, headline, detail, lanes, busy, showingOlder, plain }
   }
 
   // External: judged on evidence read from the graph, not on stored verdicts.
@@ -303,6 +353,8 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
     : tone === 'idle' ? 'Sync not reported yet' : 'Needs attention'
   const detail = [source.lines[0], summaries.tone !== 'ok' && summaries.tone !== 'idle' ? `Summaries: ${summaries.status.toLowerCase()}` : '']
     .filter(Boolean).join(' · ')
+  const plain = { headline, detail,
+    lanes: [{ ...source, title: 'Source', tech: '' }, plainSummaries(summaries, doc.summaries)] }
   return { kind: 'external', kindLabel: KIND_TEXT.external.label, kindExplainer: KIND_TEXT.external.explainer,
-    tone, chip, headline, detail, lanes, busy }
+    tone, chip, headline, detail, lanes, busy, plain }
 }

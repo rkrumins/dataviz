@@ -736,6 +736,18 @@ def _commit_summary(template: str) -> Callable[[dict], str]:
     return _build
 
 
+def _layer_summary(template: str) -> Callable[[dict], str]:
+    """A change to a semantic layer (``api/v1/endpoints/ontologies._record_change``): ``template``
+    holds one ``{}`` for the layer, named with the version it was at ("Finance v3"); a clone also
+    says which layer it copies."""
+    def _build(p: dict) -> str:
+        version = _detail(p, "version")
+        said = template.format(_subject(p) + (f" v{version}" if version is not None else ""))
+        source = _detail(p, "fromName")
+        return f"{said}, from {source} v{_detail(p, 'fromVersion') or '?'}" if source else said
+    return _build
+
+
 def _settings_summary(template: str) -> Callable[[dict], str]:
     """A save of settings (``services.settings.service``): ``template`` holds ``{keys}``, the
     settings it changed, and for a workspace's or a graph's one ``{}``, whose they are."""
@@ -986,6 +998,16 @@ _EVENT_META.update({
     "provider.connection.created": ("info", _envelope_summary("Registered provider {}")),
     "provider.connection.updated": ("info", _envelope_summary("Updated provider {}")),
     "provider.connection.deleted": ("warning", _envelope_summary("Deleted provider {}")),
+    # ── content: semantic layers, which every view resolves through
+    "ontology.layer.created": ("info", _layer_summary("Created semantic layer {}")),
+    "ontology.layer.cloned": ("info", _layer_summary("Cloned semantic layer {}")),
+    "ontology.layer.imported": ("info", _layer_summary("Imported semantic layer {}")),
+    "ontology.layer.updated": ("info", _layer_summary("Changed semantic layer {}")),
+    "ontology.layer.versioned": ("info", _layer_summary("Started a new version of semantic layer {}")),
+    "ontology.layer.published": ("info", _layer_summary("Published semantic layer {}")),
+    "ontology.layer.approved": ("info", _layer_summary("Approved semantic layer {} for everyone")),
+    "ontology.layer.deleted": ("warning", _layer_summary("Deleted semantic layer {}")),
+    "ontology.layer.restored": ("info", _layer_summary("Restored semantic layer {}")),
     # ── platform
     "platform.feature_flag.changed": ("info", _summary_flag),
     "platform.profiling_policy.updated": ("info", lambda p: "Changed profiling retention and alerting"),
@@ -1116,6 +1138,15 @@ LABELS: dict[str, str] = {
     "provider.connection.created": "Registered a provider",
     "provider.connection.updated": "Updated a provider",
     "provider.connection.deleted": "Deleted a provider",
+    "ontology.layer.created": "Created a semantic layer",
+    "ontology.layer.cloned": "Cloned a semantic layer",
+    "ontology.layer.imported": "Imported a semantic layer",
+    "ontology.layer.updated": "Changed a semantic layer",
+    "ontology.layer.versioned": "Started a new version of a semantic layer",
+    "ontology.layer.published": "Published a semantic layer",
+    "ontology.layer.approved": "Approved a semantic layer for everyone",
+    "ontology.layer.deleted": "Deleted a semantic layer",
+    "ontology.layer.restored": "Restored a semantic layer",
     "platform.feature_flag.changed": "Changed a feature flag",
     "platform.profiling_policy.updated": "Changed profiling policy",
     "platform.service_account_policy.updated": "Changed who may create service accounts",

@@ -123,7 +123,7 @@ export interface OntologyAuditEntry {
     id: string
     ontologyId: string
     schemaId: string
-    action: 'created' | 'updated' | 'published' | 'deleted' | 'restored' | 'cloned' | 'imported'
+    action: 'created' | 'updated' | 'published' | 'deleted' | 'restored' | 'cloned' | 'versioned' | 'imported' | 'approved'
     actor: string | null
     version: number | null
     summary: string | null

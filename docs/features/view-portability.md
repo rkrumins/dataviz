@@ -105,7 +105,9 @@ one schema, one parser and one importer.
     "manifest": {
       "counts": { "layers": 5, "assignments": 1200, "anchors": 3, "rules": 9, "displayRules": 4,
                   "entityTypes": 6, "relationshipTypes": 2 },
-      "entities": { "urn:…": { "name": "revenue", "type": "Table", "qualifiedName": "…" } },
+      "entities": { "urn:…": { "name": "revenue", "type": "Table", "qualifiedName": "…",
+                               "parentUrn": "urn:…", "parentName": "gold", "parentType": "Schema",
+                               "path": ["Warehouse", "gold"], "pathUrns": ["urn:…", "urn:…"] } },
       "entitiesResolved": true
     },
     "history": [{ "environment": "dev", "viewId": "view_…", "version": 7, "hash": "sha256:…",
@@ -120,7 +122,9 @@ one schema, one parser and one importer.
   Their ids are never used as ids.
 - **`manifest.entities`** names every entity the view places, so the target can show *what* didn't
   match rather than a bare URN. `entitiesResolved` is false when the source graph couldn't be asked
-  for names at export time.
+  for names at export time. Each also says where it sat there, its parent and path, as every export
+  of entities does: informational, read leniently and by nothing on import, and left out when the
+  source couldn't say.
 - **`history`** is the full ancestry: the view's own versions, preceded by history carried in from
   earlier imports, capped at 500 entries (`historyTruncated`). Its hashes let an import into a
   view that already exists find the version they last had in common.

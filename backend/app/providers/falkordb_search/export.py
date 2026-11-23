@@ -29,6 +29,11 @@ A Connections search exports its edges (``_EdgeExportWork``): the units its
 search reads (``edges``), each edge once, with its two ends and their
 parents, read a page at a time — never more rows to a reply than FalkorDB
 sends (``RESULTSET_SIZE``, 10,000 on the stock image).
+
+An export asked for ``with_path`` says where each entity sits, its parent and
+its path (``common.ancestry_columns``): the graph's containment chains, read a
+thousand rows at a time as each batch is written. Never asked for by the bulk
+property jobs that read their targets through an export, so theirs stay fast.
 """
 from __future__ import annotations
 
@@ -71,6 +76,8 @@ from backend.app.services.deep_search import (
     SearchRunContext,
     get_deep_search_settings,
 )
+from backend.common import ancestry_columns as ancestry
+from backend.common.models.graph import NodeQuery
 from backend.common.models.search import SearchQuery, export_columns
 
 #: Where exports are kept in the object store: one folder per day an export
@@ -180,13 +187,16 @@ class Manifest:
 
     def __init__(self, fmt: str, columns: List[str], folder: str,
                  parts: Optional[List[List[Any]]] = None, size: int = 0,
-                 state: Optional[Dict[str, Any]] = None) -> None:
+                 state: Optional[Dict[str, Any]] = None, with_path: bool = False) -> None:
         self.fmt, self.columns, self.folder = fmt, columns, folder
         self.parts: List[List[Any]] = parts or []          # [[key, rows], …]
         self.size = size
         # A Connections export's plan: which end anchors, what the far end's
         # scope check reads (``edges._plan``).
         self.state = state
+        # Its rows say where each entity sits: those columns are placed, never
+        # read off the node (a property named ``path`` is not its path).
+        self.with_path = with_path
 
     @classmethod
     def from_json(cls, text: Optional[str]) -> Optional["Manifest"]:
@@ -194,12 +204,20 @@ class Manifest:
             return None
         d = json.loads(text)
         return cls(d["format"], d["columns"], d["folder"], d.get("parts"), d.get("size", 0),
-                   d.get("state"))
+                   d.get("state"), bool(d.get("withPath")))
 
     def to_json(self) -> str:
         return json.dumps({"format": self.fmt, "columns": self.columns,
                            "folder": self.folder, "parts": self.parts, "size": self.size,
-                           **({"state": self.state} if self.state is not None else {})})
+                           **({"state": self.state} if self.state is not None else {}),
+                           **({"withPath": True} if self.with_path else {})})
+
+    @property
+    def read_columns(self) -> List[str]:
+        """The columns read off each node: all of them, but where it sits."""
+        if not self.with_path:
+            return self.columns
+        return [c for c in self.columns if c not in ancestry.ANCESTRY_COLUMNS]
 
 
 def _part_key(folder: str, unit: Unit) -> str:
@@ -214,9 +232,13 @@ class _ExportWork:
     """What an export takes from each unit: its matches, written to the
     unit's part — committed with the session, so a part counts once."""
 
-    def __init__(self, session: Session, ctx: Context, run, objects, manifest: Manifest) -> None:
+    def __init__(self, session: Session, ctx: Context, run, objects, manifest: Manifest,
+                 place=None) -> None:
         self.session, self.ctx, self.run, self.objects = session, ctx, run, objects
         self.manifest = manifest
+        # Fills in where each entity of a batch sits (``_placer``), for an
+        # export asked for with its path.
+        self.place = place
 
     async def expand(self, unit: Unit, timeout_s: float) -> Optional[List[Unit]]:
         return await expand_unit(unit, self.ctx, self.run, timeout_s)
@@ -232,6 +254,13 @@ class _ExportWork:
         fmt, columns = self.manifest.fmt, self.manifest.columns
         written = 0
 
+        async def encoded(batch: List[Dict[str, Any]]) -> bytes:
+            if self.place is not None:
+                await self.place(batch)
+                if fmt == "csv":
+                    batch = [ancestry.joined(r) for r in batch]
+            return await asyncio.to_thread(encode_rows, batch, fmt, columns)
+
         async def chunks() -> AsyncIterator[bytes]:
             # Streamed as read: a walk's subtree is written a page at a time.
             nonlocal written
@@ -242,11 +271,11 @@ class _ExportWork:
                 batch.append(record)
                 if len(batch) >= _ENCODE_BATCH:
                     written += len(batch)
-                    yield await asyncio.to_thread(encode_rows, batch, fmt, columns)
+                    yield await encoded(batch)
                     batch = []
             if batch:
                 written += len(batch)
-                yield await asyncio.to_thread(encode_rows, batch, fmt, columns)
+                yield await encoded(batch)
 
         key = _part_key(self.manifest.folder, unit)
         stat = await self.objects.put_stream(key, chunks())
@@ -260,7 +289,7 @@ class _ExportWork:
         unit = await read_members(unit, self.ctx)
         ctx = dataclasses.replace(self.ctx, clamp_depths=tuple(self.session.clamp_depths))
         ctx = await unit_context(unit, ctx, self.run, timeout_s)
-        columns = self.manifest.columns
+        columns = self.manifest.read_columns
 
         async def read() -> AsyncIterator[Dict[str, Any]]:
             async for row in _unit_rows(unit, ctx, self.session.clamps, columns,
@@ -394,18 +423,45 @@ async def _unit_rows(unit: Unit, ctx: Context, clamps, columns: Sequence[str], r
 # The session
 # ---------------------------------------------------------------------------
 
-def _query_id(query: SearchQuery, scope_hash: str, fmt: str, columns: Sequence[str]) -> str:
+def _query_id(query: SearchQuery, scope_hash: str, fmt: str, columns: Sequence[str],
+              with_path: bool = False) -> str:
     from backend.app.providers.falkordb_search.engine import query_identity
     return "export:" + hashlib.sha1(json.dumps(
-        [query_identity(query, scope_hash, 0), fmt, list(columns)]).encode()).hexdigest()
+        [query_identity(query, scope_hash, 0), fmt, list(columns), *(["withPath"] if with_path else [])]
+    ).encode()).hexdigest()
+
+
+def _placer(provider, admit):
+    """What fills in where each entity of a batch sits: the graph's
+    containment chains and one lookup naming the containers not met yet,
+    each statement admitted as the export's own are."""
+    known: ancestry.Names = {}
+
+    async def chains(urns: List[str]) -> Dict[str, List[str]]:
+        async with (admit() if admit else contextlib.nullcontext()):
+            return await provider.get_ancestor_chains(urns)
+
+    async def lookup(urns: List[str]) -> ancestry.Names:
+        async with (admit() if admit else contextlib.nullcontext()):
+            nodes = await provider.get_nodes(NodeQuery(urns=urns, limit=len(urns), include_child_count=False))
+        return {n.urn: (n.display_name or n.urn, n.entity_type or "") for n in nodes}
+
+    async def place(records: List[Dict[str, Any]]) -> None:
+        for r in records:                     # a container is often a match itself
+            if r.get("urn") and len(known) < ancestry.NAMES_MAX:
+                known.setdefault(r["urn"], (r.get("displayName") or r["urn"], r.get("entityType") or ""))
+        await ancestry.place(records, chains, lookup, known)
+
+    return place
 
 
 async def execute_export_session(provider, query: SearchQuery, *, context: SearchRunContext,
                                  fmt: str, columns: Sequence[str], wait_ms: int,
-                                 session_id: Optional[str] = None, objects=None
-                                 ) -> Dict[str, Any]:
+                                 session_id: Optional[str] = None, objects=None,
+                                 with_path: bool = False) -> Dict[str, Any]:
     """This request's share of an export of ``query``'s matches (its scope
-    resolved by the caller), answered with how far it has got."""
+    resolved by the caller), answered with how far it has got. ``with_path``:
+    each entity says where it sits."""
     from backend.app.providers.falkordb_search.engine import (
         _GRACE_S,
         _advance,
@@ -434,7 +490,8 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
             return await provider._ro_query(cypher, params=params, timeout=timeout_s)
 
     edges = query.predicate.kind == "edges"
-    cols = export_columns(list(columns), edges=edges)
+    with_path = with_path and not edges
+    cols = export_columns(list(columns), edges=edges, with_path=with_path)
     if not edges:
         compiler, raw_labels = await _compiler_for(provider, run, context, settings)
         where = compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
@@ -451,7 +508,7 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
             raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
             members=context.members,
         )
-    query_id = _query_id(query, context.scope_hash, fmt, cols)
+    query_id = _query_id(query, context.scope_hash, fmt, cols, with_path)
     sid = session_id_of(query_id, context.data_version, None)
     session = await _find(store, session_id, query_id, None)
     if session is not None and session.status == FAILED:
@@ -480,17 +537,18 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
                                 scope_hash=context.scope_hash)
         created = True
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
-        manifest = Manifest(fmt, cols, f"{_ROOT}/{day}/{sid}", state=state)
+        manifest = Manifest(fmt, cols, f"{_ROOT}/{day}/{sid}", state=state, with_path=with_path)
     else:
         manifest = (Manifest.from_json(await store.load_accumulator(session.sid))
-                    or Manifest(fmt, cols, f"{_ROOT}/unknown/{session.sid}"))
+                    or Manifest(fmt, cols, f"{_ROOT}/unknown/{session.sid}", with_path=with_path))
     ttl_s = max(1, min(settings.export_ttl_seconds, int(_keep_until(session) - time.time())))
     if edges:
         work: _ExportWork = _EdgeExportWork(
             session, edge_context(provider, query, manifest.state or {}), run, objects,
             manifest, _containment(provider))
     else:
-        work = _ExportWork(session, ctx, run, objects, manifest)
+        work = _ExportWork(session, ctx, run, objects, manifest,
+                           _placer(provider, admit) if manifest.with_path else None)
     session = await _advance(session, created, store, work, deadline, settings,
                              ttl_s=ttl_s, unit_s=unit_s)
     if created and session.status == COMPLETE and not work.manifest.parts:

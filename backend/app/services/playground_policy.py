@@ -22,6 +22,10 @@ and in the Playground only:
 * **Starter data models.** A blank graph needs a published data model. A new member
   sees none (data models follow the data sources a person's workspaces use), so the
   ones the administrator chose (``starterOntologyIds``) are visible to its members.
+* **Every thing has an identifier.** A graph made here identifies its things by ``id``
+  (:data:`IDENTITY_PROPERTY`, on its data source), which every write keeps equal to the
+  thing's urn (``node_identity.bind_node_write``), and an import into one refuses a row that
+  gives neither (``import_export.resolve``).
 
 A standard workspace is untouched by every check here.
 """
@@ -47,6 +51,9 @@ PLAYGROUND_ROLE = RoleName.WORKSPACE_PLAYGROUND_MEMBER.value
 DEFAULT_GRAPH_QUOTA = 5
 DEFAULT_LAYER_QUOTA = 20
 DEFAULT_MAX_IMPORT_ROWS = 200_000
+#: The property a graph made here identifies its things by, set on its data source when it is made:
+#: a field of every type of a Playground data model (``playground_layers.IDENTITY_FIELD``).
+IDENTITY_PROPERTY = "id"
 
 
 @dataclass

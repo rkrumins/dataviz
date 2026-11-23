@@ -4,7 +4,9 @@
  * workspaces are read again so the Playground opens straight away.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { playgroundService, type NewPlaygroundGraph, type PlaygroundSetup } from '@/services/playgroundService'
+import {
+    playgroundService, type NewPlaygroundGraph, type PlaygroundSetup, type PlaygroundView,
+} from '@/services/playgroundService'
 import { useFeature } from '@/store/features'
 import { useAuthStore } from '@/store/auth'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -63,11 +65,12 @@ function useGraphMade(workspaceId: string) {
     }
 }
 
-/** Start a graph from a sample. */
+/** Start a graph from a sample, with the canvases chosen beside its Context View. */
 export function useStartSample(workspaceId: string) {
     const made = useGraphMade(workspaceId)
     return useMutation({
-        mutationFn: (sampleId: string) => playgroundService.startSample(sampleId),
+        mutationFn: ({ sampleId, views }: { sampleId: string; views: PlaygroundView[] }) =>
+            playgroundService.startSample(sampleId, views),
         onSuccess: made,
     })
 }

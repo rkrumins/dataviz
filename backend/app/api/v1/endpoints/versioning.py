@@ -41,6 +41,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.raw_path_route import RawPathSegmentRoute
+from backend.common import ancestry_columns
 from backend.common.models.property_job import PropertyJobOp
 from backend.common.models.search import Predicate
 from backend.common.property_patch import InvalidPatch, normalize_update
@@ -367,51 +368,26 @@ async def _bump_main_cache(graph_id: str) -> None:
 
 
 async def _touch_views_data_updated(graph_id: str, actor: str) -> None:
-    """Stamp ``data_updated_at``/``data_updated_by`` on every live view of the graph's data
-    source after a main-advancing write (publish / MR merge / fork-PR merge / revert), so
-    Explorer's "last updated" reflects DATA changes, not just settings edits. One bulk indexed
-    UPDATE (idx_view_data_source); awaited inline like ``_bump_main_cache``. Best-effort by
-    contract — the graphver commit already landed and the management DB may be a separate
-    instance (no 2PC), so a failure here logs and never fails the user's write; the staleness
-    self-corrects on the next publish. Interactive main write-throughs (``/graph/changes`` on
-    main) are deliberately excluded — the canvas requires a draft, so every user-visible data
-    change reaches one of the four call sites."""
+    """Stamp ``data_updated_at``/``data_updated_by`` on every live view that reads the graph's
+    data source after a main-advancing write (publish / MR merge / fork-PR merge / revert), so
+    Explorer's "last updated" reflects DATA changes, not just settings edits
+    (``view_repo.touch_views_data_updated``, which an external graph's reconcile sweep calls
+    too); awaited inline like ``_bump_main_cache``. Best-effort by contract — the graphver
+    commit already landed and the management DB may be a separate instance (no 2PC), so a
+    failure here logs and never fails the user's write; the staleness self-corrects on the next
+    publish. Interactive main write-throughs (``/graph/changes`` on main) are deliberately
+    excluded — the canvas requires a draft, so every user-visible data change reaches one of the
+    four call sites."""
     try:
         svc = get_versioning_service()
         meta = await svc.get_graph(graph_id)
         ds = str(meta.get("data_source_id") or "") if meta else ""
         if not ds:
             return
-        from sqlalchemy import select as sa_select, update as sa_update
         from backend.app.db.engine import get_async_session
-        from backend.app.db.models import ViewORM, _now
-        from backend.app.db.repositories import view_activity_repo
+        from backend.app.db.repositories import view_repo
         async with get_async_session() as session:
-            # Snapshot the affected views BEFORE the bulk update so we can fan
-            # out a per-view "data_changed" activity event (the timeline's Data
-            # channel — a graph publish/merge changed what this view shows).
-            affected = (await session.execute(
-                sa_select(ViewORM.id, ViewORM.workspace_id).where(
-                    ViewORM.data_source_id == ds, ViewORM.deleted_at.is_(None),
-                )
-            )).all()
-            await session.execute(
-                sa_update(ViewORM)
-                .where(ViewORM.data_source_id == ds, ViewORM.deleted_at.is_(None))
-                # Self-assign updated_at so SQLAlchemy's column onupdate=_now does NOT
-                # fire on this Core UPDATE — data freshness must not masquerade as a
-                # settings edit (the whole reason these fields are separate).
-                .values(data_updated_at=_now(), data_updated_by=actor,
-                        updated_at=ViewORM.updated_at)
-                .execution_options(synchronize_session=False)
-            )
-            for view_id, workspace_id in affected:
-                await view_activity_repo.record_view_activity(
-                    session, view_id=view_id, workspace_id=workspace_id,
-                    action="data_changed", actor=actor,
-                    summary="Underlying data updated",
-                    changes={"graphId": graph_id},
-                )
+            await view_repo.touch_views_data_updated(session, ds, actor, changes={"graphId": graph_id})
             await session.commit()
     except Exception as exc:
         logger.warning("view data-freshness stamp for %s skipped: %s", graph_id, exc)
@@ -2075,9 +2051,13 @@ async def create_blank_graph(
     user_graph_name: Optional[str] = None
     if body.graph_name:
         user_graph_name = await claim_graph_name(session, body.provider_id, body.graph_name)
+    # In the Playground every thing is identified by ``id``, kept equal to its urn on each write: a
+    # field of every type of its data models (``playground_policy.IDENTITY_PROPERTY``).
+    in_playground = await playground_policy.playground_of(session, ws_id) is not None
     ds_id, graph_name = await create_managed_data_source(
         session, ws_id, provider_id=body.provider_id, ontology_id=body.ontology_id,
-        label=body.name, actor=user.id, graph_name=user_graph_name, description=body.description)
+        label=body.name, actor=user.id, graph_name=user_graph_name, description=body.description,
+        identity_property=playground_policy.IDENTITY_PROPERTY if in_playground else None)
 
     # 4) Genesis-only versioned graph pinned to the minted name + provider.
     try:
@@ -4593,7 +4573,8 @@ async def _import_settings_for(session: AsyncSession, data_source_id: Optional[s
     The settings are what its job keeps: where the identifier came from, the replace guard's switch
     and limits with where each came from, the refused rows it allows, and how many properties its
     graph may match by, and the most rows its file may hold (``maxRows``: the Playground's
-    ``maxImportRows`` in the Playground, else ``IMPORT_MAX_ROWS``; 0, no limit)."""
+    ``maxImportRows`` in the Playground, else ``IMPORT_MAX_ROWS``; 0, no limit). In the Playground,
+    every node row must give its identifier (``identityRequired``, ``resolve.resolve_rows``)."""
     from backend.app.db.models import WorkspaceDataSourceORM
     from backend.app.services import fork_sources, import_settings
     from backend.app.services.versioning.import_export import identifier as identifiers
@@ -4609,7 +4590,9 @@ async def _import_settings_for(session: AsyncSession, data_source_id: Optional[s
         raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
                                                      "message": str(exc)})
     limit = await playground_policy.import_row_limit(session, row.workspace_id) if row is not None else None
-    return identifier, {**settings, "maxRows": vconfig.IMPORT_MAX_ROWS if limit is None else limit}
+    required = row is not None and await playground_policy.playground_of(session, row.workspace_id) is not None
+    return identifier, {**settings, "maxRows": vconfig.IMPORT_MAX_ROWS if limit is None else limit,
+                        **({"identityRequired": True} if required else {})}
 
 
 @router.post("/graphs/{graph_id}/imports", response_model=CreateImportResponse, status_code=202)
@@ -5116,7 +5099,7 @@ async def validate_import(
         checked = await ie.validate_import(
             graph_id=graph_id, workspace_id=ws_id, data_source_id=meta.get("data_source_id"),
             branch_id=branch_id, data=bytes(body), import_format=format.lower(),
-            identifier=identifier)
+            identifier=identifier, identity_required=bool(settings.get("identityRequired")))
         return {**checked, "identifierSource": settings["identifierSource"]}
     except DryRunTooLarge as exc:
         raise HTTPException(status_code=413, detail={"type": "too_large", "message": str(exc)})
@@ -5418,6 +5401,7 @@ async def create_export(
         "Makes the request safe to send again: the same key, from the same caller, answers "
         "with the job it started")),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
+    with_path: bool = Query(False, alias="withPath", description=ancestry_columns.WITH_PATH),
     selection: Optional[ExportSelectionBody] = None,
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -5441,9 +5425,11 @@ async def create_export(
     await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
                                user=user, claims=claims, session=session, svc=svc)
     select_ids = _split(ids) + (selection.ids if selection else [])
-    # The containment the export follows from the selection, resolved now: the job walks it.
-    containment = (await _live_containment_map(session, ws_id, meta.get("data_source_id"))
-                   if with_children and select_ids else None)
+    # The containment the export follows from the selection, and that says where each entity
+    # sits, resolved now: the job walks it.
+    live_containment = (await _live_containment_map(session, ws_id, meta.get("data_source_id"))
+                        if (with_children and select_ids) or with_path else None)
+    containment = live_containment if with_children and select_ids else None
     key = _callers_key(user, idempotency_key)
     job = await _job_for_key(ie, graph_id, key, "export")
     if job is None:
@@ -5454,7 +5440,8 @@ async def create_export(
                     actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
                     branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
                     select_ids=select_ids, select_types=_split(types), select_children=containment,
-                    idempotency_key=key, file_name=download_name(filename, format) if filename else None)
+                    idempotency_key=key, file_name=download_name(filename, format) if filename else None,
+                    with_path=live_containment if with_path else None)
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
             job = await _job_for_key(ie, graph_id, key, "export")
@@ -5638,6 +5625,7 @@ async def stream_export(
     types: Optional[str] = Query(None),
     with_children: bool = Query(False, alias="withChildren"),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
+    with_path: bool = Query(False, alias="withPath", description=ancestry_columns.WITH_PATH),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     viewer: Viewer = Depends(viewer_ctx),
@@ -5659,15 +5647,19 @@ async def stream_export(
         ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id,
         ids=_split_list(ids), types=types, viewer=viewer, user=user, claims=claims, session=session,
         svc=svc, with_children=with_children)
+    place = (stream.Placer(snap, await _live_containment_map(session, ws_id, meta.get("data_source_id")))
+             if with_path else None)
     turn = await take_turn()
     try:
-        columns = await xlsx_columns(stream.record_pages(snap, selection), fmt, _split_list(props))
+        columns = await xlsx_columns(stream.record_pages(snap, selection), fmt, _split_list(props),
+                                     placed=with_path)
     except BaseException:
         stream.slots.release(turn)
         raise
     return ExportStreamResponse(
-        stream.write_export(lambda: stream.record_pages(snap, selection), fmt=fmt, columns=columns,
-                            props=_split_list(props)), turn=turn, fmt=fmt,
+        stream.write_export(lambda placed=True: stream.record_pages(snap, selection, place=place if placed else None),
+                            fmt=fmt, columns=columns, props=_split_list(props), placed=with_path),
+        turn=turn, fmt=fmt,
         filename=filename or f"{meta.get('data_source_id') or graph_id}-export",
         headers={"X-Export-As-Of": "" if snap.as_of_seq is None else str(snap.as_of_seq)})
 

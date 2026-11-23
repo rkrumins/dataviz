@@ -1258,7 +1258,8 @@ class AdvancedSearchService:
             return SearchExportResult(
                 session_id="", status="complete", format=request.format,
                 columns=export_columns(request.columns,
-                                       edges=isinstance(request.predicate, EdgesPredicate)))
+                                       edges=isinstance(request.predicate, EdgesPredicate),
+                                       with_path=request.with_path))
         op = self._provider_op("deep_search_export")
         context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash,
                           members=None if edges else self._members(request.scope, eff))
@@ -1268,8 +1269,11 @@ class AdvancedSearchService:
         predicate = self._in_subset(predicate, eff, await self._scope_boundary(scope, eff, context))
         query = SearchQuery(predicate=predicate, scope=scope,
                             options=SearchOptions(results="hits"))
+        # Where each match sits, only when asked for: a bulk property job reading its targets
+        # through an export never asks, and pays nothing for it.
         out = await op(query, context=context, fmt=request.format, columns=request.columns,
-                       wait_ms=request.wait_ms, session_id=request.session_id)
+                       wait_ms=request.wait_ms, session_id=request.session_id,
+                       **({"with_path": True} if request.with_path and not edges else {}))
         result = SearchExportResult.model_validate(out)
         if result.status == "complete" and result.session_id:
             from backend.auth_service.core import config as auth_config

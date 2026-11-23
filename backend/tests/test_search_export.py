@@ -90,6 +90,17 @@ class TestRows:
         again = Manifest.from_json(m.to_json())
         assert (again.fmt, again.columns, again.folder, again.parts, again.size) == (
             "csv", ["urn"], "f", [["f/a.part", 3]], 42)
+        assert again.with_path is False and "withPath" not in m.to_json()
+        placed = Manifest.from_json(Manifest("csv", export_columns(["path"], with_path=True), "f",
+                                             with_path=True).to_json())
+        assert placed.with_path and "path" not in placed.read_columns, "placed, never read off the node"
+
+    def test_where_an_entity_sits_follows_its_qualified_name_when_asked(self):
+        assert export_columns(["owner"], with_path=True) == [
+            "urn", "displayName", "entityType", "qualifiedName",
+            "parentUrn", "parentName", "parentType", "path", "pathUrns", "owner"]
+        assert "path" not in export_columns(["owner"], edges=True, with_path=True), \
+            "a connection's ends name their parents already"
 
 
 # ---------------------------------------------------------------------------
@@ -200,13 +211,13 @@ def _query():
                                        "scope": {"viewId": "v"}, "options": {"results": "hits"}})
 
 
-async def _follow(provider, objects, *, fmt="csv", scope_hash="h", data_version="1"):
+async def _follow(provider, objects, *, fmt="csv", scope_hash="h", data_version="1", **kw):
     out, sid, requests = None, None, 0
     context = SearchRunContext(data_version=data_version, scope_hash=scope_hash)
     while True:
         out = await execute_export_session(provider, _query(), context=context, fmt=fmt,
                                            columns=["owner", "size"], wait_ms=0,
-                                           session_id=sid, objects=objects)
+                                           session_id=sid, objects=objects, **kw)
         sid, requests = out["sessionId"], requests + 1
         if out["status"] == "complete":
             return out, requests
@@ -220,7 +231,49 @@ async def _download(provider, objects, sid, scope_hash="h"):
     return answer, b"".join([chunk async for chunk in body]).decode()
 
 
+class _PlacingProvider(_Provider):
+    """Datasets sit in a warehouse; columns in d0, inside it."""
+
+    def __init__(self, graph):
+        super().__init__(graph)
+        self.chain_reads, self.name_reads = [], []
+
+    async def get_ancestor_chains(self, urns):
+        self.chain_reads.append(list(urns))
+        return {u: (["urn:db"] if u.startswith("d") else ["d0", "urn:db"]) for u in urns}
+
+    async def get_nodes(self, query):
+        from backend.common.models.graph import GraphNode
+        self.name_reads.append(list(query.urns))
+        return [n for n in (GraphNode(urn="urn:db", entityType="Database", displayName="Warehouse"),
+                            GraphNode(urn="d0", entityType="Dataset", displayName="D0"))
+                if n.urn in query.urns]
+
+
 class TestSessions:
+    async def test_where_each_match_sits_is_written_only_when_asked(self, monkeypatch):
+        monkeypatch.setattr(export_mod, "make_plan", _plan(UNITS))
+        objects, provider = _Objects(), _PlacingProvider(_Graph(NODES))
+        out, requests = await _follow(provider, objects, with_path=True)
+        assert out["columns"][4:9] == ["parentUrn", "parentName", "parentType", "path", "pathUrns"]
+        _, text = await _download(provider, objects, out["sessionId"])
+        rows = {r["urn"]: r for r in csv.DictReader(io.StringIO(text))}
+        assert (rows["d1"]["parentUrn"], rows["d1"]["parentName"], rows["d1"]["path"]) == (
+            "urn:db", "Warehouse", "Warehouse")
+        assert (rows["c2"]["path"], rows["c2"]["pathUrns"]) == ("Warehouse / D0", "urn:db; d0")
+        assert not any("parentUrn" in s for s in provider.graph.statements), "never read off the node"
+        assert sum(read.count("urn:db") for read in provider.name_reads) <= requests, \
+            "a container is named once a request, not once a row"
+
+        out, _ = await _follow(provider, objects, fmt="ndjson", with_path=True)
+        _, text = await _download(provider, objects, out["sessionId"])
+        assert json.loads(text.splitlines()[0])["pathUrns"] == ["urn:db"]
+
+        provider.chain_reads.clear()
+        plain, _ = await _follow(provider, objects)
+        assert plain["columns"] == COLUMNS and provider.chain_reads == [], "nothing read unless asked"
+        assert plain["sessionId"] != out["sessionId"]
+
     async def test_every_match_is_written_once_across_requests(self, monkeypatch):
         monkeypatch.setattr(export_mod, "make_plan", _plan(UNITS))
         objects, provider = _Objects(), _Provider(_Graph(NODES))
@@ -524,6 +577,22 @@ class _Exporter:
 
 
 class TestService:
+    async def test_where_each_match_sits_is_asked_for_only_when_wanted(self):
+        """The Export Matches dialog asks; a bulk property job reading its targets never does,
+        so the provider is called exactly as before."""
+        class _PathExporter(_Exporter):
+            async def deep_search_export(self, query, *, with_path=False, **kw):
+                self.seen["with_path"] = with_path
+                return await super().deep_search_export(query, **kw)
+
+        exporter = _PathExporter()
+        asked = SearchExportRequest.model_validate({
+            "scope": {"viewId": "v"}, "predicate": {"kind": "all"}, "withPath": True})
+        await _service(exporter).export(asked, principal="usr_a")
+        assert exporter.seen["with_path"] is True
+        plain = SearchExportRequest.model_validate({"scope": {"viewId": "v"}, "predicate": {"kind": "all"}})
+        await _service(_Exporter()).export(plain, principal="usr_a")     # takes no such argument
+
     async def test_the_export_reads_the_resolved_scope_and_its_link_is_the_callers(self):
         exporter = _Exporter()
         request = SearchExportRequest.model_validate({

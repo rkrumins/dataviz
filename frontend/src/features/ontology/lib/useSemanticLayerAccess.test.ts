@@ -21,7 +21,9 @@ import { useSemanticLayerAccess } from './useSemanticLayerAccess'
 const ALL_ON = {
     semanticLayerEditMode: true, semanticLayerNonAdminEditing: true, semanticLayerImportEnabled: true,
     semanticLayerExportEnabled: true, semanticLayerAutoSuggest: true, semanticLayerVersionHistory: true,
+    semanticLayerCreation: true,
 }
+const CREATOR = { 'workspace:ontology:manage': true, 'workspace:ontology:create': true }
 const NONE: LayerAccess = { canEdit: false, canPublish: false, canDelete: false, canClone: false, canShare: false, canAssign: false, isOwn: false }
 const OWN: LayerAccess = { canEdit: true, canPublish: true, canDelete: true, canClone: true, canShare: true, canAssign: true, isOwn: true }
 
@@ -34,16 +36,46 @@ beforeEach(() => {
 
 describe('useSemanticLayerAccess', () => {
     it('with no layer access, answers by the org rules alone', () => {
-        perms = { 'workspace:ontology:manage': true }
+        perms = CREATOR
         expect(access()).toMatchObject({
             canEdit: true, canImport: true, canExport: true, canSuggest: true, canSeeHistory: true, canPublish: true,
             canDelete: true, canClone: true, canShare: false, canAssign: true, isOwn: false, editingBlockedBy: null,
+            canCreate: true, canImportNew: true, createBlockedBy: null, cloneBlockedBy: null,
         })
         // A layer from a server that predates `access`: the same.
         expect(access({})).toEqual(access())
 
         perms = {}
-        expect(access()).toMatchObject({ canEdit: false, canPublish: false, canClone: false, canDelete: false, editingBlockedBy: 'permission' })
+        expect(access()).toMatchObject({
+            canEdit: false, canPublish: false, canClone: false, canDelete: false, editingBlockedBy: 'permission',
+            canCreate: false, createBlockedBy: 'permission', cloneBlockedBy: 'permission',
+        })
+    })
+
+    it('starting a new layer takes the create permission and switch, and says which is missing', () => {
+        // Looks after layers, may not start one: everything else still works.
+        perms = { 'workspace:ontology:manage': true }
+        expect(access()).toMatchObject({
+            canEdit: true, canPublish: true, canCreate: false, canImportNew: false, canClone: false,
+            createBlockedBy: 'create-permission', cloneBlockedBy: 'create-permission',
+        })
+
+        // Nobody starts one with the switch off, admins included.
+        perms = { 'system:admin': true }
+        features = { ...ALL_ON, semanticLayerCreation: false }
+        expect(access()).toMatchObject({ canEdit: true, canCreate: false, canClone: false, createBlockedBy: 'creation-off' })
+
+        // A frozen model stops a blank draft or an import, not a clone — as on the server.
+        perms = CREATOR
+        features = { ...ALL_ON, semanticLayerEditMode: false }
+        expect(access()).toMatchObject({ canCreate: false, createBlockedBy: 'feature-off', canClone: true, cloneBlockedBy: null })
+
+        // Import as new also needs its switch.
+        features = { ...ALL_ON, semanticLayerImportEnabled: false }
+        expect(access()).toMatchObject({ canCreate: true, canImportNew: false })
+
+        features = { ...ALL_ON, semanticLayerNonAdminEditing: false }
+        expect(access()).toMatchObject({ canCreate: false, createBlockedBy: 'admins-only' })
     })
 
     it('an org layer takes its own answer for what may be done to it, and keeps the switches for the rest', () => {
@@ -55,8 +87,13 @@ describe('useSemanticLayerAccess', () => {
             canImport: false, canExport: false, canSeeHistory: false, canSuggest: true, editingBlockedBy: null,
         })
 
-        // The server says no where the org rules alone would have said yes: someone else's layer.
-        expect(access({ access: NONE })).toMatchObject({ canEdit: false, canPublish: false, canImport: false, editingBlockedBy: 'permission' })
+        // The server says no where the org rules alone would have said yes: someone else's layer —
+        // used only by workspaces they don't look after layers in.
+        expect(access({ access: NONE })).toMatchObject({
+            canEdit: false, canPublish: false, canImport: false, editingBlockedBy: 'not-yours',
+            // They manage layers but hold no create: that is why it can't be cloned either.
+            cloneBlockedBy: 'create-permission',
+        })
 
         // Editing is off: the layer says no, and why is still the switch.
         features = { ...ALL_ON, semanticLayerEditMode: false }
@@ -69,6 +106,8 @@ describe('useSemanticLayerAccess', () => {
         expect(own).toMatchObject({
             canEdit: true, canPublish: true, canDelete: true, canClone: true, canShare: true, isOwn: true,
             canImport: true, canExport: true, canSeeHistory: true, editingBlockedBy: null,
+            // Copied and imported into layers of their own, in the Playground.
+            canImportNew: true, cloneBlockedBy: null,
         })
         // Suggest scores layers against a graph: still the org's switch and permission.
         expect(own.canSuggest).toBe(false)

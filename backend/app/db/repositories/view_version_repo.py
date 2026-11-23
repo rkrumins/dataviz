@@ -436,7 +436,7 @@ async def restore(
     row.config = await asyncio.to_thread(json.dumps, restored)
     row.name = label["name"]
     row.description = label["description"]
-    row.tags = json.dumps(label["tags"]) if label["tags"] else None
+    row.tags = json.dumps(label["tags"], ensure_ascii=False) if label["tags"] else None
     row.view_type = label["viewType"]
     if actor is not None:
         row.updated_by = actor

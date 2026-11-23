@@ -14,7 +14,7 @@ import { createPortal } from 'react-dom'
 
 import { DocsLink } from '@/components/help/DocsLink'
 import { Kbd } from '@/components/ui/Kbd'
-import { useSearchStore } from '@/store/searchStore'
+import { useIsSearchSpotlightActive, useSearchStore } from '@/store/searchStore'
 
 import { useHostRect } from '../../studio/useHostRect'
 import { markSearchIntroSeen, useSearchIntroSeen } from './searchIntro'
@@ -30,17 +30,22 @@ export function SearchCoachmark({ anchor }: {
     useEffect(() => {
         if (studioOpen) markSearchIntroSeen()
     }, [studioOpen])
-    const rect = useHostRect(seen || studioOpen ? null : anchor)
+    // While a search is lit on the canvas, its chip says so under the toolbar
+    // and offers "Open search"; this card, opening over the same spot, covered
+    // it. One notice at a time: it waits until the search is cleared.
+    const searchShowing = useIsSearchSpotlightActive()
+    const hidden = seen || studioOpen || searchShowing
+    const rect = useHostRect(hidden ? null : anchor)
     // A control hidden at this width has nothing to point from.
-    if (seen || studioOpen || !rect || rect.width === 0) return null
+    if (hidden || !rect || rect.width === 0) return null
 
     const left = rect.left + rect.width / 2 - 20
     return createPortal(
         <>
-            <span aria-hidden className="pointer-events-none fixed z-50 rounded-lg ring-2 ring-accent-lineage/50 motion-safe:animate-pulse"
+            <span aria-hidden className="pointer-events-none fixed z-coach rounded-lg ring-2 ring-accent-lineage/50 motion-safe:animate-pulse"
                   style={{ top: rect.top - 2, left: rect.left - 2, width: rect.width + 4, height: rect.height + 4 }} />
             <div role="status" style={{ top: rect.top + rect.height + 10, left }}
-                 className="fixed z-50 w-72 rounded-xl border border-accent-lineage/40 bg-canvas-elevated py-2.5 pl-3 pr-8 text-xs leading-snug text-ink shadow-xl shadow-black/30">
+                 className="fixed z-coach w-72 rounded-xl border border-accent-lineage/40 bg-canvas-elevated py-2.5 pl-3 pr-8 text-xs leading-snug text-ink shadow-xl shadow-black/30">
                 <span className="font-semibold text-accent-lineage">New — Search Studio.</span>{' '}
                 Open this search out over the canvas: the query, a table of what it finds and what the view
                 holds, side by side. Press <Kbd shortcut="e" /> from the panel any time.

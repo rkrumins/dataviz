@@ -7,7 +7,8 @@ data pipeline, a customer 360, an ML feature pipeline — that they can explore,
 Each sample is everything the platform needs to make one, defined here and nowhere else, and
 made as every starter graph is (``playground_starter``, :func:`starter`):
 
-* its **data model** — the entity and relationship types it uses. It is an ordinary published
+* its **data model** — the entity and relationship types it uses, each type with the identifier
+  every Playground data model has (``playground_layers.IDENTITY_FIELD``). It is an ordinary published
   data model with a stable id (``bp_sample_<id>``), made the first time anyone starts the sample
   and shared by every graph made from it afterwards. A data source on it keeps it from being
   deleted, like any data model in use. Its pipeline is lineage; at its end, each output holds
@@ -15,11 +16,11 @@ made as every starter graph is (``playground_starter``, :func:`starter`):
   containment, so nothing in the pipeline becomes a child;
 * its **things and connections** — the rows of a day-0 import (:func:`rows`), loaded into a new
   blank graph as its first version, the way ``POST …/bulk-ingest`` loads one;
-* its **views** — a Context View (opened first), a Graph view and a Hierarchy view — and, on the
-  Context View, saved queries and a display rule tinting personal data;
+* its **views** — a Context View (opened first) and, as the person chooses, a Graph view and a
+  Hierarchy view — and, on the Context View, saved queries and a display rule tinting personal data;
 * its **details** — a description, the tag ``sample`` and a link to how the Playground works;
-* an **example change** waiting for review: a private draft on the Graph view adding one thing,
-  and a review that asks nobody.
+* an **example change** waiting for review: a private draft on the Graph view (else the Context
+  View) adding one thing, and a review that asks nobody.
 
 Owners are teams and platforms are products: no sample names a person.
 
@@ -32,6 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from backend.app.services.playground_layers import IDENTITY_FIELD
 from backend.app.services.playground_starter import (
     EntityType, Example, RelationshipType, SavedQuery, Starter,
 )
@@ -485,6 +487,7 @@ def rows(sample: Sample) -> List[dict]:
 
 
 _FIELDS = (
+    IDENTITY_FIELD,
     {"id": "name", "name": "Name", "type": "string", "show_in_tooltip": True, "display_order": 1},
     {"id": "description", "name": "Description", "type": "markdown", "show_in_node": False, "display_order": 2},
     {"id": "owner", "name": "Owner", "type": "string", "show_in_node": False, "display_order": 3},

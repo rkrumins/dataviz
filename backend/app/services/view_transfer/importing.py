@@ -540,7 +540,7 @@ async def import_item(
         row.config = await asyncio.to_thread(json.dumps, imported)
         row.name = item.metadata["name"]
         row.description = item.metadata.get("description")
-        row.tags = json.dumps(item.metadata["tags"]) if item.metadata.get("tags") else None
+        row.tags = json.dumps(item.metadata["tags"], ensure_ascii=False) if item.metadata.get("tags") else None
         row.view_type = view_type
         if item.action == "overwrite" and incoming_portable:
             # The view here now tracks the file's view: its next export and import line up.

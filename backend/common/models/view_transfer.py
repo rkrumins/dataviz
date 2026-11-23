@@ -23,9 +23,9 @@ importer; a newer ``formatVersion`` is refused outright (see ``bundle.parse_bund
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 #: Longest name accepted anywhere in a bundle. Mirrors ``view_transfer.limits.MAX_NAME_LENGTH``;
 #: kept here because the shared models don't import app code.
@@ -81,10 +81,33 @@ class ViewMetadata(_Model):
     viewType: str = Field("graph", max_length=64)
 
 
+#: The longest text, and the most containers, a manifest entity's place holds.
+_PLACE_TEXT_MAX = 2_000
+_PLACE_DEPTH_MAX = 256
+
+
+def _place_text(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and len(value) <= _PLACE_TEXT_MAX else None
+
+
+def _place_list(value: Any) -> Optional[List[str]]:
+    if not isinstance(value, list) or len(value) > _PLACE_DEPTH_MAX:
+        return None
+    return value if all(_place_text(v) is not None for v in value) else None
+
+
 class EntityInfo(_Model):
     name: Optional[str] = Field(None, max_length=2_000)
     type: Optional[str] = Field(None, max_length=256)
     qualifiedName: Optional[str] = Field(None, max_length=2_000)
+    # Where it sits in the graph it was exported from (``common.ancestry_columns``), as every
+    # export of entities says it. Informational: no import or reconcile reads it, so a value that
+    # doesn't fit is read as nothing rather than refusing the file.
+    parentUrn: Annotated[Optional[str], BeforeValidator(_place_text)] = None
+    parentName: Annotated[Optional[str], BeforeValidator(_place_text)] = None
+    parentType: Annotated[Optional[str], BeforeValidator(_place_text)] = None
+    path: Annotated[Optional[List[str]], BeforeValidator(_place_list)] = None
+    pathUrns: Annotated[Optional[List[str]], BeforeValidator(_place_list)] = None
 
 
 class Manifest(_Model):

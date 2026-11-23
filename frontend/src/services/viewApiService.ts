@@ -249,9 +249,9 @@ export interface ViewListParams {
     search?: string
     /** OR semantics: match views whose tags array contains ANY of these. */
     tags?: string[]
-    /** Server-side ordering key (recently-modified | data-newest | data-oldest |
-     *  newest | oldest | updated | popular | az | za). Ordered across the whole
-     *  result so it stays correct with infinite scroll. */
+    /** Server-side ordering key (``SortOption``; recently-modified when absent —
+     *  the endpoint's ``sort`` parameter lists every key). Ordered across the
+     *  whole result so it stays correct with infinite scroll. */
     sort?: string
     limit?: number
     offset?: number
@@ -510,8 +510,11 @@ export async function getViewFacets(
     return apiFetch<ViewFacetsResponse>(`/api/v1/views/facets${qs ? `?${qs}` : ''}`)
 }
 
-/** Subset of ``ViewListParams`` that applies to the stats endpoint. */
-export type ViewStatsParams = Omit<ViewListParams, 'limit' | 'offset' | 'contextModelId'>
+/** Subset of ``ViewListParams`` that applies to the stats endpoint, and where its
+ *  ``recentlyAdded`` starts counting (seven days ago when absent). */
+export type ViewStatsParams = Omit<ViewListParams, 'limit' | 'offset' | 'contextModelId'> & {
+    recentSince?: string
+}
 
 /**
  * Fetch the Explorer stats-bar numbers for a given filter set.
@@ -521,7 +524,9 @@ export type ViewStatsParams = Omit<ViewListParams, 'limit' | 'offset' | 'context
  */
 export async function getViewStats(params?: ViewStatsParams): Promise<ViewCatalogStats> {
     const sp = new URLSearchParams()
-    appendViewQuery(sp, params)
+    const { recentSince, ...filters } = params ?? {}
+    appendViewQuery(sp, filters)
+    if (recentSince) sp.set('recentSince', recentSince)
     const qs = sp.toString()
     return apiFetch<ViewCatalogStats>(`/api/v1/views/stats${qs ? `?${qs}` : ''}`)
 }

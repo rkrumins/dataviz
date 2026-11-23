@@ -12,15 +12,20 @@
  * the dialog hands it to the export tray (`backgroundExports`), and opened again it shows it once
  * more. It can be cancelled while it is prepared. One without version control exports its live
  * graph, downloaded as the server reads it, in view and edit mode alike: a cold copy, importable
- * later into one with version control.
+ * later into one with version control. Either way each entity says where it sits (its parent and
+ * path, as the canvas nests it) unless that is switched off: informational columns, which importing
+ * the file back skips.
  */
 import { useState } from 'react'
 import {
-  AlertTriangle, ArrowRight, CheckCircle2, Database, Download, FileDown, GitCompareArrows,
+  AlertTriangle, ArrowRight, CheckCircle2, Database, Download, FileDown, FolderTree, GitCompareArrows,
   Info, Layers, Loader2, RefreshCw, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ANCESTRY_COLUMNS } from '@/lib/ancestryColumns'
+import { usePersonaMode } from '@/store/persona'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { HoverTip } from '@/components/ui/HoverTip'
 import {
   createExport, exportStreamUrl, planExport, triggerBrowserDownload,
   type ExportPlan, type ExportSummary, type ExportTarget, type ImportFormat,
@@ -90,6 +95,8 @@ export function ExportDialog({
   const [scope, setScope] = useState<'view' | 'all'>(viewId && !live ? 'view' : 'all')
   const [source, setSource] = useState<'branch' | 'published'>(branchId && !live ? 'branch' : 'published')
   const [newProps, setNewProps] = useState('')
+  // Where each entity sits travels with it, as the canvas shows it: on unless asked otherwise.
+  const [withPath, setWithPath] = useState(true)
   const [phase, setPhase] = useState<Phase>(earlier ? 'server' : 'choose')
   const [plan, setPlan] = useState<ExportPlan | null>(null)
   const [fileName, setFileName] = useState(earlier?.fileName ?? '')
@@ -132,14 +139,14 @@ export function ExportDialog({
       })
       if (!graphId) {
         // The browser saves the live graph as the server reads it: nothing is held in this page.
-        triggerBrowserDownload(exportStreamUrl(target, fmt, { props, filename: stem }), `${stem}.${fmt}`)
+        triggerBrowserDownload(exportStreamUrl(target, fmt, { props, filename: stem, withPath }), `${stem}.${fmt}`)
         setFileName(`${stem}.${fmt}`)
         setPhase('started')
         return
       }
       // The server's workers write the file, and the browser downloads it once it's ready, wherever
       // the person is in the app by then.
-      const created = await createExport(target, fmt, { props, filename: stem })
+      const created = await createExport(target, fmt, { props, filename: stem, withPath })
       const what = [...new Set([dataSourceName, inView ? viewName : undefined,
         picked ? `${picked.length === 1 ? '1 entity' : `${count(picked.length)} entities`} and what is inside` : undefined,
       ].filter(Boolean))].join(' · ')
@@ -206,7 +213,8 @@ export function ExportDialog({
             <ChooseStep format={format} setFormat={setFormat} scope={scope} setScope={setScope}
               hasView={!!viewId && !live && !picked} picked={picked?.length ?? 0}
               source={source} setSource={setSource} hasBranch={!!branchId && !live}
-              live={live} newProps={newProps} setNewProps={setNewProps} />
+              live={live} newProps={newProps} setNewProps={setNewProps}
+              withPath={withPath} setWithPath={setWithPath} />
           )}
           {view === 'checking' && (
             <div className="px-8 py-16 flex flex-col items-center gap-4">
@@ -379,7 +387,7 @@ function Outcome({ tone, title, children }: {
 }
 
 // ── choose (two columns: guide | scope + format) ─────────────────────────────
-function ChooseStep({ format, setFormat, scope, setScope, hasView, picked, source, setSource, hasBranch, live, newProps, setNewProps }: {
+function ChooseStep({ format, setFormat, scope, setScope, hasView, picked, source, setSource, hasBranch, live, newProps, setNewProps, withPath, setWithPath }: {
   format: ImportFormat; setFormat: (f: ImportFormat) => void
   scope: 'view' | 'all'; setScope: (s: 'view' | 'all') => void; hasView: boolean
   /** How many entities were chosen on the canvas; 0 when the export isn't of a selection. */
@@ -387,7 +395,9 @@ function ChooseStep({ format, setFormat, scope, setScope, hasView, picked, sourc
   source: 'branch' | 'published'; setSource: (s: 'branch' | 'published') => void; hasBranch: boolean
   live: boolean
   newProps: string; setNewProps: (s: string) => void
+  withPath: boolean; setWithPath: (on: boolean) => void
 }) {
+  const technical = usePersonaMode() === 'technical'
   return (
     <div className="grid md:grid-cols-2">
       {/* Left — what you're exporting */}
@@ -407,6 +417,11 @@ function ChooseStep({ format, setFormat, scope, setScope, hasView, picked, sourc
               <Feature icon={<Layers className="w-4 h-4" />} title="Locked identity columns" body="entity_id / urn travel with each row so a re-import matches the right items — no duplicates." />
               <Feature icon={<GitCompareArrows className="w-4 h-4" />} title="A re-importable backup" body="Restore this data source, or import into a new one to clone it. Round-trips losslessly." />
             </>
+          )}
+          {withPath && (
+            <Feature icon={<FolderTree className="w-4 h-4" />} title="Where each entity sits" body={technical
+              ? 'Its parent and path, by name and by URN, as the canvas nests it. Informational: an import skips them.'
+              : 'Its parent and every container above it, as you see them on the canvas. Skipped when you import the file back.'} />
           )}
           <Feature icon={<Download className="w-4 h-4" />} title="Any size" body={live
             ? 'The file downloads while it is written, so even a very large graph needs no waiting for it to be built first.'
@@ -483,6 +498,8 @@ function ChooseStep({ format, setFormat, scope, setScope, hasView, picked, sourc
           </div>
         </div>
 
+        <PathOption on={withPath} onChange={setWithPath} technical={technical} />
+
         {SPREADSHEETS.includes(format) && (
         <div>
           <label className="block text-xs font-medium text-ink-secondary mb-1.5">Add new property columns <span className="text-ink-muted font-normal">(optional)</span></label>
@@ -500,6 +517,38 @@ function ChooseStep({ format, setFormat, scope, setScope, hasView, picked, sourc
         )}
       </div>
     </div>
+  )
+}
+
+/** Whether each entity carries where it sits: its parent and path, the five informational columns
+ *  every export of entities writes (`lib/ancestryColumns`). */
+function PathOption({ on, onChange, technical }: { on: boolean; onChange: (on: boolean) => void; technical: boolean }) {
+  return (
+    <button type="button" role="switch" aria-checked={on} onClick={() => onChange(!on)}
+      className={cn('w-full text-left flex items-start gap-3 px-3.5 py-3 rounded-xl border transition-colors duration-150',
+        on ? 'border-indigo-500/60 bg-indigo-50/40 dark:bg-indigo-950/15' : 'border-glass-border hover:border-glass-border-hover')}>
+      <FolderTree className={cn('w-4 h-4 mt-0.5 flex-shrink-0', on ? 'text-indigo-500' : 'text-ink-muted')} />
+      <span className="flex-1 min-w-0">
+        <span className="block text-xs font-semibold text-ink">Include where each entity sits (parent and path)</span>
+        <span className="block text-[11px] text-ink-muted mt-0.5 leading-relaxed">
+          {technical ? (
+            <>
+              Adds{' '}
+              <HoverTip label="One read of containment for every thousand entities"
+                detail="Lists in NDJSON and JSON; one cell in a spreadsheet, a path reading A / B and its URNs a; b.">
+                <span className="font-mono underline decoration-dotted underline-offset-2 cursor-help">{ANCESTRY_COLUMNS.join(', ')}</span>
+              </HoverTip>
+              . Informational: an import skips them.
+            </>
+          ) : 'Each row says what it sits in, all the way to the top. Skipped when you import the file back.'}
+        </span>
+      </span>
+      <span aria-hidden className={cn('relative mt-0.5 w-8 h-[18px] rounded-full flex-shrink-0 transition-colors',
+        on ? 'bg-indigo-500' : 'bg-black/15 dark:bg-white/15')}>
+        <span className={cn('absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow-sm transition-transform',
+          on ? 'translate-x-[16px]' : 'translate-x-[2px]')} />
+      </span>
+    </button>
   )
 }
 

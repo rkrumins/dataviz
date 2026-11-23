@@ -147,6 +147,10 @@ Whichever identifier an import names:
 - **A node row with no key the identifier can use is refused** (`no_key`), rather than made again
   by every import. By `prop.<name>` alone, a row with only a urn is one: its reason says that
   `prop.<name>,urn` would find it.
+- **Into the Playground, every node row gives its identifier**: its `urn` or its `prop.id` (the
+  property a Playground graph identifies its things by). One that gives neither is refused
+  (`no_key`, *"Needs an identifier (urn or id)"*) whatever else it is found by, unless it names
+  its item by an `entity_id` of the graph. A dry run (`/imports/validate`) says so too.
 - **Only the fields a row carries are written.** A blank cell keeps what the item holds; `\N` in a
   `prop.<name>` cell removes that property.
 - **A row an export wrote carries `baseVersion`**, and is merged three ways with what changed since
@@ -196,6 +200,7 @@ What the export holds:
 | `viewId` | Only a view's entities: what it places, with their containment descendants. An edge only when both its ends are in |
 | `ids`, `types` | Comma-separated entity ids or urns, and entity types: only those. An edge only when both its ends are kept |
 | `withChildren` | With `ids`: everything inside those entities too, down the ontology's containment, at every level |
+| `withPath` | `true`: each node also says where it sits, its parent and path (the informational columns below). One containment read for every thousand nodes. The Export dialog asks for it unless it is switched off |
 | `props` | Comma-separated property names to add as empty `prop.<name>` columns to fill |
 | `filename`, `idempotencyKey` | The download's name (no extension); a key that makes the request safe to send again |
 
@@ -229,6 +234,7 @@ object, one per node or edge. CSV and TSV files start with a UTF-8 byte-order ma
 | `prop.<name>` | both | One property per column. The data source's name property, `prop.name` unless it names another, is kept in step with `displayName`: edit either |
 | `properties_json` | both | Properties too nested for a column, as a JSON object |
 | `_op` | both | Blank to create or update; `delete` to delete |
+| `parentUrn`, `parentName`, `parentType`, `path`, `pathUrns` | node | **Informational** (`withPath`): where the node sits. Its direct container, then every container from the top of the graph down to it, by name and by urn. Empty at the top of the graph and on an edge row. Lists in NDJSON and JSON; in CSV, TSV and Excel `path` reads `A / B` and `pathUrns` `a; b`. **An import ignores them**: they never become properties, and the graph's containment edges stay what says where a node sits |
 
 An Excel workbook has a **Nodes** and an **Edges** sheet instead of the `kind` column, with the
 identity columns greyed. An import also reads `source.<name>` and `target.<name>`: an edge's end
@@ -285,7 +291,7 @@ curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/imports/validate?forma
 | `summary` | How many rows would be `new`, `updated`, `unchanged`, `deleted` or `invalid` (refused), and `skipped`: records that are neither a node nor an edge |
 | `rows` | Up to 200 rows that change something, in file order: `rowIndex` (the file's records counted from 0, the header not one), `kind`, `op` (`create`, `update`, `delete` or `invalid`), `matchedEntityId` (the item it found, or the id a new one would take), `label`, `reasons`, and `code` on a refused row |
 | `rowsTruncated` | More rows changed than are listed |
-| `unknownColumns` | Columns the record format doesn't name, usually a typo (`prop_owner` for `prop.owner`). An import ignores them |
+| `unknownColumns` | Columns the record format doesn't name, usually a typo (`prop_owner` for `prop.owner`). An import ignores them. The informational `parentUrn` … `pathUrns` are named, so they are never listed here: an import ignores them all the same |
 | `hints` | What to look at, such as delete rows that find nothing to delete |
 | `identifier`, `identifierSource` | The identifier the rows were matched by, and whose it is: `request`, `data_source` or `platform` |
 | `checkedAgainst` | `main`, or the draft's id |
@@ -1034,6 +1040,7 @@ dropped in silence. The reasons below are the ones the API gives.
 |---|---|---|
 | A node row with nothing to find it by again: no urn, no qualified name, no field its type matches by (by `entity_id`) | Refused, so it isn't made again by every import | `no_key`: *"it names nothing an import could find it by again: give it a urn (or the entity_id of a node in this graph). …"* |
 | By `urn`, a row with no urn; by `prop.external_id`, a row with no value | Refused | `no_key`: *"it has no urn, and with identifier=urn a row is found by its urn …"*, *"it has no external_id, and with identifier=prop.external_id …"* |
+| Into the Playground, a node row with neither a urn nor an `id` (not named by an `entity_id`) | Refused | `no_key`: *"Needs an identifier (urn or id)"* |
 | A new node, or a new edge, with no type | Refused | `missing_type`: *"node create requires entityType"*, *"edge missing edgeType"* |
 | A type the data source's ontology doesn't define | Refused | `invalid_type`: *"'View' is not a valid entity type in this ontology"* |
 | Two rows for one item that say different things | The first applies; the second is refused. Two that say the same: the second is `unchanged` | `named_already`: *"row 4 of this file already names this node — give each node one row"* (rows counted from 1) |

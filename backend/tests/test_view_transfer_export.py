@@ -210,6 +210,78 @@ async def test_export_survives_an_unreachable_source(test_client, monkeypatch):
     assert view["manifest"]["entities"] == {} and view["manifest"]["entitiesResolved"] is False
 
 
+class _PlacingEngine(_FakeEngine):
+    """A source that also says where its entities sit."""
+
+    def __init__(self, provider, chains):
+        super().__init__(provider)
+        self.chains = chains
+
+    async def get_ancestor_chains(self, urns):
+        return {u: self.chains[u] for u in urns if u in self.chains}
+
+
+async def test_the_manifest_says_where_each_entity_sat(test_client, db_session, monkeypatch):
+    """Each entity the source found carries its parent and path there, its containers named by
+    one more lookup — a trace view's seeds too. Not where the source can't say, and without
+    changing what the view's hash covers."""
+    provider = _FakeProvider({
+        "urn:a": {"type": "dataset", "name": "revenue", "qualifiedName": "fin.revenue"},
+        "urn:anchor": {"type": "domain", "name": "Finance", "qualifiedName": None},
+        "urn:seed": {"type": "dataset", "name": "orders", "qualifiedName": None},
+        "urn:db": {"type": "database", "name": "Warehouse", "qualifiedName": None},
+    })
+
+    async def _engine_for(session, workspace_id, data_source_id):
+        return _PlacingEngine(provider, {"urn:a": ["urn:anchor", "urn:db"], "urn:anchor": ["urn:db"],
+                                         "urn:seed": ["urn:db"]})
+
+    monkeypatch.setattr("backend.app.services.view_transfer.export.engine_for", _engine_for)
+    ws = await _workspace(test_client)
+    vid = await _view(test_client, ws)
+    # A trace view's seeds: its query's, which the server writes (no client route sets them).
+    row = (await db_session.execute(select(ViewORM).where(ViewORM.id == vid))).scalar_one()
+    row.config = json.dumps({**json.loads(row.config), "membership": {
+        "v": 1, "sources": [{"spec": {"seeds": {"urns": ["urn:seed"]}}}]}})
+    await db_session.flush()
+    view = (await _export(test_client, {"viewId": vid})).json()["views"][0]
+    entities = view["manifest"]["entities"]
+    assert entities["urn:a"] == {
+        "name": "revenue", "type": "dataset", "qualifiedName": "fin.revenue",
+        "parentUrn": "urn:anchor", "parentName": "Finance", "parentType": "domain",
+        "path": ["Warehouse", "Finance"], "pathUrns": ["urn:db", "urn:anchor"]}
+    assert entities["urn:anchor"]["path"] == ["Warehouse"]
+    assert entities["urn:seed"]["name"] == "orders", "a trace view's seed is named too"
+    assert entities["urn:seed"]["parentName"] == "Warehouse"
+    assert provider.calls[-1] == ["urn:db"], "the containers not referenced, named once"
+    assert view["definitionHash"] == content_hash(portable_definition(view["definition"], "reference"))
+
+
+async def test_a_source_that_cant_say_where_leaves_the_manifest_as_it_was(test_client, fake_graph):
+    ws = await _workspace(test_client)
+    vid = await _view(test_client, ws)
+    entities = (await _export(test_client, {"viewId": vid})).json()["views"][0]["manifest"]["entities"]
+    assert entities["urn:a"] == {"name": "revenue", "type": "dataset", "qualifiedName": "fin.revenue"}
+
+
+def test_where_an_entity_sat_is_read_leniently_and_by_nothing():
+    """A file's parent and path, as an older exporter left them out, a newer one writes them, or
+    someone mangled them: the file parses either way, a value that doesn't fit read as nothing."""
+    doc = _minimal_bundle()
+    doc["views"][0]["manifest"] = {"entities": {
+        "urn:a": {"name": "a", "parentUrn": "urn:p", "path": ["P"], "pathUrns": ["urn:p"]},
+        "urn:b": {"name": "b", "parentUrn": {"no": 1}, "parentName": "x" * 5000, "path": "P / Q",
+                  "pathUrns": [1, 2], "parentType": None},
+        "urn:c": {"name": "c"},
+    }}
+    parsed = bundle_mod.parse_bundle(json.dumps(doc).encode())
+    entities = parsed.bundle.views[0].manifest.entities
+    assert (entities["urn:a"].parentUrn, entities["urn:a"].path) == ("urn:p", ["P"])
+    b = entities["urn:b"]
+    assert (b.parentUrn, b.parentName, b.path, b.pathUrns) == (None, None, None, None)
+    assert entities["urn:c"].path is None and parsed.integrity == "verified"
+
+
 async def test_the_switch_stops_exports(test_client, fake_graph):
     ws = await _workspace(test_client)
     vid = await _view(test_client, ws)

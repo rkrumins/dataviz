@@ -552,9 +552,12 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
     # Phase 18: read+manage split for ontology / catalog; provider
     # stays read-only here (manage is platform-admin-only because
     # provider rows carry credentials).
+    # ``create`` lives here for the same reason ``publish`` does above:
+    # read+manage must not stand for the whole set.
     "workspace:ontology": frozenset({
         "workspace:ontology:read",
         "workspace:ontology:manage",
+        "workspace:ontology:create",
     }),
     "workspace:catalog": frozenset({
         "workspace:catalog:read",
@@ -595,6 +598,7 @@ _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:view:read",
     "workspace:ontology:read",
     "workspace:ontology:manage",
+    "workspace:ontology:create",
     "workspace:catalog:read",
     "workspace:catalog:manage",
     "workspace:provider:read",

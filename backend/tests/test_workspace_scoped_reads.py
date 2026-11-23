@@ -262,12 +262,13 @@ async def test_workspace_admin_can_create_ontology(
     test_client: AsyncClient, db_engine: AsyncEngine,
 ):
     await _seed_two_workspaces(db_engine)
-    # workspace:admin auto-implies workspace:ontology:manage via the
-    # resolver leaves set (Phase 18). We supply the implied perm
+    # workspace:admin auto-implies workspace:ontology:manage (and :create)
+    # via the resolver leaves set (Phase 18). We supply the implied perms
     # directly here since the override skips the resolver.
     claims = PermissionClaims(
         sid="sess_wsa",
-        ws_perms={"ws_A": ("workspace:admin", "workspace:ontology:manage", "workspace:ontology:read")},
+        ws_perms={"ws_A": ("workspace:admin", "workspace:ontology:manage", "workspace:ontology:create",
+                           "workspace:ontology:read")},
     )
     with _auth(user=_user(), claims=claims):
         r = await test_client.post(

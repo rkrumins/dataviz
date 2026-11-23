@@ -14,9 +14,12 @@ The visibility rules (per user's product call):
 * **Ontologies** — visible if referenced by any data source in any
   workspace the user holds ``workspace:ontology:read`` in. Ontologies
   have no per-row ACL; their workspace association is via
-  ``workspace_data_sources.ontology_id``. A Playground member also sees
+  ``workspace_data_sources.ontology_id``. A person also sees the org
+  layers they made. A Playground member also sees
   its starters, approved org-wide layers, their own layers and those
   shared with the Playground (``playground_layers.visible_ontology_ids``).
+  Seeing a layer is not changing it: ``manageable_ontology_ids`` says who
+  may.
 * **Providers** — visible if referenced by any data source in any
   workspace the user is bound to, *or* if the provider's
   ``permitted_workspaces`` ACL overlaps any of the user's workspaces.
@@ -38,11 +41,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
     CatalogItemORM,
+    OntologyORM,
     ProviderORM,
     ViewORM,
     WorkspaceDataSourceORM,
 )
-from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.permission_service import PermissionClaims, has_permission
 
 
 logger = logging.getLogger(__name__)
@@ -178,6 +182,13 @@ async def compute_visible_ontology_ids(
     )
     result = await session.execute(stmt)
     visible = {row[0] for row in result.all() if row[0] is not None}
+    # The org layers a person made, in any state: a new draft is used by no data source yet, so
+    # without this its creator was refused it (404) the moment they made it.
+    if user_id and claims.key_scope is None:
+        visible |= set((await session.execute(
+            select(OntologyORM.id).where(OntologyORM.created_by == user_id,
+                                         OntologyORM.owner_workspace_id.is_(None))
+        )).scalars())
     # A Playground member starts blank graphs from the data models its administrator chose,
     # which no data source of theirs uses yet — and builds on approved org-wide layers, their
     # own and those shared with the Playground.
@@ -253,6 +264,78 @@ async def ensure_ontology_visible(
             status_code=404,
             detail=not_found_detail or f"Ontology '{ontology_id}' not found",
         )
+
+
+_MANAGE_LAYERS = "workspace:ontology:manage"
+
+
+async def manageable_ontology_ids(
+    session: AsyncSession,
+    claims: PermissionClaims,
+    layers: Iterable,
+    *,
+    user_id: Optional[str],
+) -> Optional[set[str]]:
+    """Of ``layers`` (rows, or their responses), the ids the caller may change. ``None`` means
+    every one of them: a platform admin.
+
+    Holding ``workspace:ontology:manage`` in ANY workspace used to be enough to change every layer
+    one could see, so a data engineer in one workspace could rewrite a layer only another
+    workspace's data sources use. A layer is changed by those who manage layers where it matters:
+    in a workspace one of whose data sources uses it, or in the workspace that owns it — and,
+    while no data source uses it, by whoever made it."""
+    if _is_unrestricted(claims):
+        return None
+    layers = list(layers)
+    if not layers:
+        return set()
+    managed = {ws for ws in claims.ws_perms if has_permission(claims, _MANAGE_LAYERS, workspace_id=ws)}
+    used: dict[str, set[str]] = {}
+    for oid, ws in (await session.execute(
+        select(WorkspaceDataSourceORM.ontology_id, WorkspaceDataSourceORM.workspace_id)
+        .where(WorkspaceDataSourceORM.ontology_id.in_([layer.id for layer in layers]),
+               WorkspaceDataSourceORM.deleted_at.is_(None))
+        .distinct()
+    )).all():
+        used.setdefault(oid, set()).add(ws)
+    out: set[str] = set()
+    for layer in layers:
+        where = used.get(layer.id, set())
+        owner = getattr(layer, "owner_workspace_id", None)
+        if (where & managed or owner in managed
+                or (not where and user_id and layer.created_by == user_id)):
+            out.add(layer.id)
+    return out
+
+
+async def ensure_ontology_manageable(
+    session: AsyncSession,
+    claims: PermissionClaims,
+    ontology_id: str,
+    *,
+    user_id: Optional[str],
+    not_found_detail: Optional[str] = None,
+) -> None:
+    """:func:`ensure_ontology_visible`, then 403 ``layer_not_manageable`` when the caller sees the
+    layer but may not change it (:func:`manageable_ontology_ids`). A layer the Playground holds
+    answers to its owner rule instead, which ``ontology_manage_or_owner`` applied before this."""
+    from fastapi import HTTPException
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=user_id,
+                                  not_found_detail=not_found_detail)
+    row = await session.get(OntologyORM, ontology_id)
+    if row is None:
+        return          # the caller answers its own 404
+    allowed = await manageable_ontology_ids(session, claims, [row], user_id=user_id)
+    if allowed is None or row.id in allowed:
+        return
+    from backend.app.services.playground_layers import held_by_playground
+    if await held_by_playground(session, row):
+        return
+    raise HTTPException(status_code=403, detail={
+        "type": "layer_not_manageable",
+        "message": ("Only people who manage semantic layers in a workspace that uses this layer "
+                    "can change it — or, while no data source uses it, whoever made it."),
+    })
 
 
 async def compute_visible_catalog_ids(

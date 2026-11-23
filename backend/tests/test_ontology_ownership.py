@@ -42,7 +42,7 @@ MEMBER_PERMS = (
     "workspace:provider:read", "workspace:view:create", "workspace:view:delete",
     "workspace:view:edit", "workspace:view:read",
 )
-EDITOR_PERMS = MEMBER_PERMS + ("workspace:ontology:manage",)
+EDITOR_PERMS = MEMBER_PERMS + ("workspace:ontology:manage", "workspace:ontology:create")
 ADMIN_PERMS = EDITOR_PERMS + ("workspace:admin", "workspace:datasource:publish")
 
 

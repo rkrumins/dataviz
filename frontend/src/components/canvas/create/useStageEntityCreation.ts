@@ -39,6 +39,10 @@ export interface StageEntityInput {
    * resolved containment type. Ignored when there is no parent.
    */
   containmentEdgeType?: string
+  /** Its urn, given (a Playground identifier): the save creates it under this rather than one the
+   *  server mints, and its identifier property takes it. The canvas knows it by its temp urn
+   *  until then, as any new entity. */
+  urn?: string
 }
 
 const NODE_FIELDS = ['description', 'qualifiedName', 'sourceSystem'] as const
@@ -121,6 +125,7 @@ export function useStageEntityCreation() {
       const afterState = {
         entityType: input.entityType, displayName: input.displayName, parentUrn, tags, properties,
         ...fields,
+        ...(input.urn ? { urn: input.urn } : {}),
         // Recorded so the staged-changes review can show how the child is related to its parent —
         // only when the ontology actually declares a containment relationship.
         ...(parentUrn && containmentEdgeType ? { containmentEdgeType, parentLabel } : {}),

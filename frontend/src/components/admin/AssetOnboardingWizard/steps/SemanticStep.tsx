@@ -14,7 +14,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
     BookOpen, Sparkles, Check, X, Loader2, ChevronDown, Search, Zap,
     Box, GitBranch, Shield, CheckCircle2, PenLine, Database, Info,
-    Clock, AlertTriangle,
+    Clock, AlertTriangle, Lock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
@@ -32,6 +32,7 @@ import type { CatalogItemResponse } from '@/services/catalogService'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
+import { BLOCKED_REASON, useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
 import { CoverageRing, MiniBar, coverageColor, coverageBarClass, MergedVariantsAdvisory } from './CoverageVisuals'
 import { NodeIdentityField } from '@/components/dataSource/NodeIdentity'
 
@@ -130,6 +131,10 @@ export function SemanticStep({
     // onSuccess hooks, so invalidate the react-query ontology + schema caches
     // explicitly — otherwise lists and open canvases serve stale data.
     const { invalidateAll: invalidateOntologyCaches } = useOntologyMutations()
+    // A draft from the graph is a new semantic layer: the creating permission and switch decide it,
+    // as on the Semantic Layers page. Shown off, with why, rather than offered to be refused.
+    const { createBlockedBy } = useSemanticLayerAccess()
+    const createBlockedReason = createBlockedBy ? BLOCKED_REASON[createBlockedBy] : null
     const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
     const [loadingOntologies, setLoadingOntologies] = useState(true)
     const [sourceStates, setSourceStates] = useState<Record<string, SourceState>>(() =>
@@ -792,6 +797,7 @@ export function SemanticStep({
                                                     selectOntology={selectOntology}
                                                     selectCreateFromGraph={selectCreateFromGraph}
                                                     createDraft={createDraft}
+                                                    createBlockedReason={createBlockedReason}
                                                     updateSource={updateSource}
                                                     skipSource={skipSource}
                                                     analyzeSource={analyzeSource}
@@ -849,6 +855,8 @@ interface SourceRecommendationsProps {
     selectOntology: (itemId: string, ontologyId: string) => void
     selectCreateFromGraph: (itemId: string) => void
     createDraft: (itemId: string) => void
+    /** Why a draft from the graph can't be made here, or `null` when it can. */
+    createBlockedReason: string | null
     updateSource: (itemId: string, updates: Partial<SourceState>) => void
     skipSource: (itemId: string) => void
     analyzeSource: (item: CatalogItemResponse) => void
@@ -861,6 +869,7 @@ const SourceRecommendations = memo(function SourceRecommendations({
     selectOntology,
     selectCreateFromGraph,
     createDraft,
+    createBlockedReason,
     updateSource,
     skipSource,
     analyzeSource,
@@ -1138,11 +1147,14 @@ const SourceRecommendations = memo(function SourceRecommendations({
                 <button
                     type="button"
                     onClick={onSelectCreate}
+                    disabled={!!createBlockedReason}
                     className={cn(
                         'w-full text-left rounded-xl border-2 transition-colors duration-150',
-                        selectedId === '__create_from_graph__'
-                            ? 'border-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10 ring-1 ring-indigo-500/20'
-                            : 'border-dashed border-glass-border hover:border-indigo-500/30 hover:bg-black/[0.01] dark:hover:bg-white/[0.01]',
+                        createBlockedReason
+                            ? 'border-dashed border-glass-border opacity-70 cursor-not-allowed'
+                            : selectedId === '__create_from_graph__'
+                                ? 'border-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10 ring-1 ring-indigo-500/20'
+                                : 'border-dashed border-glass-border hover:border-indigo-500/30 hover:bg-black/[0.01] dark:hover:bg-white/[0.01]',
                     )}
                 >
                     <div className="px-4 py-3">
@@ -1178,6 +1190,12 @@ const SourceRecommendations = memo(function SourceRecommendations({
                                         <PenLine className="w-2.5 h-2.5" />New Draft
                                     </span>
                                 </div>
+                                {createBlockedReason && (
+                                    <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
+                                        <Lock className="w-3 h-3 mt-px flex-shrink-0" />
+                                        {createBlockedReason}
+                                    </p>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -1185,7 +1203,7 @@ const SourceRecommendations = memo(function SourceRecommendations({
             </div>
 
             {/* Create from graph — name input + confirm (shown when selected) */}
-            {selectedId === '__create_from_graph__' && (
+            {selectedId === '__create_from_graph__' && !createBlockedReason && (
                 <motion.div
                     initial={{ opacity: 0, y: 4 }}
                     animate={{ opacity: 1, y: 0 }}

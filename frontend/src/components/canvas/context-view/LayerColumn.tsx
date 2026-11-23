@@ -73,7 +73,15 @@ interface LayerColumnProps {
    *  from the last-clicked one to the clicked one — resolved HERE because
    *  this column owns the visible order. */
   onSelectRange: (ids: string[]) => void
+  /** ⌘A in the column: select everything the layer shows, folded containers'
+   *  insides included — the same answer the layer's menu gives (layerSelection.ts).
+   *  Absent, ⌘A selects the rows the column has open. */
+  onSelectAllInLayer?: (layerId: string) => void
   onToggle: (id: string) => void
+  /** ⇧→ on a row: open the next level inside it (or every level, as the reader
+   *  chose) — the menu's Expand. ⇧← : collapse everything inside it. */
+  onExpandBelow?: (id: string) => void
+  onCollapseInside?: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
@@ -349,7 +357,10 @@ export const LayerColumn = React.memo(function LayerColumn({
   searchResults,
   onSelect,
   onSelectRange,
+  onSelectAllInLayer,
   onToggle,
+  onExpandBelow,
+  onCollapseInside,
   onContextMenu,
   onDoubleClick,
   onAddChild,
@@ -1295,17 +1306,24 @@ export const LayerColumn = React.memo(function LayerColumn({
   // minimum distance and no-ops when the row is already visible, so
   // mid-viewport expansions never jump. Pending reveals expire so a
   // slow child load can't hijack the user's scroll seconds later.
+  //
+  // A BULK expansion (a whole level opened at once — useExpandBelow) reveals
+  // only its topmost row. Revealing each in turn scrolled the column to every
+  // one of them, so it ended wherever the last page happened to land.
   const prevExpandedRef = useRef<Set<string>>(expandedNodes)
   const pendingExpandRevealRef = useRef<Map<string, number>>(new Map())
   useEffect(() => {
     const prev = prevExpandedRef.current
     prevExpandedRef.current = expandedNodes
     const pending = pendingExpandRevealRef.current
+    let topmost: string | null = null
     expandedNodes.forEach(id => {
-      if (!prev.has(id) && nodeToFlatIndexMap.has(id)) {
-        pending.set(id, Date.now() + 2000)
-      }
+      if (prev.has(id)) return
+      const idx = nodeToFlatIndexMap.get(id)
+      if (idx === undefined) return
+      if (topmost === null || idx < nodeToFlatIndexMap.get(topmost)!) topmost = id
     })
+    if (topmost !== null) pending.set(topmost, Date.now() + 2000)
     pending.forEach((deadline, id) => {
       if (!expandedNodes.has(id) || deadline < Date.now()) {
         pending.delete(id)
@@ -1339,9 +1357,17 @@ export const LayerColumn = React.memo(function LayerColumn({
         return
       }
     }
-    // Cmd/Ctrl+A selects every entity the column shows, in one write — the
-    // selection bar then offers to compare and edit them. Only on the column itself.
+    // Cmd/Ctrl+A selects every entity the layer shows, in one write — the
+    // selection bar then offers to compare and edit them. Only on the column
+    // itself. The canvas answers what "every" is, so this, the layer's menu and
+    // an empty column's menu agree.
     if ((e.key === 'a' || e.key === 'A') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.target === e.currentTarget) {
+      if (onSelectAllInLayer) {
+        e.preventDefault()
+        e.stopPropagation()
+        onSelectAllInLayer(layer.id)
+        return
+      }
       const ids = navigableItems.filter((item) => !item.node.isLogical).map((item) => item.node.id)
       if (ids.length > 0) {
         e.preventDefault()
@@ -1373,13 +1399,15 @@ export const LayerColumn = React.memo(function LayerColumn({
       case 'ArrowRight': {
         e.preventDefault()
         const item = navigableItems[focusIndex]
-        if (item && !expandedNodes.has(item.node.id)) onToggle(item.node.id)
+        if (item && e.shiftKey && onExpandBelow) onExpandBelow(item.node.id)
+        else if (item && !expandedNodes.has(item.node.id)) onToggle(item.node.id)
         break
       }
       case 'ArrowLeft': {
         e.preventDefault()
         const item = navigableItems[focusIndex]
-        if (item && expandedNodes.has(item.node.id)) onToggle(item.node.id)
+        if (item && e.shiftKey && onCollapseInside) onCollapseInside(item.node.id)
+        else if (item && expandedNodes.has(item.node.id)) onToggle(item.node.id)
         break
       }
       case 'Enter': {
@@ -1407,7 +1435,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         setFocusIndex(count - 1)
         break
     }
-  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, onSelectRange, selectedNodeId, reorderEnabled, onReorderNudge])
+  }, [navigableItems, focusIndex, expandedNodes, onToggle, onExpandBelow, onCollapseInside, onSelect, onSelectRange, onSelectAllInLayer, layer.id, selectedNodeId, reorderEnabled, onReorderNudge])
 
   // After a keyboard reorder, re-point focus at the moved node's new row
   // (its index shifts by the displaced neighbor's visible subtree size).

@@ -405,7 +405,10 @@ async def create_ontology(
     req: OntologyCreateRequest,
     *,
     actor: Optional[str] = None,
+    cloned_from: Optional[OntologyORM] = None,
 ) -> OntologyDefinitionResponse:
+    """A new layer: draft v1 of a lineage of its own. ``cloned_from`` is the layer it copies, so
+    its history starts with where it came from rather than with a "created" it never had."""
     _sync_classification(req)
     row = OntologyORM(
         name=req.name,
@@ -432,9 +435,11 @@ async def create_ontology(
     await session.flush()
     entity_count = len(json.loads(row.entity_type_definitions or "{}"))
     rel_count = len(json.loads(row.relationship_type_definitions or "{}"))
+    holds = f"{entity_count} entity types, {rel_count} relationships"
     await _record_audit(
-        session, row, "created", actor=actor,
-        summary=f"Created draft v1 with {entity_count} entity types, {rel_count} relationships",
+        session, row, "cloned" if cloned_from is not None else "created", actor=actor,
+        summary=(f"Cloned from \"{cloned_from.name}\" v{cloned_from.version} as draft v1 with {holds}"
+                 if cloned_from is not None else f"Created draft v1 with {holds}"),
     )
     return _to_response(row)
 
@@ -601,7 +606,7 @@ async def _create_new_version(
     session.add(new_row)
     await session.flush()
     await _record_audit(
-        session, new_row, "cloned", actor=actor,
+        session, new_row, "versioned", actor=actor,
         summary=f"Created v{new_row.version} from published v{original.version}",
     )
     return _to_response(new_row)
@@ -677,7 +682,7 @@ async def approve_ontology(
         .values(scope="universal", owner_workspace_id=None, owner_visibility=None, updated_by=actor)
         .execution_options(synchronize_session="fetch"))
     await session.flush()
-    await _record_audit(session, row, "updated", actor=actor, summary=f"Approved v{row.version} for everyone")
+    await _record_audit(session, row, "approved", actor=actor, summary=f"Approved v{row.version} for everyone")
     return _to_response(row)
 
 
@@ -741,7 +746,7 @@ async def create_new_version_from_source(
     entity_count = len(json.loads(new_row.entity_type_definitions or "{}"))
     rel_count = len(json.loads(new_row.relationship_type_definitions or "{}"))
     await _record_audit(
-        session, new_row, "cloned", actor=actor,
+        session, new_row, "versioned", actor=actor,
         summary=f"Created draft v{new_row.version} from v{source.version} ({entity_count} entity types, {rel_count} relationships)",
     )
     return _to_response(new_row)

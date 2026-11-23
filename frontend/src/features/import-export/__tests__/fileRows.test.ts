@@ -6,6 +6,7 @@
  *   - the standard file reads by its `kind`, in CSV, NDJSON or a JSON array: `urn ?? entity_id` is
  *     the key, `displayName ?? qualifiedName ?? key` the name, `prop.*` and `properties_json` the
  *     properties, `sourceUrn ?? source_entity_id` and `targetUrn ?? target_entity_id` the ends;
+ *   - where an exported entity sat (its parent and path) is never a property, in either kind of file;
  *   - a summary by type, with the distinct pairs of thing types each connection type joins;
  *   - an Excel workbook, and a standard file too large to read here, go to the server as they are;
  *   - toImportRows writes the standard's NDJSON with its types mapped, a type mapped to null
@@ -116,6 +117,27 @@ describe('readFiles: the standard file', () => {
   it('takes a standard file alone', async () => {
     await expect(readFiles([file('export.csv', STANDARD_CSV), file('links.csv', CONNECTIONS)]))
       .rejects.toThrow(/export\.csv is a whole import on its own/)
+  })
+
+  it('reads an export that says where each entity sat as one that does not', async () => {
+    const placed = [
+      { kind: 'node', urn: 'urn:a', entityType: 'Table', displayName: 'A', 'prop.owner': 'Ops',
+        parentUrn: 'urn:db', parentName: 'Warehouse', parentType: 'Database', path: ['Warehouse'], pathUrns: ['urn:db'] },
+      { kind: 'edge', edgeType: 'FEEDS', sourceUrn: 'urn:a', targetUrn: 'urn:b' },
+    ]
+    const plain = placed.map(({ parentUrn: _u, parentName: _n, parentType: _t, path: _p, pathUrns: _pu, ...r }) => r)
+    const ndjson = (rows: object[]) => rows.map((r) => JSON.stringify(r)).join('\n')
+    const withPath = await readFiles([file('placed.ndjson', ndjson(placed))])
+    expect(withPath.things).toEqual((await readFiles([file('plain.ndjson', ndjson(plain))])).things)
+    expect(withPath.things[0].properties).toEqual({ owner: 'Ops' })
+  })
+
+  it('never makes a simple file’s parent and path into properties: a trace’s file brought back', async () => {
+    const trace = 'urn,name,type,role,hops,hopsUp,hopsDown,layer,parentUrn,parentName,parentType,path,pathUrns,reachedFrom\n'
+      + 'urn:a,orders,Table,seed,0,,,Gold,urn:db,Warehouse,Database,Warehouse / gold,urn:db; urn:gold,\n'
+    const read = await readFiles([file('trace.csv', trace)])
+    expect(read.format).toBe('simple')
+    expect(Object.keys(read.things[0].properties ?? {})).toEqual(['role', 'hops', 'layer'])
   })
 })
 

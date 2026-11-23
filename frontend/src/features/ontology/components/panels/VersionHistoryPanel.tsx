@@ -1,13 +1,14 @@
 /**
  * VersionHistoryPanel — version timeline + audit trail for an ontology.
- * Shows version entries alongside lifecycle events (create, update, publish,
- * delete, restore, clone) with actor info, timestamps, and change diffs.
+ * Shows version entries alongside lifecycle events (create, clone, update, new
+ * version, import, publish, approval, delete, restore) with who did each, by
+ * name, when — relative at a glance, exact on hover — and change diffs.
  * Older versions can be COMPARED with the current one and RESTORED as a new
  * draft (composition of new-version + update — nothing is overwritten).
  */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Loader2, Clock, CheckCircle2, ArrowRight, Box, GitBranch, User, Plus, Minus, Upload, Trash2, RotateCcw, Copy, PenLine, GitCompareArrows } from 'lucide-react'
+import { Loader2, Clock, CheckCircle2, ArrowRight, Box, GitBranch, Plus, Minus, Upload, Trash2, RotateCcw, Copy, PenLine, GitCompareArrows, FileInput, BadgeCheck } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ontologyDefinitionService, type OntologyDefinitionResponse, type OntologyAuditEntry } from '@/services/ontologyDefinitionService'
 import { useOntologyVersions, useOntologyAuditLog } from '../../hooks/useOntologies'
@@ -16,9 +17,10 @@ import { useSemanticLayerAccess } from '../../lib/useSemanticLayerAccess'
 import { restoreVersionAsDraft } from '../../lib/restoreVersion'
 import { OntologyStatusBadge } from '../OntologyStatusBadge'
 import { VersionDiffDialog } from '../dialogs/VersionDiffDialog'
-import { formatDate } from '../../lib/ontology-parsers'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { TablePagination } from '@/components/ui/TablePagination'
+import { DateTime } from '@/components/ui/DateTime'
+import { PersonChip } from '@/components/ui/PersonChip'
 
 interface VersionHistoryPanelProps {
   ontology: OntologyDefinitionResponse
@@ -35,7 +37,10 @@ const ACTION_CONFIG: Record<string, {
   published: { icon: Upload, label: 'Published', accent: 'text-indigo-600 dark:text-indigo-400', dotColor: 'bg-indigo-500' },
   deleted: { icon: Trash2, label: 'Deleted', accent: 'text-red-600 dark:text-red-400', dotColor: 'bg-red-500' },
   restored: { icon: RotateCcw, label: 'Restored', accent: 'text-amber-600 dark:text-amber-400', dotColor: 'bg-amber-500' },
-  cloned: { icon: Copy, label: 'New Version', accent: 'text-purple-600 dark:text-purple-400', dotColor: 'bg-purple-500' },
+  cloned: { icon: Copy, label: 'Cloned', accent: 'text-purple-600 dark:text-purple-400', dotColor: 'bg-purple-500' },
+  versioned: { icon: GitBranch, label: 'New Version', accent: 'text-violet-600 dark:text-violet-400', dotColor: 'bg-violet-500' },
+  imported: { icon: FileInput, label: 'Imported', accent: 'text-cyan-600 dark:text-cyan-400', dotColor: 'bg-cyan-500' },
+  approved: { icon: BadgeCheck, label: 'Approved for everyone', accent: 'text-emerald-600 dark:text-emerald-400', dotColor: 'bg-emerald-500' },
 }
 
 function TypeDiffBadges({ changes }: { changes: OntologyAuditEntry['changes'] }) {
@@ -219,7 +224,7 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
                       </div>
 
                       <div className="flex items-center gap-3 text-[11px] text-ink-muted mt-1.5 flex-wrap">
-                        <span>{formatDate(v.createdAt)}</span>
+                        <DateTime at={v.createdAt} />
                         <span className="flex items-center gap-1">
                           <Box className="w-2.5 h-2.5" />
                           {entityCount} entities
@@ -228,17 +233,13 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
                           <GitBranch className="w-2.5 h-2.5" />
                           {relCount} relationships
                         </span>
-                        {v.createdBy && (
-                          <span className="flex items-center gap-1 text-ink-muted/70">
-                            <User className="w-2.5 h-2.5" />
-                            {v.createdBy}
-                          </span>
-                        )}
+                        {/* Inside a row that is itself a link: the chips name, they don't navigate. */}
+                        {v.createdBy && <PersonChip id={v.createdBy} size="xs" link={false} />}
                         {v.publishedAt && (
                           <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
                             <Upload className="w-2.5 h-2.5" />
-                            Published {formatDate(v.publishedAt)}
-                            {v.publishedBy ? ` by ${v.publishedBy}` : ''}
+                            Published <DateTime at={v.publishedAt} />
+                            {v.publishedBy && <>by <PersonChip id={v.publishedBy} size="xs" link={false} /></>}
                           </span>
                         )}
                       </div>
@@ -338,13 +339,8 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
                         {entry.version != null && (
                           <span className="text-[10px] text-ink-muted font-mono">v{entry.version}</span>
                         )}
-                        <span className="text-[10px] text-ink-muted">{formatDate(entry.createdAt)}</span>
-                        {entry.actor && (
-                          <span className="flex items-center gap-1 text-[10px] text-ink-muted/70">
-                            <User className="w-2.5 h-2.5" />
-                            {entry.actor}
-                          </span>
-                        )}
+                        <DateTime at={entry.createdAt} className="text-[10px] text-ink-muted" />
+                        {entry.actor && <PersonChip id={entry.actor} size="xs" />}
                       </div>
 
                       {entry.summary && (

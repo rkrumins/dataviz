@@ -33,8 +33,11 @@ import { useEntityBaseline } from '@/features/versioning/hooks/useEntityBaseline
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { NO_VERSION_CONTROL, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
-import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
+import {
+  isIdentityOverridden, normalizeIdentity, useCanvasIdentityProperty, useCanvasNodeIdentity,
+} from '@/components/dataSource/NodeIdentity'
 import { userProperties } from '@/lib/nodeFields'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { nodeIndexOf } from '@/lib/storeIndex'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { Layers } from 'lucide-react'
@@ -52,6 +55,10 @@ import { EntityFooter } from './EntityFooter'
 import { EntityChangeDigest } from './EntityChangeDigest'
 import { changedFieldCount, useStagedNodeEdit } from './EntityChangeStrip'
 import { MultiEntityDrawer } from './multi/MultiEntityDrawer'
+
+/** `bag` without `key` (none, or not in it: `bag` itself). */
+const omitKey = (bag: Record<string, unknown>, key: string | null): Record<string, unknown> =>
+  key && key in bag ? Object.fromEntries(Object.entries(bag).filter(([k]) => k !== key)) : bag
 
 export interface EntityDrawerProps {
   /** The canvas owning this drawer accepts graph edits — a draft, in edit mode.
@@ -166,23 +173,31 @@ function OpenEntityDrawer({
   }, [])
 
   const urn = (form.urn as string | undefined) || node.id
-  const userProps = useMemo(() => userProperties(form.properties), [form.properties])
+  // In the Playground a thing's identifier (`id`) is its urn's own, kept equal to it by every save:
+  // shown read-only, at a glance and under Identifier — so it isn't among the properties to edit,
+  // and every edit of them keeps it as it is.
+  const nodeIdentity = useCanvasNodeIdentity()
+  const inPlayground = useWorkspacesStore((s) => s.workspaces.find((w) => w.id === nodeIdentity?.workspaceId)?.kind === 'playground')
+  const heldKey = inPlayground && isIdentityOverridden(nodeIdentity?.identityProperty) ? normalizeIdentity(nodeIdentity?.identityProperty) : null
+  const allProps = useMemo(() => userProperties(form.properties), [form.properties])
+  const held = useMemo(() => (heldKey && heldKey in allProps ? { [heldKey]: allProps[heldKey] } : {}), [heldKey, allProps])
+  const userProps = useMemo(() => omitKey(allProps, heldKey), [allProps, heldKey])
   // The properties as first read, for what each row says changed; none for an entity not saved yet.
   const originalProps = useMemo(
-    () => (original ? userProperties((original as Record<string, unknown>).properties) : undefined),
-    [original],
+    () => (original ? omitKey(userProperties((original as Record<string, unknown>).properties), heldKey) : undefined),
+    [original, heldKey],
   )
   // In a draft, the properties as published (main where the draft began): each row then says what
   // the draft changed — saved, or not yet — and Revert puts it back as published.
   const baseline = useEntityBaseline(versioningEnabled ? scope : {}, unsavedCreate ? null : ((data.urn as string | undefined) ?? node.id))
   const publishedProps = useMemo(
-    () => (baseline ? userProperties(baseline.published.properties) : undefined),
-    [baseline],
+    () => (baseline ? omitKey(userProperties(baseline.published.properties), heldKey) : undefined),
+    [baseline, heldKey],
   )
   const unsavedFields = changedFieldCount(useStagedNodeEdit(node.id))
   const commitProperties = useCallback(
-    (bag: Record<string, unknown>) => commit((d) => withPropertyBag(d, bag)),
-    [commit],
+    (bag: Record<string, unknown>) => commit((d) => withPropertyBag(d, { ...bag, ...held })),
+    [commit, held],
   )
   const title = useMemo(() => resolveEntityName(node.data, personaMode, node.id), [node.data, personaMode, node.id])
   const identityProperty = useCanvasIdentityProperty()
@@ -298,6 +313,7 @@ function OpenEntityDrawer({
                 entityType={entityType}
                 urn={urn}
                 userProps={userProps}
+                keptProps={held}
                 originalProps={originalProps}
                 publishedProps={publishedProps}
                 onEdit={edit}

@@ -15,10 +15,11 @@ structure. This page explains what it is, how to find your way around the
 > how they *look*.
 
 > **Before you start:** Anyone who can read a workspace's semantic layers can
-> browse them — every built-in workspace role can. Creating, changing or
-> publishing a layer needs the permission to manage semantic layers: the
-> **Data engineer** and **Workspace admin** roles have it, **Workspace member**
-> does not. Your administrator's switches can narrow this further — see
+> browse them — every built-in workspace role can. Changing or publishing a
+> layer needs the permission to manage semantic layers, and starting a new one
+> the permission to create them: the **Data engineer** and **Workspace admin**
+> roles have both, **Workspace member** has neither. Your administrator's
+> switches can narrow this further — see
 > [Who can change a semantic layer](#who-can-change-a-semantic-layer).
 
 ---
@@ -218,9 +219,22 @@ up top.
 
 ## Who can change a semantic layer
 
-Two things decide it: your **permission** to manage semantic layers (see
-*Before you start*), and your administrator's switches in **Administration →
-Features**. All six are on by default.
+Three things decide it: your **permission** to manage semantic layers (see
+*Before you start*), **which workspaces use the layer**, and your
+administrator's switches in **Administration → Features**.
+
+* You change a layer that a data source in one of your workspaces is built on —
+  where you manage semantic layers — or one you made, while no data source uses
+  it yet. A layer only other workspaces use is theirs: you can read it and clone
+  it, not change it. The layer's header says **View only** when that is so, and
+  why.
+* Starting a new layer — **New semantic layer**, **Clone**, or **Import JSON**
+  as a new layer — also needs the permission to create them.
+* Every layer's **Overview** has an **Ownership & audit** card: who made it and
+  when, who changed and published it last, which workspace owns it, and whether
+  you can change it. **History** lists every change, by name.
+
+The switches are all on by default.
 
 | Switch | When it's off |
 | --- | --- |
@@ -230,6 +244,7 @@ Features**. All six are on by default.
 | **Export layers** | **Export JSON** disappears |
 | **Suggest from graph** | **Suggest from Graph** and the match percentages disappear; people choose a layer by hand |
 | **Layer history & audit** | The **History** tab disappears. Nothing is deleted — every version is still kept |
+| **Create semantic layers** | Nobody starts a new layer, admins included: **New semantic layer**, **Clone** and **Import as new** are switched off, saying why. Existing layers can still be changed and published |
 
 ### Layers of one's own, and layers a workspace owns
 

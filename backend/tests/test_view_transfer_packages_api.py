@@ -174,6 +174,7 @@ async def test_a_view_is_packaged_by_a_job_the_request_only_queues(test_client, 
         (f"g_{ds}", view_id, None, "ndjson", 12), "published data, pinned to the commit it stands at"
     assert job["package"] == {"fileName": body["fileName"], "scope": "view", "dataVersion": "published",
                               "views": body["views"], "actor": _FAKE_USER.id}
+    assert isinstance(job["with_path"], dict), "its data says where each entity sits, up this containment"
     assert jobs.ran == ["exp_1"], "the export job was queued"
     assert not (tmp_path / "store").exists(), "nothing is written in the request"
 

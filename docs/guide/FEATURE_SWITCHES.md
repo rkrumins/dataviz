@@ -3,7 +3,7 @@
 *For Administrators.* Turn whole capabilities on or off for everyone in your
 deployment — editing, tracing, exports, sign-up, Analytics and more — and know
 who will notice before you do. This page shows you how to change a switch
-safely, then describes all 47 switches on **Administration → Features**.
+safely, then describes all 48 switches on **Administration → Features**.
 
 > **Before you start:** You need the **Super admin** role (the `system:admin`
 > permission). Nobody else sees **Features** under **Administration**, and the
@@ -225,6 +225,7 @@ will ask for.
 | **Export layers** (`semanticLayerExportEnabled`) | On | Downloads a semantic layer as JSON. | People exporting. **Export JSON** disappears from a layer's menu and the server refuses the download. Reading and editing are unaffected. | [The Semantic Layer](/guide/semantic-layer) |
 | **Suggest from graph** (`semanticLayerAutoSuggest`) | On | Scores existing layers against a connected data source, so onboarding can recommend the best fit. | People onboarding data. The suggestion step and match percentages disappear from the onboarding and data-source wizards, and layers are chosen by hand. | [The Semantic Layer](/guide/semantic-layer) |
 | **Layer history & audit** (`semanticLayerVersionHistory`) | On | Shows every past version of a layer and who changed what, when. | Everyone. The history and audit tabs disappear and the server refuses them. Versions are still kept and recorded, and come back when you switch this on. | [The Semantic Layer](/guide/semantic-layer) |
+| **Create semantic layers** (`semanticLayerCreation`) | On | Starts new semantic layers: a blank draft, one built from a graph, a clone, or a file imported as a new layer. | Everyone, admins included. **New semantic layer**, **Clone** and **Import as new** are switched off, saying why, and the server refuses them. Existing layers can still be changed, versioned, published and exported. Who may create layers while it is on is the `workspace:ontology:create` permission. A Playground member still makes layers of their own there. | [The Semantic Layer](/guide/semantic-layer) |
 
 ### Data Governance
 
@@ -319,6 +320,7 @@ Match a reported message to its switch:
 | "Exporting semantic layers is turned off for this deployment." | **Export layers** |
 | "Suggesting a semantic layer from the graph is turned off for this deployment." | **Suggest from graph** |
 | "Semantic layer history is hidden for this deployment." | **Layer history & audit** |
+| "Creating new semantic layers is turned off for this deployment." | **Create semantic layers** |
 | "Analytics isn't open on this deployment" (a page, not a message) | **Analytics for everyone** |
 
 Most messages end by saying an administrator can change it under **Admin →

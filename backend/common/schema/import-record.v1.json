@@ -99,6 +99,83 @@
           "title": "Kind",
           "type": "string"
         },
+        "parentName": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "Its direct container's name. Informational, as an export writes it: ignored on import.",
+          "title": "Parentname"
+        },
+        "parentType": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "Its direct container's type. Informational, as an export writes it: ignored on import.",
+          "title": "Parenttype"
+        },
+        "parentUrn": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The node's direct container, by urn; empty at the top of the graph. Informational, as an export writes it: ignored on import.",
+          "title": "Parenturn"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "Every container it sits in, by name, from the top of the graph down to its parent: a list, or one text with the names joined by ` / `. Informational, as an export writes it: ignored on import.",
+          "title": "Path"
+        },
+        "pathUrns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The same containers by urn: a list, or one text with the urns joined by `; `. Informational, as an export writes it: ignored on import.",
+          "title": "Pathurns"
+        },
         "properties_json": {
           "anyOf": [
             {
@@ -331,6 +408,83 @@
           "default": null,
           "description": "The layer of the view an import into a view places a new node in.",
           "title": "Layerassignment"
+        },
+        "parentName": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "Its direct container's name. Informational, as an export writes it: ignored on import.",
+          "title": "Parentname"
+        },
+        "parentType": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "Its direct container's type. Informational, as an export writes it: ignored on import.",
+          "title": "Parenttype"
+        },
+        "parentUrn": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The node's direct container, by urn; empty at the top of the graph. Informational, as an export writes it: ignored on import.",
+          "title": "Parenturn"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "Every container it sits in, by name, from the top of the graph down to its parent: a list, or one text with the names joined by ` / `. Informational, as an export writes it: ignored on import.",
+          "title": "Path"
+        },
+        "pathUrns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The same containers by urn: a list, or one text with the urns joined by `; `. Informational, as an export writes it: ignored on import.",
+          "title": "Pathurns"
         },
         "properties_json": {
           "anyOf": [

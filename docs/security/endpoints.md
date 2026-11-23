@@ -239,8 +239,8 @@
 | `POST` | `/api/v1/admin/insights/providers/{provider_id}/assets/{asset_name}/refresh` | system:admin | enforced | refused |
 | `GET` | `/api/v1/admin/insights/providers/{provider_id}/assets/{asset_name}/stats` | system:admin | n/a | refused |
 | `GET` | `/api/v1/admin/ontologies` | workspace:ontology:read (any ws) | n/a | filtered |
-| `POST` | `/api/v1/admin/ontologies` | workspace:ontology:manage (any ws) | enforced | refused |
-| `POST` | `/api/v1/admin/ontologies/import` | workspace:ontology:manage (any ws) | enforced | refused |
+| `POST` | `/api/v1/admin/ontologies` | workspace:ontology:create (any ws), workspace:ontology:manage (any ws) | enforced | refused |
+| `POST` | `/api/v1/admin/ontologies/import` | workspace:ontology:create (any ws), workspace:ontology:manage (any ws) | enforced | refused |
 | `POST` | `/api/v1/admin/ontologies/suggest` | workspace:ontology:manage (any ws) | enforced | refused |
 | `DELETE` | `/api/v1/admin/ontologies/{ontology_id}` | switches semanticLayerEditMode and semanticLayerNonAdminEditing (not on a Playground maker's own layer), workspace:ontology:manage (any ws); in the Playground, the layer's maker | enforced | refused |
 | `GET` | `/api/v1/admin/ontologies/{ontology_id}` | workspace:ontology:read (any ws) | n/a | filtered |
@@ -249,7 +249,7 @@
 | `POST` | `/api/v1/admin/ontologies/{ontology_id}/approve` | workspace:ontology:manage (any ws) | enforced | refused |
 | `GET` | `/api/v1/admin/ontologies/{ontology_id}/assignments` | workspace:ontology:read (any ws) | n/a | refused |
 | `GET` | `/api/v1/admin/ontologies/{ontology_id}/audit` | switch semanticLayerVersionHistory (not on a Playground maker's own layer), workspace:ontology:read (any ws) | n/a | refused |
-| `POST` | `/api/v1/admin/ontologies/{ontology_id}/clone` | workspace:ontology:manage (any ws) | enforced | refused |
+| `POST` | `/api/v1/admin/ontologies/{ontology_id}/clone` | workspace:ontology:create (any ws), workspace:ontology:manage (any ws) | enforced | refused |
 | `POST` | `/api/v1/admin/ontologies/{ontology_id}/coverage` | workspace:ontology:read (any ws) | enforced | refused |
 | `GET` | `/api/v1/admin/ontologies/{ontology_id}/coverage-ranking` | workspace:ontology:read (any ws) | n/a | refused |
 | `GET` | `/api/v1/admin/ontologies/{ontology_id}/export` | switch semanticLayerExportEnabled (not on a Playground maker's own layer), workspace:ontology:read (any ws) | n/a | filtered |

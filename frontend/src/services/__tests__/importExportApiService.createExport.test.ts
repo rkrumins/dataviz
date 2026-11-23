@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../apiClient', () => ({ authFetch: vi.fn() }))
 
 import { authFetch } from '../apiClient'
-import { cancelExport, createExport, planExport } from '../importExportApiService'
+import { cancelExport, createExport, exportStreamUrl, planExport } from '../importExportApiService'
 
 beforeEach(() => {
   localStorage.clear()
@@ -46,6 +46,19 @@ describe('createExport', () => {
     }
     expect(new URL(vi.mocked(authFetch).mock.calls[1][0], 'http://app').pathname)
       .toBe('/api/v1/ws1/versioning/graphs/g1/exports/plan')
+  })
+
+  it('asks for where each entity sits only when wanted, the stream as the job', async () => {
+    vi.mocked(authFetch).mockResolvedValue({ jobId: 'j1', resultUri: 'r', status: 'pending' })
+    const target = { wsId: 'ws1', dataSourceId: 'ds1', graphId: 'g1' }
+    await createExport(target, 'csv', { withPath: true })
+    await createExport(target, 'csv', { withPath: false })
+    const [placed, plain] = vi.mocked(authFetch).mock.calls.map(([url]) => new URL(url, 'http://app'))
+    expect(placed.searchParams.get('withPath')).toBe('true')
+    expect(plain.searchParams.has('withPath')).toBe(false)
+    const live = new URL(exportStreamUrl({ ...target, graphId: null }, 'ndjson', { withPath: true }), 'http://app')
+    expect(live.pathname).toBe('/api/v1/ws1/graph/export/stream')
+    expect(live.searchParams.get('withPath')).toBe('true')
   })
 
   it('asks for a plan with a plain GET when nothing is chosen', async () => {

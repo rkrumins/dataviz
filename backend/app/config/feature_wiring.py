@@ -844,6 +844,24 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         still_allowed=("Publishing", "Cloning", "Exporting", "Reading every layer",
                        "A Playground maker's own layers, which they edit whatever this says"),
     ),
+    "semanticLayerCreation": FeatureWiring(
+        key="semanticLayerCreation",
+        posture="capability",
+        server_gates=(
+            "POST /admin/ontologies — create",
+            "POST /admin/ontologies/{id}/clone — a clone is a new layer",
+            "POST /admin/ontologies/import — import as a new layer",
+        ),
+        ui_surfaces=(
+            "New semantic layer, Clone and Import as new on the semantic layer pages",
+            "Create from graph in the onboarding wizard",
+        ),
+        still_allowed=("Changing, versioning and publishing existing layers", "Exporting",
+                       "Reading every layer",
+                       "A Playground member making layers of their own in the Playground"),
+        # No depends_on: cloning makes a layer while editing is off, so this still means
+        # something then.
+    ),
     "semanticLayerImportEnabled": FeatureWiring(
         key="semanticLayerImportEnabled",
         posture="capability",

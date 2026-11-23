@@ -21,7 +21,11 @@ import { useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
+import { Z_INDEX } from '@/lib/zIndex'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { usePersonaIntroSeen } from '@/components/persona/personaIntro'
+import { useTourStore } from '@/features/tour/tourStore'
+import { usePersonaMode } from '@/store/persona'
 import { useCurrentBranchId, useGraphId } from '@/store/branchStore'
 import { jobEnded, useDraftPropertyJobs } from '@/store/propertyJobsStore'
 
@@ -70,7 +74,15 @@ export function PropertyManagerButton({ open, onToggle, className, folded = fals
     // The hint is armed once per browser; it shows whenever the manager is
     // closed until the user opens the manager or dismisses it.
     const [hintArmed, setHintArmed] = useState(() => !readSeen())
-    const hintVisible = hintArmed && !open
+    // One first-run card at a time. The Business view's own intro opens beside
+    // this button on a first visit; shown together, the two cards overlapped
+    // each other and the toolbar's buttons. This one waits its turn, and for
+    // any guided tour (as `SetupCoachMark` does).
+    const personaIntroSeen = usePersonaIntroSeen()
+    const persona = usePersonaMode()
+    const personaIntroShowing = !personaIntroSeen && persona === 'business'
+    const touring = useTourStore((s) => s.activeTourId !== null)
+    const hintVisible = hintArmed && !open && !personaIntroShowing && !touring
 
     // Callback ref: the trigger element lands in state on mount, and the
     // coachmark's position is derived from its rect at render time —
@@ -140,7 +152,7 @@ export function PropertyManagerButton({ open, onToggle, className, folded = fals
             {anchor && typeof document !== 'undefined' && createPortal(
                 <div
                     role="status"
-                    style={{ position: 'fixed', top: anchor.top, left: anchor.left, zIndex: 1000 }}
+                    style={{ position: 'fixed', top: anchor.top, left: anchor.left, zIndex: Z_INDEX.coach }}
                     className={cn(
                         'w-64 pl-3 pr-8 py-2 rounded-xl',
                         'bg-canvas-elevated border border-accent-lineage/40 shadow-xl shadow-black/30',

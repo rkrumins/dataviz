@@ -1,12 +1,13 @@
 /**
- * SyncStatusChip in each view. The Business view keeps the verdict and drops the path: one plain
- * pill in the same colour, saying Up to date, Updating or May be out of date, with no card to
- * open — so no store names, no revision ids and no account of the graph's kind. The Technical
+ * SyncStatusChip in each view. The Business view keeps its plain pill (Up to date, Updating, May
+ * be out of date) and opens a card in plain words: the kind of graph, the commit saved, what views
+ * show and the summaries, with the store names only behind "Show technical details". The Technical
  * view keeps the button and the card behind it. The status hook is mocked.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePreferencesStore } from '@/store/preferences'
 import type { SyncStatus } from '../syncStatusApi'
 
 let data: SyncStatus | undefined
@@ -39,15 +40,80 @@ beforeEach(() => {
 })
 
 describe('SyncStatusChip in the Business view', () => {
-  beforeEach(() => usePersonaStore.setState({ mode: 'business' }))
+  beforeEach(() => {
+    usePersonaStore.setState({ mode: 'business' })
+    usePreferencesStore.setState({ syncTechnicalDetailsOpen: false })
+  })
 
-  it('says it is up to date and when that was checked, with nothing to open and no store names', () => {
+  it('says it is up to date and when that was checked, as a button naming no store', () => {
     renderChip()
-    expect(screen.getByText('Up to date · checked 2m ago')).toBeInTheDocument()
-    expect(screen.queryByRole('button')).toBeNull()
+    const chip = screen.getByRole('button', { name: /^Sync status: Versioned graph, Everything is in sync/ })
+    expect(chip).toHaveTextContent('Up to date · checked 2m ago')
     for (const word of ['Postgres', 'FalkorDB', 'cmt_', 'v11']) {
       expect(document.body.textContent).not.toContain(word)
     }
+  })
+
+  it('opens a card in plain words: the kind of graph, the commit saved and what views show', async () => {
+    renderChip()
+    await userEvent.setup().click(screen.getByRole('button', { name: /^Sync status/ }))
+    const card = await screen.findByRole('dialog', { name: 'Sync details' })
+    // The card takes focus, not Check again — whose tip would otherwise open with it.
+    expect(card).toHaveFocus()
+    expect(within(card).getByText('Versioned graph')).toBeInTheDocument()
+    expect(within(card).getByText('Every change is saved as a version')).toBeInTheDocument()
+    const lanes = within(card).getByRole('list', { name: 'How up to date this view is' })
+    for (const title of ['Saved version', 'What you see', 'Summaries']) expect(within(lanes).getByText(title)).toBeInTheDocument()
+    expect(within(lanes).getByText('Version 11 · the latest')).toBeInTheDocument()
+    expect(within(lanes).getByRole('button', { name: 'Copy commit cmt_01M3AH4A26Y5ZFJ60G1ZYNM07A' })).toHaveTextContent('cmt_01M3AH4A…')
+    expect(within(lanes).getByText('Same commit as the saved version')).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: 'Check again' })).toBeInTheDocument()
+    for (const word of ['Postgres', 'FalkorDB', 'system of record']) expect(card.textContent).not.toContain(word)
+  })
+
+  it('shows the full commit id on hover', async () => {
+    renderChip()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /^Sync status/ }))
+    await user.hover(await screen.findByRole('button', { name: /^Copy commit/ }))
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('cmt_01M3AH4A26Y5ZFJ60G1ZYNM07A')
+  })
+
+  it('keeps the store names behind "Show technical details", and remembers it open', async () => {
+    const user = userEvent.setup()
+    const { unmount } = renderChip()
+    await user.click(screen.getByRole('button', { name: /^Sync status/ }))
+    const toggle = await screen.findByRole('button', { name: 'Show technical details' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('Postgres')).toBeNull()
+    await user.click(toggle)
+    expect(screen.getByRole('button', { name: 'Hide technical details' })).toHaveAttribute('aria-expanded', 'true')
+    const technical = screen.getByRole('list', { name: "Where this view's data comes from" })
+    expect(within(technical).getByText('Postgres')).toBeInTheDocument()
+    expect(within(technical).getByText('FalkorDB')).toBeInTheDocument()
+    expect(usePreferencesStore.getState().syncTechnicalDetailsOpen).toBe(true)
+    unmount()
+    renderChip()
+    await user.click(screen.getByRole('button', { name: /^Sync status/ }))
+    expect(await screen.findByText('Postgres')).toBeInTheDocument()
+  })
+
+  it('says an external graph is read live from its source, with no commit', async () => {
+    data = {
+      kind: 'external', dataSourceId: 'ds', checkedAt: minutesAgo(2),
+      source: { changedSinceRefresh: false, lastReconciledAt: minutesAgo(30) },
+      summaries: { aggregationStatus: 'ready', driftState: 'inSync', autoRefresh: true, lastJobStatus: 'completed', lastSuccessAt: minutesAgo(30) },
+      counts: { nodes: 5, edges: 4, readAt: minutesAgo(2) },
+    }
+    renderChip()
+    await userEvent.setup().click(screen.getByRole('button', { name: /^Sync status: External graph/ }))
+    const card = await screen.findByRole('dialog', { name: 'Sync details' })
+    expect(within(card).getByText('External graph')).toBeInTheDocument()
+    expect(within(card).getByText('Read live from its source — never changed here')).toBeInTheDocument()
+    expect(within(card).getByText('Source')).toBeInTheDocument()
+    expect(within(card).queryByRole('button', { name: /^Copy commit/ })).toBeNull()
+    expect(within(card).queryByRole('button', { name: 'Open Data health' })).toBeNull()
+    expect(card.textContent).not.toContain('FalkorDB')
   })
 
   it('says it is updating while the graph catches up', () => {

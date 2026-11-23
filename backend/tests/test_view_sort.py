@@ -245,3 +245,156 @@ async def test_search_treats_percent_and_underscore_as_text(db_session: AsyncSes
     assert [v.name for v in pct.items] == ["Growth 100% plan"]
     under = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, search="snake_case", limit=50)
     assert [v.name for v in under.items] == ["snake_case model"]
+
+
+# ── Sorts and filters follow the last change, settings or data ─────────────
+
+
+def _days_ago(n: int) -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(days=n)).isoformat()
+
+
+async def test_the_default_order_is_recently_modified(db_session: AsyncSession):
+    """No sort is the documented default, the later of a settings edit and a data
+    publish — not settings edits alone, which put a view published today last."""
+    ws = await _ws(db_session)
+    a = await _view(db_session, ws.id, "Edited in July")
+    b = await _view(db_session, ws.id, "Published in August")
+    await _set_times(db_session, a.id, data_updated_at=None, updated_at="2026-07-01T00:00:00+00:00")
+    await _set_times(db_session, b.id, data_updated_at="2026-08-01T00:00:00+00:00",
+                     updated_at="2026-01-01T00:00:00+00:00")
+
+    default = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, limit=50)
+    assert [v.name for v in default.items] == ["Published in August", "Edited in July"]
+    unknown = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, sort="no-such-sort", limit=50)
+    assert [v.name for v in unknown.items] == ["Published in August", "Edited in July"]
+
+
+@pytest.mark.parametrize("sort, expected", [
+    ("az", ["apple", "Banana", "cherry"]),
+    ("za", ["cherry", "Banana", "apple"]),
+])
+async def test_name_sorts_ignore_case(db_session: AsyncSession, sort, expected):
+    ws = await _ws(db_session)
+    for name in ("cherry", "Banana", "apple"):
+        await _view(db_session, ws.id, name)
+    resp = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, sort=sort, limit=50)
+    assert [v.name for v in resp.items] == expected
+
+
+async def test_popular_breaks_ties_by_the_last_change(db_session: AsyncSession):
+    """Equal likes: the view whose data changed most recently first, though its
+    settings are the older."""
+    from backend.app.db.models import ViewFavouriteORM
+    ws = await _ws(db_session)
+    edited = await _view(db_session, ws.id, "Edited")
+    published = await _view(db_session, ws.id, "Published")
+    await _set_times(db_session, edited.id, data_updated_at=None, updated_at="2026-06-01T00:00:00+00:00")
+    await _set_times(db_session, published.id, data_updated_at="2026-09-01T00:00:00+00:00",
+                     updated_at="2026-01-01T00:00:00+00:00")
+    db_session.add_all([ViewFavouriteORM(view_id=v.id, user_id="u9") for v in (edited, published)])
+    await db_session.flush()
+
+    resp = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, sort="popular", limit=50)
+    assert [v.name for v in resp.items] == ["Published", "Edited"]
+
+
+async def test_needs_attention_and_the_stale_badge_count_a_data_publish(db_session: AsyncSession):
+    """Settings untouched since spring but data published last week is not stale —
+    in the "needs attention" filter and in the badge alike."""
+    ws = await _ws(db_session)
+    fed = await _view(db_session, ws.id, "Fed weekly")
+    idle = await _view(db_session, ws.id, "Idle")
+    await _set_times(db_session, fed.id, data_updated_at=_days_ago(7), updated_at=_days_ago(200))
+    await _set_times(db_session, idle.id, data_updated_at=_days_ago(150), updated_at=_days_ago(200))
+
+    attention = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, attention_only=True, limit=50)
+    assert [v.name for v in attention.items] == ["Idle"]
+    everything = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, limit=50)
+    health = {v.name: v.health.status for v in everything.items}
+    assert health == {"Fed weekly": "healthy", "Idle": "stale"}
+    idle_reason = next(v.health.reason for v in everything.items if v.name == "Idle")
+    assert idle_reason == "Not updated in 150 days"
+    stats = await view_repo.get_view_stats(db_session, workspace_id=ws.id)
+    assert stats.needs_attention == 1
+
+
+async def test_a_tag_with_accents_matches_however_it_was_stored(db_session: AsyncSession):
+    """Before 2026-11 tags were stored with every non-ASCII character escaped; now as
+    typed. The filter finds both, and a new view stores its tags as typed."""
+    import json
+    ws = await _ws(db_session)
+    old = await _view(db_session, ws.id, "Old")
+    row = (await db_session.execute(select(ViewORM).where(ViewORM.id == old.id))).scalar_one()
+    row.tags = json.dumps(["Café"])                      # "Caf\u00e9", as written before
+    await db_session.flush()
+    new = await view_repo.create_view(db_session, ViewCreateRequest(
+        name="New", workspace_id=ws.id, view_type="graph", visibility="private", tags=["Café", "Ünits"],
+    ), user_id="u1")
+    stored = (await db_session.execute(select(ViewORM.tags).where(ViewORM.id == new.id))).scalar_one()
+    assert stored == '["Café", "Ünits"]'
+    await _view(db_session, ws.id, "Other")
+
+    resp = await view_repo.list_views_filtered(db_session, workspace_id=ws.id, tags=["Café"], limit=50)
+    assert {v.name for v in resp.items} == {"Old", "New"}
+
+
+async def test_stats_count_recent_views_from_the_cutoff_the_list_uses(db_session: AsyncSession):
+    ws = await _ws(db_session)
+    for name, age in (("Three days", 3), ("Six days", 6), ("Ten days", 10)):
+        v = await _view(db_session, ws.id, name)
+        row = (await db_session.execute(select(ViewORM).where(ViewORM.id == v.id))).scalar_one()
+        row.created_at = _days_ago(age)
+    await db_session.flush()
+
+    assert (await view_repo.get_view_stats(db_session, workspace_id=ws.id)).recently_added == 2
+    pinned = await view_repo.get_view_stats(db_session, workspace_id=ws.id, recent_since=_days_ago(5))
+    assert pinned.recently_added == 1
+
+
+async def test_a_data_change_reaches_every_view_that_reads_the_source(db_session: AsyncSession):
+    """Its own views, and views with no source of their own in a workspace whose
+    default it is — never another source's, a deleted one, or a settings field."""
+    from backend.app.db.models import ProviderORM, ViewActivityLogORM, WorkspaceDataSourceORM
+    ws = await _ws(db_session)
+    other_ws = WorkspaceORM(name="Elsewhere")
+    db_session.add(other_ws)
+    db_session.add(ProviderORM(id="prov_t", name="p", provider_type="falkordb"))
+    await db_session.flush()
+    db_session.add_all([
+        WorkspaceDataSourceORM(id="ds_main", workspace_id=ws.id, provider_id="prov_t", label="Main",
+                               is_primary=True),
+        WorkspaceDataSourceORM(id="ds_side", workspace_id=ws.id, provider_id="prov_t", label="Side"),
+        WorkspaceDataSourceORM(id="ds_far", workspace_id=other_ws.id, provider_id="prov_t", label="Far",
+                               is_primary=True),
+    ])
+    await db_session.flush()
+    views = {}
+    for key, ws_id, ds_id in (("own", ws.id, "ds_main"), ("defaulted", ws.id, None),
+                              ("side", ws.id, "ds_side"), ("far_default", other_ws.id, None),
+                              ("deleted", ws.id, "ds_main")):
+        views[key] = (await _view(db_session, ws_id, key)).id
+        row = (await db_session.execute(select(ViewORM).where(ViewORM.id == views[key]))).scalar_one()
+        row.data_source_id = ds_id
+        await _set_times(db_session, views[key], data_updated_at=None, updated_at="2026-01-01T00:00:00+00:00")
+    row = (await db_session.execute(select(ViewORM).where(ViewORM.id == views["deleted"]))).scalar_one()
+    row.deleted_at = "2026-02-01T00:00:00+00:00"
+    await db_session.flush()
+
+    stamped = await view_repo.touch_views_data_updated(db_session, "ds_main", "usr_pub")
+    assert stamped == 2
+    rows = {r.name: r for r in (await db_session.execute(select(ViewORM).where(ViewORM.id.in_(views.values()))))
+            .scalars()}
+    for name in rows:
+        await db_session.refresh(rows[name])
+    assert {n for n, r in rows.items() if r.data_updated_at} == {"own", "defaulted"}
+    assert rows["own"].data_updated_by == "usr_pub"
+    assert {rows[n].updated_at for n in ("own", "defaulted")} == {"2026-01-01T00:00:00+00:00"}, \
+        "never a settings edit"
+    logged = (await db_session.execute(
+        select(ViewActivityLogORM.view_id).where(ViewActivityLogORM.action == "data_changed"))).scalars().all()
+    assert sorted(logged) == sorted([views["own"], views["defaulted"]])
+
+    # A source that is not its workspace's default reaches only its own views.
+    assert await view_repo.touch_views_data_updated(db_session, "ds_side", None) == 1

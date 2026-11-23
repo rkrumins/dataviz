@@ -25,6 +25,9 @@ import {
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import { cn } from '@/lib/utils'
+import { DateTime } from '@/components/ui/DateTime'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { PersonChip } from '@/components/ui/PersonChip'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import { OntologyStatusBadge } from './OntologyStatusBadge'
@@ -33,7 +36,17 @@ import { PageContainer } from '@/components/layout/PageContainer'
 import { OwnLayerActions } from './OwnLayerActions'
 import { ApproveForEveryone } from './ApproveForEveryone'
 
-import type { SemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
+import { BLOCKED_REASON, type SemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
+
+/** One "who, when" on the layer: the instant (relative, exact on hover) and the person, by name. */
+function AuditStamp({ label, at, by, className }: { label: string; at: string | null | undefined; by?: string | null; className?: string }) {
+  return (
+    <span className={cn('inline-flex items-center gap-1.5 min-w-0', className)}>
+      {label} <DateTime at={at} className="font-medium" />
+      {by && <>by <PersonChip id={by} size="xs" /></>}
+    </span>
+  )
+}
 
 interface OntologyDetailHeaderProps {
   ontology: OntologyDefinitionResponse
@@ -210,6 +223,16 @@ export function OntologyDetailHeader({
 
             <OntologyStatusBadge ontology={ontology} />
 
+            {/* Why the writes are missing, rather than leaving the reader to wonder. */}
+            {access.editingBlockedBy && !ontology.deletedAt && (
+              <HoverTip label="You can read this layer, not change it" detail={BLOCKED_REASON[access.editingBlockedBy]}>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold flex-shrink-0 border border-glass-border text-ink-muted bg-black/[0.03] dark:bg-white/[0.04]">
+                  <Eye className="w-3 h-3" />
+                  View only
+                </span>
+              </HoverTip>
+            )}
+
             {/* Deployment badge — opens AssignmentManagerDialog */}
             <button
               onClick={onOpenAssignments}
@@ -236,19 +259,19 @@ export function OntologyDetailHeader({
           </div>
 
           {/* Compact summary — always visible */}
-          <div className="flex items-center gap-3 mt-1.5">
-            <p className="text-sm text-ink-muted">
+          <div className="flex items-center gap-3 mt-1.5 min-w-0">
+            <p className="text-sm text-ink-muted whitespace-nowrap">
               {entityCount} entity type{entityCount !== 1 ? 's' : ''} · {relCount} relationship{relCount !== 1 ? 's' : ''}
             </p>
-            {ontology.description && (
-              <button
-                onClick={() => setExpanded(!expanded)}
-                className="flex items-center gap-0.5 text-[11px] text-ink-muted/60 hover:text-ink-muted transition-colors"
-              >
-                {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                {expanded ? 'Less' : 'More'}
-              </button>
-            )}
+            <AuditStamp label="Changed" at={ontology.updatedAt} by={ontology.updatedBy} className="text-xs text-ink-muted" />
+            <button
+              onClick={() => setExpanded(!expanded)}
+              aria-expanded={expanded}
+              className="flex items-center gap-0.5 text-[11px] text-ink-muted/60 hover:text-ink-muted transition-colors"
+            >
+              {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              {expanded ? 'Less' : 'More'}
+            </button>
           </div>
 
           {access.isOwn && <OwnLayerActions ontology={ontology} access={access} workspaces={workspaces} />}
@@ -260,17 +283,15 @@ export function OntologyDetailHeader({
               {ontology.description && (
                 <p className="text-sm text-ink-secondary max-w-2xl">{ontology.description}</p>
               )}
-              <div className="flex items-center gap-4 flex-wrap text-[11px] text-ink-muted">
-                <span>Created {new Date(ontology.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}{ontology.createdBy ? ` by ${ontology.createdBy}` : ''}</span>
+              <div className="flex items-center gap-x-4 gap-y-1.5 flex-wrap text-[11px] text-ink-muted">
+                <AuditStamp label="Created" at={ontology.createdAt} by={ontology.createdBy} />
                 <span className="opacity-30">·</span>
-                <span>Updated {new Date(ontology.updatedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}{ontology.updatedBy ? ` by ${ontology.updatedBy}` : ''}</span>
+                <AuditStamp label="Updated" at={ontology.updatedAt} by={ontology.updatedBy} />
                 {ontology.publishedAt && (
                   <>
                     <span className="opacity-30">·</span>
-                    <span className="text-emerald-600 dark:text-emerald-400">
-                      Published {new Date(ontology.publishedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
-                      {ontology.publishedBy ? ` by ${ontology.publishedBy}` : ''}
-                    </span>
+                    <AuditStamp label="Published" at={ontology.publishedAt} by={ontology.publishedBy}
+                      className="text-emerald-600 dark:text-emerald-400" />
                   </>
                 )}
                 <span className="opacity-30">·</span>
@@ -318,14 +339,28 @@ export function OntologyDetailHeader({
                   <ShieldCheck className="w-3.5 h-3.5" />
                   Validate{hasPendingChanges ? ' (save first)' : ''}
                 </DropdownMenu.Item>
-                {/* Clone creates a new draft ontology — manage-only, or the maker's own. */}
-                {access.canClone && (
+                {/* Clone creates a new draft ontology — creating answers to its own permission and
+                    switch, or it is the maker's own. Off, it says why to those who look after layers. */}
+                {access.canClone ? (
                   <DropdownMenu.Item
                     onClick={onClone}
                     className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
                   >
                     <Copy className="w-3.5 h-3.5" />
                     Clone (Independent Copy)
+                  </DropdownMenu.Item>
+                ) : access.cloneBlockedBy && access.cloneBlockedBy !== 'permission' && (
+                  <DropdownMenu.Item
+                    disabled
+                    className="flex items-start gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-muted outline-none cursor-not-allowed max-w-[260px]"
+                  >
+                    <Copy className="w-3.5 h-3.5 mt-px flex-shrink-0 opacity-60" />
+                    <span className="min-w-0">
+                      <span className="block opacity-70">Clone (Independent Copy)</span>
+                      <span className="block mt-0.5 text-[10px] font-normal leading-snug text-amber-700 dark:text-amber-400">
+                        {BLOCKED_REASON[access.cloneBlockedBy]}
+                      </span>
+                    </span>
                   </DropdownMenu.Item>
                 )}
                 {onFindDataSources && (
@@ -347,7 +382,7 @@ export function OntologyDetailHeader({
                     Export JSON
                   </DropdownMenu.Item>
                 )}
-                {access.canImport && (
+                {(access.canImport || access.canImportNew) && (
                   <DropdownMenu.Item
                     onClick={onImport}
                     className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"

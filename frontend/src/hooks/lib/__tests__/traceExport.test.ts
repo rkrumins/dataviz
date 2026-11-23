@@ -8,7 +8,9 @@
  */
 import { describe, it, expect } from 'vitest'
 import { buildTraceView, type TraceViewInputs } from '../traceViewModel'
+import { ANCESTRY_COLUMNS } from '@/lib/ancestryColumns'
 import {
+  TRACE_EXPORT_COLUMNS,
   traceCsvLines,
   traceExportEdges,
   traceExportFilename,
@@ -115,6 +117,9 @@ describe('the files', () => {
     const rows = rowsOf()
     const lines = traceCsvLines([...rows, { ...rows[0]!, name: '=HYPERLINK("x")' }])
     expect(lines[0]).toBe('urn,name,type,role,hops,hopsUp,hopsDown,layer,parentUrn,parentName,parentType,path,pathUrns,reachedFrom\r\n')
+    // Where a row sits is the five columns every file of entities writes, and an import skips.
+    expect(TRACE_EXPORT_COLUMNS.filter((c) => (ANCESTRY_COLUMNS as readonly string[]).includes(c)))
+      .toEqual([...ANCESTRY_COLUMNS])
     expect(lines).toHaveLength(rows.length + 2)
     expect(lines.at(-1)).toContain(`"'=HYPERLINK(""x"")"`)
   })
