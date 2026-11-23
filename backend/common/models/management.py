@@ -1550,6 +1550,18 @@ class ViewCountResponse(BaseModel):
     total: int
 
 
+class ViewScopeCountsResponse(BaseModel):
+    """``GET /views/counts`` — the live views the caller can read: in all, per
+    workspace and per data source. A view with no data source is in the total and
+    its workspace's count, but in no source's."""
+    total: int
+    by_workspace: Dict[str, int] = Field(alias="byWorkspace")
+    by_data_source: Dict[str, int] = Field(alias="byDataSource")
+
+    class Config:
+        populate_by_name = True
+
+
 class ViewHistogramBucket(BaseModel):
     """Views in one UTC bucket: ``t`` is ``YYYY-MM-DDTHH`` (hour) or
     ``YYYY-MM-DDTHH:M`` (ten minutes, M the first digit of the minutes)."""
