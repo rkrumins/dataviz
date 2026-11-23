@@ -170,3 +170,47 @@ describe('deriveSync — what readers get while a newer version lands', () => {
     expect(failed.lanes[1].lines.join(' ')).toMatch(/Attempt 1 failed: the node went away mid-copy · trying again/)
   })
 })
+
+describe('deriveSync — the Business view’s plain reading', () => {
+  const STORES = /Postgres|FalkorDB|system of record/
+
+  it('says the version saved, with its commit, the version on screen and the summaries, with no store names', () => {
+    const v = deriveSync(versioned(), NOW)
+    expect(v.plain.lanes.map((l) => l.title)).toEqual(['Saved version', 'What you see', 'Summaries'])
+    expect(v.plain.lanes.map((l) => l.key)).toEqual(['record', 'graph', 'summaries'])
+    expect(v.plain.lanes[0]).toMatchObject({ status: 'Version 11', tech: '', revision: rev })
+    expect(v.plain.lanes[1]).toMatchObject({ status: 'Version 11 · the latest', tone: 'ok', revision: rev })
+    expect(v.plain.headline).toBe('Everything is in sync')
+    expect(JSON.stringify(v.plain)).not.toMatch(STORES)
+  })
+
+  it('carries the commit views show: the earlier one while a newer version is written', () => {
+    const older = { commitId: 'cmt_older', createdAt: '2026-09-24T20:06:00Z' }
+    const v = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: 9, servedRevision: older }), NOW)
+    expect(v.plain.lanes[1]).toMatchObject({ status: 'Version 9, complete', revision: older, tone: 'busy' })
+    expect(v.plain.lanes[1].lines[0]).toBe('Switches to version 11 on its own once it is written')
+  })
+
+  it('says it plainly when views read the newest version straight from where it is saved', () => {
+    const v = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: null, readMode: 'latest' }), NOW)
+    expect(v.plain.headline).toBe('Showing the newest version while the graph updates')
+    expect(v.plain.lanes[1]).toMatchObject({ status: 'Version 11 · the latest', revision: rev })
+    expect(JSON.stringify(v.plain)).not.toMatch(STORES)
+  })
+
+  it('leaves out a failed rebuild’s raw reason, keeping when it failed', () => {
+    const v = deriveSync(versioned({}, { ...okSummaries, lastJobStatus: 'failed', lastJobAt: '2026-09-24T20:00:00Z',
+      lastFailureReason: 'FalkorDB query timed out' }), NOW)
+    expect(v.lanes[2].lines).toContain('FalkorDB query timed out')
+    expect(v.plain.lanes[2].status).toMatch(/^Last rebuild failed .+ ago$/)
+    expect(v.plain.lanes[2].lines).not.toContain('FalkorDB query timed out')
+  })
+
+  it('names an external graph’s lanes Source and Summaries, with no commit', () => {
+    const v = deriveSync({ kind: 'external', dataSourceId: 'ds', checkedAt: '', source: { changedSinceRefresh: false },
+      summaries: okSummaries, counts: { nodes: 5, edges: 4, readAt: '2026-09-24T20:35:19Z' } }, NOW)
+    expect(v.plain.lanes.map((l) => l.title)).toEqual(['Source', 'Summaries'])
+    expect(v.plain.lanes.every((l) => !l.revision && l.tech === '')).toBe(true)
+    expect(v.plain.headline).toBe('In sync with the source')
+  })
+})
