@@ -21,7 +21,7 @@ from backend.app.auth.dependencies import (
 )
 from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
 from backend.app.services.aggregation.schemas import DataSourceReadinessResponse
-from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.permission_service import KeyScope, PermissionClaims
 from backend.auth_service.interface import User
 
 WS_FIN, WS_OPS = "ws_fin", "ws_ops"
@@ -155,3 +155,23 @@ async def test_needs_data_source_read_in_that_workspace(test_client: AsyncClient
     assert set(allowed.json()) == {"ds_fin_0", "ds_fin_1"}
     assert refused.status_code == 403
     assert refused.json()["detail"]["permission"] == "workspace:datasource:read"
+
+
+async def test_an_api_key_on_part_of_the_workspace_hears_only_what_it_covers(
+    test_client: AsyncClient, db_session, svc,
+):
+    """As the workspace record lists the sources to that key."""
+    await _sources(db_session, 3)
+    key = PermissionClaims(
+        sid="s_key", ws_perms={WS_FIN: ("workspace:datasource:read",)},
+        key_scope=KeyScope(
+            key_id="key_1", data="read", data_source_ids=frozenset({"ds_fin_1"}),
+            data_source_workspaces={"ds_fin_1": WS_FIN},
+        ),
+    )
+    with _auth(user=BOB, claims=key):
+        resp = await test_client.get(URL)
+
+    assert resp.status_code == 200, resp.text
+    assert set(resp.json()) == {"ds_fin_1"}
+    assert svc.asked == ["ds_fin_1"]

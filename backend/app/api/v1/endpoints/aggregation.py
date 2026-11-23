@@ -48,6 +48,7 @@ from backend.app.services.aggregation.schemas import (
     SourceChangedRequest,
     SourceChangedResponse,
 )
+from backend.app.services import workspace_visibility
 from backend.app.services.permission_service import (
     PermissionClaims,
     has_permission,
@@ -812,13 +813,19 @@ async def get_workspace_readiness(
     ws_id: str,
     request: Request,
     svc=Depends(_get_svc),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """``{dsId: readiness}`` for the workspace's data sources, in one request —
     the workspace page asked once per source, four at a time, so its slowest
     source held back the rest. Each answer is the single route's; one that
-    can't be read is ``null``, so a broken source never fails the others."""
+    can't be read is ``null``, so a broken source never fails the others. The
+    sources are the ones the workspace record lists to the caller: an API key
+    on part of the workspace hears only about what it covers."""
     sources = await data_source_repo.list_data_sources(session, ws_id)
+    covered = await workspace_visibility.key_data_source_ids(session, claims)
+    if covered is not None:
+        sources = [ds for ds in sources if ds.id in covered]
     gate = asyncio.Semaphore(_READINESS_FANOUT)
 
     async def _one(ds_id: str):
