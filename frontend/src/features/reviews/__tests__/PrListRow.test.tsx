@@ -48,6 +48,15 @@ describe('PrListRow', () => {
     expect(screen.getByText('3')).toBeInTheDocument()
   })
 
+  it('never shows two separators in a row where there is no change count', () => {
+    for (const status of ['open', 'merged'] as const) {   // the summary didn't load; a merged review isn't counted
+      const { container, unmount } = render(<PrListRow wsId="ws1" pr={pr({ status })} onOpen={() => {}} />)
+      expect(container.textContent).not.toMatch(/·\s*·/)
+      expect(container.textContent).toMatch(/main.*·\s*by Ana/)
+      unmount()
+    }
+  })
+
   it('says when it was last active, else when it was opened', () => {
     const { container, rerender } = render(
       <PrListRow wsId="ws1" pr={pr({ lastActivityAt: '2026-11-03T10:00:00Z' })} onOpen={() => {}} />)
