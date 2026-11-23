@@ -1570,7 +1570,8 @@ class ImportExportService:
     async def validate_import(self, *, graph_id: str, workspace_id: str,
                               data_source_id: Optional[str], branch_id: Optional[str],
                               data: bytes, import_format: str,
-                              identifier: Optional[str] = None) -> Dict[str, Any]:
+                              identifier: Optional[str] = None,
+                              identity_required: bool = False) -> Dict[str, Any]:
         """A dry run of importing ``data``: parsed, normalized and resolved against ``main`` (or
         the draft ``branch_id``) as an import resolves a window — the same matching, the same new
         ids, the same reasons a row is refused — and nothing written: no draft opened, no job
@@ -1578,7 +1579,9 @@ class ImportExportService:
         file is imported into a draft, which is itself a dry run until published. Not run here:
         the write gate a strict graph applies at commit, and the deletions a ``replace`` would
         make — the import's preview shows those. ``identifier``: what its rows find their entities
-        by, as an import naming it would (:mod:`.identifier`); the platform's when None."""
+        by, as an import naming it would (:mod:`.identifier`); the platform's when None.
+        ``identity_required``: each node row must give its identifier, as an import into the
+        Playground's data sources must (the job's ``identityRequired``)."""
         adapter = get_adapter(import_format)
 
         async def _chunks():
@@ -1608,6 +1611,7 @@ class ImportExportService:
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         worker = ImportWorker(self._svc, self._store, ontology=ontology, node_identity=node_identity)
         worker._identifier = identifier or identifiers.platform_default()
+        worker._identity_required = identity_required
         await worker.validation_state(snap, graph_id, branch, rows)
         nodes = [r for r in rows if r["kind"] == "node"]
         edges = [r for r in rows if r["kind"] == "edge"]

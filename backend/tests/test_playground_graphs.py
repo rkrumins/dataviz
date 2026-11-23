@@ -255,10 +255,12 @@ async def test_a_graph_on_an_approved_layer_has_no_rows_and_its_views_are_the_fi
                             ("starter_types_of", LAYER, ["dashboard", "sourceSystem"])]
     assert layers.owned == [] and layers.dropped == []
 
-    # A blank graph of Ben's on the sandbox provider, described, on the approved layer — no rows.
+    # A blank graph of Ben's on the sandbox provider, described, on the approved layer — no rows —
+    # identifying its things by ``id``.
     ds = await db_session.get(WorkspaceDataSourceORM, body["dataSourceId"])
     assert (ds.workspace_id, ds.provider_id, ds.label, ds.description, ds.created_by, ds.ontology_id) == (
         PG, SANDBOX, "Orders pipeline", ON_A_LAYER["description"], BEN.id, LAYER)
+    assert ds.identity_property == "id"
     [graph] = store.graphs
     assert (graph["kind"], graph["ontology_enforcement"], graph["base_ontology_id"]) == ("blank", "strict", LAYER)
     assert store.imports == [] and store.projected == ["g_1"]
@@ -272,6 +274,18 @@ async def test_a_graph_on_an_approved_layer_has_no_rows_and_its_views_are_the_fi
     versions = (await db_session.execute(select(ViewVersionORM))).scalars().all()
     assert sorted((v.view_id, v.version) for v in versions) == sorted(
         (view_id, 1) for view_id in body["viewIds"].values())
+
+
+@pytest.mark.asyncio
+async def test_a_blank_graph_outside_the_playground_keeps_the_identity_it_inherits(
+        test_client: AsyncClient, playground, store, db_session):
+    from backend.app.api.v1.endpoints import versioning as versioning_ep
+    db_session.add(WorkspaceORM(id="ws_team", name="Team"))
+    await db_session.commit()
+    made = await versioning_ep.create_blank_graph("ws_team", versioning_ep.CreateBlankGraphRequest(
+        name="Drawn by hand", providerId=SANDBOX, ontologyId=LAYER), BEN, store, db_session, claims=None)
+    ds = await db_session.get(WorkspaceDataSourceORM, made["data_source_id"])
+    assert ds.workspace_id == "ws_team" and ds.identity_property is None
 
 
 @pytest.mark.asyncio

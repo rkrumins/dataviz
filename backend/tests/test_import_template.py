@@ -62,6 +62,22 @@ async def test_a_template_has_a_row_of_each_type_and_a_column_of_each_property()
         assert not normalize(record, record["kind"]).get("op_error"), record
 
 
+async def test_a_playground_template_carries_the_identifier_every_type_has_once():
+    """A Playground data model gives every type an ``id`` field, and its graphs identify things by
+    it: the template has one ``prop.id`` column, said to be the identifier, and finds an edge's
+    ends by it."""
+    identified = {**ONTOLOGY, "fields": {t: [{"id": "id", "name": "Identifier", "type": "string"}, *fs]
+                                         for t, fs in ONTOLOGY["fields"].items()}}
+    assert contract.template_columns(identified, "id")["node"].count("prop.id") == 1
+    columns = list(_csv(await _service().build_template(export_format="csv", ontology=identified,
+                                                         identity_property="id"))[0])
+    assert columns.count("prop.id") == 1 and {"source.id", "target.id"} <= set(columns)
+    book = openpyxl.load_workbook(io.BytesIO(await _service().build_template(
+        export_format="xlsx", ontology=identified, identity_property="id")))
+    explained = {row[0].value: row[3].value for row in book["Columns"].iter_rows(min_row=2)}
+    assert "identifier property" in explained["prop.id"]
+
+
 async def test_without_an_ontology_a_template_holds_worked_examples():
     rows = _csv(await _service().build_template(export_format="csv"))
     assert [r["kind"] for r in rows] == ["node", "node", "edge"]

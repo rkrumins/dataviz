@@ -2075,9 +2075,13 @@ async def create_blank_graph(
     user_graph_name: Optional[str] = None
     if body.graph_name:
         user_graph_name = await claim_graph_name(session, body.provider_id, body.graph_name)
+    # In the Playground every thing is identified by ``id``, kept equal to its urn on each write: a
+    # field of every type of its data models (``playground_policy.IDENTITY_PROPERTY``).
+    in_playground = await playground_policy.playground_of(session, ws_id) is not None
     ds_id, graph_name = await create_managed_data_source(
         session, ws_id, provider_id=body.provider_id, ontology_id=body.ontology_id,
-        label=body.name, actor=user.id, graph_name=user_graph_name, description=body.description)
+        label=body.name, actor=user.id, graph_name=user_graph_name, description=body.description,
+        identity_property=playground_policy.IDENTITY_PROPERTY if in_playground else None)
 
     # 4) Genesis-only versioned graph pinned to the minted name + provider.
     try:
@@ -4593,7 +4597,8 @@ async def _import_settings_for(session: AsyncSession, data_source_id: Optional[s
     The settings are what its job keeps: where the identifier came from, the replace guard's switch
     and limits with where each came from, the refused rows it allows, and how many properties its
     graph may match by, and the most rows its file may hold (``maxRows``: the Playground's
-    ``maxImportRows`` in the Playground, else ``IMPORT_MAX_ROWS``; 0, no limit)."""
+    ``maxImportRows`` in the Playground, else ``IMPORT_MAX_ROWS``; 0, no limit). In the Playground,
+    every node row must give its identifier (``identityRequired``, ``resolve.resolve_rows``)."""
     from backend.app.db.models import WorkspaceDataSourceORM
     from backend.app.services import fork_sources, import_settings
     from backend.app.services.versioning.import_export import identifier as identifiers
@@ -4609,7 +4614,9 @@ async def _import_settings_for(session: AsyncSession, data_source_id: Optional[s
         raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
                                                      "message": str(exc)})
     limit = await playground_policy.import_row_limit(session, row.workspace_id) if row is not None else None
-    return identifier, {**settings, "maxRows": vconfig.IMPORT_MAX_ROWS if limit is None else limit}
+    required = row is not None and await playground_policy.playground_of(session, row.workspace_id) is not None
+    return identifier, {**settings, "maxRows": vconfig.IMPORT_MAX_ROWS if limit is None else limit,
+                        **({"identityRequired": True} if required else {})}
 
 
 @router.post("/graphs/{graph_id}/imports", response_model=CreateImportResponse, status_code=202)
@@ -5116,7 +5123,7 @@ async def validate_import(
         checked = await ie.validate_import(
             graph_id=graph_id, workspace_id=ws_id, data_source_id=meta.get("data_source_id"),
             branch_id=branch_id, data=bytes(body), import_format=format.lower(),
-            identifier=identifier)
+            identifier=identifier, identity_required=bool(settings.get("identityRequired")))
         return {**checked, "identifierSource": settings["identifierSource"]}
     except DryRunTooLarge as exc:
         raise HTTPException(status_code=413, detail={"type": "too_large", "message": str(exc)})

@@ -405,6 +405,50 @@ def test_a_new_node_takes_the_id_its_urn_derives_and_keeps_the_urn_as_given():
     assert all(r["resolved_op"] == "create" for r in res.values())
 
 
+_A = {"urn": "urn:a", "entityType": "Table", "displayName": "A", "qualifiedName": "db.a"}
+
+
+def _identified_run(rows, *, required=True, identity_prop="id"):
+    """As an import into the Playground resolves rows: every node row must give its identifier."""
+    v7s = iter(f"urn:uuid:0192f5a4-0000-7000-8000-00000000000{i}" for i in range(10))
+    ops, res = resolve_rows(rows, {"urn_to_eid": {"urn:a": "N1"}, "qname_to_eid": {"db.a": "N1"},
+                                   "edge_to_eid": {}, "node_eids": {"N1"}, "current": {"N1": _A}},
+                            mint_id=lambda: next(v7s), mint_urn=lambda _t: next(v7s),
+                            identity_prop=identity_prop, derive_urn=lambda seed: pointer_id("ds1", seed),
+                            require_identifier=required)
+    return ops, {r["_row_index"]: r for r in res}
+
+
+_IDENTIFIED = [
+    _node_row(0, urn="urn:li:x", displayName="x"),
+    _node_row(1, displayName="y", properties={"id": "Y-1"}),
+    _node_row(2, qualifiedName="db.new", displayName="new"),                # new, by no identifier
+    _node_row(3, qualifiedName="db.a", displayName="A renamed"),            # found by its qualifiedName
+    _node_row(4, entity_id="N1", displayName="A again"),                    # by its entity id
+    {**_node_row(5, qualifiedName="db.gone"), "op": "delete"},
+]
+
+
+def test_into_the_playground_a_node_row_must_give_its_urn_or_its_id():
+    """A row found by its qualifiedName, or new with only one, is refused: its thing would have no
+    identifier of its own for the next file to find it by. One naming its entity by its entity id
+    is exempt, and so is a delete."""
+    _ops, res = _identified_run(_IDENTIFIED)
+    assert [res[i]["resolved_op"] for i in (0, 1)] == ["create", "create"]
+    for i in (2, 3):
+        assert (res[i]["resolved_op"], res[i]["code"], res[i]["reasons"]) == (
+            "invalid", "no_key", ["Needs an identifier (urn or id)"]), res[i]
+    assert res[4]["resolved_op"] == "update"
+    assert res[5]["resolved_op"] == "unchanged" and res[5]["reasons"] == [_ALREADY_GONE]
+
+    # Anywhere else the same rows are matched as they always were; and a graph that identifies its
+    # things by urn alone is asked for the urn.
+    _ops, anywhere = _identified_run(_IDENTIFIED, required=False)
+    assert [anywhere[i]["resolved_op"] for i in (2, 3)] == ["create", "update"]
+    _ops, by_urn = _identified_run([_node_row(0, qualifiedName="db.new")], identity_prop=None)
+    assert by_urn[0]["reasons"] == ["Needs an identifier (urn)"]
+
+
 def test_a_node_row_that_names_nothing_is_refused_and_so_is_an_edge_to_it():
     """Named only by the file's own entity_id, a node would be created again by every import (and
     a replace would delete the one before): refused, with the reason and its code."""

@@ -419,6 +419,12 @@ _HAS_URN = (". It has a urn: to find a row without its {name} by its urn, send "
             "identifier=prop.{name},urn")
 
 
+def needs_identifier(identity_prop: Optional[str]) -> str:
+    """Why an import that requires an identifier (``resolve_rows(require_identifier=True)``)
+    refuses a node row that gives none: the keys that would be one."""
+    return f"Needs an identifier (urn or {identity_prop})" if identity_prop else "Needs an identifier (urn)"
+
+
 def _no_key(identifier: str, prop: Optional[str], fallback: bool, urn: Optional[str],
             delete: bool = False) -> str:
     """Why a node row (``delete``: a delete row) that names nothing its identifier reads is refused,
@@ -621,8 +627,14 @@ def resolve_rows(
     derive_edge: Optional[Callable[[str, str, str], str]] = None,
     identifier: str = "entity_id",
     derive_key: Optional[Callable[[str], str]] = None,
+    require_identifier: bool = False,
 ) -> Tuple[List[dict], List[dict]]:
     """Return ``(ops, resolutions)`` for the given normalized ``rows``.
+
+    ``require_identifier`` (an import into the Playground, ``playground_policy``): a node row it
+    creates or updates must give its thing's urn or its value of the identifier property
+    (``identity_prop``) — one that gives neither is refused (``no_key``, :func:`needs_identifier`)
+    whatever else it is matched by, unless it names its entity by an entity_id.
 
     ``ontology`` (optional ``{"node_types": [...], "edge_types": [...]}``) enables the **per-row
     ontology gate**: a node whose ``entityType`` / an edge whose ``edgeType`` isn't a type the
@@ -774,6 +786,13 @@ def resolve_rows(
             resolutions.append(_resolution(row, "invalid", None, reasons=[ambiguous[1]],
                                            code=ambiguous[0],
                                            mentions=[] if row.get("op") == "delete" else named_too))
+            continue
+        if (require_identifier and row.get("op") == "upsert" and by != "entity_id" and not row_urn
+                and not (identity_prop and key_value(props.get(identity_prop)))):
+            # Found by its qualifiedName or a team key, or new: the thing would be left (or made)
+            # with no identifier of its own for the next file to find it by.
+            resolutions.append(_resolution(row, "invalid", None, code="no_key",
+                                           reasons=[needs_identifier(identity_prop)], mentions=named_too))
             continue
         first = earlier.get(matched_eid, seen.get(matched_eid)) if matched_eid else None
         if row.get("op") == "delete":

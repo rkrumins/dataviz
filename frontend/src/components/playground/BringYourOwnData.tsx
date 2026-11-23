@@ -44,6 +44,7 @@ import { matchTypes, toImportFile, whereOf, type TypeMap } from '@/features/impo
 import { downloadSimpleTemplate, useFileIntake } from '@/features/import-export/useFileIntake'
 import { byUrnFix, refusedOf, useImportRun } from '@/features/import-export/useImportRun'
 import { ImportOptions, matchNote } from '@/features/import-export/ImportOptions'
+import { IdentifierStep, useIdentifierChoice } from '@/features/import-export/IdentifierStep'
 import { formatIdentifier, parseIdentifier, type Match } from '@/features/import-export/identifier'
 import { OWN_DATA_LIMITS, TEMPLATE_FILES } from './ownData'
 import { ModelBadge } from './ModelBadge'
@@ -139,14 +140,16 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
     const [createError, setCreateError] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
 
-    const read = intake.read
+    // The files as the person settles them: each thing identified by the column they chose.
+    const identifier = useIdentifierChoice(intake.read)
+    const read = identifier.read
     const summary = read && read.format !== 'server' ? read.summary : null
     // A name from the files until the person types one: a JSON file's own, else the first file's.
-    const [named, setNamed] = useState(read)
-    if (read !== named) {
-        setNamed(read)
-        if (read && !nameEdited) setName(read.name ?? nameFromFile(intake.files[0]?.name ?? ''))
-        if (read?.description && !description) setDescription(read.description.slice(0, OWN_DATA_LIMITS.description))
+    const [named, setNamed] = useState(intake.read)
+    if (intake.read !== named) {
+        setNamed(intake.read)
+        if (intake.read && !nameEdited) setName(intake.read.name ?? nameFromFile(intake.files[0]?.name ?? ''))
+        if (intake.read?.description && !description) setDescription(intake.read.description.slice(0, OWN_DATA_LIMITS.description))
     }
 
     // Scored against the layers on offer here, by what the file holds of each type.
@@ -235,7 +238,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
     const nameOk = name.trim().length > 0 && name.trim().length <= OWN_DATA_LIMITS.name
     const modelReady = fromFile ? !!summary : !!model && (!summary || (!!available && unmatched === 0))
     const ready = !!read && !intake.reading && !intake.warning && !rowErrors.length && !issues.length
-        && choice !== undefined && modelReady && nameOk && !full && !note?.block
+        && !!identifier.check?.ok && choice !== undefined && modelReady && nameOk && !full && !note?.block
 
     /** The new graph's own data model's types, for a model made from the file: read back, so the
      *  rows name them by their ids. Unread, the rows name them as the file does. */
@@ -268,7 +271,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
             .some(([from, to]) => to === null || caseFold(to) !== caseFold(from))
         const up = read.format === 'standard' && remaps
             ? { file: toImportFile(read, map, intake.files), format: 'ndjson' as const }
-            : intake.upload(map)
+            : intake.upload(map, read)
         if (!up) return
         setIntoDraft(!!past || keepDraft)
         await run.start({ wsId: workspaceId, graphId: target.graphId }, up.file, {
@@ -323,7 +326,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
     }
 
     const stage = run.phase === 'idle' ? 'setup' : run.phase
-    const steps = ['files', 'model', ...(showMatch ? ['types'] : []), 'canvases', 'name'] as const
+    const steps = ['files', ...(read ? ['identifier'] : []), 'model', ...(showMatch ? ['types'] : []), 'canvases', 'name'] as const
     const stepOf = (step: (typeof steps)[number]) => steps.indexOf(step) + 1
     const standardTemplate = (fmt: 'xlsx' | 'csv') => {
         if (!model) return
@@ -447,6 +450,12 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
                                         </section>
                                     )}
                                 </Step>
+
+                                {read && (
+                                    <Step n={stepOf('identifier')} title="Identifier" hint="What identifies each thing: its connections name it by this, and the next file finds it again by it.">
+                                        <IdentifierStep choice={identifier} />
+                                    </Step>
+                                )}
 
                                 <Step n={stepOf('model')} title="Data model" hint="The types and connections your graph may hold. The best approved fit for your file is chosen for you.">
                                     {matching.phase === 'analyzing' && (

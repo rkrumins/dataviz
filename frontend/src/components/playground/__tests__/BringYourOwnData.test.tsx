@@ -269,6 +269,23 @@ describe('New data source from a file', () => {
         expect(svc.loadWorkspaces).toHaveBeenCalled()
     })
 
+    it('settles what identifies each thing first, and loads the things by it', async () => {
+        renderDialog()
+        await pick(file('things.csv', 'code,type,name\nA,Table,Alpha\nB,Table,Beta\n'))
+        const step = await screen.findByRole('region', { name: 'Identifier' })
+        const column = within(step).getByLabelText('Read from the column')
+        expect(column).toHaveValue('')                               // no name says which
+        await userEvent.click(await screen.findByRole('button', { name: /Make one from my file/ }))
+        expect(create()).toBeDisabled()
+
+        await userEvent.selectOptions(column, 'code')
+        expect(within(step).getByRole('list', { name: 'First identifiers' })).toHaveTextContent('AB')
+        expect(create()).toBeEnabled()
+        await userEvent.click(create())
+        await screen.findByRole('region', { name: 'Done' })
+        expect((await sentRows()).map(r => r.urn)).toEqual(['urn:playground:A', 'urn:playground:B'])
+    })
+
     it('opens in its Context View alone unless other canvases are chosen, and sends those chosen', async () => {
         renderDialog()
         await pick(file('example.json', TEMPLATE_FILES['example.json']))

@@ -625,6 +625,9 @@ class ImportWorker:
         # The most rows its file may hold (the job's ``maxRows``, else ``IMPORT_MAX_ROWS``; 0: no
         # limit): past it, the file's read stops (TooManyRows).
         self._max_rows = config.IMPORT_MAX_ROWS
+        # Every node row must give its thing's urn or identifier value (the job's
+        # ``identityRequired``: an import into the Playground) — ``resolve_rows``.
+        self._identity_required = False
         # What a replace may delete: "all" in its scope the file leaves out, or "keyed" — by a
         # property, only the nodes that hold it, and the edges between two of them.
         self._replace_scope = "all"
@@ -671,6 +674,7 @@ class ImportWorker:
         self._refused_budget = refused_budget((job.get("import_settings") or {}).get("maxRefusedRows"))
         self._replace_scope = (job.get("import_settings") or {}).get("replaceScope") or "all"
         self._max_rows = (job.get("import_settings") or {}).get("maxRows", config.IMPORT_MAX_ROWS)
+        self._identity_required = bool((job.get("import_settings") or {}).get("identityRequired"))
         self._guard = (job.get("import_settings") or {}).get("replaceGuard")
         self._max_properties = (job.get("import_settings") or {}).get("maxMatchingProperties")
         actor = await self._branch_owner(graph_id, branch_id)
@@ -1273,7 +1277,8 @@ class ImportWorker:
     def resolve(self, rows, lookups) -> Tuple[List[dict], List[dict]]:
         """:func:`resolve_rows` as this job resolves a batch: by its identifier, through its
         ontology's gate, a new node's id derived from its key in the graph's identity scope (else a
-        urn:uuid minted, v7), a new edge's from its ends and type."""
+        urn:uuid minted, v7), a new edge's from its ends and type — and, into the Playground, each
+        node row given its identifier."""
         scope = self._id_scope
         return resolve_rows(
             rows, lookups, mint_id=new_entity_id, ontology=self._ontology,
@@ -1281,7 +1286,8 @@ class ImportWorker:
             derive_urn=lambda seed: pointer_id(scope, seed),
             derive_edge=lambda source, target, etype: edge_pointer_id(scope, source, target, etype),
             identifier=self._identifier,
-            derive_key=(lambda value: key_pointer_id(scope, self._prop, value)) if self._prop else None)
+            derive_key=(lambda value: key_pointer_id(scope, self._prop, value)) if self._prop else None,
+            require_identifier=self._identity_required)
 
     def _settle_identifier(self) -> None:
         """Once the data source's identifier property is known: ``prop.<it>`` (``,urn`` or not) is

@@ -330,10 +330,16 @@ async def test_a_sample_is_a_blank_graph_loaded_with_it_and_described(
                                       "url": f"{str(test_client.base_url).rstrip('/')}/docs/playground"}]
     assert ds.metadata_updated_by == BEN.id and ds.metadata_updated_at
 
-    # Loaded with the sample, as one day-0 import into that graph — then projected.
+    # Loaded with the sample, as one day-0 import into that graph — then projected. The graph
+    # identifies its things by ``id``, and each carries it (its urn) and its name, as a save
+    # gives them.
+    assert ds.identity_property == "id"
     [load] = store.imports
     assert load["graph_id"] == "g_1" and load["actor"] == BEN.id and load["standard_ids"] is True
-    assert load["rows"] == playground_samples.rows(RETAIL)
+    assert load["rows"] == [
+        {**row, "properties": {**row["properties"], "id": row["urn"], "name": row["displayName"]}}
+        if row["kind"] == "node" else row
+        for row in playground_samples.rows(RETAIL)]
     nodes = [row for row in load["rows"] if row["kind"] == "node"]
     edges = [row for row in load["rows"] if row["kind"] == "edge"]
     assert (len(nodes), len(edges)) == (len(RETAIL.nodes), len(RETAIL.edges))
@@ -494,6 +500,8 @@ async def test_its_data_model_is_made_once_and_shared_by_every_graph_made_from_i
     entities = json.loads(ontology.entity_type_definitions)
     assert entities["metric"]["hierarchy"]["can_be_contained_by"] == ["dashboard"]
     assert entities["dashboard"]["hierarchy"]["can_contain"] == ["metric"]
+    # Every type has the identifier its graphs identify things by.
+    assert {t: e["fields"][0]["id"] for t, e in entities.items()} == {t: "id" for t in RETAIL.entity_types}
     sources = (await db_session.execute(select(WorkspaceDataSourceORM.ontology_id).where(
         WorkspaceDataSourceORM.id.in_([first.json()["dataSourceId"], second.json()["dataSourceId"]])
     ))).scalars().all()

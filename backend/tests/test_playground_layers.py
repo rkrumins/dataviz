@@ -97,6 +97,7 @@ async def test_a_models_template_is_the_standard_import_template(test_client: As
     assert csv.status_code == 200, csv.text
     assert csv.headers["content-disposition"] == 'attachment; filename="import-template.csv"'
     assert b"table" in csv.content and b"entityType" in csv.content
+    assert b"prop.id" in csv.content.splitlines()[0]          # what a graph on it identifies things by
     assert xlsx.status_code == 200 and xlsx.content[:2] == b"PK"
     assert (unfinished.status_code, refusal(unfinished)) == (422, "ontology_not_published")
     assert (not_offered.status_code, refusal(not_offered)) == (403, "ontology_not_offered")
@@ -290,6 +291,42 @@ async def test_adding_types_to_a_draft_edits_it_in_place(test_client: AsyncClien
     feeds = json.loads(row.relationship_type_definitions)["FEEDS"]
     assert (feeds["source_types"], feeds["target_types"]) == (["table"], ["dashboard"])
     assert "FEEDS" in json.loads(row.lineage_edge_types) and row.is_published is False
+
+
+def _identified(defs) -> dict:
+    """Each type's fields by id, in order."""
+    defs = json.loads(defs) if isinstance(defs, str) else defs
+    return {t: [f["id"] for f in d.get("fields") or []] for t, d in defs.items() if not d.get("is_system")}
+
+
+@pytest.mark.asyncio
+async def test_every_type_of_a_layer_of_ones_own_has_the_identifier_its_graphs_use(
+        test_client: AsyncClient, world):
+    """Made from a file's types or as a copy, each type's fields start with ``id``, once; and types
+    added to a layer made before it had them bring it to every type."""
+    inferred = await make_layer(test_client, name="From my file", source={"infer": INFER})
+    copied = await make_layer(test_client, name="My copy", source={"cloneOf": "ont_approved"})
+    assert _identified(inferred["entityTypeDefinitions"]) == {
+        "warehouseTable": ["id", "name", "description"], "dashboard": ["id", "name", "description"]}
+    assert _identified(copied["entityTypeDefinitions"]) == {"table": ["id"]}
+
+    older = org_layer("ont_older", published=False, owner=PG, created_by=ADA.id, scope="workspace",
+                      owner_visibility="private")
+    world.add(older)
+    await world.commit()
+    with acting(ADA, MEMBER):
+        added = await test_client.post(f"{LAYERS}/ont_older/types", json=_ADD)
+    assert added.status_code == 200, added.text
+    assert {t: ids[0] for t, ids in _identified((await fresh(world, "ont_older")).entity_type_definitions).items()} == {
+        "table": "id", "dashboard": "id"}
+
+
+def test_a_types_own_identifier_field_is_kept():
+    own = {"id": "id", "name": "SAP number", "type": "string", "required": True}
+    defs, added = playground_layers.ensure_identity_field({"a": {"fields": [own]}, "b": {"name": "B"}})
+    assert defs["a"]["fields"] == [own]
+    assert defs["b"]["fields"] == [playground_layers.IDENTITY_FIELD] and added is True
+    assert playground_layers.ensure_identity_field(defs) == (defs, False)
 
 
 @pytest.mark.asyncio

@@ -56,6 +56,7 @@ from backend.app.db.repositories import (binding_repo, ontology_definition_repo,
 from backend.app.services import (playground_layers, playground_policy, playground_samples,
                                   playground_starter, view_library, workspace_access)
 from backend.app.services.feature_flags import feature_flags
+from backend.app.services.node_identity import bind_node_write, load_node_identity
 from backend.app.services.playground_starter import EntityType, Example, RelationshipType, Starter
 from backend.app.services.versioning.import_export.resolve import pointer_id, pointer_seed
 from backend.common.models.view_library import DisplayRule, SavedQueryInput
@@ -592,7 +593,12 @@ async def _start(request: Request, background: BackgroundTasks, session: AsyncSe
     ds_id, graph_id = made["data_source_id"], made["graph_id"]
     try:
         if starter.rows:
-            loaded = await svc.bulk_ingest(graph_id=graph_id, rows=list(starter.rows), actor=user.id,
+            # A day-0 import writes its nodes as they are, past the binding every save runs: each
+            # thing takes its own name and identifier (``id``, its urn) here, as a save gives them.
+            identity = await load_node_identity(session, ds_id)
+            rows = [bind_node_write(None, row, identity) if row.get("kind") == "node" else row
+                    for row in starter.rows]
+            loaded = await svc.bulk_ingest(graph_id=graph_id, rows=rows, actor=user.id,
                                            message=starter.message, standard_ids=True)
             if loaded.get("rejected"):
                 raise RuntimeError(f"{len(loaded['rejected'])} rows were refused")
@@ -850,7 +856,8 @@ async def model_template(
     ie=Depends(get_import_export_service),
 ):
     """The standard import template for a layer on offer (csv, ndjson or xlsx): what
-    ``GET …/graphs/{graph_id}/imports/template`` gives for a graph on it."""
+    ``GET …/graphs/{graph_id}/imports/template`` gives for a graph on it — which identifies its
+    things by ``id`` (``playground_policy.IDENTITY_PROPERTY``)."""
     from fastapi.responses import Response
     from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
     from backend.app.ontology.resolver import resolve_ontology
@@ -865,7 +872,8 @@ async def model_template(
     await playground_layers.assert_offered(session, claims, user.id, ontology_id)
     layer = await SQLAlchemyOntologyRepository(session).get_by_id(ontology_id)
     data = await ie.build_template(export_format=format,
-                                   ontology=import_contract_of(resolve_ontology(None, layer)))
+                                   ontology=import_contract_of(resolve_ontology(None, layer)),
+                                   identity_property=playground_policy.IDENTITY_PROPERTY)
     return Response(content=data, media_type=MEDIA_TYPES.get(format, "application/octet-stream"),
                     headers={"Content-Disposition": f'attachment; filename="import-template.{format}"'})
 
@@ -935,6 +943,9 @@ async def add_layer_types(
     if not changed:
         return LayerTypesAdded(ontology_id=row.id, version=row.version, moved_graphs=0,
                                entity_type_ids=entity_ids, relationship_type_ids=relationship_ids)
+    # Its types each have the identifier field — those added and those it had, a layer made before
+    # the field was: this is the version its graphs move to.
+    entities, _added = playground_layers.ensure_identity_field(entities)
     req = OntologyUpdateRequest(entityTypeDefinitions=entities, relationshipTypeDefinitions=relationships)
     normalise_layer_body(req)
     made = await ontology_definition_repo.update_ontology(session, row.id, req, actor=user.id)
