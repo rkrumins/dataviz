@@ -6,8 +6,8 @@
  */
 import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { Layers, Database, Loader2, Unlink, ExternalLink, ChevronDown, Box, GitBranch, Eye, FileText, Settings2 } from 'lucide-react'
+import { useInfiniteQuery } from '@tanstack/react-query'
+import { Layers, Database, Loader2, Unlink, ExternalLink, ChevronDown, Box, GitBranch, Eye, FileText, Settings2, AlertCircle, RotateCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
@@ -17,6 +17,8 @@ import { EducationalCallout } from '../EducationalCallout'
 import { TablePagination } from '@/components/ui/TablePagination'
 
 const GROUPS_PAGE_SIZE = 8
+/** Views a workspace card loads at a time; the list's own default page. */
+const VIEWS_PAGE_SIZE = 50
 
 interface UsagePanelProps {
   ontology: OntologyDefinitionResponse
@@ -202,13 +204,23 @@ function WorkspaceUsageCard({ workspace: ws, onNavigate }: WorkspaceUsageCardPro
   const [viewsExpanded, setViewsExpanded] = useState(false)
 
   // Lazy: the workspace's views load only when this section is expanded, so a
-  // fleet of N workspaces costs zero view requests until the user asks.
-  const { data: views, isLoading: loadingViews } = useQuery({
+  // fleet of N workspaces costs zero view requests until the user asks. Paged:
+  // one page stopped at 50, so the badge is the server's total and the list
+  // loads on a page at a time.
+  const {
+    data, isLoading: loadingViews, isError, refetch,
+    fetchNextPage, hasNextPage, isFetchingNextPage, isFetchNextPageError,
+  } = useInfiniteQuery({
     queryKey: ['views', 'ws', ws.workspaceId],
-    queryFn: async () => (await listViews({ workspaceId: ws.workspaceId })).items,
+    queryFn: ({ pageParam }) => listViews({ workspaceId: ws.workspaceId, limit: VIEWS_PAGE_SIZE, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (last) => (last.hasMore && last.nextOffset != null ? last.nextOffset : undefined),
     enabled: viewsExpanded,
     staleTime: 60_000,
   })
+  const views = useMemo(() => data?.pages.flatMap(p => p.items), [data])
+  const total = data?.pages[0]?.total ?? 0
+  const remaining = Math.max(0, total - (views?.length ?? 0))
 
   return (
     <div className="border border-glass-border rounded-xl bg-canvas-elevated/50 overflow-hidden">
@@ -261,12 +273,26 @@ function WorkspaceUsageCard({ workspace: ws, onNavigate }: WorkspaceUsageCardPro
             <Loader2 className="w-3 h-3 text-ink-muted/40 animate-spin flex-shrink-0" />
           ) : views ? (
             <span className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 flex-shrink-0">
-              {views.length}
+              {total.toLocaleString()}
             </span>
           ) : (
             <span className="text-[10px] text-ink-muted/60 flex-shrink-0">show</span>
           )}
         </button>
+
+        {viewsExpanded && isError && !views && (
+          <div role="alert" className="flex items-center gap-2 px-4 pb-3 pl-10 text-[11px] text-ink-muted">
+            <AlertCircle className="w-3 h-3 text-amber-500 flex-shrink-0" />
+            <span className="flex-1">Couldn’t load this workspace’s views.</span>
+            <button
+              type="button"
+              onClick={() => void refetch()}
+              className="inline-flex items-center gap-1 font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
+            >
+              <RotateCw className="w-3 h-3" /> Retry
+            </button>
+          </div>
+        )}
 
         {viewsExpanded && views && views.length === 0 && (
           <p className="px-4 pb-3 pl-10 text-[11px] text-ink-muted italic">No views in this workspace yet.</p>
@@ -286,6 +312,23 @@ function WorkspaceUsageCard({ workspace: ws, onNavigate }: WorkspaceUsageCardPro
                 <ExternalLink className="w-2.5 h-2.5 text-ink-muted/30 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
               </button>
             ))}
+            {hasNextPage && (
+              <div className="flex items-center gap-3 px-4 py-2 pl-10 border-t border-glass-border/30">
+                <span className="text-[11px] text-ink-muted flex-1">
+                  Showing {views.length.toLocaleString()} of {total.toLocaleString()}
+                  {isFetchNextPageError && <span className="text-amber-600 dark:text-amber-400"> · the next page didn’t load</span>}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void fetchNextPage()}
+                  disabled={isFetchingNextPage}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border px-2.5 py-1 text-[11px] font-semibold text-ink-secondary hover:text-indigo-600 hover:bg-indigo-500/[0.06] disabled:opacity-50 transition-colors"
+                >
+                  {isFetchingNextPage && <Loader2 className="w-3 h-3 animate-spin" aria-hidden />}
+                  {isFetchNextPageError ? 'Try again' : `Show ${Math.min(VIEWS_PAGE_SIZE, remaining).toLocaleString()} more`}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

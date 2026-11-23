@@ -531,6 +531,29 @@ export async function getViewStats(params?: ViewStatsParams): Promise<ViewCatalo
     return apiFetch<ViewCatalogStats>(`/api/v1/views/stats${qs ? `?${qs}` : ''}`)
 }
 
+/** Exact counts of the views the caller can read (``GET /views/counts``). A view
+ *  with no data source is in ``total`` and its workspace's count, in no source's. */
+export interface ViewScopeCounts {
+    total: number
+    byWorkspace: Record<string, number>
+    byDataSource: Record<string, number>
+}
+
+/**
+ * How many views the caller can read — in all, per workspace and per data source.
+ * Use it for any "N views" figure: counting a ``listViews`` page stops at the
+ * page size. The filters narrow all three numbers.
+ */
+export async function getViewCounts(
+    params?: { workspaceIds?: string[]; dataSourceIds?: string[] },
+): Promise<ViewScopeCounts> {
+    const sp = new URLSearchParams()
+    params?.workspaceIds?.forEach(id => sp.append('workspaceIds', id))
+    params?.dataSourceIds?.forEach(id => sp.append('dataSourceIds', id))
+    const qs = sp.toString()
+    return apiFetch<ViewScopeCounts>(`/api/v1/views/counts${qs ? `?${qs}` : ''}`)
+}
+
 /** Create a new view (workspaceId required) */
 export async function createView(data: ViewCreateRequest): Promise<View> {
     return apiFetch<View>('/api/v1/views/', {
