@@ -134,6 +134,10 @@ export interface CanvasProviderStatePillProps {
  * retried. Three cases: a partial load (some entities didn't arrive), a
  * refresh that is slow or warming, and a confirmed outage while the last
  * loaded data is still shown.
+ *
+ * It does not place itself. A canvas with a status stack of its own (the
+ * Context View) shows it there, below its toolbar and with its other notices
+ * (`useCanvasProviderPill`); CanvasRouter floats it over any other canvas.
  */
 export const CanvasProviderStatePill = React.memo(function CanvasProviderStatePill({
   state,
@@ -156,41 +160,39 @@ export const CanvasProviderStatePill = React.memo(function CanvasProviderStatePi
     ? (retrying ? 'showing what’s loaded · retrying automatically' : 'showing what’s loaded · Retry loads the rest')
     : 'showing the last loaded data · watching for recovery'
   return (
-    <div className="pointer-events-none absolute top-4 left-1/2 z-40 -translate-x-1/2">
-      <div
-        role="status"
-        aria-live="polite"
-        // Opaque on purpose: the pill floats over a busy canvas and has to stay
-        // legible. (`bg-canvas-elevated/90` would paint NOTHING — the token is
-        // a bare var() and an alpha suffix emits no rule; the amber variant is
-        // a real palette colour and keeps its alpha in dark mode.)
+    <div
+      role="status"
+      aria-live="polite"
+      // Opaque on purpose: the pill floats over a busy canvas and has to stay
+      // legible. (`bg-canvas-elevated/90` would paint NOTHING — the token is
+      // a bare var() and an alpha suffix emits no rule; the amber variant is
+      // a real palette colour and keeps its alpha in dark mode.)
+      className={cn(
+        'pointer-events-auto flex items-center gap-2.5 rounded-full border py-1.5 pl-3.5 pr-2 text-xs shadow-lg',
+        calm
+          ? 'border-glass-border bg-canvas-elevated text-ink shadow-black/10'
+          : 'border-amber-300/60 bg-amber-50 text-amber-800 shadow-amber-500/10 backdrop-blur-sm dark:border-amber-500/30 dark:bg-amber-950/60 dark:text-amber-300',
+      )}
+    >
+      <span
         className={cn(
-          'pointer-events-auto flex items-center gap-2.5 rounded-full border py-1.5 pl-3.5 pr-2 text-xs shadow-lg',
-          calm
-            ? 'border-glass-border bg-canvas-elevated text-ink shadow-black/10'
-            : 'border-amber-300/60 bg-amber-50 text-amber-800 shadow-amber-500/10 backdrop-blur-sm dark:border-amber-500/30 dark:bg-amber-950/60 dark:text-amber-300',
+          'inline-block h-1.5 w-1.5 shrink-0 rounded-full animate-pulse',
+          calm ? 'bg-accent-lineage' : 'bg-amber-400',
         )}
-      >
-        <span
-          className={cn(
-            'inline-block h-1.5 w-1.5 shrink-0 rounded-full animate-pulse',
-            calm ? 'bg-accent-lineage' : 'bg-amber-400',
-          )}
-        />
-        <span className="whitespace-nowrap font-semibold">{headline}</span>
-        <span className={cn('hidden sm:inline', calm ? 'text-ink-muted' : 'text-amber-600/80 dark:text-amber-400/70')}>
-          — {detail}
-        </span>
-        {onRetry && (
-          <button
-            onClick={onRetry}
-            className="ml-1 shrink-0 rounded-full p-1 transition-colors hover:bg-black/[0.05] dark:hover:bg-white/[0.06]"
-            title="Retry now"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-          </button>
-        )}
-      </div>
+      />
+      <span className="whitespace-nowrap font-semibold">{headline}</span>
+      <span className={cn('hidden sm:inline', calm ? 'text-ink-muted' : 'text-amber-600/80 dark:text-amber-400/70')}>
+        — {detail}
+      </span>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          className="ml-1 shrink-0 rounded-full p-1 transition-colors hover:bg-black/[0.05] dark:hover:bg-white/[0.06]"
+          title="Retry now"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+        </button>
+      )}
     </div>
   )
 })

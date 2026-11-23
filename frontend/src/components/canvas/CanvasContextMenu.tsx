@@ -60,6 +60,9 @@ export interface LayerMenuModel {
     onAddEntity?: () => void
     onNewGroup?: () => void
     onBuild?: () => void
+    /** Select everything the layer shows (layerSelection.ts) — in both views, and
+     *  during a trace too: selecting writes nothing. */
+    selectAll?: { count: number; onSelect: () => void }
 }
 
 export interface ContextMenuAction {
@@ -68,6 +71,11 @@ export interface ContextMenuAction {
     icon: keyof typeof LucideIcons
     shortcut?: string
     disabled?: boolean
+    /** A quieter second line — for a disabled item, why. */
+    hint?: string
+    /** A switch on the item's own row, changing what the item does (its label
+     *  says what it does now). Flipping it keeps the menu open. */
+    toggle?: { label: string; checked: boolean; onChange: (checked: boolean) => void }
     danger?: boolean
     dividerAfter?: boolean
     onClick: () => void
@@ -125,6 +133,25 @@ export interface CanvasContextMenuProps {
     /** Narrow the canvas to the right-clicked entity (or the selection it is
      *  part of): one entry per reach, shown in a "Narrow to this" submenu. */
     narrowActions?: ContextMenuAction[]
+    /** Nothing here can be edited (Published, or a trace holding the canvas):
+     *  View & Edit reads as View details — the panel it opens reads only. */
+    viewOnly?: boolean
+    /** Open what is inside the entity (or the selection it is part of) — a
+     *  level at a time, or every level — and close it all again. Right after
+     *  View: opening an entity is the first thing after looking at it. */
+    expandActions?: ContextMenuAction[]
+    /** An empty column right-clicked: select everything in ITS layer, beside
+     *  `onSelectAll`'s everything the canvas shows. */
+    selectLayer?: { name: string; count: number; onSelect: () => void } | null
+    /** A trace holds the canvas. Its own actions lead the entity's menu (start
+     *  it again from here, add this, take this out), and every menu ends by
+     *  saying why there is nothing to edit, with the way out. */
+    trace?: {
+        actions: ContextMenuAction[]
+        /** Editing would otherwise be on — the trace is what pauses it. */
+        editingPaused: boolean
+        onExit: () => void
+    }
 }
 
 // ============================================
@@ -160,6 +187,10 @@ export function CanvasContextMenu({
     onMoveToLayer,
     layerMenu = null,
     narrowActions = [],
+    viewOnly = false,
+    expandActions = [],
+    selectLayer = null,
+    trace,
 }: CanvasContextMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null)
     const listRef = useRef<HTMLDivElement>(null)
@@ -217,6 +248,16 @@ export function CanvasContextMenu({
     // and narrowing the canvas are the Technical view's.
     const technical = usePersonaMode() === 'technical'
 
+    /** "Select all in <Layer> (N)" — offered with nothing to select too, saying why. */
+    const selectAllIn = useCallback((name: string, count: number, onSelect: () => void): ContextMenuAction => ({
+        id: 'select-layer',
+        label: `Select all in ${name}${count > 0 ? ` (${count.toLocaleString()})` : ''}`,
+        icon: 'CheckSquare',
+        disabled: count === 0,
+        hint: count === 0 ? 'Nothing in this layer is on the canvas yet' : undefined,
+        onClick: () => { if (count > 0) { onSelect(); onClose() } },
+    }), [onClose])
+
     // Build actions based on target type
     const actions = useCallback((): ContextMenuAction[] => {
         if (!target) return []
@@ -224,15 +265,32 @@ export function CanvasContextMenu({
         const result: ContextMenuAction[] = []
 
         if (target.type === 'node') {
+            // A trace's own actions first: on a trace card they are what the
+            // reader came for.
+            if (trace && trace.actions.length > 0) {
+                const own = trace.actions.map((a) => ({ ...a, onClick: () => { a.onClick(); onClose() } }))
+                own[own.length - 1] = { ...own[own.length - 1], dividerAfter: true }
+                result.push(...own)
+            }
+
             // Node actions
             if (onEditNode) {
                 result.push({
                     id: 'edit',
-                    label: 'View & Edit',
+                    label: viewOnly ? 'View details' : 'View & Edit',
                     icon: 'PanelRight',
                     shortcut: 'Enter',
                     onClick: () => { onEditNode(target.id); onClose() }
                 })
+            }
+
+            if (expandActions.length > 0) {
+                if (result.length > 0) result[result.length - 1] = { ...result[result.length - 1], dividerAfter: true }
+                result.push(...expandActions.map((a, i) => ({
+                    ...a,
+                    dividerAfter: i === expandActions.length - 1,
+                    onClick: () => { a.onClick(); onClose() },
+                })))
             }
 
             if (onTraceNode) {
@@ -422,11 +480,15 @@ export function CanvasContextMenu({
                 })
             }
 
+            if (selectLayer) {
+                result.push(selectAllIn(selectLayer.name, selectLayer.count, selectLayer.onSelect))
+            }
             if (onSelectAll) {
                 result.push({
                     id: 'select-all',
-                    label: 'Select All',
-                    icon: 'CheckSquare',
+                    // Beside a layer's own, "all" needs saying: the whole canvas.
+                    label: selectLayer ? 'Select everything' : 'Select All',
+                    icon: selectLayer ? 'ListChecks' : 'CheckSquare',
                     shortcut: '⌘A',
                     onClick: () => { onSelectAll(); onClose() }
                 })
@@ -438,9 +500,12 @@ export function CanvasContextMenu({
                     id: 'layer-settings',
                     label: m.canEdit ? 'Layer settings…' : 'Layer details…',
                     icon: 'SlidersHorizontal',
-                    dividerAfter: true,
+                    dividerAfter: !m.selectAll,
                     onClick: () => { m.onOpenSettings?.(); onClose() },
                 })
+            }
+            if (m.selectAll) {
+                result.push({ ...selectAllIn(m.name, m.selectAll.count, m.selectAll.onSelect), dividerAfter: true })
             }
             if (m.canEdit) {
                 const adds: ContextMenuAction[] = []
@@ -539,7 +604,8 @@ export function CanvasContextMenu({
         return result
     }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections, onAskAboutNode, onExportNode,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
-        onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical])
+        onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical,
+        viewOnly, trace, selectLayer, selectAllIn, expandActions])
 
     // Get icon component
     const getIcon = (iconName: keyof typeof LucideIcons) => {
@@ -587,6 +653,9 @@ export function CanvasContextMenu({
             {isOpen && target && (
                 <motion.div
                     ref={menuRef}
+                    // Esc closes the menu first — and only the menu (a trace's own
+                    // Esc, which leaves the trace, waits for it to be gone).
+                    data-canvas-context-menu
                     initial={{ opacity: 0, scale: 0.95, y: -5 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     transition={{ duration: 0.1 }}
@@ -634,7 +703,7 @@ export function CanvasContextMenu({
                                     })}
                                 </div>
                             )}
-                            {!layerMenu.canEdit && (
+                            {!layerMenu.canEdit && !trace && (
                                 <p className="mt-1 text-[11px] leading-snug text-ink-muted">
                                     Layers change in a draft — start editing to insert, rename, recolour or move them.
                                 </p>
@@ -721,21 +790,28 @@ export function CanvasContextMenu({
                         <div className="py-1">
                             {actions().map((action, index) => (
                                 <React.Fragment key={action.id}>
+                                    <div className="flex items-center">
                                     <button
                                         onClick={action.onClick}
                                         disabled={action.disabled}
                                         className={cn(
-                                            "w-full flex items-center justify-between gap-3 px-3 py-2 text-sm transition-colors",
+                                            "flex-1 min-w-0 flex items-center justify-between gap-3 px-3 py-2 text-sm transition-colors",
                                             action.disabled
-                                                ? "text-ink-muted cursor-not-allowed opacity-50"
+                                                ? "text-ink-muted cursor-not-allowed"
                                                 : action.danger
                                                     ? "text-red-500 hover:bg-red-500/10"
                                                     : "text-ink hover:bg-accent-lineage/10 hover:text-accent-lineage"
                                         )}
                                     >
-                                        <span className="flex items-center gap-2.5">
-                                            {getIcon(action.icon)}
-                                            {action.label}
+                                        <span className="flex items-start gap-2.5 text-left">
+                                            <span className={cn("mt-0.5 flex-none", action.disabled && "opacity-50")}>{getIcon(action.icon)}</span>
+                                            <span className="min-w-0">
+                                                <span className={cn("block", action.disabled && "opacity-50")}>{action.label}</span>
+                                                {/* Kept readable on a disabled item: it is the reason. */}
+                                                {action.hint && (
+                                                    <span className="block max-w-[15rem] text-[11px] leading-snug text-ink-muted">{action.hint}</span>
+                                                )}
+                                            </span>
                                         </span>
                                         {action.shortcut && (
                                             <span className="text-[10px] text-ink-muted bg-black/5 dark:bg-white/10 px-1.5 py-0.5 rounded font-mono">
@@ -743,6 +819,32 @@ export function CanvasContextMenu({
                                             </span>
                                         )}
                                     </button>
+                                    {action.toggle && (
+                                        <button
+                                            type="button"
+                                            role="switch"
+                                            aria-checked={action.toggle.checked}
+                                            aria-label={action.toggle.label}
+                                            onClick={() => action.toggle!.onChange(!action.toggle!.checked)}
+                                            className={cn(
+                                                "shrink-0 mr-2 flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[10.5px] font-medium transition-colors",
+                                                "text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5",
+                                                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40",
+                                            )}
+                                        >
+                                            {action.toggle.label}
+                                            <span className={cn(
+                                                "relative inline-flex h-3.5 w-6 rounded-full transition-colors",
+                                                action.toggle.checked ? "bg-accent-lineage" : "bg-black/15 dark:bg-white/20",
+                                            )}>
+                                                <span className={cn(
+                                                    "absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white shadow transition-transform",
+                                                    action.toggle.checked ? "translate-x-3" : "translate-x-0.5",
+                                                )} />
+                                            </span>
+                                        </button>
+                                    )}
+                                    </div>
                                     {action.dividerAfter && index < actions().length - 1 && (
                                         <div className="border-t border-glass-border my-1" />
                                     )}
@@ -751,6 +853,23 @@ export function CanvasContextMenu({
                         </div>
                     )}
                     </div>
+                    {/* Why there is nothing to edit while a trace is on, and the way
+                        out — instead of the menu simply going quiet about it. */}
+                    {trace && (
+                        <div className="flex-none flex items-center justify-between gap-3 px-3 pt-2 pb-1 mt-1 border-t border-glass-border">
+                            <span className="flex items-center gap-1.5 text-[11px] text-ink-muted">
+                                <LucideIcons.Lock className="w-3 h-3 flex-none" aria-hidden="true" />
+                                {trace.editingPaused ? 'Editing is paused while tracing' : 'Viewing a trace'}
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => { trace.onExit(); onClose() }}
+                                className="shrink-0 rounded-md px-2 py-0.5 text-[11.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                            >
+                                Exit trace
+                            </button>
+                        </div>
+                    )}
                 </motion.div>
             )}
         </>,

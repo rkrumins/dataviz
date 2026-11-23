@@ -1,4 +1,5 @@
 import tailwindcssAnimate from 'tailwindcss-animate'
+import { Z_INDEX } from './src/lib/zIndex'
 
 // ── Theme colours kept in CSS variables, with opacity modifiers that work ──
 //
@@ -156,6 +157,9 @@ export default {
       backdropBlur: {
         glass: 'var(--nx-glass-blur)',
       },
+      // The layering scale (`z-canvas`, `z-status`, `z-popover` …), named once
+      // in src/lib/zIndex.ts so a class and an inline style cannot disagree.
+      zIndex: Object.fromEntries(Object.entries(Z_INDEX).map(([name, z]) => [name, String(z)])),
       boxShadow: {
         'glass': '0 8px 32px rgba(0, 0, 0, 0.12)',
         'glass-lg': '0 16px 48px rgba(0, 0, 0, 0.16)',

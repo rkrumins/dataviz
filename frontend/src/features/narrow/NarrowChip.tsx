@@ -66,7 +66,10 @@ export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsVi
   }
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-3 z-30 flex justify-center px-4">
+    // Placed by the canvas's status stack (CanvasStatusStack), which owns the
+    // top of the canvas and its layer: positioned here, at the columns' own
+    // z-30, it sat under the column headers that come later in the page.
+    <div className="pointer-events-none flex w-full justify-center">
       <motion.div
         role="status"
         aria-label="The canvas is narrowed"

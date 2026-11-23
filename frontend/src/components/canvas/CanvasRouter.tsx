@@ -30,6 +30,7 @@ import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVers
 import { useStagedDraftPersistence } from '@/features/canvas-drafts/useStagedDraftPersistence'
 import { RestoredDraftBanner } from '@/features/canvas-drafts/RestoredDraftBanner'
 import { CanvasProviderStateOverlay, CanvasProviderStatePill } from './CanvasProviderStateOverlay'
+import { CanvasProviderPillSlot } from './canvasProviderPill'
 import { isHydrationFailure } from '@/hooks/useGraphHydration'
 import { useAutoDraftForBlankModel } from '@/features/versioning/model/useAutoDraftForBlankModel'
 import { GraphCanvas } from './GraphCanvas'
@@ -186,6 +187,21 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     }
   }, [layoutType])
 
+  // What a load that ended short says over a canvas that keeps its data. The
+  // Context View shows it in its own status stack, below its toolbar and with
+  // its other notices — floated over the whole canvas, as it is for the others,
+  // it landed on that toolbar's search and menu buttons.
+  const providerPill = failedState && hasNodes ? (
+    <CanvasProviderStatePill
+      state={failedState}
+      partial={nodeFetchFailures > 0}
+      missingEntities={missingEntityCount}
+      retrying={!autoRetryStopped}
+      onRetry={retryHydration}
+    />
+  ) : null
+  const pillInCanvas = CanvasComponent === ReferenceModelCanvas
+
   return (
     <ErrorBoundary
       resetKeys={[activeView?.id, providerVersion]}
@@ -214,6 +230,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
         className="mx-4 mt-2"
       />
       <div className="relative flex-1 min-h-0">
+        <CanvasProviderPillSlot value={pillInCanvas ? providerPill : null}>
         <AnimatePresence>
           <motion.div
             key={layoutType}
@@ -231,6 +248,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
             </Suspense>
           </motion.div>
         </AnimatePresence>
+        </CanvasProviderPillSlot>
 
         {failedState && !hasNodes && (
           <CanvasProviderStateOverlay
@@ -238,14 +256,10 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
             onRetry={retryHydration}
           />
         )}
-        {failedState && hasNodes && (
-          <CanvasProviderStatePill
-            state={failedState}
-            partial={nodeFetchFailures > 0}
-            missingEntities={missingEntityCount}
-            retrying={!autoRetryStopped}
-            onRetry={retryHydration}
-          />
+        {providerPill && !pillInCanvas && (
+          <div className="pointer-events-none absolute top-4 left-1/2 z-status -translate-x-1/2">
+            {providerPill}
+          </div>
         )}
 
         {activeView && layoutType !== 'graph' && layoutType !== 'reference' && (

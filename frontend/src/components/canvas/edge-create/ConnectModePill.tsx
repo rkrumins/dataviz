@@ -71,7 +71,9 @@ export function ConnectModePill(props: ConnectModePillProps) {
       role="status"
       aria-live="polite"
       data-connect-ui
-      className="pointer-events-none absolute inset-x-0 top-3 z-40 flex justify-center px-4"
+      // Placed by the canvas's status stack (CanvasStatusStack), under any
+      // notice that outranks it rather than on top of it.
+      className="pointer-events-none flex w-full justify-center"
     >
       {/* Keyed on the nudge: each stray click remounts the capsule, replaying its shake. */}
       <div

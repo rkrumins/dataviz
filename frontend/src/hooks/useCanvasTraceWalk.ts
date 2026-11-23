@@ -39,6 +39,24 @@ const EMPTY_SEEDS: readonly string[] = []
  *  this traces its first `MAX_TRACE_SEEDS` (the canvas says so). */
 export const MAX_TRACE_SEEDS = 25
 
+/**
+ * Adding to a trace: which of `urns` it would add (those it does not start
+ * from already), and — when they would take it past the cap — why it cannot.
+ * All or nothing: adding the first few of a selection and quietly dropping the
+ * rest would trace something other than what was picked.
+ */
+export function traceSeedAddition(
+    seeds: readonly string[],
+    urns: readonly string[],
+): { urns: string[]; blocked: string | null } {
+    const added = [...new Set(urns)].filter(u => !seeds.includes(u))
+    const room = MAX_TRACE_SEEDS - seeds.length
+    const blocked = added.length === 0 || added.length <= room ? null
+        : room <= 0 ? `This trace already starts from ${MAX_TRACE_SEEDS} entities, the most it can.`
+            : `Only ${room} more fit: a trace starts from at most ${MAX_TRACE_SEEDS} entities.`
+    return { urns: added, blocked }
+}
+
 export interface CanvasTraceWalk {
     isTracing: boolean
     /** The FIRST seed. Kept for every consumer that reasons about one focal

@@ -87,6 +87,9 @@ export interface UseCanvasInteractionsOptions {
     onCloseEntityDrawer?: () => boolean
     /** Callback to exit an active trace (ESC cascade). Should return true if it handled the exit. */
     onExitTrace?: () => boolean
+    /** ESC with nothing open and nothing selected: put away a search still shaping the canvas.
+     *  Should return true if there was one to clear. */
+    onClearSearch?: () => boolean
     /** Arm edge connect-mode from the currently selected node (e.g. 'C' key). */
     onConnectMode?: (sourceNodeId: string) => void
     /** 'C' with no single node selected: turn the Connect tool on or off. */
@@ -265,6 +268,7 @@ export function useCanvasInteractions(
         onCloseEdgePanel,
         onCloseEntityDrawer,
         onExitTrace,
+        onClearSearch,
         onConnectMode,
         onConnectTool,
         onDuplicateWithOptions,
@@ -745,6 +749,9 @@ export function useCanvasInteractions(
                 // Edge panel was open and closed
             } else if (onCloseEntityDrawer?.()) {
                 // Entity drawer was open and closed
+            } else if (useCanvasStore.getState().selectedNodeIds.length === 0 && onClearSearch?.()) {
+                // Nothing open and nothing held: the search was the last thing
+                // shaping the canvas, and Esc puts it away.
             } else {
                 clearSelection()
             }

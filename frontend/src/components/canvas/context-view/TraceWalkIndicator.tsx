@@ -239,10 +239,15 @@ export function TraceWalkIndicator(props: TraceWalkIndicatorProps) {
             aria-live="polite"
             data-trace-phase={phase}
             // Flex-centred, never transform-centred: the capsule owns its own
-            // transform channel for the entrance glide. z-40 clears the
-            // columns' own chrome (z-30), which would otherwise paint over the
-            // buttons and make the way out unclickable.
-            className="pointer-events-none absolute inset-x-0 top-3 z-40 flex justify-center px-4"
+            // transform channel for the entrance glide. On the canvas the
+            // status stack (CanvasStatusStack) places it, above the columns and
+            // with the other notices; on the Lens board it places itself, and
+            // z-40 clears that board's own chrome (z-30), which would otherwise
+            // paint over the buttons and make the way out unclickable.
+            className={cn(
+                'pointer-events-none flex justify-center',
+                surface === 'lens' ? 'absolute inset-x-0 top-3 z-40 px-4' : 'w-full',
+            )}
         >
             <div
                 className={cn(
