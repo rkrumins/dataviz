@@ -38,8 +38,11 @@ const LIVE = [view('live_a'), view('live_b')]
 const TRASHED = [view('gone_c', { deletedAt: '2026-02-01T00:00:00Z' })]
 
 const toggleFavourite = vi.fn()
+// What the list was asked for.
+const listAsked = vi.fn()
 vi.mock('@/hooks/useExplorerViews', () => ({
   useExplorerViews: (filters: { category: string | null }) => {
+    listAsked(filters)
     // A new array each render, as a refetch or an optimistic patch gives.
     const views = [...(filters.category === 'deleted' ? TRASHED : LIVE)]
     return {
@@ -178,6 +181,14 @@ describe('ExplorerPage stats tiles', () => {
     const asked = statsAsked.mock.calls.at(-1)?.[0]
     expect(asked.viewTypes).toEqual(['graph'])
     expect(asked.createdBy).toBeUndefined()
+  })
+
+  it('count recent views from the cutoff the Recent list uses', () => {
+    statsAsked.mockClear()
+    renderPage('/explorer?category=recently-added')
+    const since = listAsked.mock.calls.at(-1)?.[0].recentSince
+    expect(since).toEqual(expect.any(String))
+    expect(statsAsked.mock.calls.at(-1)?.[0].recentSince).toBe(since)
   })
 
   it('switch to their category and keep every other filter', async () => {

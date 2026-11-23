@@ -167,10 +167,10 @@ export function ExplorerPage() {
   )
   // The tiles are shortcuts to a category (Total: none), so each counts what
   // clicking it shows — the current filters with the tile's own category, not
-  // the one open now.
+  // the one open now. Recent counts from the Recent list's own cutoff.
   const statsParams = useMemo(
-    () => toQueryParams(resolveFilters({ ...filterState, category: null }, resolveCtx)),
-    [filterState, resolveCtx],
+    () => ({ ...toQueryParams(resolveFilters({ ...filterState, category: null }, resolveCtx)), recentSince }),
+    [filterState, resolveCtx, recentSince],
   )
   const { stats: catalogStats, isFetching: statsFetching } = useViewStats(statsParams)
 

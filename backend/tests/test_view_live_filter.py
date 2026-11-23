@@ -18,12 +18,11 @@ ALLOWED = {
     # One view by id, where access rules decide (a staged view is private to its importer); and
     # a person's own drafts, which include the view a draft holds.
     "api/v1/endpoints/views.py": 2,
-    # Data freshness after a graph publish: a staged view is stamped too.
-    "api/v1/endpoints/versioning.py": 2,
     # Sharing a staged view with the people reviewing its draft.
     "api/v1/endpoints/view_grants.py": 1,
-    # Deleting a view: its importer can delete a staged one.
-    "db/repositories/view_repo.py": 1,
+    # Deleting a view: its importer can delete a staged one. And data freshness after a data
+    # change (``touch_views_data_updated``): a staged view is stamped too.
+    "db/repositories/view_repo.py": 2,
     # Whether an identity is taken in a workspace: a staged view holds its identity.
     "services/view_transfer/importing.py": 1,
     # What a draft changes in views, which includes the views waiting in it.

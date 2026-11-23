@@ -242,8 +242,12 @@ def _health_for(row: ViewORM, facts: _ScopeFacts) -> Dict[str, Optional[str]]:
             return {"status": "broken", "reason": "Data source no longer exists"}
         if not facts.ds_active:
             return {"status": "warning", "reason": "Data source is inactive"}
+    # Stale is judged on the last change of either kind, as the "needs attention"
+    # filter is (``_last_change_expr``): a view whose data is published every week
+    # is not stale because nobody has touched its settings since spring.
+    changed = max(row.updated_at or "", row.data_updated_at or "")
     try:
-        updated = datetime.fromisoformat((row.updated_at or "").replace("Z", "+00:00"))
+        updated = datetime.fromisoformat(changed.replace("Z", "+00:00"))
         if updated.tzinfo is None:
             updated = updated.replace(tzinfo=timezone.utc)
         age_days = (datetime.now(timezone.utc) - updated).days
@@ -661,7 +665,7 @@ async def create_view(
         config=json.dumps(config) if config else "{}",
         visibility=req.visibility or "private",
         created_by=user_id,
-        tags=json.dumps(req.tags) if req.tags else None,
+        tags=json.dumps(req.tags, ensure_ascii=False) if req.tags else None,
         is_pinned=req.is_pinned,
         ontology_digest=ontology_digest,
     )
@@ -759,7 +763,7 @@ async def update_view(
     # 422s before reaching this function; skipping it here keeps a direct
     # repo caller from bypassing that rule too.
     if req.tags is not None:
-        row.tags = json.dumps(req.tags)
+        row.tags = json.dumps(req.tags, ensure_ascii=False)
     if req.is_pinned is not None:
         row.is_pinned = req.is_pinned
     if ontology_digest is not None:
@@ -1499,7 +1503,7 @@ async def _promote_staged_import(
     row.config = merged_config
     row.name = label.get("name") or row.name
     row.description = label.get("description") or None
-    row.tags = json.dumps(label["tags"]) if label.get("tags") else None
+    row.tags = json.dumps(label["tags"], ensure_ascii=False) if label.get("tags") else None
     row.view_type = label.get("viewType") or row.view_type
     if staged.get("portableId"):
         row.portable_id = staged["portableId"]
@@ -1826,12 +1830,13 @@ def _apply_view_filters(
 
     # Tag filter — OR semantics across the supplied tags. Tags are stored
     # as a JSON-encoded string (e.g. ``["finance","pii"]``), so we look
-    # for the quoted token. This is a pragmatic match that's safe for
-    # normal tag values (alphanumeric + dashes); more exotic characters
-    # should be normalised upstream.
+    # for the token as JSON writes it. In both spellings: tags written before
+    # 2026-11 escaped every non-ASCII character (``"Caf\u00e9"``), newer ones
+    # store it as typed (``"Café"``), and the filter must find either.
     if tags:
+        tokens = {json.dumps(t, ensure_ascii=a) for t in tags for a in (False, True)}
         query = query.where(
-            or_(*[ViewORM.tags.ilike(_contains(f'"{t}"'), escape="\\") for t in tags])
+            or_(*[ViewORM.tags.ilike(_contains(token), escape="\\") for token in sorted(tokens)])
         )
 
     # Search / attention both need workspace + data source joins; do them once.
@@ -1864,8 +1869,9 @@ def _apply_view_filters(
             ]))
 
     if attention_only:
-        # Views "needing attention" are those that are stale (not updated in
-        # 90 days), or reference an inactive/missing workspace or data source.
+        # Views "needing attention" are those that are stale (nothing changed,
+        # settings or data, in 90 days), or reference an inactive/missing
+        # workspace or data source.
         # Mirrors the useViewHealth hook on the frontend so server-side
         # filtering returns the same set the client would compute locally.
         stale_cutoff = (
@@ -1877,7 +1883,7 @@ def _apply_view_filters(
         )
         query = query.where(
             or_(
-                ViewORM.updated_at < stale_cutoff,
+                _last_change_expr() < stale_cutoff,  # nothing changed, settings or data
                 WorkspaceORM.id.is_(None),          # workspace missing (broken)
                 WorkspaceORM.is_active.is_(False),  # workspace inactive (warning)
                 WorkspaceDataSourceORM.is_active.is_(False),
@@ -2079,28 +2085,33 @@ def _view_order_keys(sort: Optional[str], rank: Dict[str, int]):
     if sort == "modified-asc":
         # The same "last changed" the list's Updated column shows, oldest first.
         return [_last_change_expr().asc()]
+    # A–Z as people read it: "apple" sits beside "Apple", not after "Zebra".
+    by_name = func.lower(ViewORM.name)
     if sort == "az":
-        return [ViewORM.name.asc()]
+        return [by_name.asc()]
     if sort == "za":
-        return [ViewORM.name.desc()]
+        return [by_name.desc()]
+    # Equal likes fall back to the last change, settings or data, as the list's
+    # Updated column shows it.
     if sort == "popular":
-        return [_favourite_count().desc(), ViewORM.updated_at.desc()]
+        return [_favourite_count().desc(), _last_change_expr().desc()]
     if sort == "likes-asc":
-        return [_favourite_count().asc(), ViewORM.updated_at.desc()]
+        return [_favourite_count().asc(), _last_change_expr().desc()]
     if sort in ("type-az", "type-za"):
         label = case(_VIEW_TYPE_SORT_LABELS, value=ViewORM.view_type, else_=ViewORM.view_type)
-        return [label.asc() if sort == "type-az" else label.desc(), ViewORM.name.asc()]
+        return [label.asc() if sort == "type-az" else label.desc(), by_name.asc()]
     if sort in ("owner-az", "owner-za"):
         # Positions in name order (reversed for Z→A); a creator with no account sorts last.
         if not rank:
-            return [ViewORM.name.asc()]
-        return [case(rank, value=ViewORM.created_by, else_=len(rank)).asc(), ViewORM.name.asc()]
+            return [by_name.asc()]
+        return [case(rank, value=ViewORM.created_by, else_=len(rank)).asc(), by_name.asc()]
     if sort == "most-opened":
         if not rank:
             return [_last_change_expr().desc()]
         return [case(rank, value=ViewORM.id, else_=0).desc(), _last_change_expr().desc()]
-    # Default (no sort, or one this list doesn't know): settings-updated desc.
-    return [ViewORM.updated_at.desc()]
+    # Default (no sort, or one this list doesn't know): recently modified, as the
+    # endpoint documents — the later of a settings edit and a data publish.
+    return [_last_change_expr().desc()]
 
 
 async def count_views(session: AsyncSession, **filters) -> int:
@@ -2561,6 +2572,7 @@ async def get_view_stats(
     deleted_only: bool = False,
     attention_only: bool = False,
     readable=None,
+    recent_since: Optional[str] = None,
 ) -> ViewCatalogStats:
     """Compute the Explorer stats bar numbers for a given filter set.
 
@@ -2612,16 +2624,19 @@ async def get_view_stats(
     total_result = await session.execute(total_query)
     total = total_result.scalar_one() or 0
 
-    # Recently added — same filters plus a created_after overlay.
-    seven_days_ago = (
+    # Recently added — same filters plus a created_after overlay. From the
+    # caller's own cutoff when it sends one: the Explorer's Recent list holds its
+    # "seven days ago" from when the page opened, and the tile must count that
+    # list, not a window that slides on with every refetch.
+    since = recent_since or (
         datetime.now(timezone.utc) - timedelta(days=7)
     ).isoformat()
     # Caller may already have a stricter created_after; use the later
     # of the two so we never broaden what they asked for.
     effective_created_after = (
-        max(created_after, seven_days_ago)
+        max(created_after, since)
         if created_after
-        else seven_days_ago
+        else since
     )
     recent_kwargs = {**filter_kwargs, "created_after": effective_created_after}
     recent_query = _apply_view_filters(
@@ -2699,6 +2714,50 @@ async def set_context_model_version(
         return None
     await session.refresh(row)
     return await _to_enriched_response(session, row, user_id)
+
+
+async def touch_views_data_updated(
+    session: AsyncSession, ds_id: str, actor: Optional[str], *,
+    summary: str = "Underlying data updated", changes: Optional[dict] = None,
+) -> int:
+    """Stamp ``data_updated_at``/``data_updated_by`` on every live view that reads
+    data source ``ds_id``, and record a ``data_changed`` activity on each (the
+    timeline's Data channel). Returns how many views it stamped; the caller commits.
+
+    The views that read it are its own and, when it is its workspace's default,
+    the views with no data source of their own there — they read it too
+    (``SourceKindSets.kind_for``), and missed every publish while only the
+    first kind was stamped. ``updated_at`` is self-assigned so the column's
+    ``onupdate`` does not fire: data freshness must not pose as a settings edit
+    (the whole reason the two are separate). ``actor`` is None for a change made
+    outside this app, which nobody here published."""
+    from backend.app.db.repositories import data_source_repo, view_activity_repo
+
+    reads = ViewORM.data_source_id == ds_id
+    ds = await session.get(WorkspaceDataSourceORM, ds_id)
+    if ds is not None:
+        defaults = await data_source_repo.default_data_source_ids(session, [ds.workspace_id])
+        if defaults.get(ds.workspace_id) == ds_id:
+            reads = or_(reads, and_(
+                ViewORM.data_source_id.is_(None), ViewORM.workspace_id == ds.workspace_id,
+            ))
+    live = and_(reads, ViewORM.deleted_at.is_(None))
+    # Snapshot the affected views BEFORE the bulk update, for their activity rows.
+    affected = (await session.execute(select(ViewORM.id, ViewORM.workspace_id).where(live))).all()
+    if not affected:
+        return 0
+    await session.execute(
+        update(ViewORM).where(live)
+        .values(data_updated_at=datetime.now(timezone.utc).isoformat(), data_updated_by=actor,
+                updated_at=ViewORM.updated_at)
+        .execution_options(synchronize_session=False)
+    )
+    for view_id, workspace_id in affected:
+        await view_activity_repo.record_view_activity(
+            session, view_id=view_id, workspace_id=workspace_id,
+            action="data_changed", actor=actor, summary=summary, changes=changes,
+        )
+    return len(affected)
 
 
 async def last_built_from(session: AsyncSession, user_id: str, template_ids: Sequence[str]) -> Dict[str, str]:

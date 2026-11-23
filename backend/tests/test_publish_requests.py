@@ -174,6 +174,40 @@ async def test_requester_can_withdraw(test_client: AsyncClient, db_session):
     assert after.json().get("publishRequest") is None
 
 
+@pytest.mark.asyncio
+async def test_asking_and_answering_are_not_edits_of_the_view(
+    test_client: AsyncClient, db_session,
+):
+    """The Explorer sorts and filters on ``updated_at``: asking for publication,
+    withdrawing or declining it leaves it alone. Approving changes who can see
+    the view — a settings edit, stamped as one."""
+    vid = await _seed(db_session)
+    then = "2026-01-01T00:00:00+00:00"
+    row = await db_session.get(ViewORM, vid)
+    row.updated_at = then
+    await db_session.commit()
+
+    async def updated_at() -> str:
+        await db_session.refresh(row)
+        return row.updated_at
+
+    with _auth(user=CREATOR, claims=MEMBER_CLAIMS):
+        assert (await test_client.post(f"/api/v1/views/{vid}/publish-request", json={})).status_code == 200
+        assert await updated_at() == then
+        assert (await test_client.delete(f"/api/v1/views/{vid}/publish-request")).status_code == 204
+        assert await updated_at() == then
+        await test_client.post(f"/api/v1/views/{vid}/publish-request", json={})
+    with _auth(user=ADMIN, claims=ADMIN_CLAIMS):
+        assert (await test_client.post(f"/api/v1/views/{vid}/publish-request/deny", json={})).status_code == 200
+    assert await updated_at() == then
+    with _auth(user=CREATOR, claims=MEMBER_CLAIMS):
+        await test_client.post(f"/api/v1/views/{vid}/publish-request", json={})
+    with _auth(user=ADMIN, claims=ADMIN_CLAIMS):
+        assert (await test_client.post(f"/api/v1/views/{vid}/publish-request/approve")).status_code == 200
+    assert await updated_at() > then
+    assert row.updated_by == ADMIN.id
+
+
 # ── the open-policy shortcut ─────────────────────────────────────────
 
 @pytest.mark.asyncio

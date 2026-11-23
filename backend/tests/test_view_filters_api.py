@@ -147,6 +147,26 @@ async def test_fifty_contributors_is_fine(test_client: AsyncClient):
     assert resp.status_code == 200
 
 
+async def test_a_negative_offset_is_422(test_client: AsyncClient):
+    resp = await test_client.get("/api/v1/views/", params={"offset": -1})
+    assert resp.status_code == 422, resp.text
+
+
+async def test_stats_count_recent_views_from_the_cutoff_sent(test_client: AsyncClient, db_session):
+    """The Recent list's cutoff, sent as ``recentSince``, is the tile's too."""
+    await _seed(
+        db_session, WorkspaceORM(id="ws_main", name="Main"),
+        _view("v_mar1", created_at="2026-03-01T10:00:00+00:00"),
+        _view("v_mar5", created_at="2026-03-05T10:00:00+00:00"),
+    )
+    resp = await test_client.get("/api/v1/views/stats", params={"recentSince": "2026-03-03T00:00:00.000Z"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["recentlyAdded"] == 1
+    bad = await test_client.get("/api/v1/views/stats", params={"recentSince": "last week"})
+    assert bad.status_code == 422
+    assert "recentSince" in bad.json()["detail"]
+
+
 # ── people ────────────────────────────────────────────────────────────
 
 async def test_contributor_roles(test_client: AsyncClient, db_session):

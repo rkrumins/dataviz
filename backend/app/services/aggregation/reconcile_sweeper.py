@@ -1440,6 +1440,8 @@ class ReconciliationSweeper:
                     await self._finalize_action(session, action, mode)
                     await session.commit()
                 result.actions += 1
+                if action.reason == "raw_drift":
+                    await self._touch_views(action)
             except asyncio.CancelledError:
                 raise
             except HeldError as exc:
@@ -1488,6 +1490,35 @@ class ReconciliationSweeper:
         state.last_reconcile_checked_at = now
         if action.adopt_counts_digest is not None:
             state.last_seen_counts_digest = action.adopt_counts_digest
+
+    async def _touch_views(self, action: _Action) -> None:
+        """Say on every view that reads an external source that its data changed.
+
+        A versioned graph's views are stamped by the publish that changed them; an
+        external graph is never published here, and this sweep is what finds out it
+        changed — so without this its views' "Data updated" never moved, and the
+        Explorer sorted and filtered them on settings edits alone. The views live in
+        the management DB, the same database as this state (``get_jobs_session`` is
+        a pool on it), but in a session of their own, after the dispatch has
+        committed: a failure here must never undo the adopted baseline, which would
+        rebuild the source again next tick. Best-effort: a miss waits for the next
+        change."""
+        from backend.app.db.repositories import view_repo
+
+        try:
+            async with self._session_factory() as session:
+                await view_repo.touch_views_data_updated(
+                    session, action.data_source_id, None,
+                    summary="Its source changed", changes={"reason": action.reason},
+                )
+                await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "reconcile sweep: views of %s not stamped with the data change: %s",
+                action.data_source_id, exc,
+            )
 
     async def _dispatch_first_build(self, svc, session, action, actor, run_id) -> None:
         """Queue the very first aggregation for an onboarded source.
