@@ -484,13 +484,18 @@ describe('the trace overlay on the real canvas', () => {
 
   // Read-only has to be literal: the panels that hang off the canvas write to
   // the same places the canvas does — the layer menu rewrites the reference
-  // layout, the drawer's Edit tab stages entity changes.
+  // layout, the drawer's Edit tab stages entity changes. But read-only is not
+  // "no menu": a right-click that does nothing at all read as broken, so the
+  // menu opens, offers only what reads, and says why (traceMenu.harness.test).
   it('the layer menu and the drawer offer no edits during a trace', async () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', draft: true })
+    const offersCreate = () => [...document.querySelectorAll('button')]
+      .some(b => b.textContent?.includes('Create Entity Here'))
 
     // Controls: both are live in browse.
     await h.layerContextMenu()
     expect(h.contextMenuOpen()).toBe(true)
+    expect(offersCreate()).toBe(true)
     h.pressEscape()
     await h.openDrawer('tableau')
     expect(h.drawerEditTabs()).toBe(1)
@@ -498,7 +503,10 @@ describe('the trace overlay on the real canvas', () => {
     await h.startTrace('cfo')
 
     await h.layerContextMenu()
-    expect(h.contextMenuOpen()).toBe(false)
+    expect(h.contextMenuOpen()).toBe(true)
+    expect(offersCreate()).toBe(false)
+    expect(document.body).toHaveTextContent('Editing is paused while tracing')
+    h.pressEscape()
     await h.openDrawer('tableau')
     expect(h.drawerEditTabs()).toBe(0)
     expect(h.storeWrites()).toBe(0)

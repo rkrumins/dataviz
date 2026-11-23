@@ -19,6 +19,10 @@
  * Docked bottom-centre over the columns, above the trace dock, and it
  * reserves its own band (`--selection-bar-height`) so a column's last row
  * can still scroll clear of it — see useBandReservation.
+ *
+ * During a trace it is the slim trace bar: what was picked on the trace can
+ * be traced FROM (a new trace, the one on screen a Back away) or added to the
+ * trace on screen, besides Details and Export, which only read.
  */
 import { useRef, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -69,8 +73,15 @@ export interface SelectionBarProps {
   /** Download the held entities with everything inside them, to edit offline and import back.
    *  Absent — no version control, or no right to export — not offered. */
   onExport?: () => void
-  /** Show the bar for ONE held entity too: where nothing else offers its actions (a trace, whose
-   *  cards have no context menu). */
+  /** During a trace: trace again, from the held entities. Absent, not offered. */
+  onTraceFrom?: () => void
+  /** During a trace: add the held entities to the trace on screen. Absent when they are all in
+   *  it already. */
+  onAddToTrace?: () => void
+  /** Why they cannot all be added (the trace's cap) — the action then says so, disabled. */
+  addToTraceBlocked?: string | null
+  /** Show the bar for ONE held entity too: where its actions are not otherwise to hand (a
+   *  trace, whose cards are traced from here). */
   offerForOne?: boolean
   /** Where the bar's lane sits on a canvas other than the Context View, as position classes
    *  (`left-4 right-4 bottom-16`). Absent, the Context View's lane: above its trace dock and layer
@@ -95,6 +106,9 @@ export function SelectionBar({
   onOpenShared,
   sharedEditable = false,
   onExport,
+  onTraceFrom,
+  onAddToTrace,
+  addToTraceBlocked = null,
   offerForOne = false,
   placementClassName,
   hint,
@@ -323,6 +337,53 @@ export function SelectionBar({
                 <LucideIcons.ScanSearch className="w-3.5 h-3.5" strokeWidth={2.2} />
                 Narrow…
               </button>
+            )}
+            {/* The trace bar's own: trace again from these, or add them to this trace. */}
+            {onAddToTrace && (
+              <HoverTip
+                className="inline-flex"
+                label={addToTraceBlocked ?? (single ? 'Add it to the trace on screen' : 'Add them to the trace on screen')}
+                detail={addToTraceBlocked ? 'Take a starting point out in the trace dock to make room' : 'The trace keeps what it shows, and walks these too'}
+              >
+                <button
+                  type="button"
+                  onClick={onAddToTrace}
+                  disabled={!!addToTraceBlocked}
+                  className={cn(
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium whitespace-nowrap',
+                    'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
+                    'hover:border-accent-lineage/45 hover:text-accent-lineage',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    'disabled:opacity-50 disabled:pointer-events-none',
+                    'transition-colors duration-150',
+                  )}
+                >
+                  <LucideIcons.ListPlus className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+                  Add to trace
+                </button>
+              </HoverTip>
+            )}
+            {onTraceFrom && (
+              <HoverTip
+                className="inline-flex"
+                label={single ? 'Trace from this entity instead' : 'Trace from these instead'}
+                detail="A new trace — Back in the trace dock returns to this one"
+              >
+                <button
+                  type="button"
+                  onClick={onTraceFrom}
+                  className={cn(
+                    'flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12.5px] font-medium whitespace-nowrap',
+                    'text-accent-lineage bg-accent-lineage/15 border border-accent-lineage/45',
+                    'hover:bg-accent-lineage/25 hover:border-accent-lineage/65',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
+                    'transition-colors duration-150',
+                  )}
+                >
+                  <LucideIcons.GitBranch className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+                  {single ? 'Trace from here' : `Trace these ${count}`}
+                </button>
+              </HoverTip>
             )}
             {onExport && (
               <button

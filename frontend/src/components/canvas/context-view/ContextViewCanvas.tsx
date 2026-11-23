@@ -187,7 +187,7 @@ import {
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensWalk } from '@/hooks/useLensWalk'
 import { selectionMembers, selectionFocusUrn, unionWalkModels, withSelectionFocus, type LensWalkModel } from './lens/closure-adapter'
-import { MAX_TRACE_SEEDS, useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
+import { MAX_TRACE_SEEDS, traceSeedAddition, useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
 import { useTraceOverlay, type TraceOverlay } from '@/hooks/useTraceOverlay'
 import { lanesToRenderTrees } from '@/hooks/lib/traceViewModel'
 import { useBranchCreatedDelta } from '@/hooks/useBranchCreatedDelta'
@@ -387,6 +387,7 @@ import { OrphansDrawer } from './OrphansDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useLoadingNotification, useAppNotifications, useNotificationStore } from '@/components/ui/notifications'
+import { Kbd } from '@/components/ui/Kbd'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
@@ -1652,17 +1653,18 @@ export function ContextViewCanvas({
   const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
     e.preventDefault()
     e.stopPropagation()
-    // The menu is an authoring surface (rename/duplicate/delete/reorder) and
-    // its targets are resolved against the BROWSE tree, which is not what the
-    // columns are showing. No menu while a trace is on.
-    if (traceWriteLocked()) return
+    // During a trace too: the menu then reads only, leads with the trace's
+    // own actions, and says why there is nothing to edit (CanvasContextMenu's
+    // `trace`). Every write it could offer is gated on `canvasWritable`. A card
+    // the walk found and the browse store never loaded is found on the board
+    // the columns are drawing — the trace's lanes while one is on.
     const node = nodes.find(n => n.id === nodeId)
     interactions.openContextMenu(e, {
       type: 'node',
       id: nodeId,
-      data: node?.data as Record<string, unknown> || {},
+      data: (node?.data ?? renderMapRef.current.get(nodeId)?.data ?? {}) as Record<string, unknown>,
     })
-  }, [nodes, interactions, traceWriteLocked])
+  }, [nodes, interactions])
 
 
 
@@ -1702,9 +1704,13 @@ export function ContextViewCanvas({
 
   // Double-click handler: inline edit (default) or trace (shift+double-click)
   const handleDoubleClick = useCallback(async (nodeId: string, event?: React.MouseEvent) => {
-    // A trace is a read-only projection: no inline edit, and no re-trace
-    // gesture that would land mid-walk. ESC leaves first.
-    if (traceWriteLocked()) return
+    // A trace is a read-only projection: no inline edit. Shift+double-click
+    // still traces — from this card, as a new trace with the one on screen a
+    // Back away in the dock.
+    if (traceWriteLocked()) {
+      if (event?.shiftKey) toggleTraceRef.current(nodeId)
+      return
+    }
 
     // UX-first: Double-click = inline edit (modern approach)
     // Use Shift+Double-click for trace (power user feature)
@@ -2913,6 +2919,31 @@ export function ContextViewCanvas({
     })
     canvasTraceRef.current.removeSeed(urn)
   }, [exitCanvasTrace, flushExpansionRecord, urnToIdMap])
+  // ADD SEEDS to the trace on screen — removeTraceSeed's other half. Not a new
+  // trace either: the seeds already walked stay in hand and only the new ones
+  // are walked, the picture stays, and the history entry on screen is
+  // rewritten in place rather than pushed (Back still returns to the trace
+  // before this one). Capped at MAX_TRACE_SEEDS by the caller, which says so.
+  const addTraceSeeds = useCallback((urns: readonly string[]) => {
+    const seeds = canvasTraceRef.current.tracedUrns
+    const next = [...seeds, ...urns.filter(u => !seeds.includes(u))].slice(0, MAX_TRACE_SEEDS)
+    if (next.length === seeds.length || seeds.length === 0) return
+    flushExpansionRecord()
+    const onScreen = traceSeedKey(seeds)
+    setTraceHistory(h => {
+      const cur = currentTraceEntry(h)
+      return cur && traceSeedKey(traceEntrySeeds(cur)) === onScreen
+        ? updateCurrentTraceSeeds(h, next, u => urnToIdMap.get(u) ?? u)
+        : h
+    })
+    canvasTraceRef.current.start(next)
+  }, [flushExpansionRecord, urnToIdMap])
+  /** What adding these entities to the trace on screen would add — the ones it
+   *  does not start from already — and, when they don't all fit, why not. */
+  const traceAddition = useCallback(
+    (ids: readonly string[]) => traceSeedAddition(canvasTrace.tracedUrns, ids.map(id => displayMap.get(id)?.urn ?? id)),
+    [canvasTrace.tracedUrns, displayMap],
+  )
   // Forward-declared refs, for hooks that fire earlier in render order.
   // Assigned in an effect (not render) — the interaction callbacks that
   // read them only fire after commit, and a render-time ref write blocks
@@ -3457,8 +3488,9 @@ export function ContextViewCanvas({
         // preventDefaults EVERY Escape for its clear-selection handler, so
         // that flag is always true here and would retire the exit entirely.
         // The open dialog is the real signal, and it is precise — the
-        // popovers unmount on close, leaving nothing behind to match.
-        if (document.querySelector('[role="dialog"]')) return
+        // popovers unmount on close, leaving nothing behind to match. The
+        // context menu, which opens during a trace too, is the same case.
+        if (document.querySelector('[role="dialog"], [data-canvas-context-menu]')) return
         e.preventDefault()
         exitCanvasTrace()
         return
@@ -4158,8 +4190,8 @@ export function ContextViewCanvas({
     useHierarchyBuilderStore.getState().openBuild({ layerId })
   }, [])
   const handleLayerContextMenuOpen = useCallback((e: React.MouseEvent, layerId: string) => {
-    // Rename / delete / reorder a layer all rewrite the reference layout.
-    if (traceWriteLockedRef.current()) return
+    // During a trace too: what it offers that writes (Create Entity Here) is
+    // gated on `canvasWritable`, and the rest only reads.
     interactions.openContextMenu(e, {
       type: 'canvas',
       position: { x: e.clientX, y: e.clientY },
@@ -5208,6 +5240,47 @@ export function ContextViewCanvas({
   }, [interactions.state.contextMenu.target, selectedNodeIds, canvasWritable, displayMap])
   const nodeCustomActions = useMemo(() => [...propertyMenuActions, ...memberMenuActions, ...reorderMenuActions],
     [propertyMenuActions, memberMenuActions, reorderMenuActions])
+  // A trace card's own actions, at the top of its menu: start the trace again
+  // from here (Back in the dock returns to this one), add it to this trace,
+  // or take a starting point out. For the selection the card is part of.
+  const traceMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const target = interactions.state.contextMenu.target
+    if (!traceActive || !target || target.type !== 'node' || !isSelectableNode(target.id)) return []
+    const ids = menuSelection(target.id, selectedNodeIds)
+    const several = ids.length > 1
+    const actions: ContextMenuAction[] = [{
+      id: 'trace-from-here',
+      label: several ? `Trace these ${ids.length.toLocaleString()}` : 'Trace from here',
+      icon: 'GitBranch',
+      onClick: () => startCanvasTrace(ids),
+    }]
+    const add = traceAddition(ids)
+    if (add.urns.length > 0) {
+      actions.push({
+        id: 'trace-add',
+        label: add.urns.length > 1 ? `Add these ${add.urns.length.toLocaleString()} to this trace` : 'Add to this trace',
+        icon: 'ListPlus',
+        disabled: !!add.blocked,
+        hint: add.blocked ?? undefined,
+        onClick: () => { if (!add.blocked) addTraceSeeds(add.urns) },
+      })
+    }
+    // Taking out the only starting point would be leaving the trace — the
+    // menu's footer is that.
+    const urn = displayMap.get(target.id)?.urn ?? target.id
+    if (!several && canvasTrace.tracedUrns.length > 1 && canvasTrace.tracedUrns.includes(urn)) {
+      actions.push({ id: 'trace-remove', label: 'Remove from this trace', icon: 'ListMinus', onClick: () => removeTraceSeed(urn) })
+    }
+    return actions
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.state.contextMenu.target, traceActive, selectedNodeIds, startCanvasTrace, traceAddition, addTraceSeeds,
+    displayMap, canvasTrace.tracedUrns, removeTraceSeed])
+  // What the selection adds to the trace on screen (the trace's selection bar).
+  const selectionTraceAddition = useMemo(
+    () => (traceActive ? traceAddition(bulkSelection) : null),
+    [traceActive, traceAddition, bulkSelection],
+  )
+
   // Right-click → Narrow to this: one entry per reach, applied at once; or
   // choose in the composer. The selection the entity is part of narrows together.
   const narrowMenuActions = useMemo<ContextMenuAction[]>(() => {
@@ -7719,18 +7792,26 @@ export function ContextViewCanvas({
             onExport={exportWithChildren ? () => exportWithChildren(bulkSelection) : undefined}
           />
         )}
-        {/* During a trace the selection's one action is Export…: it only reads, so the trace's
-            write lock doesn't apply, and a trace's cards have no context menu to offer it. Only
-            once the reader selects something other than what is traced: the selection a trace
-            starts from is the trace's own, and the dock already reads it. */}
-        {traceActive && exportWithChildren && !selectionIsTraced(bulkSelection) && (
+        {/* During a trace the selection is something to trace FROM: start again from it, or add
+            it to the trace on screen — and read it (Details) or export it, which only read, so the
+            trace's write lock doesn't apply. Only once the reader selects something other than
+            what is traced: the selection a trace starts from is the trace's own, and the dock
+            already reads it. The same actions lead a trace card's context menu. */}
+        {traceActive && bulkSelection.length > 0 && !selectionIsTraced(bulkSelection) && (
           <SelectionBar
             nodeIds={bulkSelection}
             labelFor={(id) => displayMap.get(id)?.name
               || (traceNodeIndex?.get(id)?.data as { label?: string } | undefined)?.label || id}
             onRemove={(id) => selectNode(id, true)}
             onClear={clearSelection}
-            onExport={() => exportWithChildren(bulkSelection)}
+            onTraceFrom={() => startCanvasTrace(bulkSelection)}
+            onAddToTrace={selectionTraceAddition && selectionTraceAddition.urns.length > 0
+              ? () => addTraceSeeds(selectionTraceAddition.urns)
+              : undefined}
+            addToTraceBlocked={selectionTraceAddition?.blocked}
+            onOpenDetails={offerDetails ? () => useCanvasStore.getState().openNodeDrawer(bulkSelection[0]) : undefined}
+            onExport={exportWithChildren ? () => exportWithChildren(bulkSelection) : undefined}
+            hint={<><Kbd shortcut="shift" /> double-click a card to trace from it</>}
             offerForOne
           />
         )}
@@ -8527,15 +8608,21 @@ export function ContextViewCanvas({
 
       {/* === UX-FIRST INTERACTION COMPONENTS === */}
 
-      {/* Modern Context Menu - Full CRUD operations. Every mutation affordance is draft-gated:
-          Published is strictly read-only, so on it the menu offers only the read affordances
-          (trace, copy URN, select all). */}
+      {/* Modern Context Menu - Full CRUD operations. Every mutation affordance is gated on
+          `canvasWritable` — a draft being edited, and no trace: Published is strictly read-only,
+          and a trace is for its whole life — so there the menu offers only the read affordances
+          (details, trace, focus, copy URN, select), and during a trace leads with the trace's own
+          and says why nothing else is offered. */}
       <CanvasContextMenu
         isOpen={interactions.state.contextMenu.isOpen}
         position={interactions.state.contextMenu.position}
         target={interactions.state.contextMenu.target}
         onClose={interactions.closeContextMenu}
-        onEditNode={canvasWritable ? interactions.editNode : undefined}
+        onEditNode={interactions.editNode}
+        viewOnly={!canvasWritable}
+        trace={traceActive
+          ? { actions: traceMenuActions, editingPaused: canEditGraph, onExit: exitCanvasTrace }
+          : undefined}
         onDuplicateNode={canvasWritable ? interactions.duplicateNode : undefined}
         onDuplicateWithOptions={canvasWritable ? (id) => setDuplicateFor(id) : undefined}
         onDeleteNode={canvasWritable ? interactions.deleteNode : undefined}
@@ -8548,7 +8635,8 @@ export function ContextViewCanvas({
             anchor: interactions.state.contextMenu.position,
           })
         } : undefined}
-        onTraceNode={(id) => startCanvasTrace(id)}
+        // During a trace, "Trace from here" leads the menu instead (`trace`).
+        onTraceNode={traceActive ? undefined : (id) => startCanvasTrace(id)}
         onFocusConnections={openLens}
         onAskAboutNode={useAskAboutNode()}
         onExportNode={exportWithChildren ? (id) => {
@@ -8556,18 +8644,23 @@ export function ContextViewCanvas({
           const selection = selectedNodeIds.filter(isSelectableNode)
           exportWithChildren(selection.length > 1 && selection.includes(id) ? selection : [id])
         } : undefined}
-        onCopyUrn={interactions.copyUrn}
-        onEditEdge={canEditGraph ? interactions.editEdge : undefined}
-        onDeleteEdge={canEditGraph ? interactions.deleteEdge : undefined}
-        onReverseEdge={canEditGraph ? interactions.reverseEdge : undefined}
-        onCreateNode={canEditGraph ? (_pos, layerId) => {
+        // A card the walk found is not in the store `copyUrn` reads: it is on the board.
+        onCopyUrn={(id) => {
+          const urn = resolveTraceNode(id)?.data?.urn
+          if (urn) void navigator.clipboard.writeText(urn)
+          else void interactions.copyUrn(id)
+        }}
+        onEditEdge={canvasWritable ? interactions.editEdge : undefined}
+        onDeleteEdge={canvasWritable ? interactions.deleteEdge : undefined}
+        onReverseEdge={canvasWritable ? interactions.reverseEdge : undefined}
+        onCreateNode={canvasWritable ? (_pos, layerId) => {
           // Right-clicked an empty layer column → scope the new node to that
           // layer so it lands there (and is assigned on stage, see onEntityStaged).
           useHierarchyBuilderStore.getState().open({ layerId })
         } : undefined}
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
-        onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
+        onMoveToLayer={layerEditsAllowed ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
         customActions={nodeCustomActions}
         queryActions={queryMenuActions}
         narrowActions={narrowMenuActions}

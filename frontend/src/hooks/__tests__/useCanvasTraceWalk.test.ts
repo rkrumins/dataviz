@@ -12,7 +12,7 @@
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { useCanvasTraceWalk, MAX_TRACE_SEEDS } from '../useCanvasTraceWalk'
+import { useCanvasTraceWalk, MAX_TRACE_SEEDS, traceSeedAddition } from '../useCanvasTraceWalk'
 import { recordEvent } from '@/services/telemetryService'
 import { useCanvasStore } from '@/store/canvas'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
@@ -382,5 +382,25 @@ describe('useCanvasTraceWalk — several seeds', () => {
     await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
     const walked = new Set(traceClosure.mock.calls.map(([req]) => req.urn))
     expect(walked).toEqual(new Set(selection.slice(0, MAX_TRACE_SEEDS)))
+  })
+})
+
+describe('traceSeedAddition — adding to the trace on screen', () => {
+  const seeds = (n: number) => Array.from({ length: n }, (_, i) => `s${i}`)
+
+  it('adds only what the trace does not start from already', () => {
+    expect(traceSeedAddition(['a', 'b'], ['b', 'c', 'c'])).toEqual({ urns: ['c'], blocked: null })
+    expect(traceSeedAddition(['a'], ['a'])).toEqual({ urns: [], blocked: null })
+  })
+
+  it('fills the trace exactly to the cap', () => {
+    expect(traceSeedAddition(seeds(MAX_TRACE_SEEDS - 2), ['x', 'y'])).toEqual({ urns: ['x', 'y'], blocked: null })
+  })
+
+  it('refuses, and says why, past the cap — all or nothing', () => {
+    expect(traceSeedAddition(seeds(MAX_TRACE_SEEDS), ['x']).blocked)
+      .toBe(`This trace already starts from ${MAX_TRACE_SEEDS} entities, the most it can.`)
+    expect(traceSeedAddition(seeds(MAX_TRACE_SEEDS - 1), ['x', 'y']).blocked)
+      .toBe(`Only 1 more fit: a trace starts from at most ${MAX_TRACE_SEEDS} entities.`)
   })
 })
