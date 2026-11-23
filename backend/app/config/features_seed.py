@@ -135,6 +135,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "semanticLayerNonAdminEditing":
         "Only administrators can change semantic layers in this deployment. "
         "An administrator can widen this under Admin → Features.",
+    "semanticLayerCreation":
+        "Creating new semantic layers is turned off for this deployment. Existing layers can "
+        "still be changed and published. An administrator can enable it under Admin → Features.",
     "semanticLayerImportEnabled":
         "Importing semantic layers is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
@@ -1294,6 +1297,33 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "turning it off for compliance reasons, check that hiding is what the requirement asks for."
         ),
         "sort_order": 5,
+        "deprecated": False,
+    },
+    {
+        "key": "semanticLayerCreation",
+        "name": "Create semantic layers",
+        "description": (
+            "Start new semantic layers — a blank draft, one built from a graph, a clone of an "
+            "existing layer, or a file imported as a new layer."
+        ),
+        "impact_when_off": (
+            "Nobody can start a new semantic layer, admins included: New semantic layer, Clone and "
+            "Import as new are switched off and the server refuses them. Existing layers can still "
+            "be changed, versioned, published and exported, and data sources can still be given "
+            "any of them. Playground members still make layers of their own there."
+        ),
+        "category_id": "semantic_layers",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn this off to keep the set of layers fixed — while you consolidate near-duplicates, "
+            "say — without freezing the ones in use. Who may create layers when it is on is the "
+            "workspace:ontology:create permission, which every role that manages layers holds by "
+            "default."
+        ),
+        "sort_order": 6,
         "deprecated": False,
     },
     # ── Notifications ──────────────────────────────────────────────────────────

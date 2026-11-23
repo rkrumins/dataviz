@@ -116,6 +116,14 @@ describe('where an event links to', () => {
         expect(links).toEqual([{ key: 'group', label: 'Open the group', href: '/admin/groups?group=grp_1' }])
     })
 
+    it('opens a semantic layer at its history', () => {
+        const links = activityLinks(ev({
+            eventType: 'ontology.layer.published', category: 'content',
+            target: { type: 'ontology', id: 'bp 1', label: 'Finance' }, workspaceId: null, dataSourceId: null,
+        }))
+        expect(links).toEqual([{ key: 'ontology', label: 'Open the semantic layer', href: '/schema/bp%201?tab=history' }])
+    })
+
     it('opens a service account by its id', () => {
         const account = activityLinks(ev({
             eventType: 'identity.service_account.disabled', category: 'access',

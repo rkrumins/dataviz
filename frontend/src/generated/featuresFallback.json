@@ -1389,6 +1389,41 @@
       "dependsOn": []
     },
     {
+      "key": "semanticLayerCreation",
+      "name": "Create semantic layers",
+      "description": "Start new semantic layers \u2014 a blank draft, one built from a graph, a clone of an existing layer, or a file imported as a new layer.",
+      "category": "semantic_layers",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn this off to keep the set of layers fixed \u2014 while you consolidate near-duplicates, say \u2014 without freezing the ones in use. Who may create layers when it is on is the workspace:ontology:create permission, which every role that manages layers holds by default.",
+      "impactWhenOff": "Nobody can start a new semantic layer, admins included: New semantic layer, Clone and Import as new are switched off and the server refuses them. Existing layers can still be changed, versioned, published and exported, and data sources can still be given any of them. Playground members still make layers of their own there.",
+      "impactWhenOn": null,
+      "sortOrder": 6,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /admin/ontologies \u2014 create",
+        "POST /admin/ontologies/{id}/clone \u2014 a clone is a new layer",
+        "POST /admin/ontologies/import \u2014 import as a new layer"
+      ],
+      "uiSurfaces": [
+        "New semantic layer, Clone and Import as new on the semantic layer pages",
+        "Create from graph in the onboarding wizard"
+      ],
+      "stillAllowed": [
+        "Changing, versioning and publishing existing layers",
+        "Exporting",
+        "Reading every layer",
+        "A Playground member making layers of their own in the Playground"
+      ],
+      "dependsOn": []
+    },
+    {
       "key": "announcementsEnabled",
       "name": "Announcements",
       "description": "Show announcement banners to everyone using the product.",
@@ -1864,6 +1899,7 @@
     "semanticLayerExportEnabled": true,
     "semanticLayerAutoSuggest": true,
     "semanticLayerVersionHistory": true,
+    "semanticLayerCreation": true,
     "announcementsEnabled": true,
     "conversationsEnabled": false,
     "toursEnabled": false,

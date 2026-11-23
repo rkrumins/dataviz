@@ -230,7 +230,7 @@ export function ontologyAuditOf(id: string) {
         entry('published', 4, 3, 'usr_ada', 'Published v4'),
         entry('updated', 4, 5, 'usr_ben', 'Added 2 entity type(s); Added 1 relationship(s); Removed 1 relationship(s)',
             { addedEntityTypes: ['Counterparty', 'Exposure'], addedRelationshipTypes: ['EXPOSED_TO'], removedRelationshipTypes: ['LINKED_TO'] }),
-        entry('cloned', 4, 26, 'usr_ben', 'Created v4 from published v3'),
+        entry('versioned', 4, 26, 'usr_ben', 'Created v4 from published v3'),
         entry('published', 3, 144, 'usr_ada', 'Published v3'),
         entry('imported', 3, 150, 'usr_ana', 'Imported into draft v3: Added 1 entity type(s); Removed 1 entity type(s)',
             { addedEntityTypes: ['RiskModel'], removedEntityTypes: ['Spreadsheet'] }),
@@ -243,7 +243,7 @@ export function ontologyAuditOf(id: string) {
     if (id === 'ont_reg') return [
         entry('updated', 2, 1.5, 'usr_me', 'Added 1 entity type(s); Removed 1 entity type(s); Added 1 relationship(s)',
             { addedEntityTypes: ['Filing'], removedEntityTypes: ['Submission'], addedRelationshipTypes: ['FILED_AS'] }),
-        entry('cloned', 2, 30, 'usr_ada', 'Created v2 from published v1'),
+        entry('versioned', 2, 30, 'usr_ada', 'Created v2 from published v1'),
         entry('published', 1, 300, 'usr_ada', 'Published v1'),
         entry('created', 1, 320, 'usr_ana', 'Created draft v1 with 3 entity types, 2 relationships'),
     ]

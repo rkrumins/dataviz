@@ -767,15 +767,15 @@ class OntologyORM(Base):
 class OntologyAuditLogORM(Base):
     """
     Immutable audit trail for ontology lifecycle events.
-    Each row captures a single action (create, update, publish, delete, restore, clone)
-    along with who performed it and a summary of what changed.
+    Each row captures a single action (create, update, publish, delete, restore, clone, a new
+    version, import, approval) along with who performed it and a summary of what changed.
     """
     __tablename__ = "ontology_audit_log"
 
     id = Column(Text, primary_key=True, default=lambda: f"oal_{uuid.uuid4().hex[:12]}")
     ontology_id = Column(Text, nullable=False, index=True)
     schema_id = Column(Text, nullable=False, index=True)           # groups events across versions
-    action = Column(Text, nullable=False)                           # created | updated | published | deleted | restored | cloned
+    action = Column(Text, nullable=False)                           # created | updated | published | deleted | restored | cloned | versioned | imported | approved
     actor = Column(Text, nullable=True)                             # user who performed the action
     version = Column(Integer, nullable=True)                        # ontology version at time of action
     summary = Column(Text, nullable=True)                           # human-readable summary
@@ -788,7 +788,8 @@ class OntologyAuditLogORM(Base):
         Index("idx_oal_created", "created_at"),
         Index("idx_oal_actor_action", "actor", "action", "created_at"),
         CheckConstraint(
-            "action IN ('created', 'updated', 'published', 'deleted', 'restored', 'cloned', 'imported')",
+            "action IN ('created', 'updated', 'published', 'deleted', 'restored', 'cloned', 'imported', "
+            "'versioned', 'approved')",
             name="ck_oal_action_enum",
         ),
     )

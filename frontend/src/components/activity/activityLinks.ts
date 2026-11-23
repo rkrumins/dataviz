@@ -65,6 +65,13 @@ export function activityLinks(event: ActivityEvent): ActivityLink[] {
     if (target.type === 'view' && target.id) {
         links.push({ key: 'view', label: 'Open the view', href: `/views/${encodeURIComponent(target.id)}` })
     }
+    if (target.type === 'ontology' && target.id) {
+        links.push({
+            key: 'ontology',
+            label: 'Open the semantic layer',
+            href: `/schema/${encodeURIComponent(target.id)}?tab=history`,
+        })
+    }
     if (target.type === 'provider') {
         links.push({ key: 'providers', label: 'Open Providers', href: '/ingestion?tab=providers' })
     }

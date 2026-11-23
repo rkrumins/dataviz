@@ -10,10 +10,11 @@ import { useState, useMemo } from 'react'
 import {
   X, Sparkles, Database, Loader2, Box, GitBranch, Shield,
   CheckCircle2, Copy, ArrowRight, PenLine, Users, Check, Search, Zap,
-  Clock, RefreshCw, AlertTriangle,
+  Clock, RefreshCw, AlertTriangle, Lock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { OntologyMatchResult, OntologyDefinitionResponse, MergedVariantSpelling } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { SchemaStatsFreshness } from '@/features/ontology/lib/ontology-utils'
@@ -67,6 +68,10 @@ interface SuggestConfirmDialogProps {
   onCreateDraft: (name: string | undefined, targetWsId: string | null, targetDsId: string | null) => void
   onClose: () => void
   isCreating: boolean
+  /** Why "Create from Physical Graph" is switched off (creating a layer is), or `null`. */
+  createBlockedReason?: string | null
+  /** Why "Clone & Extend" is, or `null`. */
+  cloneBlockedReason?: string | null
 }
 
 export function SuggestConfirmDialog({
@@ -85,6 +90,8 @@ export function SuggestConfirmDialog({
   onCreateDraft,
   onClose,
   isCreating,
+  createBlockedReason = null,
+  cloneBlockedReason = null,
 }: SuggestConfirmDialogProps) {
   const [phase, setPhase] = useState<Phase>('confirm')
   const [matches, setMatches] = useState<OntologyMatchResult[]>([])
@@ -778,11 +785,14 @@ export function SuggestConfirmDialog({
               <button
                 type="button"
                 onClick={() => setSelectedId('__create_from_graph__')}
+                disabled={!!createBlockedReason}
                 className={cn(
                   'w-full text-left rounded-xl border-2 transition-colors duration-150',
-                  selectedId === '__create_from_graph__'
-                    ? 'border-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10 ring-1 ring-indigo-500/20'
-                    : 'border-dashed border-glass-border hover:border-indigo-500/30 hover:bg-black/[0.01] dark:hover:bg-white/[0.01]',
+                  createBlockedReason
+                    ? 'border-dashed border-glass-border opacity-70 cursor-not-allowed'
+                    : selectedId === '__create_from_graph__'
+                      ? 'border-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10 ring-1 ring-indigo-500/20'
+                      : 'border-dashed border-glass-border hover:border-indigo-500/30 hover:bg-black/[0.01] dark:hover:bg-white/[0.01]',
                 )}
               >
                 <div className="px-5 py-4">
@@ -824,6 +834,12 @@ export function SuggestConfirmDialog({
                           New Draft
                         </span>
                       </div>
+                      {createBlockedReason && (
+                        <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
+                          <Lock className="w-3 h-3 mt-px flex-shrink-0" />
+                          {createBlockedReason}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -952,14 +968,20 @@ export function SuggestConfirmDialog({
                 <>
                   {/* Clone & Extend — only when an existing layer is selected */}
                   {selectedId && selectedId !== '__create_from_graph__' && (
-                    <button
-                      onClick={() => onCloneExisting(selectedId, pickedWsId, pickedDsId)}
-                      disabled={isCreating}
-                      className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                    <HoverTip
+                      label={cloneBlockedReason ? 'Can’t clone a semantic layer' : 'Copy this layer into a new draft of your own, then extend it'}
+                      detail={cloneBlockedReason ?? undefined}
+                      className="inline-flex"
                     >
-                      <Copy className="w-3.5 h-3.5" />
-                      Clone & Extend
-                    </button>
+                      <button
+                        onClick={() => onCloneExisting(selectedId, pickedWsId, pickedDsId)}
+                        disabled={isCreating || !!cloneBlockedReason}
+                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium text-ink-secondary border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {cloneBlockedReason ? <Lock className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                        Clone & Extend
+                      </button>
+                    </HoverTip>
                   )}
 
                   {/* Primary confirm — changes label based on selection */}
