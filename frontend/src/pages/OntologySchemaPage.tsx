@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams, useBlocker } from 'react-router-dom'
 import { Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Activity, Settings, X, LayoutDashboard, Trash2, RotateCcw, Clock, AlertTriangle, Unlink } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
+import { BLOCKED_REASON, useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
 import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
 import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
@@ -20,6 +20,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { fetchSchemaStats, fetchSchemaStatsWithMeta, generateSuggestedName, triggerIntrospectionRefresh } from '@/features/ontology/lib/ontology-utils'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { PersonChip } from '@/components/ui/PersonChip'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import type { EntityTypeSummary, EdgeTypeSummary, GraphSchemaStats } from '@/providers/GraphDataProvider'
 
@@ -95,6 +96,9 @@ const TAB_DEFS: Array<{
   { id: 'settings', label: 'Settings', icon: Settings },
 ]
 
+/** Why an import target is off when neither the layer nor creating is what stops it: the switch. */
+const IMPORT_OFF = 'Importing semantic layers is turned off for this deployment. An administrator can turn on “Import layers” under Admin → Features.'
+
 /** Map legacy tab URLs to new tab IDs for backward compatibility */
 const LEGACY_TAB_MAP: Record<string, OntologyTab> = {
   entities: 'schema',
@@ -143,9 +147,13 @@ export function OntologySchemaPage() {
   // permission half. The other half is Admin → Features, whose six semantic-layer switches were
   // enforced nowhere: an admin could turn Import off and watch people go on importing. The server
   // refuses those calls now, and this hook keeps the UI from offering a button that will 403.
-  // Creating a layer answers to these org rules; what may be done to the open layer is that
-  // layer's own answer (`access`, below, once it is read).
-  const canCreate = useSemanticLayerAccess().canEdit
+  // Creating a layer answers to these org rules — its own permission and switch on top of editing;
+  // what may be done to the open layer is that layer's own answer (`access`, below, once it is read).
+  // Creating is offered to everyone who looks after layers: switched off, with why, when they
+  // can't; never to a reader.
+  const orgAccess = useSemanticLayerAccess()
+  const offerCreate = orgAccess.createBlockedBy !== 'permission'
+  const createBlockedReason = offerCreate && orgAccess.createBlockedBy ? BLOCKED_REASON[orgAccess.createBlockedBy] : null
 
   // ── Workspace context ──────────────────────────────────────────────
   const workspaces = useWorkspacesStore(s => s.workspaces)
@@ -1560,7 +1568,8 @@ export function OntologySchemaPage() {
             workspaces={workspaces}
             isLoading={isLoadingOntologies}
             isSuggesting={isSuggesting}
-            canManage={canCreate}
+            canManage={offerCreate}
+            createBlockedReason={createBlockedReason}
             onCreateDraft={() => setShowCreateDialog(true)}
             onSuggest={handleSuggestOntology}
             dashboardMode={dashboardMode}
@@ -1583,7 +1592,8 @@ export function OntologySchemaPage() {
                 onUnassign={requestUnassign}
                 onBulkUnassign={entries => setBulkUnassignTargets(entries)}
                 onSuggest={handleSuggestForDataSource}
-                onCreateDraft={() => setShowCreateDialog(true)}
+                onCreateDraft={offerCreate ? () => setShowCreateDialog(true) : undefined}
+                createBlockedReason={createBlockedReason}
                 onSuggestFromGraph={access.canSuggest ? handleSuggestOntology : undefined}
                 canSuggest={access.canSuggest}
                 isAssigning={isAssigning}
@@ -1599,7 +1609,7 @@ export function OntologySchemaPage() {
                     <p className="text-sm font-semibold text-red-600 dark:text-red-400">This semantic layer has been deleted</p>
                     <p className="text-xs text-red-500/70 mt-0.5">
                       {selectedOntology?.deletedAt && `Deleted on ${new Date(selectedOntology.deletedAt).toLocaleDateString()}`}
-                      {selectedOntology?.deletedBy && ` by ${selectedOntology.deletedBy}`}
+                      {selectedOntology?.deletedBy && <> by <PersonChip id={selectedOntology.deletedBy} size="xs" /></>}
                       . It is read-only and hidden from active lists.
                     </p>
                   </div>
@@ -2070,6 +2080,8 @@ export function OntologySchemaPage() {
           onCreateDraft={handleSuggestCreateDraft}
           onClose={() => { if (!isSuggesting) setShowSuggestDialog(false) }}
           isCreating={isSuggesting}
+          createBlockedReason={orgAccess.createBlockedBy ? BLOCKED_REASON[orgAccess.createBlockedBy] : null}
+          cloneBlockedReason={orgAccess.cloneBlockedBy ? BLOCKED_REASON[orgAccess.cloneBlockedBy] : null}
         />
       )}
 
@@ -2082,6 +2094,10 @@ export function OntologySchemaPage() {
           onImportNew={access.isOwn ? importAsOwnLayer : ontologyDefinitionService.importNew}
           onImportInto={ontologyDefinitionService.importInto}
           onSuccess={handleImportSuccess}
+          newBlockedReason={access.canImportNew ? null
+            : access.createBlockedBy ? BLOCKED_REASON[access.createBlockedBy] : IMPORT_OFF}
+          intoBlockedReason={access.canImport ? null
+            : access.editingBlockedBy ? BLOCKED_REASON[access.editingBlockedBy] : IMPORT_OFF}
         />
       )}
 

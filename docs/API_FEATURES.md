@@ -4,7 +4,7 @@
 to know which endpoint a switch turns off.*
 
 This page is the reference for the feature-switch API behind **Administration → Features**:
-every route with its request and answer, how a change is saved safely, and all 47 switches
+every route with its request and answer, how a change is saved safely, and all 48 switches
 with their defaults and the server routes each one controls.
 
 - **Administrators:** what each switch does on screen, and how to change one, is in
@@ -192,7 +192,7 @@ An unknown key answers `404`.
 
 ## Feature flags (authoritative set)
 
-All 47 switches, grouped as **Administration → Features** groups them. **Switch** is the name
+All 48 switches, grouped as **Administration → Features** groups them. **Switch** is the name
 an administrator sees. **When it is off** names the routes the server refuses — `403` with
 `{"detail": {"type": "feature_disabled", "feature": "<key>", "message": "…"}}` unless the row
 says otherwise — or what it does instead. Paths are relative to `/api/v1`. Every switch whose
@@ -277,6 +277,7 @@ feature open to anyone who knows the URL.
 | Export layers | `semanticLayerExportEnabled` | On | `GET /admin/ontologies/{ontology_id}/export` | |
 | Suggest from graph | `semanticLayerAutoSuggest` | On | `POST /admin/ontologies/suggest` | Choosing a layer by hand keeps working |
 | Layer history & audit | `semanticLayerVersionHistory` | On | `GET /admin/ontologies/{ontology_id}/versions`, `GET /admin/ontologies/{ontology_id}/audit` | Hidden, not deleted |
+| Create semantic layers | `semanticLayerCreation` | On | `POST /admin/ontologies`, `POST /admin/ontologies/{ontology_id}/clone`, `POST /admin/ontologies/import` — for everyone, administrators included | Changing, versioning, publishing and importing into existing layers keep working; the Playground's own layers are unaffected. Who may create is `workspace:ontology:create` |
 
 ### Notifications
 

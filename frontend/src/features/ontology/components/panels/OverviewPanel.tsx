@@ -5,10 +5,10 @@
  *   1. Schema composition — entity types, relationships, coverage
  *   2. Usage & adoption — workspaces, data sources, views
  *   3. Structure breakdown — hierarchy + data flow cards
- *   4. Uncovered types warning (if applicable)
+ *   4. Ownership & audit — who owns it, made, changed and published it, and who may change it
+ *   5. Uncovered types warning (if applicable)
  *
  * Self-contained: fetches graph stats, coverage, and view counts.
- * Metadata (created/updated/published) lives in the page header, not here.
  */
 import { useState, useEffect, useMemo } from 'react'
 import {
@@ -35,6 +35,7 @@ import { SchemaMinimapSVG } from '../SchemaMinimapSVG'
 import { SchemaHealthRing } from '../SchemaHealthRing'
 import { EducationalCallout } from '../EducationalCallout'
 import { QuickRecommendBanner } from '../QuickRecommendBanner'
+import { OwnershipAuditCard } from '../OwnershipAuditCard'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 
 interface OverviewPanelProps {
@@ -371,6 +372,9 @@ export function OverviewPanel({
           </button>
         </div>
       </section>
+
+      {/* ── Ownership & audit ────────────────────────────────────── */}
+      <OwnershipAuditCard ontology={ontology} workspaces={workspaces} onOpenHistory={() => onNavigateTab('history')} />
 
       {/* ── Evolution Policy ─────────────────────────────────────── */}
       <section>

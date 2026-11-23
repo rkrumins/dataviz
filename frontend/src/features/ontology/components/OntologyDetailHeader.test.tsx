@@ -9,7 +9,7 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LayerAccess, OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 
@@ -181,5 +181,22 @@ describe('OntologyDetailHeader, the maker’s own layer', () => {
     await waitFor(() => expect(listVersions).toHaveBeenCalledTimes(2))
     expect(screen.queryByRole('button', { name: 'Move my graphs to this version' })).toBeNull()
     expect(within(document.body).getByText('Yours')).toBeInTheDocument()
+  })
+})
+
+describe('OntologyDetailHeader, an org layer someone else looks after', () => {
+  const before = useAuthStore.getState().permissions
+  afterEach(() => useAuthStore.setState({ permissions: before }))
+
+  it('says it is view only and why, and why Clone is switched off', async () => {
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, semanticLayerNonAdminEditing: true } })
+    // Looks after layers in one workspace, may not start one; the server says this layer isn't theirs.
+    useAuthStore.setState({ permissions: { sid: 't', global: [], ws: { ws_a: ['workspace:ontology:manage', 'workspace:ontology:read'] } } } as never)
+    renderHeader(layer({ access: { ...READER, canAssign: true }, ownerWorkspaceId: null, ownerVisibility: null }))
+    expect(screen.getByText('View only')).toBeInTheDocument()
+    const items = await menuItems()
+    expect(items).toContain('Clone (Independent Copy)')
+    expect(items).toContain('can’t start new ones')
+    expect(screen.getByRole('menuitem', { name: /Clone/ })).toHaveAttribute('data-disabled')
   })
 })

@@ -3,7 +3,7 @@
  * Also handles the import mode selection (new vs. into current).
  */
 import { useState } from 'react'
-import { X, Upload, FileJson, AlertTriangle, CheckCircle2, Info, Loader2, ArrowRight } from 'lucide-react'
+import { X, Upload, FileJson, AlertTriangle, CheckCircle2, Info, Loader2, ArrowRight, Lock } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -18,6 +18,10 @@ interface ImportDialogProps {
   onImportNew: (data: Record<string, unknown>) => Promise<OntologyImportResponse>
   onImportInto: (id: string, data: Record<string, unknown>) => Promise<OntologyImportResponse>
   onSuccess: (result: OntologyImportResponse) => void
+  /** Why importing as a NEW layer is unavailable (creating is), or `null` when it isn't. */
+  newBlockedReason?: string | null
+  /** Why importing into the current layer is unavailable (changing it is), or `null`. */
+  intoBlockedReason?: string | null
 }
 
 type ImportMode = 'new' | 'into'
@@ -84,8 +88,12 @@ export function ImportDialog({
   onImportNew,
   onImportInto,
   onSuccess,
+  newBlockedReason = null,
+  intoBlockedReason = null,
 }: ImportDialogProps) {
-  const [mode, setMode] = useState<ImportMode>(currentOntology ? 'into' : 'new')
+  const canInto = !!currentOntology && !intoBlockedReason
+  const [mode, setMode] = useState<ImportMode>(canInto ? 'into' : 'new')
+  const modeBlocked = mode === 'new' ? newBlockedReason : intoBlockedReason
   const [isImporting, setIsImporting] = useState(false)
   const [result, setResult] = useState<OntologyImportResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -257,11 +265,14 @@ export function ImportDialog({
                 {/* Import as new */}
                 <button
                   onClick={() => setMode('new')}
+                  disabled={!!newBlockedReason}
                   className={cn(
                     'w-full text-left px-3.5 py-3 rounded-xl border-2 transition-colors duration-150',
-                    mode === 'new'
-                      ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
-                      : 'border-glass-border hover:border-glass-border-hover'
+                    newBlockedReason
+                      ? 'border-dashed border-glass-border opacity-70 cursor-not-allowed'
+                      : mode === 'new'
+                        ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
+                        : 'border-glass-border hover:border-glass-border-hover'
                   )}
                 >
                   <div className="flex items-center gap-3">
@@ -274,6 +285,7 @@ export function ImportDialog({
                     <div className="flex-1">
                       <span className="text-sm font-semibold text-ink">Create New Draft</span>
                       <p className="text-[11px] text-ink-muted mt-0.5">Import as a brand new semantic layer</p>
+                      {newBlockedReason && <BlockedReason reason={newBlockedReason} />}
                     </div>
                   </div>
                 </button>
@@ -282,11 +294,14 @@ export function ImportDialog({
                 {currentOntology && (
                   <button
                     onClick={() => setMode('into')}
+                    disabled={!!intoBlockedReason}
                     className={cn(
                       'w-full text-left px-3.5 py-3 rounded-xl border-2 transition-colors duration-150',
-                      mode === 'into'
-                        ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
-                        : 'border-glass-border hover:border-glass-border-hover'
+                      intoBlockedReason
+                        ? 'border-dashed border-glass-border opacity-70 cursor-not-allowed'
+                        : mode === 'into'
+                          ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
+                          : 'border-glass-border hover:border-glass-border-hover'
                     )}
                   >
                     <div className="flex items-center gap-3">
@@ -305,6 +320,7 @@ export function ImportDialog({
                             ? 'Published — will create a new draft version'
                             : `Draft v${currentOntology.version} — will update in-place`}
                         </p>
+                        {intoBlockedReason && <BlockedReason reason={intoBlockedReason} />}
                       </div>
                     </div>
                   </button>
@@ -328,7 +344,7 @@ export function ImportDialog({
           </button>
           <button
             onClick={handleImport}
-            disabled={!isValid || isImporting}
+            disabled={!isValid || isImporting || !!modeBlocked}
             className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors disabled:opacity-50 shadow-sm"
           >
             {isImporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
@@ -338,5 +354,16 @@ export function ImportDialog({
       </div>
       </div>
     </>
+  )
+}
+
+
+/** Why an import target is switched off, under it — where the eye already is, not in a tooltip. */
+function BlockedReason({ reason }: { reason: string }) {
+  return (
+    <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
+      <Lock className="w-3 h-3 mt-px flex-shrink-0" />
+      {reason}
+    </p>
   )
 }

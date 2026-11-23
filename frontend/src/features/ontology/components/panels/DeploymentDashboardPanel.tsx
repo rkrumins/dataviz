@@ -19,9 +19,10 @@ import {
   Shield, CheckCircle2, PenLine, Unlink, Sparkles, Link2,
   GitBranch, ChevronDown, ChevronUp, ChevronRight, X,
   Plus, BookOpen, Eye, HelpCircle, Compass, MoreHorizontal,
-  Grid3x3, LayoutList, Network, CircleDot, Check, Trash2,
+  Grid3x3, LayoutList, Network, CircleDot, Check, Trash2, Lock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { useDeploymentMatrix } from '../../hooks/useDeploymentMatrix'
@@ -115,7 +116,10 @@ interface DeploymentDashboardPanelProps {
    *  so calling it in a loop would drop all but the last selection.) */
   onBulkUnassign?: (entries: DeploymentEntry[]) => void
   onSuggest: (workspaceId: string, dataSourceId: string) => void
+  /** Offered to those who look after layers; omitted for readers. */
   onCreateDraft?: () => void
+  /** Why "New Semantic Layer" is switched off for someone it is offered to; `null` when it isn't. */
+  createBlockedReason?: string | null
   onSuggestFromGraph?: () => void
   /** semanticLayerAutoSuggest flag — hides every "Suggest" affordance when off (server 403s otherwise). */
   canSuggest?: boolean
@@ -132,6 +136,7 @@ export function DeploymentDashboardPanel({
   onBulkUnassign,
   onSuggest,
   onCreateDraft,
+  createBlockedReason = null,
   onSuggestFromGraph,
   canSuggest = true,
   isAssigning,
@@ -345,7 +350,16 @@ export function DeploymentDashboardPanel({
                 Suggest from Graph
               </button>
             )}
-            {onCreateDraft && (
+            {onCreateDraft && createBlockedReason && (
+              <HoverTip label="Can’t start a new semantic layer" detail={createBlockedReason} className="inline-flex">
+                <button disabled
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold border border-dashed border-glass-border text-ink-muted cursor-not-allowed">
+                  <Lock className="w-4 h-4" />
+                  New Semantic Layer
+                </button>
+              </HoverTip>
+            )}
+            {onCreateDraft && !createBlockedReason && (
               <button onClick={onCreateDraft}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/20 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
                 <Plus className="w-4 h-4" />

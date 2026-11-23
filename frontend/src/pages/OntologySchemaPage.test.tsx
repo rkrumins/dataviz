@@ -64,11 +64,15 @@ vi.mock('@/features/ontology/hooks/useOntologyMutations', () => ({
   }),
 }))
 
-vi.mock('@/features/ontology/lib/useSemanticLayerAccess', () => ({
-  useSemanticLayerAccess: () => ({
-    canEdit: true, canImport: true, canExport: true, canSuggest: true,
-    canSeeHistory: true, canPublish: true, editingBlockedBy: null,
-  }),
+const ACCESS = {
+  canEdit: true, canImport: true, canExport: true, canSuggest: true,
+  canSeeHistory: true, canPublish: true, editingBlockedBy: null,
+  canCreate: true, canImportNew: true, createBlockedBy: null as string | null, cloneBlockedBy: null as string | null,
+}
+let access = { ...ACCESS }
+vi.mock('@/features/ontology/lib/useSemanticLayerAccess', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/features/ontology/lib/useSemanticLayerAccess')>()),
+  useSemanticLayerAccess: () => access,
 }))
 
 vi.mock('@/hooks/useGraphSchema', () => ({
@@ -110,7 +114,11 @@ vi.mock('@/services/workspaceService', () => ({
 // ─── Heavy children → prop-driven stubs ────────────────────────────────
 
 vi.mock('@/features/ontology/components/OntologySidebar', () => ({
-  OntologySidebar: () => <div data-testid="sidebar" />,
+  OntologySidebar: (props: { canManage?: boolean; createBlockedReason?: string | null }) => (
+    <div data-testid="sidebar">
+      {props.canManage && <span data-testid="sidebar-create">{props.createBlockedReason ?? 'create offered'}</span>}
+    </div>
+  ),
 }))
 
 vi.mock('@/features/ontology/components/OntologyDetailHeader', () => ({
@@ -160,13 +168,18 @@ vi.mock('@/features/ontology/components/panels/VersionHistoryPanel', () => ({ Ve
 vi.mock('@/features/ontology/components/panels/DeploymentDashboardPanel', () => ({
   DeploymentDashboardPanel: (props: {
     onBulkUnassign?: (entries: Array<{ workspaceId: string; dataSourceId: string; dataSourceLabel: string }>) => void
+    onCreateDraft?: () => void
+    createBlockedReason?: string | null
   }) => (
-    <button onClick={() => props.onBulkUnassign?.([
-      { workspaceId: 'ws1', dataSourceId: 'ds1', dataSourceLabel: 'Source A' },
-      { workspaceId: 'ws1', dataSourceId: 'ds2', dataSourceLabel: 'Source B' },
-    ])}>
-      bulk-unassign-two
-    </button>
+    <>
+      <button onClick={() => props.onBulkUnassign?.([
+        { workspaceId: 'ws1', dataSourceId: 'ds1', dataSourceLabel: 'Source A' },
+        { workspaceId: 'ws1', dataSourceId: 'ds2', dataSourceLabel: 'Source B' },
+      ])}>
+        bulk-unassign-two
+      </button>
+      {props.onCreateDraft && <span data-testid="hero-create">{props.createBlockedReason ?? 'create offered'}</span>}
+    </>
   ),
 }))
 vi.mock('@/features/ontology/components/panels/AdoptionMatchSection', () => ({ AdoptionMatchSection: () => null }))
@@ -206,6 +219,7 @@ async function stageDelete(user: ReturnType<typeof userEvent.setup>) {
 
 beforeEach(() => {
   updateMock.mockReset()
+  access = { ...ACCESS }
 })
 
 // ─── Tests ──────────────────────────────────────────────────────────────
@@ -302,5 +316,34 @@ describe('OntologySchemaPage edit model', () => {
     await waitFor(() => expect(updateDataSourceMock).toHaveBeenCalledTimes(2))
     expect(updateDataSourceMock).toHaveBeenCalledWith('ws1', 'ds1', { ontologyId: '' })
     expect(updateDataSourceMock).toHaveBeenCalledWith('ws1', 'ds2', { ontologyId: '' })
+  })
+})
+
+describe('OntologySchemaPage, creating a layer', () => {
+  it('offers New semantic layer to someone who may create one', async () => {
+    renderPage('/schema?view=dashboard')
+    expect(await screen.findByTestId('sidebar-create')).toHaveTextContent('create offered')
+    expect(screen.getByTestId('hero-create')).toHaveTextContent('create offered')
+  })
+
+  it('switches it off, saying why, for someone who looks after layers but may not start one', async () => {
+    access = { ...ACCESS, canCreate: false, createBlockedBy: 'create-permission' }
+    renderPage('/schema?view=dashboard')
+    expect(await screen.findByTestId('sidebar-create')).toHaveTextContent(/can’t start new ones.*workspace:ontology:create/)
+    expect(screen.getByTestId('hero-create')).toHaveTextContent(/can’t start new ones/)
+  })
+
+  it('names the switch when creating is turned off for everyone', async () => {
+    access = { ...ACCESS, canCreate: false, createBlockedBy: 'creation-off' }
+    renderPage('/schema?view=dashboard')
+    expect(await screen.findByTestId('sidebar-create')).toHaveTextContent('“Create semantic layers” under Admin → Features')
+  })
+
+  it('offers a reader no create at all', async () => {
+    access = { ...ACCESS, canEdit: false, canCreate: false, createBlockedBy: 'permission' }
+    renderPage('/schema?view=dashboard')
+    await screen.findByTestId('sidebar')
+    expect(screen.queryByTestId('sidebar-create')).toBeNull()
+    expect(screen.queryByTestId('hero-create')).toBeNull()
   })
 })

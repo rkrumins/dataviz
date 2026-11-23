@@ -37,8 +37,10 @@ const ACTIONS: Record<string, { label: string; icon: Glyph; tint: string }> = {
     updated: { label: 'Edited', icon: PenLine, tint: 'bg-indigo-500/12 text-indigo-600 ring-indigo-500/20 dark:text-indigo-400' },
     deleted: { label: 'Deleted', icon: Trash2, tint: 'bg-rose-500/12 text-rose-600 ring-rose-500/20 dark:text-rose-400' },
     restored: { label: 'Restored', icon: RotateCcw, tint: 'bg-amber-500/12 text-amber-600 ring-amber-500/20 dark:text-amber-400' },
-    cloned: { label: 'New draft', icon: CopyPlus, tint: 'bg-violet-500/12 text-violet-600 ring-violet-500/20 dark:text-violet-400' },
+    versioned: { label: 'New draft', icon: CopyPlus, tint: 'bg-violet-500/12 text-violet-600 ring-violet-500/20 dark:text-violet-400' },
+    cloned: { label: 'Cloned', icon: CopyPlus, tint: 'bg-violet-500/12 text-violet-600 ring-violet-500/20 dark:text-violet-400' },
     imported: { label: 'Imported into', icon: Import, tint: 'bg-cyan-500/12 text-cyan-600 ring-cyan-500/20 dark:text-cyan-400' },
+    approved: { label: 'Approved for everyone', icon: BadgeCheck, tint: 'bg-emerald-500/12 text-emerald-600 ring-emerald-500/20 dark:text-emerald-400' },
 }
 const OTHER = { icon: History, tint: 'bg-slate-500/12 text-slate-600 ring-slate-500/20 dark:text-slate-300' }
 

@@ -52,6 +52,8 @@ _SERVICE_ACCOUNTS_MIGRATION_PATH = _VERSIONS_DIR / "20261023_1200_service_accoun
 _NATIVE_QUERY_MIGRATION_PATH = _VERSIONS_DIR / "20261024_1000_native_query.py"
 # Org-wide read for service accounts added the org_reader role.
 _ORG_READ_MIGRATION_PATH = _VERSIONS_DIR / "20261026_1200_sa_org_read.py"
+# Creating semantic layers split workspace:ontology:create off manage.
+_ONTOLOGY_CREATE_MIGRATION_PATH = _VERSIONS_DIR / "20261201_1000_ontology_create.py"
 
 
 def _load_migration(path: Path, name: str):
@@ -154,6 +156,7 @@ def test_seed_leaves_match_catalogue(migration_module, ws_reads_migration_module
             _DATASOURCE_PUBLISH_MIGRATION_PATH, "_rbac_ds_publish_migration"
         )._NEW_PERMISSIONS
     }
+    perm_ids.add(_load_migration(_ONTOLOGY_CREATE_MIGRATION_PATH, "_rbac_ont_create_migration")._PERMISSION)
     for prefix, leaves in _SEED_LEAVES.items():
         expected = {p for p in perm_ids if p.startswith(prefix + ":")}
         assert leaves == expected, (
@@ -555,6 +558,36 @@ def test_native_query_permission_reaches_an_existing_database():
         reads = "workspace:datasource:read" in spec.permissions
         assert (perm in spec.permissions) == reads, role
     assert perm in _WORKSPACE_CATEGORY_LEAVES
+
+
+def test_ontology_create_permission_reaches_an_existing_database():
+    """``workspace:ontology:create`` arrives by migration AND ``rbac_seed``, with the same text and
+    the same grants, and "Reset to default" restores it: every built-in role that manages
+    semantic layers holds it, ``workspace:admin`` implies it in code, and it never collapses into
+    a wildcard read+manage could stand for."""
+    from backend.app.config import rbac_seed
+    from backend.app.services.permission_service import _SEED_LEAVES, _WORKSPACE_CATEGORY_LEAVES
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+
+    perm = "workspace:ontology:create"
+    assert _ONTOLOGY_CREATE_MIGRATION_PATH.exists(), f"missing migration: {_ONTOLOGY_CREATE_MIGRATION_PATH}"
+    mod = _load_migration(_ONTOLOGY_CREATE_MIGRATION_PATH, "_ontology_create_migration")
+    assert mod._PERMISSION == perm
+    assert mod.revision == _ONTOLOGY_CREATE_MIGRATION_PATH.stem and len(mod.revision) <= 32
+
+    seed_perm = next(p for p in rbac_seed.PERMISSIONS if p["id"] == perm)
+    assert (seed_perm["category"], seed_perm["description"], seed_perm["long_description"]) == (
+        "workspace", mod._DESCRIPTION, mod._LONG_DESCRIPTION,
+    )
+    assert json.loads(seed_perm["examples"]) == mod._EXAMPLES
+    seed_grants = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm}
+    assert set(mod._ROLE_PERMISSIONS) == seed_grants
+    managers = {r for r, p in rbac_seed.ROLE_GRANTS if p == "workspace:ontology:manage"}
+    assert {r for r, _ in seed_grants} == managers
+    for role, spec in SYSTEM_ROLE_DEFAULTS.items():
+        assert (perm in spec.permissions) == ("workspace:ontology:manage" in spec.permissions), role
+    assert perm in _WORKSPACE_CATEGORY_LEAVES
+    assert perm in _SEED_LEAVES["workspace:ontology"]
 
 
 def test_the_org_reader_role_reaches_an_existing_database():

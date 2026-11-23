@@ -6,6 +6,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { Search, Plus, Shield, CheckCircle2, PenLine, Lock, Box, GitBranch, Loader2, BookOpen, Database, X, Trash2, LayoutGrid, LayoutDashboard, Link2, Unlink, PanelLeftClose, PanelLeftOpen, Info, ChevronDown, ChevronUp, Layers } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceResponse, WorkspaceResponse } from '@/services/workspaceService'
 import type { StatusFilter } from '../lib/ontology-types' // used by STATUS_CONFIGS key type
@@ -22,6 +23,9 @@ interface OntologySidebarProps {
   /** Phase 18: when ``false`` (reader), hide the Create Draft + Suggest
    *  affordances. The catalogue stays visible and selectable. */
   canManage?: boolean
+  /** Why someone who looks after layers can't start one here — the switch or permission that
+   *  decides it. The button stays, switched off, saying so; `null` when they can. */
+  createBlockedReason?: string | null
   onCreateDraft: () => void
   onSuggest?: () => void
   dashboardMode?: boolean
@@ -120,6 +124,7 @@ export function OntologySidebar({
   workspaces,
   isLoading,
   canManage = true,
+  createBlockedReason = null,
   onCreateDraft,
   dashboardMode,
   onToggleDashboard,
@@ -496,13 +501,17 @@ export function OntologySidebar({
         {/* Collapsed actions */}
         <div className="border-t border-glass-border/60 p-1.5 space-y-1">
           {canManage && (
+          <HoverTip label={createBlockedReason ? 'Can’t start a new semantic layer' : 'New semantic layer'}
+            detail={createBlockedReason ?? undefined} className="flex">
           <button
             onClick={onCreateDraft}
-            className="w-full flex items-center justify-center p-2 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors"
-            title="New Draft"
+            disabled={!!createBlockedReason}
+            aria-label="New semantic layer"
+            className="w-full flex items-center justify-center p-2 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:bg-black/[0.06] disabled:text-ink-muted dark:disabled:bg-white/[0.08] disabled:cursor-not-allowed"
           >
             <Plus className="w-4 h-4" />
           </button>
+          </HoverTip>
           )}
         </div>
 
@@ -1051,6 +1060,17 @@ export function OntologySidebar({
       {/* Bottom — single compact "New" button (CTAs live in the dashboard hero now) */}
       {canManage && (
       <div className="border-t border-glass-border/60 p-3">
+        {createBlockedReason ? (
+          <HoverTip label="Can’t start a new semantic layer" detail={createBlockedReason} className="flex">
+            <button
+              disabled
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border border-dashed border-glass-border text-ink-muted cursor-not-allowed"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              New Semantic Layer
+            </button>
+          </HoverTip>
+        ) : (
         <button
           onClick={onCreateDraft}
           className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:from-indigo-600 hover:to-violet-700 transition-all shadow-sm shadow-indigo-500/25"
@@ -1058,6 +1078,7 @@ export function OntologySidebar({
           <Plus className="w-3.5 h-3.5" />
           New Semantic Layer
         </button>
+        )}
       </div>
       )}
 
