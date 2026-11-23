@@ -15,12 +15,13 @@
  * panel's `accent-primary` classes were dead no-ops). The real primary accent
  * is `accent-lineage`; the green Plus/Add CTA is kept from the old panel.
  */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
 import type { LineageNode } from '@/store/canvas'
+import { useWorkspacesStore } from '@/store/workspaces'
 import {
   useViewEntityTypes,
   useViewRootEntityTypes,
@@ -113,10 +114,15 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
 
   const {
     tree, active, allowedTypes, edgeOptions, blockedReason, canCommit,
-    setName, setType, setEdgeType, setDetails, retarget,
+    setName, setType, setEdgeType, setDetails, setIdentifier, identifierUrn, identifierProblem, retarget,
     commitSibling, commitAndNest, indent, outdent,
     renameRow, updateRowDetails, removeRow, descendantCount, stageRows,
   } = useHierarchyOutline({ scopeParentUrn, initialTypeId, onEntityStaged })
+  // In the Playground a new entity may be given its identifier (its `id`, which a file's key of the
+  // same value finds): offered beside its name.
+  const nodeIdentity = useCanvasNodeIdentity()
+  const inPlayground = useWorkspacesStore((s) => s.workspaces.find((w) => w.id === nodeIdentity?.workspaceId)?.kind === 'playground')
+  const identifierId = useId()
 
   const entityTypes = useViewEntityTypes()
   const rootEntityTypes = useViewRootEntityTypes()
@@ -663,6 +669,29 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                     placeholder="Enter display name..." className="input w-full"
                   />
                 </div>
+
+                {inPlayground && (
+                  <div className="space-y-1.5">
+                    <label htmlFor={identifierId} className="flex items-center gap-1.5 text-xs font-medium text-ink-muted uppercase tracking-wider">
+                      <LucideIcons.Fingerprint className="w-3.5 h-3.5" aria-hidden /> Identifier
+                      <span className="normal-case tracking-normal font-normal text-ink-muted/70">· optional</span>
+                    </label>
+                    <input
+                      id={identifierId} type="text" value={active.identifier}
+                      onChange={(e) => setIdentifier(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.altKey && !e.shiftKey) { e.preventDefault(); doAdd() } }}
+                      placeholder="e.g. orders_daily" spellCheck={false} autoComplete="off"
+                      aria-invalid={!!identifierProblem || undefined} aria-describedby={`${identifierId}-hint`}
+                      className={cn('input w-full font-mono text-[13px]', identifierProblem && 'border-rose-500/60')}
+                    />
+                    <p id={`${identifierId}-hint`} aria-live="polite"
+                      className={cn('text-[11px] leading-snug', identifierProblem ? 'text-rose-600 dark:text-rose-400' : 'text-ink-muted')}>
+                      {identifierProblem ?? (identifierUrn
+                        ? <>Saved as <code className="font-mono text-ink-secondary">{identifierUrn}</code> — a file with this key finds it again.</>
+                        : 'How files and connections name it. Left blank, one is made for it.')}
+                    </p>
+                  </div>
+                )}
 
                 {/* Details — ONE editor in ONE place: bound to a committed row via
                     its row action, or to the entity being typed. Never inline in

@@ -4,7 +4,9 @@
  * the data models on offer are cards with where each comes from, the best-fitting approved one
  * chosen — never one that fits nothing, and nothing without scores — and "Make one from my file"
  * last. Each of the file's types is matched to one of the model's, or its rows left out, and a
- * connection the model's relationship doesn't allow is named. Create makes the graph (once), then
+ * connection the model's relationship doesn't allow is named. It opens in its Context View, with a
+ * Graph view and a Hierarchy if chosen — a Hierarchy only of a model that nests one type in
+ * another. Create makes the graph (once), then
  * loads the file into it with the standard import; a load that fails is tried again into the same
  * graph. Done, it opens, or opens with the import for more data.
  */
@@ -265,6 +267,68 @@ describe('New data source from a file', () => {
             ['urn:playground:orders', 'table'], ['urn:playground:daily', 'table'], ['urn:playground:dash', 'dashboard']])
         expect(rows.filter(r => r.kind === 'edge').map(r => r.targetUrn)).toEqual(['urn:playground:daily', 'urn:playground:dash'])
         expect(svc.loadWorkspaces).toHaveBeenCalled()
+    })
+
+    it('settles what identifies each thing first, and loads the things by it', async () => {
+        renderDialog()
+        await pick(file('things.csv', 'code,type,name\nA,Table,Alpha\nB,Table,Beta\n'))
+        const step = await screen.findByRole('region', { name: 'Identifier' })
+        const column = within(step).getByLabelText('Read from the column')
+        expect(column).toHaveValue('')                               // no name says which
+        await userEvent.click(await screen.findByRole('button', { name: /Make one from my file/ }))
+        expect(create()).toBeDisabled()
+
+        await userEvent.selectOptions(column, 'code')
+        expect(within(step).getByRole('list', { name: 'First identifiers' })).toHaveTextContent('AB')
+        expect(create()).toBeEnabled()
+        await userEvent.click(create())
+        await screen.findByRole('region', { name: 'Done' })
+        expect((await sentRows()).map(r => r.urn)).toEqual(['urn:playground:A', 'urn:playground:B'])
+    })
+
+    it('opens in its Context View alone unless other canvases are chosen, and sends those chosen', async () => {
+        renderDialog()
+        await pick(file('example.json', TEMPLATE_FILES['example.json']))
+        await userEvent.click(await screen.findByRole('button', { name: /Make one from my file/ }))
+        const canvases = screen.getByRole('region', { name: 'Canvases' })
+        expect(within(canvases).getByRole('checkbox', { name: 'Context View, opens first' })).toHaveAttribute('aria-checked', 'true')
+        await userEvent.click(within(canvases).getByRole('checkbox', { name: /^Graph/ }))
+        await userEvent.click(create())
+        expect(svc.createGraph).toHaveBeenCalledWith(expect.objectContaining({ views: ['graph'] }))
+    })
+
+    it('offers a Hierarchy only of a data model that nests one type in another, saying why not otherwise', async () => {
+        svc.get.mockImplementation(async (id: string) => id === 'ont_pipes' ? {
+            ...(LAYERS.ont_pipes as object),
+            relationshipTypeDefinitions: { FEEDS: { name: 'Feeds', source_types: ['table'], target_types: ['dashboard'] },
+                HAS: { name: 'Has', is_containment: true, source_types: ['dashboard'], target_types: ['table'] } },
+        } : LAYERS[id])
+        renderDialog()
+        await pick(file('things.csv', THINGS), file('links.csv', CONNECTIONS))
+        const canvases = screen.getByRole('region', { name: 'Canvases' })
+        const tree = () => within(canvases).getByRole('checkbox', { name: /^Hierarchy/ })
+        await waitFor(() => expect(tree()).not.toHaveAttribute('aria-disabled'))
+        expect(tree()).toHaveTextContent('Dashboards and their tables')
+
+        // A data model with nothing nested — or one made from the file — can't have one, and says so.
+        await userEvent.click(card(/Finance reporting/))
+        await waitFor(() => expect(tree()).toHaveAttribute('aria-disabled', 'true'))
+        await userEvent.click(screen.getByRole('button', { name: /Make one from my file/ }))
+        expect(tree()).toHaveAccessibleDescription(/doesn’t put one inside another/)
+        await userEvent.click(tree())
+        await userEvent.click(create())
+        expect(svc.createGraph.mock.calls[0][0]).not.toHaveProperty('views')
+    })
+
+    it('says which views it was made with — and a Hierarchy asked for that it couldn’t have', async () => {
+        svc.createGraph.mockResolvedValueOnce({ ...MADE, viewIds: { context: 'v_ctx', graph: 'v_graph', hierarchy: null } })
+        renderDialog()
+        await pick(file('example.json', TEMPLATE_FILES['example.json']))
+        await userEvent.click(await screen.findByRole('button', { name: /Make one from my file/ }))
+        await userEvent.click(create())
+        const done = await screen.findByRole('region', { name: 'Done' })
+        expect(done).toHaveTextContent('It opens in its Context View, with a Graph view beside it.')
+        expect(done).toHaveTextContent('It has no Hierarchy view: its data model has nothing that holds anything else.')
     })
 
     it('done, opens the graph, or opens it with the import for more data', async () => {

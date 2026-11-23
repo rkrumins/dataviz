@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Annotated, Any, Dict, List, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request, status
@@ -56,6 +56,7 @@ from backend.app.db.repositories import (binding_repo, ontology_definition_repo,
 from backend.app.services import (playground_layers, playground_policy, playground_samples,
                                   playground_starter, view_library, workspace_access)
 from backend.app.services.feature_flags import feature_flags
+from backend.app.services.node_identity import bind_node_write, load_node_identity
 from backend.app.services.playground_starter import EntityType, Example, RelationshipType, Starter
 from backend.app.services.versioning.import_export.resolve import pointer_id, pointer_seed
 from backend.common.models.view_library import DisplayRule, SavedQueryInput
@@ -284,6 +285,8 @@ class SampleSummary(BaseModel):
     node_count: int = Field(alias="nodeCount")
     edge_count: int = Field(alias="edgeCount")
     entity_types: List[str] = Field(alias="entityTypes")
+    #: What its Hierarchy view would show (``Dashboards and their metrics``); null: it has none.
+    hierarchy: Optional[str] = None
 
 
 class SampleCatalogue(BaseModel):
@@ -294,18 +297,24 @@ class SampleCatalogue(BaseModel):
     quota_left: int = Field(alias="quotaLeft")
 
 
+#: The views a person adds beside the Context View every graph opens in (``playground_starter``).
+Views = List[Literal["graph", "hierarchy"]]
+
+
 class Started(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     data_source_id: str = Field(alias="dataSourceId")
     #: The Context View: the one to open.
     view_id: str = Field(alias="viewId")
-    #: Every view it was made with, by kind: ``context``, ``graph`` (and a sample's ``hierarchy``).
-    view_ids: Dict[str, str] = Field(alias="viewIds")
+    #: Every view it was made with, by kind: ``context``, and each of ``graph`` and ``hierarchy``
+    #: asked for — null for one it can't have (a Hierarchy view of a graph with no containment).
+    view_ids: Dict[str, Optional[str]] = Field(alias="viewIds")
 
 
 class StartedSample(Started):
-    #: The example change waiting for review: a private draft on the Graph view, and its review.
+    #: The example change waiting for review: a private draft on the Graph view (else the Context
+    #: View), and its review.
     draft_id: Optional[str] = Field(None, alias="draftId")
     review_id: Optional[str] = Field(None, alias="reviewId")
 
@@ -323,18 +332,18 @@ async def _members_playground(session: AsyncSession, claims: PermissionClaims) -
     return ws
 
 
-async def _may_start(session: AsyncSession, claims: PermissionClaims, user: User, starter: Starter
-                     ) -> Tuple[str, Optional[str]]:
+async def _may_start(session: AsyncSession, claims: PermissionClaims, user: User,
+                     view_types: List[str]) -> Tuple[str, Optional[str]]:
     """What would refuse a starter graph, asked before anything is made: membership, the quota and
-    the sandbox provider, making views there, and each layout its views are in. Returns the
-    Playground's id and its sandbox provider (plain values: making a data model may roll the
-    session back, which expires the row)."""
+    the sandbox provider, making views there, and each layout its views are in (``view_types``).
+    Returns the Playground's id and its sandbox provider (plain values: making a data model may
+    roll the session back, which expires the row)."""
     ws = await _members_playground(session, claims)
     ws_id, provider_id = ws.id, settings_of(ws).sandbox_provider_id
     await playground_policy.assert_blank_graph(session, ws_id, provider_id, user.id)
     await authorize_view_create(claims, session, workspace_id=ws_id, data_source_id=None,
                                 visibility="workspace")
-    for _key, view_type, _name, _config in playground_starter.views(starter):
+    for view_type in view_types:
         await ensure_view_mode_allowed(view_type, session)
     return ws_id, provider_id
 
@@ -352,9 +361,15 @@ async def list_samples(
     return SampleCatalogue(quota_left=max(0, left), samples=[
         SampleSummary(id=s.id, title=s.title, description=s.description, icon=s.icon, color=s.color,
                       view_type=s.view_type, node_count=len(s.nodes), edge_count=len(s.edges),
-                      entity_types=[t.name for t in s.entity_types.values()])
+                      entity_types=[t.name for t in s.entity_types.values()],
+                      hierarchy=playground_starter.hierarchy_of(playground_samples.starter(s)))
         for s in playground_samples.SAMPLES
     ])
+
+
+class StartSample(BaseModel):
+    #: The views to make beside the Context View: none asked for, the Context View alone.
+    views: Views = Field(default_factory=list)
 
 
 @router.post("/samples/{sample_id}", response_model=StartedSample, response_model_by_alias=True,
@@ -363,6 +378,7 @@ async def start_sample(
     sample_id: str,
     request: Request,
     background: BackgroundTasks,
+    body: Optional[StartSample] = Body(None),
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -370,11 +386,12 @@ async def start_sample(
 ):
     """Start a graph from a sample: a blank graph on the Playground's sandbox provider — one of
     the person's quota — whose first version is the sample, loaded as a day-0 import; a Context
-    View (to open first), a Graph view and a Hierarchy view on it, shared with everyone in the
-    Playground; saved queries and a display rule on the Context View; the data source described,
-    tagged and linked to how the Playground works; and an example change waiting for review — a
-    private draft on the Graph view, with a review that asks nobody. They change it as they would
-    any blank graph, and publish and merge their own changes (``playground_policy``).
+    View (to open first) on it and, as ``views`` asks, a Graph view and a Hierarchy view, shared
+    with everyone in the Playground; saved queries and a display rule on the Context View; the data
+    source described, tagged and linked to how the Playground works; and an example change waiting
+    for review — a private draft on the Graph view (else the Context View), with a review that asks
+    nobody. They change it as they would any blank graph, and publish and merge their own changes
+    (``playground_policy``).
 
     The sample is the platform's, not the person's, so it lands on main as the graph's first
     version, as its genesis did; what they change after goes through drafts like any edit.
@@ -385,10 +402,12 @@ async def start_sample(
     if sample is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="There is no such sample.")
     starter = playground_samples.starter(sample)
-    ws_id, provider_id = await _may_start(session, claims, user, starter)
+    include = (body or StartSample()).views
+    ws_id, provider_id = await _may_start(
+        session, claims, user, [view_type for _k, view_type, _n, _c in playground_starter.views(starter, include)])
     await playground_starter.ensure_ontology(session, starter)
     return StartedSample(**await _start(request, background, session, svc, user, ws_id, provider_id,
-                                        starter, failure="sample_load_failed", own_ontology=False))
+                                        starter, include, failure="sample_load_failed", own_ontology=False))
 
 
 # ── A graph for the person's own data ───────────────────────────────────
@@ -441,6 +460,8 @@ class NewGraph(BaseModel):
     model: GraphModel
     #: The entity types its file uses, which are its Context View's layers (on an ``ontologyId``).
     types: Optional[List[str]] = Field(None, max_length=1000)
+    #: The views to make beside the Context View: none asked for, the Context View alone.
+    views: Views = Field(default_factory=list)
 
 
 class StartedGraph(Started):
@@ -513,8 +534,9 @@ async def create_graph(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Start a graph for the person's own data: a blank graph of their quota on the Playground's
-    sandbox provider, a Context View (to open first) and a Graph view, the data source described —
-    and no rows yet. Its file loads through the standard import
+    sandbox provider, a Context View (to open first) and, as ``views`` asks, a Graph view and a
+    Hierarchy view (when its semantic layer has a containment among its types), the data source
+    described — and no rows yet. Its file loads through the standard import
     (``/{ws_id}/versioning/graphs/{graph_id}/imports``), which holds each row to its semantic layer.
     A graph with no data is a graph: an import that fails is tried again into it.
 
@@ -525,9 +547,9 @@ async def create_graph(
     over all of them. What would refuse it is asked first; a graph that can't be made takes its data
     source and views with it, and the layer made for it — never a layer it was built on."""
     infer = _inferred(body.model.infer) if body.model.infer is not None else None
-    # No rows, so no hierarchy: its views are a Context View and a Graph view whatever its types,
-    # and what would refuse them is asked before its layer is looked up or made.
-    ws_id, provider_id = await _may_start(session, claims, user, _graph_starter(body, "", {}, {}))
+    # What would refuse its views is asked before its layer is looked up or made: each view asked
+    # for, a Hierarchy view too though its layer may turn out to have no containment for one.
+    ws_id, provider_id = await _may_start(session, claims, user, ["reference", *body.views])
     if infer is None:
         layer = await playground_layers.assert_offered(session, claims, user.id, body.model.ontology_id)
         ontology_id = layer.id
@@ -544,8 +566,8 @@ async def create_graph(
             await _drop_ontology(session, ontology_id)
             raise
     made = await _start(request, background, session, svc, user, ws_id, provider_id,
-                        _graph_starter(body, ontology_id, *types), failure="graph_create_failed",
-                        own_ontology=infer is not None)
+                        _graph_starter(body, ontology_id, *types), body.views,
+                        failure="graph_create_failed", own_ontology=infer is not None)
     type_ids = ({"entity": {t.name: tid for tid, t in types[0].items()},
                  "relationship": {r.name: rid for rid, r in types[1].items()}} if infer is not None else {})
     return StartedGraph(**made, ontologyId=ontology_id, typeIds=type_ids)
@@ -553,12 +575,13 @@ async def create_graph(
 
 async def _start(request: Request, background: BackgroundTasks, session: AsyncSession,
                  svc: GraphVersioningService, user: User, ws_id: str, provider_id: Optional[str],
-                 starter: Starter, *, failure: str, own_ontology: bool) -> dict:
+                 starter: Starter, include: Views, *, failure: str, own_ontology: bool) -> dict:
     """Make a starter graph on its data model (already made): the blank graph, its first version (a
     sample's rows; a graph for the person's own data has none, its file loads through the import),
-    its views (each at version 1), the Context View's library, the data source's details and the
-    example change. Returns what the routes answer. Anything that fails takes all of it with it
-    (:func:`_discard`) — with ``own_ontology``, the data model too — and answers 502 ``failure``."""
+    its views — the Context View and those of ``include`` it can have — each at version 1, the
+    Context View's library, the data source's details and the example change. Returns what the
+    routes answer. Anything that fails takes all of it with it (:func:`_discard`) — with
+    ``own_ontology``, the data model too — and answers 502 ``failure``."""
     try:
         made = await create_blank_graph(ws_id, CreateBlankGraphRequest(
             name=starter.title, description=starter.description, provider_id=provider_id,
@@ -570,13 +593,18 @@ async def _start(request: Request, background: BackgroundTasks, session: AsyncSe
     ds_id, graph_id = made["data_source_id"], made["graph_id"]
     try:
         if starter.rows:
-            loaded = await svc.bulk_ingest(graph_id=graph_id, rows=list(starter.rows), actor=user.id,
+            # A day-0 import writes its nodes as they are, past the binding every save runs: each
+            # thing takes its own name and identifier (``id``, its urn) here, as a save gives them.
+            identity = await load_node_identity(session, ds_id)
+            rows = [bind_node_write(None, row, identity) if row.get("kind") == "node" else row
+                    for row in starter.rows]
+            loaded = await svc.bulk_ingest(graph_id=graph_id, rows=rows, actor=user.id,
                                            message=starter.message, standard_ids=True)
             if loaded.get("rejected"):
                 raise RuntimeError(f"{len(loaded['rejected'])} rows were refused")
         digest = await _compute_ontology_digest(session, ws_id, ds_id)
-        view_ids: Dict[str, str] = {}
-        for key, view_type, name, config in playground_starter.views(starter):
+        view_ids: Dict[str, Optional[str]] = {}
+        for key, view_type, name, config in playground_starter.views(starter, include):
             view = await view_repo.create_view(session, ViewCreateRequest(
                 name=name, description=starter.description, workspace_id=ws_id, data_source_id=ds_id,
                 view_type=view_type, config=config, visibility="workspace",
@@ -596,6 +624,8 @@ async def _start(request: Request, background: BackgroundTasks, session: AsyncSe
         for view_id in view_ids.values():
             await view_version_repo.checkpoint(session, await session.get(ViewORM, view_id),
                                                source="create", actor=user.id, message=starter.message)
+        for key in include:                  # asked for, and it can't have one: say so
+            view_ids.setdefault(key, None)
         if starter.tags or starter.links:
             ds = await session.get(WorkspaceDataSourceORM, ds_id)
             ds.tags = json.dumps(list(starter.tags)) if starter.tags else None
@@ -605,8 +635,10 @@ async def _start(request: Request, background: BackgroundTasks, session: AsyncSe
             ds.metadata_updated_at = datetime.now(timezone.utc).isoformat()
         draft_id = review_id = None
         if starter.example is not None:
+            # From its Graph view when it has one: on the view it opens in, the person's first Edit
+            # finds the example waiting among the drafts to continue.
             draft_id, review_id = await _example_change(session, svc, user.id, ws_id, ds_id, graph_id,
-                                                        view_ids["graph"], starter.example)
+                                                        view_ids.get("graph") or context, starter.example)
         await session.commit()
     except Exception:
         logger.exception("starter graph %s could not be made in graph %s; removing it", starter.title, graph_id)
@@ -824,7 +856,8 @@ async def model_template(
     ie=Depends(get_import_export_service),
 ):
     """The standard import template for a layer on offer (csv, ndjson or xlsx): what
-    ``GET …/graphs/{graph_id}/imports/template`` gives for a graph on it."""
+    ``GET …/graphs/{graph_id}/imports/template`` gives for a graph on it — which identifies its
+    things by ``id`` (``playground_policy.IDENTITY_PROPERTY``)."""
     from fastapi.responses import Response
     from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
     from backend.app.ontology.resolver import resolve_ontology
@@ -839,7 +872,8 @@ async def model_template(
     await playground_layers.assert_offered(session, claims, user.id, ontology_id)
     layer = await SQLAlchemyOntologyRepository(session).get_by_id(ontology_id)
     data = await ie.build_template(export_format=format,
-                                   ontology=import_contract_of(resolve_ontology(None, layer)))
+                                   ontology=import_contract_of(resolve_ontology(None, layer)),
+                                   identity_property=playground_policy.IDENTITY_PROPERTY)
     return Response(content=data, media_type=MEDIA_TYPES.get(format, "application/octet-stream"),
                     headers={"Content-Disposition": f'attachment; filename="import-template.{format}"'})
 
@@ -909,6 +943,9 @@ async def add_layer_types(
     if not changed:
         return LayerTypesAdded(ontology_id=row.id, version=row.version, moved_graphs=0,
                                entity_type_ids=entity_ids, relationship_type_ids=relationship_ids)
+    # Its types each have the identifier field — those added and those it had, a layer made before
+    # the field was: this is the version its graphs move to.
+    entities, _added = playground_layers.ensure_identity_field(entities)
     req = OntologyUpdateRequest(entityTypeDefinitions=entities, relationshipTypeDefinitions=relationships)
     normalise_layer_body(req)
     made = await ontology_definition_repo.update_ontology(session, row.id, req, actor=user.id)

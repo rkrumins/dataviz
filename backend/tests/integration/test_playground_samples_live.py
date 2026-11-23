@@ -148,7 +148,8 @@ async def _samples(falkordb_port: str) -> None:
     try:
         async with _app_as(_person(), {ws_id: MEMBER_PERMS}, [sandbox], falkordb_port) as c:
             for sample in playground_samples.SAMPLES:          # the retail pipeline first
-                r = await c.post(f"/api/v1/playground/samples/{sample.id}")
+                r = await c.post(f"/api/v1/playground/samples/{sample.id}",
+                                 json={"views": ["graph", "hierarchy"]})
                 assert r.status_code == 201, (sample.id, r.status_code, r.text)
                 out = r.json()
                 svc = GraphVersioningService()

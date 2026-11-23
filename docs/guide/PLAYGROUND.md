@@ -55,7 +55,7 @@ you built, how many more graphs you may start, and three ways to start the next.
 | Start from… | You get | Best when |
 | --- | --- | --- |
 | **A sample** | A realistic graph, its views, saved searches and an example change waiting for review | You've never built a graph, or want to see what one is for |
-| **A file** | A versioned data source of your things and how they connect, on an approved semantic layer or one of your own, with a Context View and a Graph view | You have a spreadsheet, an export from a workspace, or an import file |
+| **A file** | A versioned data source of your things and how they connect, on an approved semantic layer or one of your own, with a Context View, and a Graph view or a Hierarchy if you want them | You have a spreadsheet, an export from a workspace, or an import file |
 | **A blank graph** | An empty graph on the data model you pick, to draw on | You'd rather build it by hand |
 
 Whatever you start from, you get the same thing a team workspace gives you: a
@@ -66,8 +66,11 @@ layer when it moves into a workspace.
 ### Start from a sample
 
 1. Click **Start from a sample**. The samples are just below.
-2. Click **Start** on one. The button says **Starting…** while the graph is made.
-3. Its **Context View** opens. The notification offers **Take the tour** — a lap
+2. Click **Start** on one, and choose its **canvases**. It always opens in its
+   **Context View**; tick **Graph** or **Hierarchy** to get those views beside it.
+   You can add more views later.
+3. Click **Start sample**. The button says **Starting…** while the graph is made.
+4. Its **Context View** opens. The notification offers **Take the tour** — a lap
    around the canvas — and **See the example review**.
 
 | Sample | What it shows |
@@ -80,13 +83,14 @@ Each sample comes with:
 
 * a **Context View**, one layer per kind of thing in pipeline order — the one
   that opens, and the one you edit in;
-* a **Graph view** of the same graph, and a **Hierarchy view** of what the
+* if you chose them, a **Graph view** of the same graph, and a **Hierarchy view** of what the
   pipeline ends in and what it holds — dashboards and their metrics, reports and
   their metrics, or feature sets and their features;
 * **saved searches** on the Context View — the data marked PII, the certified
   data, what one team owns, and everything feeding the key output — under
   **Library → This view**, and a display rule tinting what's marked `pii`;
-* an **example change waiting for review**, on the Graph view: a private draft
+* an **example change waiting for review**, on the Graph view (or on the Context
+  View, if you didn't choose a Graph view): a private draft
   that adds one more thing, and a review of it nobody was asked to give, so no
   one is notified. Approve and merge it yourself to see how publishing works;
 * a description, the tag `sample` and a link back to this page, under **Data →
@@ -112,7 +116,14 @@ anything that can't be used is shown before anything is made.
      (CSV, TSV, ndjson, JSON or Excel). Once you've picked a semantic layer you can
      download its template, with a column for everything it holds. A file you
      exported from a workspace comes in as it is.
-3. **Data model.** Pick what your data is: the cards are ranked by how much of your
+3. **Identifier.** Every thing needs an identifier of its own: it's how its
+   connections name it, and how the next file finds it again. In the simple files
+   it's read from the column named `key`, `id`, `identifier` or `urn`; choose
+   another column if that isn't the one. A standard file's rows give their `urn`
+   or `prop.id`; rows that give neither can take one from a column. You see the
+   first values, and how many things have none or share one. **Create** waits
+   until every thing has one, and no two share one.
+4. **Data model.** Pick what your data is: the cards are ranked by how much of your
    file each semantic layer already describes, and the best approved one is
    already picked.
    * **Approved** — the organization's published semantic layers, the same ones
@@ -123,15 +134,19 @@ anything that can't be used is shown before anything is made.
      samples'.
    * **Make one from my file** — a data model made from the types in your file,
      yours to change afterwards.
-4. **Match types.** Each type in your file is matched to one in the semantic
+5. **Match types.** Each type in your file is matched to one in the semantic
    layer — by its name, where it can be. Change any that's wrong, or choose
    **Leave these rows out**. A connection the semantic layer doesn't allow between
    those two types is listed under **Rows to fix**. On a semantic layer of your own,
    **Add to my data model** adds what's missing.
-5. **Name it**, and describe it if you like. **More options** chooses
+6. **Canvases.** Your graph opens in its **Context View**. Tick **Graph** for a
+   freely laid-out view of the same things, or **Hierarchy** for what holds what.
+   A Hierarchy needs a semantic layer that puts one kind of thing inside another,
+   such as a dashboard and its metrics; when yours doesn't, the card says so.
+7. **Name it**, and describe it if you like. **More options** chooses
    how rows match things you already have, and can keep the first load in a draft
    for you to review before publishing.
-6. Click **Create**. The data source and its views are made, then your rows load —
+8. Click **Create**. The data source and its views are made, then your rows load —
    the same import every workspace uses, with its progress. When it's done you see
    what was added and anything that couldn't be, with why; **Open it** opens the
    Context View, and **Add more data** opens **Import** on it.
@@ -176,7 +191,9 @@ with semicolons or tabs reads the same.
    the samples'. With none to pick, the wizard offers a sample or your own data
    instead — either makes a data model for you.
 3. Name the graph and its first view, choose a layout, and create it.
-4. Add things and how they connect on the canvas.
+4. Add things and how they connect on the canvas. Give a new thing an
+   **Identifier** if you like — say the key it has in a file you'll bring in
+   later, so that file finds it. Left blank, one is made for it.
 
 ### How many you may have
 
@@ -209,8 +226,17 @@ what each change does and saves it to the draft. See
 To bring more rows into a graph you already have, click **Add more data** beside
 it under **Your experiments**, or use **Import / Export → Import…** on its Context
 View. They land in a draft, like any edit, and the same two kinds of file work —
-the simple ones and the standard import file. See
-[Import & Export](/guide/import-export).
+the simple ones and the standard import file. As when you start from a file,
+**Import** first shows what identifies each thing, and waits until every thing has
+an identifier of its own. See [Import & Export](/guide/import-export).
+
+### Identifiers
+
+Every thing in a Playground graph has an **Identifier**, its `id`. It's the same
+as the thing's URN, it never changes, and you can copy it from the thing's
+details. Every kind of thing in a Playground data model has the field. A row of
+a file that gives a thing neither a `urn` nor an `id` is refused: *Needs an
+identifier (urn or id)*.
 
 ## Find
 
@@ -390,6 +416,11 @@ The server enforces each of these, whatever the screen shows:
   "*sample name* (sample)"; a graph from files gets a data model of its own. If a
   graph's data model can't be made, nothing is kept; if its rows don't load, the
 data source stays, empty, for its maker to try again or delete.
+* Every thing in a graph made in the Playground has an identifier, `id`, equal to
+  its URN: the graph's data source identifies its things by it, and an import into
+  it refuses a row that gives neither a `urn` nor an `id`. Graphs made before this
+  can be given theirs with `backend/scripts/playground_backfill_ids.py` (a dry run
+  unless you pass `--apply`).
 * A member changes, deletes, publishes and merges only the graphs and views they
   made; drafts on someone else's graph are closed to them. Workspace admins of
   the Playground and platform administrators can do anything there.

@@ -11,7 +11,9 @@
  *     types. The best approved one is chosen for them — never one that fits nothing, and nothing
  *     without scores. "Make one from my file" is the last choice.
  *  3. Match types: each of the file's types to one of the data model's, or its rows left out.
- *  4. Name, with More options: what existing items are matched by, and keeping the first load
+ *  4. Canvases: the Context View it opens in, and a Graph view and a Hierarchy if wanted
+ *     (`CanvasChoice`) — a Hierarchy only of a data model that nests one type in another.
+ *  5. Name, with More options: what existing items are matched by, and keeping the first load
  *     in a draft.
  *
  * Create makes the graph, then loads it. A load that fails is tried again into the same graph:
@@ -42,10 +44,14 @@ import { matchTypes, toImportFile, whereOf, type TypeMap } from '@/features/impo
 import { downloadSimpleTemplate, useFileIntake } from '@/features/import-export/useFileIntake'
 import { byUrnFix, refusedOf, useImportRun } from '@/features/import-export/useImportRun'
 import { ImportOptions, matchNote } from '@/features/import-export/ImportOptions'
+import { IdentifierStep } from '@/features/import-export/IdentifierStep'
+import { useIdentifierChoice } from '@/features/import-export/useIdentifierChoice'
 import { formatIdentifier, parseIdentifier, type Match } from '@/features/import-export/identifier'
 import { OWN_DATA_LIMITS, TEMPLATE_FILES } from './ownData'
 import { ModelBadge } from './ModelBadge'
 import { TypeMatchTable, type ModelTypes, type TypeKind } from './TypeMatchTable'
+import { CanvasChoice } from './CanvasChoice'
+import { hierarchyOfLayer, madeWith, useCanvasChoice, type HierarchyOption } from './canvasChoiceModel'
 
 /** Rows to fix shown at once; the rest are counted. */
 const SHOWN = 8
@@ -136,14 +142,16 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
     const [createError, setCreateError] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
 
-    const read = intake.read
+    // The files as the person settles them: each thing identified by the column they chose.
+    const identifier = useIdentifierChoice(intake.read)
+    const read = identifier.read
     const summary = read && read.format !== 'server' ? read.summary : null
     // A name from the files until the person types one: a JSON file's own, else the first file's.
-    const [named, setNamed] = useState(read)
-    if (read !== named) {
-        setNamed(read)
-        if (read && !nameEdited) setName(read.name ?? nameFromFile(intake.files[0]?.name ?? ''))
-        if (read?.description && !description) setDescription(read.description.slice(0, OWN_DATA_LIMITS.description))
+    const [named, setNamed] = useState(intake.read)
+    if (intake.read !== named) {
+        setNamed(intake.read)
+        if (intake.read && !nameEdited) setName(intake.read.name ?? nameFromFile(intake.files[0]?.name ?? ''))
+        if (intake.read?.description && !description) setDescription(intake.read.description.slice(0, OWN_DATA_LIMITS.description))
     }
 
     // Scored against the layers on offer here, by what the file holds of each type.
@@ -178,6 +186,20 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
         ? summary.thingTypes.filter(([t]) => !has(typeMap.entity, t)).length + summary.connectionTypes.filter(([t]) => !has(typeMap.relationship, t)).length
         : 0
     const showMatch = !!model && !!summary && summary.thingTypes.length + summary.connectionTypes.length > 0
+    // A Hierarchy as the server makes one: of a containment among the types the graph lays out.
+    const hierarchy = useMemo<HierarchyOption>(() => {
+        if (fromFile) return { why: 'A data model made from your file connects things; it doesn’t put one inside another, which a hierarchy needs.' }
+        if (!model) return { why: 'Choose a data model first.' }
+        const layer = layerQuery.data
+        if (!layer) return { why: `Checking whether ${model.name} nests one kind of thing in another…` }
+        const used = summary ? Object.values(typeMap.entity).filter((t): t is string => !!t) : undefined
+        return hierarchyOfLayer(
+            Object.entries(layer.entityTypeDefinitions ?? {}).map(([id, def]) => entityDefToSchema(id, def as Record<string, unknown>)),
+            Object.entries(layer.relationshipTypeDefinitions ?? {}).map(([id, def]) => relDefToSchema(id, def as Record<string, unknown>)),
+            layer.containmentEdgeTypes ?? [], used,
+        )
+    }, [fromFile, model, layerQuery.data, summary, typeMap])
+    const canvases = useCanvasChoice(hierarchy)
 
     const pick = (id: string) => {
         setChoice(id)
@@ -218,7 +240,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
     const nameOk = name.trim().length > 0 && name.trim().length <= OWN_DATA_LIMITS.name
     const modelReady = fromFile ? !!summary : !!model && (!summary || (!!available && unmatched === 0))
     const ready = !!read && !intake.reading && !intake.warning && !rowErrors.length && !issues.length
-        && choice !== undefined && modelReady && nameOk && !full && !note?.block
+        && !!identifier.check?.ok && choice !== undefined && modelReady && nameOk && !full && !note?.block
 
     /** The new graph's own data model's types, for a model made from the file: read back, so the
      *  rows name them by their ids. Unread, the rows name them as the file does. */
@@ -251,7 +273,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
             .some(([from, to]) => to === null || caseFold(to) !== caseFold(from))
         const up = read.format === 'standard' && remaps
             ? { file: toImportFile(read, map, intake.files), format: 'ndjson' as const }
-            : intake.upload(map)
+            : intake.upload(map, read)
         if (!up) return
         setIntoDraft(!!past || keepDraft)
         await run.start({ wsId: workspaceId, graphId: target.graphId }, up.file, {
@@ -281,6 +303,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
                         } }
                         : { ontologyId: model!.id },
                     ...(!fromFile && entityTypes.length ? { types: entityTypes } : {}),
+                    ...(canvases.views.length ? { views: canvases.views } : {}),
                 }
                 try {
                     target = await create.mutateAsync(body)
@@ -305,7 +328,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
     }
 
     const stage = run.phase === 'idle' ? 'setup' : run.phase
-    const steps = ['files', 'model', ...(showMatch ? ['types'] : []), 'name'] as const
+    const steps = ['files', ...(read ? ['identifier'] : []), 'model', ...(showMatch ? ['types'] : []), 'canvases', 'name'] as const
     const stepOf = (step: (typeof steps)[number]) => steps.indexOf(step) + 1
     const standardTemplate = (fmt: 'xlsx' | 'csv') => {
         if (!model) return
@@ -430,6 +453,12 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
                                     )}
                                 </Step>
 
+                                {read && (
+                                    <Step n={stepOf('identifier')} title="Identifier" hint="What identifies each thing: its connections name it by this, and the next file finds it again by it.">
+                                        <IdentifierStep choice={identifier} />
+                                    </Step>
+                                )}
+
                                 <Step n={stepOf('model')} title="Data model" hint="The types and connections your graph may hold. The best approved fit for your file is chosen for you.">
                                     {matching.phase === 'analyzing' && (
                                         <p className="mb-2 flex items-center gap-1.5 text-[11px] text-ink-muted"><Loader2 className="w-3 h-3 animate-spin" aria-hidden /> Matching your file against the data models…</p>
@@ -491,6 +520,10 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
                                     </section>
                                 )}
 
+                                <Step n={stepOf('canvases')} title="Canvases" hint="It opens in its Context View. Add a Graph view or a Hierarchy beside it if you’d like them.">
+                                    <CanvasChoice choice={canvases} />
+                                </Step>
+
                                 <Step n={stepOf('name')} title="Name it">
                                     <div className="space-y-3">
                                         <label htmlFor={ids.name} className="block">
@@ -534,7 +567,7 @@ export function BringYourOwnData({ workspaceId, onClose, quotaLeft }: {
                         {stage === 'running' && <Loading upload={run.upload} started={!!run.job} />}
                         {stage === 'done' && made && (
                             <Done name={name.trim()} summary={(run.job?.summary as ImportSummary | null | undefined) ?? null} keptInDraft={intoDraft}
-                                wsId={workspaceId} graphId={made.graphId} jobId={run.job?.jobId ?? null} />
+                                wsId={workspaceId} graphId={made.graphId} jobId={run.job?.jobId ?? null} views={madeWith(made.viewIds)} />
                         )}
                         {stage === 'failed' && made && (
                             <section aria-label="Load failed" className="space-y-3">
@@ -664,14 +697,16 @@ function Loading({ upload, started }: { upload: { sent: number; total: number } 
     )
 }
 
-/** What the first load did: its counts, whether it was published, and the rows it refused. */
-function Done({ name, summary, keptInDraft, wsId, graphId, jobId }: {
+/** What the first load did: its counts, whether it was published, the rows it refused, and the
+ *  views it was made with (`views`, in a sentence). */
+function Done({ name, summary, keptInDraft, wsId, graphId, jobId, views }: {
     name: string
     summary: ImportSummary | null
     keptInDraft: boolean
     wsId: string
     graphId: string
     jobId: string | null
+    views: string
 }) {
     const publish = summary?.publish
     // Why its publish was skipped: a sentence, or the publish route's refusal with its message.
@@ -698,7 +733,7 @@ function Done({ name, summary, keptInDraft, wsId, graphId, jobId }: {
                 </div>
             )}
             {summary?.refused && <RefusedRowsPanel report={summary.refused} wsId={wsId} graphId={graphId} jobId={jobId} />}
-            <p className="text-[11px] text-ink-muted">You get a Context View and a Graph view. Add more data any time: it opens the import in a draft.</p>
+            <p className="text-[11px] text-ink-muted">{views} Add more data any time: it opens the import in a draft.</p>
         </section>
     )
 }

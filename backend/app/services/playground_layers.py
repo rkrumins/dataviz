@@ -35,7 +35,7 @@ from backend.app.db.models import OntologyAuditLogORM, OntologyORM, WorkspaceDat
 from backend.app.ontology.resolver import parse_entity_definitions, parse_relationship_definitions
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.playground_policy import (
-    PLAYGROUND_FLAG, get_playground, is_owner_or_admin, settings_of,
+    IDENTITY_PROPERTY, PLAYGROUND_FLAG, get_playground, is_owner_or_admin, settings_of,
 )
 from backend.app.services.playground_starter import (
     EntityType, RelationshipType, _entity_type_id, _relationship_type_id, definition_columns,
@@ -62,6 +62,30 @@ _FIELDS = (
     {"id": "name", "name": "Name", "type": "string", "show_in_tooltip": True, "display_order": 1},
     {"id": "description", "name": "Description", "type": "markdown", "show_in_node": False, "display_order": 2},
 )
+
+#: The field every entity type of a Playground data model has: a thing's identifier, which a graph
+#: made here identifies it by and keeps equal to its urn on every write
+#: (``node_identity.bind_node_write``) — so every thing has one, and nobody types it in. Not
+#: ``required``: a publish refuses a new thing whose required field is empty, and a graph made
+#: before graphs here were identified by it (or on a layer the org approved) never fills it.
+IDENTITY_FIELD = {"id": IDENTITY_PROPERTY, "name": "Identifier", "type": "string", "show_in_node": False,
+                  "display_order": 0}
+
+
+def ensure_identity_field(entity_defs: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    """``entity_defs`` (an entity type definitions column, raw) with :data:`IDENTITY_FIELD` first
+    among the fields of each type that has no field by its id, and whether any was added. A
+    type's own field by that id is left as it is."""
+    out: Dict[str, Any] = {}
+    added = False
+    for tid, d in entity_defs.items():
+        fields = list(d.get("fields") or []) if isinstance(d, dict) else None
+        if fields is None or any(isinstance(f, dict) and f.get("id") == IDENTITY_PROPERTY for f in fields):
+            out[tid] = d
+            continue
+        out[tid] = {**d, "fields": [dict(IDENTITY_FIELD), *fields]}
+        added = True
+    return out, added
 
 
 def _refuse(code: int, kind: str, message: str, **extra: Any) -> HTTPException:
@@ -411,8 +435,8 @@ async def create_owned(session: AsyncSession, *, claims: PermissionClaims, user_
     """A semantic layer of the caller's own in the Playground, from ``source``: ``{"blank": True}``,
     ``{"cloneOf": id}`` (a layer they can see), ``{"layer": <Semantic Layers export>}`` or
     ``{"infer": {"thingTypes": [...], "connectionTypes": [{"name", "ends"}]}}``. Owned by the
-    Playground and made by ``user_id``; published when ``publish``. 409 ``layer_quota`` past the
-    member's quota. Committed."""
+    Playground and made by ``user_id``; published when ``publish``. Each of its entity types has
+    :data:`IDENTITY_FIELD`. 409 ``layer_quota`` past the member's quota. Committed."""
     from backend.app.db.repositories import ontology_definition_repo
 
     ws = await session.get(WorkspaceORM, playground_id)
@@ -422,6 +446,7 @@ async def create_owned(session: AsyncSession, *, claims: PermissionClaims, user_
                       f"You have {quota} semantic layers in the Playground, its limit. "
                       "Delete one to make another.", limit=quota)
     req = await _create_request(session, claims, user_id, name, description, source)
+    req.entity_type_definitions, _added = ensure_identity_field(req.entity_type_definitions or {})
     made = await ontology_definition_repo.create_ontology(session, req, actor=user_id)
     row = await session.get(OntologyORM, made.id)
     row.scope = "workspace"

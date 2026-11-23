@@ -30,6 +30,9 @@ import { downloadSimpleTemplate, useFileIntake, type FileIntake } from './useFil
 import { blocked, byUrnFix, heldForRows, matchedNothing, refusedOf, useImportRun } from './useImportRun'
 import { ImportOptions, matchNote } from './ImportOptions'
 import { InformationalColumnsNote } from './InformationalColumnsNote'
+import { IdentifierStep } from './IdentifierStep'
+import { useIdentifierChoice } from './useIdentifierChoice'
+import { useWorkspacesStore } from '@/store/workspaces'
 
 /** The graph's types, which the simple files' types are matched to. */
 export interface GraphTypes {
@@ -81,15 +84,18 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, types, onClose, 
     return () => { live = false }
   }, [wsId, graphId])
 
+  // Into the Playground, every thing needs an identifier: settled here first (`IdentifierStep`).
+  const inPlayground = useWorkspacesStore((s) => s.workspaces.find((w) => w.id === wsId)?.kind === 'playground')
+  const identifier = useIdentifierChoice(intake.read)
   const phase = run.phase === 'idle' ? 'choose' : run.phase
-  const typeMap = useMemo(() => typeMapOf(intake.read, types), [intake.read, types])
+  const typeMap = useMemo(() => typeMapOf(identifier.read, types), [identifier.read, types])
   const note = matchNote(match, settings)
   const job = run.job
 
   /** ``past``: a replace that was held, sent again into its draft — past the replace guard, or
    *  (``refused``) without the rows it refused, or (``identifier``) matching by another key. */
   async function start(past?: { branchId: string; refused?: boolean; identifier?: string }) {
-    const up = intake.upload(typeMap)
+    const up = intake.upload(typeMap, identifier.read)
     if (!up) return
     const done = await run.start({ wsId, graphId }, up.file, {
       format: up.format, reconcileMode, branchId: past?.branchId ?? branchId, viewId,
@@ -104,6 +110,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, types, onClose, 
   }
 
   const ready = !!intake.read && !intake.reading && !intake.warning && !note?.block
+    && (!inPlayground || !!identifier.check?.ok)
 
   return (
     <>
@@ -134,7 +141,8 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, types, onClose, 
         <div className="flex-1 overflow-y-auto">
           {phase === 'choose' && (
             <ChooseStep
-              intake={intake} inputRef={inputRef} types={types}
+              intake={intake} inputRef={inputRef} types={types} read={identifier.read}
+              identifier={inPlayground && identifier.read ? <IdentifierStep choice={identifier} /> : null}
               options={
                 <ImportOptions
                   reconcile={{ mode: reconcileMode, onChange: setReconcileMode, viewScoped: !!viewId }}
@@ -260,15 +268,19 @@ function FileNote({ read, files, types }: { read: FileRead; files: File[]; types
 }
 
 // ── choose (two columns: guide | action) ─────────────────────────────────────
-function ChooseStep({ intake, inputRef, types, options, onDownloadTemplate }: {
+function ChooseStep({ intake, inputRef, types, read, identifier, options, onDownloadTemplate }: {
   intake: FileIntake
   inputRef: React.RefObject<HTMLInputElement | null>
   types?: GraphTypes
+  /** The files as the person settled them (their things' identifiers, say). */
+  read: FileRead | null
+  /** What each thing is identified by, where an import must give every thing one. */
+  identifier: React.ReactNode
   /** How it reconciles and what it matches by. */
   options: React.ReactNode
   onDownloadTemplate: (format: ImportFormat) => void
 }) {
-  const { files, read, reading, errors, warning, dragging, setDragging, format, setFormat, autoDetected } = intake
+  const { files, reading, errors, warning, dragging, setDragging, format, setFormat, autoDetected } = intake
   return (
     <div className="grid md:grid-cols-2">
       {/* Left — the guide (persistent context) */}
@@ -406,6 +418,7 @@ function ChooseStep({ intake, inputRef, types, options, onDownloadTemplate }: {
           </div>
         )}
 
+        {identifier}
         {options}
       </div>
     </div>

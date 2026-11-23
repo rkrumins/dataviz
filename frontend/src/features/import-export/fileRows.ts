@@ -17,7 +17,7 @@ import { detectFormat, type ImportFormat } from '@/services/importExportApiServi
 import {
   connectionsFromCsv, guessConnectionColumns, guessThingColumns, looksLikeConnections, parseCsv,
   parseOwnDataJson, summarize, thingsFromCsv, validateOwnData,
-  type OwnConnection, type OwnThing, type PropertyValue, type RowError,
+  type CsvTable, type OwnConnection, type OwnThing, type PropertyValue, type RowError, type ThingColumns,
 } from '@/components/playground/ownData'
 
 /** `server`: read by the server alone (an Excel workbook, say), sent as it is. */
@@ -43,6 +43,17 @@ export interface FileRead {
   /** A simple JSON file's own name and description, for what it makes. */
   name?: string
   description?: string
+  /** A things CSV: its table and the columns its fields are read from, so its things can be read
+   *  again by another identifier column (`withIdentifierColumn`). */
+  keyedBy?: { file: string; table: CsvTable; columns: ThingColumns; connections?: { file: string; lines?: number[] } }
+  /** A standard file read here: each node row's identifier, in file order — its urn, else its
+   *  `prop.id`, else its entity_id; '' for a row that gives none. */
+  identifiers?: string[]
+  /** A standard file some of whose node rows give no identifier: its records, so one can be
+   *  mapped from a column (`withIdentifierColumn`). Kept only then: a large file is held once. */
+  records?: Record<string, unknown>[]
+  /** The format of a `passthrough` made here (rewritten with identifiers), not the file chosen. */
+  passthroughFormat?: ImportFormat
 }
 
 /** A file's type name → a type id of the data model; `null` leaves its rows out. A name not
@@ -60,6 +71,10 @@ export interface TypeRef {
 
 /** Read whole in the browser up to this. A larger standard file goes to the server as it is. */
 export const READ_LIMIT = 50 * 1024 ** 2
+
+/** The property a Playground graph identifies its things by, kept equal to their urn (backend
+ *  `playground_policy.IDENTITY_PROPERTY`): an import there needs a urn or one of these per thing. */
+export const IDENTITY_PROPERTY = 'id'
 
 /** Formats only the server reads (or refuses, saying why). */
 const SERVER_ONLY = new Set(['xlsx', 'xlsm', 'xls', 'numbers', 'parquet', 'zip'])
@@ -90,6 +105,12 @@ interface Part {
   lines?: number[]
   name?: string
   description?: string
+  /** A things CSV's table and the columns read from it. */
+  table?: CsvTable
+  columns?: ThingColumns
+  /** A standard file's node rows' identifiers, and (when some give none) its records. */
+  identifiers?: string[]
+  records?: Rec[]
 }
 
 function propertiesOf(r: Rec): Record<string, PropertyValue> {
@@ -113,7 +134,8 @@ function fromStandard(records: Rec[]): { things: OwnThing[]; connections: OwnCon
     if (str(r._op).toLowerCase() === 'delete') continue
     const kind = str(r.kind).toLowerCase()
     if (kind === 'node') {
-      const key = str(r.urn) || str(r.entity_id)
+      // Its id names it when it has no urn, as an import into the Playground reads it.
+      const key = str(r.urn) || str(r.entity_id) || str(propertiesOf(r)[IDENTITY_PROPERTY])
       const thing: OwnThing = { key, type: str(r.entityType), name: str(r.displayName) || str(r.qualifiedName) || key }
       const description = str(r.description)
       if (description) thing.description = description
@@ -131,6 +153,21 @@ function fromStandard(records: Rec[]): { things: OwnThing[]; connections: OwnCon
     }
   }
   return { things, connections }
+}
+
+/** A standard node record's identifier: its urn, else its `prop.id`, else its entity_id ('' for
+ *  none) — what an import into the Playground needs of every node row. */
+export function standardIdentifier(r: Rec): string {
+  return str(r.urn) || str(propertiesOf(r)[IDENTITY_PROPERTY]) || str(r.entity_id)
+}
+
+/** A standard file read here, as a part: its things and connections, each node row's identifier,
+ *  and — only when one gives none — its records, for one to be mapped from a column. */
+function standardPart(file: File, records: Rec[]): Part {
+  const nodes = records.filter(r => str(r.kind).toLowerCase() === 'node' && str(r._op).toLowerCase() !== 'delete')
+  const identifiers = nodes.map(standardIdentifier)
+  return { file, format: 'standard', ...fromStandard(records), identifiers,
+    ...(identifiers.some(id => !id) ? { records } : {}) }
 }
 
 /** A file too large to read here is standard when its first lines say so. */
@@ -160,7 +197,7 @@ async function readOne(file: File): Promise<Part> {
     const records = Array.isArray(data) ? data
       : isRecord(data) && !('things' in data) ? (data.records ?? data.rows ?? [data]) : null
     if (Array.isArray(records) && records.some(r => isRecord(r) && isKind(r.kind))) {
-      return { file, format: 'standard', ...fromStandard(records.filter(isRecord)) }
+      return standardPart(file, records.filter(isRecord))
     }
     const simple = parseOwnDataJson(text)
     return { file, format: 'simple', things: simple.things, connections: simple.connections, name: simple.name, description: simple.description }
@@ -178,19 +215,21 @@ async function readOne(file: File): Promise<Part> {
       if (isRecord(rec)) records.push(rec)
     })
     if (!records.some(r => isKind(r.kind))) throw new Error('None of its lines has a "kind" of node or edge — see the template.')
-    return { file, format: 'standard', ...fromStandard(records) }
+    return standardPart(file, records)
   }
   const table = parseCsv(text)
   if (!table.headers.length) throw new Error('This file is empty.')
   const kind = table.headers.indexOf('kind')
   if (standardHeader(table.headers) && table.rows.every(r => !str(r.cells[kind]) || isKind(r.cells[kind]))) {
     const records = table.rows.map(r => Object.fromEntries(table.headers.map((h, i) => [h, r.cells[i] ?? ''])))
-    return { file, format: 'standard', ...fromStandard(records) }
+    return standardPart(file, records)
   }
   const lines = table.rows.map(r => r.line)
-  return looksLikeConnections(table.headers)
-    ? { file, format: 'simple', connections: connectionsFromCsv(table, guessConnectionColumns(table.headers)), lines }
-    : { file, format: 'simple', things: thingsFromCsv(table, guessThingColumns(table.headers)), lines }
+  if (looksLikeConnections(table.headers)) {
+    return { file, format: 'simple', connections: connectionsFromCsv(table, guessConnectionColumns(table.headers)), lines }
+  }
+  const columns = guessThingColumns(table.headers)
+  return { file, format: 'simple', things: thingsFromCsv(table, columns), lines, table, columns }
 }
 
 /** Read one file, its problem said with its name. */
@@ -239,8 +278,9 @@ export async function readFiles(files: File[]): Promise<FileRead> {
   const whole = parts.find(p => p.format !== 'simple')
   if (whole) {
     if (parts.length > 1) throw new Error(`${whole.file.name} is a whole import on its own: choose it alone.`)
-    const { things = [], connections = [] } = whole
-    return { format: whole.format, things, connections, summary: summaryOf(things, connections), passthrough: whole.file, errors: [] }
+    const { things = [], connections = [], identifiers, records } = whole
+    return { format: whole.format, things, connections, summary: summaryOf(things, connections), passthrough: whole.file, errors: [],
+      ...(identifiers ? { identifiers } : {}), ...(records ? { records } : {}) }
   }
   const thingParts = parts.filter(p => p.things)
   const connectionParts = parts.filter(p => p.connections)
@@ -249,8 +289,12 @@ export async function readFiles(files: File[]): Promise<FileRead> {
       throw new Error(`${list.map(p => p.file.name).join(' and ')} both hold ${what}: choose one file of things and one of connections.`)
     }
   }
-  const [tp] = thingParts
-  const [cp] = connectionParts
+  return simpleRead(thingParts[0], connectionParts[0])
+}
+
+/** The simple files' read: their things and connections, the rows that would be refused, and —
+ *  for a things CSV — what to read them again by another identifier column with. */
+function simpleRead(tp: Part | undefined, cp: Part | undefined): FileRead {
   const things = tp?.things ?? []
   const connections = cp?.connections ?? []
   const errors = validateOwnData(things, connections).rows.map((e): RowError => {
@@ -261,6 +305,55 @@ export async function readFiles(files: File[]): Promise<FileRead> {
   return {
     format: 'simple', things, connections, summary: summaryOf(things, connections), errors,
     ...(tp?.name ? { name: tp.name } : {}), ...(tp?.description ? { description: tp.description } : {}),
+    ...(tp?.table && tp.columns ? { keyedBy: {
+      file: tp.file.name, table: tp.table, columns: tp.columns,
+      ...(cp ? { connections: { file: cp.file.name, ...(cp.lines ? { lines: cp.lines } : {}) } } : {}),
+    } } : {}),
+  }
+}
+
+/**
+ * The read with its things identified by `column`: a things CSV's things read again with it as
+ * their key (another field it held gives it up; the old key column becomes a property), its rows
+ * checked again; or, for a standard file, each node row that gives no identifier given one from
+ * `column`'s value — as its urn (`urnOf`), so it shows as the thing's `id` too — and the file to
+ * send rewritten as NDJSON. Any other read, or a column it doesn't have, is returned as it is.
+ */
+export function withIdentifierColumn(read: FileRead, column: string): FileRead {
+  const csv = read.keyedBy
+  if (csv) {
+    if (csv.columns.key === column || !csv.table.headers.includes(column)) return read
+    const columns: ThingColumns = { ...csv.columns, key: column }
+    for (const field of ['type', 'name', 'description', 'tags'] as const) if (columns[field] === column) columns[field] = null
+    // An old key column named `id` isn't kept as a property: a thing's `id` is its identifier, so
+    // the old values would name other things.
+    const things = thingsFromCsv(csv.table, columns).map((t) => {
+      if (!t.properties || !(IDENTITY_PROPERTY in t.properties)) return t
+      const out: OwnThing = { ...t, properties: { ...t.properties } }
+      delete out.properties![IDENTITY_PROPERTY]
+      if (!Object.keys(out.properties!).length) delete out.properties
+      return out
+    })
+    const tp: Part = { file: new File([], csv.file), format: 'simple', things,
+      lines: csv.table.rows.map(r => r.line), table: csv.table, columns }
+    const cp: Part | undefined = csv.connections && { file: new File([], csv.connections.file), format: 'simple',
+      connections: read.connections, ...(csv.connections.lines ? { lines: csv.connections.lines } : {}) }
+    return { ...simpleRead(tp, cp), ...(read.name ? { name: read.name } : {}), ...(read.description ? { description: read.description } : {}) }
+  }
+  if (!read.records || !read.passthrough) return read
+  const records = read.records.map((r) => {
+    if (str(r.kind).toLowerCase() !== 'node' || standardIdentifier(r)) return r
+    const value = str(r[column])
+    return value ? { ...r, urn: urnOf(value) } : r
+  })
+  const part = standardPart(read.passthrough, records)
+  const name = `${read.passthrough.name.replace(/\.[^.]+$/, '')}.identified.ndjson`
+  const lines = records.map(r => JSON.stringify(Object.fromEntries(Object.entries(r).filter(([, v]) => v !== '' && v != null))))
+  return {
+    ...read, things: part.things ?? [], connections: part.connections ?? [],
+    summary: summaryOf(part.things ?? [], part.connections ?? []), identifiers: part.identifiers, records,
+    passthrough: new File([`${lines.join('\n')}\n`], name, { type: 'application/x-ndjson', lastModified: read.passthrough.lastModified }),
+    passthroughFormat: 'ndjson',
   }
 }
 

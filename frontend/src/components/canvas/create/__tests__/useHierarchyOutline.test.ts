@@ -14,7 +14,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import type { ParsedOutlineRow } from '../outlineParser'
-import { useHierarchyOutline } from '../useHierarchyOutline'
+import { IDENTIFIER_TAKEN, useHierarchyOutline } from '../useHierarchyOutline'
 
 vi.mock('@/features/versioning/model/ensureDraftOpen', () => ({
   ensureDraftOpen: vi.fn().mockResolvedValue('branch-1'),
@@ -34,6 +34,10 @@ const settle = () => new Promise((r) => setTimeout(r, 0))
 vi.mock('@/providers/ViewExecutionContext', () => ({
   useViewExecutionContext: () => null,
 }))
+
+// The graph an identifier is looked up in; none by default, as outside a canvas.
+const graph = vi.hoisted(() => ({ provider: null as null | { getNode: (urn: string) => Promise<unknown> } }))
+vi.mock('@/providers/GraphProviderContext', () => ({ useGraphProviderIfAvailable: () => graph.provider }))
 
 // ---------------------------------------------------------------------------
 // Fixture ontology — domain -> dataPlatform -> container -> dataset -> column,
@@ -650,5 +654,56 @@ describe('useHierarchyBuilderStore', () => {
 
     useHierarchyBuilderStore.getState().close()
     expect(useHierarchyBuilderStore.getState().sessionAddedCount).toBe(0)
+  })
+})
+
+describe('an identifier of its own (the Playground)', () => {
+  beforeEach(() => {
+    resetStores()
+    graph.provider = null
+  })
+
+  const outline = () => renderHook(() => useHierarchyOutline({ scopeParentUrn: null, initialTypeId: 'domain' }))
+
+  it('stages the new entity under the urn its identifier names, then starts the next one blank', () => {
+    const { result } = outline()
+    act(() => { result.current.setName('Sales'); result.current.setIdentifier(' sales ') })
+    expect(result.current.identifierUrn).toBe('urn:playground:sales')
+    let tempUrn: string | null = null
+    act(() => { tempUrn = result.current.commitSibling() })
+    expect((findByTempUrn(tempUrn!)!.after as { urn?: string }).urn).toBe('urn:playground:sales')
+    expect(canvasNode(tempUrn!)?.id).toBe(tempUrn)                  // the canvas knows it by its temp urn
+    expect(result.current.active.identifier).toBe('')
+
+    act(() => result.current.setName('Marketing'))
+    act(() => { tempUrn = result.current.commitSibling() })
+    expect(findByTempUrn(tempUrn!)!.after).not.toHaveProperty('urn')   // blank: the server mints one
+  })
+
+  it('refuses one another entity holds — on the canvas, or being added', () => {
+    seedNode('urn:playground:orders', 'domain', 'Orders')
+    const { result } = outline()
+    act(() => { result.current.setName('Orders again'); result.current.setIdentifier('orders') })
+    expect(result.current.identifierProblem).toBe(IDENTIFIER_TAKEN)
+    expect(result.current.canCommit).toBe(false)
+
+    act(() => { result.current.setIdentifier('daily'); result.current.setName('Daily') })
+    act(() => { result.current.commitSibling() })
+    act(() => { result.current.setName('Daily too'); result.current.setIdentifier('daily') })
+    expect(result.current.identifierProblem).toBe(IDENTIFIER_TAKEN)
+  })
+
+  it('asks the graph after a pause in typing, for one not loaded here', async () => {
+    const getNode = vi.fn(async (urn: string) => (urn === 'urn:playground:held' ? { urn } : null))
+    graph.provider = { getNode }
+    const { result } = outline()
+    act(() => { result.current.setName('Held'); result.current.setIdentifier('held') })
+    expect(result.current.canCommit).toBe(true)                     // not yet answered
+    await act(() => new Promise((r) => setTimeout(r, 350)))
+    expect(getNode).toHaveBeenCalledWith('urn:playground:held')
+    expect(result.current.identifierProblem).toBe(IDENTIFIER_TAKEN)
+    act(() => result.current.setIdentifier('free'))
+    await act(() => new Promise((r) => setTimeout(r, 350)))
+    expect(result.current.identifierProblem).toBeNull()
   })
 })

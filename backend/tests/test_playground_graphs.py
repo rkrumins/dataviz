@@ -1,7 +1,8 @@
 """A graph for your own data, started in the Playground (``POST /playground/graphs``).
 
 These pin what one is: a blank graph of the person's quota on the Playground's sandbox provider,
-a Context View and a Graph view, the data source described — and no rows: the file loads through
+a Context View and the views asked for beside it (a Graph view; a Hierarchy view when its layer has
+a containment among the file's types), the data source described — and no rows: the file loads through
 the standard import, which holds its rows to the graph's semantic layer. It is built on
 
 * a semantic layer on offer (``ontologyId``): refused as ``playground_layers.assert_offered``
@@ -241,7 +242,7 @@ def _views_fail(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_graph_on_an_approved_layer_has_no_rows_and_its_views_are_the_files_types(
         test_client: AsyncClient, playground, store, layers, db_session):
-    r = await _post(test_client, ON_A_LAYER)
+    r = await _post(test_client, {**ON_A_LAYER, "views": ["graph"]})
     assert r.status_code == 201, r.text
     body = r.json()
     assert body == {**body, "graphId": "g_1", "mainBranchId": "br_1"}
@@ -254,10 +255,12 @@ async def test_a_graph_on_an_approved_layer_has_no_rows_and_its_views_are_the_fi
                             ("starter_types_of", LAYER, ["dashboard", "sourceSystem"])]
     assert layers.owned == [] and layers.dropped == []
 
-    # A blank graph of Ben's on the sandbox provider, described, on the approved layer — no rows.
+    # A blank graph of Ben's on the sandbox provider, described, on the approved layer — no rows —
+    # identifying its things by ``id``.
     ds = await db_session.get(WorkspaceDataSourceORM, body["dataSourceId"])
     assert (ds.workspace_id, ds.provider_id, ds.label, ds.description, ds.created_by, ds.ontology_id) == (
         PG, SANDBOX, "Orders pipeline", ON_A_LAYER["description"], BEN.id, LAYER)
+    assert ds.identity_property == "id"
     [graph] = store.graphs
     assert (graph["kind"], graph["ontology_enforcement"], graph["base_ontology_id"]) == ("blank", "strict", LAYER)
     assert store.imports == [] and store.projected == ["g_1"]
@@ -271,6 +274,70 @@ async def test_a_graph_on_an_approved_layer_has_no_rows_and_its_views_are_the_fi
     versions = (await db_session.execute(select(ViewVersionORM))).scalars().all()
     assert sorted((v.view_id, v.version) for v in versions) == sorted(
         (view_id, 1) for view_id in body["viewIds"].values())
+
+
+@pytest.mark.asyncio
+async def test_a_blank_graph_outside_the_playground_keeps_the_identity_it_inherits(
+        test_client: AsyncClient, playground, store, db_session):
+    from backend.app.api.v1.endpoints import versioning as versioning_ep
+    db_session.add(WorkspaceORM(id="ws_team", name="Team"))
+    await db_session.commit()
+    made = await versioning_ep.create_blank_graph("ws_team", versioning_ep.CreateBlankGraphRequest(
+        name="Drawn by hand", providerId=SANDBOX, ontologyId=LAYER), BEN, store, db_session, claims=None)
+    ds = await db_session.get(WorkspaceDataSourceORM, made["data_source_id"])
+    assert ds.workspace_id == "ws_team" and ds.identity_property is None
+
+
+@pytest.mark.asyncio
+async def test_asked_for_no_other_view_it_opens_in_a_context_view_alone(
+        test_client: AsyncClient, playground, store, layers, db_session):
+    r = await _post(test_client, ON_A_LAYER)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["viewIds"] == {"context": body["viewId"]}
+    [view] = (await db_session.execute(select(ViewORM))).scalars().all()
+    assert (view.id, view.view_type) == (body["viewId"], "reference")
+
+
+@pytest.mark.asyncio
+async def test_a_hierarchy_asked_of_a_layer_with_no_containment_is_said_not_made(
+        test_client: AsyncClient, playground, store, layers, db_session):
+    r = await _post(test_client, {**ON_A_LAYER, "views": ["graph", "hierarchy"]})
+    assert r.status_code == 201, r.text
+    ids = r.json()["viewIds"]
+    assert set(ids) == {"context", "graph", "hierarchy"} and ids["hierarchy"] is None
+    views = (await db_session.execute(select(ViewORM))).scalars().all()
+    assert sorted(v.view_type for v in views) == ["graph", "reference"]
+
+
+@pytest.mark.asyncio
+async def test_a_hierarchy_is_made_of_a_layers_containment_among_the_files_types(
+        test_client: AsyncClient, playground, store, layers, db_session):
+    held = ({**LAYER_TYPES[0], "metric": EntityType("Metric", "Metrics", "A number.", "Gauge", "#14b8a6")},
+            {**LAYER_TYPES[1], "HAS_METRIC": RelationshipType(
+                "Has metric", "A dashboard shows it.", "#14b8a6", containment=True,
+                ends=(("dashboard",), ("metric",)))})
+    db_session.add(_layer_row("ont_held", held))
+    await db_session.commit()
+    layers.types["ont_held"] = held
+    r = await _post(test_client, {**ON_A_LAYER, "model": {"ontologyId": "ont_held"},
+                                  "types": ["dashboard", "metric"], "views": ["hierarchy"]})
+    assert r.status_code == 201, r.text
+    ids = r.json()["viewIds"]
+    assert set(ids) == {"context", "hierarchy"} and ids["hierarchy"]
+    hierarchy = await db_session.get(ViewORM, ids["hierarchy"])
+    assert hierarchy.view_type == "hierarchy" and hierarchy.name == "Orders pipeline: Dashboards and their metrics"
+    assert json.loads(hierarchy.config)["content"]["visibleEntityTypes"] == ["dashboard", "metric"]
+
+
+@pytest.mark.asyncio
+async def test_a_view_asked_for_whose_layout_is_withdrawn_is_refused_before_anything_is_made(
+        test_client: AsyncClient, playground, store, layers, db_session):
+    feature_flags._cache["allowedViewModes"] = ["graph", "reference"]       # no Hierarchy views
+    r = await _post(test_client, {**ON_A_LAYER, "views": ["hierarchy"]})
+    assert r.status_code == 403 and r.json()["detail"]["feature"] == "allowedViewModes", r.text
+    assert store.graphs == [] and layers.asked == []
+    await _nothing_made(db_session, store)
 
 
 @pytest.mark.asyncio
