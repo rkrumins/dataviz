@@ -41,6 +41,9 @@ class RoleName(str, Enum):
     WORKSPACE_PUBLISHER = "workspace_publisher"
     WORKSPACE_STEWARD = "workspace_steward"
     WORKSPACE_VIEWER = "workspace_viewer"
+    #: The Playground's own role: build graphs and views there, change only what you made. Held
+    #: only in the Playground, so it is no workspace template.
+    WORKSPACE_PLAYGROUND_MEMBER = "workspace_playground_member"
 
 
 # Frozenset (not enum) because the most frequent operation is a
@@ -102,10 +105,16 @@ _WORKSPACE_ROLE_LABELS: dict[str, str] = {
     RoleName.WORKSPACE_DATA_ENGINEER.value: "Data engineer",
     RoleName.WORKSPACE_STEWARD.value: "Steward",
     RoleName.WORKSPACE_ADMIN.value: "Admin",
+    RoleName.WORKSPACE_PLAYGROUND_MEMBER.value: "Playground member",
 }
 
 
 def role_label(role_name: str) -> str:
     """How a workspace role reads in a sentence (the Inbox): "Member",
-    "Viewer" — or a custom role's own name."""
-    return _WORKSPACE_ROLE_LABELS.get(role_name, role_name)
+    "Viewer" — or a custom role's own name in words ("Marketing lead" for
+    ``marketing_lead``), never its raw ``snake_case``."""
+    label = _WORKSPACE_ROLE_LABELS.get(role_name)
+    if label is not None:
+        return label
+    words = " ".join(role_name.replace("-", "_").replace("_", " ").split())
+    return words[:1].upper() + words[1:] if words else role_name

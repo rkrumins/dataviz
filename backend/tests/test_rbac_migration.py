@@ -285,6 +285,21 @@ def test_every_workspace_template_role_reads_as_a_word():
     assert role_label("workspace_publisher") == "Publisher"
 
 
+def test_every_role_reads_as_a_name_never_with_underscores():
+    """The Playground's role has its own name, and so does every role the platform seeds; a
+    custom role reads as its name in words."""
+    from backend.app.config.rbac_seed import SYSTEM_ROLES as ROLES
+    from backend.app.services import playground_policy
+    from backend.common.roles import RoleName, role_label
+
+    assert playground_policy.PLAYGROUND_ROLE == RoleName.WORKSPACE_PLAYGROUND_MEMBER.value
+    assert role_label("workspace_playground_member") == "Playground member"
+    assert [r["name"] for r in ROLES if "_" in role_label(r["name"])] == []
+    assert role_label("marketing_lead") == "Marketing lead"
+    assert role_label("data-quality__reviewers") == "Data quality reviewers"
+    assert role_label("Finance Analysts") == "Finance Analysts"
+
+
 def test_datasource_publish_migration_runs_and_reverts():
     """Upgrade twice (chain-replay over a seeded database is a no-op),
     then downgrade: the permission and its grants go, and the role goes

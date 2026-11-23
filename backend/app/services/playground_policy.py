@@ -37,12 +37,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
 from backend.app.services.permission_service import PermissionClaims, has_permission
+from backend.common.roles import RoleName
 
 #: The switch that opens the Playground.
 PLAYGROUND_FLAG = "playgroundEnabled"
 
 PLAYGROUND_KIND = "playground"
-PLAYGROUND_ROLE = "workspace_playground_member"
+PLAYGROUND_ROLE = RoleName.WORKSPACE_PLAYGROUND_MEMBER.value
 DEFAULT_GRAPH_QUOTA = 5
 DEFAULT_LAYER_QUOTA = 20
 DEFAULT_MAX_IMPORT_ROWS = 200_000

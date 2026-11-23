@@ -20,7 +20,7 @@
  *   1. Extend the RoleVisual interface.
  *   2. Add the value to every entry below (or make it optional).
  */
-import { Shield, UserCog, UserPlus, Eye, Database, ScrollText, Sparkles, Upload, Globe, type LucideIcon } from 'lucide-react'
+import { Shield, UserCog, UserPlus, Eye, Database, ScrollText, Sparkles, Upload, Globe, FlaskConical, type LucideIcon } from 'lucide-react'
 
 export interface RoleVisual {
     /** Display label for the role (e.g. "Super admin"). For custom
@@ -125,6 +125,15 @@ export const ROLE_VISUAL: Record<string, RoleVisual> = {
         gradient: 'from-teal-500/20 to-teal-500/0',
         iconBg: 'bg-teal-500/10 text-teal-500 border-teal-500/20',
     },
+    // The Playground's own: build graphs and views there, and change only what you made.
+    workspace_playground_member: {
+        label: 'Playground member',
+        icon: FlaskConical,
+        accent: 'fuchsia',
+        badge: 'bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-300 border-fuchsia-500/20',
+        gradient: 'from-fuchsia-500/20 to-fuchsia-500/0',
+        iconBg: 'bg-fuchsia-500/10 text-fuchsia-500 border-fuchsia-500/20',
+    },
     // Reads every workspace and nothing else — for a service account.
     org_reader: {
         label: 'Org reader',
@@ -172,12 +181,18 @@ const CUSTOM_ROLE_VISUAL_BASE = {
     iconBg: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
 } as const
 
-/** Visual for a non-built-in role — uses the role's own name as the
- *  label so chips show e.g. "marketing_lead" instead of all reading
- *  "Custom". The Sparkles icon marks it visually distinct from
- *  system roles. */
+/** A role's name as words: `marketing_lead` reads "Marketing lead". A name already in words is
+ *  left as it is, but for its first letter. */
+export function humanizeRoleName(roleName: string): string {
+    const words = roleName.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim()
+    return words ? words.charAt(0).toUpperCase() + words.slice(1) : roleName
+}
+
+/** Visual for a non-built-in role — its own name, in words, as the label, so chips show e.g.
+ *  "Marketing lead" instead of all reading "Custom" (or the raw `marketing_lead`). The Sparkles
+ *  icon marks it visually distinct from system roles. */
 export function customRoleVisual(roleName: string): RoleVisual {
-    return { ...CUSTOM_ROLE_VISUAL_BASE, label: roleName }
+    return { ...CUSTOM_ROLE_VISUAL_BASE, label: humanizeRoleName(roleName) }
 }
 
 /** Canonical lookup + fallback in one call. Use this at every chip
