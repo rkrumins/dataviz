@@ -147,6 +147,10 @@ Whichever identifier an import names:
 - **A node row with no key the identifier can use is refused** (`no_key`), rather than made again
   by every import. By `prop.<name>` alone, a row with only a urn is one: its reason says that
   `prop.<name>,urn` would find it.
+- **Into the Playground, every node row gives its identifier**: its `urn` or its `prop.id` (the
+  property a Playground graph identifies its things by). One that gives neither is refused
+  (`no_key`, *"Needs an identifier (urn or id)"*) whatever else it is found by, unless it names
+  its item by an `entity_id` of the graph. A dry run (`/imports/validate`) says so too.
 - **Only the fields a row carries are written.** A blank cell keeps what the item holds; `\N` in a
   `prop.<name>` cell removes that property.
 - **A row an export wrote carries `baseVersion`**, and is merged three ways with what changed since
@@ -1034,6 +1038,7 @@ dropped in silence. The reasons below are the ones the API gives.
 |---|---|---|
 | A node row with nothing to find it by again: no urn, no qualified name, no field its type matches by (by `entity_id`) | Refused, so it isn't made again by every import | `no_key`: *"it names nothing an import could find it by again: give it a urn (or the entity_id of a node in this graph). …"* |
 | By `urn`, a row with no urn; by `prop.external_id`, a row with no value | Refused | `no_key`: *"it has no urn, and with identifier=urn a row is found by its urn …"*, *"it has no external_id, and with identifier=prop.external_id …"* |
+| Into the Playground, a node row with neither a urn nor an `id` (not named by an `entity_id`) | Refused | `no_key`: *"Needs an identifier (urn or id)"* |
 | A new node, or a new edge, with no type | Refused | `missing_type`: *"node create requires entityType"*, *"edge missing edgeType"* |
 | A type the data source's ontology doesn't define | Refused | `invalid_type`: *"'View' is not a valid entity type in this ontology"* |
 | Two rows for one item that say different things | The first applies; the second is refused. Two that say the same: the second is `unchanged` | `named_already`: *"row 4 of this file already names this node — give each node one row"* (rows counted from 1) |

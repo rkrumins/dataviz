@@ -113,7 +113,7 @@ function nameHint(original: Data | null, form: Data, mapping: DataSourceResponse
 }
 
 export function EntityEditTab({
-  nodeId, form, original, entityType, urn, userProps, originalProps, publishedProps, onEdit, onCommit, onCancel, onCopyUrn,
+  nodeId, form, original, entityType, urn, userProps, keptProps, originalProps, publishedProps, onEdit, onCommit, onCancel, onCopyUrn,
 }: {
   nodeId: string
   form: Data
@@ -126,6 +126,8 @@ export function EntityEditTab({
   urn: string
   /** The node's own properties (reserved names the reader mirrors in are left out). */
   userProps: Data
+  /** Its properties not offered to edit (a Playground thing's identifier), kept by every edit. */
+  keptProps?: Data
   onEdit: (update: (data: Data) => Data) => void
   /** Stage the copy — after `update`, when given. */
   onCommit: (update?: (data: Data) => Data) => void
@@ -280,7 +282,7 @@ export function EntityEditTab({
           <PanelErrorBoundary resetKeys={[urn]}>
             <PropertyEditor
               value={userProps}
-              onChange={(next) => onCommit((d) => withPropertyBag(d, next as Data))}
+              onChange={(next) => onCommit((d) => withPropertyBag(d, { ...next as Data, ...keptProps }))}
               original={originalProps}
               published={publishedProps}
               searchable

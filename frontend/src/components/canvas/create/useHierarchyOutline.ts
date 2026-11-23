@@ -39,6 +39,8 @@ import { toBuildRows } from './buildmode/BuildPaste'
 import type { ParsedOutlineRow } from './outlineParser'
 import type { EntityTypeSchema } from '@/types/schema'
 import { splitNodeFields } from '@/lib/nodeFields'
+import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
+import { IDENTITY_PROPERTY, urnOf } from '@/features/import-export/fileRows'
 
 export interface OutlineRow {
   changeId: string
@@ -60,7 +62,12 @@ export interface ActiveRow {
   edgeType: string | null
   /** tags = raw comma-string; the panel parses on commit. */
   details: { description: string; tags: string; fieldValues: Record<string, unknown> }
+  /** Its identifier, as typed (a Playground graph's `id`); blank: the server mints its urn. */
+  identifier: string
 }
+
+/** Why an identifier can't be the new entity's: another holds it. */
+export const IDENTIFIER_TAKEN = 'Another entity already has this identifier.'
 
 /** Lowest hierarchy.level first, then name — matches outlineParser's tie-break. */
 function sortByLevelThenName(types: EntityTypeSchema[]): EntityTypeSchema[] {
@@ -102,6 +109,7 @@ export function useHierarchyOutline(opts: {
     parentUrn: scopeParentUrn,
     edgeType: null,
     details: { description: '', tags: '', fieldValues: {} },
+    identifier: '',
   }))
   const [indentBlockedReason, setIndentBlockedReason] = useState<string | null>(null)
 
@@ -252,8 +260,30 @@ export function useHierarchyOutline(opts: {
     return `A ${parentLabel} can't contain a ${typeLabel}.`
   }, [active.parentUrn, active.typeId, edgeOptions, parentTypeOf, entityTypes])
 
+  // --- Its identifier: the urn a file's key of the same value names (`urnOf`), which no other
+  // entity may hold — on the canvas, being added, or (asked after a pause in typing) in the graph.
+  const identifierUrn = active.identifier.trim() ? urnOf(active.identifier.trim()) : null
+  const provider = useGraphProviderIfAvailable()
+  const [heldInGraph, setHeldInGraph] = useState<ReadonlySet<string>>(() => new Set())
+  const heldHere = useMemo(() => !!identifierUrn && (
+    canvasNodes.some((n) => n.id === identifierUrn || n.data?.urn === identifierUrn
+      || (n.data?.properties as Record<string, unknown> | undefined)?.[IDENTITY_PROPERTY] === identifierUrn)
+    || allStaged.some((c) => c.type === 'create_entity' && (c.after as { urn?: unknown } | undefined)?.urn === identifierUrn)
+  ), [identifierUrn, canvasNodes, allStaged])
+  useEffect(() => {
+    if (!identifierUrn || heldHere || !provider || heldInGraph.has(identifierUrn)) return
+    let live = true
+    const wait = setTimeout(() => {
+      provider.getNode(identifierUrn)
+        .then((node) => { if (live && node) setHeldInGraph((s) => new Set(s).add(identifierUrn)) })
+        .catch(() => {})                   // unanswered: the save says so, if it is taken
+    }, 300)
+    return () => { live = false; clearTimeout(wait) }
+  }, [identifierUrn, heldHere, provider, heldInGraph])
+  const identifierProblem = identifierUrn && (heldHere || heldInGraph.has(identifierUrn)) ? IDENTIFIER_TAKEN : null
+
   const blockedReason = indentBlockedReason ?? edgeBlockedReason
-  const canCommit = Boolean(active.name.trim() && active.typeId && !blockedReason)
+  const canCommit = Boolean(active.name.trim() && active.typeId && !blockedReason && !identifierProblem)
 
   // --- Vanished parent fallback (rule 7): mirrors UnifiedCreatePanel ~:244.
   useEffect(() => {
@@ -293,6 +323,7 @@ export function useHierarchyOutline(opts: {
   }, [])
   const setEdgeType = useCallback((edgeType: string | null) => setActive((prev) => ({ ...prev, edgeType })), [])
   const setDetails = useCallback((details: ActiveRow['details']) => setActive((prev) => ({ ...prev, details })), [])
+  const setIdentifier = useCallback((identifier: string) => setActive((prev) => ({ ...prev, identifier })), [])
 
   const retarget = useCallback((parentUrn: string | null) => {
     setIndentBlockedReason(null)
@@ -313,14 +344,15 @@ export function useHierarchyOutline(opts: {
       ...(topLevel as Pick<StageEntityInput, 'qualifiedName' | 'sourceSystem'>),
       description: active.details.description.trim() || undefined,
       properties,
+      ...(identifierUrn ? { urn: identifierUrn } : {}),
     })
     registerBatchUrn(tempUrn)
     lastUsedTypeAtDepth.current.set(depthForParent(active.parentUrn), active.typeId)
     lastCommittedTempUrn.current = tempUrn
     onEntityStaged?.(tempUrn, active.parentUrn ?? undefined)
-    setActive((prev) => ({ ...prev, name: '', details: { description: '', tags: '', fieldValues: {} } }))
+    setActive((prev) => ({ ...prev, name: '', details: { description: '', tags: '', fieldValues: {} }, identifier: '' }))
     return tempUrn
-  }, [canCommit, active, stageEntity, depthForParent, onEntityStaged, registerBatchUrn])
+  }, [canCommit, active, identifierUrn, stageEntity, depthForParent, onEntityStaged, registerBatchUrn])
 
   const commitAndNest = useCallback((): string | null => {
     const tempUrn = commitSibling()
@@ -447,6 +479,9 @@ export function useHierarchyOutline(opts: {
     setType,
     setEdgeType,
     setDetails,
+    setIdentifier,
+    identifierUrn,
+    identifierProblem,
     retarget,
     commitSibling,
     commitAndNest,
