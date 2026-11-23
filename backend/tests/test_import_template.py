@@ -49,6 +49,8 @@ async def test_a_template_has_a_row_of_each_type_and_a_column_of_each_property()
                    "source.asset_id", "target.asset_id", "source.sap_id", "target.sap_id"):
         assert column in columns, column
     assert columns[-1] == "_op"
+    assert not {"parentUrn", "parentName", "parentType", "path", "pathUrns"} & set(columns), \
+        "where a node sits is what an export says, never a column to fill"
     column, table, edge = rows
     assert (edge["sourceUrn"], edge["targetUrn"]) == (table["urn"], column["urn"]), \
         "an edge joins example nodes of the types it may join"

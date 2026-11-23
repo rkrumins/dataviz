@@ -8,7 +8,8 @@ The file also carries, per view:
 
 * a manifest naming every entity the view references (resolved against the source graph, one
   lookup per graph however many views share it), so the importing side can say WHAT didn't
-  match, not just how many;
+  match, not just how many — and where each sat there, its parent and its path, which nothing
+  on the importing side reads;
 * its history: the version hashes the view has been through, including those carried in from
   earlier imports, which is how a later import finds the version both sides last agreed on.
 """
@@ -29,10 +30,11 @@ from backend.app.services.view_transfer import limits
 from backend.app.services.view_transfer.bundle import assemble_bundle
 from backend.app.services.view_transfer.canonical import canonical_json
 from backend.app.services.view_transfer.references import (
-    URN_KIND_ANCHOR, URN_KIND_ASSIGNMENT, URN_KIND_PREDICATE, URN_KIND_ROOT, URN_KIND_RULE,
-    collect, definition_stats, urns_of_kind,
+    URN_KIND_ANCHOR, URN_KIND_ASSIGNMENT, URN_KIND_MEMBERSHIP, URN_KIND_PREDICATE, URN_KIND_ROOT,
+    URN_KIND_RULE, collect, definition_stats, urns_of_kind,
 )
 from backend.app.services.view_transfer.sources import describe_source, effective_data_source, engine_for
+from backend.common import ancestry_columns as ancestry
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +162,28 @@ async def _history(
     return (entries[-limits.MAX_HISTORY_ENTRIES:] if truncated else entries), truncated
 
 
+async def _places(engine, found: Dict[str, Optional[dict]]) -> Dict[str, Dict[str, Any]]:
+    """Where each entity the source found sits there (``common.ancestry_columns``): its
+    containment chain, a thousand at a time, and one lookup that names the containers the views
+    don't reference themselves. Left out where the source can't say: the file is complete without
+    it, as it is without names."""
+    records = [{"urn": urn} for urn, info in found.items() if isinstance(info, dict)]
+    known = {urn: (info.get("name") or urn, info.get("type") or "")
+             for urn, info in found.items() if isinstance(info, dict)}
+
+    async def lookup(urns: List[str]) -> ancestry.Names:
+        named = await engine.provider.resolve_identities(urns)
+        return {urn: (info.get("name") or urn, info.get("type") or "")
+                for urn, info in named.items() if isinstance(info, dict)}
+
+    try:
+        await ancestry.place(records, engine.get_ancestor_chains, lookup, known)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("export: where entities sit could not be read (%s); left out", exc)
+        return {}
+    return {r["urn"]: {c: r[c] for c in ancestry.ANCESTRY_COLUMNS} for r in records if "pathUrns" in r}
+
+
 async def export_views(
     session: AsyncSession,
     requests: List[Tuple[ViewORM, Optional[int], bool]],
@@ -206,7 +230,8 @@ async def export_views(
             urn
             for refs, item_key in zip(refs_of, view_source) if item_key == key
             for urn in urns_of_kind(refs, URN_KIND_ASSIGNMENT, URN_KIND_ANCHOR,
-                                    URN_KIND_RULE, URN_KIND_ROOT, URN_KIND_PREDICATE)
+                                    URN_KIND_RULE, URN_KIND_ROOT, URN_KIND_PREDICATE,
+                                    URN_KIND_MEMBERSHIP)
         }))
         engine = source_engines.get(key)
         found: Dict[str, Optional[dict]] = {}
@@ -218,6 +243,10 @@ async def export_views(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("export: identity lookup failed for source %s: %s", key, exc)
                 ok = False
+        if engine is not None and found:
+            places = await _places(engine, found)
+            found = {urn: {**info, **places.get(urn, {})} if isinstance(info, dict) else info
+                     for urn, info in found.items()}
         entities_by_source[key] = found
         resolved_ok[key] = ok
 
@@ -232,7 +261,8 @@ async def export_views(
         found = entities_by_source.get(key, {})
         manifest_entities, counts = await asyncio.to_thread(lambda refs=refs, found=found, item=item: (
             {
-                urn: {"name": info.get("name"), "type": info.get("type"), "qualifiedName": info.get("qualifiedName")}
+                urn: {"name": info.get("name"), "type": info.get("type"), "qualifiedName": info.get("qualifiedName"),
+                      **{c: info[c] for c in ancestry.ANCESTRY_COLUMNS if c in info}}
                 for urn in sorted(refs.urns)
                 if isinstance(info := found.get(urn), dict)
             },

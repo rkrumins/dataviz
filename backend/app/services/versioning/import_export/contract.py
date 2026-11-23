@@ -16,7 +16,9 @@ import json
 import re
 from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, TypeAdapter, model_validator
+
+from backend.common.ancestry_columns import informational_path, informational_text
 
 FORMAT_VERSION = 1
 SCHEMA_ID = f"https://synodic.dev/schemas/import-record.v{FORMAT_VERSION}.json"
@@ -40,6 +42,12 @@ _POINTER = ("A pointer, not stored: it finds the node that carries it as its urn
             "`target.<name>`), and by `prop.<name>,urn` by this when it has no `<name>`, or no node "
             "holds its value yet.")
 
+# Where a node sits, as an export writes it (``common.ancestry_columns``): read leniently, and by
+# nothing — the graph's containment edges say where a node sits, not a row.
+_INFORMATIONAL = "Informational, as an export writes it: ignored on import."
+_InfoText = Annotated[Optional[str], BeforeValidator(informational_text)]
+_InfoPath = Annotated[Optional[Union[List[str], str]], BeforeValidator(informational_path)]
+
 
 class _Record(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -58,6 +66,15 @@ class _Record(BaseModel):
     op: Optional[Literal["", "upsert", "delete"]] = Field(
         None, alias="_op", description="Blank or `upsert` creates or updates; `delete` deletes the "
         "entity the row names.")
+    parentUrn: _InfoText = Field(None, description=f"The node's direct container, by urn; empty "
+                                 f"at the top of the graph. {_INFORMATIONAL}")
+    parentName: _InfoText = Field(None, description=f"Its direct container's name. {_INFORMATIONAL}")
+    parentType: _InfoText = Field(None, description=f"Its direct container's type. {_INFORMATIONAL}")
+    path: _InfoPath = Field(None, description="Every container it sits in, by name, from the top of "
+                            "the graph down to its parent: a list, or one text with the names "
+                            f"joined by ` / `. {_INFORMATIONAL}")
+    pathUrns: _InfoPath = Field(None, description="The same containers by urn: a list, or one text "
+                                f"with the urns joined by `; `. {_INFORMATIONAL}")
 
 
 class ImportNodeRecord(_Record):

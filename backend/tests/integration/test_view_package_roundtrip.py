@@ -114,7 +114,8 @@ async def _run(root: str, monkeypatch) -> None:
         workspace_id="ws_dev", data_source_id=dev_ds, graph_id=dev["graph_id"], actor="alice",
         as_of_seq=(await svc.get_graph(dev["graph_id"]))["main_head_commit_seq"],
         package={"fileName": "finance.v3.view-package.zip", "scope": "source", "dataVersion": "published",
-                 "views": [{"viewId": "view_1", "version": 3}], "actor": "alice"})
+                 "views": [{"viewId": "view_1", "version": 3}], "actor": "alice"},
+        with_path={"CONTAINS": False})
     await svc.apply_ops(graph_id=dev["graph_id"], actor="alice", message="after the ask", ops=[_n("late")])
     store.puts.clear()
     summary = await ie.run_export(created["job_id"])
@@ -131,6 +132,10 @@ async def _run(root: str, monkeypatch) -> None:
     assert parsed.manifest["data"] == {"version": "published", "nodes": 121, "edges": 120, "typeStats": {
         "nodeCount": 121, "edgeCount": 120, "entityTypeCounts": {"Table": 120, "Metric": 1},
         "edgeTypeCounts": {"PRODUCES": 120}}}, "pinned to the commit it was asked at: 'late' isn't in it"
+    with zipfile.ZipFile(path) as z:
+        first = json.loads(z.read(DATA_PART).splitlines()[0])
+    assert (first["parentUrn"], first["path"], first["pathUrns"]) == (None, [], []), \
+        "each entity says where it sits: here, nothing contains anything"
 
     # ── Import: uploaded in parts, checked, then read in place into two targets ──
     with open(path, "rb") as f:
@@ -168,6 +173,8 @@ async def _run(root: str, monkeypatch) -> None:
     in_draft = await svc.materialize_state(graph_id=uat_gid, branch_id=draft)
     on_main = await svc.materialize_state(graph_id=uat_gid, branch_id=main_id)
     assert len(in_draft["nodes"]) == 121 and len(in_draft["edges"]) == 120
+    assert not any({"parentUrn", "path", "pathUrns"} & set(p.get("properties") or {})
+                   for p in in_draft["nodes"].values()), "where it sat is never imported"
     assert sorted(p.get("urn") for p in on_main["nodes"].values()) == ["urn:t000"], \
         "nothing lands on main until the draft is published"
 

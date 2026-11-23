@@ -196,6 +196,7 @@ What the export holds:
 | `viewId` | Only a view's entities: what it places, with their containment descendants. An edge only when both its ends are in |
 | `ids`, `types` | Comma-separated entity ids or urns, and entity types: only those. An edge only when both its ends are kept |
 | `withChildren` | With `ids`: everything inside those entities too, down the ontology's containment, at every level |
+| `withPath` | `true`: each node also says where it sits, its parent and path (the informational columns below). One containment read for every thousand nodes. The Export dialog asks for it unless it is switched off |
 | `props` | Comma-separated property names to add as empty `prop.<name>` columns to fill |
 | `filename`, `idempotencyKey` | The download's name (no extension); a key that makes the request safe to send again |
 
@@ -229,6 +230,7 @@ object, one per node or edge. CSV and TSV files start with a UTF-8 byte-order ma
 | `prop.<name>` | both | One property per column. The data source's name property, `prop.name` unless it names another, is kept in step with `displayName`: edit either |
 | `properties_json` | both | Properties too nested for a column, as a JSON object |
 | `_op` | both | Blank to create or update; `delete` to delete |
+| `parentUrn`, `parentName`, `parentType`, `path`, `pathUrns` | node | **Informational** (`withPath`): where the node sits. Its direct container, then every container from the top of the graph down to it, by name and by urn. Empty at the top of the graph and on an edge row. Lists in NDJSON and JSON; in CSV, TSV and Excel `path` reads `A / B` and `pathUrns` `a; b`. **An import ignores them**: they never become properties, and the graph's containment edges stay what says where a node sits |
 
 An Excel workbook has a **Nodes** and an **Edges** sheet instead of the `kind` column, with the
 identity columns greyed. An import also reads `source.<name>` and `target.<name>`: an edge's end
@@ -285,7 +287,7 @@ curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/imports/validate?forma
 | `summary` | How many rows would be `new`, `updated`, `unchanged`, `deleted` or `invalid` (refused), and `skipped`: records that are neither a node nor an edge |
 | `rows` | Up to 200 rows that change something, in file order: `rowIndex` (the file's records counted from 0, the header not one), `kind`, `op` (`create`, `update`, `delete` or `invalid`), `matchedEntityId` (the item it found, or the id a new one would take), `label`, `reasons`, and `code` on a refused row |
 | `rowsTruncated` | More rows changed than are listed |
-| `unknownColumns` | Columns the record format doesn't name, usually a typo (`prop_owner` for `prop.owner`). An import ignores them |
+| `unknownColumns` | Columns the record format doesn't name, usually a typo (`prop_owner` for `prop.owner`). An import ignores them. The informational `parentUrn` … `pathUrns` are named, so they are never listed here: an import ignores them all the same |
 | `hints` | What to look at, such as delete rows that find nothing to delete |
 | `identifier`, `identifierSource` | The identifier the rows were matched by, and whose it is: `request`, `data_source` or `platform` |
 | `checkedAgainst` | `main`, or the draft's id |

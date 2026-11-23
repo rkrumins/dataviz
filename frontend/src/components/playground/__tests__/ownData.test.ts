@@ -49,6 +49,17 @@ describe('matching columns', () => {
         expect(propertyColumns(headers, cols)).toEqual(['owner', 'system'])
     })
 
+    it('never makes where a thing sat into a property, however its columns are written', () => {
+        // A trace's, a member set's or a search's file, brought back: its parent and path say
+        // where each row came from, and nothing of the thing.
+        const headers = ['urn', 'name', 'type', 'layer', 'parentUrn', 'parentName', 'parentType', 'path', 'pathUrns',
+            'parent_urn', 'Parent Name', 'PATH']
+        expect(propertyColumns(headers, guessThingColumns(headers))).toEqual(['layer'])
+        const t = parseCsv('urn,type,name,parentUrn,path,pathUrns,owner\nurn:a,Table,A,urn:db,Warehouse / gold,urn:db; urn:gold,Ops\n')
+        expect(thingsFromCsv(t, guessThingColumns(t.headers))).toEqual([
+            { key: 'urn:a', type: 'Table', name: 'A', properties: { owner: 'Ops' } }])
+    })
+
     it('tells a file of connections from a file of things', () => {
         expect(looksLikeConnections(['from', 'type', 'to'])).toBe(true)
         expect(looksLikeConnections(['Source', 'Relationship', 'Target'])).toBe(true)

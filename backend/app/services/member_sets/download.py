@@ -28,19 +28,14 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence,
 from sqlalchemy import select
 
 from backend.app.db.models import MemberSetEdgeORM, MemberSetRowORM
+from backend.common import ancestry_columns as ancestry
 from backend.common.models.graph import GraphNode, NodeQuery
 
 #: What every member row carries, first and in this order: what it is, why it is in,
 #: and where it sits — its parent, and every container from the top of the graph
-#: down to it (by name and by URN).
+#: down to it (by name and by URN: ``common.ancestry_columns``).
 BASE_COLUMNS = ("urn", "name", "type", "qualifiedName", "via", "hops", "hopsUp", "hopsDown", "nearestSeed",
-                "parentUrn", "parentName", "parentType", "path", "pathUrns")
-#: How a path is one CSV cell, as the trace dock's own file writes it: names read
-#: ``A / B``, URNs (which may hold a ``/``) ``a; b``. NDJSON and JSON keep lists.
-_JOINED = {"path": " / ", "pathUrns": "; "}
-#: Container names kept for one download, so each is read once however many rows
-#: sit in it; past it a name is read again rather than held.
-_NAMES_MAX = 100_000
+                *ancestry.ANCESTRY_COLUMNS)
 EDGE_COLUMNS = ("source", "target", "type")
 #: Rows per read of the set; members per node query for extra columns.
 PAGE = 5_000
@@ -73,8 +68,8 @@ def _csv(records: Sequence[Dict[str, Any]], columns: Sequence[str]) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\r\n")
     for r in records:
-        writer.writerow([_cell(_JOINED[c].join(r[c]) if c in _JOINED and isinstance(r.get(c), list) else r.get(c))
-                         for c in columns])
+        r = ancestry.joined(r)
+        writer.writerow([_cell(r.get(c)) for c in columns])
     return buf.getvalue().encode("utf-8")
 
 
@@ -96,8 +91,7 @@ def hops_of(row) -> Optional[int]:
 def _member(row) -> Dict[str, Any]:
     return {"urn": row.urn, "name": row.name, "type": row.type, "qualifiedName": row.qualified_name,
             "via": row.via, "hops": hops_of(row), "hopsUp": row.hops_up, "hopsDown": row.hops_down,
-            "nearestSeed": row.nearest_seed,
-            "parentUrn": None, "parentName": None, "parentType": None, "path": None, "pathUrns": None}
+            "nearestSeed": row.nearest_seed, **ancestry.empty()}
 
 
 def _value(node: GraphNode, column: str) -> Any:
@@ -133,41 +127,27 @@ async def _fill(records: List[Dict[str, Any]], columns: Sequence[str], engine, a
 
 
 async def _place(records: List[Dict[str, Any]], engine, admit, known: Dict[str, Tuple[str, str]]) -> None:
-    """Where each member sits: its containment chain, ``LOOKUP`` at a time, and the
-    names of containers not seen yet — each statement admitted on its own, the same
-    chains the canvas nests members in. ``known`` carries names across a download's
-    pages (filled from the members themselves first: a container is often one).
+    """Where each member sits: its containment chain and the names of containers not
+    seen yet (``ancestry.place``), each statement admitted on its own, the same chains
+    the canvas nests members in. ``known`` carries names across a download's pages
+    (filled from the members themselves first: a container is often one).
 
     A chain the graph could not say leaves the cells empty; an entity at the top of
     the graph has an empty path and no parent."""
     for r in records:
-        if len(known) < _NAMES_MAX:
+        if len(known) < ancestry.NAMES_MAX:
             known.setdefault(r["urn"], (r["name"] or r["urn"], r["type"] or ""))
-    for i in range(0, len(records), LOOKUP):
-        chunk = records[i:i + LOOKUP]
-        try:
-            async with (admit() if admit is not None else nullcontext()):
-                chains = await engine.get_ancestor_chains([r["urn"] for r in chunk])
-        except NotImplementedError:
-            return
-        unnamed = sorted({a for r in chunk for a in chains.get(r["urn"]) or [] if a not in known})
-        for j in range(0, len(unnamed), LOOKUP):
-            batch = unnamed[j:j + LOOKUP]
-            async with (admit() if admit is not None else nullcontext()):
-                nodes = await engine.get_nodes_query(NodeQuery(urns=batch, limit=len(batch), include_child_count=False))
-            for n in nodes:
-                if len(known) < _NAMES_MAX:
-                    known[n.urn] = (n.display_name or n.urn, n.entity_type or "")
-        for r in chunk:
-            chain = chains.get(r["urn"])
-            if chain is None:
-                continue
-            top_down = list(reversed(chain))
-            r["pathUrns"] = top_down
-            r["path"] = [known.get(a, (a, ""))[0] for a in top_down]
-            if top_down:
-                r["parentUrn"] = top_down[-1]
-                r["parentName"], r["parentType"] = known.get(top_down[-1], (top_down[-1], ""))
+
+    async def chains(urns: List[str]) -> Dict[str, List[str]]:
+        async with (admit() if admit is not None else nullcontext()):
+            return await engine.get_ancestor_chains(urns)
+
+    async def lookup(urns: List[str]) -> Dict[str, Tuple[str, str]]:
+        async with (admit() if admit is not None else nullcontext()):
+            nodes = await engine.get_nodes_query(NodeQuery(urns=urns, limit=len(urns), include_child_count=False))
+        return {n.urn: (n.display_name or n.urn, n.entity_type or "") for n in nodes}
+
+    await ancestry.place(records, chains, lookup, known)
 
 
 async def _rows(sessions: Sessions, set_id: str, fmt: str, columns: Sequence[str], engine, admit,

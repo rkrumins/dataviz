@@ -34,6 +34,7 @@
  * is a claim about the data source and is only ever made once the walk
  * says 'done'.
  */
+import { ANCESTRY_COLUMNS, PATH_SEPARATOR, URN_LIST_SEPARATOR } from '@/lib/ancestryColumns'
 import type { LineageNode } from '@/store/canvas'
 import {
     boundaryFrontierFilter,
@@ -2718,15 +2719,24 @@ export interface WalkExportNode {
     urn: string
     name: string
     type: string
-    /** Containment parent, null for a top-level card. */
+    /** WHERE IT LIVES, as every file of entities says it
+     *  (`lib/ancestryColumns`): its containment parent, whether or not
+     *  this picture draws it — a container demoted to a breadcrumb is
+     *  still where the thing is — and null only at the top of the graph.
+     *  `parentType` is null for a parent the picture has no card for. */
     parentUrn: string | null
+    parentName: string | null
+    parentType: string | null
+    /** Every containment level above it, root first, by name and by urn:
+     *  not just the ones this picture happened to draw. As deep as a card
+     *  keeps it (`ANCESTRY_CAP`, its deepest levels). */
+    path: string[]
+    pathUrns: string[]
+    /** The parent IN THIS PICTURE, null for a top-level card: the tree the
+     *  rest of the export describes, so it never names a card with no row. */
+    pictureParentUrn: string | null
     /** Nesting level, 0 for a top-level card — same as `FocusCard.depth`. */
     depth: number
-    /** WHERE IT LIVES, in full — every containment level above it, not
-     *  just the one this picture happened to draw. `parentUrn` is null
-     *  for a card whose container was demoted to a breadcrumb, which
-     *  left a spreadsheet with no way to say where the thing was. */
-    path: string
     /** Which SIDE of the focus this is on, and how far — the two facts a
      *  reader sorts and filters a lineage export by, and neither was in
      *  it. 'focus' for the subject itself. */
@@ -2773,13 +2783,18 @@ export function buildWalkExport(
     now: () => string = () => new Date().toISOString(),
 ): WalkExportPayload {
     const cardById = new Map(graph.cards.map(c => [c.id, c]))
+    const typeOf = new Map(graph.cards.filter(c => c.nodeId !== null).map(c => [c.nodeId!, c.type]))
     const nodes: WalkExportNode[] = graph.cards
         .filter(c => c.nodeId !== null)
         .map(c => ({
             urn: c.nodeId!,
             name: c.label,
             type: c.type,
-            path: c.ancestry.length > 0 ? c.ancestry.join(' › ') : (c.parentLabel ?? ''),
+            parentUrn: c.parentId,
+            parentName: c.parentLabel,
+            parentType: c.parentId ? typeOf.get(c.parentId) ?? null : null,
+            path: c.ancestry,
+            pathUrns: c.ancestryIds,
             direction: c.band === 0 ? 'focus' as const : c.band < 0 ? 'upstream' as const : 'downstream' as const,
             hops: Math.abs(c.band),
             drawnIn: c.drawnIn,
@@ -2791,7 +2806,7 @@ export function buildWalkExport(
             // breadcrumb is top-level here, and naming a parent that has
             // no row would leave anyone rebuilding the tree with a
             // dangling id — and contradict `depth`, which already says 0.
-            parentUrn: c.frameId === null ? null : c.parentId,
+            pictureParentUrn: c.frameId === null ? null : c.parentId,
             depth: c.depth,
         }))
     const edges: WalkExportEdge[] = graph.edges.map(e => ({
@@ -2827,14 +2842,18 @@ function csvField(v: string | number | null): string {
  * an edges table — the simplest single-download shape (two files would
  * mean two save-as prompts for one export click; one combined table
  * would mean a stub row per node re-explaining the edge columns). The
- * column headers alone say which table is which.
+ * column headers alone say which table is which. Where each sits is the
+ * five columns every file of entities ends its identity with, a path
+ * reading `A / B` and its urns `a; b`.
  */
 export function walkExportToCsv(payload: WalkExportPayload): string {
     const nodeRows = [
-        'urn,name,type,path,direction,hops,parentUrn,depth,drawnIn,drawnOut,knownIn,knownOut',
+        ['urn', 'name', 'type', 'direction', 'hops', 'pictureParentUrn', 'depth',
+            'drawnIn', 'drawnOut', 'knownIn', 'knownOut', ...ANCESTRY_COLUMNS].join(','),
         ...payload.nodes.map(n => [
-            n.urn, n.name, n.type, n.path, n.direction, n.hops,
-            n.parentUrn, n.depth, n.drawnIn, n.drawnOut, n.knownIn, n.knownOut,
+            n.urn, n.name, n.type, n.direction, n.hops, n.pictureParentUrn, n.depth,
+            n.drawnIn, n.drawnOut, n.knownIn, n.knownOut,
+            n.parentUrn, n.parentName, n.parentType, n.path.join(PATH_SEPARATOR), n.pathUrns.join(URN_LIST_SEPARATOR),
         ].map(csvField).join(',')),
     ]
     const edgeRows = [

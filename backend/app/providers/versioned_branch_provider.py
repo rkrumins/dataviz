@@ -589,7 +589,7 @@ class VersionedBranchProvider:
         raise NotImplementedError(self._deep_search_gap)
 
     async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
-                                 session_id=None):
+                                 session_id=None, with_path=False):
         raise NotImplementedError(self._deep_search_gap)
 
     async def deep_search_export_open(self, session_id, *, context):

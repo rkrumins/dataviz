@@ -10,6 +10,7 @@
  * wait on an import.
  */
 
+import { isAncestryColumn } from '@/lib/ancestryColumns'
 import type { OwnConnection, OwnThing, PropertyValue } from '@/services/playgroundService'
 
 export type { OwnConnection, OwnThing, PropertyValue }
@@ -157,10 +158,12 @@ export function looksLikeConnections(headers: string[]): boolean {
     return !!c.from && !!c.to
 }
 
-/** The columns of things that become properties: every column not matched to a field. */
+/** The columns of things that become properties: every column not matched to a field, but where a
+ *  thing sat in the graph its file was exported from (`lib/ancestryColumns`): informational, never
+ *  a property of the thing. */
 export function propertyColumns(headers: string[], cols: ThingColumns): string[] {
     const used = new Set(Object.values(cols).filter(Boolean))
-    return headers.filter(h => h && !used.has(h))
+    return headers.filter(h => h && !used.has(h) && !isAncestryColumn(h))
 }
 
 /** A cell as a property value: a plain number or true/false as such, everything else as text. A

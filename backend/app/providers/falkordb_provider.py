@@ -6841,14 +6841,14 @@ class FalkorDBProvider(GraphDataProvider):
 
     @_search_reads
     async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
-                                 session_id=None):
+                                 session_id=None, with_path=False):
         """Every match of ``query``, written to a file, in as many requests
         as the scan takes. See ``falkordb_search/export.py``."""
         from .falkordb_search.export import execute_export_session
         await self._ensure_connected()
         return await execute_export_session(self, query, context=context, fmt=fmt,
                                             columns=columns, wait_ms=wait_ms,
-                                            session_id=session_id)
+                                            session_id=session_id, with_path=with_path)
 
     async def deep_search_export_open(self, session_id, *, context):
         """A complete export of ``context``'s scope, to stream — or None."""

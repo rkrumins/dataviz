@@ -35,6 +35,7 @@ from typing import Annotated, Any, Dict, List, Literal, NamedTuple, Optional, Tu
 
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
+from ..ancestry_columns import ANCESTRY_COLUMNS
 from ..derived_artifacts import is_derived_edge_type
 from ..search_semantics import KEY_OPERATORS
 from .graph import GraphNode
@@ -1901,12 +1902,15 @@ SEARCH_EXPORT_EDGE_COLUMNS = (
 SEARCH_EXPORT_COLUMNS_MAX = 200
 
 
-def export_columns(columns: List[str], *, edges: bool = False) -> List[str]:
+def export_columns(columns: List[str], *, edges: bool = False,
+                   with_path: bool = False) -> List[str]:
     """Every column of an export: the base ones — an entity's, or ``edges``,
-    a Connections search's — then the properties asked for (an entity's, or
-    the edge's own), each once."""
+    a Connections search's — then, ``with_path``, where an entity sits
+    (``ancestry_columns``; an edge's ends name their parents already), then
+    the properties asked for (an entity's, or the edge's own), each once."""
     base = SEARCH_EXPORT_EDGE_COLUMNS if edges else SEARCH_EXPORT_BASE_COLUMNS
-    return list(dict.fromkeys([*base, *(c for c in columns if c)]))
+    place = ANCESTRY_COLUMNS if with_path and not edges else ()
+    return list(dict.fromkeys([*base, *place, *(c for c in columns if c)]))
 
 
 class SearchExportRequest(_Base):
@@ -1923,6 +1927,12 @@ class SearchExportRequest(_Base):
         description="Properties to add to each row, after its urn, name, type and "
                     "qualified name — ``description`` and ``tags`` included. A "
                     "Connections search's: the edge's own, after its fixed columns.")
+    with_path: bool = Field(
+        False, alias="withPath",
+        description="Each entity's parent and path (parentUrn, parentName, parentType, "
+                    "path, pathUrns), after its qualified name: informational columns, "
+                    "which an import ignores. One containment read for every thousand "
+                    "matches. Not for a Connections search, whose ends name their parents.")
     wait_ms: int = Field(2000, alias="waitMs", ge=0, le=60000)
     session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
 

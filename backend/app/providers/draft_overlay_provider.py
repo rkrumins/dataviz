@@ -1379,12 +1379,13 @@ class DraftOverlayProvider:
         return answer
 
     async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
-                                 session_id=None):
+                                 session_id=None, with_path=False):
         """An export of every match — the base's, like :meth:`deep_search_session`."""
         self._now_only("Search")
         return await self._base.deep_search_export(query, context=context, fmt=fmt,
                                                    columns=columns, wait_ms=wait_ms,
-                                                   session_id=session_id)
+                                                   session_id=session_id,
+                                                   **({"with_path": True} if with_path else {}))
 
     async def deep_search_export_open(self, session_id, *, context):
         """A complete export, to stream — the base's."""

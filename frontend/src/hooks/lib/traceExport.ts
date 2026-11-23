@@ -19,6 +19,7 @@
  */
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import { specFor } from '@/features/narrow/model'
+import { ANCESTRY_COLUMNS, PATH_SEPARATOR } from '@/lib/ancestryColumns'
 import { csvLine } from '@/lib/csv'
 import type { MembershipSpec } from '@/types/membership'
 import type { TraceCard, TraceView } from './traceViewModel'
@@ -70,9 +71,10 @@ export interface TraceExportInput {
   seedModels?: ReadonlyMap<string, Pick<LensWalkModel, 'nodes'>>
 }
 
+/** Where each row sits is the five columns every file of entities carries (`lib/ancestryColumns`). */
 export const TRACE_EXPORT_COLUMNS = [
   'urn', 'name', 'type', 'role', 'hops', 'hopsUp', 'hopsDown', 'layer',
-  'parentUrn', 'parentName', 'parentType', 'path', 'pathUrns', 'reachedFrom',
+  ...ANCESTRY_COLUMNS, 'reachedFrom',
 ] as const
 
 /** Each node's containment chain from the top down to its parent, read once per
@@ -183,7 +185,7 @@ export function traceCsvLines(rows: readonly TraceExportRow[]): string[] {
   for (const r of rows) {
     lines.push(csvLine([
       r.urn, r.name, r.type, r.role, r.hops, r.hopsUp, r.hopsDown, r.layer,
-      r.parentUrn, r.parentName, r.parentType, r.path.join(' / '), r.pathUrns, r.reachedFrom,
+      r.parentUrn, r.parentName, r.parentType, r.path.join(PATH_SEPARATOR), r.pathUrns, r.reachedFrom,
     ]))
   }
   return lines

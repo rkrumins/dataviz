@@ -68,6 +68,24 @@ def test_a_column_the_contract_doesnt_name_is_refused_and_reported():
     assert contract.unknown_columns([{"kind": "node", "prop_owner": 1, "urn": "u"}]) == ["prop_owner"]
 
 
+def test_where_a_node_sits_passes_the_contract_and_is_not_an_unknown_column():
+    """An export's informational columns (its parent and its path) are named by the contract, so
+    a connector validating an exported file against the published schema accepts it, and the dry
+    run never lists them. Read leniently: a value a spreadsheet made something else fails nothing."""
+    from backend.common.ancestry_columns import ANCESTRY_COLUMNS
+
+    node = {"kind": "node", "urn": "u", "parentUrn": "urn:db", "parentName": "Warehouse",
+            "parentType": "Database", "path": ["Warehouse"], "pathUrns": ["urn:db"]}
+    contract.validate_record(node)
+    contract.validate_record({**node, "path": "Warehouse / gold", "pathUrns": "urn:db; urn:gold"})
+    contract.validate_record({"kind": "edge", "edgeType": "E", **dict.fromkeys(ANCESTRY_COLUMNS, "")})
+    odd = contract.validate_record({**node, "parentName": 2024, "path": {"not": "a path"}})
+    assert odd.parentName == "2024" and odd.path is None
+    assert contract.unknown_columns([node]) == []
+    node_schema = contract.json_schema()["$defs"]["ImportNodeRecord"]["properties"]
+    assert all("ignored on import" in node_schema[c]["description"] for c in ANCESTRY_COLUMNS)
+
+
 def test_a_data_sources_schema_names_its_types_and_types_its_properties():
     generic = contract.json_schema()
     assert generic["$id"].endswith("import-record.v1.json") and generic["x-format-version"] == 1

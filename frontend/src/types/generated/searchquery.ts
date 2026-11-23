@@ -765,6 +765,10 @@ export type Predicate1 =
 export type Sessionid4 = string | null
 export type Waitms2 = number
 /**
+ * Each entity's parent and path (parentUrn, parentName, parentType, path, pathUrns), after its qualified name: informational columns, which an import ignores. One containment read for every thousand matches. Not for a Connections search, whose ends name their parents.
+ */
+export type Withpath = boolean
+/**
  * Every column, in order.
  */
 export type Columns2 = string[]
@@ -1812,6 +1816,7 @@ export interface SearchExportRequest {
     scope: SearchScope
     sessionId?: Sessionid4
     waitMs?: Waitms2
+    withPath?: Withpath
 }
 export interface SearchExportResult {
     columns?: Columns2

@@ -77,6 +77,9 @@ class ExportWorker:
         self._select_types = options.get("types") or []
         # The selection's contents come too, down these containment types ({type: child is source}).
         self._containment = (options.get("containment") or {}) if options.get("children") else None
+        # Each node says where it sits, up these containment types (an export asked for before
+        # the option existed has no key, and no columns).
+        self._with_path = options.get("withPath")
 
     async def run(self, job_id: str, *, lease: Optional[Lease] = None) -> Dict[str, int]:
         """Write the export on ``lease`` — the transfer lane's; called without one, the job is
@@ -157,10 +160,12 @@ class ExportWorker:
                 await progress()
                 yield chunk
 
+        place = stream.Placer(snap, self._with_path) if self._with_path is not None else None
         # It takes its turn with the streamed exports (the lease keeps the job alive while it waits).
         body = stream.in_turn(stream.write_export(
-            lambda: checked(stream.record_pages(snap, selection, tally=tally, stats=stats)),
-            fmt=fmt, props=self._extra_props))
+            lambda placed=True: checked(stream.record_pages(snap, selection, tally=tally, stats=stats,
+                                                            place=place if placed else None)),
+            fmt=fmt, props=self._extra_props, placed=place is not None))
         if self._package is not None:
             body = self._package.write(body, tally, stats)
         async with contextlib.aclosing(body):           # its turn goes back even if the store fails

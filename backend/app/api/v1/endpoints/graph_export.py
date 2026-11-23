@@ -26,6 +26,7 @@ from backend.app.providers.manager import provider_manager
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.versioning.import_export import live, stream
 from backend.auth_service.interface import User
+from backend.common import ancestry_columns as ancestry
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +62,14 @@ async def take_turn() -> int:
     return turn
 
 
-async def xlsx_columns(pages, fmt: str, props=()) -> Optional[stream.Columns]:
+async def xlsx_columns(pages, fmt: str, props=(), placed: bool = False) -> Optional[stream.Columns]:
     """An xlsx export's columns, found before the first byte so that one an Excel sheet can't
     hold is refused (422) rather than cut off. ``None`` for the other formats: csv/tsv find theirs
-    once the download has started, so a large one doesn't sit silent while they are counted."""
+    once the download has started, so a large one doesn't sit silent while they are counted.
+    ``placed``: the file says where each node sits (``pages`` read no chain for it)."""
     if fmt != "xlsx":
         return None
-    columns = await stream.columns_of(pages, props)
+    columns = await stream.columns_of(pages, props, placed)
     reason = stream.excel_overflow(columns.counts)
     if reason:
         raise HTTPException(status_code=422, detail={"code": "EXCEL_ROW_LIMIT", "message": reason})
@@ -206,6 +208,7 @@ async def stream_live_export(
     format: str = Query("ndjson"),
     props: Optional[str] = Query(None, description="Comma-separated property names to add as empty columns to fill"),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
+    with_path: bool = Query(False, alias="withPath", description=ancestry.WITH_PATH),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     # Closed before the body streams: a long download holds no database connection.
     session: AsyncSession = Depends(get_graph_read_db_session, scope="function"),
@@ -216,12 +219,14 @@ async def stream_live_export(
     fmt = export_format(format)
     extra = [p.strip() for p in (props or "").split(",") if p.strip()]
     provider = await _provider(ws_id, data_source_id, session, user)
+    place = live.placer(provider) if with_path else None
     turn = await take_turn()
     try:
-        columns = await xlsx_columns(live.record_pages(provider), fmt, extra)
+        columns = await xlsx_columns(live.record_pages(provider), fmt, extra, placed=with_path)
     except BaseException:
         stream.slots.release(turn)
         raise
     return ExportStreamResponse(
-        stream.write_export(lambda: live.record_pages(provider), fmt=fmt, columns=columns, props=extra),
+        stream.write_export(lambda placed=True: live.record_pages(provider, place=place if placed else None),
+                            fmt=fmt, columns=columns, props=extra, placed=with_path),
         turn=turn, fmt=fmt, filename=filename or f"{data_source_id}-export")

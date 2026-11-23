@@ -17,6 +17,8 @@
  *   - entities selected on the canvas export alone, with everything inside them, named for the
  *     selection, and the dialog says how to bring the edited file back; none of them there says so;
  *   - new property columns are offered only for the spreadsheet formats;
+ *   - each entity says where it sits (its parent and path) unless that is switched off, in the
+ *     terms of the persona reading;
  *   - a failure says why and can be retried.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
@@ -35,6 +37,7 @@ vi.mock('@/services/importExportApiService', async (importOriginal) => ({
 vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
 
 import { cancelExport, createExport, getExport, planExport, triggerBrowserDownload } from '@/services/importExportApiService'
+import { usePersonaStore } from '@/store/persona'
 import { dismissExport, exportStage, trackExport, useBackgroundExports } from '../backgroundExports'
 import { ExportDialog, type ExportDialogProps } from '../ExportDialog'
 
@@ -91,7 +94,8 @@ describe('ExportDialog', () => {
     await screen.findByText('Your download has started')
     const target = { wsId: 'ws1', dataSourceId: 'ds1', graphId: 'g1', viewId: 'v1', branchId: 'br1' }
     expect(planExport).toHaveBeenCalledWith(target, 'csv')
-    expect(createExport).toHaveBeenCalledWith(target, 'csv', { props: [], filename: 'Finance-DWH-Revenue-lineage-draft' })
+    expect(createExport).toHaveBeenCalledWith(target, 'csv',
+      { props: [], filename: 'Finance-DWH-Revenue-lineage-draft', withPath: true })
     expect(getExport).toHaveBeenCalledWith('ws1', 'g1', 'j1')
     const [url, name] = downloaded()
     expect(url.pathname).toBe('/api/v1/ws1/versioning/graphs/g1/exports/j1/download')
@@ -124,7 +128,7 @@ describe('ExportDialog', () => {
     await screen.findByText('Your download has started')
     const target = { wsId: 'ws1', dataSourceId: 'ds1', graphId: 'g1', viewId: undefined, branchId: undefined }
     expect(planExport).toHaveBeenCalledWith(target, 'ndjson')
-    expect(createExport).toHaveBeenCalledWith(target, 'ndjson', { props: [], filename: 'Finance-DWH' })
+    expect(createExport).toHaveBeenCalledWith(target, 'ndjson', { props: [], filename: 'Finance-DWH', withPath: true })
   })
 
   it('says where a prepared export waits, and how far it has got, when the dialog opens on it again', async () => {
@@ -316,7 +320,8 @@ describe('ExportDialog', () => {
     const target = { wsId: 'ws1', dataSourceId: 'ds1', graphId: 'g1', viewId: undefined, branchId: 'br1',
                      ids: ['urn:a', 'gv:e2'], withChildren: true }
     expect(planExport).toHaveBeenCalledWith(target, 'csv')
-    expect(createExport).toHaveBeenCalledWith(target, 'csv', { props: [], filename: 'Finance-DWH-selection-draft' })
+    expect(createExport).toHaveBeenCalledWith(target, 'csv',
+      { props: [], filename: 'Finance-DWH-selection-draft', withPath: true })
     expect(screen.getByText(/use Import in Edit mode to bring your changes back/)).toBeInTheDocument()
   })
 
@@ -342,6 +347,36 @@ describe('ExportDialog', () => {
 
     await screen.findByText('Your download has started')
     expect(vi.mocked(createExport).mock.calls[0][2]).toMatchObject({ props: ['Owner', 'PII'] })
+  })
+
+  it('says where each entity sits unless that is switched off, for every format', async () => {
+    usePersonaStore.setState({ mode: 'business' })
+    vi.mocked(planExport).mockResolvedValue(plan({ format: 'ndjson' }))
+    open()
+    const option = screen.getByRole('switch', { name: /Include where each entity sits \(parent and path\)/ })
+    expect(option).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByText('Where each entity sits')).toBeInTheDocument()      // what you'll get
+    expect(within(option).getByText(/all the way to the top\. Skipped when you import the file back/))
+      .toBeInTheDocument()
+    expect(within(option).queryByText(/parentUrn/)).not.toBeInTheDocument()     // plain words for Business
+    await userEvent.click(option)
+    expect(option).toHaveAttribute('aria-checked', 'false')
+    expect(screen.queryByText('Where each entity sits')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByText('NDJSON'))
+    await userEvent.click(screen.getByRole('button', { name: /Export NDJSON/ }))
+
+    await screen.findByText('Your download has started')
+    expect(vi.mocked(createExport).mock.calls[0][2]).toMatchObject({ withPath: false })
+  })
+
+  it('asks the live graph for where each entity sits too, and names the columns for the technical persona', async () => {
+    vi.mocked(planExport).mockResolvedValue(plan({ exact: false }))
+    open({ graphId: null, branchId: undefined })
+    expect(screen.getByText('parentUrn, parentName, parentType, path, pathUrns')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Export CSV/ }))
+
+    await screen.findByText('Your download has started')
+    expect(downloaded()[0].searchParams.get('withPath')).toBe('true')
   })
 
   it('says why an export could not start, and retries', async () => {
