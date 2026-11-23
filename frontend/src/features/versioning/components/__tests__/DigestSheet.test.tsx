@@ -35,14 +35,15 @@ import { ME, NOTHING_NEW, digest, truncated } from '../__fixtures__/digest'
 const mockDigest = vi.mocked(getGraphDigest)
 const mockSeen = vi.mocked(markDigestSeen)
 
-function renderSheet() {
+function renderSheet({ compare = true } = {}) {
   const onCompare = vi.fn()
   const onOpenChange = vi.fn()
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
-        <DigestSheet wsId="ws1" graphId="g1" mainBranchId="br_main" open onOpenChange={onOpenChange} onCompare={onCompare} />
+        <DigestSheet wsId="ws1" graphId="g1" mainBranchId="br_main" open onOpenChange={onOpenChange}
+          onCompare={compare ? onCompare : undefined} />
       </MemoryRouter>
     </QueryClientProvider>,
   )
@@ -103,6 +104,14 @@ describe('DigestSheet', () => {
     expect(onCompare).toHaveBeenLastCalledWith(214, 215)
     await user.click(screen.getByRole('button', { name: 'Compare all' }))
     expect(onCompare).toHaveBeenLastCalledWith(212, null)          // everything since the marker
+  })
+
+  it('offers no comparison where there is no canvas to show it on, and still each version’s changes', async () => {
+    mockDigest.mockResolvedValue(digest())
+    renderSheet({ compare: false })
+    const region = within(await screen.findByRole('region', { name: /Versions/ }))
+    expect(region.getAllByRole('button', { name: 'Changes' }).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: /Compare/ })).not.toBeInTheDocument()
   })
 
   it('lists the reviews waiting on the reader, each a link to its review', async () => {

@@ -19,6 +19,9 @@
  * Its Settings section summarises the graph's settings and opens all of them in the graph's
  * settings drawer (GraphSettingsSummary has its own spec); it replaces the separate drafts-and-
  * reviews and imports blocks, which are no longer on the tab.
+ * Its header says what changed since you last looked (DigestChip), which opens the list of it
+ * (DigestSheet), with no comparison here: there is no canvas. A watcher's notification opens the tab
+ * with the list showing (`whatsnew=1`), and closing it takes that off the address.
  * The data hooks are stubbed; the cards themselves have their own specs.
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -99,6 +102,21 @@ vi.mock('@/features/reviews/components/PrDetailDrawer', () => ({ PrDetailDrawer:
 vi.mock('../GraphSettingsSummary', () => ({
   GraphSettingsSummary: ({ wsId, graphId, label }: { wsId: string; graphId: string; label?: string }) =>
     <div data-testid="settings-summary" data-ws={wsId} data-graph={graphId} data-label={label ?? ''} />,
+}))
+vi.mock('../DigestChip', () => ({
+  DigestChip: ({ graphId, onOpen }: { graphId: string; onOpen: () => void }) =>
+    <button type="button" data-graph={graphId} onClick={onOpen}>3 new versions since your last visit</button>,
+}))
+vi.mock('../DigestSheet', () => ({
+  DigestSheet: ({ open, graphId, mainBranchId, onOpenChange, onCompare }: {
+    open: boolean; graphId: string; mainBranchId: string | null
+    onOpenChange: (open: boolean) => void; onCompare?: unknown
+  }) => open ? (
+    <div role="dialog" aria-label="Since your last visit" data-graph={graphId} data-main={mainBranchId ?? ''}
+      data-compare={String(!!onCompare)}>
+      <button type="button" onClick={() => onOpenChange(false)}>Close</button>
+    </div>
+  ) : null,
 }))
 vi.mock('../ProjectionHealthCard', () => ({
   ProjectionHealthCard: ({ graphId, showActions, dataSourceId }: {
@@ -500,5 +518,32 @@ describe('DataSourceVersioningTab — recent history', () => {
     expect(screen.getByText('Service account')).toBeInTheDocument()
     expect(screen.getByText('Nightly loader')).toBeInTheDocument()
     expect(screen.getAllByText('Service account')).toHaveLength(1)   // a person by hand: no chip
+  })
+})
+
+
+describe('DataSourceVersioningTab — what changed since you last looked', () => {
+  it('opens from the chip in its header, with no comparison here', () => {
+    renderTab()
+    expect(screen.queryByRole('dialog', { name: 'Since your last visit' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '3 new versions since your last visit' }))
+    const sheet = screen.getByRole('dialog', { name: 'Since your last visit' })
+    expect(sheet).toHaveAttribute('data-graph', 'g1')
+    expect(sheet).toHaveAttribute('data-main', 'b_main')
+    expect(sheet).toHaveAttribute('data-compare', 'false')
+  })
+
+  it('a watcher’s notification opens it, and closing it takes that off the address', () => {
+    render(
+      <MemoryRouter initialEntries={['/workspaces/ws1?ds=ds1&dstab=versioning&whatsnew=1']}>
+        <DataSourceVersioningTab wsId="ws1" dataSourceId="ds1" label="Sales" />
+        <Where />
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('dialog', { name: 'Since your last visit' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog', { name: 'Since your last visit' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('where')).toHaveTextContent('/workspaces/ws1?ds=ds1&dstab=versioning')
+    expect(screen.getByTestId('where').textContent).not.toContain('whatsnew')
   })
 })

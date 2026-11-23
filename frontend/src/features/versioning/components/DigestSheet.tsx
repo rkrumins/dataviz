@@ -2,8 +2,9 @@
  * DigestSheet — what changed in the graph since you last looked: the versions published since your
  * seen marker (or in the last 7 days, said so), who published them and what each recorded of
  * itself, the reviews waiting on you, and the entities you watch that changed. From each, the way
- * on: a version's changes in place (`ChangeList`), its comparison in History (`RevisionCompare`),
- * a watched entity's history (`EntityHistory`), a review in the Reviews inbox.
+ * on: a version's changes in place (`ChangeList`), its comparison in History (`RevisionCompare`)
+ * where there is a canvas to show it on (`onCompare`), a watched entity's history (`EntityHistory`),
+ * a review in the Reviews inbox.
  *
  * Opening it marks nothing seen. It is a list to work through — a comparison opened from it, and the
  * way back, must find it as it was — and "seen" is kept by the server for every device, so a glance
@@ -147,7 +148,7 @@ function VersionRow({ v, wsId, graphId, me, onCompare }: {
   wsId: string
   graphId: string
   me: string | null
-  onCompare: (fromSeq: number, toSeq: number | null) => void
+  onCompare?: (fromSeq: number, toSeq: number | null) => void
 }) {
   const [open, setOpen] = useState(false)
   const panel = useId()
@@ -180,14 +181,16 @@ function VersionRow({ v, wsId, graphId, me, onCompare }: {
           <div className="mt-1.5 -ml-2 flex flex-wrap items-center gap-1">
             <Expander open={open} onToggle={() => setOpen((o) => !o)} controls={panel} icon={ListTree}
               label={open ? 'Hide changes' : 'Changes'} />
-            <button
-              type="button"
-              onClick={() => onCompare(v.seq - 1, v.seq)}
-              className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-            >
-              <GitCompareArrows className="w-3.5 h-3.5" aria-hidden /> Compare
-              <span className="sr-only">version #{v.seq} with the one before</span>
-            </button>
+            {onCompare && (
+              <button
+                type="button"
+                onClick={() => onCompare(v.seq - 1, v.seq)}
+                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+              >
+                <GitCompareArrows className="w-3.5 h-3.5" aria-hidden /> Compare
+                <span className="sr-only">version #{v.seq} with the one before</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -256,8 +259,9 @@ export function DigestSheet({ wsId, graphId, mainBranchId, open, onOpenChange, o
   mainBranchId: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
-  /** Two versions to compare in History; `toSeq` null is Published as it is now. */
-  onCompare: (fromSeq: number, toSeq: number | null) => void
+  /** Two versions to compare in History; `toSeq` null is Published as it is now. Absent where there
+   *  is no canvas to compare them on (the data source's Version control tab): no Compare there. */
+  onCompare?: (fromSeq: number, toSeq: number | null) => void
 }) {
   const q = useGraphDigest(wsId, graphId)
   const mark = useMarkDigestSeen(wsId, graphId)
@@ -287,9 +291,9 @@ export function DigestSheet({ wsId, graphId, mainBranchId, open, onOpenChange, o
       ) : (
         <>You haven’t marked this graph seen yet, so here is everything published in the last 7 days.</>
       )) : undefined}
-      footer={d && (d.versions.length > 0 || canMark) ? (
+      footer={d && ((d.versions.length > 0 && onCompare) || canMark) ? (
         <>
-          {d.versions.length > 0 && (
+          {d.versions.length > 0 && onCompare && (
             <Button variant="secondary" size="md" leftIcon={GitCompareArrows} onClick={() => onCompare(fromSeq, null)}>
               Compare all
             </Button>
