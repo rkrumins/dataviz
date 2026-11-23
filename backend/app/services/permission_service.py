@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Mapping, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
@@ -372,6 +372,53 @@ async def resolve(
             if b.scope_type in ("workspace", "global") and b.subject_type == "user"
         ]
     return await _fold(session, bindings, sid=sid, service=service)
+
+
+async def resolve_many(session: AsyncSession, user_ids) -> dict[str, PermissionClaims]:
+    """:func:`resolve` for many people at once, in four queries however many they are: their
+    teams, every binding of theirs or their teams' (expired ones left out), the permissions of the
+    roles those bind, and the permissions' categories. Each person's are folded as :func:`resolve`
+    folds them (:func:`_fold_sets`), so a check against them answers as it would against theirs.
+    Claims of no session (``sid`` empty): for deciding who to tell, never for a token."""
+    users = sorted({u for u in user_ids if u})
+    if not users:
+        return {}
+    people = [u for u in users if not is_service_account(u)]
+    teams: dict[str, list[str]] = {u: [] for u in users}
+    if people:
+        for user_id, group_id in (await session.execute(
+                select(GroupMemberORM.user_id, GroupMemberORM.group_id)
+                .where(GroupMemberORM.user_id.in_(people)))).all():
+            teams[user_id].append(group_id)
+    groups = sorted({g for ids in teams.values() for g in ids})
+    where = and_(RoleBindingORM.subject_type == "user", RoleBindingORM.subject_id.in_(users))
+    if groups:
+        where = or_(where, and_(RoleBindingORM.subject_type == "group",
+                                RoleBindingORM.subject_id.in_(groups)))
+    now = datetime.now(timezone.utc)
+    bindings = [b for b in (await session.execute(select(RoleBindingORM).where(where))).scalars().all()
+                if not binding_repo._is_expired(b.expires_at, now=now)]
+    own: dict[str, list[RoleBindingORM]] = {u: [] for u in users}
+    of_team: dict[str, list[RoleBindingORM]] = {}
+    for b in bindings:
+        if b.subject_type == "user":
+            own[b.subject_id].append(b)
+        else:
+            of_team.setdefault(b.subject_id, []).append(b)
+    role_perms = await permission_repo.get_role_permissions_for_roles(
+        session, sorted({b.role_name for b in bindings}))
+    perm_categories = await permission_repo.get_permission_categories(session)
+    out: dict[str, PermissionClaims] = {}
+    for user_id in users:
+        service = is_service_account(user_id)
+        held = own[user_id] + [b for g in teams[user_id] for b in of_team.get(g, [])]
+        if service:
+            held = [b for b in held if b.scope_type in ("workspace", "global")]
+        global_set, ws_sets = _fold_sets(held, role_perms, perm_categories, service=service)
+        out[user_id] = PermissionClaims(
+            sid="", global_perms=tuple(sorted(global_set)),
+            ws_perms={ws: _collapse_wildcards(perms) for ws, perms in ws_sets.items()})
+    return out
 
 
 async def resolve_group(session: AsyncSession, group_id: str) -> PermissionClaims:

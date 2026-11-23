@@ -495,6 +495,22 @@ class GraphWatchORM(Base):
     )
 
 
+class GraphWatchToldORM(Base):
+    """How far a watched versioned graph's watchers have been told of the versions its published
+    line gained (``digest.tell_pending``, in the versioning worker): all of them up to
+    ``told_seq``; a round in progress up to ``round_to``, through the watcher ``round_through`` (by
+    user id), saved with each batch it tells. ``told_seq`` NULL: not read yet, so the worker starts
+    it at the graph's head. Keyed by the data source, like ``graph_watches``."""
+
+    __tablename__ = "graph_watch_told"
+
+    data_source_id = Column(Text, primary_key=True)
+    told_seq = Column(BigInteger, nullable=True)
+    round_to = Column(BigInteger, nullable=True)
+    round_through = Column(Text, nullable=True)
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+
 # ------------------------------------------------------------------ #
 # feature_categories  (definitions: id, label, icon, color, order)     #
 # ------------------------------------------------------------------ #

@@ -401,6 +401,12 @@ lineage record lists it). The merge revision runs nothing.
 `20261122_1300_merge_rules_store`**, the settings line's head once `main`'s newer head merged in.
 Both were pushed with their parents, so a merge revision that runs nothing joins them.
 
+**`20261123_0100_graph_watch_told` adds `graph_watch_told`** (a new table): how far each watched
+graph's watchers have been told, which the versioning worker saves with each batch of notifications
+it sends (`digest.tell_pending`), so a restart carries on where it stopped. It adds a row, not read
+yet, for each graph watched already: the worker starts each at its head and tells nobody of what
+came before. The downgrade drops the table.
+
 **Rolling back.** For one release, every save through the store writes the old storage too:
 New-version builds' JSON, the `platform_settings` columns, a workspace's and a data source's
 columns (a data source's forks' as well), and a graph's `projection_state.read_mode`. Each graph's

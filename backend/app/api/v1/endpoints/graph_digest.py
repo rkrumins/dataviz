@@ -176,6 +176,8 @@ async def put_watch(
             "message": f"You watch {graph_watch_repo.ENTITIES_MAX} entities in this graph already: "
                        "stop watching one to watch another."})
     await graph_watch_repo.watch(session, user.id, ds, urn)
+    # Its watchers are told of what the graph publishes from now on (``digest.tell_pending``).
+    await graph_watch_repo.start_telling(session, ds, int(meta.get("main_head_commit_seq") or 0))
     return _watching(await graph_watch_repo.watches(session, user.id, ds))
 
 

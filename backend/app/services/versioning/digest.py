@@ -8,17 +8,29 @@ the watched entities ``ix_nv_urn``, then one ``ix_nv_entity_hist`` probe each; t
 ones asking them or a team of theirs (``ix_rr_graph``), from the review records, each decided as the
 review inbox's ``needs_review`` decides it (``review_state.waits_on``).
 
-After a publish, an undo or a restore commits (``main_activity.note`` → :func:`note`), each person
-watching the graph, or an entity the version changed, who may still read it is told in their Inbox:
-one notification each, however much of what they watch it changed, and never its author. An author
-who had seen everything before it has seen it too: their marker moves to it. All of that is best
-effort, bounded in time, and never fails the commit it follows.
+Telling the people who watch a graph is the versioning worker's (:func:`tell_pending`, every
+``TELL_POLL_SECS``), never a commit's: a publish, an undo or a restore commits and answers, whoever
+watches. A pass finds each watched graph whose published line moved past its marker
+(``graph_watch_told``) and tells, in one round, of every version a person published since (a
+draft's, a review's or a fork's publish, an undo, a restore): each person watching the graph, or an
+entity those versions changed, who may still read it — at most one unread notification per graph
+each, as one still unread already points at the digest, which lists everything since they last
+looked — and never anyone of only what they published themselves. A round tells its watchers by
+user id, ``TELL_BATCH`` at a time, each batch committed with the marker: a restart carries on where
+it stopped, nobody is told twice, and two workers never tell one graph at once (``SKIP LOCKED``).
+Their access is decided for each batch at once (``permission_service.resolve_many``).
+
+A commit does one thing more, once it has landed (``main_activity.note`` → :func:`note`): an author
+who had seen everything before their own version has seen it too, so their marker moves to it.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from bisect import bisect_right
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import takewhile
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
@@ -40,10 +52,16 @@ ASKED_MAX = 200
 #: What a watcher is told of: versions a person published (a draft's, a review's or a fork's
 #: publish, an undo, a restore). Syncs, imports and writes straight to main show in the digest.
 TOLD_OF = ("squash_publish", "revert", "restore")
-#: How long telling the watchers of one version may take, after its commit.
-TELL_TIMEOUT_SECS = 5.0
-#: Watchers told, and committed, at a time.
-_TELL_CHUNK = 50
+#: How often the versioning worker tells the watchers of the graphs that moved (:func:`tell_pending`).
+TELL_POLL_SECS = 2.0
+#: How long one pass may tell for; what it leaves, the next tells.
+TELL_PASS_SECS = 5.0
+#: Watchers told, and committed with their graph's marker, at a time.
+TELL_BATCH = 200
+#: Ids read at a time, in one IN list: data sources, or the urns watched in a graph.
+_AT_ONCE = 1000
+#: How long an author's own marker may take to move once their commit has landed.
+CAUGHT_UP_TIMEOUT_SECS = 2.0
 KIND = "watch.new_version"
 _STATS_KEYS = ("create", "update", "delete", "nodes", "edges")
 _ENDED = ("merged", "closed", "merging")
@@ -232,87 +250,268 @@ async def _reviews_waiting(svc, s, graph_id: str, actor: str) -> Tuple[List[Dict
 
 # ── Telling the people who watch it ───────────────────────────────────────────────────────────
 def note(session, graph, commit) -> None:
-    """Tell the people watching ``graph`` of ``commit`` once ``session``'s transaction commits
-    (``main_activity.note`` calls this where ``main``'s head moves): never if it rolls back."""
+    """Once ``session``'s transaction commits (``main_activity.note`` calls this where ``main``'s
+    head moves; never if it rolls back), an author who had seen everything before their own version
+    has seen it too. Telling the people watching ``graph`` is the worker's (:func:`tell_pending`)."""
     if commit.kind not in TOLD_OF:
         return
-    graph_id, workspace_id, data_source_id = graph.id, graph.workspace_id, graph.data_source_id
+    data_source_id = graph.data_source_id
 
-    async def tell() -> None:
-        await tell_watchers(graph_id=graph_id, workspace_id=workspace_id,
-                            data_source_id=data_source_id, commit=commit)
+    async def caught_up() -> None:
+        try:
+            await asyncio.wait_for(_caught_up(commit.actor, data_source_id, commit.commit_seq),
+                                   CAUGHT_UP_TIMEOUT_SECS)
+        except Exception:  # noqa: BLE001 — a marker never fails the commit it follows
+            logger.warning("the seen marker of %s's author did not move to version %s",
+                           data_source_id, getattr(commit, "commit_seq", None), exc_info=True)
 
-    db.after_commit(session, tell)
+    db.after_commit(session, caught_up)
 
 
-async def tell_watchers(*, graph_id: str, workspace_id: str, data_source_id: str, commit: Any) -> int:
-    """How many people were told of ``commit``. Never raises, and gives up past
-    ``TELL_TIMEOUT_SECS``: the version it tells of has landed."""
+async def _caught_up(actor: Optional[str], data_source_id: str, seq: int) -> None:
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.repositories import graph_watch_repo
+
+    if not actor:
+        return
+    async with get_async_session() as s:
+        await graph_watch_repo.advance_if_caught_up(s, actor, data_source_id, seq)
+        await s.commit()
+
+
+@dataclass(frozen=True)
+class _Watched:
+    """A watched graph whose watchers have something to be told, as a pass found it."""
+    data_source_id: str
+    graph_id: str
+    workspace_id: str
+    head: int
+    told_seq: Optional[int]
+    round_to: Optional[int]
+
+    @property
+    def untold(self) -> int:
+        """Versions past what its watchers were told of (0 for a marker not read yet)."""
+        return max(0, self.head - self.told_seq) if self.told_seq is not None else 0
+
+
+@dataclass(frozen=True)
+class _Round:
+    """What a round tells of: ``main``'s versions after ``span[0]`` up to ``span[1]`` that a person
+    published (``TOLD_OF``) — how many, the latest, who published them, and the windows holding only
+    those (for the entities they changed)."""
+    span: Tuple[int, int]
+    versions: int
+    latest: Any
+    authors: frozenset
+    runs: Tuple[Tuple[int, int], ...]
+
+
+async def tell_pending(*, budget_secs: Optional[float] = None) -> int:
+    """One pass of the worker's telling (every ``TELL_POLL_SECS``): each watched graph whose
+    published line moved past its marker has its watchers told, a round each, for at most
+    ``budget_secs`` (``TELL_PASS_SECS``); a graph left over, or one that failed, carries on in the
+    next pass from where its marker stands. How many were told. Never raises."""
+    from backend.app.jobs import metrics
+
+    deadline = time.monotonic() + (TELL_PASS_SECS if budget_secs is None else budget_secs)
     try:
-        return await asyncio.wait_for(
-            _tell(graph_id=graph_id, workspace_id=workspace_id, data_source_id=data_source_id,
-                  commit=commit), TELL_TIMEOUT_SECS)
-    except Exception:  # noqa: BLE001 — telling people never fails the publish it tells of
-        logger.warning("the watchers of %s were not told of version %s", graph_id,
-                       getattr(commit, "commit_seq", None), exc_info=True)
+        pending = await _pending()
+    except Exception:  # noqa: BLE001 — the next pass reads them again
+        logger.warning("which watched graphs moved could not be read", exc_info=True)
         return 0
+    told = behind = 0
+    for i, g in enumerate(pending):
+        if i and time.monotonic() >= deadline:            # each pass moves at least one along
+            behind += g.untold
+            continue
+        try:
+            n, done = await _tell_graph(g, deadline)
+        except Exception:  # noqa: BLE001 — its marker stands where its last batch left it
+            logger.warning("the watchers of %s were not told of versions %s to %s yet",
+                           g.graph_id, (g.told_seq or 0) + 1, g.head, exc_info=True)
+            n, done = 0, False
+        told += n
+        if not done:
+            behind += g.untold
+    metrics.gauge_set("graphver_watch_untold_versions", behind)
+    if told:
+        metrics.increment("graphver_watch_notified_total", told)
+    return told
 
 
-async def _changed_in(graph_id: str, seq: int, urns: Set[str]) -> Dict[str, Optional[str]]:
-    """The watched ``urns`` version ``seq`` of ``main`` changed → each one's name."""
+async def _pending() -> List[_Watched]:
+    """The watched graphs whose watchers have something to be told: a round in progress, a marker
+    not read yet, or a head past (or, for a graph re-created under its data source, short of) it."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.repositories import graph_watch_repo
+
+    out: List[_Watched] = []
+    after = ""
+    while True:                                       # the markers, a page at a time
+        async with get_async_session() as s:
+            marks = await graph_watch_repo.markers(s, after=after, limit=_AT_ONCE)
+        heads = await _heads([ds for ds, _told, _to in marks]) if marks else {}
+        for ds, told, round_to in marks:
+            if ds not in heads:
+                continue                              # no versioned graph of it now
+            graph_id, workspace_id, head = heads[ds]
+            if round_to is not None or told is None or head != told:
+                out.append(_Watched(ds, graph_id, workspace_id, head, told, round_to))
+        if len(marks) < _AT_ONCE:
+            return out
+        after = marks[-1][0]
+
+
+async def _heads(data_source_ids: Sequence[str]) -> Dict[str, Tuple[str, str, int]]:
+    """data source → its live versioned graph: ``(graph_id, workspace_id, main's head)``."""
+    out: Dict[str, Tuple[str, str, int]] = {}
+    async with db.graphver_session() as s:
+        for i in range(0, len(data_source_ids), _AT_ONCE):
+            for ds, graph_id, workspace_id, head in (await s.execute(
+                    select(GraphORM.data_source_id, GraphORM.id, GraphORM.workspace_id,
+                           GraphORM.main_head_commit_seq)
+                    .where(GraphORM.data_source_id.in_(data_source_ids[i:i + _AT_ONCE]),
+                           GraphORM.deleted_at.is_(None)))).all():
+                out[ds] = (graph_id, workspace_id, head or 0)
+    return out
+
+
+async def _tell_graph(g: _Watched, deadline: float) -> Tuple[int, bool]:
+    """Tell ``g``'s watchers, a batch per transaction holding its marker, until its round is done
+    or the pass's time is up: ``(told, done)``. A marker another worker holds is theirs to tell."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.repositories import graph_watch_repo
+
+    told = 0
+    people: Optional[List[str]] = None
+    watching: Dict[str, Tuple[bool, Set[str]]] = {}
+    label = ""
+    found: Optional[_Round] = None
+    changed: Optional[Dict[str, Optional[str]]] = None
+    while True:
+        async with get_async_session() as s:
+            mark = await graph_watch_repo.claim(s, g.data_source_id)
+            if mark is None:
+                return told, True
+            if mark.told_seq is None or mark.told_seq > g.head or (mark.round_to or 0) > g.head:
+                # Not read yet, or kept for an earlier graph of this data source: its watchers are
+                # told from the head on, of nothing before.
+                mark.told_seq, mark.round_to, mark.round_through = g.head, None, None
+                mark.updated_at = datetime.now(timezone.utc)
+                await s.commit()
+                return told, True
+            if mark.round_to is None:
+                if mark.told_seq >= g.head:
+                    return told, True                 # told already, by another worker
+                mark.round_to, mark.round_through = g.head, ""
+            if found is None or found.span != (mark.told_seq, mark.round_to):
+                found = await _round(g.graph_id, mark.told_seq, mark.round_to)
+                changed = None
+            if people is None:
+                watching = await graph_watch_repo.watchers(s, g.data_source_id)
+                people = sorted(watching)
+                label = await _label(s, g.data_source_id)
+            start = bisect_right(people, mark.round_through or "")
+            batch = people[start:start + TELL_BATCH] if found.versions else []
+            if not batch:
+                mark.told_seq, mark.round_to, mark.round_through = mark.round_to, None, None
+                mark.updated_at = datetime.now(timezone.utc)
+                await s.commit()
+                return told, True
+            if changed is None:
+                urns = sorted({u for _whole, urns in watching.values() for u in urns})
+                changed = await _changed_between(g.graph_id, found.runs, urns) if urns else {}
+            told += await _tell_batch(s, g, label, found, batch, watching, changed)
+            mark.round_through = batch[-1]
+            mark.updated_at = datetime.now(timezone.utc)
+            await s.commit()
+        if time.monotonic() >= deadline:
+            return told, False
+
+
+async def _label(s, data_source_id: str) -> str:
+    from backend.app.db.models import WorkspaceDataSourceORM
+
+    ds = await s.get(WorkspaceDataSourceORM, data_source_id)
+    return (ds.label or ds.graph_name or "this graph") if ds is not None else "this graph"
+
+
+async def _round(graph_id: str, lo: int, hi: int) -> _Round:
+    """The versions a person published on ``graph_id``'s ``main`` after ``lo`` up to ``hi``
+    (``uq_commits_branch_seq``)."""
     async with db.graphver_session() as s:
         main_id = await _main_id(s, graph_id)
-        changed = await _watched_changes(s, graph_id, main_id, sorted(urns), seq - 1, seq)
-    return {w["urn"]: w["name"] for w in changed}
+        told = (CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                CommitORM.commit_seq > lo, CommitORM.commit_seq <= hi, CommitORM.kind.in_(TOLD_OF))
+        rows = (await s.execute(select(CommitORM.commit_seq, CommitORM.actor).where(*told)
+                                .order_by(CommitORM.commit_seq))).all()
+        latest = None
+        if rows:
+            latest = (await s.execute(
+                select(CommitORM.commit_seq, CommitORM.kind, CommitORM.actor, CommitORM.message,
+                       CommitORM.stats)
+                .where(CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                       CommitORM.commit_seq == rows[-1].commit_seq))).one()
+    runs: List[Tuple[int, int]] = []
+    for seq, _actor in rows:                     # main's versions are numbered one after another
+        if runs and runs[-1][1] == seq - 1:
+            runs[-1] = (runs[-1][0], seq)
+        else:
+            runs.append((seq - 1, seq))
+    return _Round(span=(lo, hi), versions=len(rows), latest=latest,
+                  authors=frozenset(actor for _seq, actor in rows), runs=tuple(runs))
 
 
-async def _tell(*, graph_id: str, workspace_id: str, data_source_id: str, commit: Any) -> int:
-    from backend.app.db.engine import get_async_session
-    from backend.app.db.models import WorkspaceDataSourceORM
-    from backend.app.db.repositories import graph_watch_repo, notification_repo
+async def _changed_between(graph_id: str, runs: Sequence[Tuple[int, int]],
+                           urns: Sequence[str]) -> Dict[str, Optional[str]]:
+    """The watched ``urns`` the versions in ``runs`` changed → each one's name, as last named."""
+    out: Dict[str, Optional[str]] = {}
+    async with db.graphver_session() as s:
+        main_id = await _main_id(s, graph_id)
+        for lo, hi in runs:
+            for i in range(0, len(urns), _AT_ONCE):
+                for w in await _watched_changes(s, graph_id, main_id, urns[i:i + _AT_ONCE],
+                                                lo, hi):
+                    out[w["urn"]] = w["name"]
+    return out
+
+
+async def _tell_batch(s, g: _Watched, label: str, found: _Round, batch: Sequence[str],
+                      watching: Mapping[str, Tuple[bool, Set[str]]],
+                      changed: Mapping[str, Optional[str]]) -> int:
+    """Tell those of ``batch`` with something to be told who may still read the graph, in ``s``'s
+    transaction: at most one unread notification per graph each (``dedupe_unread``)."""
+    from backend.app.db.repositories import notification_repo
     from backend.app.services import permission_service
 
-    seq, actor = commit.commit_seq, commit.actor
-    async with get_async_session() as s:
-        if actor:
-            await graph_watch_repo.advance_if_caught_up(s, actor, data_source_id, seq)
-        whole: Set[str] = set()
-        entities: Dict[str, Set[str]] = {}
-        for user_id, urn in await graph_watch_repo.watchers(s, data_source_id):
-            if user_id == actor:
-                continue
-            if urn is None:
-                whole.add(user_id)
-            else:
-                entities.setdefault(user_id, set()).add(urn)
-        if not whole and not entities:
-            return 0
-        changed = (await _changed_in(graph_id, seq, {u for urns in entities.values() for u in urns})
-                   if entities else {})
-        ds = await s.get(WorkspaceDataSourceORM, data_source_id)
-        label = (ds.label or ds.graph_name or "this graph") if ds is not None else "this graph"
-        # Committed a chunk at a time: past the time allowed, those told so far stay told.
-        await s.commit()
-        n = 0
-        by_copy: Dict[Tuple[str, str], List[str]] = {}
-        recipients = [u for u in sorted(whole | set(entities))
-                      if u in whole or any(urn in changed for urn in entities.get(u, ()))]
-        for i, user_id in enumerate(recipients, 1):
-            claims = await permission_service.resolve(s, user_id)
-            if permission_service.has_permission(claims, "workspace:datasource:read",
-                                                 workspace_id=workspace_id):
-                names = sorted({changed[u] or u for u in entities.get(user_id, ()) if u in changed})
-                by_copy.setdefault(_copy(commit, label, names, whole=user_id in whole),
-                                   []).append(user_id)
-            if by_copy and (i % _TELL_CHUNK == 0 or i == len(recipients)):
-                for (title, body), user_ids in by_copy.items():
-                    n += await notification_repo.notify(
-                        s, user_ids=user_ids, kind=KIND, title=title, body=body,
-                        link=f"/workspaces/{workspace_id}?ds={data_source_id}&dstab=versioning",
-                        actor_id=actor, resource_type="data_source", resource_id=data_source_id)
-                by_copy = {}
-                await s.commit()
-        return n
+    wanted: Dict[str, List[str]] = {}
+    for user_id in batch:
+        if found.authors == {user_id}:
+            continue                                  # told only of what they published themselves
+        whole, urns = watching[user_id]
+        names = sorted({changed[u] or u for u in urns if u in changed})
+        if whole or names:
+            wanted[user_id] = names
+    if not wanted:
+        return 0
+    claims = await permission_service.resolve_many(s, wanted)
+    by_copy: Dict[Tuple[str, str], List[str]] = {}
+    for user_id, names in wanted.items():
+        if permission_service.has_permission(claims[user_id], "workspace:datasource:read",
+                                             workspace_id=g.workspace_id):
+            copy = _copy(found.latest, label, names, whole=watching[user_id][0],
+                         versions=found.versions)
+            by_copy.setdefault(copy, []).append(user_id)
+    sole = next(iter(found.authors)) if len(found.authors) == 1 else None
+    n = 0
+    for (title, body), user_ids in by_copy.items():
+        n += await notification_repo.notify(
+            s, user_ids=user_ids, kind=KIND, title=title, body=body,
+            link=f"/workspaces/{g.workspace_id}?ds={g.data_source_id}&dstab=versioning&whatsnew=1",
+            actor_id=sole, resource_type="data_source", resource_id=g.data_source_id,
+            dedupe_unread=True, strict=True)
+    return n
 
 
 def _listed(names: Sequence[str], shown: int = 3) -> str:
@@ -324,14 +523,17 @@ def _listed(names: Sequence[str], shown: int = 3) -> str:
     return named[0] if len(named) == 1 else f"{', '.join(named[:-1])} and {named[-1]}"
 
 
-def _copy(commit: Any, label: str, names: Sequence[str], *, whole: bool) -> Tuple[str, str]:
+def _copy(commit: Any, label: str, names: Sequence[str], *, whole: bool,
+          versions: int = 1) -> Tuple[str, str]:
     """The notification's title and body: the graph's news for someone watching it (naming the
-    entities they also watch that it changed), else what it changed of the entities they watch."""
+    entities they also watch that it changed), else what it changed of the entities they watch.
+    ``versions``: how many a round tells of, ``commit`` the latest of them."""
     kind = commit.kind
     if whole:
-        title = {"revert": f"A change to “{label}” was undone",
-                 "restore": f"“{label}” was restored to an earlier version"}.get(
-            kind, f"New version of “{label}”")
+        title = (f"{versions:,} new versions of “{label}”" if versions > 1 else
+                 {"revert": f"A change to “{label}” was undone",
+                  "restore": f"“{label}” was restored to an earlier version"}.get(
+                     kind, f"New version of “{label}”"))
     elif len(names) == 1:
         title = f"“{names[0]}” changed in “{label}”"
     else:
@@ -339,13 +541,18 @@ def _copy(commit: Any, label: str, names: Sequence[str], *, whole: bool) -> Tupl
     said = f"Version #{commit.commit_seq}"
     if kind == "squash_publish" and commit.message:
         said += f": “{commit.message}”"
-    parts = [said + "."]
-    counts = counts_of(commit.stats)
-    done = [f"{counts[k]:,} {k}" for k in ("added", "changed", "removed") if counts and counts[k]]
-    if done:
-        parts.append(", ".join(done) + ".")
+    they = "They" if versions > 1 else "It"
+    if versions > 1:
+        parts = [f"The latest is v{said[1:]}." if whole else
+                 f"In {versions:,} new versions, the latest v{said[1:]}."]
+    else:
+        parts = [said + "."]
+        counts = counts_of(commit.stats)
+        done = [f"{counts[k]:,} {k}" for k in ("added", "changed", "removed") if counts and counts[k]]
+        if done:
+            parts.append(", ".join(done) + ".")
     if whole and names:
-        parts.append(f"It changed {_listed(names)}, which you watch.")
+        parts.append(f"{they} changed {_listed(names)}, which you watch.")
     elif len(names) > 1:
-        parts.append(f"It changed {_listed(names)}.")
+        parts.append(f"{they} changed {_listed(names)}.")
     return title, " ".join(parts)

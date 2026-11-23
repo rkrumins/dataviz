@@ -1,7 +1,7 @@
 """What changed since you last looked, and watching, over HTTP (``endpoints/graph_digest.py``) on the
 unit harness: the real routes, permissions and repository against SQLite, the versioning store's
-answer stood in for (``digest.read``), and who a publish tells (``digest.tell_watchers``) against
-the same database.
+answer stood in for (``digest.read``), and who the worker's telling tells (``digest.tell_pending``)
+against the same database, the versioning store's versions stood in for.
 
 * Each route has the data-source read in the graph's workspace as its gate; a graph elsewhere is
   a 404; an API key is refused.
@@ -10,15 +10,17 @@ the same database.
 * No marker: the last 7 days, said so. The versions, their counts (null where none were
   recorded), the cap, the authors, the reviews and the watched entities, as the store answers.
 * A fork is read and marked like any graph, forks on or off.
-* A publish tells each watcher who may read the graph once, never its author; a caught-up author
-  has seen it; telling nobody never raises.
+* A pass tells each watcher who may read the graph once, never anyone of only what they published;
+  several versions are told in one notification; nobody gets a second while one is unread; a round
+  cut short carries on where it stopped, telling nobody twice; a failed one is told again; a pass
+  never raises. Watching starts the telling at the head; a caught-up author has seen their own
+  version.
 
 The store's own queries, the notifications a real publish sends and their query plans run against
 Postgres: ``integration/test_graph_digest_live.py``.
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -29,8 +31,8 @@ from backend.app.api.v1.endpoints import graph_digest
 from backend.app.api.v1.endpoints.versioning import get_versioning_service
 from backend.app.auth import api_key_surface
 from backend.app.auth.dependencies import get_current_user, get_permission_claims
-from backend.app.db.models import (GraphSeenORM, GraphWatchORM, NotificationORM, ProviderORM,
-                                   UserORM, WorkspaceDataSourceORM, WorkspaceORM)
+from backend.app.db.models import (GraphSeenORM, GraphWatchORM, GraphWatchToldORM, NotificationORM,
+                                   ProviderORM, UserORM, WorkspaceDataSourceORM, WorkspaceORM)
 from backend.app.db.repositories import graph_watch_repo
 from backend.app.main import app
 from backend.app.services import permission_service
@@ -342,10 +344,22 @@ def test_what_a_watcher_is_told_says_what_changed():
     assert digest._copy(_commit(kind="revert"), "L", [], whole=True)[0] == "A change to “L” was undone"
 
 
+def test_a_round_of_several_versions_is_told_in_one_notification():
+    graph = digest._copy(_commit(218), "Ledger", [], whole=True, versions=3)
+    assert graph == ("3 new versions of “Ledger”", "The latest is version #218: “Fix owner emails”.")
+    named = digest._copy(_commit(218, kind="revert"), "Ledger", ["A", "B"], whole=True, versions=2)
+    assert named == ("2 new versions of “Ledger”",
+                     "The latest is version #218. They changed “A” and “B”, which you watch.")
+    entity = digest._copy(_commit(218), "Ledger", ["Orders"], whole=False, versions=4)
+    assert entity == ("“Orders” changed in “Ledger”",
+                      "In 4 new versions, the latest version #218: “Fix owner emails”.")
+
+
 @pytest.fixture
 def telling(world, monkeypatch):
-    """``tell_watchers`` against the test database, with the watched entities a version changed
-    and who reads the workspace stood in for."""
+    """``tell_pending`` against the test database: ``ds_1``'s graph ``g_1`` in ``ws_1``, its head
+    and the versions a person published (``versions``: seq → commit), the watched entities they
+    changed and who reads the workspace stood in for."""
     from contextlib import asynccontextmanager
 
     from backend.app.db import engine
@@ -355,31 +369,56 @@ def telling(world, monkeypatch):
         yield world.session
         await world.session.commit()
 
-    readers = {"usr_bob", "usr_carol", "usr_alice"}
+    state = SimpleNamespace(head=216, versions={216: _commit()}, readers={"usr_bob", "usr_carol",
+                            "usr_alice"}, session=world.session, rounds=[])
     changed = {"urn:t:orders": "Orders", "urn:t:invoices": "Invoices"}
 
-    async def changed_in(graph_id, seq, urns):
+    async def heads(data_source_ids):
+        return {"ds_1": ("g_1", "ws_1", state.head)} if "ds_1" in data_source_ids else {}
+
+    async def round_(graph_id, lo, hi):
+        state.rounds.append((lo, hi))
+        told = [state.versions[k] for k in sorted(state.versions) if lo < k <= hi]
+        return digest._Round(span=(lo, hi), versions=len(told), latest=told[-1] if told else None,
+                             authors=frozenset(c.actor for c in told),
+                             runs=tuple((c.commit_seq - 1, c.commit_seq) for c in told))
+
+    async def changed_between(graph_id, runs, urns):
         return {u: changed[u] for u in urns if u in changed}
 
-    async def resolve(s, user_id, **_kw):
-        return PermissionClaims(sid="", ws_perms={"ws_1": _LEAVES} if user_id in readers else {})
+    async def resolve_many(s, user_ids):
+        return {u: PermissionClaims(sid="", ws_perms={"ws_1": _LEAVES} if u in state.readers else {})
+                for u in user_ids}
 
     monkeypatch.setattr(engine, "get_async_session", session)
-    monkeypatch.setattr(digest, "_changed_in", changed_in)
-    monkeypatch.setattr(permission_service, "resolve", resolve)
-    return SimpleNamespace(readers=readers, session=world.session)
+    monkeypatch.setattr(digest, "_heads", heads)
+    monkeypatch.setattr(digest, "_round", round_)
+    monkeypatch.setattr(digest, "_changed_between", changed_between)
+    monkeypatch.setattr(permission_service, "resolve_many", resolve_many)
+    return state
 
 
-async def _watch(s, user_id, urn=None, ds="ds_1"):
+async def _watch(s, user_id, urn=None, ds="ds_1", head=215):
     await graph_watch_repo.watch(s, user_id, ds, urn)
+    await graph_watch_repo.start_telling(s, ds, head)
 
 
 async def _told(s):
-    rows = (await s.execute(select(NotificationORM).order_by(NotificationORM.user_id))).scalars().all()
-    return {r.user_id: (r.kind, r.title, r.body, r.link, r.actor_id, r.resource_id) for r in rows}
+    rows = (await s.execute(select(NotificationORM).order_by(NotificationORM.user_id,
+                                                              NotificationORM.created_at))).scalars().all()
+    told: dict = {}
+    for r in rows:
+        told.setdefault(r.user_id, []).append((r.kind, r.title, r.body, r.link, r.actor_id,
+                                               r.resource_id))
+    return told
 
 
-async def test_a_publish_tells_each_watcher_once_and_never_its_author(telling):
+async def _mark(s, ds="ds_1"):
+    m = await s.get(GraphWatchToldORM, ds, populate_existing=True)
+    return None if m is None else (m.told_seq, m.round_to, m.round_through)
+
+
+async def test_a_pass_tells_each_watcher_once_and_never_the_author(telling):
     s = telling.session
     await _watch(s, "usr_alice")                                   # the author
     await _watch(s, "usr_bob")                                     # the graph and two entities
@@ -391,18 +430,122 @@ async def test_a_publish_tells_each_watcher_once_and_never_its_author(telling):
     await _watch(s, "usr_frank", ds="ds_9")                        # another graph
     telling.readers.update({"usr_erin", "usr_frank"})
     await s.commit()
-    n = await digest.tell_watchers(graph_id="g_1", workspace_id="ws_1", data_source_id="ds_1",
-                                   commit=_commit())
+    assert await digest.tell_pending() == 2
     told = await _told(s)
-    assert n == 2 and sorted(told) == ["usr_bob", "usr_carol"]
-    link = "/workspaces/ws_1?ds=ds_1&dstab=versioning"
-    assert told["usr_bob"] == (
+    assert sorted(told) == ["usr_bob", "usr_carol"]
+    link = "/workspaces/ws_1?ds=ds_1&dstab=versioning&whatsnew=1"
+    assert told["usr_bob"] == [(
         "watch.new_version", "New version of “Ledger”",
         "Version #216: “Fix owner emails”. 12 added, 3 changed, 1 removed. "
-        "It changed “Invoices” and “Orders”, which you watch.", link, "usr_alice", "ds_1")
-    assert told["usr_carol"][1:3] == ("2 things you watch changed in “Ledger”",
-                                      "Version #216: “Fix owner emails”. 12 added, 3 changed, "
-                                      "1 removed. It changed “Invoices” and “Orders”.")
+        "It changed “Invoices” and “Orders”, which you watch.", link, "usr_alice", "ds_1")]
+    assert told["usr_carol"][0][1:3] == ("2 things you watch changed in “Ledger”",
+                                         "Version #216: “Fix owner emails”. 12 added, 3 changed, "
+                                         "1 removed. It changed “Invoices” and “Orders”.")
+    assert await _mark(s) == (216, None, None)
+    assert await digest.tell_pending() == 0 and telling.rounds == [(215, 216)]   # nothing new
+
+
+async def test_several_versions_are_one_notification_and_one_unread_is_all_anyone_gets(telling):
+    s = telling.session
+    for user_id in ("usr_bob", "usr_carol"):
+        await _watch(s, user_id)
+    await s.commit()
+    telling.head = 218
+    telling.versions.update({217: _commit(217, actor="usr_carol", message="Owners"),
+                             218: _commit(218, message="Regions")})
+    assert await digest.tell_pending() == 2
+    told = await _told(s)
+    assert told["usr_bob"][0][1:3] == ("3 new versions of “Ledger”",
+                                       "The latest is version #218: “Regions”.")
+    assert told["usr_bob"][0][4] is None                           # two authors: nobody's own
+    assert told["usr_carol"][0][1] == "3 new versions of “Ledger”"  # 216 and 218 weren't hers
+
+    telling.head = 219
+    telling.versions[219] = _commit(219)
+    assert await digest.tell_pending() == 0                        # both still have it unread
+    assert await _mark(s) == (219, None, None)
+    bob = (await s.execute(select(NotificationORM).where(NotificationORM.user_id == "usr_bob"))).scalar_one()
+    bob.read_at = "2026-11-23T09:00:00+00:00"
+    await s.commit()
+    telling.head = 220
+    telling.versions[220] = _commit(220, message="Owners again")
+    assert await digest.tell_pending() == 1                        # Bob read his: told again
+    told = await _told(s)
+    assert [t[1] for t in told["usr_bob"]] == ["3 new versions of “Ledger”", "New version of “Ledger”"]
+    assert len(told["usr_carol"]) == 1
+
+
+async def test_a_round_cut_short_carries_on_where_it_stopped_and_tells_nobody_twice(telling, monkeypatch):
+    s = telling.session
+    people = [f"usr_w{i}" for i in range(5)]
+    for user_id in people:
+        await _watch(s, user_id)
+    await s.commit()
+    telling.readers.update(people)
+    monkeypatch.setattr(digest, "TELL_BATCH", 2)
+    assert await digest.tell_pending(budget_secs=0) == 2           # one batch, then out of time
+    assert await _mark(s) == (215, 216, "usr_w1")
+    telling.head = 217                                             # a version lands meanwhile
+    telling.versions[217] = _commit(217, message="Later")
+    assert await digest.tell_pending(budget_secs=0) == 2
+    assert await _mark(s) == (215, 216, "usr_w3")                  # the round it began, still
+    assert await digest.tell_pending() == 1
+    told = await _told(s)
+    assert sorted(told) == people and all(len(t) == 1 for t in told.values())
+    assert {t[0][1] for t in told.values()} == {"New version of “Ledger”"}   # of 216, as begun
+    assert await _mark(s) == (216, None, None)
+    assert await digest.tell_pending() == 0                        # 217: all still unread
+    assert await _mark(s) == (217, None, None)
+
+
+async def test_a_failed_batch_is_told_again_and_a_pass_never_raises(telling, monkeypatch):
+    s = telling.session
+    await _watch(s, "usr_bob")
+    await _watch(s, "usr_carol", "urn:t:orders")
+    await s.commit()
+
+    async def broken(graph_id, runs, urns):
+        raise ConnectionError("the versioning store is out of reach")
+
+    changed_between = digest._changed_between
+    monkeypatch.setattr(digest, "_changed_between", broken)
+    assert await digest.tell_pending() == 0
+    assert await _told(s) == {} and (await _mark(s))[0] == 215     # nobody told, nothing passed
+    monkeypatch.setattr(digest, "_changed_between", changed_between)
+    assert await digest.tell_pending() == 2
+    assert sorted(await _told(s)) == ["usr_bob", "usr_carol"]
+
+    async def unreadable(data_source_ids):
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(digest, "_heads", unreadable)
+    assert await digest.tell_pending() == 0
+
+
+async def test_a_marker_not_read_yet_starts_at_the_head_telling_nobody_of_before(telling):
+    s = telling.session
+    await graph_watch_repo.watch(s, "usr_bob", "ds_1", None)
+    s.add(GraphWatchToldORM(data_source_id="ds_1"))                # as the migration leaves it
+    await s.commit()
+    assert await digest.tell_pending() == 0
+    assert await _mark(s) == (216, None, None) and await _told(s) == {}
+    telling.head = 3                                               # the graph made again
+    telling.versions = {3: _commit(3)}
+    assert await digest.tell_pending() == 0
+    assert await _mark(s) == (3, None, None)
+
+
+async def test_watching_starts_the_telling_at_the_head(world, test_client):
+    url = _V.format("g_1") + "/watch"
+    assert (await test_client.put(url, json={})).status_code == 200
+    m = await world.session.get(GraphWatchToldORM, "ds_1")
+    assert (m.told_seq, m.round_to) == (HEAD, None)
+    m.told_seq = 200                                               # being told, further back
+    await world.session.commit()
+    as_("usr_carol")
+    assert (await test_client.put(url, json={"entityUrn": "urn:t:orders"})).status_code == 200
+    await world.session.refresh(m)
+    assert m.told_seq == 200                                       # left where it was
 
 
 async def test_an_author_who_had_seen_everything_has_seen_their_own_version(telling):
@@ -411,61 +554,33 @@ async def test_an_author_who_had_seen_everything_has_seen_their_own_version(tell
                GraphSeenORM(user_id="usr_bob", data_source_id="ds_1", seen_seq=215),
                GraphSeenORM(user_id="usr_carol", data_source_id="ds_1", seen_seq=210)])
     await s.commit()
-    await digest.tell_watchers(graph_id="g_1", workspace_id="ws_1", data_source_id="ds_1",
-                               commit=_commit(216))
-    await digest.tell_watchers(graph_id="g_1", workspace_id="ws_1", data_source_id="ds_1",
-                               commit=_commit(218, actor="usr_carol"))     # 211…217 unseen: kept
+    await digest._caught_up("usr_alice", "ds_1", 216)
+    await digest._caught_up("usr_carol", "ds_1", 218)             # 211…217 unseen: kept
+    await digest._caught_up(None, "ds_1", 219)                    # nobody's
     marks = dict((await s.execute(select(GraphSeenORM.user_id, GraphSeenORM.seen_seq))).all())
     assert marks == {"usr_alice": 216, "usr_bob": 215, "usr_carol": 210}
 
 
-async def test_telling_the_watchers_never_raises_and_gives_up_in_time(telling, monkeypatch):
-    s = telling.session
-    await _watch(s, "usr_bob")
-    await s.commit()
-
-    async def broken(graph_id, seq, urns):
-        raise ConnectionError("the graph store is out of reach")
-
-    await _watch(s, "usr_carol", "urn:t:orders")
-    await s.commit()
-    monkeypatch.setattr(digest, "_changed_in", broken)
-    assert await digest.tell_watchers(graph_id="g_1", workspace_id="ws_1", data_source_id="ds_1",
-                                      commit=_commit()) == 0
-
-    async def slow(**_kw):
-        await asyncio.sleep(1)
-
-    monkeypatch.setattr(digest, "TELL_TIMEOUT_SECS", 0.05)
-    monkeypatch.setattr(digest, "_tell", slow)
-    assert await digest.tell_watchers(graph_id="g_1", workspace_id="ws_1", data_source_id="ds_1",
-                                      commit=_commit()) == 0
-
-
-async def test_past_the_time_allowed_those_told_so_far_stay_told(telling, monkeypatch):
-    s = telling.session
-    for user_id in ("usr_bob", "usr_carol"):
-        await _watch(s, user_id)
-    await s.commit()
-    resolve = permission_service.resolve
-
-    async def slow_for_carol(session, user_id, **kw):
-        if user_id == "usr_carol":
-            await asyncio.sleep(5)
-        return await resolve(session, user_id, **kw)
-
-    monkeypatch.setattr(permission_service, "resolve", slow_for_carol)
-    monkeypatch.setattr(digest, "_TELL_CHUNK", 1)
-    monkeypatch.setattr(digest, "TELL_TIMEOUT_SECS", 0.5)
-    assert await digest.tell_watchers(graph_id="g_1", workspace_id="ws_1", data_source_id="ds_1",
-                                      commit=_commit()) == 0         # gave up, and says nothing more
-    assert sorted(await _told(s)) == ["usr_bob"]
-
-
-def test_only_what_a_person_published_tells_the_watchers(monkeypatch):
+def test_only_what_a_person_published_moves_its_authors_marker(monkeypatch):
     noted = []
     monkeypatch.setattr(digest.db, "after_commit", lambda session, step: noted.append(step))
     graph = SimpleNamespace(id="g_1", workspace_id="ws_1", data_source_id="ds_1")
     for kind in ("squash_publish", "revert", "restore", "edit", "import", "sync", "genesis"):
         digest.note(object(), graph, _commit(kind=kind))
     assert len(noted) == 3
+
+
+async def test_a_pass_reads_the_markers_a_page_at_a_time_and_tells_every_graph(telling, monkeypatch):
+    s = telling.session
+    for ds in ("ds_1", "ds_2", "ds_3"):
+        await _watch(s, "usr_bob", ds=ds)
+    await s.commit()
+
+    async def heads(data_source_ids):
+        return {ds: (f"g_{ds}", "ws_1", 216) for ds in data_source_ids}
+
+    monkeypatch.setattr(digest, "_heads", heads)
+    monkeypatch.setattr(digest, "_AT_ONCE", 2)
+    assert await digest.tell_pending() == 3
+    assert sorted(t[5] for t in (await _told(s))["usr_bob"]) == ["ds_1", "ds_2", "ds_3"]
+    assert [await _mark(s, ds) for ds in ("ds_1", "ds_2", "ds_3")] == [(216, None, None)] * 3

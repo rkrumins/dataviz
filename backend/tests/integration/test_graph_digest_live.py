@@ -4,9 +4,11 @@
   recorded of itself (an import's, a publish's; a fork's beginning nothing), who published them,
   the cap, the last 7 days for a reader with no marker, the reviews waiting on them (asked, not
   approved, or approved before the draft changed again), and the entities they watch that changed.
-* A publish, an undo and a restore tell each watcher who reads the graph once — the graph's or an
-  entity's watcher — never the author, whose caught-up marker moves with it; only once it has
-  committed (one rolled back tells nobody); and a publish whose telling fails still lands.
+* A publish, an undo and a restore answer before anyone is told: the worker's pass
+  (``digest.tell_pending``) tells each watcher who reads the graph once — the graph's or an
+  entity's watcher — never the author, whose caught-up marker moves with the commit; nothing of one
+  rolled back; nobody a second time while one is still unread; a pass that fails tells again.
+* Hundreds watching: two passes at once tell each of them once, a batch at a time.
 * A fork has a digest, a marker and watchers of its own.
 * Every query the digest and a publish make is served by an index.
 
@@ -73,6 +75,19 @@ async def _told(ds: str) -> dict:
     for r in rows:
         told.setdefault(r.user_id, []).append((r.title, r.body, r.link, r.actor_id))
     return told
+
+
+async def _read(ds: str, user: str) -> None:
+    """``user`` reads what they were told of ``ds``."""
+    from sqlalchemy import update
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.models import NotificationORM
+
+    async with get_async_session() as s:
+        await s.execute(update(NotificationORM).where(
+            NotificationORM.resource_id == ds, NotificationORM.user_id == user,
+            NotificationORM.read_at.is_(None)).values(read_at=datetime.now(timezone.utc).isoformat()))
+        await s.commit()
 
 
 def _stage(eid: str, **fields) -> dict:
@@ -177,7 +192,9 @@ async def _digest_run(monkeypatch) -> None:
             d = await x.draft(alice, (child, {"description": "Owned by finance"}))
             r = await x.publish(alice, d, "Q3 fixes")
             assert r.status_code == 200, r.text
-            link = f"/workspaces/{WS}?ds={ds}&dstab=versioning"
+            assert await _told(ds) == {}                          # the publish told nobody itself
+            assert await digest.tell_pending() == 2
+            link = f"/workspaces/{WS}?ds={ds}&dstab=versioning&whatsnew=1"
             assert await _told(ds) == {
                 bob: [(f"New version of “{label}”", "Version #3: “Q3 fixes”. 1 changed.", link,
                        alice)],
@@ -235,10 +252,14 @@ async def _digest_run(monkeypatch) -> None:
                 assert r.status_code == 200, r.text
                 assert [w["id"] for w in (await x.digest(bob))["reviewsWaiting"]] == [pr]
 
-            # An undo tells the graph's watchers, in its own words; Carol's root was not touched.
+            # An undo tells the graph's watchers, in its own words, once they read what they were
+            # told before; Carol's root was not touched.
+            await _read(ds, bob)
+            await _read(ds, carol)
             commit = (await x.digest(bob))["head"]["version"]
             r = await c.post(f"{x.g}/commits/{commit}/revert", json={}, headers=h(alice))
             assert r.status_code == 200, r.text
+            assert await digest.tell_pending() == 2
             told = await _told(ds)
             assert told[bob][-1][:2] == (f"A change to “{label}” was undone",
                                           "Version #4. 1 changed.")
@@ -256,16 +277,31 @@ async def _digest_run(monkeypatch) -> None:
                 m.setattr(type(svc), "_resolve_live_prs", refuse)
                 with pytest.raises(RuntimeError):
                     await svc.publish(graph_id=gid, branch_id=d, actor=alice, message="never lands")
+            assert await digest.tell_pending() == 0
             assert (await x.digest(bob))["head"]["seq"] == 4 and await _told(ds) == before
 
-            async def broken(**_kw):
+            # A publish lands whatever its own after-commit step meets; a pass that fails tells
+            # nobody and leaves its place, so the next tells them, once. Bob read the undo's; Carol,
+            # whose is still unread, is told nothing more.
+            async def broken(*_a, **_kw):
                 raise ConnectionError("the management database is out of reach")
 
             with monkeypatch.context() as m:
-                m.setattr(digest, "_tell", broken)
+                m.setattr(digest, "_caught_up", broken)
                 r = await x.publish(alice, d, "lands anyway")
                 assert r.status_code == 200, r.text
             assert (await x.digest(bob))["head"]["seq"] == 5 and await _told(ds) == before
+            await _read(ds, bob)
+            with monkeypatch.context() as m:
+                m.setattr(digest, "_tell_batch", broken)
+                assert await digest.tell_pending() == 0
+            assert await _told(ds) == before
+            assert await digest.tell_pending() == 1
+            told = await _told(ds)
+            assert told[bob][-1][:2] == (f"New version of “{label}”",
+                                          "Version #5: “lands anyway”. 1 changed.")
+            assert told[carol] == before[carol]
+            assert await digest.tell_pending() == 0
 
             # The cap: the newest first, the rest said; and the last 7 days, cut by time.
             monkeypatch.setattr(digest, "VERSIONS_MAX", 2)
@@ -320,6 +356,7 @@ async def _fork_run(monkeypatch) -> None:
             got = await x.digest(bob)
             assert [(v["seq"], v["message"]) for v in got["versions"]] == [(3, "In the fork")]
             assert (await parent.digest(bob))["versions"] == []
+            assert await digest.tell_pending() == 1
             told = await _told(f"dsfork_dg_{run}")
             assert [t[0] for t in told[bob]] == ["New version of “this graph”"]   # no row of its own
             assert await _told(ds) == {}
@@ -332,7 +369,8 @@ def test_a_fork_has_a_digest_marker_and_watchers_of_its_own(data_sources, monkey
     asyncio.run(_fork_run(monkeypatch))
 
 
-_PLANNED = ("commits", "node_versions", "merge_requests", "graph_seen", "graph_watches")
+_PLANNED = ("commits", "node_versions", "merge_requests", "graph_seen", "graph_watches",
+            "graph_watch_told", "graphver.graphs", "notifications", "role_bindings", "group_members")
 
 
 async def _plans_run(monkeypatch) -> None:
@@ -352,16 +390,6 @@ async def _plans_run(monkeypatch) -> None:
                 t in statement for t in _PLANNED):
             seen.append((statement, parameters))
 
-    tell = digest._tell
-
-    async def telling(**kw):                    # what a publish asks, and nothing else of it
-        on[0] = True
-        try:
-            return await tell(**kw)
-        finally:
-            on[0] = False
-
-    monkeypatch.setattr(digest, "_tell", telling)
     try:
         async with await _harness(monkeypatch) as c:
             x = _Harness(c, gid)
@@ -380,8 +408,11 @@ async def _plans_run(monkeypatch) -> None:
             on[0] = True
             await x.digest(bob)
             on[0] = False
-            r = await x.publish(alice, d, "planned")                 # the watchers told
+            r = await x.publish(alice, d, "planned")
             assert r.status_code == 200, r.text
+            on[0] = True
+            assert await digest.tell_pending() == 1                 # the watchers told
+            on[0] = False
             for engine in (db.get_engine(), mgmt.get_engine()):
                 event.remove(engine.sync_engine, "before_cursor_execute", capture)
         tables = {t for s, _p in seen for t in _PLANNED if t in s}
@@ -402,3 +433,44 @@ async def _plans_run(monkeypatch) -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_every_query_the_digest_and_a_publish_make_is_served_by_an_index(data_sources, monkeypatch):
     asyncio.run(_plans_run(monkeypatch))
+
+
+async def _crowd_run(monkeypatch) -> None:
+    from backend.app.api.v1.endpoints.versioning import get_versioning_service
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.repositories import graph_watch_repo
+
+    run = os.urandom(3).hex()
+    author = f"alice_{run}"
+    people = [f"w{i:03d}_{run}" for i in range(300)]
+    ds = await _seed(run, [author, *people], readers=[author, *people])
+    svc = get_versioning_service()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id=WS, actor=author))["graph_id"]
+    try:
+        async with await _harness(monkeypatch) as c:
+            x = _Harness(c, gid)
+            r = await c.post(f"{x.g}/bulk-ingest", content=_IMPORT_NDJSON, headers=h(author))
+            assert r.status_code == 200, r.text
+            await x.watch(people[0])                          # starts the telling at the head
+            async with get_async_session() as s:
+                for p in people[1:]:
+                    await graph_watch_repo.watch(s, p, ds, None)
+                await s.commit()
+            child = (await _ids(gid))["urn:t:child"]
+            d = await x.draft(author, (child, {"description": "For everyone"}))
+            r = await x.publish(author, d, "For everyone")
+            assert r.status_code == 200, r.text
+            assert await _told(ds) == {}                      # the publish told nobody itself
+            monkeypatch.setattr(digest, "TELL_BATCH", 40)
+            both = await asyncio.gather(digest.tell_pending(), digest.tell_pending())
+            assert sum(both) + await digest.tell_pending() == len(people)
+            told = await _told(ds)
+            assert sorted(told) == sorted(people) and {len(t) for t in told.values()} == {1}
+            assert await digest.tell_pending() == 0
+    finally:
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_hundreds_watching_are_each_told_once_by_two_passes_at_once(data_sources, monkeypatch):
+    asyncio.run(_crowd_run(monkeypatch))
